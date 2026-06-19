@@ -5137,6 +5137,15 @@ function Test-DomainMemberFunctionality {
         $checkPki = ($checkPkiCert -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        # Live status heartbeat. Invoke-VmCommand -PollProgress polls this nested
+        # job's Progress stream and treats every new record as a heartbeat that
+        # resets the stall timer, so the multi-minute ccmsetup wait loops below
+        # never trip a false "timed out" failure as long as they keep emitting
+        # progress. Each Status carries a changing value so the record count
+        # always advances (the host resets the timer on count growth).
+        $progressActivity = "$env:COMPUTERNAME [DomainMember]"
+        Write-Progress -Activity $progressActivity -Status "Checking domain membership"
+
         # Domain membership
         $cs = Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue
         if (-not $cs.PartOfDomain) {
@@ -5155,6 +5164,7 @@ function Test-DomainMemberFunctionality {
         # Retry a few times: right after Phase 10 the netlogon service / DC can
         # be transiently unreachable, especially in parallel runs, and a single
         # false return would otherwise fail an otherwise-healthy client.
+        Write-Progress -Activity $progressActivity -Status "Checking secure channel"
         $sc = $false
         $scError = $null
         for ($i = 1; $i -le 4; $i++) {
@@ -5248,6 +5258,7 @@ function Test-DomainMemberFunctionality {
             Start-Sleep -Seconds 10
             # Wait up to 5 minutes for ccmsetup to finish
             for ($w = 0; $w -lt 30; $w++) {
+                Write-Progress -Activity $progressActivity -Status "ccmsetup retry: waiting for ccmsetup to finish ($($w * 10)s)"
                 Start-Sleep -Seconds 10
                 if (-not (Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue)) { break }
             }
@@ -5270,6 +5281,7 @@ function Test-DomainMemberFunctionality {
             return $false
         }
 
+        Write-Progress -Activity $progressActivity -Status "Checking ConfigMgr client (CcmExec)"
         $ccm = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
         if ($ccm) {
             if ($ccm.Status -ne 'Running') {
@@ -5288,6 +5300,7 @@ function Test-DomainMemberFunctionality {
                     # Wait up to 5 min for ccmsetup to finish
                     $results.Details.Add("INFO: CcmExec is $($ccm.Status), ccmsetup.exe still running, waiting up to 5 min...")
                     for ($w = 0; $w -lt 30; $w++) {
+                        Write-Progress -Activity $progressActivity -Status "CcmExec $($ccm.Status); waiting for ccmsetup to finish ($($w * 10)s)"
                         Start-Sleep -Seconds 10
                         if (-not (Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue)) { break }
                     }
@@ -5338,6 +5351,7 @@ function Test-DomainMemberFunctionality {
                 # ccmsetup is actively running -- wait up to 5 minutes for it to finish
                 $results.Details.Add("INFO: ccmsetup.exe is running, waiting up to 5 min for it to finish...")
                 for ($w = 0; $w -lt 30; $w++) {
+                    Write-Progress -Activity $progressActivity -Status "ccmsetup running; waiting for it to finish ($($w * 10)s)"
                     Start-Sleep -Seconds 10
                     if (-not (Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue)) { break }
                 }
@@ -5407,7 +5421,7 @@ function Test-DomainMemberFunctionality {
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $domain, $checkPkiCert `
         -DisplayName "Phase11-DomainMember-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 300
+        -AsJob -TimeoutSeconds 300 -PollProgress
 
     # If the guest reported NeedsPushCheck, enrich with deploy config context.
     if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.NeedsPushCheck) {
@@ -5425,6 +5439,8 @@ function Test-DomainMemberFunctionality {
     if ($officeChannel -and $officeChannel -ne $false -and $result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Passed) {
         $officeCheckBlock = {
             $officeResults = @{ Details = [System.Collections.Generic.List[string]]::new() }
+            $progressActivity = "$env:COMPUTERNAME [DomainMember]"
+            Write-Progress -Activity $progressActivity -Status "Triggering Office deployment policy"
             # The Install Targets collection refreshes on its own schedule, and the
             # client only pulls down the deployment after a Machine Policy cycle.
             # Trigger the full chain proactively (Policy Retrieval -> Evaluation ->
@@ -5448,6 +5464,7 @@ function Test-DomainMemberFunctionality {
             # of cycles. Total budget: 36 iterations * 5s = 180s.
             $app = $null
             for ($i = 0; $i -lt 36; $i++) {
+                Write-Progress -Activity $progressActivity -Status "Polling for Office deployment policy ($($i * 5)s)"
                 try {
                     $app = Get-CimInstance -Namespace 'root\ccm\ClientSDK' -ClassName CCM_Application -ErrorAction SilentlyContinue |
                         Where-Object { $_.Name -like '*Microsoft 365*' -or $_.Name -like '*Microsoft365*' }
@@ -5520,7 +5537,7 @@ function Test-DomainMemberFunctionality {
         }
         $officeResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock $officeCheckBlock -DisplayName "Phase11-DomainMember-OfficeCheck" -SuppressLog `
-            -AsJob -TimeoutSeconds 300
+            -AsJob -TimeoutSeconds 300 -PollProgress
         if ($officeResult.ScriptBlockOutput -is [hashtable] -and $officeResult.ScriptBlockOutput.Details) {
             foreach ($detail in $officeResult.ScriptBlockOutput.Details) {
                 $result.ScriptBlockOutput.Details.Add($detail)

@@ -5299,9 +5299,9 @@ function Invoke-VmCommand {
         [switch]$ShowVMSessionError,
         [Parameter(Mandatory = $false, HelpMessage = "Run command as a job")]
         [switch]$AsJob,
-        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
+        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length. With -PollProgress this is a STALL timeout (max time with no progress heartbeat from the guest), not an absolute deadline.")]
         [int]$TimeoutSeconds = 180,
-        [Parameter(Mandatory = $false, HelpMessage = "When running as a job, poll the inner job's Progress stream and re-emit the latest record so long-running remote scriptblocks surface live status (instead of appearing frozen). The remote scriptblock must call Write-Progress for there to be anything to forward.")]
+        [Parameter(Mandatory = $false, HelpMessage = "When running as a job, poll the inner job's Progress stream and re-emit the latest record so long-running remote scriptblocks surface live status (instead of appearing frozen). The remote scriptblock must call Write-Progress for there to be anything to forward. Also switches -TimeoutSeconds to heartbeat/stall semantics: each new progress record resets the timer (bounded by an absolute ceiling).")]
         [switch]$PollProgress,
         [Parameter(Mandatory = $false, HelpMessage = "Skip domain credential fallback via VMNote. Use during OOBE polling when VM is not yet domain-joined.")]
         [switch]$SkipDomainFallback,
@@ -5399,14 +5399,35 @@ function Invoke-VmCommand {
                         # long remote operation looks frozen. Forwarding the latest record via
                         # Write-Progress2 -force surfaces live status in the caller's progress
                         # stream (e.g. the Phase 11 job's display via Wait-Phase/Write-JobProgress).
-                        $pollDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+                        #
+                        # HEARTBEAT (STALL) TIMEOUT: with -PollProgress, $TimeoutSeconds is the
+                        # max time we'll wait WITHOUT a new progress record from the guest -- it
+                        # is NOT an absolute deadline. Every Write-Progress the remote scriptblock
+                        # emits is a heartbeat that resets the timer, so a validation that
+                        # legitimately spends several minutes across many short steps (e.g. the
+                        # DomainMember CCM-client / ccmsetup wait loops, which heartbeat every
+                        # ~10s) never gets reaped as a false "timed out" failure. Only a genuinely
+                        # hung scriptblock -- no progress at all for $TimeoutSeconds -- is killed.
+                        # An absolute ceiling bounds a scriptblock that heartbeats forever.
+                        $stallSeconds = $TimeoutSeconds
+                        $absoluteCeiling = (Get-Date).AddSeconds([Math]::Max($TimeoutSeconds * 6, 1800))
+                        $stallDeadline = (Get-Date).AddSeconds($stallSeconds)
                         $lastForwarded = $null
-                        while ($job.State -eq "Running" -and (Get-Date) -lt $pollDeadline) {
+                        $lastProgressCount = 0
+                        while ($job.State -eq "Running" -and (Get-Date) -lt $stallDeadline -and (Get-Date) -lt $absoluteCeiling) {
                             Start-Sleep -Milliseconds 750
                             try {
                                 # PSRemotingJob exposes per-session streams on its child job.
                                 $progressSource = if ($job.ChildJobs -and $job.ChildJobs.Count -gt 0) { $job.ChildJobs[0] } else { $job }
                                 if ($progressSource -and $progressSource.Progress -and $progressSource.Progress.Count -gt 0) {
+                                    # Any growth in the progress stream is a heartbeat -> reset the
+                                    # stall timer. The guest emits a distinct status (with an
+                                    # elapsed-seconds counter) on each loop iteration so the record
+                                    # count always advances even when the activity is unchanged.
+                                    if ($progressSource.Progress.Count -ne $lastProgressCount) {
+                                        $lastProgressCount = $progressSource.Progress.Count
+                                        $stallDeadline = (Get-Date).AddSeconds($stallSeconds)
+                                    }
                                     $lastRec = $progressSource.Progress[$progressSource.Progress.Count - 1]
                                     if ($lastRec -and $lastRec.Activity -and $lastRec.StatusDescription) {
                                         $line = "$($lastRec.Activity)|$($lastRec.StatusDescription)"
@@ -5418,6 +5439,14 @@ function Invoke-VmCommand {
                                 }
                             }
                             catch { }
+                        }
+                        if ($job.State -eq "Running") {
+                            if ((Get-Date) -ge $absoluteCeiling) {
+                                Write-Log "$VmName`: Job '$DisplayName' hit absolute ceiling ($([int]([Math]::Max($TimeoutSeconds * 6, 1800)))s); stopping." -LogOnly
+                            }
+                            else {
+                                Write-Log "$VmName`: Job '$DisplayName' stalled (no progress heartbeat for ${stallSeconds}s); stopping." -LogOnly
+                            }
                         }
                     }
                     else {
