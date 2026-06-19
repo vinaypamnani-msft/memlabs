@@ -705,6 +705,79 @@ if ($ThisVM.role -ne "CAS") {
             Write-DscStatus "MEMLABS-PULSE-CERTS: Waiting for host to refresh certificates on clients"
             Start-Sleep -Seconds 60
         }
+
+        # A fresh HTTPS flip leaves each MP's RUNNING http.sys/Schannel/IIS holding
+        # PRE-HTTPS TLS state, so the MP's DeviceCertAuthModule cannot negotiate the
+        # client PKI cert on /ccm_system (NegotiateClientCertificate -> fNegotiated=
+        # false -> HTTP 403.7 "Client certificate required"). The client then fails
+        # ccmsetup GetDPLocations with 0x87d00454 and the agent never installs.
+        # EnableHTTPS only flips the SITE to HTTPS-only; the MP boxes keep serving
+        # the stale TLS state until they are cycled. Proven root cause + fix: a COLD
+        # BOOT of the MP makes Schannel re-read the cert binding + trusted-issuer set
+        # and the push succeeds. (Single-MP sites happen to get cycled at the right
+        # moment; a SECOND MP that never gets a post-HTTPS restart keeps failing
+        # deterministically -- the multi-MP delta we hit.) So bounce every MP in
+        # THIS site once, right before auto-push:
+        #   - remote MPs: full reboot (flushes http.sys SSL cache AND the
+        #     LSASS/Schannel trusted-issuer cache, which iisreset alone does not),
+        #   - the local site-server MP: iisreset + CcmExec restart (we run inside
+        #     this box's ScriptWorkflow task and cannot reboot ourselves).
+        # Gated by $needCertPulse (only when push targets aren't yet Client=1 -- if
+        # every target already installed, the MP already negotiated certs fine) and
+        # a one-shot flag so retries / -StartPhase re-runs don't re-bounce.
+        $mpBounceFlag = Join-Path -Path $LogPath -ChildPath "MPCertNegotiationBounce.flag"
+        if ($needCertPulse -and -not (Test-Path $mpBounceFlag)) {
+            $siteMPs = @()
+            try {
+                $siteMPs = @($deployConfig.virtualMachines | Where-Object { $_.installMP -and $_.siteCode -eq $ThisVM.siteCode })
+            }
+            catch {
+                Write-DscStatus "MP TLS bounce: failed to enumerate MPs ($($_.Exception.Message)); skipping" -Warning
+                $siteMPs = @()
+            }
+            if ($siteMPs.Count -gt 0) {
+                Write-DscStatus "MP TLS bounce: refreshing client-cert negotiation on $($siteMPs.Count) MP(s) in site $($ThisVM.siteCode) before client push"
+                foreach ($mp in $siteMPs) {
+                    if ($mp.vmName -eq $ThisVM.vmName) {
+                        # Local site-server MP -- cannot reboot mid-workflow.
+                        Write-DscStatus "MP TLS bounce: local iisreset + CcmExec restart on $($mp.vmName)"
+                        try { & iisreset.exe /restart | Out-Null }
+                        catch { Write-DscStatus "MP TLS bounce: iisreset on $($mp.vmName) failed: $($_.Exception.Message)" -Warning }
+                        try { Restart-Service -Name CcmExec -Force -ErrorAction SilentlyContinue } catch {}
+                        continue
+                    }
+                    # Remote MP -- full reboot to clear stale TLS state.
+                    Write-DscStatus "MP TLS bounce: rebooting MP $($mp.vmName) to refresh TLS client-cert state"
+                    try {
+                        Restart-Computer -ComputerName $mp.vmName -Force -ErrorAction Stop
+                    }
+                    catch {
+                        Write-DscStatus "MP TLS bounce: reboot of $($mp.vmName) failed ($($_.Exception.Message)); skipping" -Warning
+                        continue
+                    }
+                    # Let the box actually go down before polling, so we don't read
+                    # the pre-reboot 'Running' state and exit early.
+                    Start-Sleep -Seconds 45
+                    $mpHealthy = $false
+                    for ($i = 1; $i -le 20; $i++) {
+                        try {
+                            $w3 = Get-Service -ComputerName $mp.vmName -Name 'W3SVC' -ErrorAction Stop
+                            if ($w3.Status -eq 'Running') {
+                                Write-DscStatus "MP TLS bounce: $($mp.vmName) back up (W3SVC Running, attempt $i)"
+                                $mpHealthy = $true
+                                break
+                            }
+                        }
+                        catch {}
+                        Start-Sleep -Seconds 30
+                    }
+                    if (-not $mpHealthy) {
+                        Write-DscStatus "MP TLS bounce: $($mp.vmName) not confirmed healthy after reboot; continuing (auto-push will retry)" -Warning
+                    }
+                }
+            }
+            try { Set-Content -Path $mpBounceFlag -Value "bounced $(Get-Date -Format s)" -Force -Encoding ASCII } catch {}
+        }
     }
     Write-DscStatus "Always Running PushClients.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
