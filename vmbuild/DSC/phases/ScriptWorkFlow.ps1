@@ -16,6 +16,15 @@ try {
     $bannerUser   = "$($env:USERDOMAIN)\$($env:USERNAME)"
     $bannerPSVer  = $PSVersionTable.PSVersion.ToString()
     $bannerOS     = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch { '<unknown>' }
+    # Last boot time + uptime. Logging this in every ScriptWorkflow banner makes
+    # a mid-run reboot trivial to spot: if a later banner shows a fresh boot time
+    # (low uptime) the box restarted between runs -- a common cause of half-
+    # finished work (e.g. an orphaned background download whose join never ran).
+    $bannerBoot   = try {
+        $lbt = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+        $up  = (Get-Date) - $lbt
+        '{0:yyyy-MM-dd HH:mm:ss} (up {1}d {2}h {3}m)' -f $lbt, $up.Days, $up.Hours, $up.Minutes
+    } catch { '<unknown>' }
     $bannerStart  = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     $bannerCwd    = (Get-Location).Path
     $bannerScript = $MyInvocation.MyCommand.Path
@@ -39,6 +48,7 @@ try {
     "  Host         : $bannerHost"                                             | Write-StatusLogEntry -Component 'ScriptWorkflow'
     "  User         : $bannerUser"                                             | Write-StatusLogEntry -Component 'ScriptWorkflow'
     "  OS           : $bannerOS"                                               | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  LastBoot     : $bannerBoot"                                             | Write-StatusLogEntry -Component 'ScriptWorkflow'
     "  PowerShell   : $bannerPSVer"                                            | Write-StatusLogEntry -Component 'ScriptWorkflow'
     "  Script       : $bannerScript"                                           | Write-StatusLogEntry -Component 'ScriptWorkflow'
     "  Cwd          : $bannerCwd"                                              | Write-StatusLogEntry -Component 'ScriptWorkflow'
