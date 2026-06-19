@@ -1026,8 +1026,17 @@ function Add-ExistingVMsToDeployConfig {
     $dc = $config.virtualMachines | Where-Object { $_.role -eq "DC" }
 
     # Add Primary to list when new VMs need BLM collection membership (Phase 8 EnableBLM)
+    # OR when new VMs need the ConfigMgr client pushed to them (Phase 8 ScriptWorkflow ->
+    # PushClients). Without the hidden Primary in the config, Get-Phase8ConfigurationData
+    # has no Primary node to add, so Phase 8 is skipped entirely and PushClients never
+    # runs for a client added to an already-deployed domain. Keep the pushable-role list
+    # in sync with Get-Phase8ConfigurationData.
     $newBLMVMs = @($config.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
-    if ($newBLMVMs.Count -gt 0) {
+    $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    $newPushVMs = @($config.virtualMachines | Where-Object {
+            $_.role -in $pushableRoles -and -not $_.hidden -and ($_.pushClient -ne $false)
+        })
+    if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0) {
         $existingPrimary = Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role "Primary"
         if ($existingPrimary) {
             $primaryName = if ($existingPrimary -is [array]) { $existingPrimary[0] } else { $existingPrimary }

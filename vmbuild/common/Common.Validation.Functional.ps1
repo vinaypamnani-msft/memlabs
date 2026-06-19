@@ -4905,7 +4905,15 @@ function Test-UserProfilePreCreation {
     $adminName = $DeployConfig.vmOptions.adminName
     if (-not $adminName) { $adminName = 'admin' }
 
-    Write-Log "[Phase $Phase] $VMName [ProfilePreCreate]: Pre-creating profile for $Domain\$adminName" -LogOnly
+    # Prefer the VM's own assigned domain user (domainUser) over the domain admin,
+    # so the profile that actually gets used on first RDP login is the one we
+    # pre-create. domainUser is stored prefixed (e.g. "ADA-user1") and shares the
+    # same lab password as the admin account (both set to $DomainCreds in Phase2DC),
+    # so the existing admin password works to register the task as that user.
+    $thisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VMName } | Select-Object -First 1
+    $profileUser = if ($thisVM -and $thisVM.domainUser) { $thisVM.domainUser } else { $adminName }
+
+    Write-Log "[Phase $Phase] $VMName [ProfilePreCreate]: Pre-creating profile for $Domain\$profileUser" -LogOnly
 
     $scriptBlock = {
         param($domainName, $userName, [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '')]
@@ -4963,19 +4971,22 @@ function Test-UserProfilePreCreation {
             $results.Details.Add("OK: Profile pre-created at $($userProfile.LocalPath)")
         }
         else {
-            $results.Passed = $false
-            $results.Details.Add("FAIL: Profile for $fullUser was not created (first RDP login may be slow)")
+            # Non-fatal: a missing pre-created profile only means the first interactive
+            # RDP/RDCMan logon will incur the one-time "Preparing your desktop" delay.
+            # It does not indicate a broken VM, so this is a WARN, not a FAIL.
+            $results.Details.Add("WARN: Profile for $fullUser was not pre-created (first RDP login may be slow)")
         }
 
         return $results
     }
 
-    # Pass the admin password so the scheduled task can run as the domain admin
+    # Pass the admin password so the scheduled task can run as the chosen domain user
+    # (admin and per-VM domainUser share the same lab password).
     $adminPassword = $Common.LocalAdmin.GetNetworkCredential().Password
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
         -ScriptBlock $scriptBlock `
-        -ArgumentList @($Domain, $adminName, $adminPassword) `
+        -ArgumentList @($Domain, $profileUser, $adminPassword) `
         -DisplayName "Phase11-ProfilePreCreate" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 
