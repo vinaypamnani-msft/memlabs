@@ -2708,15 +2708,18 @@ $global:VM_Config = {
             Write-Progress2 $Activity -Status "Skip copying DSC files to the VM." -percentcomplete 35 -force -Log
         }
 
-        # WSUS categories baseline cab. Ship to top-of-hierarchy SUP/WSUS
-        # VMs so InstallRoles (Phase 8) can run `wsusutil import` from a
-        # script context that owns launch + verify, instead of doing the
-        # slow/flaky first categories sync from Microsoft Update. Phase 7
-        # WSUSSync DSC observes the cab's presence and skips its early MU
-        # fire-and-forget sync when the cab is on disk.
-        # No-op when the cab is absent on host, the flag is off, the VM isn't
-        # the top-of-hierarchy SUP, or the guest already has a matching cab.
-        # Gated on Phase <= 7 so the copy lands before InstallRoles runs.
+        # WSUS categories baseline cab. Ship to EVERY SUP/WSUS VM (not just
+        # top-of-hierarchy) so InstallRoles (Phase 8) can run `wsusutil import`
+        # locally and pre-populate dbo.UpdateCategories before CM's first
+        # categories sync. Without the local cab a Primary-under-CAS SUP (or
+        # any downstream SUP) falls back to pulling the full ~13K-entry
+        # taxonomy from its upstream source -- whether that's MU or another
+        # WSUS -- which is the multi-hour path we want to avoid. The import
+        # is idempotent: Start-WsusBaselineImportBackground short-circuits
+        # with 'already-imported' once dbo.UpdateCategories is populated, so
+        # re-running Phase <=7 on a healthy box is a fast no-op.
+        # No-op when the cab is absent on host, the flag is off, the VM is
+        # not a SUP/WSUS, or the guest already has a matching cab on disk.
         if ($Phase -le 7) {
             $cmoForCab = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
             $cabEnabled = $true
@@ -2724,14 +2727,8 @@ $global:VM_Config = {
                 $cabEnabled = $false
             }
             $isWsusVm = ($currentItem.installSUP -eq $true) -or ($currentItem.Role -eq 'WSUS')
-            $hasCAS = ($deployConfig.virtualMachines | Where-Object { $_.role -eq 'CAS' }).Count -gt 0
-            $isTopOfHier = ($currentItem.Role -eq 'WSUS') -or (
-                ($currentItem.installSUP -eq $true) -and (
-                    ($currentItem.role -eq 'CAS') -or ($currentItem.role -eq 'Primary' -and -not $hasCAS)
-                )
-            )
             $hostCabPath = Join-Path $Common.AzureFilesPath "tools\wsus\WsusCategoriesBaseline.cab"
-            if ($cabEnabled -and $isWsusVm -and $isTopOfHier -and (Test-Path $hostCabPath)) {
+            if ($cabEnabled -and $isWsusVm -and (Test-Path $hostCabPath)) {
                 try {
                     # Staleness warning: cab >540 days old (based on host
                     # LastWriteTime -- when it was placed in this checkout).
