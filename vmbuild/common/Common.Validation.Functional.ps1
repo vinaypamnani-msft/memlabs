@@ -6369,15 +6369,43 @@ function Test-CMSiteWideFunctionality {
                         if (-not $cmdSupport) {
                             $results.Details.Add("WARN: Boot image '$biName' does not have command support enabled")
                         }
-                        # Check distribution — query SMS_PackageStatusDistPointsSummarizer
+                        # Check distribution — query SMS_PackageStatusDistPointsSummarizer.
+                        # State values: 0=Installed, 1=InstallPending, 2=InstallRetrying,
+                        # 3=InstallFailed, 4=RemovalPending, 5=RemovalRetrying, 6=RemovalFailed,
+                        # 7=ContentValidating, 8=ContentValidationFailed. We also consult
+                        # SMS_DistributionPoint to see whether the package has been *targeted*
+                        # to any DP at all — distinguishes "no targeting" from "in progress".
                         try {
-                            $dpStatus = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
-                                -Filter "PackageID='$($bi.PackageID)' AND State=0" -ErrorAction Stop)
-                            if ($dpStatus.Count -ge 1) {
-                                $results.Details.Add("OK: Boot image '$biName' distributed to $($dpStatus.Count) DP(s)")
+                            $allDp = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                                -Filter "PackageID='$($bi.PackageID)'" -ErrorAction Stop)
+                            $installed = @($allDp | Where-Object { $_.State -eq 0 })
+                            $inProgress = @($allDp | Where-Object { $_.State -in 1, 2, 7 })
+                            $failed = @($allDp | Where-Object { $_.State -in 3, 6, 8 })
+                            if ($installed.Count -ge 1 -and $failed.Count -eq 0 -and $inProgress.Count -eq 0) {
+                                $results.Details.Add("OK: Boot image '$biName' distributed to $($installed.Count) DP(s)")
+                            }
+                            elseif ($failed.Count -ge 1) {
+                                $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) distribution failed on $($failed.Count) DP(s) [Installed=$($installed.Count), InProgress=$($inProgress.Count)]")
+                            }
+                            elseif ($inProgress.Count -ge 1) {
+                                # Pending/Retrying/Validating -- distribution is actively being processed.
+                                $results.Details.Add("OK: Boot image '$biName' distribution in progress on $($inProgress.Count) DP(s) [Installed=$($installed.Count)]")
                             }
                             else {
-                                $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) not distributed to any DP (distribution may still be in progress)")
+                                # No summarizer rows at all -- either truly not targeted yet,
+                                # or DistMgr hasn't created the per-DP status rows. Check
+                                # SMS_DistributionPoint (the targeting table) to disambiguate.
+                                try {
+                                    $targeted = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint `
+                                        -Filter "PackageID='$($bi.PackageID)'" -ErrorAction Stop)
+                                }
+                                catch { $targeted = @() }
+                                if ($targeted.Count -ge 1) {
+                                    $results.Details.Add("OK: Boot image '$biName' targeted to $($targeted.Count) DP(s); distribution pending (DistMgr has not yet posted status)")
+                                }
+                                else {
+                                    $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) not distributed to any DP and no distribution targeting found")
+                                }
                             }
                         }
                         catch {
