@@ -655,6 +655,37 @@ function Start-PhaseJobs {
                         continue
                     }
                 }
+                else {
+                    # The VM reports 'Running', but that only means the Hyper-V
+                    # worker process is up -- the guest OS / PSDirect VMBus can
+                    # still be unreachable (mid-boot, hung integration services,
+                    # or a passive SQLAO node that came up slowly). The old code
+                    # skipped straight to the Step 2 ADSI add against an
+                    # unreachable guest, where each Invoke-VmCommand burned ~5 min
+                    # in Get-VmSession credential/retry timeouts and returned
+                    # nothing usable ("Invoke-VmCommand returned no result"), then
+                    # repeated that 3x before failing preflight ~15 min later.
+                    # Probe PSDirect liveness here (this also gives the guest a
+                    # settle window); if it's still dead, restart it ONCE and wait.
+                    $reachable = Wait-ForVm -VmName $sqlHost -PathToVerify 'C:\Users' -VmDomainName $domain -TimeoutMinutes 3 -SkipDiskTest -Quiet
+                    if (-not $reachable) {
+                        Write-Log "[Phase 8] $sqlHost is Running but not reachable via PowerShell Direct after 3 min; restarting it once for site-server $($ss.vmName) preflight." -Warning
+                        try { Stop-VM2 -Name $sqlHost -TurnOff } catch {
+                            Write-Log "[Phase 8] $sqlHost`: Stop-VM2 threw: $($_.Exception.Message)" -Warning
+                        }
+                        try { Start-VM2 -Name $sqlHost -ErrorAction Stop } catch {
+                            Write-Log "[Phase 8] $sqlHost`: Start-VM2 threw: $($_.Exception.Message)" -Warning
+                        }
+                        $reachable = Wait-ForVm -VmName $sqlHost -PathToVerify 'C:\Users' -VmDomainName $domain -TimeoutMinutes 5 -SkipDiskTest -Quiet
+                        if (-not $reachable) {
+                            $postState = (Get-VM2 -Name $sqlHost -ErrorAction SilentlyContinue).State
+                            $msg = "[$($ss.vmName) -> $sqlHost] SQL host is Running but never became reachable via PowerShell Direct, even after a restart (state=$postState). The in-guest self-heal scriptblock cannot be delivered."
+                            Write-Log "[Phase 8] $msg" -Failure
+                            $preflightFailures.Add($msg) | Out-Null
+                            continue
+                        }
+                    }
+                }
 
                 # Step 2: idempotently add the site-server machine account to
                 # local Administrators on this SQL host. Retry transient
@@ -734,7 +765,22 @@ function Start-PhaseJobs {
                         }
                     }
                     else {
-                        $lastError = if ($result -and $result.ErrorDetails) { $result.ErrorDetails } else { 'Invoke-VmCommand returned no result' }
+                        # ChannelBroken means Get-VmSession could never open a
+                        # PSDirect session (every credential attempt timed out --
+                        # the guest is Running but its VMBus/PSDirect host is hung),
+                        # so the in-guest secure-channel/admin-add scriptblock never
+                        # ran. Surface that explicitly instead of the opaque
+                        # "returned no result" -- it points the operator at a hung
+                        # guest rather than at a membership/ADSI problem.
+                        if ($result -and $result.ChannelBroken) {
+                            $lastError = "PowerShell Direct channel to $sqlHost is hung (VM is Running but the guest is not responding); the in-guest secure-channel/admin-add scriptblock could not be delivered"
+                        }
+                        elseif ($result -and $result.ErrorDetails) {
+                            $lastError = $result.ErrorDetails
+                        }
+                        else {
+                            $lastError = 'Invoke-VmCommand returned no result'
+                        }
                         Write-Log "[Phase 8] $sqlHost`: self-heal attempt $attempts failed ($lastError)." -Warning
                     }
                     if (-not $success -and $attempts -lt $maxAttempts) { Start-Sleep -Seconds 10 }
