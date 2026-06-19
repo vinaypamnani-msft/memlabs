@@ -1005,7 +1005,12 @@ try {
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
         Write-Log "Log file: $($Common.LogPath)" -Warning -NoIndent
         if ($currentPhase -ge 2) {
-            if ($currentPhase -eq 8) {
+            $offerRestore = $false
+            if ($currentPhase -eq 8 -and $deployConfig) {
+                try { $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig }
+                catch { $offerRestore = $false }
+            }
+            if ($offerRestore) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
@@ -1168,7 +1173,12 @@ finally {
         Write-Log "Log file: $($Common.LogPath)" -Warning -NoIndent
         $exitcode = 2
         if ($currentPhase -ge 2 -and $currentPhase -le $maxPhase) {
-            if ($currentPhase -eq 8) {
+            $offerRestore = $false
+            if ($currentPhase -eq 8 -and $deployConfig) {
+                try { $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig }
+                catch { $offerRestore = $false }
+            }
+            if ($offerRestore) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"

@@ -111,6 +111,43 @@ function Merge-Phase8AutoSnapshot {
     }
 }
 
+function Test-Phase8AutoSnapshotExists {
+    <#
+    .SYNOPSIS
+        Returns $true when a "MemLabs Phase 8 AutoSnapshot" checkpoint still
+        exists on any VM in the domain.
+    .DESCRIPTION
+        Used to decide whether suggesting -restore after a Phase 8 failure /
+        cancel is meaningful. The Phase 8 auto-snapshot is only ever created
+        when a CAS/Primary is about to perform its first CM install (i.e. NOT a
+        re-run of an already-installed site -- see Get-ConfigurationData), and
+        it is merged/removed once Phase 11 validation passes. So its presence
+        is a reliable proxy for "a fresh CM setup was attempted this run and a
+        pre-install rollback point is available", which is exactly when
+        restoring before retrying makes sense. When it's absent (re-run,
+        -NoSnapshot, snapshot declined, or the run was cancelled before the
+        snapshot was taken) restoring is pointless and should not be offered.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$DeployConfig
+    )
+
+    $domain = $DeployConfig.vmOptions.domainName
+    $snapshotPattern = "*MemLabs Phase 8 AutoSnapshot*"
+
+    $vms = Get-List -Type VM -DomainName $domain
+    if (-not $vms) { return $false }
+
+    foreach ($vm in $vms) {
+        $snaps = @(Get-VMCheckpoint -VMName $vm.vmName -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like $snapshotPattern })
+        if ($snaps.Count -gt 0) { return $true }
+    }
+    return $false
+}
+
 function Invoke-AutoSnapShotDomain {
     [CmdletBinding()]
     param (
