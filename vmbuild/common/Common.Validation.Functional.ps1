@@ -5252,6 +5252,23 @@ function Test-DomainMemberFunctionality {
             }
             return $diag
         }
+        # Returns the last meaningful ccmsetup.log line (message unwrapped from the
+        # <![LOG[...]LOG]!> envelope, whitespace-collapsed, capped) so a 'waiting'
+        # progress line can show what ccmsetup is actually doing right now.
+        $tailCcmLine = {
+            $p = 'C:\Windows\ccmsetup\Logs\ccmsetup.log'
+            if (Test-Path $p) {
+                $line = Get-Content $p -Tail 1 -ErrorAction SilentlyContinue | Select-Object -Last 1
+                if ($line) {
+                    $m = [regex]::Match([string]$line, '<!\[LOG\[(.*?)\]LOG\]!>')
+                    $msg = if ($m.Success) { $m.Groups[1].Value } else { [string]$line }
+                    $msg = ($msg -replace '\s+', ' ').Trim()
+                    if ($msg.Length -gt 120) { $msg = $msg.Substring(0, 120) + '...' }
+                    return $msg
+                }
+            }
+            return ''
+        }
 
         # Domain membership
         $cs = Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue
@@ -5461,8 +5478,13 @@ function Test-DomainMemberFunctionality {
                 Start-Sleep -Seconds 10
             }
             # Wait up to 5 minutes for ccmsetup to finish
+            $waitStart = Get-Date
             for ($w = 0; $w -lt 30; $w++) {
-                Write-Progress -Activity $progressActivity -Status "ccmsetup retry: waiting for ccmsetup to finish ($($w * 10)s)"
+                $elapsed = [int]((Get-Date) - $waitStart).TotalSeconds
+                $tail = & $tailCcmLine
+                $msg = "ccmsetup retry: waiting for ccmsetup to finish (${elapsed}s)"
+                if ($tail) { $msg += " -- last log: $tail" }
+                Write-Progress -Activity $progressActivity -Status $msg
                 Start-Sleep -Seconds 10
                 if (-not (Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue)) { break }
             }
@@ -5503,8 +5525,13 @@ function Test-DomainMemberFunctionality {
                 if ($setup) {
                     # Wait up to 5 min for ccmsetup to finish
                     $results.Details.Add("INFO: CcmExec is $($ccm.Status), ccmsetup.exe still running, waiting up to 5 min...")
+                    $waitStart = Get-Date
                     for ($w = 0; $w -lt 30; $w++) {
-                        Write-Progress -Activity $progressActivity -Status "CcmExec $($ccm.Status); waiting for ccmsetup to finish ($($w * 10)s)"
+                        $elapsed = [int]((Get-Date) - $waitStart).TotalSeconds
+                        $tail = & $tailCcmLine
+                        $msg = "CcmExec $($ccm.Status); waiting for ccmsetup to finish (${elapsed}s)"
+                        if ($tail) { $msg += " -- last log: $tail" }
+                        Write-Progress -Activity $progressActivity -Status $msg
                         Start-Sleep -Seconds 10
                         if (-not (Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue)) { break }
                     }
