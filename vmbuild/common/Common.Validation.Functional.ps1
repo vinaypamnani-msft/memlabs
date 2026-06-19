@@ -5586,7 +5586,19 @@ function Test-DomainMemberFunctionality {
 
     # Office deployment policy check: if installOffice is set, verify the client received the deployment
     $officeChannel = $CurrentItem.installOffice
-    if ($officeChannel -and $officeChannel -ne $false -and $result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Passed) {
+    $officeWanted = ($officeChannel -and $officeChannel -ne $false -and $result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Passed)
+    # Office is deployed via the ConfigMgr client. If CcmExec isn't actually
+    # installed/running there's no point polling CCM_Application for 3 min -- it
+    # can never populate. Detect client health from the main test's Details (all
+    # success paths add an "OK: CcmExec ... Running" line).
+    $clientRunningForOffice = $false
+    if ($officeWanted -and $result.ScriptBlockOutput.Details) {
+        $clientRunningForOffice = [bool]($result.ScriptBlockOutput.Details | Where-Object { $_ -match '^OK: CcmExec' })
+    }
+    if ($officeWanted -and -not $clientRunningForOffice) {
+        $result.ScriptBlockOutput.Details.Add("WARN: Skipping Office deployment policy check -- ConfigMgr client (CcmExec) is not installed/running, so the Office deployment can't be received. Resolve the client install first (see the ccmsetup WARN above).")
+    }
+    if ($officeWanted -and $clientRunningForOffice) {
         $officeCheckBlock = {
             $officeResults = @{ Details = [System.Collections.Generic.List[string]]::new() }
             $progressActivity = "$env:COMPUTERNAME [DomainMember]"
