@@ -264,8 +264,19 @@ Function Write-Progress2Impl {
 
             $StatusValue = $null
             if ($PSBoundParameters.TryGetValue('Status', [ref]$StatusValue)) {
-                $StatusValue = $StatusValue.TrimEnd()
-                $PSBoundParameters['Status'] = $StatusValue
+                if ([string]::IsNullOrWhiteSpace($StatusValue)) {
+                    # A whitespace-only Status (e.g. PS remoting's built-in
+                    # "Preparing modules for first use." record forwarded by
+                    # Invoke-VmCommand) trims to an empty string, which the wrapped
+                    # Write-Progress rejects via ValidateNotNullOrEmpty and throws on
+                    # every record. Status is optional, so drop it instead of failing.
+                    $PSBoundParameters.Remove('Status') | Out-Null
+                    $Status = $null
+                }
+                else {
+                    $StatusValue = $StatusValue.TrimEnd()
+                    $PSBoundParameters['Status'] = $StatusValue
+                }
             }
 
             if ($writeLog) {
@@ -5429,7 +5440,7 @@ function Invoke-VmCommand {
                                         $stallDeadline = (Get-Date).AddSeconds($stallSeconds)
                                     }
                                     $lastRec = $progressSource.Progress[$progressSource.Progress.Count - 1]
-                                    if ($lastRec -and $lastRec.Activity -and $lastRec.StatusDescription) {
+                                    if ($lastRec -and -not [string]::IsNullOrWhiteSpace($lastRec.Activity) -and -not [string]::IsNullOrWhiteSpace($lastRec.StatusDescription)) {
                                         $line = "$($lastRec.Activity)|$($lastRec.StatusDescription)"
                                         if ($line -ne $lastForwarded) {
                                             $lastForwarded = $line
