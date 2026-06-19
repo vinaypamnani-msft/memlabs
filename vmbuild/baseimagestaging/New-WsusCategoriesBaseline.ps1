@@ -3,7 +3,8 @@
 # Operator-run helper that produces a `wsusutil export` cab containing only
 # the Products / Classifications / Languages / Detectoid taxonomy from a
 # clean WSUS server (no products subscribed, no update metadata). The cab
-# is then imported in Phase 7 by the WSUSSync DSC resource on every fresh
+# is then imported in Phase 8 by InstallRoles.ps1 (via
+# Start-WsusBaselineImportBackground in ScriptFunctions.ps1) on every fresh
 # deploy, in place of the slow / flaky first MU categories sync.
 #
 # Cadence: regenerate when (a) a new Microsoft product memlabs needs has
@@ -38,11 +39,11 @@
 #   Skips generation entirely. Pushes an existing host cab (default
 #   $OutputDir\WsusCategoriesBaseline.cab, override with -CabPath) to the
 #   guest at C:\staging\wsus\WsusCategoriesBaseline.cab -- the exact path
-#   the WSUSSync DSC resource reads from in Phase 7 -- runs `wsusutil
-#   import`, and prints pre/post taxonomy counts and the delta. Use this
-#   to validate a freshly-generated cab against a clean WSUS VM before
-#   uploading it to Azure Files. Combine with -Reset to wipe + retest on
-#   the same VM.
+#   InstallRoles' Start-WsusBaselineImportBackground reads from in Phase 8
+#   -- runs `wsusutil import`, and prints pre/post taxonomy counts and
+#   the delta. Use this to validate a freshly-generated cab against a
+#   clean WSUS VM before uploading it to Azure Files. Combine with -Reset
+#   to wipe + retest on the same VM.
 
 [CmdletBinding()]
 param (
@@ -72,9 +73,9 @@ param (
     [switch]$Resume,
 
     # Test mode: skip generation. Push an existing host cab to the guest at
-    # the same path WSUSSync DSC reads from, run `wsusutil import`, and
-    # report pre/post taxonomy counts. Combine with -Reset to wipe + retest.
-    # Mutually exclusive with -Resume.
+    # the same path Start-WsusBaselineImportBackground reads from, run
+    # `wsusutil import`, and report pre/post taxonomy counts. Combine with
+    # -Reset to wipe + retest. Mutually exclusive with -Resume.
     [Parameter(Mandatory = $false)]
     [switch]$Upload,
 
@@ -223,11 +224,11 @@ END
 }
 
 # -Upload: short-circuit. Skip generation; push an existing host cab to the
-# guest at C:\staging\wsus\WsusCategoriesBaseline.cab (the exact path the
-# WSUSSync DSC resource reads from in Phase 7), snapshot pre-import
-# taxonomy, run `wsusutil import`, snapshot post-import taxonomy, and
-# report the delta. Validates a freshly-generated cab end-to-end before
-# the operator uploads it to Azure Files.
+# guest at C:\staging\wsus\WsusCategoriesBaseline.cab (the exact path
+# InstallRoles' Start-WsusBaselineImportBackground reads from in Phase 8),
+# snapshot pre-import taxonomy, run `wsusutil import`, snapshot post-import
+# taxonomy, and report the delta. Validates a freshly-generated cab
+# end-to-end before the operator uploads it to Azure Files.
 if ($Upload.IsPresent) {
     if (-not $CabPath) {
         $CabPath = Join-Path $OutputDir "WsusCategoriesBaseline.cab"
@@ -329,7 +330,7 @@ if ($Upload.IsPresent) {
     }
     Write-Log "[Baseline] Cab on guest verified: $($v.Bytes) bytes, MD5=$($v.Md5)."
 
-    # Run wsusutil import. Same invocation the DSC resource uses.
+    # Run wsusutil import. Same invocation Start-WsusBaselineImportBackground uses.
     Write-Log "[Baseline] Running wsusutil import on $VmName (may take several minutes)..."
     $import = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Upload: wsusutil import" -ScriptBlock {
         param($cab, $log)
@@ -391,13 +392,22 @@ if ($Upload.IsPresent) {
     Write-Log "  Post-import Taxonomy: Cats=$($post.TaxonomyCats), Clas=$($post.TaxonomyClas), SubscribedCats=$($post.SubscribedCats)"
     Write-Log "  Delta:                Cats=+$dCats, Clas=+$dClas, ImportTime=$($imp.ElapsedSec)s"
     if ($post.TaxonomyCats -le 0) {
-        Write-Log "[Baseline] FAIL: post-import taxonomy is empty. The DSC resource would treat this as a failure and fall back to MU sync." -Failure
+        Write-Log "[Baseline] FAIL: post-import taxonomy is empty. InstallRoles' Start-WsusBaselineImportBackground would log no-cab/error and let MU sync take over." -Failure
     }
-    elseif ($post.SubscribedCats -le 0) {
-        Write-Log "[Baseline] WARNING: TaxonomyCats=$($post.TaxonomyCats) but SubscribedCats=0. The DSC resource checks SubscribedCats and would treat this as 'no categories present' and fall back to MU sync. The cab populated the catalog but no entries are flagged as subscribed -- regenerate the cab or revisit the import-side gating." -Warning
+    elseif ($post.TaxonomyCats -lt 100) {
+        Write-Log "[Baseline] WARNING: post-import TaxonomyCats=$($post.TaxonomyCats) is below the 100-row threshold InstallRoles uses to consider the cab 'landed'. Wait-WsusBaselineImport would treat this as a partial import and retry. Regenerate the cab from a fully-categorized source." -Warning
     }
     else {
-        Write-Log "[Baseline] PASS: cab is good. The WSUSSync DSC resource would accept this and skip MU categories sync." -Success
+        # SubscribedCats=0 immediately post-import is the EXPECTED healthy
+        # outcome -- the cab ships taxonomy only (Products / Classifications /
+        # Languages / Detectoid metadata in dbo.UpdateCategories). Subscription
+        # state (which products/classifications are flagged for download) is
+        # set later by ConfigMgr's Set-CMSoftwareUpdatePointComponent + WCM
+        # push, not by the cab. InstallRoles' Start-WsusBaselineImportBackground
+        # gates on the FULL taxonomy count (Get-WsusTaxonomyCategoryCount,
+        # which reads $wsus.GetUpdateCategories()), so 433 cats / 0 subs is
+        # correctly detected as 'already-imported' on re-run.
+        Write-Log "[Baseline] PASS: cab is good. InstallRoles' Start-WsusBaselineImportBackground will detect TaxonomyCats=$($post.TaxonomyCats) on re-run and skip re-import. SubscribedCats=$($post.SubscribedCats) is expected: cab ships taxonomy only, CM/WCM sets subscription later." -Success
     }
     return
 }
@@ -449,7 +459,7 @@ else {
 }
 
 # Drive a categories sync on the guest. Subscribe to a minimal product set
-# (SQL Server 2005 + Tools, mirroring the existing WSUSSync resource), kick
+# (SQL Server 2005 + Tools, mirroring the existing WSUSSync MU fallback), kick
 # the sync, then poll from the host every 60s so progress is visible.
 if ($Resume.IsPresent) {
     Write-Log "[Baseline] -Resume: attaching to existing categories sync (skipping hardening + StartSynchronization)..."
