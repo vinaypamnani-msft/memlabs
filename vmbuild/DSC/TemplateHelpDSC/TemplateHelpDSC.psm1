@@ -5585,110 +5585,38 @@ class WSUSSync {
     [string] $ServerName
 
     [void] Set() {
-        # Pre-built categories baseline cab takes precedence over MU sync.
-        # The cab (C:\staging\wsus\WsusCategoriesBaseline.cab, shipped via
-        # Common.ScriptBlocks.ps1 in pre-DSC stage when cmOptions.WsusImportBaseline
-        # is true) contains only the Products/Classifications/Languages/Detectoid
-        # taxonomy from a `wsusutil export` of a clean WSUS server -- no products
-        # subscribed, no update metadata. Importing it bypasses the slow/flaky
-        # first MU categories sync entirely. perfloading still drives the
-        # per-deploy product subscription + updates sync as today.
+        # Pre-Phase-7 cab import has been moved out of this DSC resource
+        # into InstallRoles.ps1 (Start-WsusBaselineImportBackground /
+        # Wait-WsusBaselineImport in ScriptFunctions.ps1). DSC's "background
+        # process + reboot between phases" model could not reliably tell a
+        # completed `wsusutil import` from one killed mid-flight by a
+        # post-phase reboot, leaving SUSDB with a partial taxonomy that the
+        # next CM sync would trip over ("invalid update identity in XML").
+        # InstallRoles owns launch + verify (exit code, log tail, post-count)
+        # in a single script context so partial imports get retried instead
+        # of silently shipped. See ScriptFunctions.ps1.
         #
-        # Run the import in the BACKGROUND (no -Wait) so Phase 7 doesn't sit
-        # on a 10-15 min synchronous wsusutil import. We persist the launched
-        # PID + start time to a state file; perfloading.ps1 reads it and waits
-        # on the process (bounded to 30 min from start) before triggering its
-        # first product sync. The state file is removed by perfloading once
-        # the wait completes, or on the next Phase 7 pass before re-launch.
-        #
-        # Falls through to the MU sync path on any failure (cab missing,
-        # wsusutil missing, fast-fail at launch). A late failure (process
-        # alive past 2s, then errors out) leaves no categories; perfloading
-        # will see the empty catalog and trigger a normal sync there.
+        # If the cab is present we skip the MU fire-and-forget sync below --
+        # InstallRoles will populate the taxonomy via cab import. If the cab
+        # is absent (cab disabled, copy failed, no cab in the build) we
+        # still kick off the MU sync here so categories are downloading in
+        # the background through Phases 7-10 instead of stalling perfloading
+        # for hours waiting on the first MU categories sync.
         $cabPath = 'C:\staging\wsus\WsusCategoriesBaseline.cab'
-        $stateFile = 'C:\staging\wsus\WsusCategoriesBaseline.import.state.json'
         if (Test-Path $cabPath) {
-            $importedOk = $false
-            try {
-                Write-Status "WSUS categories baseline cab present. Attempting wsusutil import for $($this.ServerName)."
-
-                # Skip import if categories already present -- merging into a
-                # non-empty DB leaves subscription state ambiguous.
-                $hasCats = $false
-                $preCount = 0
-                try {
-                    $WSUS_pre = Get-WsusServer -Name $this.ServerName -PortNumber 8530
-                    if ($WSUS_pre) {
-                        $cats_pre = $WSUS_pre.GetSubscription().GetUpdateCategories()
-                        if ($cats_pre) { $preCount = $cats_pre.Count }
-                        $hasCats = $preCount -gt 0
-                    }
-                } catch {}
-                if ($hasCats) {
-                    Write-Status "WSUS catalog already populated ($preCount categories) - skipping baseline import and MU sync."
-                    if (Test-Path $stateFile) { Remove-Item $stateFile -Force -ErrorAction SilentlyContinue }
-                    return
-                }
-
-                $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
-                if (-not (Test-Path $wsusUtil)) {
-                    Write-Status "WsusUtil.exe not found at $wsusUtil - falling back to MU sync."
-                }
-                else {
-                    # Drop any stale state file from a prior pass before launching.
-                    if (Test-Path $stateFile) { Remove-Item $stateFile -Force -ErrorAction SilentlyContinue }
-                    $importLog = 'C:\staging\wsus\WsusCategoriesBaseline.import.log'
-                    $proc = Start-Process -FilePath $wsusUtil -ArgumentList @('import', $cabPath, $importLog) -PassThru -NoNewWindow -ErrorAction Stop
-                    # Give wsusutil a moment to fail fast (bad cab, locked DB, ...).
-                    Start-Sleep -Seconds 2
-                    if ($proc.HasExited -and $proc.ExitCode -ne 0) {
-                        $tail = ''
-                        if (Test-Path $importLog) {
-                            $tailLines = Get-Content $importLog -Tail 5 -ErrorAction SilentlyContinue
-                            if ($tailLines) { $tail = ($tailLines -join ' | ') }
-                        }
-                        Write-Status "WSUS baseline import exited immediately (exit=$($proc.ExitCode)). Tail: $tail. Falling back to MU sync."
-                    }
-                    elseif ($proc.HasExited -and $proc.ExitCode -eq 0) {
-                        # Unusual (real import takes minutes) but treat as success.
-                        Write-Status "WSUS baseline import finished immediately (exit=0). Skipping MU categories sync."
-                        $importedOk = $true
-                    }
-                    else {
-                        # Background import in flight. Record state for perfloading.
-                        $state = [PSCustomObject]@{
-                            ProcessId       = $proc.Id
-                            ProcessName     = $proc.ProcessName
-                            StartTimeUtc    = (Get-Date).ToUniversalTime().ToString('o')
-                            CabPath         = $cabPath
-                            ImportLog       = $importLog
-                            MaxWaitMinutes  = 30
-                        }
-                        try {
-                            $state | ConvertTo-Json | Set-Content -Path $stateFile -Encoding UTF8 -Force
-                        }
-                        catch {
-                            Write-Status "Failed to persist baseline import state ($stateFile): $($_.Exception.Message). Perfloading will not wait."
-                        }
-                        Write-Status "WSUS baseline import running in background (pid=$($proc.Id), max wait 30 min). Perfloading will wait before sync 1. Skipping MU categories sync."
-                        $importedOk = $true
-                    }
-                }
-            }
-            catch {
-                Write-Status "WSUS baseline import threw: $($_.Exception.Message). Falling back to MU sync."
-            }
-            if ($importedOk) { return }
+            Write-Status "WSUS categories baseline cab present at $cabPath. Skipping Phase 7 MU sync; InstallRoles will run wsusutil import."
+            return
         }
 
-        # Early fire-and-forget sync to pre-download the WSUS category catalog.
-        # This runs in Phase 7 (after any PBIRS install on the same VM has
-        # completed and rebooted), ~3-4 hours before perfloading needs WSUS
-        # ready. By syncing now (even with minimal products), the full
-        # category taxonomy downloads in background. When perfloading runs
-        # its product sync later, categories are already present and only
+        # No cab -- fall back to the early fire-and-forget MU sync to
+        # pre-download the WSUS category catalog. This runs in Phase 7
+        # (after any PBIRS install on the same VM has completed and
+        # rebooted), ~3-4 hours before perfloading needs WSUS ready. By
+        # syncing now (even with minimal products), the full category
+        # taxonomy downloads in background. When perfloading runs its
+        # product sync later, categories are already present and only
         # update metadata is needed.
-        Write-Status "Starting early WSUS catalog sync for $($this.ServerName) (fire-and-forget)"
+        Write-Status "Starting early WSUS catalog sync for $($this.ServerName) (fire-and-forget, no cab available)"
         try {
             $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530
             if (-not $WSUS) {

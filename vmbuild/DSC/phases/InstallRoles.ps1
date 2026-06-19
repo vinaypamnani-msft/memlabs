@@ -263,6 +263,15 @@ if ($thisSiteIsTopSite -and -not $existingSUPs -and $SUPs.Count -gt 0) {
     $configureSUP = $true
 }
 
+# Kick off the WSUS categories cab import in the background NOW (before the
+# Install-SUP loop and WCM configuration). Owns launch + verify in a single
+# script context -- replaces the old Phase 7 WSUSSync background launch
+# which could be killed mid-import by a post-phase reboot, leaving SUSDB
+# with a partial taxonomy that the next CM sync would trip over.
+# No-op when the cab isn't on disk (cab disabled or copy failed) -- in that
+# case Phase 7's MU fire-and-forget sync is populating the taxonomy.
+Start-WsusBaselineImportBackground -Tag "[InstallRoles]" | Out-Null
+
 # Install SUP
 foreach ($SUP in $SUPs) {
 
@@ -345,12 +354,14 @@ if ($configureSUP) {
                     }
                 }
  
-                # If Phase 7's WSUSSync launched wsusutil import in the
-                # background, wait for it to finish before triggering the
-                # CM-side sync. wsyncmgr -> WSUS.StartSynchronization() on
-                # top of an in-flight wsusutil import races on SUSDB writes
-                # and on subscription state. Bounded to 30 min from the
-                # import's original start (see ScriptFunctions.ps1).
+                # Wait for the cab import launched at the top of this script
+                # (Start-WsusBaselineImportBackground) to finish AND verify
+                # the taxonomy actually landed (log marker + count threshold,
+                # with a single synchronous retry on partial). wsyncmgr ->
+                # WSUS.StartSynchronization() on top of an in-flight or
+                # partial cab import races on SUSDB writes and triggers the
+                # 'invalid update identity in XML' SqlException. No-op when
+                # the cab path wasn't used (no state file).
                 Wait-WsusBaselineImport -Tag "[InstallRoles]"
 
                 # Guard against re-runs: if a sync (especially a long Categories

@@ -2090,10 +2090,13 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     }
 
     if ($Sups -and $syncNeeded) {
-        # If Phase 7's WSUSSync launched wsusutil import in the background,
-        # wait for it to finish (bounded 30 min from start) before kicking
-        # off any sync work. Running an MU categories sync on top of an
-        # in-flight baseline import would race on subscription state.
+        # Safety net: InstallRoles owns the cab import (launch +
+        # verify+retry). By the time perfloading runs, the state file
+        # is normally already removed and this call is a no-op. The
+        # call stays so that an InstallRoles pass that didn't reach
+        # the wait (early-return, exception before Wait, etc.) still
+        # gets caught here before perfloading triggers a CM-side sync
+        # on top of an in-flight or partial wsusutil import.
         Wait-WsusBaselineImport -Tag $Tag
 
         # Two syncs are needed for WSUS to be fully operational:

@@ -2586,12 +2586,14 @@ $global:VM_Config = {
         }
 
         # WSUS categories baseline cab. Ship to top-of-hierarchy SUP/WSUS
-        # VMs so Phase 7's WSUSSync resource can `wsusutil import` instead of
-        # doing the slow/flaky first categories sync from Microsoft Update.
+        # VMs so InstallRoles (Phase 8) can run `wsusutil import` from a
+        # script context that owns launch + verify, instead of doing the
+        # slow/flaky first categories sync from Microsoft Update. Phase 7
+        # WSUSSync DSC observes the cab's presence and skips its early MU
+        # fire-and-forget sync when the cab is on disk.
         # No-op when the cab is absent on host, the flag is off, the VM isn't
         # the top-of-hierarchy SUP, or the guest already has a matching cab.
-        # Gated on Phase <= 7 so the copy doesn't fire on every later phase
-        # pass (the cab only needs to be in place before Phase 7's DSC pass).
+        # Gated on Phase <= 7 so the copy lands before InstallRoles runs.
         if ($Phase -le 7) {
             $cmoForCab = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
             $cabEnabled = $true
@@ -2629,12 +2631,12 @@ $global:VM_Config = {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying WSUS categories baseline cab ($sizeMB MB) to the VM."
                         $cabCopyOk = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $hostCabPath -Destination 'C:\staging\wsus' -Force
                         if ($cabCopyOk -eq $false) {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): WSUS baseline cab copy failed; WSUSSync will fall back to Microsoft Update sync." -Warning
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): WSUS baseline cab copy failed; InstallRoles will skip wsusutil import and Phase 7 WSUSSync will fall back to a Microsoft Update sync." -Warning
                         }
                     }
                 }
                 catch {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): WSUS baseline cab pre-copy probe threw: $($_.Exception.Message). Skipping; WSUSSync will fall back to MU sync." -Warning
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): WSUS baseline cab pre-copy probe threw: $($_.Exception.Message). Skipping; InstallRoles will skip wsusutil import and Phase 7 WSUSSync will fall back to MU sync." -Warning
                 }
             }
         }

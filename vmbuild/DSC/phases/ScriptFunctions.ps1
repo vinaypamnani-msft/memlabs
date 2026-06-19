@@ -732,25 +732,160 @@ function Get-UpdatePack {
     return $updatepack
 }
 
-function Wait-WsusBaselineImport {
-    # WSUSSync (Phase 7, TemplateHelpDSC.psm1) may have launched
-    # `wsusutil import` in the background and persisted its PID + start
-    # time to C:\staging\wsus\WsusCategoriesBaseline.import.state.json.
-    # Any later caller that's about to trigger a WSUS sync (InstallRoles'
-    # Sync-CMSoftwareUpdate, perfloading's full.syn drop) must wait for
-    # that process to finish first -- triggering a CM-side sync on top
-    # of an in-flight `wsusutil import` races on SUSDB writes and on
-    # WSUS subscription state.
+function Test-WsusBaselineImportSuccess {
+    # Returns $true when import.log tail shows a successful wsusutil completion.
+    # wsusutil writes the same final line on success regardless of the cab size.
+    param([string]$ImportLog)
+    if (-not (Test-Path $ImportLog)) { return $false }
+    try {
+        $tail = Get-Content $ImportLog -Tail 25 -ErrorAction Stop
+    } catch { return $false }
+    if (-not $tail) { return $false }
+    $joined = ($tail -join "`n")
+    if ($joined -match 'Successfully imported metadata' -or $joined -match 'Import .* (succeeded|completed)') {
+        return $true
+    }
+    return $false
+}
+
+function Get-WsusTaxonomyCategoryCount {
+    # Lightweight count of the WSUS UpdateCategories taxonomy. Used to gauge
+    # whether a cab import landed (postinstall=~17, healthy cab=~400+).
+    param([string]$ServerName = $env:COMPUTERNAME, [int]$PortNumber = 8530)
+    try {
+        $w = Get-WsusServer -Name $ServerName -PortNumber $PortNumber -ErrorAction Stop
+        if (-not $w) { return -1 }
+        return @($w.GetUpdateCategories()).Count
+    } catch {
+        return -1
+    }
+}
+
+function Start-WsusBaselineImportBackground {
+    # Launch `wsusutil import` against C:\staging\wsus\WsusCategoriesBaseline.cab
+    # in the background and persist PID + start time + expected-count to a
+    # state file for Wait-WsusBaselineImport to consume. Owns the entire cab
+    # lifecycle (previously this was split across WSUSSync DSC + perfloading
+    # and a post-Phase-7 reboot could kill wsusutil mid-import, leaving a
+    # partial taxonomy that the next CM sync would fail on).
     #
-    # Bounded to MaxWaitMinutes (default 30, from the state file) measured
-    # from the import's ORIGINAL StartTimeUtc -- not from when this
-    # function is entered -- so a long Phase 8/9 doesn't extend the
-    # deadline. Returns silently when no state file exists, the PID is
-    # already gone, the deadline has passed, or the process exits during
-    # the wait. Removes the state file on terminal exit.
-    param([string]$Tag = '[WSUS]')
+    # No-op when the cab is absent, wsusutil is missing, the taxonomy is
+    # already populated (count >= ExpectedCount), or a launch already
+    # produced a state file with a still-running PID.
+    #
+    # Returns one of: 'launched', 'already-running', 'already-imported',
+    # 'no-cab', 'no-wsusutil', 'fast-fail', 'error'.
+    param(
+        [string]$Tag = '[WSUS]',
+        [int]$MaxWaitMinutes = 30,
+        [int]$ExpectedCount = 100   # taxonomy threshold above which we consider the cab "landed"
+    )
+
+    $cabPath   = 'C:\staging\wsus\WsusCategoriesBaseline.cab'
+    $stateFile = 'C:\staging\wsus\WsusCategoriesBaseline.import.state.json'
+    $importLog = 'C:\staging\wsus\WsusCategoriesBaseline.import.log'
+
+    if (-not (Test-Path $cabPath)) {
+        Write-DscStatus "$Tag Baseline cab not present at $cabPath - skipping import (Phase 7 MU fire-and-forget sync should populate taxonomy instead)."
+        return 'no-cab'
+    }
+
+    # Skip if a prior pass already imported a healthy taxonomy.
+    $preCount = Get-WsusTaxonomyCategoryCount
+    if ($preCount -ge $ExpectedCount) {
+        Write-DscStatus "$Tag Baseline cab already imported (TaxonomyCats=$preCount >= $ExpectedCount). Skipping re-import."
+        if (Test-Path $stateFile) { Remove-Item $stateFile -Force -ErrorAction SilentlyContinue }
+        return 'already-imported'
+    }
+
+    # Honor an in-flight import from a previous pass (idempotent re-entry).
+    if (Test-Path $stateFile) {
+        try {
+            $existing = Get-Content $stateFile -Raw -ErrorAction Stop | ConvertFrom-Json
+            $exPid = [int]$existing.ProcessId
+            $exName = if ($existing.ProcessName) { [string]$existing.ProcessName } else { 'WsusUtil' }
+            $exProc = Get-Process -Id $exPid -ErrorAction SilentlyContinue
+            if ($exProc -and $exProc.ProcessName -ieq $exName) {
+                Write-DscStatus "$Tag Baseline import already running (pid=$exPid). Not relaunching."
+                return 'already-running'
+            }
+        } catch {}
+        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
+    if (-not (Test-Path $wsusUtil)) {
+        Write-DscStatus "$Tag WsusUtil.exe not found at $wsusUtil - cab import skipped."
+        return 'no-wsusutil'
+    }
+
+    try {
+        # Rotate the import log so we don't confuse Test-WsusBaselineImportSuccess
+        # with tail lines from a prior partial run.
+        if (Test-Path $importLog) {
+            try { Move-Item -Path $importLog -Destination "$importLog.prev" -Force -ErrorAction SilentlyContinue } catch {}
+        }
+
+        Write-DscStatus "$Tag Launching wsusutil import (cab=$([math]::Round((Get-Item $cabPath).Length/1MB,1)) MB, pre-TaxonomyCats=$preCount, max wait $MaxWaitMinutes min)..."
+        $proc = Start-Process -FilePath $wsusUtil -ArgumentList @('import', $cabPath, $importLog) -PassThru -NoNewWindow -ErrorAction Stop
+        Start-Sleep -Seconds 2
+
+        if ($proc.HasExited -and $proc.ExitCode -ne 0) {
+            $tail = ''
+            if (Test-Path $importLog) {
+                $tailLines = Get-Content $importLog -Tail 5 -ErrorAction SilentlyContinue
+                if ($tailLines) { $tail = ($tailLines -join ' | ') }
+            }
+            Write-DscStatus "$Tag WARN: wsusutil import fast-failed (exit=$($proc.ExitCode)). Tail: $tail"
+            return 'fast-fail'
+        }
+
+        $state = [PSCustomObject]@{
+            ProcessId       = $proc.Id
+            ProcessName     = $proc.ProcessName
+            StartTimeUtc    = (Get-Date).ToUniversalTime().ToString('o')
+            CabPath         = $cabPath
+            ImportLog       = $importLog
+            MaxWaitMinutes  = $MaxWaitMinutes
+            ExpectedCount   = $ExpectedCount
+            PreTaxonomyCats = $preCount
+        }
+        try {
+            $state | ConvertTo-Json | Set-Content -Path $stateFile -Encoding UTF8 -Force
+        }
+        catch {
+            Write-DscStatus "$Tag WARN: failed to persist baseline import state ($($_.Exception.Message)). Wait-WsusBaselineImport will be unable to verify."
+        }
+        Write-DscStatus "$Tag wsusutil import running in background (pid=$($proc.Id))."
+        return 'launched'
+    }
+    catch {
+        Write-DscStatus "$Tag WARN: wsusutil import launch threw: $($_.Exception.Message)"
+        return 'error'
+    }
+}
+
+function Wait-WsusBaselineImport {
+    # Wait for a previously-launched `wsusutil import` (see
+    # Start-WsusBaselineImportBackground) to finish AND verify success via
+    # three checks before allowing a CM-side sync to proceed on top of it:
+    #   1. import.log tail shows a wsusutil completion marker
+    #   2. WSUS taxonomy count >= ExpectedCount (default 100)
+    #   3. If neither (1) nor (2) holds, the import is partial; retry once
+    #      synchronously, then surface a WARN and proceed.
+    #
+    # No-op when the state file is absent (cab path wasn't used, or a
+    # previous Wait already cleared it). Bounded to MaxWaitMinutes from
+    # the import's original StartTimeUtc so a long Phase 8/9 doesn't
+    # extend the deadline. Removes the state file on terminal exit so a
+    # later perfloading Wait call is a clean no-op.
+    param(
+        [string]$Tag = '[WSUS]',
+        [int]$RetryOnPartial = 1
+    )
 
     $stateFile = 'C:\staging\wsus\WsusCategoriesBaseline.import.state.json'
+    $importLog = 'C:\staging\wsus\WsusCategoriesBaseline.import.log'
     if (-not (Test-Path $stateFile)) { return }
 
     try {
@@ -758,55 +893,110 @@ function Wait-WsusBaselineImport {
     }
     catch {
         Write-DscStatus "$Tag Baseline import state file unreadable ($($_.Exception.Message)). Proceeding without wait."
+        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
         return
     }
 
     $importPid = 0
     try { $importPid = [int]$state.ProcessId } catch {}
-    if ($importPid -le 0) {
-        Write-DscStatus "$Tag Baseline import state file missing ProcessId. Proceeding without wait."
-        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
-        return
-    }
-    $expectedName = if ($state.ProcessName) { [string]$state.ProcessName } else { 'WsusUtil' }
-    $maxMinutes   = 30
+    $expectedName  = if ($state.ProcessName) { [string]$state.ProcessName } else { 'WsusUtil' }
+    $maxMinutes    = 30
     try { if ($state.MaxWaitMinutes) { $maxMinutes = [int]$state.MaxWaitMinutes } } catch {}
+    $expectedCount = 100
+    try { if ($state.ExpectedCount)  { $expectedCount = [int]$state.ExpectedCount } } catch {}
+    if ($state.ImportLog) { $importLog = [string]$state.ImportLog }
     $startTimeUtc = [DateTime]::UtcNow
     try { $startTimeUtc = ([DateTime]::Parse($state.StartTimeUtc)).ToUniversalTime() } catch {}
     $deadlineUtc  = $startTimeUtc.AddMinutes($maxMinutes)
 
-    $proc = Get-Process -Id $importPid -ErrorAction SilentlyContinue
-    if (-not $proc -or ($expectedName -and $proc.ProcessName -ine $expectedName)) {
-        Write-DscStatus "$Tag Baseline import (pid=$importPid) no longer running. Proceeding."
+    # Poll until the wsusutil process exits or we hit the deadline.
+    if ($importPid -gt 0) {
+        $proc = Get-Process -Id $importPid -ErrorAction SilentlyContinue
+        if ($proc -and ($expectedName -and $proc.ProcessName -ieq $expectedName)) {
+            $remainingSec = ($deadlineUtc - [DateTime]::UtcNow).TotalSeconds
+            if ($remainingSec -gt 0) {
+                Write-DscStatus "$Tag Waiting for in-flight WSUS baseline import (pid=$importPid, up to $([math]::Round($remainingSec/60,1)) min remaining)..."
+                $lastLogUtc = [DateTime]::UtcNow
+                while ($true) {
+                    $p = Get-Process -Id $importPid -ErrorAction SilentlyContinue
+                    if (-not $p -or ($expectedName -and $p.ProcessName -ine $expectedName)) { break }
+                    if ([DateTime]::UtcNow -ge $deadlineUtc) {
+                        Write-DscStatus "$Tag WARN: Baseline import (pid=$importPid) exceeded $maxMinutes-min deadline. Proceeding anyway; sync may fail."
+                        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+                        return
+                    }
+                    Start-Sleep -Seconds 5
+                    if (([DateTime]::UtcNow - $lastLogUtc).TotalSeconds -ge 60) {
+                        $remSec = [math]::Max(0, ($deadlineUtc - [DateTime]::UtcNow).TotalSeconds)
+                        $liveCount = Get-WsusTaxonomyCategoryCount
+                        Write-DscStatus "$Tag Baseline import still running (pid=$importPid, TaxonomyCats=$liveCount, $([math]::Round($remSec/60,1)) min remaining)..."
+                        $lastLogUtc = [DateTime]::UtcNow
+                    }
+                }
+            }
+        }
+    }
+
+    # Verify the import actually completed (not just "process gone").
+    $elapsedMin   = [math]::Round(([DateTime]::UtcNow - $startTimeUtc).TotalMinutes, 1)
+    $logSuccess   = Test-WsusBaselineImportSuccess -ImportLog $importLog
+    $postCount    = Get-WsusTaxonomyCategoryCount
+    $countLanded  = ($postCount -ge $expectedCount)
+
+    if ($logSuccess -and $countLanded) {
+        Write-DscStatus "$Tag Baseline import verified (elapsed=${elapsedMin}min, TaxonomyCats=$postCount, log='Successfully imported metadata')."
         Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
         return
     }
 
-    $remainingSec = ($deadlineUtc - [DateTime]::UtcNow).TotalSeconds
-    if ($remainingSec -le 0) {
-        Write-DscStatus "$Tag WARN: Baseline import (pid=$importPid) is past its $maxMinutes-min deadline (started $($startTimeUtc.ToString('u'))). Not waiting; proceeding."
+    if ($countLanded -and -not $logSuccess) {
+        Write-DscStatus "$Tag Baseline import looks landed (TaxonomyCats=$postCount >= $expectedCount) but no success marker in $importLog. Proceeding."
+        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
         return
     }
 
-    Write-DscStatus "$Tag Waiting for in-flight WSUS baseline import (pid=$importPid, up to $([math]::Round($remainingSec/60,1)) min remaining)..."
-    $lastLogUtc = [DateTime]::UtcNow
-    while ($true) {
-        $proc = Get-Process -Id $importPid -ErrorAction SilentlyContinue
-        if (-not $proc -or ($expectedName -and $proc.ProcessName -ine $expectedName)) {
-            $elapsedMin = [math]::Round(([DateTime]::UtcNow - $startTimeUtc).TotalMinutes, 1)
-            Write-DscStatus "$Tag Baseline import (pid=$importPid) finished after ${elapsedMin} min. Proceeding."
-            Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+    # Partial import (process ended without populating the taxonomy).
+    Write-DscStatus "$Tag WARN: Baseline import did not complete (elapsed=${elapsedMin}min, TaxonomyCats=$postCount, expected>=$expectedCount, logSuccess=$logSuccess). Likely killed by reboot or wsusutil error."
+
+    if ($RetryOnPartial -gt 0) {
+        Write-DscStatus "$Tag Retrying wsusutil import synchronously (one shot)..."
+        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+        $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
+        $cabPath  = if ($state.CabPath) { [string]$state.CabPath } else { 'C:\staging\wsus\WsusCategoriesBaseline.cab' }
+        if (-not (Test-Path $wsusUtil)) {
+            Write-DscStatus "$Tag WARN: WsusUtil.exe missing at $wsusUtil. Cannot retry."
             return
         }
-        if ([DateTime]::UtcNow -ge $deadlineUtc) {
-            Write-DscStatus "$Tag WARN: Baseline import (pid=$importPid) exceeded $maxMinutes-min deadline. Leaving process running; proceeding with sync."
+        if (-not (Test-Path $cabPath)) {
+            Write-DscStatus "$Tag WARN: Cab missing at $cabPath. Cannot retry."
             return
         }
-        Start-Sleep -Seconds 5
-        if (([DateTime]::UtcNow - $lastLogUtc).TotalSeconds -ge 60) {
-            $remainingSec = [math]::Max(0, ($deadlineUtc - [DateTime]::UtcNow).TotalSeconds)
-            Write-DscStatus "$Tag Baseline import still running (pid=$importPid, $([math]::Round($remainingSec/60,1)) min remaining)..."
-            $lastLogUtc = [DateTime]::UtcNow
+        try {
+            if (Test-Path $importLog) {
+                try { Move-Item -Path $importLog -Destination "$importLog.partial" -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            $retryDeadlineMin = 20
+            $retry = Start-Process -FilePath $wsusUtil -ArgumentList @('import', $cabPath, $importLog) -PassThru -NoNewWindow -ErrorAction Stop
+            Write-DscStatus "$Tag wsusutil import retry running (pid=$($retry.Id), up to $retryDeadlineMin min)..."
+            $retryDeadline = (Get-Date).AddMinutes($retryDeadlineMin)
+            while (-not $retry.HasExited -and (Get-Date) -lt $retryDeadline) {
+                Start-Sleep -Seconds 10
+            }
+            if (-not $retry.HasExited) {
+                try { $retry.Kill() } catch {}
+                Write-DscStatus "$Tag WARN: wsusutil import retry exceeded $retryDeadlineMin min and was killed. Proceeding with whatever taxonomy is loaded."
+                return
+            }
+            $finalCount = Get-WsusTaxonomyCategoryCount
+            if ($retry.ExitCode -eq 0 -and $finalCount -ge $expectedCount) {
+                Write-DscStatus "$Tag Baseline import retry succeeded (exit=0, TaxonomyCats=$finalCount)."
+            }
+            else {
+                Write-DscStatus "$Tag WARN: Baseline import retry ended exit=$($retry.ExitCode), TaxonomyCats=$finalCount. Proceeding; CM sync may need extra cycles to populate categories."
+            }
+        }
+        catch {
+            Write-DscStatus "$Tag WARN: wsusutil import retry threw: $($_.Exception.Message). Proceeding."
         }
     }
 }
