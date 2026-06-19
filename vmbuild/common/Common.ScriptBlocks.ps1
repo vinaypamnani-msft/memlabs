@@ -3978,6 +3978,7 @@ $global:VM_Config = {
         $staleRestartCount = 0
         $staleRestartMax = 2
         $lastStaleWarningTime = [DateTime]::MinValue
+        $certPulseDone = $false   # one-shot guard for the PKI cert pre-stage handshake
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Started Monitoring $($currentItem.role) configuration."
         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Ready and Waiting for job progress"
@@ -4418,6 +4419,97 @@ $global:VM_Config = {
                         $previousStatus = $currentStatus
                         $lastStatusChangeTime = [DateTime]::UtcNow
                         $lastStaleWarningTime = [DateTime]::MinValue
+
+                        # Cross-tier PKI pre-stage. The guest ScriptWorkflow emits this
+                        # sentinel right before client push, then sleeps ~60s. It cannot
+                        # PSDirect into the clients, but we (the host) can -- pulse +
+                        # verify the cert chain on every push target now so the offline
+                        # root + sub-CA land in each client's LocalMachine stores BEFORE
+                        # auto-push runs ccmsetup (a missing chain => GetDPLocations
+                        # 0x87d00454 over HTTPS). One-shot, best-effort, non-fatal.
+                        if (-not $certPulseDone -and $currentStatusTrimmed -match 'MEMLABS-PULSE-CERTS') {
+                            $certPulseDone = $true
+                            $pkiOn = $false
+                            try { $pkiOn = [bool]$deployConfig.cmOptions.UsePKI } catch { $pkiOn = $false }
+                            if ($pkiOn) {
+                                # Resolve this site server's push-client list.
+                                $pulseTargets = @()
+                                try {
+                                    if ($currentItem.thisParams -and $currentItem.thisParams.ClientPush) {
+                                        $pulseTargets = @($currentItem.thisParams.ClientPush)
+                                    }
+                                    elseif ($deployConfig -and $deployConfig.virtualMachines) {
+                                        $meVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $currentItem.vmName } | Select-Object -First 1
+                                        if ($meVm -and $meVm.thisParams -and $meVm.thisParams.ClientPush) {
+                                            $pulseTargets = @($meVm.thisParams.ClientPush)
+                                        }
+                                    }
+                                }
+                                catch { $pulseTargets = @() }
+                                $pulseTargets = @($pulseTargets | Where-Object { $_ -and $_ -ne $currentItem.vmName } | Select-Object -Unique)
+                                if ($pulseTargets.Count -gt 0) {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): PKI pre-stage -- pulsing cert chain on $($pulseTargets.Count) push client(s): $($pulseTargets -join ', ')" -OutputStream
+                                    # Runs on each client (guest PS5.1) via PSDirect: pull GP/autoenroll
+                                    # so the published root + sub-CA propagate, then verify the client-auth
+                                    # cert builds a complete chain to a trusted root.
+                                    $certPulseBlock = {
+                                        $o = [ordered]@{ CertFound = $false; ChainOk = $false; ChainStatus = 'n/a' }
+                                        try { & certutil.exe -pulse 2>&1 | Out-Null } catch { }
+                                        try { & gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch { }
+                                        Start-Sleep -Seconds 5
+                                        $cert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                                            Where-Object {
+                                                ($_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.2') -and
+                                                ($_.Subject -ne $_.Issuer) -and ($_.Issuer -notmatch 'O=Microsoft')
+                                            } | Select-Object -First 1
+                                        if ($cert) {
+                                            $o.CertFound = $true
+                                            try {
+                                                $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+                                                $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+                                                $built = $chain.Build($cert)
+                                                $st = (@($chain.ChainStatus) | ForEach-Object { $_.Status }) -join ','
+                                                if (-not $st) { $st = 'OK' }
+                                                $o.ChainOk = [bool]$built
+                                                $o.ChainStatus = $st
+                                            }
+                                            catch { $o.ChainStatus = "chain-error: $($_.Exception.Message)" }
+                                        }
+                                        return $o
+                                    }
+                                    foreach ($pt in $pulseTargets) {
+                                        $ptDomain = $domainName
+                                        try {
+                                            $ptVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $pt } | Select-Object -First 1
+                                            if ($ptVm -and $ptVm.domain) { $ptDomain = $ptVm.domain }
+                                        }
+                                        catch { $ptDomain = $domainName }
+                                        try {
+                                            $pr = Invoke-VmCommand -VmName $pt -VmDomainName $ptDomain -ScriptBlock $certPulseBlock -AsJob -TimeoutSeconds 120 -SuppressLog -DisplayName "PKI cert pre-stage"
+                                            $po = $pr.ScriptBlockOutput
+                                            if ($po -and $po.ChainOk) {
+                                                Write-Log "[Phase $Phase]: ${pt}: PKI pre-stage OK -- client cert chains to trusted root ($($po.ChainStatus))." -LogOnly
+                                            }
+                                            elseif ($po -and $po.CertFound) {
+                                                Write-Log "[Phase $Phase]: ${pt}: PKI pre-stage pulsed, but chain still incomplete ($($po.ChainStatus)); should converge before ccmsetup retry." -Warning
+                                            }
+                                            else {
+                                                Write-Log "[Phase $Phase]: ${pt}: PKI pre-stage pulsed, no client-auth cert yet (auto-enroll pending)." -Warning
+                                            }
+                                        }
+                                        catch {
+                                            Write-Log "[Phase $Phase]: ${pt}: PKI pre-stage pulse failed: $($_.Exception.Message)" -Warning
+                                        }
+                                    }
+                                }
+                                else {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): PKI pre-stage sentinel seen but no push clients resolved." -LogOnly
+                                }
+                            }
+                            else {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): PKI pre-stage sentinel seen but UsePKI=false; skipping." -LogOnly
+                            }
+                        }
                     }
                     else {
                         # Status unchanged — check for stale progress

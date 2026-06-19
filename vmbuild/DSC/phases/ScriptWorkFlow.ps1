@@ -654,6 +654,17 @@ if ($CurrentRole -eq "CAS") {
 # PushClients first so auto-push has maximum time to install the agent on
 # all targets while EnableBLM configures policies and collections.
 if ($ThisVM.role -ne "CAS") {
+    # Cross-tier PKI pre-stage handshake. ScriptWorkflow runs inside the guest
+    # and cannot PSDirect into the client VMs, but the HOST monitor can. Emit a
+    # sentinel status the host watches for, then pause ~60s so the host can
+    # pulse + verify the offline-root/sub-CA chain into every push client's
+    # LocalMachine cert stores BEFORE auto-push runs ccmsetup. Without the full
+    # chain the client fails GetDPLocations (0x87d00454) over HTTPS. Non-PKI
+    # deploys skip this so they are not delayed.
+    if ($cmo.UsePKI) {
+        Write-DscStatus "MEMLABS-PULSE-CERTS: Waiting for host to refresh certificates on clients"
+        Start-Sleep -Seconds 60
+    }
     Write-DscStatus "Always Running PushClients.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
     Set-Location $LogPath
