@@ -2182,7 +2182,24 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         # previous sync 1), skip the wait entirely — we can subscribe
         # products immediately without waiting for any current sync.
         $sync1Done = $false
-        if ($catalogHasOurProducts) {
+        if ($ThisVM.hidden) {
+            # This Primary is hidden => it's an existing, already-deployed site
+            # server pulled into the config only so a *new* VM (e.g. a client added
+            # to an existing domain) can get PushClients re-run. There is no actual
+            # deployment happening to this site server, so blocking here for up to
+            # 40 attempts (~40 min) waiting on a WSUS sync is pure dead time. Kick a
+            # background sync off (only when the catalog still needs our products) so
+            # the catalog refreshes on its own, and proceed without monitoring it.
+            if ($catalogHasOurProducts) {
+                Write-DscStatus "$Tag Primary is hidden (re-run for a new VM) and products already in catalog — skipping sync 1 wait"
+            }
+            else {
+                Write-DscStatus "$Tag Primary is hidden (re-run for a new VM) — triggering background sync 1 and NOT waiting"
+                Invoke-FullSync
+            }
+            $sync1Done = $true
+        }
+        elseif ($catalogHasOurProducts) {
             Write-DscStatus "$Tag Target products already in catalog ($($productsInCatalog.Count)/$($products.Count)) — skipping sync 1 wait, proceeding to subscribe"
             $sync1Done = $true
         }
