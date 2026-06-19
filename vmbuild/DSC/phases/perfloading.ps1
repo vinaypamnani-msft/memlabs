@@ -1561,6 +1561,62 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         return $false
     }
 
+    # Resolve a curated product name to the ACTUAL CM/WSUS catalog title.
+    # Microsoft spells the same product differently across the WSUS
+    # (Get-WsusProduct.Title) and CM (Get-CMSoftwareUpdateCategory's
+    # LocalizedCategoryInstanceName) APIs and across releases, so an exact
+    # string compare silently drops valid products: Set-CMSoftwareUpdatePoint-
+    # Component ignores any -AddProduct name not present VERBATIM in
+    # SMS_UpdateCategoryInstance (no error, no warning). Observed live: the
+    # curated 'Microsoft SQL Server 2022' / 'Windows 11' never matched the
+    # catalog ('SQL Server 2022' / a version-qualified Windows 11 title), so
+    # they were reported 'missing from catalog' on every run and never
+    # subscribed.
+    #
+    # Strategy: exact (case-insensitive) match first; otherwise an all-token
+    # substring match using a per-product signature, picking the shortest
+    # (most generic parent) catalog title. Returns $null only when the product
+    # is genuinely absent from the supplied catalog (caller treats that as
+    # 'needs a sync' and re-resolves once the catalog is populated).
+    function Resolve-CMProductName {
+        param(
+            [Parameter(Mandatory)][string]$Desired,
+            [string[]]$Catalog
+        )
+        if (-not $Catalog -or @($Catalog).Count -eq 0) { return $null }
+
+        # 1. Exact, case-insensitive.
+        $exact = @($Catalog | Where-Object { $_ -ieq $Desired })
+        if ($exact.Count -gt 0) { return $exact[0] }
+
+        # 2. Token signature for every curated name this script produces.
+        #    All tokens must appear (case-insensitive substring) in the title.
+        $tokenMap = @{
+            'Windows Server 2016'                        = @('windows server 2016')
+            'Windows Server 2019'                        = @('windows server 2019')
+            'Microsoft Server operating system-21H2'     = @('server operating system', '21h2')
+            'Microsoft Server Operating System-24H2'     = @('server operating system', '24h2')
+            'Windows 10, version 1903 and later'         = @('windows 10', '1903')
+            'Windows 11'                                 = @('windows 11')
+            'Microsoft SQL Server 2016'                  = @('sql server 2016')
+            'Microsoft SQL Server 2017'                  = @('sql server 2017')
+            'Microsoft SQL Server 2019'                  = @('sql server 2019')
+            'Microsoft SQL Server 2022'                  = @('sql server 2022')
+            'Microsoft SQL Server 2025'                  = @('sql server 2025')
+            'Microsoft 365 Apps/Office 2019/Office LTSC' = @('365 apps')
+        }
+        $tokens = $tokenMap[$Desired]
+        if (-not $tokens) { return $null }
+
+        $cands = @($Catalog | Where-Object {
+                $n = $_.ToLowerInvariant()
+                $missing = @($tokens | Where-Object { $n -notlike "*$($_.ToLowerInvariant())*" })
+                $missing.Count -eq 0
+            })
+        if ($cands.Count -eq 0) { return $null }
+        return ($cands | Sort-Object { $_.Length } | Select-Object -First 1)
+    }
+
     # Kick off WSUS sync early so it runs in background while we create collections
     $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
     $syncNeeded = $false
@@ -1622,14 +1678,33 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         $products = @($products | Where-Object { $_ } | Select-Object -Unique)
         Write-DscStatus "$Tag Dynamic SUP product set ($($products.Count)) from $($clientVMs.Count) pushable VMs: $($products -join ', ')"
 
+        # Map each curated product name to the ACTUAL CM catalog title so every
+        # downstream compare (subscribed / missing / in-catalog) and the
+        # AddProduct call use the exact string CM expects. Products not yet in
+        # the catalog keep their curated name here and are re-resolved after
+        # sync 1 at AddProduct time.
+        $allCatalogProducts = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+        $resolvedProducts = @()
+        foreach ($p in $products) {
+            $actual = Resolve-CMProductName -Desired $p -Catalog $allCatalogProducts
+            if ($actual) {
+                if ($actual -ine $p) { Write-DscStatus "$Tag Product '$p' resolved to catalog title '$actual'" }
+                $resolvedProducts += $actual
+            }
+            else {
+                $resolvedProducts += $p
+            }
+        }
+        $products = @($resolvedProducts | Select-Object -Unique)
+
         $missingproducts = @($products | Where-Object { $_ -notin $productclassifications })
 
         # Check if the specific products we need exist as categories in the
         # full catalog (not just subscribed). WSUS ships with built-in
         # categories, so a generic count isn't meaningful. If our target
         # products are present, sync 1 has populated the catalog and we can
-        # subscribe without waiting for the current sync.
-        $allCatalogProducts = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+        # subscribe without waiting for the current sync. (Names are already
+        # resolved to actual catalog titles above.)
         $productsInCatalog = @($products | Where-Object { $_ -in $allCatalogProducts })
         # Gate Sync 1 on the *core* OS/SQL products only. Compound/aliased names
         # (the Office bundle string) may never match a single catalog category,
@@ -2230,6 +2305,26 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         if (-not $sync1Done) {
             Write-DscStatus "$Tag WARNING: Sync 1 did not complete after 40 attempts. Adding products anyway — sync 2 may fail if catalog is incomplete."
         }
+
+        # Re-resolve against the now-synced catalog. Products that weren't in the
+        # catalog at the early check kept their curated name; sync 1 has since
+        # populated the taxonomy, so map them to the real category title now —
+        # otherwise the AddProduct loop below would feed CM a name that isn't in
+        # SMS_UpdateCategoryInstance and it would be silently dropped.
+        $freshCatalog = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+        $resolvedForAdd = @()
+        foreach ($p in $products) {
+            $actual = Resolve-CMProductName -Desired $p -Catalog $freshCatalog
+            if ($actual) {
+                if ($actual -ine $p) { Write-DscStatus "$Tag Product '$p' resolved to catalog title '$actual' (post-sync)" }
+                $resolvedForAdd += $actual
+            }
+            else {
+                Write-DscStatus "$Tag WARNING: product '$p' is still not in the catalog after sync — it will be reported rejected below"
+                $resolvedForAdd += $p
+            }
+        }
+        $products = @($resolvedForAdd | Select-Object -Unique)
 
         Write-DscStatus "$Tag Enabling missing products: $($products -join ', ')"
         $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
