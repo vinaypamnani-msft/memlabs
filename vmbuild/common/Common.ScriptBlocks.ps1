@@ -1570,6 +1570,129 @@ $global:VM_Create = {
     }
 }
 
+function Save-CMSetupLogsFromVm {
+    <#
+    .SYNOPSIS
+        Pulls C:\ConfigMgrSetup.log and C:\staging\DSC\InstallCMLog.log out of
+        a CM-setup VM (CAS / Primary / Secondary / PassiveSite) and writes
+        them next to the host VMBuild log so operators can inspect them
+        without RDP'ing the VM.
+    .DESCRIPTION
+        InstallCMLog.log (DSC wrapper transcript, normally <1 MB) is ALWAYS
+        pulled in full. ConfigMgrSetup.log is pulled FULL on failure and as
+        the last 5000 lines on success -- on CAS after a CB upgrade the full
+        file routinely runs 100-300 MB, so the tail keeps disk + PSDirect
+        serialization cost bounded while still preserving the operationally
+        useful end-of-install context.
+        Files land in (Split-Path $Common.LogPath -Parent) as:
+            <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.log          (Failure: full)
+            <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.tail5000.log (Success: tail)
+            <VmName>-Phase<N>-<timestamp>-InstallCMLog.log            (always: full)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$DomainName,
+        [Parameter(Mandatory)][int]$Phase,
+        [Parameter(Mandatory)][ValidateSet('Success', 'Failure')][string]$Mode
+    )
+
+    $probeAndRead = {
+        param([string]$Mode)
+        $out = [ordered]@{
+            SetupExists    = $false
+            SetupBytes     = 0
+            SetupContent   = $null
+            SetupTail      = $false
+            WrapperExists  = $false
+            WrapperBytes   = 0
+            WrapperContent = $null
+        }
+        if (Test-Path 'C:\ConfigMgrSetup.log') {
+            $fi = Get-Item 'C:\ConfigMgrSetup.log' -ErrorAction SilentlyContinue
+            if ($fi) {
+                $out.SetupExists = $true
+                $out.SetupBytes  = $fi.Length
+                if ($Mode -eq 'Failure') {
+                    $out.SetupContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
+                }
+                else {
+                    $out.SetupTail = $true
+                    $out.SetupContent = (Get-Content -LiteralPath $fi.FullName -Tail 5000 -ErrorAction SilentlyContinue) -join "`r`n"
+                }
+            }
+        }
+        if (Test-Path 'C:\staging\DSC\InstallCMLog.log') {
+            $fi = Get-Item 'C:\staging\DSC\InstallCMLog.log' -ErrorAction SilentlyContinue
+            if ($fi) {
+                $out.WrapperExists  = $true
+                $out.WrapperBytes   = $fi.Length
+                $out.WrapperContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
+            }
+        }
+        [pscustomobject]$out
+    }
+
+    try {
+        $res = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -ScriptBlock $probeAndRead -ArgumentList @($Mode) -SuppressLog -DisplayName "Pull CM setup logs ($Mode)"
+    }
+    catch {
+        Write-Log "[Phase $Phase]: $VmName`: CMLog capture: PSDirect call threw: $($_.Exception.Message)" -Warning
+        return
+    }
+    if (-not $res -or $res.ScriptBlockFailed -or -not $res.ScriptBlockOutput) {
+        Write-Log "[Phase $Phase]: $VmName`: CMLog capture: no response from VM" -Warning
+        return
+    }
+
+    $r = $res.ScriptBlockOutput
+    $logDir = $null
+    if ($Common -and $Common.LogPath) { $logDir = Split-Path $Common.LogPath -Parent }
+    if (-not $logDir -or -not (Test-Path $logDir)) {
+        Write-Log "[Phase $Phase]: $VmName`: CMLog capture: host log dir not resolvable ($logDir)" -Warning
+        return
+    }
+
+    $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
+    $base  = "$VmName-Phase$Phase-$stamp"
+
+    if ($r.SetupExists) {
+        if ($r.SetupContent) {
+            $suffix = if ($r.SetupTail) { 'ConfigMgrSetup.tail5000.log' } else { 'ConfigMgrSetup.log' }
+            $dest = Join-Path $logDir "$base-$suffix"
+            try {
+                Set-Content -LiteralPath $dest -Value $r.SetupContent -Encoding UTF8 -ErrorAction Stop
+                $mb = [math]::Round($r.SetupBytes / 1MB, 2)
+                $note = if ($r.SetupTail) { "tail of ${mb}MB in-VM" } else { "full ${mb}MB" }
+                Write-Log "[Phase $Phase]: $VmName`: Pulled ConfigMgrSetup.log ($note) -> $dest" -OutputStream
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write ConfigMgrSetup copy: $_" -Warning
+            }
+        }
+        else {
+            Write-Log "[Phase $Phase]: $VmName`: ConfigMgrSetup.log present in VM ($($r.SetupBytes) bytes) but Get-Content returned empty" -Warning
+        }
+    }
+
+    if ($r.WrapperExists) {
+        if ($r.WrapperContent) {
+            $dest = Join-Path $logDir "$base-InstallCMLog.log"
+            try {
+                Set-Content -LiteralPath $dest -Value $r.WrapperContent -Encoding UTF8 -ErrorAction Stop
+                $kb = [math]::Round($r.WrapperBytes / 1KB, 1)
+                Write-Log "[Phase $Phase]: $VmName`: Pulled InstallCMLog.log (${kb}KB) -> $dest" -OutputStream
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write InstallCMLog copy: $_" -Warning
+            }
+        }
+        else {
+            Write-Log "[Phase $Phase]: $VmName`: InstallCMLog.log present in VM ($($r.WrapperBytes) bytes) but Get-Content returned empty" -Warning
+        }
+    }
+}
+
 $global:VM_Config = {
     # Suppress CIM cmdlet progress in child process (see VM_Create comment).
     $Global:ProgressPreference = 'SilentlyContinue'
@@ -4602,6 +4725,9 @@ $global:VM_Config = {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG: SQLAO Init_Database failure detected. ConfigMgr Setup failed over to the secondary to set db_owner, failed back to the primary, and the secondary replica did not re-converge to HEALTHY/SYNCHRONIZED within ConfigMgr's ~15min budget." -OutputStream
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG: The CM site DB is partially committed (created before the failover); re-running setup.exe is unsafe. Restore the Phase 8 checkpoint on this VM, then before redeploying restart the SQL service on the SQLAO secondary node (the one that was UNKNOWN in ConfigMgrSetup.log) to clear the stuck replica state-machine, wait ~2 min for AG to report HEALTHY on both replicas, then resume Phase 8. The new pre-flight AG stability gate will hold setup.exe until the AG has been HEALTHY for 60s, which prevents this in most cases." -OutputStream
                         }
+                        if ($using:Phase -eq 8 -and $currentItem.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite')) {
+                            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
+                        }
                         return
                     }
                 }
@@ -4626,7 +4752,19 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
             Write-Progress2 "Exception" -Status "Failed end $_" -force
+            if ($using:Phase -eq 8 -and $currentItem.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite')) {
+                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
+            }
             return
+        }
+
+        # Phase 8 CM-setup roles: pull ConfigMgrSetup.log + InstallCMLog.log
+        # off the VM into the host log folder so operators don't have to RDP
+        # in to read them. Full ConfigMgrSetup.log on failure (incl. timeout),
+        # tail-5000 on success; InstallCMLog.log is always full.
+        if ($using:Phase -eq 8 -and $currentItem.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite')) {
+            $cmLogMode = if ($complete) { 'Success' } else { 'Failure' }
+            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode $cmLogMode
         }
 
 
