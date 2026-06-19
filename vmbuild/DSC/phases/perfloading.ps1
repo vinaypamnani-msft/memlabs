@@ -2008,6 +2008,15 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     )
 
 
+    # MEMLABS-* device collections + the Office Install Targets collection +
+    # the Office deployment recovery sweep are all Primary-tier work. In a
+    # hierarchy the CAS holds no client resources (clients report to the
+    # Primary's MP) so creating these collections at the CAS scope produces
+    # nothing but empty collections + replication noise + colleval load. The
+    # apps/packages, OSD/TS and Office-app blocks above are already gated
+    # this same way; this block was missed and was running on CAS too.
+    if ($CurrentRole -ne "CAS") {
+
         # Check if MEMLABS folder exists under Device Collections
     $folder = Get-CMFolder -FolderPath "\DeviceCollection\MEMLABS"
 
@@ -2052,54 +2061,52 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     }
 
     # Office Install Targets collection: ensure it exists with a current query
-    # rule. Also called inside the per-Primary Office app block above (before the
-    # deployment is created); calling again here covers the CAS/top-level path
-    # that skips the Office app block but still benefits from the collection
-    # being present and current.
+    # rule. The collection + deployment + members all belong on the Primary;
+    # this is reached only on Primary/standalone now (the outer CAS-skip
+    # gate above takes care of the hierarchy CAS path).
     $officeTargetVMs = @($deployConfig.virtualMachines | Where-Object { $_.installOffice -and $_.installOffice -ne $false })
     if ($officeTargetVMs.Count -gt 0) {
         Set-OfficeInstallTargetsCollection -OfficeTargetVMs $officeTargetVMs | Out-Null
 
-        # Self-heal missing Office deployments (non-CAS only -- deployment lives
-        # on the Primary). The original perfloading flow created the deployment
-        # immediately after the app and then short-circuits on re-runs
-        # ("application already exists, skipping"). If a prior run hit the order
-        # bug (deployment created against a not-yet-existing collection) the
-        # deployment was lost forever. Re-establish it here if missing.
-        if ($CurrentRole -ne "CAS") {
-            $officeAppNameBase = "MEMLABS-Microsoft365Apps"
-            $officeChannels = @($officeTargetVMs | ForEach-Object { $_.installOffice } | Select-Object -Unique)
-            $officeColName = "MEMLABS-Office Install Targets"
-            foreach ($ch in $officeChannels) {
-                $appName = if ($officeChannels.Count -eq 1) { $officeAppNameBase } else { "$officeAppNameBase-$ch" }
-                if (-not (Get-CMApplication -Name $appName -Fast -ErrorAction SilentlyContinue)) { continue }
-                $existingDep = Get-CMApplicationDeployment -Name $appName -CollectionName $officeColName -ErrorAction SilentlyContinue
-                if (-not $existingDep) {
-                    try {
-                        New-CMApplicationDeployment -ApplicationName $appName `
-                            -CollectionName $officeColName `
-                            -DeployAction Install `
-                            -DeployPurpose Required `
-                            -UserNotification DisplayAll `
-                            -ErrorAction Stop | Out-Null
-                        Write-DscStatus "$Tag Recovered missing Office deployment for '$appName' -> '$officeColName'"
-                    }
-                    catch {
-                        Write-DscStatus "$Tag WARNING: Failed to (re)create Office deployment for '$appName': $($_.Exception.Message)"
-                    }
+        # Self-heal missing Office deployments. The original perfloading flow
+        # created the deployment immediately after the app and short-circuits
+        # on re-runs ("application already exists, skipping"). If a prior run
+        # hit the order bug (deployment created against a not-yet-existing
+        # collection) the deployment was lost forever. Re-establish here.
+        $officeAppNameBase = "MEMLABS-Microsoft365Apps"
+        $officeChannels = @($officeTargetVMs | ForEach-Object { $_.installOffice } | Select-Object -Unique)
+        $officeColName = "MEMLABS-Office Install Targets"
+        foreach ($ch in $officeChannels) {
+            $appName = if ($officeChannels.Count -eq 1) { $officeAppNameBase } else { "$officeAppNameBase-$ch" }
+            if (-not (Get-CMApplication -Name $appName -Fast -ErrorAction SilentlyContinue)) { continue }
+            $existingDep = Get-CMApplicationDeployment -Name $appName -CollectionName $officeColName -ErrorAction SilentlyContinue
+            if (-not $existingDep) {
+                try {
+                    New-CMApplicationDeployment -ApplicationName $appName `
+                        -CollectionName $officeColName `
+                        -DeployAction Install `
+                        -DeployPurpose Required `
+                        -UserNotification DisplayAll `
+                        -ErrorAction Stop | Out-Null
+                    Write-DscStatus "$Tag Recovered missing Office deployment for '$appName' -> '$officeColName'"
                 }
-                else {
-                    # Deployment exists; force a policy re-author so any collection
-                    # member added after the original deployment author time gets
-                    # the assignment projected. Symptom this fixes: client's
-                    # PolicyAgent RequestedConfig has 7-Zip / other assignments
-                    # but not the Office assignment, even though the collection
-                    # contains the client and the deployment targets it.
-                    Update-OfficeDeploymentPolicy -AppName $appName -CollectionName $officeColName
+                catch {
+                    Write-DscStatus "$Tag WARNING: Failed to (re)create Office deployment for '$appName': $($_.Exception.Message)"
                 }
+            }
+            else {
+                # Deployment exists; force a policy re-author so any collection
+                # member added after the original deployment author time gets
+                # the assignment projected. Symptom this fixes: client's
+                # PolicyAgent RequestedConfig has 7-Zip / other assignments
+                # but not the Office assignment, even though the collection
+                # contains the client and the deployment targets it.
+                Update-OfficeDeploymentPolicy -AppName $appName -CollectionName $officeColName
             }
         }
     }
+
+    } # end Primary-only collections + Office Install Targets block
 
     #install Endpoint protection role in hierarchy to support defender updates
     if (!(Get-CMEndpointProtectionPoint -AllSite)) {
