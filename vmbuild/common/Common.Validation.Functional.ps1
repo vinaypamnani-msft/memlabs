@@ -5607,6 +5607,18 @@ function Test-DomainMemberFunctionality {
     $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
     $pushExpected = ($CurrentItem.pushClient -ne $false)
 
+    # Cross-forest client management: a domain whose DC has
+    # externalDomainJoinSiteCode is NOT managed by a local Primary -- its clients
+    # are managed by a REMOTE CM site in the trusted forest (e.g. cstest8b
+    # clients -> cstest8 PRI). Resolve that managing site so the push hint points
+    # at the right server and so we can verify the client actually registered
+    # with the remote site below. The domain's own DC carries the setting.
+    $domainDC = $DeployConfig.virtualMachines | Where-Object { $_.role -in @('DC', 'BDC') } | Select-Object -First 1
+    $extSiteCode = if ($domainDC) { $domainDC.externalDomainJoinSiteCode } else { $null }
+    $isExternallyManaged = [bool]($extSiteCode -and $extSiteCode -ne 'NONE')
+    $expectedSiteCode = if ($isExternallyManaged) { "$extSiteCode" } else { '' }
+    $externalSiteServer = if ($isExternallyManaged -and $domainDC.thisParams) { $domainDC.thisParams.ExternalSiteServer } else { $null }
+
     Write-Log "[Phase $Phase] $VMName [DomainMember]: Testing domain join and CCM client (if present)" -LogOnly
 
     $scriptBlock = {
@@ -6081,7 +6093,8 @@ function Test-DomainMemberFunctionality {
     if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.NeedsPushCheck) {
         if ($pushExpected) {
             $result.ScriptBlockOutput.Details.Add("  WARN: pushClient=$true in config but no ccmsetup evidence on VM — push may have failed or still be in progress on the site server side")
-            $result.ScriptBlockOutput.Details.Add("  Check ccmsetup on the Primary: Get-CMDevice -Name '$VMName' | Select IsClient,ClientActiveStatus")
+            $pushTarget = if ($isExternallyManaged -and $externalSiteServer) { "the REMOTE managing site server $externalSiteServer (site $expectedSiteCode)" } else { "the Primary" }
+            $result.ScriptBlockOutput.Details.Add("  Check ccmsetup on ${pushTarget}: Get-CMDevice -Name '$VMName' | Select IsClient,ClientActiveStatus")
         }
         else {
             $result.ScriptBlockOutput.Details[-1] = "OK: CcmExec not installed (pushClient=false in config)"
@@ -6095,6 +6108,80 @@ function Test-DomainMemberFunctionality {
         $ccmFailed = $result.ScriptBlockOutput.Details | Where-Object { $_ -match 'ccmsetup failed' }
         if ($ccmFailed) {
             Save-CcmSetupLog -VMName $VMName -DomainName $domain
+        }
+    }
+
+    # Cross-forest client-management verification. When this client's domain is
+    # managed by a REMOTE CM site, confirm the client actually registered with
+    # and was assigned to that remote site -- the end-to-end proof that the
+    # forest trust + cross-forest PKI let the client reach the remote MP.
+    # Informational/WARN only (never fails the VM).
+    if ($isExternallyManaged -and $result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Details) {
+        $clientRunningForReg = [bool]($result.ScriptBlockOutput.Details | Where-Object { $_ -match '^OK: CcmExec' })
+        if ($clientRunningForReg) {
+            $regCheckBlock = {
+                param($expSite)
+                $reg = @{ Details = [System.Collections.Generic.List[string]]::new() }
+
+                # Assigned site code (COM is authoritative; registry fallback).
+                $assigned = $null
+                try {
+                    $smsClient = New-Object -ComObject 'Microsoft.SMS.Client'
+                    $assigned = $smsClient.GetAssignedSite()
+                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($smsClient)
+                }
+                catch {
+                    try { $assigned = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Mobile Client' -Name 'AssignedSiteCode' -ErrorAction Stop).AssignedSiteCode } catch {}
+                }
+                if ($assigned) {
+                    if ("$assigned" -eq "$expSite") {
+                        $reg.Details.Add("OK: ConfigMgr client assigned to remote site '$assigned' (matches externalDomainJoinSiteCode)")
+                    }
+                    else {
+                        $reg.Details.Add("WARN: ConfigMgr client assigned site '$assigned' != expected remote site '$expSite' (cross-forest site assignment may not have applied)")
+                    }
+                }
+                else {
+                    $reg.Details.Add("WARN: Could not read the client's assigned site code (expected remote site '$expSite')")
+                }
+
+                # A populated registration GUID means MP_ClientRegistration completed.
+                $clientId = $null
+                try { $clientId = (Get-CimInstance -Namespace 'root\ccm' -ClassName CCM_Client -ErrorAction Stop).ClientId } catch {}
+                if (-not $clientId) {
+                    try { $clientId = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Client\Configuration\Client Properties' -Name 'SMSID' -ErrorAction Stop).SMSID } catch {}
+                }
+                if ($clientId) {
+                    $reg.Details.Add("OK: Client is registered (ClientId $clientId) -- MP registration with the remote site succeeded over the cross-forest trust/PKI")
+                }
+                else {
+                    $reg.Details.Add("WARN: Client has no registration GUID yet -- MP_ClientRegistration with the remote site's MP may not have completed (check the cross-forest PKI client cert + MP reachability)")
+                }
+
+                # The MP the client is actually talking to.
+                try {
+                    $auth = Get-CimInstance -Namespace 'root\ccm' -ClassName SMS_Authority -ErrorAction Stop | Select-Object -First 1
+                    if ($auth -and $auth.CurrentManagementPoint) {
+                        $reg.Details.Add("OK: Current Management Point = $($auth.CurrentManagementPoint) (authority $($auth.Name))")
+                    }
+                }
+                catch {}
+
+                return $reg
+            }
+            $regResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+                -ScriptBlock $regCheckBlock -ArgumentList $expectedSiteCode `
+                -DisplayName "Phase11-DomainMember-RemoteSiteReg" -SuppressLog `
+                -AsJob -TimeoutSeconds 180
+            if ($regResult.ScriptBlockOutput -is [hashtable] -and $regResult.ScriptBlockOutput.Details) {
+                foreach ($detail in $regResult.ScriptBlockOutput.Details) {
+                    $result.ScriptBlockOutput.Details.Add($detail)
+                }
+            }
+        }
+        else {
+            $mgmtServerNote = if ($externalSiteServer) { " ($externalSiteServer)" } else { '' }
+            $result.ScriptBlockOutput.Details.Add("WARN: This domain is managed by remote CM site '$expectedSiteCode'$mgmtServerNote but the ConfigMgr client isn't running, so remote-site registration can't be verified")
         }
     }
 
