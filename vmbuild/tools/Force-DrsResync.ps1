@@ -122,7 +122,14 @@ $sqlExecBlock = {
     catch { $err = $_.Exception.Message }
     return [pscustomobject]@{ Messages = ($msgs -join '; '); Error = $err }
 }
-function GuestSql { param($Session, $Db, $Query) return @(Invoke-Command -Session $Session -ScriptBlock $sqlQueryBlock -ArgumentList $Db, $Query) }
+function GuestSql {
+    param($Session, $Db, $Query)
+    # PS remoting can return an empty result set as a single deserialized empty-collection object that
+    # doesn't unroll (so @() would count it as 1 phantom row). Real rows and the __error row are
+    # PSCustomObjects carrying NoteProperty columns; the artifact has none - so keep only note-property rows.
+    $res = Invoke-Command -Session $Session -ScriptBlock $sqlQueryBlock -ArgumentList $Db, $Query
+    return @($res | Where-Object { ($null -ne $_) -and (@($_.PSObject.Properties | Where-Object { $_.MemberType -eq 'NoteProperty' }).Count -gt 0) })
+}
 function GuestExec { param($Session, $Db, $Query) return Invoke-Command -Session $Session -ScriptBlock $sqlExecBlock -ArgumentList $Db, $Query }
 function ResolveCmDb {
     param($Session, $SiteCode)
