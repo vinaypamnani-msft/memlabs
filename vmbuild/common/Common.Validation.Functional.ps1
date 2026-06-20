@@ -80,6 +80,27 @@ function Test-VmFunctionality {
             # Let the freshly-rebooted guest bring AD / secure channel back up.
             Start-Sleep -Seconds 30
         }
+
+        # WMI/CIM liveness gate. A guest can answer PSDirect ($env:COMPUTERNAME is
+        # pure PowerShell over VMBus) while its winmgmt/CIM stack is wedged --
+        # Get-CimInstance / Get-WmiObject then hang. Almost every Phase 11 check
+        # uses WMI, so a wedged CIM provider hangs the check chain even though the
+        # PSDirect liveness probe above passed (exactly the CT7-W11Client1 case:
+        # liveness OK, the Get-CimInstance uptime probe timed out). Probe CIM with
+        # a bounded job; when it's wedged, repair it (restart winmgmt in-guest via
+        # PSDirect, reboot only if that's not enough) BEFORE the checks run.
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "WMI/CIM liveness check"
+        $cimProbe = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock { (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).CSName } `
+            -DisplayName "Phase11-CimGate" -SuppressLog -AsJob -TimeoutSeconds 60
+        $cimOk = $cimProbe -and -not $cimProbe.ScriptBlockFailed -and -not [string]::IsNullOrWhiteSpace("$($cimProbe.ScriptBlockOutput)")
+        if (-not $cimOk) {
+            Write-Log "[Phase $Phase] $VMName [$role]: Guest WMI/CIM is unresponsive (PSDirect is healthy); repairing winmgmt before validation" -Warning
+            $cimRepaired = Repair-VmCimServer -VmName $VMName -VmDomainName $domain -Phase $Phase -AllowReboot
+            $cimNote = if ($cimRepaired) { 'repaired (winmgmt restart/reboot)' } else { 'repair attempted, still degraded' }
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$role]: WARN - guest WMI/CIM was wedged; $cimNote before validating"; Level = 'Warning' })
+            if ($cimRepaired) { Start-Sleep -Seconds 15 }
+        }
     }
 
     # Post-reboot settle gate: when Phase 11 is run standalone (-startPhase 11)
