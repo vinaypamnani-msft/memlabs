@@ -4963,9 +4963,17 @@ function Test-DscIdle {
           - Pending* = a configuration and/or reboot is queued and the
             consistency engine will pick it up.
         DSC continuing to run after the build just burns host CPU/disk, so this
-        emits a WARN with the LCM state and the most recent DSC operational-log
-        activity (which resource/config is still executing). It is informational
-        only and never fails the VM.
+        emits a WARN. Rather than dumping the last few raw log lines, it mines
+        the DSC operational log to report the actionable detail:
+          - the LCM's own LCMStateDetail reason string;
+          - the in-flight Start-DscConfiguration: when it started, how long it
+            has been running, and WHO triggered it (a remote DC/orchestrator =
+            a deploy step re-pushed the config and it is transient; the local
+            machine = the consistency-engine timer fired on its own schedule);
+          - the full resource execution sequence, which fingerprints exactly
+            which phase MOF is applying;
+          - the resource currently executing.
+        It is informational only and never fails the VM.
     #>
     [CmdletBinding()]
     param(
@@ -4983,8 +4991,16 @@ function Test-DscIdle {
 
         $results.Details.Add("CMD: (Get-DscLocalConfigurationManager).LCMState")
         $lcmState = 'Unknown'
+        $lcmDetail = $null
         try {
-            $lcmState = (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState
+            $lcm = Get-DscLocalConfigurationManager -ErrorAction Stop
+            $lcmState = $lcm.LCMState
+            # LCMStateDetail is a human-readable reason string (sometimes an
+            # array), e.g. "LCM is applying a new configuration." It is far more
+            # specific than the bare 'Busy'/'PendingConfiguration' state word.
+            if ($lcm.PSObject.Properties['LCMStateDetail'] -and $lcm.LCMStateDetail) {
+                $lcmDetail = ($lcm.LCMStateDetail | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim() }) -join '; '
+            }
         }
         catch {
             # LCM unreadable (no config ever pushed / provider host down) means
@@ -5000,27 +5016,94 @@ function Test-DscIdle {
         }
 
         # Any other state means DSC is still running after the build finished.
-        $results.Details.Add("WARN: DSC LCM is '$lcmState' (expected 'Idle' after the build) - DSC is still running after deployment and wasting resources")
+        $stateLine = "WARN: DSC LCM is '$lcmState' (expected 'Idle' after the build) - DSC is still running after deployment and wasting resources"
+        if ($lcmDetail) { $stateLine += " [LCM: $lcmDetail]" }
+        $results.Details.Add($stateLine)
 
-        # Surface the most recent DSC operational-log activity so the operator
-        # can see which configuration/resource is still executing.
+        # Pull a wider window of operational-log events so we can reconstruct
+        # exactly WHAT is running, WHO started it, and HOW LONG it has been
+        # going -- instead of just dumping the last few raw lines.
+        $events = $null
         try {
-            $events = Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 12 -ErrorAction Stop |
+            $events = Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 60 -ErrorAction Stop |
                 Sort-Object TimeCreated
-            if ($events) {
-                $results.Details.Add("WARN: Most recent DSC operational-log activity (oldest -> newest):")
-                foreach ($e in $events) {
-                    $msg = ($e.Message -replace '\s+', ' ').Trim()
-                    if ($msg.Length -gt 220) { $msg = $msg.Substring(0, 220) + '...' }
-                    $results.Details.Add("WARN:   [$($e.TimeCreated.ToString('HH:mm:ss'))] $msg")
-                }
-            }
-            else {
-                $results.Details.Add("WARN: No DSC operational-log events found to identify the running configuration")
-            }
         }
         catch {
             $results.Details.Add("WARN: Could not read DSC operational log to identify the running configuration ($($_.Exception.Message))")
+            return $results
+        }
+        if (-not $events) {
+            $results.Details.Add("WARN: No DSC operational-log events found to identify the running configuration")
+            return $results
+        }
+
+        $now = Get-Date
+
+        # 1) The in-flight apply: the most recent "Start-DscConfiguration ...
+        #    started" operation that has not been followed by a completion. This
+        #    tells us how long DSC has been busy and -- crucially -- WHO kicked
+        #    it off. A remote "from computer <DC>" means the deploy orchestrator
+        #    re-pushed the phase config (expected, transient); the local computer
+        #    name means the consistency-engine timer fired on its own schedule.
+        $startEvt = $events | Where-Object { $_.Message -match 'Start-DscConfiguration' -and $_.Message -match 'started' } |
+            Select-Object -Last 1
+        if ($startEvt) {
+            $elapsed = $now - $startEvt.TimeCreated
+            $elapsedStr = if ($elapsed.TotalMinutes -ge 1) { "{0:n1} min" -f $elapsed.TotalMinutes } else { "{0:n0} sec" -f $elapsed.TotalSeconds }
+            $fromComputer = if ($startEvt.Message -match 'from computer\s+([^\s\.\,]+)') { $Matches[1] } else { 'unknown' }
+            $origin = if ($fromComputer -and $fromComputer -ne 'unknown' -and $fromComputer -ne $env:COMPUTERNAME -and $fromComputer -ne 'NULL') {
+                "remote orchestrator '$fromComputer' (a deploy step re-pushed the config)"
+            }
+            elseif ($fromComputer -eq $env:COMPUTERNAME) {
+                "local consistency-engine timer"
+            }
+            else {
+                "computer '$fromComputer'"
+            }
+            $results.Details.Add("WARN: Active apply started $($startEvt.TimeCreated.ToString('HH:mm:ss')) ($elapsedStr ago) by $origin")
+        }
+        else {
+            $results.Details.Add("WARN: No in-flight Start-DscConfiguration found; LCM may be mid consistency-check or pending a queued config/reboot")
+        }
+
+        # 2) The resource execution sequence: the ordered list of resources in
+        #    the configuration currently applying. This is the single most
+        #    useful line -- it fingerprints WHICH phase MOF is running (e.g.
+        #    ADKInstall / ReportBuilder / ODBCDriver = the site-server config).
+        #    The old code truncated it to 220 chars and buried it; print it in
+        #    full, wrapped, so the operator can see every resource.
+        $seqEvt = $events | Where-Object { $_.Message -match 'Resource execution sequence' } | Select-Object -Last 1
+        if ($seqEvt) {
+            $seq = ($seqEvt.Message -replace '\s+', ' ').Trim()
+            $seq = $seq -replace '^.*Resource execution sequence\s*::\s*', ''
+            $resList = $seq -split '\s*,\s*' | Where-Object { $_ }
+            $results.Details.Add("WARN: Configuration applying contains $($resList.Count) resource(s) (this identifies which phase MOF is running):")
+            # Emit in chunks of 6 so a long sequence stays readable in the log.
+            for ($i = 0; $i -lt $resList.Count; $i += 6) {
+                $chunk = $resList[$i..([Math]::Min($i + 5, $resList.Count - 1))] -join ', '
+                $results.Details.Add("WARN:   $chunk")
+            }
+        }
+
+        # 3) The currently-executing resource: the latest "[Start Set]/[Start
+        #    Resource]/[Start Test]" without a matching end line, so the operator
+        #    sees the specific resource that is blocking idle right now.
+        $currentResEvt = $events | Where-Object { $_.Message -match '\[\s*(Start Set|Start Resource|Start Test)\s*\]' } |
+            Select-Object -Last 1
+        if ($currentResEvt) {
+            $curMsg = ($currentResEvt.Message -replace '\s+', ' ').Trim()
+            if ($curMsg -match '(\[\s*(?:Start Set|Start Resource|Start Test)\s*\][^\r\n]*?\]\])') { $curMsg = $Matches[1] }
+            if ($curMsg.Length -gt 200) { $curMsg = $curMsg.Substring(0, 200) + '...' }
+            $results.Details.Add("WARN: Currently executing: [$($currentResEvt.TimeCreated.ToString('HH:mm:ss'))] $curMsg")
+        }
+
+        # 4) The raw recent activity tail, kept as a fallback for anything the
+        #    structured extraction above did not capture.
+        $results.Details.Add("WARN: Most recent DSC operational-log activity (oldest -> newest):")
+        foreach ($e in ($events | Select-Object -Last 8)) {
+            $msg = ($e.Message -replace '\s+', ' ').Trim()
+            if ($msg.Length -gt 220) { $msg = $msg.Substring(0, 220) + '...' }
+            $results.Details.Add("WARN:   [$($e.TimeCreated.ToString('HH:mm:ss'))] $msg")
         }
 
         return $results
@@ -8263,7 +8346,6 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
             -DisplayName "Phase5-SQLAO-Validate" -SuppressLog
 
         # Process results inline (Format-TestResult hardcodes Phase 11)
-        $passed = $true
         if (-not $result -or $result.ScriptBlockFailed) {
             $hasValidPass = $result -and $result.ScriptBlockOutput -is [hashtable] -and
                 $result.ScriptBlockOutput.ContainsKey('Passed') -and $result.ScriptBlockOutput.Passed -eq $true
