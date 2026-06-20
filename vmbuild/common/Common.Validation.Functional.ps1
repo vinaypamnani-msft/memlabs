@@ -4890,15 +4890,18 @@ function Test-MaintenanceTasks {
     # non-fatal WARN instead of failing the VM.
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
         -ScriptBlock $scriptBlock -DisplayName "Phase11-Maintenance-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 120
+        -AsJob -TimeoutSeconds 120 -RebootIfUnresponsive
 
     $hasValidResult = $result -and $result.ScriptBlockOutput -is [hashtable] -and
         $result.ScriptBlockOutput.ContainsKey('Passed')
     if ((-not $result) -or ($result.ScriptBlockFailed -and -not $hasValidResult)) {
-        # Transient PSDirect stall: the probe never returned a verdict. Non-fatal
-        # -- surface a WARN but don't fail the VM over a check that timed out.
-        Write-Log "[Phase $Phase] $VMName [Maintenance]: WARN - could not verify scheduled tasks (PSDirect probe returned no result; likely a transient guest stall) - not failing the VM" -Warning -LogOnly
-        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [Maintenance]: WARN - scheduled-task check skipped (PSDirect probe timed out; not failing the VM)"; Level = 'Warning' })
+        # Transient PSDirect stall: the probe never returned a verdict. The
+        # session has been evicted and, if the guest was genuinely wedged, the VM
+        # was rebooted by -RebootIfUnresponsive. Non-fatal -- surface a WARN but
+        # don't fail the VM over a check that timed out.
+        $rebootNote = if ($result -and $result.Rebooted) { ' (VM was rebooted to recover a wedged PSDirect channel)' } else { '' }
+        Write-Log "[Phase $Phase] $VMName [Maintenance]: WARN - could not verify scheduled tasks (PSDirect probe returned no result; likely a transient guest stall)$rebootNote - not failing the VM" -Warning -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [Maintenance]: WARN - scheduled-task check skipped (PSDirect probe timed out; not failing the VM)$rebootNote"; Level = 'Warning' })
         return $true
     }
 
@@ -4982,7 +4985,7 @@ function Test-DscIdle {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
         -ScriptBlock $scriptBlock -DisplayName "Phase11-DSC-Idle-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 180
+        -AsJob -TimeoutSeconds 180 -RebootIfUnresponsive
 
     # Format-TestResult returns the script's Passed verdict, which is always
     # $true here; the WARN: detail lines still reach the console/log via the

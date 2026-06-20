@@ -5318,6 +5318,8 @@ function Invoke-VmCommand {
         [switch]$SkipDomainFallback,
         [Parameter(Mandatory = $false, HelpMessage = "Max retries for Get-VmSession (default 3). Reduce for tight polling loops.")]
         [int]$SessionMaxRetries = 3,
+        [Parameter(Mandatory = $false, HelpMessage = "On an -AsJob timeout, after evicting the wedged session run a 30s liveness probe (hostname); if the guest still does not answer, reboot the VM to recover. Default OFF -- only set where the VM is expected to be responsive (e.g. post-build Phase 11 checks), NEVER in readiness/OOBE polling loops where a timeout is normal and the VM may be intentionally mid-reboot.")]
+        [switch]$RebootIfUnresponsive,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
@@ -5352,6 +5354,8 @@ function Invoke-VmCommand {
             ScriptBlockOutput	= $null
             ErrorDetails      = $null
             ChannelBroken     = $false
+            TimedOut          = $false
+            Rebooted          = $false
         }
 
         # Prepare args
@@ -5483,11 +5487,26 @@ function Invoke-VmCommand {
                         if (-not $SuppressLog) {
                             Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $OutErr." -Failure
                         }
-                        if ($job.State -eq "Running") {
+                        $jobTimedOut = ($job.State -eq "Running")
+                        if ($jobTimedOut) {
                             Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
                         }
                         Stop-Job $job | Out-Null
                         Remove-Job $job
+                        if ($jobTimedOut) {
+                            # The job never finished within the timeout: the guest
+                            # didn't answer, so this PSDirect session is suspect.
+                            # Evict + dispose every cached session for this VM so the
+                            # NEXT call builds a FRESH session instead of reusing a
+                            # wedged channel -- reusing a hung session is what cascades
+                            # into a full phase hang.
+                            $return.TimedOut = $true
+                            Remove-VmSessionFromCache -VmName $VmName
+                            if ($RebootIfUnresponsive) {
+                                $recovery = Invoke-VmLivenessRecovery -VmName $VmName -VmDomainName $VmDomainName -Quiet:$SuppressLog
+                                $return.Rebooted = [bool]$recovery.Rebooted
+                            }
+                        }
                     }
                 }
                 else {
@@ -5683,6 +5702,72 @@ function Remove-VmSession {
         }
     } catch {}
     try { Remove-PSSession $Session -ErrorAction SilentlyContinue } catch {}
+}
+
+# Evict + dispose EVERY cached PSDirect session for a VM and forget its
+# last-known-good credential. Call this whenever a command against the VM
+# times out / the channel is suspect: a session whose command hung must not
+# be reused (it stays in ps_cache reporting Availability='Available' and the
+# next caller rides the same wedged channel -> cascading hangs). The next
+# Get-VmSession then builds a fresh, validated session.
+function Remove-VmSessionFromCache {
+    param([string]$VmName)
+    if (-not $VmName) { return }
+    $VmName = $VmName.Split('.')[0]
+    foreach ($key in @($global:ps_cache.Keys)) {
+        if ($key -like "$VmName-*") {
+            $sess = $global:ps_cache[$key]
+            $global:ps_cache.Remove($key)
+            Remove-VmSession $sess
+            Write-Log "$VmName`: Evicted cached PSDirect session '$key' (timed out / unresponsive)" -Verbose
+        }
+    }
+    if ($global:ps_lastGoodCred.ContainsKey($VmName)) { $global:ps_lastGoodCred.Remove($VmName) }
+}
+
+# Liveness probe + reboot escalation for a VM whose PSDirect command timed
+# out. The caller has already evicted the wedged session, so this runs a
+# fresh, short 'hostname' probe over a NEW session:
+#   - guest answers  -> it is alive; the original command was merely slow /
+#                       stuck. Do NOT reboot.
+#   - probe also times out -> the channel is genuinely wedged. Reboot the VM
+#                       to recover (bounded, single attempt).
+# Returns @{ Alive; Rebooted }. The probe deliberately does NOT pass
+# -RebootIfUnresponsive, so there is no recursion.
+function Invoke-VmLivenessRecovery {
+    param(
+        [string]$VmName,
+        [string]$VmDomainName,
+        [switch]$Quiet
+    )
+    $outcome = @{ Alive = $false; Rebooted = $false }
+    if (-not $Quiet) {
+        Write-Log "$VmName`: PSDirect command timed out; running 30s liveness probe (hostname) before escalating." -Warning
+    }
+    $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog `
+        -DisplayName "Liveness probe (hostname)" -AsJob -TimeoutSeconds 30 -SessionMaxRetries 1 `
+        -ScriptBlock { $env:COMPUTERNAME }
+    if ($probe -and -not $probe.ScriptBlockFailed -and $probe.ScriptBlockOutput) {
+        $outcome.Alive = $true
+        if (-not $Quiet) {
+            Write-Log "$VmName`: Liveness probe OK (guest responded '$($probe.ScriptBlockOutput)'); NOT rebooting -- the original command was slow, not the channel." -Warning
+        }
+        return $outcome
+    }
+    # Probe failed too -> channel wedged. Reboot to recover.
+    Write-Log "$VmName`: Liveness probe FAILED after session eviction; PSDirect channel is wedged. Rebooting VM to recover." -Warning
+    $rebooted = Restart-UnresponsiveVm -VmName $VmName -MaxRetries 1 -WaitTimeSeconds 120
+    $outcome.Rebooted = [bool]$rebooted
+    # Drop any session that may have been re-created during the probe so the
+    # post-reboot guest gets a fresh channel.
+    Remove-VmSessionFromCache -VmName $VmName
+    if ($rebooted) {
+        Write-Log "$VmName`: VM rebooted and is responsive again." -Warning
+    }
+    else {
+        Write-Log "$VmName`: VM did NOT become responsive after reboot." -Failure
+    }
+    return $outcome
 }
 
 function Get-VmSession {
