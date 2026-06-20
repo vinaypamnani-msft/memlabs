@@ -5475,6 +5475,18 @@ function Invoke-VmCommand {
                             Write-Log "$VmName`: Job '$DisplayName' Succeeded" -LogOnly
                         }
                         $failed = $false
+                        # Remove the completed job NOW. Leaving it leaks a PSRemotingJob still
+                        # bound to the cached session's runspace. Wait-ForVm polls via this path
+                        # every few seconds, so a long wait accumulates dozens of leaked completed
+                        # jobs against one VM's session. When that session is later evicted/disposed
+                        # (Remove-VmSessionFromCache on timeout) or the VM is turned off (stop-vm2
+                        # -TurnOff in the channel-broken recovery), every leaked job's transport
+                        # breaks at once and a late state-change/transport callback fires on a
+                        # threadpool thread against an already-disposed job -> unhandled
+                        # PSObjectDisposedException ('object "PSJob" has already been disposed')
+                        # that kills the whole phase child process. Receive-Job already drained the
+                        # output, so removing it here is safe and closes that race.
+                        Remove-Job $job -Force -ErrorAction SilentlyContinue
                     }
                     else {
                         Write-Log "$VmName`: Job '$DisplayName' Failed State: $($job.State)" -LogOnly
@@ -5492,18 +5504,46 @@ function Invoke-VmCommand {
                         $jobTimedOut = ($job.State -eq "Running")
                         if ($jobTimedOut) {
                             Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
+                            # A timed-out PSDirect/PSRemoting job is wedged on a dead or hung
+                            # VMBus channel. Stop-Job / Remove-Job BLOCK on it (often for
+                            # minutes) because the remote pipeline can't acknowledge
+                            # cancellation until the VM is rebooted -- synchronously stopping
+                            # it here would just make the caller MORE stuck. Signal
+                            # cancellation asynchronously and ABANDON the job object instead;
+                            # it is reaped when the reboot below breaks its transport, or when
+                            # this process exits. (We do NOT Receive/Remove it -- it never
+                            # produced output and a forced remove would block on the same dead
+                            # transport.)
+                            try { $job.StopJobAsync() } catch {}
                         }
-                        Stop-Job $job | Out-Null
-                        Remove-Job $job
+                        else {
+                            # Job is in a terminal state (Failed / Stopped) -- its pipeline is
+                            # already done, so stop+remove are instant and safe.
+                            Stop-Job $job -ErrorAction SilentlyContinue | Out-Null
+                            Remove-Job $job -Force -ErrorAction SilentlyContinue
+                        }
                         if ($jobTimedOut) {
                             # The job never finished within the timeout: the guest
                             # didn't answer, so this PSDirect session is suspect.
-                            # Evict + dispose every cached session for this VM so the
-                            # NEXT call builds a FRESH session instead of reusing a
-                            # wedged channel -- reusing a hung session is what cascades
-                            # into a full phase hang.
+                            # Evict the cached session for this VM so the NEXT call
+                            # builds a FRESH session instead of reusing a wedged
+                            # channel -- reusing a hung session is what cascades into
+                            # a full phase hang.
                             $return.TimedOut = $true
-                            Remove-VmSessionFromCache -VmName $VmName
+                            # -LeakSession (do NOT dispose): the timed-out job above
+                            # was only StopJobAsync'd (abandoned, NOT removed -- a
+                            # synchronous Remove-Job blocks on the dead VMBus). If we
+                            # DISPOSE its session now, the job's later transport-break
+                            # StateChanged callback -- fired when the VM is rebooted to
+                            # recover the channel (Wait-ForVm's heartbeat reboot, or
+                            # Invoke-VmLivenessRecovery) -- runs on a threadpool thread
+                            # against an already-disposed object -> unhandled
+                            # PSObjectDisposedException ('object "PSJob" has already
+                            # been disposed') that crashes the whole phase child
+                            # process. Evict the cache ENTRY but LEAK the session object
+                            # (reaped at process exit); the wedged channel is no longer
+                            # reachable via the cache anyway.
+                            Remove-VmSessionFromCache -VmName $VmName -LeakSession
                             if ($RebootIfUnresponsive) {
                                 $recovery = Invoke-VmLivenessRecovery -VmName $VmName -VmDomainName $VmDomainName -Quiet:$SuppressLog
                                 $return.Rebooted = [bool]$recovery.Rebooted
@@ -5715,15 +5755,28 @@ function Remove-VmSession {
 # next caller rides the same wedged channel -> cascading hangs). The next
 # Get-VmSession then builds a fresh, validated session.
 function Remove-VmSessionFromCache {
-    param([string]$VmName)
+    param(
+        [string]$VmName,
+        # When set, the cache ENTRY is removed (so the next Get-VmSession builds a
+        # fresh session) but the underlying PSSession/runspace is NOT disposed.
+        # Use this when an abandoned, still-running timed-out PSRemoting job is
+        # bound to the session: disposing it now would let the job's late
+        # state-change/transport callback (which fires when a subsequent reboot
+        # breaks the VMBus) hit an already-disposed object on a threadpool thread
+        # -> unhandled PSObjectDisposedException that kills the phase child
+        # process. Leaking the session object (reaped at process exit) is the safe
+        # trade -- the channel is dead and is no longer reachable via the cache.
+        [switch]$LeakSession
+    )
     if (-not $VmName) { return }
     $VmName = $VmName.Split('.')[0]
     foreach ($key in @($global:ps_cache.Keys)) {
         if ($key -like "$VmName-*") {
             $sess = $global:ps_cache[$key]
             $global:ps_cache.Remove($key)
-            Remove-VmSession $sess
-            Write-Log "$VmName`: Evicted cached PSDirect session '$key' (timed out / unresponsive)" -Verbose
+            if (-not $LeakSession) { Remove-VmSession $sess }
+            $dispNote = if ($LeakSession) { 'leaked (abandoned job may still ride it)' } else { 'disposed' }
+            Write-Log "$VmName`: Evicted cached PSDirect session '$key' ($dispNote; timed out / unresponsive)" -Verbose
         }
     }
     if ($global:ps_lastGoodCred.ContainsKey($VmName)) { $global:ps_lastGoodCred.Remove($VmName) }
@@ -5763,8 +5816,11 @@ function Invoke-VmLivenessRecovery {
     $rebooted = Restart-UnresponsiveVm -VmName $VmName -MaxRetries 1 -WaitTimeSeconds 120
     $outcome.Rebooted = [bool]$rebooted
     # Drop any session that may have been re-created during the probe so the
-    # post-reboot guest gets a fresh channel.
-    Remove-VmSessionFromCache -VmName $VmName
+    # post-reboot guest gets a fresh channel. -LeakSession: a probe that timed
+    # out left an abandoned job bound to that session; disposing it here (right
+    # after a reboot that just broke its transport) risks the same disposed-job
+    # callback crash, so evict the cache entry but don't dispose the object.
+    Remove-VmSessionFromCache -VmName $VmName -LeakSession
     if ($rebooted) {
         Write-Log "$VmName`: VM rebooted and is responsive again." -Warning
     }
