@@ -318,6 +318,19 @@ function Test-VmFunctionality {
         $null = Test-DscIdle -VMName $VMName -Domain $domain
     }
 
+    # Cross-forest trust validation. On a DC that joined a Forest Trust, verify
+    # the trust object + secure channel, forward AND reverse DNS, the remote
+    # admin landing in local Administrators, the remote root CA being trusted +
+    # published locally, and (when a remote CM site manages this domain) the
+    # System Management delegation + schema extension. Informational/WARN only
+    # (not assigned to $testsPassed) -- a not-yet-converged trust shouldn't fail
+    # the DC, but the WARN lines surface the real cross-forest gaps (esp. the
+    # missing reverse DNS forwarder).
+    if ($testsPassed -and -not $vmIsLinux -and $role -in @('DC', 'BDC') -and $CurrentItem.ForestTrust -and $CurrentItem.ForestTrust -ne 'NONE') {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying cross-forest trust"
+        $null = Test-ForestTrustFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
     # ---- Linux health check ----
     # For all Linux VMs: ping + SSH + SMB health cascade from the host.
     # Ping fail → restart. SSH down + SMB down → restart (both services dead).
@@ -4949,6 +4962,257 @@ function Test-MaintenanceTasks {
     }
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'Maintenance' -Result $result)
+}
+
+function Test-ForestTrustFunctionality {
+    <#
+    .SYNOPSIS
+        Validates the cross-forest trust feature on a DC that joined a Forest
+        Trust (ForestTrust != NONE). Informational/WARN only -- never fails the
+        VM (a not-yet-fully-replicated trust shouldn't fail the DC's validation).
+    .DESCRIPTION
+        Runs in-guest on the new domain's DC and checks each mechanic the
+        forest-trust deployment establishes (see Phase2DC.ps1):
+          A. The bidirectional forest trust object + a functional secure channel.
+          A. Forward DNS (this DC's conditional forwarder to the remote forest)
+             AND the REVERSE path (can the remote forest's DNS resolve THIS
+             domain) -- the most likely functional gap, since the deployment
+             only creates the forwarder on this side.
+          B. The remote-forest admin landed in local Administrators
+             (AddRemoteAdmins).
+          C. The remote root CA is trusted (enterprise Root + NTAuth stores) and
+             published into this forest's Configuration NC
+             (InstallRootCertificate + RunPkiSync).
+          D. When externalDomainJoinSiteCode is set (a remote CM site manages
+             this domain's clients): the System Management container exists and
+             the remote 'ConfigMgr IIS Servers' group is delegated on it, and
+             the AD schema was extended for ConfigMgr (extadsch).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+    $tp = $CurrentItem.thisParams
+    $remoteForest = $CurrentItem.ForestTrust
+
+    # Remote DC FQDN to drive DNS / reverse-DNS probes. thisParams.OtherDC is the
+    # canonical value; RootCADC is an equivalent fallback (both = remote DC FQDN).
+    $remoteDcFqdn = $null
+    if ($tp) {
+        if ($tp.OtherDC) { $remoteDcFqdn = $tp.OtherDC }
+        elseif ($tp.RootCADC) { $remoteDcFqdn = $tp.RootCADC }
+    }
+    $externalSiteCode = $CurrentItem.externalDomainJoinSiteCode
+
+    Write-Log "[Phase $Phase] $VMName [ForestTrust]: Validating cross-forest trust to '$remoteForest'" -LogOnly
+
+    if (-not $remoteDcFqdn) {
+        Write-Log "[Phase $Phase] $VMName [ForestTrust]: No remote DC FQDN in thisParams; skipping cross-forest validation" -LogOnly
+        return $true
+    }
+
+    $forestTrustScript = {
+        param($localDomain, $remoteForest, $remoteDcFqdn, $externalSiteCode)
+
+        # Informational: Passed stays $true so the trust checks never fail the DC.
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $remoteNetbios = ($remoteForest -split '\.')[0]
+        $localDcFqdn = "$env:COMPUTERNAME.$localDomain"
+
+        # --- A1: Forest trust object ---
+        $results.Details.Add("CMD: Get-ADTrust -Filter { Target -eq '$remoteForest' }")
+        try {
+            $trust = Get-ADTrust -Filter "Target -eq '$remoteForest'" -ErrorAction Stop
+            if (-not $trust) {
+                $results.Details.Add("WARN: No AD trust object found for forest '$remoteForest'")
+            }
+            else {
+                $dir = "$($trust.Direction)"
+                $tt = "$($trust.TrustType)"
+                $ft = $trust.ForestTransitive
+                if ($dir -eq 'BiDirectional' -and $ft) {
+                    $results.Details.Add("OK: Forest trust to '$remoteForest' is BiDirectional + ForestTransitive ($tt)")
+                }
+                else {
+                    $results.Details.Add("WARN: Trust to '$remoteForest' present but Direction=$dir ForestTransitive=$ft TrustType=$tt (expected a BiDirectional forest trust)")
+                }
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: Get-ADTrust for '$remoteForest' failed: $($_.Exception.Message)")
+        }
+
+        # --- A2: Functional secure channel to the remote forest ---
+        $results.Details.Add("CMD: nltest /sc_query:$remoteForest")
+        try {
+            $sc = & nltest "/sc_query:$remoteForest" 2>&1 | Out-String
+            if ($sc -match 'Success|NERR_Success|Connection Status = 0\b') {
+                $results.Details.Add("OK: Secure channel to '$remoteForest' verified (nltest)")
+            }
+            else {
+                $firstLine = (($sc -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1)
+                $results.Details.Add("WARN: nltest secure channel to '$remoteForest' did not report success: $($firstLine.Trim())")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: nltest /sc_query:$remoteForest failed: $($_.Exception.Message)")
+        }
+
+        # --- A3: Forward DNS to the remote forest (this side's conditional forwarder) ---
+        $remoteIp = $null
+        $results.Details.Add("CMD: Resolve-DnsName $remoteDcFqdn")
+        try {
+            $fwd = Resolve-DnsName -Name $remoteDcFqdn -Type A -ErrorAction Stop | Where-Object { $_.IPAddress } | Select-Object -First 1
+            if ($fwd) {
+                $remoteIp = $fwd.IPAddress
+                $results.Details.Add("OK: Forward DNS resolves '$remoteDcFqdn' -> $remoteIp (conditional forwarder works)")
+            }
+            else {
+                $results.Details.Add("WARN: '$remoteDcFqdn' returned no A record")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: Forward DNS for '$remoteDcFqdn' failed (conditional forwarder may be missing): $($_.Exception.Message)")
+        }
+
+        # --- A4: REVERSE DNS path (remote forest -> this domain). The deployment
+        #         only creates a forwarder on THIS side, so a remote DNS that
+        #         can't resolve this domain breaks remote-site client management
+        #         and incoming-trust validation. Ask the remote DNS directly. ---
+        if ($remoteIp) {
+            $results.Details.Add("CMD: Resolve-DnsName $localDcFqdn -Server $remoteIp")
+            try {
+                $rev = Resolve-DnsName -Name $localDcFqdn -Type A -Server $remoteIp -ErrorAction Stop | Where-Object { $_.IPAddress } | Select-Object -First 1
+                if ($rev) {
+                    $results.Details.Add("OK: Remote forest DNS ($remoteIp) can resolve this domain ('$localDcFqdn' -> $($rev.IPAddress))")
+                }
+                else {
+                    $results.Details.Add("WARN: Remote forest DNS ($remoteIp) returned no record for '$localDcFqdn' -- the reverse conditional forwarder (remote -> $localDomain) is likely missing; remote-site client management/auth may break")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: Remote forest DNS ($remoteIp) cannot resolve '$localDcFqdn' -- the reverse conditional forwarder (remote -> $localDomain) is missing; remote-site client management/auth may break: $($_.Exception.Message)")
+            }
+        }
+
+        # --- B: Remote-forest admin in local Administrators (AddRemoteAdmins) ---
+        $results.Details.Add("CMD: Get-LocalGroupMember Administrators (looking for '$remoteNetbios\\*')")
+        try {
+            $admins = Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop
+            $remoteAdmins = @($admins | Where-Object { "$($_.Name)" -like "$remoteNetbios\*" })
+            if ($remoteAdmins.Count -gt 0) {
+                $results.Details.Add("OK: Local Administrators includes remote-forest principal(s): $(($remoteAdmins | ForEach-Object { $_.Name }) -join ', ')")
+            }
+            else {
+                $results.Details.Add("WARN: No '$remoteNetbios\\*' principal in local Administrators (AddRemoteAdmins may not have applied)")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: Could not enumerate local Administrators: $($_.Exception.Message)")
+        }
+
+        # --- C1: Remote root CA trusted in the enterprise Root + NTAuth stores ---
+        $results.Details.Add("CMD: certutil -store -enterprise Root / NTAuth (looking for '$remoteNetbios-')")
+        try {
+            $rootStore = & certutil -store -enterprise Root 2>&1 | Out-String
+            $ntauthStore = & certutil -store -enterprise NTAuth 2>&1 | Out-String
+            $needle = [regex]::Escape("$remoteNetbios-")
+            if ($rootStore -match $needle) {
+                $results.Details.Add("OK: Remote CA '$remoteNetbios-*' present in enterprise Root store")
+            }
+            else {
+                $results.Details.Add("WARN: Remote CA '$remoteNetbios-*' NOT found in enterprise Root store (InstallRootCertificate dspublish RootCA may have failed)")
+            }
+            if ($ntauthStore -match $needle) {
+                $results.Details.Add("OK: Remote CA present in enterprise NTAuth store")
+            }
+            else {
+                $results.Details.Add("WARN: Remote CA NOT found in enterprise NTAuth store (cross-forest client auth requires NTAuth)")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: certutil enterprise store query failed: $($_.Exception.Message)")
+        }
+
+        # --- C2: Remote CA published into the LOCAL forest Configuration NC,
+        #         plus the synced certificate templates (RunPkiSync). ---
+        try {
+            $configNC = ([ADSI]"LDAP://RootDSE").configurationNamingContext.Value
+            $caContainer = [ADSI]"LDAP://CN=Certification Authorities,CN=Public Key Services,CN=Services,$configNC"
+            $names = @()
+            foreach ($c in $caContainer.Children) { $names += [string]$c.Properties['cn'].Value }
+            if (@($names | Where-Object { $_ -like "$remoteNetbios-*" }).Count -gt 0) {
+                $results.Details.Add("OK: Remote root CA published in local AD Certification Authorities [$($names -join ', ')]")
+            }
+            else {
+                $results.Details.Add("WARN: Remote root CA not in local AD Certification Authorities [present: $($names -join ', ')] (InstallRootCertificate dspublish / RunPkiSync gap)")
+            }
+
+            $tmplContainer = [ADSI]"LDAP://CN=Certificate Templates,CN=Public Key Services,CN=Services,$configNC"
+            $tmplCount = @($tmplContainer.Children).Count
+            $results.Details.Add("OK: Local forest has $tmplCount certificate template(s) (RunPkiSync copies remote templates here)")
+        }
+        catch {
+            $results.Details.Add("WARN: Could not read local Configuration NC PKI containers: $($_.Exception.Message)")
+        }
+
+        # --- D: Remote-site client-management prerequisites (externalDomainJoinSiteCode) ---
+        if ($externalSiteCode -and $externalSiteCode -ne 'NONE') {
+            try {
+                $defNC = ([ADSI]"LDAP://RootDSE").defaultNamingContext.Value
+                $smPath = "LDAP://CN=System Management,CN=System,$defNC"
+                if ([System.DirectoryServices.DirectoryEntry]::Exists($smPath)) {
+                    $results.Details.Add("OK: System Management container exists (CN=System Management,CN=System,$defNC)")
+                    $sm = [ADSI]$smPath
+                    $acl = $sm.ObjectSecurity
+                    $hasRemoteIIS = @($acl.Access | Where-Object { "$($_.IdentityReference)" -like "$remoteNetbios\*ConfigMgr*" }).Count -gt 0
+                    if ($hasRemoteIIS) {
+                        $results.Details.Add("OK: Remote '$remoteNetbios\ConfigMgr IIS Servers' is delegated on the System Management container")
+                    }
+                    else {
+                        $results.Details.Add("WARN: No '$remoteNetbios\ConfigMgr IIS Servers' ACE on System Management (DelegateControl gap; remote site '$externalSiteCode' can't publish here -- may appear as a SID if cross-forest name resolution is down)")
+                    }
+                }
+                else {
+                    $results.Details.Add("WARN: System Management container missing -- remote CM site '$externalSiteCode' cannot publish to this domain")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: System Management container/ACL check failed: $($_.Exception.Message)")
+            }
+
+            try {
+                $schemaNC = ([ADSI]"LDAP://RootDSE").schemaNamingContext.Value
+                $searcher = [ADSISearcher]::new()
+                $searcher.SearchRoot = [ADSI]"LDAP://$schemaNC"
+                $searcher.Filter = "(cn=MS-SMS-*)"
+                $smsClasses = @($searcher.FindAll()).Count
+                if ($smsClasses -gt 0) {
+                    $results.Details.Add("OK: AD schema extended for ConfigMgr ($smsClasses MS-SMS-* schema object(s) present)")
+                }
+                else {
+                    $results.Details.Add("WARN: No MS-SMS-* classes in the schema -- extadsch may not have extended this forest's schema (remote site can't manage clients here)")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: Schema extension check failed: $($_.Exception.Message)")
+            }
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $forestTrustScript -ArgumentList @($domain, $remoteForest, $remoteDcFqdn, $externalSiteCode) `
+        -DisplayName "Phase11-ForestTrust-Test" -SuppressLog -AsJob -TimeoutSeconds 300
+
+    $null = Format-TestResult -VMName $VMName -RoleLabel 'ForestTrust' -Result $result
+    return $true
 }
 
 function Test-DscIdle {
