@@ -1237,6 +1237,20 @@ function ConvertTo-DeployConfigEx {
                         $OtherDomainShort = $($ThisVM.ForestTrust).Split(".")[0]
                         $OtherRootCA = "$($OtherCAVM.VmName).$($ThisVM.ForestTrust)\$($OtherDomainShort)-$($OtherCAVM.VmName)-CA"
                         $thisParams | Add-Member -MemberType NoteProperty -Name "RootCA" -Value $OtherRootCA -Force
+
+                        # RootCA above is only a best-effort GUESS (assumes the CA
+                        # lives on the InstallCA VM and that its CN follows
+                        # <netbios>-<vm>-CA). With multi-tier PKI the issuing CA can
+                        # live on any member server with a custom CN, so the DSC
+                        # resource AUTHORITATIVELY rediscovers it from the remote
+                        # forest's AD Enrollment Services container. Give it the
+                        # remote DC to query and a host hint to disambiguate when
+                        # multiple Enterprise issuing CAs are published.
+                        $OtherDCForCA = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1)
+                        if ($OtherDCForCA) {
+                            $thisParams | Add-Member -MemberType NoteProperty -Name "RootCADC" -Value "$($OtherDCForCA.VmName).$($ThisVM.ForestTrust)" -Force
+                        }
+                        $thisParams | Add-Member -MemberType NoteProperty -Name "IssuingCAHint" -Value "$(($OtherCAVM | Select-Object -First 1).VmName)" -Force
                     }
 
                     if ($thisVM.externalDomainJoinSiteCode -ne "NONE") {

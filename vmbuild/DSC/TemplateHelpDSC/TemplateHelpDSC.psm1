@@ -6203,6 +6203,76 @@ class InstallRootCertificate {
     [DscProperty(Key)]
     [string]$CAName
 
+    # Remote forest DC FQDN (e.g. CST-DC1.cstest8.com) used to AUTHORITATIVELY
+    # discover the issuing CA from AD instead of guessing its -config string.
+    [DscProperty()]
+    [string]$RemoteForestDC
+
+    # Optional issuing-CA host hint (short or FQDN) to disambiguate when the
+    # remote forest publishes more than one Enterprise issuing CA.
+    [DscProperty()]
+    [string]$IssuingCAHint
+
+    # Resolve the issuing CA's certutil -config string ("<dNSHostName>\<cn>")
+    # by enumerating the remote forest's Enrollment Services container -- the
+    # exact object set ADCS itself publishes for every Enterprise issuing CA.
+    # This is naming-, IP-, and tier-agnostic: an offline standalone root never
+    # publishes a pKIEnrollmentService object, so only true issuing CAs appear,
+    # and a CA on a non-DC member server with a custom CN is found correctly.
+    # Falls back to the passed-in CAName guess if discovery yields nothing.
+    [string] ResolveCAConfig() {
+        $fallback = $this.CAName
+        if ([string]::IsNullOrWhiteSpace($this.RemoteForestDC)) {
+            return $fallback
+        }
+        try {
+            $rootDSE = [ADSI]"LDAP://$($this.RemoteForestDC)/RootDSE"
+            $configNC = [string]$rootDSE.configurationNamingContext.Value
+            if ([string]::IsNullOrWhiteSpace($configNC)) {
+                Write-Status "CA discovery: could not read configurationNamingContext from $($this.RemoteForestDC); using fallback '$fallback'"
+                return $fallback
+            }
+            $enrollPath = "LDAP://$($this.RemoteForestDC)/CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC"
+            $enroll = [ADSI]$enrollPath
+            $cas = @()
+            foreach ($child in $enroll.Children) {
+                $cn = [string]$child.Properties['cn'].Value
+                $dns = [string]$child.Properties['dNSHostName'].Value
+                if (-not [string]::IsNullOrWhiteSpace($cn) -and -not [string]::IsNullOrWhiteSpace($dns)) {
+                    $cas += [pscustomobject]@{ CN = $cn; DnsHostName = $dns; Config = "$dns\$cn" }
+                }
+            }
+            if ($cas.Count -eq 0) {
+                Write-Status "CA discovery: no Enterprise issuing CA published in the $($this.RemoteForestDC) forest; using fallback '$fallback'"
+                return $fallback
+            }
+            $chosen = $null
+            if (-not [string]::IsNullOrWhiteSpace($this.IssuingCAHint)) {
+                foreach ($ca in $cas) {
+                    $hostShort = ($ca.DnsHostName -split '\.')[0]
+                    if ($hostShort -eq $this.IssuingCAHint -or $ca.DnsHostName -eq $this.IssuingCAHint) {
+                        $chosen = $ca
+                        break
+                    }
+                }
+            }
+            if (-not $chosen) {
+                $chosen = $cas | Select-Object -First 1
+            }
+            if ($cas.Count -gt 1) {
+                $allConfigs = ($cas | ForEach-Object { $_.Config }) -join ', '
+                Write-Status "CA discovery: $($cas.Count) issuing CAs found [$allConfigs]; selected '$($chosen.Config)'"
+            }
+            else {
+                Write-Status "CA discovery: resolved issuing CA '$($chosen.Config)'"
+            }
+            return $chosen.Config
+        }
+        catch {
+            Write-Status "WARNING: CA discovery against $($this.RemoteForestDC) failed: $_. Using fallback '$fallback'"
+            return $fallback
+        }
+    }
 
     [void] Set() {
 
@@ -6212,24 +6282,60 @@ class InstallRootCertificate {
         if (-not (Test-Path $_FileName)) {
             Write-Status "Install Root Cert"
 
+            # Discover the real issuing-CA -config string from the remote forest's
+            # AD (naming/IP/tier-agnostic), falling back to the configured guess.
+            $caConfig = $this.ResolveCAConfig()
+
             # Get the full certificate chain from the CA (works for both single-tier and two-tier PKI)
             $chainFile = "C:\Temp\ca_chain.p7b"
-            certutil.exe -config $this.CAName -ca.chain $chainFile
+            if (Test-Path $chainFile) { Remove-Item $chainFile -Force -ErrorAction SilentlyContinue }
+            certutil.exe -config $caConfig -ca.chain $chainFile
+            $certutilChainExit = $LASTEXITCODE
 
-            # Import the PKCS#7 chain and find root (self-signed) vs subordinate certs
-            $chainCerts = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
-            $chainCerts.Import($chainFile)
+            $rootCert = $null
+            $subCACert = $null
 
-            $rootCert = $chainCerts | Where-Object { $_.Subject -eq $_.Issuer } | Select-Object -First 1
-            $subCACert = $chainCerts | Where-Object { $_.Subject -ne $_.Issuer } | Select-Object -First 1
+            # certutil only writes $chainFile when it could actually reach/enroll
+            # against the issuing CA. If the CA is not online/answering yet (a
+            # cross-forest CA whose VM hasn't finished, a DNS/secure-channel gap,
+            # etc.), the file is never created and the old code crashed on
+            # $chainCerts.Import($chainFile) with "The system cannot find the file
+            # specified" -- an opaque failure a DC reboot can never fix, so the
+            # phase looped indefinitely. Only import when the chain file actually
+            # materialized; otherwise fall through to the lighter -ca.cert path.
+            if (Test-Path $chainFile) {
+                try {
+                    # Import the PKCS#7 chain and find root (self-signed) vs subordinate certs
+                    $chainCerts = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+                    $chainCerts.Import($chainFile)
+                    $rootCert = $chainCerts | Where-Object { $_.Subject -eq $_.Issuer } | Select-Object -First 1
+                    $subCACert = $chainCerts | Where-Object { $_.Subject -ne $_.Issuer } | Select-Object -First 1
+                }
+                catch {
+                    Write-Status "WARNING: Failed to import CA chain '$chainFile': $_"
+                }
+            }
+            else {
+                Write-Status "WARNING: certutil -ca.chain did not produce '$chainFile' (exit $certutilChainExit); CA '$caConfig' may be unreachable. Falling back to -ca.cert."
+            }
 
             if (-not $rootCert) {
-                Write-Status "WARNING: Could not find root CA in chain, falling back to -ca.cert"
-                certutil.exe -config $this.CAName -ca.cert $_FileName
+                Write-Status "Could not find root CA in chain, falling back to -ca.cert"
+                certutil.exe -config $caConfig -ca.cert $_FileName
             }
             else {
                 [System.IO.File]::WriteAllBytes($_FileName, $rootCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
                 Write-Status "Exported root CA '$($rootCert.Subject)' to $_FileName"
+            }
+
+            # If neither the chain import nor the -ca.cert fallback produced the
+            # root cert file, the issuing CA is genuinely unreachable right now.
+            # Throw a clear, actionable error so the LCM retries this resource on
+            # a real (recoverable) condition, instead of the downstream dspublish
+            # calls running against a missing file and the DC looping forever on
+            # the same opaque missing-file exception.
+            if (-not (Test-Path $_FileName)) {
+                throw "InstallRootCertificate: unable to obtain root CA certificate from CA '$caConfig' (certutil -ca.chain exit $certutilChainExit, -ca.cert fallback also produced no file). The issuing CA is not reachable yet; DSC will retry."
             }
 
             # Publish root CA cert as RootCA and NtauthCA

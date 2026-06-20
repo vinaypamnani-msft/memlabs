@@ -800,8 +800,10 @@
                 $waitOnDependency = "[AddToAdminGroup]AddCertPublisher"
 
                 InstallRootCertificate InstallRootCertificate {
-                    CAName    = $ThisVM.ThisParams.RootCA
-                    DependsOn = $waitOnDependency
+                    CAName         = $ThisVM.ThisParams.RootCA
+                    RemoteForestDC = $ThisVM.ThisParams.RootCADC
+                    IssuingCAHint  = $ThisVM.ThisParams.IssuingCAHint
+                    DependsOn      = $waitOnDependency
                 }
                 $waitOnDependency = "[InstallRootCertificate]InstallRootCertificate"
 
