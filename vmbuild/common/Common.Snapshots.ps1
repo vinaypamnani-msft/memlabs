@@ -204,7 +204,7 @@ function Invoke-SnapshotDomain {
     # disk I/O on whatever drive backs each VM. Parallelize via ThreadJob with
     # a modest throttle so we don't queue-storm the storage controller. Falls
     # back to sequential when ThreadJob isn't available.
-    $useThreadJob = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -ne $null
+    $useThreadJob = $null -ne (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)
 
     $snapshotWorker = {
         param($vmName, $snapshotName)

@@ -690,7 +690,7 @@ function Get-UpdatePack {
 
     Write-DscStatus "Get CM Update..." -NoStatus
     $updatepack = ""
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
     $CMPSSuppressFastNotUsedCheck = $true
 
     $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" } # filter hotfixes

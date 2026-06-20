@@ -783,7 +783,7 @@ function Select-MainMenu {
     }
 
     while ($true) {
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
         $global:GoBack = $false
         Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $true

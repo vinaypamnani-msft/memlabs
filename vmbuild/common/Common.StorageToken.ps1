@@ -218,8 +218,6 @@ function Get-StorageConfig {
     Write-Log "Get-StorageConfig: Found $($configFiles.Count) config file(s): $($configFiles.Name -join ', ')" -LogOnly
 
     # ---- Try each config file in descending order (newest first) ----
-    $config = $null
-    $configPath = $null
     $authSet = $false
 
     foreach ($file in ($configFiles | Sort-Object @{
@@ -283,8 +281,6 @@ function Get-StorageConfig {
         $testUrl = Get-StorageUrl -BaseUrl $candidateStorageLocation -FileName $script:fileListName
         $testResponse = Invoke-StorageRequest -Url $testUrl
         if ($null -ne $testResponse) {
-            $config = $candidate
-            $configPath = $file.FullName
             $authSet = $true
             Write-Log "Get-StorageConfig: Storage auth mode: SAS Token via $($file.Name)" -LogOnly
             break

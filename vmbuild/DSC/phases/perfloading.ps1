@@ -37,8 +37,6 @@ Write-DscStatus "$Tag Starting perfloading"
     # hierarchy cannot run hierarchy-level cmdlets (site features, default
     # client settings, custom client setting creation/deployment).
     $isTopLevel = ($CurrentRole -eq 'CAS') -or (-not $ThisVM.parentSiteCode)
-    $DCVM = ($deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" })
-    $DCName = $DCVM.vmName
     $CMInstallDir = $ThisVM.CMInstallDir
     # Read Site Code from registry
     #Write-DscStatus "$Tag Setting PS Drive for ConfigMgr" -NoStatus
@@ -245,7 +243,7 @@ Write-DscStatus "$Tag Starting perfloading"
         Write-DscStatus "$Tag DP group: $DPGroupName already exists"
     }
     else {
-        $DPGroup = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all Distribution Points" -ErrorAction SilentlyContinue
+        $null = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all Distribution Points" -ErrorAction SilentlyContinue
         Write-DscStatus "$Tag DP group: $DPGroupName created successfully"
     }
 
@@ -739,12 +737,10 @@ Write-DscStatus "$Tag Starting perfloading"
         $win10OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 10" | Select-Object -ExpandProperty PackageID
         $ClientPackagePackageId = Get-CMPackage -Fast -Name "Configuration Manager Client Package" | Select-Object -ExpandProperty PackageID
         $UserStateMigrationToolPackageId = Get-CMPackage -Fast -Name "User State Migration Tool for Windows" | Select-Object -ExpandProperty PackageID
-        $win11UpgradeOperatingSystempath = "\\$ThisMachineName\osd\Windows 11 24h2"  
         $win11UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 11 24h2\sources\install.wim"
         $win10UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 10 22h2\sources\install.wim"
         $clientProps = 'CCMDEBUGLOGGING="1" CCMLOGGINGENABLED="TRUE" CCMLOGLEVEL="0" CCMLOGMAXHISTORY="5" CCMLOGMAXSIZE="10000000" SMSCACHESIZE="15000"'
         $cm_svc_file = "C:\Staging\DSC\cm_svc.txt"
-        $domainshortname = $deployConfig.parameters.domainName -replace "\.com$", ""
 
         $tstimezone = [System.TimeZoneInfo]::FindSystemTimeZoneById($deployconfig.vmOptions.timeZone)
         if (Test-Path $cm_svc_file) {
@@ -2541,9 +2537,6 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         }
     }
     if ($Sups) {
-        # Define the collection where the updates will be deployed
-        $TargetCollection = Get-CMDeviceCollection -Name "All systems"
-    
         # Define ADR Names
         $ADRNames = @{
             "Client"   = "MEMLABS-ADR-Windows-10/11"

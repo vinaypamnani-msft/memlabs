@@ -421,6 +421,8 @@ function Invoke-LogRotateIfNeeded {
 
 function Flush-LogBuffer {
     [CmdletBinding(DefaultParameterSetName = 'Path')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '',
+        Justification = 'Established internal helper name; renaming would touch many call sites across the codebase.')]
     param(
         [Parameter(ParameterSetName = 'Path')]
         [string]$Path,
@@ -5631,6 +5633,8 @@ $global:ps_lastGoodCred = @{}
 # Returns @{ Session; TimedOut; ErrorMessage } so callers can
 # distinguish channel-broken (timeout / VMBus error) from auth errors.
 function New-PSSessionWithTimeout {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '',
+        Justification = 'The nested job scriptblock parameter $cred receives an existing [pscredential]; it is never a plaintext password.')]
     param(
         [string]$Name,
         [guid]$VMId,
@@ -6370,6 +6374,9 @@ function Install-Tools {
 }
 
 function Clean-StaleToolZips {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '',
+        Justification = 'Established internal helper name; renaming would touch its call sites across the codebase.')]
+    param()
     # Scan all per-VM toolhash cache files to find which tool zips are
     # actively referenced, then delete any tools-*.zip that isn't needed.
     # This prevents 200+ MB zips from accumulating across reruns when
@@ -7904,21 +7911,18 @@ if (-not $Common.Initialized) {
 
     $profileSkipStorageInit = $false
     $profileSkipMaintenanceRefresh = $false
-    $profileSkipVmCacheRefresh = $false
     $profileSkipEnvironmentDetection = $false
     $profileSkipHostPreparation = $false
 
     if ($StartupProfile -eq "Fast" -or $removeOnlyProfile) {
         $profileSkipStorageInit = $true
         $profileSkipMaintenanceRefresh = $true
-        $profileSkipVmCacheRefresh = $true
         $profileSkipEnvironmentDetection = $true
         $profileSkipHostPreparation = $true
     }
 
     $effectiveSkipStorageInit = $profileSkipStorageInit -or $SkipStorageInit.IsPresent
     $effectiveSkipMaintenanceRefresh = $profileSkipMaintenanceRefresh -or $SkipMaintenanceRefresh.IsPresent
-    $effectiveSkipVmCacheRefresh = $profileSkipVmCacheRefresh -or $SkipVmCacheRefresh.IsPresent
     $effectiveSkipEnvironmentDetection = $profileSkipEnvironmentDetection -or $SkipEnvironmentDetection.IsPresent
     $effectiveSkipHostPreparation = $profileSkipHostPreparation -or $SkipHostPreparation.IsPresent
 
@@ -7930,7 +7934,6 @@ if (-not $Common.Initialized) {
             $effectiveSkipMaintenanceRefresh = $true
         }
         $effectiveSkipHostPreparation = $true
-        $effectiveSkipVmCacheRefresh = $true
     }
 
     try {

@@ -357,9 +357,7 @@ function Select-RolesForExisting {
     }
 
     $existingRoles2 = @()
-    $CurrentValue = $null
     if ($enhance) {
-        $CurrentValue = "DomainMember"
         foreach ($item in $existingRoles) {
 
             switch ($item) {

@@ -341,7 +341,6 @@ $global:VM_Create = {
         # This keeps dynamic memory enabled (so Restore-DynamicMemory can adjust without stopping VMs)
         # but prevents balloon-down during heavy parallel workloads.
         if ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($currentItem.memory / 1))) {
-            $dynamicMinRamDeferred = $dynamicMinRam
             $raw99 = [long][math]::Floor(($currentItem.memory / 1) * 0.99)
             $dynamicMinRam = [string]($raw99 - ($raw99 % 2MB))
         }
@@ -870,56 +869,6 @@ $global:VM_Create = {
         # This gets set to true later, if a required fix failed to get applied. When version isn't updated, VM Maintenance could attempt fix again.
         $skipVersionUpdate = $false
 
-        $Fix_DefaultProfile = {
-            $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
-            $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
-            $path3 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat"
-            if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse | Out-Null }
-            if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse | Out-Null }
-            if (Test-Path $path3) { Remove-Item -Path $path3 -Force | Out-Null }
-        }
-
-        $Fix_LocalAccount = {
-            Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
-        }
-
-        $Fix_WorkGroupMachines = {
-            New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "LocalAccountTokenFilterPolicy" -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
-        }
-        # Add TLS keys, without these upgradeToLatest can fail when accessing the new endpoints that require TLS 1.2
-        $Set_TLS12Keys = {
-            param([String]$domainName)
-
-            $netRegKey = "HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319"
-            if (Test-Path $netRegKey) {
-                New-ItemProperty -Path $netRegKey -Name "SystemDefaultTlsVersions" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-                New-ItemProperty -Path $netRegKey -Name "SchUseStrongCrypto" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-                New-ItemProperty -Path $netRegKey -Name "MemLabsComment" -Value "SystemDefaultTlsVersions and SchUseStrongCrypto set by MemLabs" -PropertyType STRING -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-
-            $netRegKey32 = "HKLM:\SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v4.0.30319"
-            if (Test-Path $netRegKey32) {
-                New-ItemProperty -Path $netRegKey32 -Name "SystemDefaultTlsVersions" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-                New-ItemProperty -Path $netRegKey32 -Name "SchUseStrongCrypto" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
-                New-ItemProperty -Path $netRegKey32 -Name "MemLabsComment" -Value "SystemDefaultTlsVersions and SchUseStrongCrypto set by MemLabs" -PropertyType STRING -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-
-            # Set the domain to be included in intranet sites for IE/Edge for kerberos to work
-            try {
-                if ($domainName -and ($domainName -ne "WORKGROUP")) {
-                    New-Item -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains" -Force
-                    New-Item -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains\$domainName" -Force
-                    Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains" -Name "@" -Value "" -Force
-                    New-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains\$domainName" -Name "*" -Value 1 -PropertyType DWORD -Force
-                }
-                New-Item -Path "HKLM:\Software\Policies\Microsoft\Edge" -Force
-                New-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Edge" -Name "HideFirstRunExperience" -Value 1 -PropertyType DWORD -Force
-                New-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Edge" -Name "AutoImportAtFirstRun " -Value 4 -PropertyType DWORD -Force
-            }
-            catch {}
-
-        }
-
         # Combined scriptblock that runs Fix_DefaultProfile + Fix_LocalAccount +
         # Set-TimeZone + TLS 1.2 keys + WorkgroupMember fix in one PSDirect call.
         $Fix_NewVmSettings = {
@@ -969,12 +918,10 @@ $global:VM_Create = {
             # immediately even though PSDirect can already authenticate.
             # Retry a few times with a short delay.
             try {
-                $acctSet = $false
                 for ($acctTry = 1; $acctTry -le 5; $acctTry++) {
                     try {
                         $localUser = Get-LocalUser -Name "vmbuildadmin" -ErrorAction Stop
                         Set-LocalUser -Name $localUser.Name -PasswordNeverExpires $true -ErrorAction Stop
-                        $acctSet = $true
                         break
                     }
                     catch {
@@ -2237,9 +2184,9 @@ $global:VM_Config = {
                                     # Restart DHCP service to clear any stale state
                                     Stop-Service "DHCPServer" -ErrorAction SilentlyContinue | Out-Null
                                     Start-Sleep -Seconds 3
-                                    $dhcp = Start-DHCP
+                                    $null = Start-DHCP
                                     Start-Sleep -Seconds 10
-                                    $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
+                                    $null = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
                                 }
                                 catch {
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to repair network $($currentNetwork). $($_.Exception.Message)" -Warning -OutputStream
@@ -2250,8 +2197,8 @@ $global:VM_Config = {
                                 try {
                                     stop-service "DHCPServer" | Out-Null
                                     start-sleep -seconds 5
-                                    $dhcp = Start-DHCP
-                                    $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
+                                    $null = Start-DHCP
+                                    $null = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
                                 }
                                 catch {                                   
                                 }
@@ -2850,13 +2797,11 @@ $global:VM_Config = {
                 # delete the old module files. On existing VMs that already ran
                 # DSC, WmiPrvSE holds a lock on the .psm1 and Remove-Item with
                 # SilentlyContinue silently fails, leaving stale module code.
-                $wmiprvseKilled = $false
                 $dscHosts = Get-Process wmiprvse* -ErrorAction SilentlyContinue | Where-Object { $_.modules.ModuleName -like "*DSC*" }
                 if ($dscHosts) {
                     "Killing $($dscHosts.Count) WmiPrvSE process(es) holding DSC modules before module install." | Out-File $log -Append
                     $dscHosts | Stop-Process -Force -ErrorAction SilentlyContinue
                     Start-Sleep -Seconds 5
-                    $wmiprvseKilled = $true
                 }
 
                 foreach ($folder in $modules) {

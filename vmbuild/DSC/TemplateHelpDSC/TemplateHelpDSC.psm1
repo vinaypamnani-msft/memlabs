@@ -55,7 +55,7 @@ function Invoke-DownloadFile {
                     Write-Verbose $_
                     $ErrorMessage = $_.Exception.Message
                     # Force reboot
-                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                     #$global:DSCMachineStatus = 1
                     write-status "Failed to Download $url with error: $ErrorMessage"
                     throw "Failed to Download $url with error: $ErrorMessage"
@@ -663,7 +663,7 @@ class InstallSSMS {
                 Write-Status "SSMS Installed Successfully!"
 
                 # Reboot
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
             }
             catch {
@@ -751,7 +751,7 @@ class InstallDotNet4 {
             Write-Status ".NET $($this.FileName) Installed Successfully!"
 
             # Reboot
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
         }
         catch {
@@ -1128,7 +1128,6 @@ class InstallVCRedist {
             # bundle writes) to contain a "Shutting down, exit code"
             # line. Poll up to 120s; that covers slow disks and AV
             # scanning the cached MSIs.
-            $bundleKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
             $childLogPattern = if ($_path -like "*x64*") {
                 "c:\temp\vc_redistx64_*_vcRuntime*_x64.log"
             } else {
@@ -1328,7 +1327,7 @@ class InstallConsole {
         Write-Status "Installing SCCM Console..."
         & C:\staging\DSC\phases\Install-Console.ps1 -SiteServer $_SiteServer -CMInstallDir $_CMInstallDir
         Write-Status "Finished installing SCCM Console... Rebooting"  
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1      
     }
 
@@ -1645,7 +1644,6 @@ class WaitForExtendSchemaFile {
             }
 
             # Verify Schema Admin membership (extadsch.exe requires it)
-            $isSchemaAdmin = $false
             try {
                 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
                 $schemaAdminsSID = (Get-ADGroup "Schema Admins" -ErrorAction Stop).SID
@@ -1654,7 +1652,6 @@ class WaitForExtendSchemaFile {
                 }
                 else {
                     Write-Status "Schema Admin membership confirmed for '$($currentUser.Name)'"
-                    $isSchemaAdmin = $true
                 }
             }
             catch {
@@ -1934,7 +1931,7 @@ class DelegateControl {
                     Write-Status "dsacls.exe failed to add permissions 5 time.. Attempting reboot."
                     Write-Verbose "Rebooting"
                     New-Item $_FileName
-                    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                     $global:DSCMachineStatus = 1
                     return
                 }
@@ -1990,7 +1987,7 @@ class DelegateControl {
                         $serverArg1 = "\\$($dc.HostName)\$arg1"
                         Write-Status "Trying dsacls via $($dc.Name)... (Try $retries/$maxretries)"
                         Write-Verbose "Running $cmd $serverArg1 $arg2 $arg3 $arg4"
-                        $dcResult = & $cmd $serverArg1 $arg2 $arg3 $arg4 *>&1
+                        $null = & $cmd $serverArg1 $arg2 $arg3 $arg4 *>&1
                         $dcExitCode = $LASTEXITCODE
                         Write-Verbose "dsacls via $($dc.Name) exit code: $dcExitCode"
                         if ($dcExitCode -eq 0) {
@@ -2815,7 +2812,6 @@ class RegisterTaskScheduler {
         $_ScriptName = $this.ScriptName
         $_ScriptPath = $this.ScriptPath
         $_ScriptArgument = $this.ScriptArgument
-        $_AdminCreds = $this.AdminCreds
 
 
 
@@ -2948,8 +2944,6 @@ class RegisterTaskScheduler {
 
         # Seconds to wait to start task
         $waitTime = 15
-        $TaskStartTime = [datetime]::Now.AddSeconds($waitTime)
-        $RegisterTime = [datetime]::Now
         #$Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
         #Write-Verbose "Time is now: $RegisterTime Task Scheduled to run at $TaskStartTime"
 
@@ -3110,7 +3104,7 @@ class AddUserToLocalAdminGroup {
             Write-Status "AddUserToLocalAdminGroup: Failed to add $_DomainName\$_Name to administrators group $_"
             if ($(Test-ComputerSecureChannel) -eq $False) { 
                 Write-Status "AddUserToLocalAdminGroup: Secure Channel is broken. Attempting to reboot to fix it."
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
             }
         }
@@ -3161,7 +3155,7 @@ class JoinDomain {
         try {
             Write-Status "Joining computer to Domain $_DomainName"
             Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Stop
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
         }
         catch {
@@ -3202,7 +3196,7 @@ class JoinDomain {
             }
             $global:DSCMachineStatus = 1
         }
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
     }
 
@@ -3389,7 +3383,7 @@ class TestDomainJoin {
 
         if (-not $dcReachable) {
             Write-Status "DC '$_DCName' is not reachable after 6 attempts. Secure channel cannot be verified or repaired. Requesting reboot to reset network stack."
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
             return
         }
@@ -3442,7 +3436,7 @@ class TestDomainJoin {
             Write-Status "Remove-Computer failed: $msg"
             throw
         }
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
     }
 
@@ -3727,7 +3721,7 @@ class OpenFirewallPortForSCCM {
                 New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
 
                 # Force reboot, RDP doesn't seem to work until reboot
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
             }
         }
@@ -3888,7 +3882,7 @@ class InstallFeatureForSCCM {
             Write-Status "Installing $($featureList.Count) Windows Features: $($featureList -join ', ')"
             $result = Install-WindowsFeature -Name $featureList -IncludeManagementTools
             if ($result.RestartNeeded -eq "Yes") {
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
             }
         }
@@ -3958,7 +3952,7 @@ class SetCustomPagingFile {
             Set-CimInstance $currentpagingfile -Property @{InitialSize = $_InitialSize ; MaximumSize = $_MaximumSize }
         }
         Write-Status "Page file configured. $_Drive\pagefile.sys Size: $_MaximumSize MB. Rebooting."
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
     }
 
@@ -4513,7 +4507,6 @@ class WaitForClusterAccess {
             }
         }
 
-        $dcShortNames = $allDCs | ForEach-Object { ($_ -split '\.')[0] }
         if ($dcsWithRecord.Count -eq $allDCs.Count) {
             $summary = "DNS OK on all $($allDCs.Count) DC(s) -> $knownIP"
         }
@@ -5395,7 +5388,7 @@ class ConfigureWSUS {
         }
         
         try {
-            $wsus = get-WsusServer
+            $null = get-WsusServer
         }
         catch {
             Write-Status "Failed to Configure WSUS. Could not locate WSUS Server after postinstall"
@@ -6167,7 +6160,7 @@ class RebootNow {
             Write-Status "Rebooting machine."
             Start-sleep -seconds 4
             New-Item $_FileName
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
             return
         }
@@ -6396,7 +6389,7 @@ class AddCertificateTemplate {
                         if (-not (Test-Path "C:\temp\certreboot2.txt")) {
                             Write-Status "Rebooting $_"
                             New-Item "C:\temp\certreboot2.txt"
-                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                             $global:DSCMachineStatus = 1
                             return
                         }
@@ -6440,7 +6433,7 @@ class AddCertificateTemplate {
                         if (-not (Test-Path "C:\temp\certreboot.txt")) {
                             Write-Status "Rebooting $_"
                             New-Item "C:\temp\certreboot.txt"
-                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                             $global:DSCMachineStatus = 1
                             return
                         }

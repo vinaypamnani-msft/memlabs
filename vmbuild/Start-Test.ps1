@@ -90,6 +90,8 @@ param (
 
 
 function Run-Test {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '',
+        Justification = 'Local test-runner helper; not an exported cmdlet.')]
     param(
         [string]$Test
     )

@@ -418,6 +418,8 @@ function Start-Phase {
 }
 
 function Start-NormalJobs {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '',
+        Justification = 'deployConfigCopy/devBranchValue/azureFileList/localAdmin are consumed via $using: inside Start-Job/Start-ThreadJob scriptblocks, which PSScriptAnalyzer cannot trace.')]
     param (
         [object]$machines,
         [object]$scriptBlock,
@@ -522,6 +524,8 @@ function Start-NormalJobs {
 
 
 function Start-PhaseJobs {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '',
+        Justification = 'devBranchValue and phaseRunGuid are consumed via $using: inside Start-Job/Start-ThreadJob scriptblocks, which PSScriptAnalyzer cannot trace.')]
     param (
         [int]$Phase,
         [object]$deployConfig
@@ -563,7 +567,7 @@ function Start-PhaseJobs {
     # Other phases (VM_Create, VM_Config) stay on Start-Job for now --
     # their per-VM payload is larger so the relative win is smaller, and
     # they touch $global:DSC_Copied which would need review for ThreadJob.
-    $usePhaseThreadJob = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -ne $null
+    $usePhaseThreadJob = $null -ne (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)
     $phaseThreadJobThrottle = 16
 
     # Determine single vs. multi-DSC
@@ -1223,7 +1227,6 @@ function Start-PhaseJobs {
             }
         }
         else {
-            $reservation = $null
             #Phase 5 is for SQL Always on.. So if we are in this phase, it is a SQLAO node
             $alreadyCopiedDSC = $false
             if (-not $global:DSC_Copied) {
@@ -1707,12 +1710,10 @@ function Get-ConfigurationData {
                     $_.NodeName -ne "*" -and ($_.Role -eq 'CAS' -or $_.Role -eq 'Primary')
                 }
                 $needsSnapshot = $false
-                $pendingSiteServer = $null
                 foreach ($node in $phase8SiteServers) {
                     $vmNote = Get-VMNote -VMName $node.NodeName
                     if (-not $vmNote -or -not $vmNote.lastPhaseComplete -or $vmNote.lastPhaseComplete -lt 8) {
                         $needsSnapshot = $true
-                        $pendingSiteServer = $node.NodeName
                         break
                     }
                 }
