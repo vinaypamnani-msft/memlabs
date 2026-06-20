@@ -6460,6 +6460,26 @@ function Test-CMSiteWideFunctionality {
         ($_.installSUP -or $_.InstallSUP) -and $_.siteCode -eq $siteCode
     } | Select-Object -First 1)
 
+    # Expected boundary groups + their subnet boundaries, mirroring
+    # InstallBoundaryGroups.ps1: one boundary group named by site code, each
+    # containing an IPRange boundary for that site's subnet (.1-.254 over /24).
+    # Encoded as "SiteCode~Subnet~First-Last" pairs joined by '|' for the
+    # remote scriptblock to verify existence AND membership.
+    $expectedBoundaryPairs = @()
+    try {
+        foreach ($sn in @($CurrentItem.thisParams.sitesAndNetworks)) {
+            if (-not $sn -or -not $sn.SiteCode -or -not $sn.Subnet) { continue }
+            $octets = "$($sn.Subnet)" -split '\.'
+            if ($octets.Count -ne 4) { continue }
+            $range = "$($octets[0]).$($octets[1]).$($octets[2]).1-$($octets[0]).$($octets[1]).$($octets[2]).254"
+            $expectedBoundaryPairs += "$($sn.SiteCode)~$($sn.Subnet)~$range"
+        }
+    }
+    catch {
+        Write-Log "[Phase $Phase] $VMName [$role ($siteCode)]: Could not enumerate sitesAndNetworks for boundary check: $($_.Exception.Message)" -Warning -LogOnly
+    }
+    $expectedBoundaryCsv = ($expectedBoundaryPairs -join '|')
+
     $siteRoleLabel = "$role ($siteCode)"
     Write-Log "[Phase $Phase] $VMName [$siteRoleLabel]: Testing site-wide settings (BoundaryGroups, Discovery, Apps, CommsMode)" -LogOnly
 
@@ -6468,13 +6488,14 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner)
+        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv)
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
         $isPrimary = ($vmRole -eq 'Primary')
         $hasSup = ($hasSUPInner -eq 'True')
         $expectedApps = if ([string]::IsNullOrEmpty($expectedAppsCsv)) { @() } else { @($expectedAppsCsv -split '\|') }
+        $expectedBoundaries = if ([string]::IsNullOrEmpty($expectedBgCsv)) { @() } else { @($expectedBgCsv -split '\|') }
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         $ns = "root\SMS\site_$sc"
@@ -6485,7 +6506,11 @@ function Test-CMSiteWideFunctionality {
         # false failures.
         if ($topLevel) {
 
-        # 1. Boundary groups -- at least the default "Default-Site-Boundary-Group" should exist
+        # 1. Boundary groups -- verify they EXIST and that each expected
+        # per-site group (named by site code, created by InstallBoundaryGroups.ps1)
+        # actually CONTAINS its subnet boundary as a member. A group that exists
+        # but is empty (no boundary member) silently breaks client site
+        # assignment, so existence alone is not enough.
         $results.Details.Add("CMD: Get-WmiObject -Namespace '$ns' -Class SMS_BoundaryGroup")
         try {
             $bgs = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop)
@@ -6495,6 +6520,63 @@ function Test-CMSiteWideFunctionality {
             else {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: No boundary groups defined for site '$sc'")
+            }
+
+            # Per-expected-site verification: group named <sitecode> exists AND
+            # its subnet boundary is a member. Membership issues WARN (not FAIL)
+            # to avoid false negatives from DRS timing / Forest-Discovery boundary
+            # naming, while still surfacing a genuinely empty/mis-membered group.
+            foreach ($pair in $expectedBoundaries) {
+                $parts = $pair -split '~'
+                if ($parts.Count -lt 3) { continue }
+                $bgName = $parts[0]; $subnet = $parts[1]; $range = $parts[2]
+
+                $grp = $bgs | Where-Object { $_.Name -eq $bgName } | Select-Object -First 1
+                if (-not $grp) {
+                    $results.Details.Add("WARN: Expected boundary group '$bgName' (site $bgName) not found")
+                    continue
+                }
+
+                # Locate the subnet's boundary -- exact IPRange (.1-.254) first,
+                # then any boundary whose Value references the /24 prefix.
+                $bnd = $null
+                try {
+                    $bnd = @(Get-WmiObject -Namespace $ns -Class SMS_Boundary -Filter "Value='$range'" -ErrorAction Stop) | Select-Object -First 1
+                } catch {}
+                if (-not $bnd) {
+                    $prefix = $subnet -replace '\.\d+$', '.'
+                    try {
+                        $bnd = @(Get-WmiObject -Namespace $ns -Class SMS_Boundary -ErrorAction Stop |
+                            Where-Object { "$($_.Value)" -like "$prefix*" }) | Select-Object -First 1
+                    } catch {}
+                }
+                if (-not $bnd) {
+                    $results.Details.Add("WARN: Boundary group '$bgName' exists but no boundary found for subnet $subnet ($range)")
+                    continue
+                }
+
+                # Confirm the boundary is a member of THIS group via the
+                # association class; fall back to the boundary's GroupCount when
+                # SMS_BoundaryGroupMembers is unavailable.
+                $isMember = $false
+                $viaAssoc = $false
+                try {
+                    $members = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupMembers -Filter "GroupID=$($grp.GroupID)" -ErrorAction Stop)
+                    $viaAssoc = $true
+                    $isMember = @($members | Where-Object { $_.BoundaryID -eq $bnd.BoundaryID }).Count -gt 0
+                }
+                catch {
+                    $isMember = ([int]$bnd.GroupCount -gt 0)
+                }
+                if ($isMember -and $viaAssoc) {
+                    $results.Details.Add("OK: Boundary group '$bgName' contains subnet boundary $subnet ($range)")
+                }
+                elseif ($isMember) {
+                    $results.Details.Add("OK: Boundary group '$bgName' present; subnet boundary $subnet is grouped (membership inferred from GroupCount)")
+                }
+                else {
+                    $results.Details.Add("WARN: Subnet boundary $subnet ($range) is NOT a member of boundary group '$bgName' (clients on $subnet may not resolve this site's MP/DP content)")
+                }
             }
         }
         catch {
@@ -7062,7 +7144,7 @@ function Test-CMSiteWideFunctionality {
 
     $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP) `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
