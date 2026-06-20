@@ -114,9 +114,10 @@ $sqlSnapBlock = {
     catch { $out.Add("Could not resolve CM database: $($_.Exception.Message)") }
     if (-not $db) { return $out }
     $out.Add("CM database: $db")
-    Q $db "SELECT SiteCode, SiteStatus, SiteServerName FROM ServerData ORDER BY SiteCode" "ServerData (SiteStatus per site)"
+    Q $db "SELECT SiteCode, SiteStatus FROM ServerData ORDER BY SiteCode" "ServerData (SiteStatus per site)"
     Q $db "SELECT ReplicationGroup, ReplicationPattern FROM ReplicationData ORDER BY ReplicationPattern, ReplicationGroup" "ReplicationData (groups)"
-    Q $db "SELECT TOP 50 ReplicationGroup, LastSendStartTime, LastSendEndTime FROM DRS_MessageActivity_Send ORDER BY LastSendStartTime DESC" "DRS_MessageActivity_Send (recent sends)"
+    Q $db "SELECT TOP 60 rd.ReplicationGroup, rd.ReplicationPattern, s.SiteCode, s.Active, s.LastSendResult, s.LastVersionSent, s.LastSendStartTime, s.LastSendEndTime FROM DRS_MessageActivity_Send s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID ORDER BY s.LastSendStartTime DESC" "DRS_MessageActivity_Send (per-group send status; LastSendResult<0 = error)"
+    Q $db "SELECT rd.ReplicationGroup, rd.ReplicationPattern, s.SiteCode, s.Active, s.LastSendResult FROM DRS_MessageActivity_Send s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID WHERE s.LastSendResult < 0 ORDER BY rd.ReplicationGroup" "Send groups with an ERROR result (LastSendResult<0)"
     return $out
 }
 
