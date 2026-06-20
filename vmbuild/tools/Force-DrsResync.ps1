@@ -168,6 +168,14 @@ function ConvertTo-DateOrNull {
     if ([datetime]::TryParse([string]$v, [ref]$d)) { return $d }
     return $null
 }
+function DumpServerRows {
+    param($Label, $Rows)
+    foreach ($row in $Rows) {
+        $sc = if ($row.PSObject.Properties.Name -contains 'SiteCode') { "$($row.SiteCode)".Trim() } else { '?' }
+        $ss = if ($row.PSObject.Properties.Name -contains 'SiteStatus') { StatusText $row.SiteStatus } else { '?' }
+        Say ("   $Label ServerData row: SiteCode=$sc  SiteStatus=$ss") 'DarkGray'
+    }
+}
 function TailRcm {
     param($Session, $Lines = 40)
     return Invoke-Command -Session $Session -ScriptBlock {
@@ -242,6 +250,8 @@ $priLocal = StatusFromRows -Rows $priServer.Rows -SiteCode $pri.siteCode
 $casCopy = StatusFromRows -Rows $casServer.Rows -SiteCode $pri.siteCode
 Say ("Primary's own status (on $($priSqlVm.vmName), $priDb): {0}   [ServerData rows: {1}]" -f (StatusText $priLocal), $priServer.Rows.Count)
 Say ("CAS's copy of $($pri.siteCode) status (on $($casSqlVm.vmName), $casDb): {0}   [ServerData rows: {1}]" -f (StatusText $casCopy), $casServer.Rows.Count)
+DumpServerRows 'PRI' $priServer.Rows
+DumpServerRows 'CAS' $casServer.Rows
 
 $gRows = @(GuestSql -Session $priSql -Db $priDb -Query "SELECT ReplicationGroup FROM ReplicationData WHERE ReplicationPattern='global' ORDER BY ReplicationGroup")
 $gErr = Get-SqlError -Rows $gRows
