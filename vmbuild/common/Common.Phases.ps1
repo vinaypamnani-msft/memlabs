@@ -1653,6 +1653,35 @@ function Wait-Phase {
 
         } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
 
+        # ── PSDirect leak diagnostic (LogOnly) ────────────────────────────
+        # Phase boundary: every worker job for this phase has finished. Count
+        # the PSRemoting jobs + PSSessions still alive in THIS (parent/host)
+        # process to learn whether abandoned timed-out Invoke-VmCommand jobs and
+        # their leaked sessions actually escape the worker that created them.
+        #   - ThreadJob workers run in child runspaces with their OWN job
+        #     repositories, and Start-Job workers run in child PROCESSES, so the
+        #     leaked Invoke-Command -AsJob jobs likely DON'T appear here -- a
+        #     count of ~0 phase-over-phase means the leak is reaped at worker
+        #     teardown and no cross-phase reaper is needed (the -LeakSession
+        #     crash fix in Invoke-VmCommand is sufficient).
+        #   - If the PSRemotingJob / PSSession counts CLIMB across phases, the
+        #     leak is escaping to the parent and a reaper (hung off the next
+        #     phase's Wait-ForVm, per the design discussion) is warranted.
+        # PSJobTypeName disambiguates: 'RemoteJob' = the leaked PSDirect jobs;
+        # 'BackgroundJob'/'ThreadJob' = the phase workers themselves.
+        try {
+            $allJobs = @(Get-Job -ErrorAction SilentlyContinue)
+            $remoteJobs = @($allJobs | Where-Object { $_ -is [System.Management.Automation.PSRemotingJob] })
+            $byState = (@($remoteJobs | Group-Object State | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
+            $byType = (@($allJobs | Group-Object PSJobTypeName | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
+            $sessions = @(Get-PSSession -ErrorAction SilentlyContinue)
+            $sessByAvail = (@($sessions | Group-Object Availability | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
+            $cacheCount = if ($global:ps_cache) { $global:ps_cache.Count } else { 0 }
+            $threadJobMode = [bool](Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)
+            Write-Log "[Phase $Phase] PSDirect leak diag (pid $PID, ThreadJobMode=$threadJobMode): PSRemotingJobs=$($remoteJobs.Count) [$byState]; AllJobsByType [$byType]; PSSessions=$($sessions.Count) [$sessByAvail]; ps_cache=$cacheCount" -LogOnly
+        }
+        catch { Write-Log "[Phase $Phase] PSDirect leak diag failed: $_" -LogOnly -Verbose }
+
         $return.Elapsed = $(get-date) - $StartTime
         return $return
     }
