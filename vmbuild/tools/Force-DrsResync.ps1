@@ -266,7 +266,7 @@ if ($gErr) { Say ("SQL ERROR reading ReplicationData on $($priSqlVm.vmName) ($pr
 $globalGroups = @()
 foreach ($g in $gRows) { if ($g.PSObject.Properties.Name -contains 'ReplicationGroup') { $globalGroups += "$($g.ReplicationGroup)" } }
 Say ("Primary global replication groups: {0}" -f $globalGroups.Count)
-$inflight = @(GuestSql -Session $priSql -Db $priDb -Query "SELECT ReplicationGroup, LastSendStartTime, LastSendEndTime FROM DRS_MessageActivity_Send WHERE LastSendStartTime IS NOT NULL AND (LastSendEndTime IS NULL OR LastSendStartTime > LastSendEndTime)")
+$inflight = @(GuestSql -Session $priSql -Db $priDb -Query "SELECT rd.ReplicationGroup, s.LastSendStartTime, s.LastSendEndTime, s.Active FROM DRS_MessageActivity_Send s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID WHERE s.LastSendStartTime IS NOT NULL AND (s.LastSendEndTime IS NULL OR s.LastSendStartTime > s.LastSendEndTime)")
 $ifErr = Get-SqlError -Rows $inflight
 if ($ifErr) { Say ("SQL ERROR reading DRS_MessageActivity_Send on $($priSqlVm.vmName) ($priDb): {0}" -f $ifErr) 'Red' }
 # Only count a row as genuinely in-flight when the start time is a real date and the end is either
