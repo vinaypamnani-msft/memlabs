@@ -141,6 +141,33 @@ function StatusForSite {
     }
     return $null
 }
+function Get-SqlError {
+    param($Rows)
+    foreach ($row in $Rows) { if ($row.PSObject.Properties.Name -contains '__error') { return $row.__error } }
+    return $null
+}
+function Read-ServerData {
+    param($Session, $Db)
+    $rows = @(GuestSql -Session $Session -Db $Db -Query "SELECT SiteCode, SiteStatus FROM ServerData")
+    $err = Get-SqlError -Rows $rows
+    $real = @($rows | Where-Object { $_.PSObject.Properties.Name -notcontains '__error' })
+    return [pscustomobject]@{ Rows = $real; Error = $err }
+}
+function StatusFromRows {
+    param($Rows, $SiteCode)
+    foreach ($row in $Rows) {
+        if (($row.PSObject.Properties.Name -contains 'SiteCode') -and ("$($row.SiteCode)".Trim() -eq $SiteCode)) { return [int]$row.SiteStatus }
+    }
+    return $null
+}
+function ConvertTo-DateOrNull {
+    param($v)
+    if ($null -eq $v) { return $null }
+    if ($v -is [datetime]) { return $v }
+    $d = [datetime]::MinValue
+    if ([datetime]::TryParse([string]$v, [ref]$d)) { return $d }
+    return $null
+}
 function TailRcm {
     param($Session, $Lines = 40)
     return Invoke-Command -Session $Session -ScriptBlock {
@@ -207,17 +234,31 @@ Say ""
 
 # ---- before-state ----
 Say "---- BEFORE: ServerData.SiteStatus ----" 'Cyan'
-$priLocal = StatusForSite -Session $priSql -Db $priDb -SiteCode $pri.siteCode
-$casCopy = StatusForSite -Session $casSql -Db $casDb -SiteCode $pri.siteCode
-Say ("Primary's own status (on $($priSqlVm.vmName), $priDb): {0}" -f (StatusText $priLocal))
-Say ("CAS's copy of $($pri.siteCode) status (on $($casSqlVm.vmName), $casDb): {0}" -f (StatusText $casCopy))
+$priServer = Read-ServerData -Session $priSql -Db $priDb
+$casServer = Read-ServerData -Session $casSql -Db $casDb
+if ($priServer.Error) { Say ("SQL ERROR reading ServerData on $($priSqlVm.vmName) ($priDb): {0}" -f $priServer.Error) 'Red' }
+if ($casServer.Error) { Say ("SQL ERROR reading ServerData on $($casSqlVm.vmName) ($casDb): {0}" -f $casServer.Error) 'Red' }
+$priLocal = StatusFromRows -Rows $priServer.Rows -SiteCode $pri.siteCode
+$casCopy = StatusFromRows -Rows $casServer.Rows -SiteCode $pri.siteCode
+Say ("Primary's own status (on $($priSqlVm.vmName), $priDb): {0}   [ServerData rows: {1}]" -f (StatusText $priLocal), $priServer.Rows.Count)
+Say ("CAS's copy of $($pri.siteCode) status (on $($casSqlVm.vmName), $casDb): {0}   [ServerData rows: {1}]" -f (StatusText $casCopy), $casServer.Rows.Count)
 
 $gRows = @(GuestSql -Session $priSql -Db $priDb -Query "SELECT ReplicationGroup FROM ReplicationData WHERE ReplicationPattern='global' ORDER BY ReplicationGroup")
+$gErr = Get-SqlError -Rows $gRows
+if ($gErr) { Say ("SQL ERROR reading ReplicationData on $($priSqlVm.vmName) ($priDb): {0}" -f $gErr) 'Red' }
 $globalGroups = @()
 foreach ($g in $gRows) { if ($g.PSObject.Properties.Name -contains 'ReplicationGroup') { $globalGroups += "$($g.ReplicationGroup)" } }
 Say ("Primary global replication groups: {0}" -f $globalGroups.Count)
-$inflight = @(GuestSql -Session $priSql -Db $priDb -Query "SELECT ReplicationGroup, LastSendStartTime, LastSendEndTime FROM DRS_MessageActivity_Send WHERE LastSendStartTime > LastSendEndTime")
-$inflightReal = @($inflight | Where-Object { $_.PSObject.Properties.Name -notcontains '__error' })
+$inflight = @(GuestSql -Session $priSql -Db $priDb -Query "SELECT ReplicationGroup, LastSendStartTime, LastSendEndTime FROM DRS_MessageActivity_Send WHERE LastSendStartTime IS NOT NULL AND (LastSendEndTime IS NULL OR LastSendStartTime > LastSendEndTime)")
+$ifErr = Get-SqlError -Rows $inflight
+if ($ifErr) { Say ("SQL ERROR reading DRS_MessageActivity_Send on $($priSqlVm.vmName) ($priDb): {0}" -f $ifErr) 'Red' }
+# Only count a row as genuinely in-flight when the start time is a real date and the end is either
+# unset or earlier than the start. A row with empty/NULL timestamps is NOT a live send (was a false defer).
+$inflightReal = @($inflight | Where-Object { $_.PSObject.Properties.Name -notcontains '__error' } | ForEach-Object {
+        $s = ConvertTo-DateOrNull $_.LastSendStartTime
+        $e = ConvertTo-DateOrNull $_.LastSendEndTime
+        if (($null -ne $s) -and (($null -eq $e) -or ($s -gt $e))) { $_ }
+    })
 Say ("Primary sends currently in-flight: {0}" -f $inflightReal.Count)
 foreach ($x in $inflightReal) { Say ("   in-flight: {0}  start={1} end={2}" -f $x.ReplicationGroup, $x.LastSendStartTime, $x.LastSendEndTime) }
 Say ""
@@ -226,7 +267,9 @@ Say ""
 Say "---- DETECTION ----" 'Cyan'
 $wedged = $false
 $reason = ''
-if ($null -eq $priLocal) { $reason = "Could not read the primary's own SiteStatus; cannot safely decide." }
+if ($priServer.Error) { $reason = "Could not read the primary's ServerData (SQL error above) on $($priSqlVm.vmName) - cannot safely decide. Fix SQL access / DB state and re-run." }
+elseif ($priServer.Rows.Count -eq 0 -and $globalGroups.Count -eq 0) { $reason = "DRS is not initialized on the primary yet: ServerData has 0 rows and there are no global replication groups. This primary is still early in its deploy (hasn't joined the CAS / configured replication). Too early to resync - re-run once the link is forming." }
+elseif ($null -eq $priLocal) { $reason = "Primary ServerData has $($priServer.Rows.Count) row(s) but none for site $($pri.siteCode); cannot read its own status yet. Re-run shortly." }
 elseif ($priLocal -lt 125) { $reason = "Primary is $($statusName[$priLocal]) (not yet ReplicationActive=125): still applying its global snapshot. Not wedged - a real sync is in progress." }
 elseif ($null -ne $casCopy -and $casCopy -ge 125) { $reason = "CAS already sees the primary as ReplicationActive (status $casCopy). The link has recovered. Nothing to do." }
 else { $wedged = $true; $reason = "Primary is ReplicationActive (125) but the CAS's copy is $(StatusText $casCopy) (< 125). This is the stale-status wedge." }
