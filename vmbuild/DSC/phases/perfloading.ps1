@@ -653,13 +653,38 @@ Write-DscStatus "$Tag Starting perfloading"
             Write-DscStatus "$Tag WARNING: Failed to enable command support for boot image: $biName ($packageId). Error: $_"
         }
 
-        # Distribute the boot image
+        # Distribute the boot image. On a re-run the content is already on the
+        # DP(s), and Start-CMContentDistribution then throws "No content
+        # destination was found ... already been distributed" -- a benign
+        # condition that the old catch logged as a scary "Failed". Pre-check
+        # the targeting table (SMS_DistributionPoint lists package->DP
+        # assignments) and skip when already distributed; if the pre-check
+        # misses and the cmdlet still reports an "already distributed" error,
+        # classify it as informational rather than a failure.
+        $alreadyDistributed = $false
         try {
-            Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName "ALL DPS"
-            Write-DscStatus "$Tag Successfully started distribution for boot image: $biName ($packageId)"
+            $dpTargets = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
+            if ($dpTargets.Count -gt 0) { $alreadyDistributed = $true }
         }
-        catch {
-            Write-DscStatus "$Tag Failed to start distribution for boot image: $biName ($packageId). Error: $_"
+        catch { }
+
+        if ($alreadyDistributed) {
+            Write-DscStatus "$Tag Boot image already distributed to $($dpTargets.Count) DP(s): $biName ($packageId) -- skipping"
+        }
+        else {
+            try {
+                Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName "ALL DPS"
+                Write-DscStatus "$Tag Successfully started distribution for boot image: $biName ($packageId)"
+            }
+            catch {
+                $biDistMsg = "$_"
+                if ($biDistMsg -match 'already been distributed' -or $biDistMsg -match 'No content destination was found') {
+                    Write-DscStatus "$Tag Boot image already distributed: $biName ($packageId) -- skipping"
+                }
+                else {
+                    Write-DscStatus "$Tag WARNING: Failed to start distribution for boot image: $biName ($packageId). Error: $_"
+                }
+            }
         }
     }
 
@@ -702,10 +727,13 @@ Write-DscStatus "$Tag Starting perfloading"
     }
     else {
 
-    #get OS upgrade package 
+    #get OS upgrade package (guard existence so a re-run doesn't throw
+    # "An object with the specified name already exists" -- mirrors the OS
+    # image block below. Get-CMOperatingSystemUpgradePackage is the read-side
+    # cmdlet for the upgrade packages New-CMOperatingSystemInstaller creates.)
     try {
-        New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 
-        New-CMOperatingSystemInstaller -Name "Windows 10 upgrade" -Path "\\$ThisMachineName\OSD\Windows 10 22h2" -Version 10.0.19041 
+        if (!(Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade")) { New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 }
+        if (!(Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade")) { New-CMOperatingSystemInstaller -Name "Windows 10 upgrade" -Path "\\$ThisMachineName\OSD\Windows 10 22h2" -Version 10.0.19041 }
         Write-DscStatus "$Tag Windows 10 and 11 OS upgrade packages created"
     }
     catch {
