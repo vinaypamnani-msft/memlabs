@@ -147,10 +147,13 @@ foreach ($vm in $logTargets) {
         catch { Write-Host "  FAILED $(Split-Path $f -Leaf): $($_.Exception.Message)" -ForegroundColor Red }
     }
 
-    if ($TailLines -gt 0) {
+    if ($TailLines -gt 0 -and -not [string]::IsNullOrWhiteSpace($info.LogDir)) {
         $tail = Invoke-Command -Session $session -ScriptBlock { param($d, $n) $f = Join-Path $d 'rcmctrl.log'; if (Test-Path $f) { Get-Content $f -Tail $n } else { @('(no rcmctrl.log)') } } -ArgumentList $info.LogDir, $TailLines
         Write-Host "  --- rcmctrl tail ($TailLines) ---" -ForegroundColor DarkGray
         $tail | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    }
+    elseif ($TailLines -gt 0) {
+        Write-Host "  (no CM log dir on this VM - skipping rcmctrl tail; site systems like MP/DP don't run RCM)" -ForegroundColor DarkGray
     }
 
     # SQL snapshot from this site's SQL host
