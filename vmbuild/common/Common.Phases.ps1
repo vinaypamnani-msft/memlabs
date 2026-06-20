@@ -1227,6 +1227,14 @@ function Start-PhaseJobs {
             }
         }
         else {
+            # NOTE: consumed inside $global:VM_Config via $using:reservation.
+            # Static analysis can't see the cross-scriptblock $using: read, so
+            # do NOT remove this as a "dead local" -- doing so re-breaks the
+            # 418f5d9d "Fix using:reservation crash" (the first VM_Config job of
+            # every Phase 2 deploy throws "the using variable '$using:reservation'
+            # ... has not been set in the local session").
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Read in $global:VM_Config via $using:reservation')]
+            $reservation = $null
             #Phase 5 is for SQL Always on.. So if we are in this phase, it is a SQLAO node
             $alreadyCopiedDSC = $false
             if (-not $global:DSC_Copied) {
