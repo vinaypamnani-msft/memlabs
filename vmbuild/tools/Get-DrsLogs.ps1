@@ -33,9 +33,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Destination under the workspace logs folder so VS Code / the agent can read them.
+# Destination under the vmbuild\logs folder so VS Code / the agent can read them.
+# Script lives in vmbuild\tools, so the logs root is its parent (vmbuild)\logs.
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$destRoot = Join-Path $scriptRoot 'logs\drs-investigation'
+$vmbuildRoot = Split-Path -Parent $scriptRoot
+$destRoot = Join-Path $vmbuildRoot 'logs\drs-investigation'
 New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
 
 if (-not $Credential) {
