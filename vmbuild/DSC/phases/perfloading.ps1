@@ -242,29 +242,38 @@ Write-DscStatus "$Tag Starting perfloading"
     $existingDPGroups = @(Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name)
 
     if ($DPGroupName -in $existingDPGroups) {
-
         Write-DscStatus "$Tag DP group: $DPGroupName already exists"
-
     }
-    else { 
+    else {
         $DPGroup = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all Distribution Points" -ErrorAction SilentlyContinue
         Write-DscStatus "$Tag DP group: $DPGroupName created successfully"
+    }
 
-        # Get all Distribution Points
-        $DistributionPoints = Get-CMDistributionPoint -AllSite
-
-        # Display each Distribution Point's name without the leading '\\'
-        $DistributionPoints | ForEach-Object {
-            $DPPath = $_.NetworkOSPath
-            $DPName = ($DPPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
-            Write-DscStatus "$Tag Distribution Point Name: $DPName"
-            try {
-                Add-CMDistributionPointToGroup -DistributionPointGroupName "ALL DPS" -DistributionPointName $DPName 
-                Write-DscStatus "$Tag Successfully added Distribution Point: $DPName to Group: $($DPGroupName)"
-            }
-            catch {
-                Write-DscStatus "$Tag Failed to add Distribution Point: $DPName to Group: $($DPGroupName). Error: $_"
-            }
+    # ALWAYS reconcile group membership against the current DP list -- do NOT
+    # gate this on the group being newly created. "ALL DPS" is hierarchy-global
+    # data: on a child Primary the group is usually created+replicated by the
+    # CAS (which runs this same block first, before the role gate) BEFORE this
+    # site's DP exists, so it arrives here already-existing but EMPTY (or missing
+    # this site's DP). The old code only populated the group in the freshly-
+    # created branch, so on the child Primary the group stayed empty and every
+    # Start-CMContentDistribution -DistributionPointGroupName "ALL DPS" failed
+    # with "No content destination was found" -- silently skipping boot image,
+    # application, and package distribution to this site's DP. (Only the boot-
+    # image call surfaced it; the app/package calls use -ErrorAction
+    # SilentlyContinue and swallowed the same failure.)
+    # Add-CMDistributionPointToGroup is idempotent here: a DP already in the
+    # group throws and is logged-and-skipped.
+    $DistributionPoints = @(Get-CMDistributionPoint -AllSite)
+    Write-DscStatus "$Tag Reconciling '$DPGroupName' membership against $($DistributionPoints.Count) distribution point(s)"
+    foreach ($dp in $DistributionPoints) {
+        $DPName = ($dp.NetworkOSPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
+        try {
+            Add-CMDistributionPointToGroup -DistributionPointGroupName $DPGroupName -DistributionPointName $DPName -ErrorAction Stop
+            Write-DscStatus "$Tag Added Distribution Point '$DPName' to group '$DPGroupName'"
+        }
+        catch {
+            # Most common: DP is already a member. Benign -- log and continue.
+            Write-DscStatus "$Tag DP '$DPName' not added to '$DPGroupName' (likely already a member): $($_.Exception.Message)"
         }
     }
 
