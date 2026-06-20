@@ -117,7 +117,7 @@ try {
     $sw.Stop()
     if ($finished) {
         if ($job.State -eq 'Completed') {
-            $result = Receive-Job $job -ErrorAction Stop
+            $null = Receive-Job $job -ErrorAction Stop
             Write-Host "  PASS - Start-Job copy completed in $($sw.ElapsedMilliseconds)ms" -ForegroundColor Green
         }
         else {
@@ -160,7 +160,7 @@ try {
     $sw.Stop()
     if ($finished) {
         if ($tjob.State -eq 'Completed') {
-            $result = Receive-Job $tjob -ErrorAction Stop
+            $null = Receive-Job $tjob -ErrorAction Stop
             Write-Host "  PASS - Start-ThreadJob copy completed in $($sw.ElapsedMilliseconds)ms" -ForegroundColor Green
         }
         else {
@@ -200,7 +200,7 @@ try {
     $sw.Stop()
     if ($finished) {
         if ($job4.State -eq 'Completed') {
-            $result = Receive-Job $job4 -ErrorAction Stop
+            $null = Receive-Job $job4 -ErrorAction Stop
             Write-Host "  PASS - Recursive Start-Job copy completed in $($sw.ElapsedMilliseconds)ms" -ForegroundColor Green
         }
         else {
@@ -281,7 +281,7 @@ if ($concurrentCount -ge 2) {
             $localCred = $using:cred
             $localDscPath = $using:dscPath
             $innerScript = {
-                param($iVmId, $iCred, $iDscPath)
+                param($iVmId, [pscredential]$iCred, $iDscPath)
                 $ps = New-PSSession -VMId $iVmId -Credential $iCred -ErrorAction Stop
                 Invoke-Command -Session $ps -ScriptBlock { New-Item -Path "C:\staging\DSC-test" -ItemType Directory -Force } -ErrorAction SilentlyContinue
                 Copy-Item -ToSession $ps -Path $iDscPath -Destination "C:\staging\DSC-test" -Recurse -Container -Force -ErrorAction Stop
@@ -341,7 +341,7 @@ if ($concurrentCount -ge 2) {
             $localCred = $using:cred
             $localDscPath = $using:dscPath
             $innerThreadScript = {
-                param($iVmId, $iCred, $iDscPath)
+                param($iVmId, [pscredential]$iCred, $iDscPath)
                 $ps = New-PSSession -VMId $iVmId -Credential $iCred -ErrorAction Stop
                 Invoke-Command -Session $ps -ScriptBlock { New-Item -Path "C:\staging\DSC-test" -ItemType Directory -Force } -ErrorAction SilentlyContinue
                 Copy-Item -ToSession $ps -Path $iDscPath -Destination "C:\staging\DSC-test" -Recurse -Container -Force -ErrorAction Stop
