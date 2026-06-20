@@ -1048,6 +1048,19 @@ function Add-ExistingVMsToDeployConfig {
         if ($null -ne $dc.ForestTrust -and $dc.ForestTrust -ne "NONE") {
             $OtherDC = get-list -Type vm -DomainName $dc.ForestTrust | Where-Object { $_.Role -eq "DC" }
             Add-ExistingVMToDeployConfig -vmName $OtherDC.vmName -configToModify $config -OtherDC:$true
+
+            # Multi-tier PKI: the remote forest's ENTERPRISE issuing CA can live
+            # on a member server that is neither the DC (added above) nor the
+            # site server (added below). InstallRootCertificate's
+            # certutil -ca.chain must be able to REACH that CA host, so start it
+            # too. The offline StandaloneRootCA is intentionally excluded -- it
+            # stays offline by design and its certificate is retrieved through
+            # the issuing CA's chain, not by contacting the root directly.
+            $RemoteIssuingCAs = get-list -Type vm -DomainName $dc.ForestTrust | Where-Object { $_.InstallCA -and $_.Role -ne "StandaloneRootCA" }
+            foreach ($caVM in $RemoteIssuingCAs) {
+                Add-ExistingVMToDeployConfig -vmName $caVM.vmName -configToModify $config
+            }
+
             if ($null -ne $dc.externalDomainJoinSiteCode -and $dc.externalDomainJoinSiteCode -ne "NONE") {
                 $RemoteSiteServer = Get-SiteServerForSiteCode -deployConfig $config -SiteCode $dc.externalDomainJoinSiteCode -DomainName $dc.ForestTrust -type VM
                 if ($RemoteSiteServer.Role -eq "Secondary") {
