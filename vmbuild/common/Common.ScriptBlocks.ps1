@@ -3478,6 +3478,51 @@ $global:VM_Config = {
             param($DscFolder)
             try {
                 $global:ScriptBlockName = "DSC_StartConfig"
+
+                # When Start-DscConfiguration fails, the generic wrapper string
+                # we return to the host ("Could not run Start-DscConfiguration...")
+                # hides the real cause. The authoritative detail -- which resource
+                # failed and its exception -- lives in the LCM ConfigurationStatus
+                # record and the operational event log on this guest. Mine them so
+                # the failing resource + error travels back to the host build log
+                # instead of forcing a manual in-guest dig.
+                function Get-DscFailureDetail {
+                    param($ErrorRecord)
+                    $detail = New-Object System.Collections.Generic.List[string]
+                    if ($ErrorRecord) {
+                        $msg = $null
+                        try { $msg = $ErrorRecord.Exception.Message } catch {}
+                        if (-not [string]::IsNullOrWhiteSpace($msg)) {
+                            $detail.Add("Error: " + ($msg -replace '\s+', ' ').Trim())
+                        }
+                    }
+                    # Authoritative: every resource the last apply left not-in-state, with its own error text.
+                    try {
+                        $status = Get-DscConfigurationStatus -ErrorAction Stop
+                        if ($status -and $status.ResourcesNotInDesiredState) {
+                            foreach ($r in $status.ResourcesNotInDesiredState) {
+                                $rerr = $r.Error
+                                if ([string]::IsNullOrWhiteSpace($rerr)) { $rerr = '(no error text)' }
+                                $detail.Add("Failed resource " + $r.ResourceId + ": " + ($rerr -replace '\s+', ' ').Trim())
+                            }
+                        }
+                    }
+                    catch {
+                        # Get-DscConfigurationStatus refuses while the LCM is mid-apply; fall back to the event log.
+                        try {
+                            $evts = Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 40 -ErrorAction Stop |
+                                Where-Object { $_.LevelDisplayName -eq 'Error' } | Select-Object -First 3
+                            foreach ($e in $evts) {
+                                $em = ($e.Message -replace '\s+', ' ').Trim()
+                                if ($em.Length -gt 300) { $em = $em.Substring(0, 300) }
+                                $detail.Add("DSC error event: " + $em)
+                            }
+                        }
+                        catch {}
+                    }
+                    if ($detail.Count -gt 0) { return ($detail -join ' || ') }
+                    return $null
+                }
                 #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
@@ -3567,6 +3612,11 @@ $global:VM_Config = {
                         $data = "Could not run Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop"
                         $data | Out-File $log -Append      
                         $_ | Out-File $log -Append              
+                        $dscDetail = Get-DscFailureDetail -ErrorRecord $_
+                        if ($dscDetail) {
+                            $dscDetail | Out-File $log -Append
+                            $data = "$data | $dscDetail"
+                        }
                         Write-Error $data
                         Write-Error $_
                         return $data
