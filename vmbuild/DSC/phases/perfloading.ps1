@@ -2133,33 +2133,52 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     }
 
 
-    # Loop through each collection and create it in SCCM
+    # Loop through each collection and ensure it exists AND carries its query
+    # membership rule. Membership reconciliation must NOT be gated on the
+    # collection being newly created: on a re-run (or a prior partial run that
+    # created the collection but died before Add-CMDeviceCollectionQueryMembership-
+    # Rule) the collection exists but has no rule, and the old "if (-not Get-
+    # CMDeviceCollection)" guard skipped it -- leaving the collection permanently
+    # empty. Checking for existence is not a reason to skip populating members.
     foreach ($Collection in $Collections) {
         $CollectionName = $Collection.Name
         $Query = $Collection.Query
-    
-        if (-not (Get-CMDeviceCollection -Name $CollectionName)) {
-            try {
-                # Create the device collection
-                $NewCollection = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
+        $ruleName = "$CollectionName Rule"
 
+        try {
+            # Ensure the collection exists.
+            $col = Get-CMDeviceCollection -Name $CollectionName
+            if (-not $col) {
+                $col = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
                 Write-DscStatus "$Tag Created collection: $CollectionName"
-
-                # Add a query rule to the collection
-                Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule" -ErrorAction Stop
-    
-                Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
-
-                # Force collection membership evaluation so members appear immediately
-                Invoke-CMCollectionUpdate -CollectionId $NewCollection.CollectionID -ErrorAction Stop
-
-                Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID -ErrorAction Stop
-
+                Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $col.CollectionID -ErrorAction SilentlyContinue
                 Write-DscStatus "$Tag Moved collection '$CollectionName' under the folder MEMLABS"
             }
-            catch {
-                Write-DscStatus "$Tag WARNING: Failed to fully configure collection '$CollectionName': $($_.Exception.Message)"
+            else {
+                Write-DscStatus "$Tag Collection already exists: $CollectionName (reconciling membership rule)"
             }
+
+            if (-not $col) {
+                Write-DscStatus "$Tag WARNING: Could not create or resolve collection '$CollectionName'; skipping rule"
+                continue
+            }
+
+            # ALWAYS ensure the query membership rule is present -- add it when
+            # missing regardless of whether we just created the collection.
+            $existingRules = @(Get-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -ErrorAction SilentlyContinue)
+            $haveRule = @($existingRules | Where-Object { $_.RuleName -eq $ruleName }).Count -gt 0
+            if (-not $haveRule) {
+                Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName $ruleName -ErrorAction Stop
+                Write-DscStatus "$Tag Added collection query rule: $ruleName"
+                # Force membership evaluation so members appear immediately.
+                Invoke-CMCollectionUpdate -CollectionId $col.CollectionID -ErrorAction SilentlyContinue
+            }
+            else {
+                Write-DscStatus "$Tag Collection query rule already present: $ruleName"
+            }
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to fully configure collection '$CollectionName': $($_.Exception.Message)"
         }
     }
 
