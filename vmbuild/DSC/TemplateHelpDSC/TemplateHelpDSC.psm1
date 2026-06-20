@@ -6274,6 +6274,29 @@ class InstallRootCertificate {
         }
     }
 
+    # AD's cACertificate attribute is multi-valued: it can come back as a single
+    # byte[] (one cert) or an object[]/Array of byte[] (cross-cert history). Pull
+    # the first usable DER cert blob out of whatever shape we get.
+    [byte[]] FirstCertBytes([object]$val) {
+        if ($null -eq $val) { return $null }
+        if ($val -is [byte[]]) { return $val }
+        if ($val -is [System.Array]) {
+            foreach ($item in $val) {
+                if ($item -is [byte[]]) { return $item }
+            }
+        }
+        return $null
+    }
+
+    [bool] BytesEqual([byte[]]$a, [byte[]]$b) {
+        if ($null -eq $a -or $null -eq $b) { return $false }
+        if ($a.Length -ne $b.Length) { return $false }
+        for ($i = 0; $i -lt $a.Length; $i++) {
+            if ($a[$i] -ne $b[$i]) { return $false }
+        }
+        return $true
+    }
+
     [void] Set() {
 
         $_FileName = "C:\Temp\rootCA.cer"
@@ -6282,60 +6305,80 @@ class InstallRootCertificate {
         if (-not (Test-Path $_FileName)) {
             Write-Status "Install Root Cert"
 
-            # Discover the real issuing-CA -config string from the remote forest's
-            # AD (naming/IP/tier-agnostic), falling back to the configured guess.
-            $caConfig = $this.ResolveCAConfig()
+            $rootBytes = $null
+            $issuingBytes = $null
 
-            # Get the full certificate chain from the CA (works for both single-tier and two-tier PKI)
-            $chainFile = "C:\Temp\ca_chain.p7b"
-            if (Test-Path $chainFile) { Remove-Item $chainFile -Force -ErrorAction SilentlyContinue }
-            certutil.exe -config $caConfig -ca.chain $chainFile
-            $certutilChainExit = $LASTEXITCODE
-
-            $rootCert = $null
-            $subCACert = $null
-
-            # certutil only writes $chainFile when it could actually reach/enroll
-            # against the issuing CA. If the CA is not online/answering yet (a
-            # cross-forest CA whose VM hasn't finished, a DNS/secure-channel gap,
-            # etc.), the file is never created and the old code crashed on
-            # $chainCerts.Import($chainFile) with "The system cannot find the file
-            # specified" -- an opaque failure a DC reboot can never fix, so the
-            # phase looped indefinitely. Only import when the chain file actually
-            # materialized; otherwise fall through to the lighter -ca.cert path.
-            if (Test-Path $chainFile) {
+            # PRIMARY retrieval: read the CA certificates straight from the remote
+            # forest's AD (Configuration NC), where ADCS publishes them and which
+            # is replicated to every DC. This replaces 'certutil -config X
+            # -ca.chain <file>', which mis-parses on Server 2022 ("Too many
+            # arguments" -> no file produced) and so never worked for the
+            # cross-forest case. The CA is reachable (certutil -ping/ICertRequest2
+            # succeeds); the retrieval verb was the bug. AD read is naming-, IP-,
+            # tier-, and DCOM-agnostic and works for single- and multi-tier PKI.
+            if (-not [string]::IsNullOrWhiteSpace($this.RemoteForestDC)) {
                 try {
-                    # Import the PKCS#7 chain and find root (self-signed) vs subordinate certs
-                    $chainCerts = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
-                    $chainCerts.Import($chainFile)
-                    $rootCert = $chainCerts | Where-Object { $_.Subject -eq $_.Issuer } | Select-Object -First 1
-                    $subCACert = $chainCerts | Where-Object { $_.Subject -ne $_.Issuer } | Select-Object -First 1
+                    $configNC = [string]([ADSI]"LDAP://$($this.RemoteForestDC)/RootDSE").configurationNamingContext.Value
+
+                    # Root (self-signed) CA cert(s): CN=Certification Authorities
+                    $caContainer = [ADSI]"LDAP://$($this.RemoteForestDC)/CN=Certification Authorities,CN=Public Key Services,CN=Services,$configNC"
+                    foreach ($ca in $caContainer.Children) {
+                        $b = $this.FirstCertBytes($ca.Properties['cACertificate'].Value)
+                        if ($b) {
+                            $rootBytes = $b
+                            Write-Status "Read root CA '$([string]$ca.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
+                            break
+                        }
+                    }
+
+                    # Issuing CA cert: the pKIEnrollmentService object (prefer the
+                    # host hint when more than one issuing CA is published).
+                    $enroll = [ADSI]"LDAP://$($this.RemoteForestDC)/CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC"
+                    $picked = $null
+                    foreach ($svc in $enroll.Children) {
+                        if (-not [string]::IsNullOrWhiteSpace($this.IssuingCAHint)) {
+                            $dns = [string]$svc.Properties['dNSHostName'].Value
+                            $short = ($dns -split '\.')[0]
+                            if ($short -eq $this.IssuingCAHint -or $dns -eq $this.IssuingCAHint) {
+                                $picked = $svc
+                                break
+                            }
+                        }
+                        if (-not $picked) { $picked = $svc }
+                    }
+                    if ($picked) {
+                        $b = $this.FirstCertBytes($picked.Properties['cACertificate'].Value)
+                        if ($b) {
+                            $issuingBytes = $b
+                            Write-Status "Read issuing CA '$([string]$picked.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
+                        }
+                    }
                 }
                 catch {
-                    Write-Status "WARNING: Failed to import CA chain '$chainFile': $_"
+                    Write-Status "WARNING: Reading CA certs from AD ($($this.RemoteForestDC)) failed: $_"
                 }
             }
-            else {
-                Write-Status "WARNING: certutil -ca.chain did not produce '$chainFile' (exit $certutilChainExit); CA '$caConfig' may be unreachable. Falling back to -ca.cert."
-            }
 
-            if (-not $rootCert) {
-                Write-Status "Could not find root CA in chain, falling back to -ca.cert"
+            if ($rootBytes -or $issuingBytes) {
+                # Prefer the self-signed root for the RootCA file; if only the
+                # issuing CA was found, use it.
+                if (-not $rootBytes) { $rootBytes = $issuingBytes }
+                [System.IO.File]::WriteAllBytes($_FileName, $rootBytes)
+                Write-Status "Wrote root CA certificate to $_FileName from AD"
+            }
+            else {
+                # FALLBACK: legacy certutil retrieval (only if the AD read yielded
+                # nothing -- e.g. RemoteForestDC absent or the container empty).
+                $caConfig = $this.ResolveCAConfig()
+                Write-Status "AD CA read unavailable; falling back to certutil -ca.cert against '$caConfig'"
                 certutil.exe -config $caConfig -ca.cert $_FileName
             }
-            else {
-                [System.IO.File]::WriteAllBytes($_FileName, $rootCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
-                Write-Status "Exported root CA '$($rootCert.Subject)' to $_FileName"
-            }
 
-            # If neither the chain import nor the -ca.cert fallback produced the
-            # root cert file, the issuing CA is genuinely unreachable right now.
-            # Throw a clear, actionable error so the LCM retries this resource on
-            # a real (recoverable) condition, instead of the downstream dspublish
-            # calls running against a missing file and the DC looping forever on
-            # the same opaque missing-file exception.
+            # If we still have no root cert file, fail with a clear, actionable
+            # error so the LCM retries on a real (recoverable) condition instead
+            # of the downstream dspublish calls running against a missing file.
             if (-not (Test-Path $_FileName)) {
-                throw "InstallRootCertificate: unable to obtain root CA certificate from CA '$caConfig' (certutil -ca.chain exit $certutilChainExit, -ca.cert fallback also produced no file). The issuing CA is not reachable yet; DSC will retry."
+                throw "InstallRootCertificate: unable to obtain root CA certificate for forest '$($this.RemoteForestDC)' / CA '$($this.CAName)' (AD read produced no cert and certutil -ca.cert fallback produced no file). DSC will retry."
             }
 
             # Publish root CA cert as RootCA and NtauthCA
@@ -6344,12 +6387,15 @@ class InstallRootCertificate {
             Write-Status "Running certutil.exe -dspublish -f $_FileName NtauthCA"
             certutil.exe -dspublish -f $_FileName NtauthCA
 
-            # If two-tier PKI, publish the subordinate CA cert as SubCA
-            if ($subCACert) {
+            # If two-tier PKI (issuing CA differs from the root), publish the
+            # issuing/subordinate CA as SubCA and NtauthCA (it is the CA that
+            # actually signs the end-entity certs we cross-forest authenticate).
+            if ($issuingBytes -and $rootBytes -and -not $this.BytesEqual($issuingBytes, $rootBytes)) {
                 $subCACertFile = "C:\Temp\subCA.cer"
-                [System.IO.File]::WriteAllBytes($subCACertFile, $subCACert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
-                Write-Status "Two-tier PKI: publishing subordinate CA '$($subCACert.Subject)' as SubCA"
+                [System.IO.File]::WriteAllBytes($subCACertFile, $issuingBytes)
+                Write-Status "Two-tier PKI: publishing subordinate/issuing CA as SubCA + NtauthCA"
                 certutil.exe -dspublish -f $subCACertFile SubCA
+                certutil.exe -dspublish -f $subCACertFile NtauthCA
             }
             else {
                 # Single-tier: the CA is the root, publish as SubCA too
