@@ -1914,6 +1914,75 @@ else {
             Write-DscStatus "Primary is installed. Waiting for replication link to be 'Active'"
         }
 
+        # --- DRS stale-status self-heal helpers (force-send the primary's global changes) ---
+        # The wedge: a child primary finishes init and flips its OWN ServerData.SiteStatus to
+        # ReplicationActive(125), but the CAS reads the primary's status from its own replicated copy
+        # of ServerData, which can lag ~50 min. While stale, the CAS logs "Publisher not active" and the
+        # link sits NotStarted - and the built-in reinit below only fires on Failed/Degraded/Error, so it
+        # never triggers. spDRSSendChangesForGroup run on the PRIMARY flushes its pending global changes
+        # (including that status row) up to the CAS - exactly what the DRS message builder calls internally
+        # (guarded by context_info), idempotent, and a no-op when nothing is pending. Proven on cstest8 to
+        # collapse the ~50-min dead-wait to ~20s. Requires the wait-loop account to have rights on the
+        # primary's SQL; on any failure we log and fall back to the existing wait (no worse than today).
+        function Get-PrimarySqlDataSourceForResync {
+            param($PrimaryVM, $DeployCfg, $DomainFqdn)
+            $sqlVmName = if ($PrimaryVM.remoteSQLVM) { $PrimaryVM.remoteSQLVM } else { $PrimaryVM.vmName }
+            $sqlVMObj = $DeployCfg.virtualMachines | Where-Object { $_.vmName -eq $sqlVmName }
+            $server = $sqlVmName
+            $instance = $null
+            $portNum = $null
+            if ($sqlVMObj) {
+                $instance = $sqlVMObj.sqlInstanceName
+                if ($sqlVMObj.AlwaysOnListenerName) {
+                    $server = $sqlVMObj.AlwaysOnListenerName
+                    if ($sqlVMObj.thisParams -and $sqlVMObj.thisParams.SQLAO -and $sqlVMObj.thisParams.SQLAO.SQLAOPort) {
+                        $portNum = $sqlVMObj.thisParams.SQLAO.SQLAOPort
+                    }
+                }
+            }
+            $serverFqdn = if ($server -like "*.*") { $server } else { "$server.$DomainFqdn" }
+            if ($portNum) { return "$serverFqdn,$portNum" }
+            if ($instance -and $instance.ToUpper() -ne 'MSSQLSERVER') { return "$serverFqdn\$instance" }
+            return $serverFqdn
+        }
+        function Invoke-DrsForceSendOnPrimary {
+            param($PrimaryVM, $PrimarySiteCode, $DeployCfg, $DomainFqdn)
+            $r = [pscustomobject]@{ DataSource = $null; Database = $null; Groups = 0; Sent = 0; Failed = 0; Error = $null }
+            try {
+                $ds = Get-PrimarySqlDataSourceForResync -PrimaryVM $PrimaryVM -DeployCfg $DeployCfg -DomainFqdn $DomainFqdn
+                $db = "CM_$PrimarySiteCode"
+                $r.DataSource = $ds
+                $r.Database = $db
+                $cs = "Data Source=$ds;Initial Catalog=$db;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+                $conn = New-Object System.Data.SqlClient.SqlConnection $cs
+                $conn.Open()
+                try {
+                    $listCmd = $conn.CreateCommand()
+                    $listCmd.CommandText = "SELECT ReplicationGroup FROM ReplicationData WHERE ReplicationPattern = 'global' ORDER BY ReplicationGroup"
+                    $listCmd.CommandTimeout = 30
+                    $groups = @()
+                    $rdr = $listCmd.ExecuteReader()
+                    while ($rdr.Read()) { $groups += [string]$rdr['ReplicationGroup'] }
+                    $rdr.Close()
+                    $r.Groups = $groups.Count
+                    foreach ($grp in $groups) {
+                        try {
+                            $execCmd = $conn.CreateCommand()
+                            $execCmd.CommandText = "EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup = @rg"
+                            $execCmd.CommandTimeout = 120
+                            [void]$execCmd.Parameters.AddWithValue("@rg", $grp)
+                            [void]$execCmd.ExecuteNonQuery()
+                            $r.Sent++
+                        }
+                        catch { $r.Failed++ }
+                    }
+                }
+                finally { $conn.Close() }
+            }
+            catch { $r.Error = $_.Exception.Message }
+            return $r
+        }
+
         # Replication wait with timeout, failure detection, and reinit
         $drsStartTime = Get-Date
         $drsTimeoutSec = 120 * 60  # 2 hours
@@ -1923,6 +1992,14 @@ else {
         $reinitAttempted = @{}
         $reinitCooldownMin = 10
         $sleepSeconds = 30
+
+        # DRS stale-status force-send self-heal (tunables + per-primary tracking)
+        $forceSendThresholdMin = 3      # link stuck at 100% init / not-active / not-failed this long -> force-send
+        $forceSendMaxAttempts = 2       # cap force-send attempts per primary
+        $forceSendCooldownMin = 5       # minimum gap between attempts
+        $forceSendStuckSince = @{}      # when the non-failed stuck window started, per primary
+        $forceSendCount = @{}           # attempts made, per primary
+        $forceSendLastAttempt = @{}     # timestamp of last attempt, per primary
 
         # Expand stateMap to include all WMI enum values
         $stateMap = @{ 0 = "Unknown"; 1 = "Initializing"; 2 = "Active"; 3 = "Degraded"; 4 = "Failed"; 5 = "NotStarted"; 6 = "Error"; 7 = "Unknown(7)"; 8 = "Degraded(8)"; 9 = "Failed(9)" }
@@ -2005,6 +2082,39 @@ else {
                         if ($replicationStatus.Site2ToSite1SiteState -ne 2) { $pending += "Site($PSSiteCode->$SiteCode)=$s21Name" }
                         $pendingStr = $pending -join ", "
                         Write-DscStatus "Init 100% complete, waiting for link activation. Pending: $pendingStr (${drsElapsedMin}m elapsed)" -RetrySeconds $sleepSeconds -MachineName $PSVM.VmName
+
+                        # DRS stale-status self-heal: 100% init done, link NOT active and NOT in a failed state
+                        # (the NotStarted/Initializing "Publisher not active" wedge the reinit path above does not
+                        # cover). Force-send the primary's global changes to flush its ReplicationActive status up
+                        # to the CAS. Gated, bounded, and fully logged so a bad run is easy to spot.
+                        if (-not $linkInFailedState) {
+                            if (-not $forceSendStuckSince[$PSVM.VmName]) { $forceSendStuckSince[$PSVM.VmName] = Get-Date }
+                            $stuckMin = [int]((Get-Date) - $forceSendStuckSince[$PSVM.VmName]).TotalMinutes
+                            $attemptsSoFar = [int]$forceSendCount[$PSVM.VmName]
+                            $lastFs = $forceSendLastAttempt[$PSVM.VmName]
+                            $cooldownOk = (-not $lastFs) -or ([int]((Get-Date) - $lastFs).TotalMinutes -ge $forceSendCooldownMin)
+                            if ($stuckMin -ge $forceSendThresholdMin -and $attemptsSoFar -lt $forceSendMaxAttempts -and $cooldownOk) {
+                                $forceSendCount[$PSVM.VmName] = $attemptsSoFar + 1
+                                $forceSendLastAttempt[$PSVM.VmName] = Get-Date
+                                Write-DscStatus "DRS stale-status self-heal: link stuck ${stuckMin}m at 100% init / not-active / not-failed (Pending: $pendingStr). Force-sending the primary's global changes (spDRSSendChangesForGroup) to flush its status to the CAS [attempt $($attemptsSoFar + 1)/$forceSendMaxAttempts]." -MachineName $PSVM.VmName
+                                try {
+                                    $fsResult = Invoke-DrsForceSendOnPrimary -PrimaryVM $PSVM -PrimarySiteCode $PSSiteCode -DeployCfg $deployConfig -DomainFqdn $DomainFullName
+                                    if ($fsResult.Error) {
+                                        Write-DscStatus "DRS force-send could NOT run on the primary's SQL ($($fsResult.DataSource) / $($fsResult.Database)): $($fsResult.Error). No change made; continuing the normal wait." -MachineName $PSVM.VmName
+                                    }
+                                    else {
+                                        Write-DscStatus "DRS force-send done on $($fsResult.DataSource) / $($fsResult.Database): $($fsResult.Sent)/$($fsResult.Groups) global groups sent ($($fsResult.Failed) failed). Watching for the CAS to see the primary active." -MachineName $PSVM.VmName
+                                    }
+                                }
+                                catch {
+                                    Write-DscStatus "DRS force-send threw unexpectedly: $_. Continuing the normal wait (the sproc is idempotent, so no harm)." -MachineName $PSVM.VmName
+                                }
+                            }
+                        }
+                        else {
+                            # Link is in a failed state -> handled by the reinit path above; reset the stuck timer.
+                            $forceSendStuckSince[$PSVM.VmName] = $null
+                        }
 
                         # Log SQL Broker diagnostics every 5 minutes when stuck at 100% init
                         if ($drsElapsedMin -gt 0 -and $drsElapsedMin % 5 -eq 0) {
