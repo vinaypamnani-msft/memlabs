@@ -816,6 +816,12 @@ $script:_consoleInputHandle = $null
 # Tracks whether Shift is held for the text-selection toggle.
 # Reset by Enable-MouseInput at the start of each menu session.
 $script:_mouseShiftHeld = $false
+# Last reported mouse button bitmask (dwButtonState). Used for edge-triggered
+# (up->down) button detection so a left click is never misread as a right click
+# when a prior right-button-up record was missed/swallowed (e.g. GOBACK
+# navigated away before the up-event was read, or a ConPTY Suspend/Resume cycle
+# dropped it) and the console keeps reporting the right-button bit as "stuck".
+$script:_lastMouseButtonState = [uint32]0
 
 function Enable-MouseInput {
     if ($Global:Common -and -not $Global:Common.MouseEnabled) {
@@ -829,6 +835,7 @@ function Enable-MouseInput {
     [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
     $script:_savedConsoleMode = $mode
     $script:_mouseShiftHeld = $false
+    $script:_lastMouseButtonState = [uint32]0
 
     # Enable mouse input and disable Quick Edit Mode (which swallows mouse
     # events for text selection). Preserve processed input so Ctrl+C works.
@@ -857,6 +864,7 @@ function Disable-MouseInput {
     }
     $script:_mouseActiveMode = $null
     $script:_mouseShiftHeld = $false
+    $script:_lastMouseButtonState = [uint32]0
 }
 
 # Suspend mouse handling while Shift is held for text selection.
@@ -2223,10 +2231,35 @@ function Get-KeyStroke {
                         $me = $rec.MouseEvent
                         $isWheel = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_WHEELED) -ne 0
                         $isMove  = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_MOVED) -ne 0
-                        # Button detection: require dwEventFlags==0 (button-down, not drag).
-                        # Right-click takes priority so both-buttons-pressed → escape.
-                        $isBack  = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::RIGHTMOST_BUTTON_PRESSED))
-                        $isClick = (-not $isBack -and $me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED))
+                        # Edge-triggered button detection. We act on the button
+                        # that NEWLY transitioned from up->down in this record,
+                        # not on whatever bits happen to be set in the snapshot.
+                        # This is what makes clicks reliable: if a prior
+                        # right-button-up record was missed/swallowed (GOBACK
+                        # navigated away before it was read, or a ConPTY
+                        # Suspend/Resume cycle dropped it), the console keeps
+                        # reporting the right bit as "stuck". A snapshot test
+                        # (dwButtonState -band RIGHTMOST) would then misread
+                        # every subsequent LEFT click as a right click (GOBACK).
+                        # Masking against the previous state ignores already-held
+                        # bits and only reacts to the genuine new press.
+                        $isBack  = $false
+                        $isClick = $false
+                        if ($me.dwEventFlags -eq 0) {
+                            # Button press/release record (not move/wheel/double-click).
+                            $prevBtn = $script:_lastMouseButtonState
+                            $newlyPressed = $me.dwButtonState -band (-bnot $prevBtn)
+                            $script:_lastMouseButtonState = $me.dwButtonState
+                            # Left takes priority over right on a simultaneous
+                            # both-buttons-down so an ambiguous press activates
+                            # rather than navigating away.
+                            if ($newlyPressed -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED) {
+                                $isClick = $true
+                            }
+                            elseif ($newlyPressed -band [MemLabsConsole.MouseInput]::RIGHTMOST_BUTTON_PRESSED) {
+                                $isBack = $true
+                            }
+                        }
                         if ($isClick -or $isBack -or $isMove -or $isWheel) {
                             # Wheel direction: dwButtonState high word is the signed delta.
                             # Bit 31 indicates negative (down). Avoids [int] cast overflow
@@ -2236,7 +2269,7 @@ function Get-KeyStroke {
                                 $wheelBtn = if ($me.dwButtonState -band 0x80000000) { 4 } else { 3 }  # 3=up, 4=down
                             }
                             if ($isClick -or $isBack) {
-                                Write-Log -Verbose -LogOnly "Mouse btn: btnState=0x$($me.dwButtonState.ToString('X8')) flags=0x$($me.dwEventFlags.ToString('X8')) -> $(if ($isBack) {'BACK'} else {'CLICK'}) at ($($me.dwMousePosition.X),$($me.dwMousePosition.Y))"
+                                Write-Log -Verbose -LogOnly "Mouse btn: btnState=0x$($me.dwButtonState.ToString('X8')) prev=0x$($prevBtn.ToString('X8')) new=0x$($newlyPressed.ToString('X8')) flags=0x$($me.dwEventFlags.ToString('X8')) -> $(if ($isBack) {'BACK'} else {'CLICK'}) at ($($me.dwMousePosition.X),$($me.dwMousePosition.Y))"
                             }
                             return [pscustomobject]@{
                                 IsMouseEvent = $true
