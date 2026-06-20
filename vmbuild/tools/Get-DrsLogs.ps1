@@ -1,157 +1,172 @@
 <#
 .SYNOPSIS
-    Pulls ConfigMgr DRS / replication logs from the cstest7 CAS + Primary (+MP) into
-    vmbuild\logs\drs-investigation\<VMName>\ via PowerShell Direct (no SMB/network needed).
+    Collects the DRS / replication diagnostic logs and a SQL replication-state snapshot from a CAS+Primary
+    hierarchy (CAS, child Primary, and their MP/DP site systems) into logs\drs-investigation\<VM>\.
 
-.DESCRIPTION
-    For each target site server it:
-      - opens a PowerShell Direct session (Invoke-Command/New-PSSession -VMName),
-      - resolves the real CM log dir from HKLM:\SOFTWARE\Microsoft\SMS\Setup\"Installation Directory"\Logs,
-      - copies the replication-relevant logs (rcmctrl, smsexec, hman, sender, despool, replmgr, dataldr)
-        plus C:\ConfigMgrSetup.log, INCLUDING the rolled-over .lo_ files,
-      - also captures a live SQL snapshot of ServerData.SiteStatus + vReplicationData init status
-        (so we can see what state each site is in right now).
+    CONFIG-DRIVEN: resolves the VMs and each site's SQL host (honoring remoteSQLVM) from Get-List and
+    connects with Get-VmSession (PowerShell Direct, credential-managed). No hardcoded VM names/domains.
+    Logs are pulled from the SITE SERVERS (where rcmctrl etc. live); the SQL snapshot runs on each site's
+    SQL host (which may be a remote SQL VM, e.g. CST-PRISITE -> CST-PRISQL).
 
-    Safe / read-only: only reads logs and runs SELECTs. Nothing is modified on the guests.
-
-.PARAMETER Credential
-    Domain admin (or local admin) credential for the guests. If omitted you are prompted.
-    Default user is cstest7\admin.
-
-.PARAMETER VMNames
-    Site servers to collect from. Default: the cstest7 CAS, Primary, and MP/DP.
+.PARAMETER Domain        Domain FQDN to scope to. Auto-detected if only one CAS hierarchy exists.
+.PARAMETER PrimaryName   Specific child-primary VM name when a CAS has more than one.
+.PARAMETER TailLines     Tail size for the on-screen preview of rcmctrl.log (default 30; 0 = no preview).
 
 .EXAMPLE
-    .\Get-DrsLogs.ps1
-    # prompts for the cstest7\admin password, pulls logs for CS1SITE/PS1SITE/PS1DPMP1
+    cd C:\memlabs\vmbuild\tools ; .\Get-DrsLogs.ps1
+.EXAMPLE
+    .\Get-DrsLogs.ps1 -Domain cstest8.com
 #>
 [CmdletBinding()]
 param(
-    [pscredential]$Credential,
-    [string[]]$VMNames = @('CT7-PS1SITE', 'CT7-CS1SITE', 'CT7-PS1DPMP1')
+    [string]$Domain,
+    [string]$PrimaryName,
+    [int]$TailLines = 30
 )
 
 $ErrorActionPreference = 'Stop'
 
-# Destination under the vmbuild\logs folder so VS Code / the agent can read them.
-# Script lives in vmbuild\tools, so the logs root is its parent (vmbuild)\logs.
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$scriptRoot = $PSScriptRoot
 $vmbuildRoot = Split-Path -Parent $scriptRoot
-$destRoot = Join-Path $vmbuildRoot 'logs\drs-investigation'
+Set-Location $vmbuildRoot
+
+$commonPath = Join-Path $vmbuildRoot 'Common.ps1'
+$bom = [System.IO.File]::ReadAllBytes($commonPath)[0..2]
+if (-not ($bom[0] -eq 0xEF -and $bom[1] -eq 0xBB -and $bom[2] -eq 0xBF)) {
+    Write-Host "ERROR: Common.ps1 is missing UTF-8 BOM (PS5.1 parse hazard). Run: git checkout -- vmbuild/Common.ps1" -ForegroundColor Red
+    exit 1
+}
+. $commonPath -InJob
+
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$destRoot = Join-Path $vmbuildRoot "logs\drs-investigation"
 New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
 
-if (-not $Credential) {
-    $Credential = Get-Credential -UserName 'cstest7\admin' -Message 'Domain admin for the cstest7 guests (PowerShell Direct)'
+$logNames = @('rcmctrl.log', 'rcmctrl.lo_', 'smsexec.log', 'hman.log', 'sender.log', 'despool.log', 'despoolr.log', 'replmgr.log', 'dataldr.log', 'ConfigMgrSetup.log')
+
+# ---- resolve topology ----
+function Resolve-SqlVm {
+    param($SiteVm, $AllVms)
+    if ([string]::IsNullOrWhiteSpace($SiteVm.remoteSQLVM)) { return $SiteVm }
+    $r = @($AllVms | Where-Object { $_.domain -eq $SiteVm.domain -and $_.vmName -eq $SiteVm.remoteSQLVM })
+    if ($r.Count -eq 0) { $r = @($AllVms | Where-Object { $_.domain -eq $SiteVm.domain -and ($_.vmName -like "*$($SiteVm.remoteSQLVM)") }) }
+    if ($r.Count -gt 0) { return $r[0] }
+    return $SiteVm
 }
 
-# Log basenames to collect from the CM Logs dir. The *.lo_ rollover is captured by the wildcard.
-$cmLogNames = @(
-    'rcmctrl',   # DRS replication config monitor  <-- the key one
-    'smsexec',   # SMS Executive
-    'hman',      # Hierarchy Manager (site attach / parent-child)
-    'sender',    # inter-site sender
-    'despool',   # inbound inter-site despooler
-    'replmgr',   # replication manager
-    'dataldr'    # inventory data loader (primary)
-)
+Write-Host "================ Get-DrsLogs  $stamp ================" -ForegroundColor Cyan
+$allVms = @(Get-List -Type VM -SmartUpdate)
+if ($Domain) { $allVms = @($allVms | Where-Object { $_.domain -eq $Domain }) }
 
-foreach ($vm in $VMNames) {
-    Write-Host "==== $vm ====" -ForegroundColor Cyan
-    $vmDest = Join-Path $destRoot $vm
-    New-Item -ItemType Directory -Path $vmDest -Force | Out-Null
+$casList = @($allVms | Where-Object { $_.role -eq 'CAS' })
+if ($casList.Count -eq 0) { Write-Host "FATAL: no CAS found$(if ($Domain) { " in domain $Domain" })." -ForegroundColor Red; return }
+$casDomains = @($casList | Select-Object -ExpandProperty domain -Unique)
+if ($casDomains.Count -gt 1) { Write-Host "FATAL: CAS in multiple domains ($($casDomains -join ', ')). Re-run with -Domain." -ForegroundColor Red; return }
+$cas = $casList[0]
+$dom = $cas.domain
 
-    $session = $null
-    try {
-        $session = New-PSSession -VMName $vm -Credential $Credential -ErrorAction Stop
-    }
-    catch {
-        Write-Warning "[$vm] Could not open PowerShell Direct session: $($_.Exception.Message)"
-        continue
-    }
+$priList = @($allVms | Where-Object { $_.role -eq 'Primary' -and $_.domain -eq $dom -and $_.parentSiteCode -eq $cas.siteCode })
+if ($priList.Count -eq 0) { Write-Host "FATAL: no child Primary under CAS $($cas.vmName) (site $($cas.siteCode))." -ForegroundColor Red; return }
+if ($PrimaryName) { $priList = @($priList | Where-Object { $_.vmName -eq $PrimaryName }) }
+if ($priList.Count -eq 0) { Write-Host "FATAL: -PrimaryName '$PrimaryName' did not match." -ForegroundColor Red; return }
+if ($priList.Count -gt 1) { Write-Host "FATAL: multiple child primaries ($($priList.vmName -join ', ')). Re-run with -PrimaryName <one>." -ForegroundColor Red; return }
+$pri = $priList[0]
 
-    try {
-        # Resolve the CM Logs directory from the guest registry (most reliable across installs).
-        $logDir = Invoke-Command -Session $session -ScriptBlock {
-            $candidates = @()
-            try {
-                $instDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop).'Installation Directory'
-                if ($instDir) { $candidates += (Join-Path $instDir 'Logs') }
-            }
-            catch {}
-            $candidates += @('E:\ConfigMgr\Logs', 'D:\Program Files\Microsoft Configuration Manager\Logs', 'C:\Program Files\Microsoft Configuration Manager\Logs')
-            foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
-            return $null
-        }
+$siteCodes = @($cas.siteCode, $pri.siteCode)
+$siteSystems = @($allVms | Where-Object { $_.role -in @('SiteSystem', 'DPMP') -and $_.domain -eq $dom -and ($_.siteCode -in $siteCodes -or $_.parentSiteCode -in $siteCodes) })
 
-        if (-not $logDir) {
-            Write-Warning "[$vm] Could not locate CM Logs directory (is this a site server?)."
-        }
-        else {
-            Write-Host "[$vm] CM Logs dir: $logDir"
-            foreach ($name in $cmLogNames) {
-                # match name.log, name.lo_, and any name-<timestamp>.log rollovers
-                $remoteGlob = Join-Path $logDir ("$name*.lo*")
-                $files = Invoke-Command -Session $session -ScriptBlock {
-                    param($g) Get-ChildItem -Path $g -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-                } -ArgumentList $remoteGlob
-                foreach ($f in $files) {
-                    try {
-                        Copy-Item -FromSession $session -Path $f -Destination $vmDest -Force
-                        Write-Host "  pulled $(Split-Path $f -Leaf)"
-                    }
-                    catch { Write-Warning "  [$vm] failed to copy $f : $($_.Exception.Message)" }
-                }
-            }
-        }
-
-        # ConfigMgrSetup.log (+rollover) lives at the system-drive root, not the Logs dir.
-        $setupFiles = Invoke-Command -Session $session -ScriptBlock {
-            Get-ChildItem -Path 'C:\ConfigMgrSetup.lo*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-        }
-        foreach ($f in $setupFiles) {
-            try {
-                Copy-Item -FromSession $session -Path $f -Destination $vmDest -Force
-                Write-Host "  pulled $(Split-Path $f -Leaf)"
-            }
-            catch { Write-Warning "  [$vm] failed to copy $f : $($_.Exception.Message)" }
-        }
-
-        # Live SQL snapshot of replication state (read-only). Best-effort.
-        $sqlSnap = Invoke-Command -Session $session -ScriptBlock {
-            try {
-                $cn = New-Object System.Data.SqlClient.SqlConnection "Server=localhost;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
-                $cn.Open()
-                $dbCmd = $cn.CreateCommand()
-                $dbCmd.CommandText = "SELECT TOP 1 name FROM sys.databases WHERE name LIKE 'CM[_]%' ORDER BY name"
-                $db = $dbCmd.ExecuteScalar()
-                if (-not $db) { return "No CM_ database found on localhost." }
-                $cn.ChangeDatabase($db)
-                $out = @("DB: $db", "")
-                $q1 = $cn.CreateCommand()
-                $q1.CommandText = "SELECT SiteCode, SiteStatus FROM ServerData"
-                $r = $q1.ExecuteReader()
-                $out += "ServerData (SiteStatus: 115=ReplInitializing 120=ReplMaintenance 125=ReplActive):"
-                while ($r.Read()) { $out += ("  {0} = {1}" -f $r['SiteCode'], $r['SiteStatus']) }
-                $r.Close()
-                $q2 = $cn.CreateCommand()
-                $q2.CommandText = "SELECT ReplicationGroup, ReplicationPattern, InitializationStatus, SyncStatus FROM vReplicationData ORDER BY InitializationStatus, ReplicationGroup"
-                $r2 = $q2.ExecuteReader()
-                $out += "", "vReplicationData (InitializationStatus: lower = not yet active):"
-                while ($r2.Read()) { $out += ("  {0,-32} {1,-8} init={2} sync={3}" -f $r2['ReplicationGroup'], $r2['ReplicationPattern'], $r2['InitializationStatus'], $r2['SyncStatus']) }
-                $r2.Close()
-                $cn.Close()
-                return ($out -join "`r`n")
-            }
-            catch { return "SQL snapshot failed: $($_.Exception.Message)" }
-        }
-        $sqlSnap | Out-File -FilePath (Join-Path $vmDest 'replication-state-snapshot.txt') -Encoding utf8
-        Write-Host "  wrote replication-state-snapshot.txt"
-    }
-    finally {
-        if ($session) { Remove-PSSession $session }
-    }
-}
-
+$logTargets = @($cas, $pri) + $siteSystems | Sort-Object vmName -Unique
+Write-Host "Domain  : $dom" -ForegroundColor Gray
+Write-Host "CAS     : $($cas.vmName) (site $($cas.siteCode))  SQL: $((Resolve-SqlVm $cas $allVms).vmName)" -ForegroundColor Gray
+Write-Host "Primary : $($pri.vmName) (site $($pri.siteCode))  SQL: $((Resolve-SqlVm $pri $allVms).vmName)" -ForegroundColor Gray
+if ($siteSystems.Count) { Write-Host "SiteSys : $($siteSystems.vmName -join ', ')" -ForegroundColor Gray }
 Write-Host ""
-Write-Host "Done. Logs are under: $destRoot" -ForegroundColor Green
-Write-Host "Tell the agent to read vmbuild\logs\drs-investigation\CT7-PS1SITE\rcmctrl.log" -ForegroundColor Green
+
+# ---- in-guest replication-state snapshot (runs on the SQL VM) ----
+$sqlSnapBlock = {
+    param($siteCode)
+    $out = New-Object System.Collections.Generic.List[string]
+    function Q {
+        param($db, $q, $title)
+        $out.Add("---- $title ----")
+        try {
+            $cs = "Server=localhost;Initial Catalog=$db;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+            $cn = New-Object System.Data.SqlClient.SqlConnection $cs
+            $cn.Open()
+            $cmd = $cn.CreateCommand(); $cmd.CommandText = $q; $cmd.CommandTimeout = 60
+            $r = $cmd.ExecuteReader()
+            while ($r.Read()) {
+                $line = @()
+                for ($i = 0; $i -lt $r.FieldCount; $i++) { $line += ("{0}={1}" -f $r.GetName($i), $r.GetValue($i)) }
+                $out.Add('  ' + ($line -join '  '))
+            }
+            $r.Close(); $cn.Close()
+        }
+        catch { $out.Add('  ERROR: ' + $_.Exception.Message) }
+    }
+    $db = $null
+    try {
+        $cs = "Server=localhost;Initial Catalog=master;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+        $cn = New-Object System.Data.SqlClient.SqlConnection $cs; $cn.Open()
+        $cmd = $cn.CreateCommand(); $cmd.CommandText = "SELECT TOP 1 name FROM sys.databases WHERE name = 'CM_$siteCode' OR name LIKE 'CM[_]%' ORDER BY CASE WHEN name='CM_$siteCode' THEN 0 ELSE 1 END, name"
+        $db = $cmd.ExecuteScalar(); $cn.Close()
+    }
+    catch { $out.Add("Could not resolve CM database: $($_.Exception.Message)") }
+    if (-not $db) { return $out }
+    $out.Add("CM database: $db")
+    Q $db "SELECT SiteCode, SiteStatus, SiteServerName FROM ServerData ORDER BY SiteCode" "ServerData (SiteStatus per site)"
+    Q $db "SELECT ReplicationGroup, ReplicationPattern FROM ReplicationData ORDER BY ReplicationPattern, ReplicationGroup" "ReplicationData (groups)"
+    Q $db "SELECT TOP 50 ReplicationGroup, LastSendStartTime, LastSendEndTime FROM DRS_MessageActivity_Send ORDER BY LastSendStartTime DESC" "DRS_MessageActivity_Send (recent sends)"
+    return $out
+}
+
+$logCollectBlock = {
+    param($logNames)
+    $dir = $null
+    try { $inst = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop).'Installation Directory'; if ($inst) { $dir = Join-Path $inst 'Logs' } } catch {}
+    if (-not $dir) { foreach ($c in @('E:\ConfigMgr\Logs', 'D:\Program Files\Microsoft Configuration Manager\Logs', 'C:\Program Files\Microsoft Configuration Manager\Logs')) { if (Test-Path $c) { $dir = $c; break } } }
+    $found = @()
+    if ($dir) { foreach ($n in $logNames) { $p = Join-Path $dir $n; if (Test-Path $p) { $found += $p } } }
+    # ConfigMgrSetup.log lives at the system drive root
+    foreach ($c in @('C:\ConfigMgrSetup.log', 'D:\ConfigMgrSetup.log', 'E:\ConfigMgrSetup.log')) { if (Test-Path $c) { $found += $c } }
+    return [pscustomobject]@{ LogDir = $dir; Files = $found }
+}
+
+foreach ($vm in $logTargets) {
+    Write-Host "==== $($vm.vmName) (role $($vm.role), site $($vm.siteCode)) ====" -ForegroundColor Yellow
+    $dest = Join-Path $destRoot $vm.vmName
+    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+
+    $session = Get-VmSession -VmName $vm.vmName -VmDomainName $dom
+    if (-not $session) { Write-Host "  could not open a session (is it running?) - skipping" -ForegroundColor Red; continue }
+
+    $info = Invoke-Command -Session $session -ScriptBlock $logCollectBlock -ArgumentList (, $logNames)
+    Write-Host "  log dir: $($info.LogDir)" -ForegroundColor DarkGray
+    foreach ($f in $info.Files) {
+        try { Copy-Item -FromSession $session -Path $f -Destination $dest -Force; Write-Host "  pulled $(Split-Path $f -Leaf)" -ForegroundColor Gray }
+        catch { Write-Host "  FAILED $(Split-Path $f -Leaf): $($_.Exception.Message)" -ForegroundColor Red }
+    }
+
+    if ($TailLines -gt 0) {
+        $tail = Invoke-Command -Session $session -ScriptBlock { param($d, $n) $f = Join-Path $d 'rcmctrl.log'; if (Test-Path $f) { Get-Content $f -Tail $n } else { @('(no rcmctrl.log)') } } -ArgumentList $info.LogDir, $TailLines
+        Write-Host "  --- rcmctrl tail ($TailLines) ---" -ForegroundColor DarkGray
+        $tail | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    }
+
+    # SQL snapshot from this site's SQL host
+    if ($vm.role -in @('CAS', 'Primary')) {
+        $sqlVm = Resolve-SqlVm -SiteVm $vm -AllVms $allVms
+        $sqlSession = if ($sqlVm.vmName -eq $vm.vmName) { $session } else { Get-VmSession -VmName $sqlVm.vmName -VmDomainName $dom }
+        if ($sqlSession) {
+            Write-Host "  SQL snapshot from $($sqlVm.vmName)..." -ForegroundColor DarkGray
+            $snap = Invoke-Command -Session $sqlSession -ScriptBlock $sqlSnapBlock -ArgumentList $vm.siteCode
+            $snapPath = Join-Path $dest "replication-state-$stamp.txt"
+            Set-Content -Path $snapPath -Value $snap -Encoding utf8
+            Write-Host "  wrote $(Split-Path $snapPath -Leaf)" -ForegroundColor Gray
+        }
+        else { Write-Host "  could not open SQL session to $($sqlVm.vmName)" -ForegroundColor Red }
+    }
+    Write-Host ""
+}
+
+Write-Host "Done. Logs under: $destRoot" -ForegroundColor Green
