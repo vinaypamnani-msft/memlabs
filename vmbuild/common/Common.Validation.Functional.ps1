@@ -4876,9 +4876,35 @@ function Test-MaintenanceTasks {
         return $results
     }
 
-    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-Maintenance-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 300
+    # The scheduled-task query is fast (~1.5s) and idempotent, but the guest's
+    # PSDirect/job host can transiently stall on a freshly-built VM and never
+    # return, leaving the -AsJob call to burn the full timeout and report a hard
+    # FAIL with no output ('ScriptBlock failed (no error detail returned)').
+    # Observed on a Win11 client whose session hung for the full 300s right after
+    # a prior Phase 11 check (-ActivationCheck) had also timed out -- a single
+    # transient stall on this trivial check otherwise fails the whole VM (and the
+    # build). Retry the probe a few times on a transient PSDirect failure (no
+    # valid Passed result) with a shorter per-attempt timeout before surfacing it.
+    $result = $null
+    $maxAttempts = 3
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
+            -ScriptBlock $scriptBlock -DisplayName "Phase11-Maintenance-Test" -SuppressLog `
+            -AsJob -TimeoutSeconds 120
+
+        $hasValidResult = $result -and $result.ScriptBlockOutput -is [hashtable] -and
+            $result.ScriptBlockOutput.ContainsKey('Passed')
+        $transientFailure = (-not $result) -or ($result.ScriptBlockFailed -and -not $hasValidResult)
+        if (-not $transientFailure) { break }
+
+        if ($attempt -lt $maxAttempts) {
+            Write-Log "[Phase $Phase] $VMName [Maintenance]: PSDirect probe returned no result (attempt $attempt/$maxAttempts, likely a transient guest stall); retrying after backoff" -Warning -LogOnly
+            Start-Sleep -Seconds (5 * $attempt)
+        }
+        else {
+            Write-Log "[Phase $Phase] $VMName [Maintenance]: PSDirect probe still returning no result after $maxAttempts attempts; reporting failure" -Warning -LogOnly
+        }
+    }
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'Maintenance' -Result $result)
 }
