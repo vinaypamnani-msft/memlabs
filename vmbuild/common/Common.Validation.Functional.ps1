@@ -6922,15 +6922,73 @@ function Test-CMSiteWideFunctionality {
                 }
 
                 # ---- Test C: last sync result + UpdateCount (informational) ----
+                # The taxonomy (Test A) only ever lands via the FIRST sync
+                # (cab import or full MU categories sync), so TaxonomyCats >= 100
+                # is proof the initial sync ran -- regardless of whether the
+                # subscription's GetSynchronizationHistory() has a retained row
+                # yet (it can be empty right after install, or pruned). And a
+                # SyncState of Running means a sync is actively progressing
+                # right now, which is healthy, not a failure. Only treat a
+                # genuinely-never-synced, idle WSUS as a WARN.
                 $ucBit = "UpdateCount=$($wStatus.UpdateCount)"
+                $initialSyncDone = ($taxCats -is [int] -and $taxCats -ge 100)
+                $syncRunning = ($syncState -eq 'Running')
                 if ($lastResult -eq 'Succeeded') {
                     $results.Details.Add("OK: WSUS last sync Succeeded [LastSync=$lastSyncTime; SyncState=$syncState; $ucBit]")
+                }
+                elseif ($syncRunning) {
+                    # Active sync in progress -- working, don't warn. Note
+                    # whether this is the (already-completed) initial taxonomy
+                    # sync feeding the update sync that's now running.
+                    $phaseBit = if ($initialSyncDone) { 'update sync in progress (initial categories sync already completed)' } else { 'initial sync in progress' }
+                    $results.Details.Add("OK: WSUS sync running [$phaseBit; SyncState=$syncState; $ucBit]")
                 }
                 elseif ($lastResult) {
                     $results.Details.Add("WARN: WSUS last sync Result=$lastResult [LastSync=$lastSyncTime; SyncState=$syncState; $ucBit]")
                 }
+                elseif ($initialSyncDone) {
+                    # No retained sync-history row, but the taxonomy is fully
+                    # populated -- the initial categories sync demonstrably ran.
+                    # The update sync (dbo.Update rows) may simply not have run
+                    # yet for a narrow subscription; that's not a failure.
+                    $results.Details.Add("OK: WSUS initial sync completed (taxonomy populated) [TaxonomyCats=$taxCats; SyncState=$syncState; $ucBit] - no retained sync-history row yet; update sync may not have run for this subscription")
+                }
                 else {
-                    $results.Details.Add("WARN: WSUS has no sync history [SyncState=$syncState; $ucBit] - first sync has not run")
+                    $results.Details.Add("WARN: WSUS has no sync history and taxonomy not populated [SyncState=$syncState; $ucBit] - first sync has not run")
+                }
+
+                # ---- Kick a sync when subscribed but 0 updates and idle ----
+                # If the subscription has products/classifications set but the
+                # update catalog (dbo.Update / UpdateCount) is still empty and
+                # nothing is currently syncing, the post-subscription update
+                # sync simply never ran (or ran before the subscription was
+                # pushed). Start one here so the lab gets real updates without
+                # waiting for the next scheduled sync.
+                $haveSubscription =
+                    (($subCats -is [int] -and $subCats -gt 0) -and ($subClas -is [int] -and $subClas -gt 0)) -or
+                    (($cmProdCount -is [int] -and $cmProdCount -gt 0) -and ($cmClassCount -is [int] -and $cmClassCount -gt 0))
+                if ($haveSubscription -and ($wStatus.UpdateCount -eq 0) -and (-not $syncRunning)) {
+                    $kicked = $false
+                    # Prefer the CM cmdlet so WCM stays the source of truth;
+                    # fall back to the WSUS subscription API if unavailable.
+                    try {
+                        if (Get-Command Sync-CMSoftwareUpdate -ErrorAction SilentlyContinue) {
+                            Sync-CMSoftwareUpdate -FullSync $false -ErrorAction Stop
+                            $kicked = $true
+                            $results.Details.Add("OK: subscribed but UpdateCount=0 and idle - started a software update sync via Sync-CMSoftwareUpdate")
+                        }
+                    } catch {
+                        $results.Details.Add("WARN: Sync-CMSoftwareUpdate failed to start a sync [$($_.Exception.Message)] - will try the WSUS subscription API")
+                    }
+                    if (-not $kicked) {
+                        try {
+                            $sub.StartSynchronization()
+                            $kicked = $true
+                            $results.Details.Add("OK: subscribed but UpdateCount=0 and idle - started a WSUS subscription sync (StartSynchronization)")
+                        } catch {
+                            $results.Details.Add("WARN: subscribed but UpdateCount=0 and idle - failed to start a sync [$($_.Exception.Message)]")
+                        }
+                    }
                 }
 
                 # Append baseline-cab provenance when an import was used.
