@@ -60,6 +60,28 @@ function Test-VmFunctionality {
     $testsPassed = $true
     $vmIsLinux = Test-VmIsLinux -Vm $CurrentItem
 
+    # Early PSDirect liveness gate + auto-recovery. A guest whose PSDirect
+    # channel is up but whose command/job host is wedged would otherwise hang
+    # each sub-check on its own timeout, only reaching the Maintenance check's
+    # reboot escalation after burning minutes -- and a fully wedged channel that
+    # blocks a SYNCHRONOUS probe (e.g. the uptime gate below) could hang the whole
+    # VM job indefinitely. Probe once up-front with -AsJob (bounded) +
+    # -RebootIfUnresponsive: a genuinely wedged VM is detected and rebooted in ONE
+    # fast step before the full check chain runs. On a healthy VM this is a ~1s
+    # no-op. Skip Linux and powered-off / non-PSDirect roles.
+    if (-not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "PSDirect liveness check"
+        $liveGate = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock { $env:COMPUTERNAME } -DisplayName "Phase11-LivenessGate" `
+            -SuppressLog -AsJob -TimeoutSeconds 60 -RebootIfUnresponsive
+        if ($liveGate -and $liveGate.Rebooted) {
+            Write-Log "[Phase $Phase] $VMName [$role]: PSDirect channel was wedged; VM rebooted to recover before validation" -Warning
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$role]: WARN - PSDirect channel was wedged; rebooted VM to recover before validating"; Level = 'Warning' })
+            # Let the freshly-rebooted guest bring AD / secure channel back up.
+            Start-Sleep -Seconds 30
+        }
+    }
+
     # Post-reboot settle gate: when Phase 11 is run standalone (-startPhase 11)
     # the VMs are freshly rebooted and many subsystems (AD replication, the
     # failover cluster, the SMS provider host, secure channels) need a couple of
@@ -73,7 +95,7 @@ function Test-VmFunctionality {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Checking uptime (settle gate)"
         $uptimeResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock { (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime | Select-Object -ExpandProperty TotalMinutes } `
-            -DisplayName "Phase11-UptimeGate" -SuppressLog -SessionMaxRetries 3
+            -DisplayName "Phase11-UptimeGate" -SuppressLog -AsJob -TimeoutSeconds 60
         if ($uptimeResult -and -not $uptimeResult.ScriptBlockFailed -and $null -ne $uptimeResult.ScriptBlockOutput) {
             $uptimeMin = [double]($uptimeResult.ScriptBlockOutput | Select-Object -First 1)
             if ($uptimeMin -lt $minUptimeMinutes) {
