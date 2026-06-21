@@ -1665,6 +1665,22 @@ function Test-Configuration {
                     if ($vm.sqlVersion -match '201[0-6]') {
                         Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] SQLAO does not support $($vm.sqlVersion). Use SQL Server 2017 or later." -ReturnObject $return -Failure
                     }
+                    # Both replicas of a SQLAO pair must sit on the SAME domain network.
+                    # The failover cluster forms a single client-facing cluster IP + AG
+                    # listener IP on one subnet; if the two nodes live on different
+                    # networks, no single IP is hostable by both and New-Cluster fails
+                    # with "no appropriate ClusterAndClient network was found to host it".
+                    # Only the primary node carries OtherNode, so check from there.
+                    if ($vm.OtherNode) {
+                        $otherVm = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $vm.OtherNode }
+                        if ($otherVm) {
+                            $thisNet  = if ($vm.network) { $vm.network } else { $ConfigObject.vmOptions.network }
+                            $otherNet = if ($otherVm.network) { $otherVm.network } else { $ConfigObject.vmOptions.network }
+                            if ($thisNet -ne $otherNet) {
+                                Add-ValidationMessage -Message "SQL Validation: SQLAO nodes [$($vm.vmName)] ($thisNet) and [$($vm.OtherNode)] ($otherNet) are on different networks. Both replicas must share one network so the cluster/AG IP is hostable by both." -ReturnObject $return -Failure
+                            }
+                        }
+                    }
                 }
             }
 

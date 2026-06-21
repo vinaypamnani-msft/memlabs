@@ -4733,6 +4733,30 @@ class JoinClusterByIP {
             }
 
             if ($_Role -eq 'Create') {
+                # Preflight: the static cluster IP must sit on a local NIC that owns
+                # that subnet. WSFC only assigns the ClusterAndClient role to a
+                # gateway-bearing network, so a cluster IP that matches no local NIC
+                # (e.g. allocated from the wrong subnet on a multi-network lab) fails
+                # New-Cluster with the opaque "no appropriate ClusterAndClient network
+                # was found to host it" and then retries for 30+ min before the
+                # orchestrator force-restarts the VM. Fail FAST here with an actionable
+                # message naming the bad IP, the node's actual NICs, and the expected
+                # subnet -- but only when the cluster doesn't already exist (rerun).
+                $_localCluster = Get-Cluster -ErrorAction SilentlyContinue -Verbose:$false
+                if (-not ($_localCluster -and $_localCluster.Name -eq $_ClusterName)) {
+                    $_clusterPrefix = ($_ClusterIP.Split('.')[0..2] -join '.') + '.'
+                    $_localV4 = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                        Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' })
+                    $_hostingNic = $_localV4 | Where-Object { $_.IPAddress -like "$_clusterPrefix*" } | Select-Object -First 1
+                    if (-not $_hostingNic) {
+                        $_have = (($_localV4 | ForEach-Object { $_.IPAddress }) | Sort-Object -Unique) -join ', '
+                        throw "JoinClusterByIP preflight FAILED: cluster IP '$_ClusterIP' is not on any local subnet of '$_NodeName' (node IPv4: [$_have]). The cluster/AG IP must live on this node's own domain subnet ($_clusterPrefix*). This is a config/IP-allocation error -- New-Cluster would fail with 'no appropriate ClusterAndClient network was found to host it'. Remove + re-add this SQLAO node (or correct its ClusterIPAddress/AGIPAddress) so the IP is allocated from the node's network."
+                    }
+                    $_gw = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $_hostingNic.InterfaceIndex -ErrorAction SilentlyContinue
+                    if (-not $_gw) {
+                        Write-Status "WARNING: NIC hosting $_clusterPrefix* (ifIndex $($_hostingNic.InterfaceIndex), IP $($_hostingNic.IPAddress)) has no default gateway; WSFC may classify it Cluster-only and reject the cluster IP. Proceeding -- New-Cluster will report the authoritative result."
+                    }
+                }
                 Write-Status "Creating cluster '$_ClusterName' on '$_NodeName' with IP $_ClusterIP"
                 try {
                     New-Cluster -Name $_ClusterName -Node $_NodeName -StaticAddress $_ClusterIP -NoStorage -Force -ErrorAction Stop -WarningAction SilentlyContinue -Verbose:$false
