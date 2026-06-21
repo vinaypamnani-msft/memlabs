@@ -3734,6 +3734,109 @@ $global:VM_Config = {
             $DSC_CreateConfig = $DSC_CreateMultiConfig
         }
 
+        # Phase 5 SQLAO DNS preflight (deadlock-breaker for already-poisoned nodes).
+        # A SQLAO node stranded by a PRIOR run's DNS scrub (domain NIC registration
+        # disabled -> no A record on the DC) can't be reached by the DC's DSC push,
+        # which then dead-waits ("No DSC status after 3 min"). The post-complete
+        # scrubDns self-heal can't rescue it because it only runs AFTER Phase 5
+        # succeeds -- which can't happen while the node is unresolvable. Break that
+        # deadlock here, BEFORE the push: cheaply check (host-side, against the DC)
+        # whether the node's own A record is correctly published; only when it's
+        # missing/wrong/VIP-polluted do we invoke the in-guest SkipAsSource-aware
+        # re-register. No-op (single DC DNS query) on healthy/fresh nodes.
+        if ($currentItem.role -eq 'SQLAO' -and $skipStartDsc) {
+            $pfFqdn = "$($currentItem.vmName).$($deployConfig.vmOptions.domainName)"
+            $pfOwnIp = $currentItem.AssignedIP
+            if (-not $pfOwnIp) { $pfOwnIp = $currentItem.LastKnownIP }
+            $pfVips = @()
+            foreach ($vp in @('ClusterIPAddress', 'AGIPAddress')) {
+                if ($currentItem.$vp) { $pfVips += ($currentItem.$vp -replace '/\d+$', '') }
+            }
+            # The DC is always on the domain DEFAULT network at .1.
+            $pfDcIp = ($deployConfig.vmOptions.network -replace '\.\d+$', '.1')
+            $needsDnsFix = $false
+            $pfResolvedIps = @()
+            try {
+                $pfResolved = @(Resolve-DnsName -Name $pfFqdn -Server $pfDcIp -Type A -DnsOnly -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq 'A' })
+                $pfResolvedIps = @($pfResolved.IPAddress)
+                if ($pfOwnIp) {
+                    if ($pfResolvedIps -notcontains $pfOwnIp) { $needsDnsFix = $true }
+                }
+                elseif (-not $pfResolvedIps.Count) {
+                    $needsDnsFix = $true
+                }
+                # A cluster VIP published under the node's own name is also wrong.
+                foreach ($v in $pfVips) { if ($pfResolvedIps -contains $v) { $needsDnsFix = $true } }
+            }
+            catch {
+                $needsDnsFix = $true
+            }
+
+            if (-not $needsDnsFix) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS preflight: node A record OK on DC $pfDcIp ($($pfResolvedIps -join ',')); no action." -LogOnly
+            }
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS preflight: node not correctly published on DC $pfDcIp [resolved: $($pfResolvedIps -join ',')]; re-registering its own IP." -Warning
+                $preflightFix = {
+                    param($nodeSubnet, $nodeOwnIp, $clusterVips, $dcIp, $fqdn)
+                    $out = @()
+                    $vipSet = @()
+                    if ($clusterVips) { $vipSet = @($clusterVips | Where-Object { $_ }) }
+                    # Find the domain NIC (the one carrying this node's own subnet IP).
+                    $domainAdapter = $null
+                    foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
+                        $ips = @((Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress)
+                        if ($ips | Where-Object { $_ -like "$nodeSubnet*" }) { $domainAdapter = $adapter; break }
+                    }
+                    if (-not $domainAdapter) { return "no domain NIC on $nodeSubnet*; skipped" }
+                    # Mark cluster VIPs SkipAsSource so registerdns publishes ONLY the
+                    # node's own IP under its name (never a cluster core / AG listener VIP).
+                    foreach ($addr in (Get-NetIPAddress -InterfaceIndex $domainAdapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
+                        if (-not ($addr.IPAddress -like "$nodeSubnet*")) { continue }
+                        if ($nodeOwnIp -and $addr.IPAddress -eq $nodeOwnIp) {
+                            if ($addr.SkipAsSource) { Set-NetIPAddress -InterfaceIndex $addr.InterfaceIndex -IPAddress $addr.IPAddress -SkipAsSource $false -ErrorAction SilentlyContinue }
+                            continue
+                        }
+                        $isVip = $false
+                        if ($nodeOwnIp) { $isVip = $true }
+                        elseif ($vipSet -contains $addr.IPAddress) { $isVip = $true }
+                        elseif ($addr.PrefixOrigin -eq 'Manual') { $isVip = $true }
+                        if ($isVip -and -not $addr.SkipAsSource) {
+                            Set-NetIPAddress -InterfaceIndex $addr.InterfaceIndex -IPAddress $addr.IPAddress -SkipAsSource $true -ErrorAction SilentlyContinue
+                            $out += "marked VIP $($addr.IPAddress) SkipAsSource"
+                        }
+                    }
+                    Set-DnsClient -InterfaceIndex $domainAdapter.InterfaceIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue
+                    & ipconfig /registerdns 2>&1 | Out-Null
+                    $out += "enabled reg + registerdns on '$($domainAdapter.InterfaceAlias)'"
+                    # Wait (up to ~30s) for the DC to publish the node's own A record,
+                    # so the DC's subsequent DSC push can resolve the node.
+                    if ($nodeOwnIp -and $dcIp -and $fqdn) {
+                        $published = $false
+                        for ($i = 0; $i -lt 10; $i++) {
+                            Start-Sleep -Seconds 3
+                            $r = @(Resolve-DnsName -Name $fqdn -Server $dcIp -Type A -DnsOnly -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq 'A' })
+                            if (@($r.IPAddress) -contains $nodeOwnIp) { $published = $true; break }
+                        }
+                        if ($published) { $out += "A record $nodeOwnIp visible on DC" }
+                        else { $out += "A record not visible after 30s (registration submitted)" }
+                    }
+                    return ($out -join '; ')
+                }
+                $pfNodeNet = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
+                $pfNodeSubnet = ($pfNodeNet -replace '\.\d+$', '.')
+                $pf = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName `
+                    -ScriptBlock $preflightFix -ArgumentList @($pfNodeSubnet, $pfOwnIp, $pfVips, $pfDcIp, $pfFqdn) `
+                    -DisplayName "Ensure node DNS published"
+                if ($pf.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS preflight fix failed: $($pf.ScriptBlockOutput)" -Warning
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS preflight fix: $($pf.ScriptBlockOutput)"
+                }
+            }
+        }
+
         if ($skipStartDsc) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on the DC."
             Write-Progress2 $Activity -Status "Waiting for DC to start DSC" -percentcomplete 75 -force
