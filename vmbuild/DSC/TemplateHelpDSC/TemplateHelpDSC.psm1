@@ -7013,33 +7013,52 @@ class DisableClusterNicDnsRegistration {
         }
 
         foreach ($adapter in $clusterAdapters) {
-            Write-Status "Stripping DNS capability from heartbeat adapter '$($adapter.Name)' ($_subnet*)"
-            # Three-layer prevention: even if one setting is reset by the cluster
-            # service on failover/reboot, the other two make registration impossible.
+            # Each mutation below is guarded with a cheap "is it already correct?"
+            # read so a re-run (Test() returns $false by design) is a fast no-op
+            # and -- importantly -- does NOT needlessly re-bind / reset a live
+            # heartbeat NIC every time. Set() is still fully self-correcting.
+            $changed = $false
+
+            # Three-layer DNS-registration prevention:
             #  1. RegisterThisConnectionsAddress = $false  (preference flag)
             #  2. No DNS servers  (nowhere to send the update)
             #  3. No DNS suffix   (no zone to register in)
-            Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction Stop
-            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses @() -ErrorAction SilentlyContinue
+            $dnsCli = Get-DnsClient -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue
+            if ((-not $dnsCli) -or $dnsCli.RegisterThisConnectionsAddress -or ($dnsCli.ConnectionSpecificSuffix -ne '')) {
+                Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction Stop
+                $changed = $true
+            }
+            $curServers = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+            if ($curServers.Count -gt 0) {
+                Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses @() -ErrorAction SilentlyContinue
+                $changed = $true
+            }
 
-            # Set higher metric so the domain NIC is always preferred for outbound traffic.
-            Set-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -InterfaceMetric 20 -ErrorAction SilentlyContinue
+            # Higher metric so the domain NIC is always preferred for outbound traffic.
+            $curMetric = (Get-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).InterfaceMetric
+            if ($curMetric -ne 20) {
+                Set-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -InterfaceMetric 20 -ErrorAction SilentlyContinue
+                $changed = $true
+            }
 
             # Disable NetBIOS over TCP/IP on the cluster NIC (2 = Disable).
             $wmiNic = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex = $($adapter.InterfaceIndex)" -ErrorAction SilentlyContinue
-            if ($wmiNic) {
+            if ($wmiNic -and $wmiNic.TcpipNetbiosOptions -ne 2) {
                 $wmiNic.SetTcpipNetbios(2) | Out-Null
+                $changed = $true
             }
 
-            # Disable IPv6 on the cluster NIC to prevent AAAA record registration.
-            Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
-
-            # Disable LLTD (Link-Layer Topology Discovery) on the cluster NIC.
-            # The responder (ms_rspndr) lets the heartbeat subnet appear in
-            # network topology maps; the mapper (ms_lltdio) probes for peers.
-            # Neither serves any purpose on a private cluster heartbeat network.
-            Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID ms_lltdio -ErrorAction SilentlyContinue
-            Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID ms_rspndr -ErrorAction SilentlyContinue
+            # Disable IPv6 (AAAA registration), LLTD mapper (ms_lltdio) + responder
+            # (ms_rspndr) on the cluster NIC. Disable-NetAdapterBinding re-binds the
+            # adapter (slow + briefly disruptive), so only touch a binding that is
+            # actually still enabled.
+            foreach ($comp in @('ms_tcpip6', 'ms_lltdio', 'ms_rspndr')) {
+                $binding = Get-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID $comp -ErrorAction SilentlyContinue
+                if ($binding -and $binding.Enabled) {
+                    Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID $comp -ErrorAction SilentlyContinue
+                    $changed = $true
+                }
+            }
 
             # Remove default gateway from cluster NIC -- heartbeat NICs should never
             # route externally. DHCP may have handed one out before the scope was fixed.
@@ -7047,6 +7066,7 @@ class DisableClusterNicDnsRegistration {
             if ($gateway) {
                 Remove-NetRoute -InterfaceIndex $adapter.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue
                 Write-Status "Removed default gateway from cluster adapter '$($adapter.Name)'"
+                $changed = $true
             }
 
             # Rename to something descriptive if still using a generic Windows name.
@@ -7054,16 +7074,27 @@ class DisableClusterNicDnsRegistration {
                 try {
                     Rename-NetAdapter -InputObject $adapter -NewName 'Cluster' -ErrorAction Stop
                     Write-Status "Renamed adapter '$($adapter.Name)' -> 'Cluster'"
+                    $changed = $true
                 }
                 catch {
                     Write-Verbose "Could not rename adapter '$($adapter.Name)': $_"
                 }
             }
+
+            if ($changed) {
+                Write-Status "Stripped DNS capability from heartbeat adapter '$($adapter.Name)' ($_subnet*)"
+            }
+            else {
+                Write-Status "Heartbeat adapter '$($adapter.Name)' already configured ($_subnet*)"
+            }
         }
 
         # Also rename the domain adapter for consistency and ensure low metric.
         foreach ($adapter in $domainAdapters) {
-            Set-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -InterfaceMetric 10 -ErrorAction SilentlyContinue
+            $curMetric = (Get-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).InterfaceMetric
+            if ($curMetric -ne 10) {
+                Set-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -InterfaceMetric 10 -ErrorAction SilentlyContinue
+            }
 
             if ($adapter.Name -match '^Ethernet(\s\d+)?$') {
                 try {
@@ -7091,11 +7122,27 @@ class DisableClusterNicDnsRegistration {
             $isClusterName = $iface.InterfaceAlias -like '*Cluster*' -or $iface.InterfaceAlias -like '*isatap*'
 
             if ($isClusterSubnet -or $isClusterName) {
-                Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction SilentlyContinue
-                Set-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -ServerAddresses @() -ErrorAction SilentlyContinue
-                Disable-NetAdapterBinding -InterfaceAlias $iface.InterfaceAlias -ComponentID ms_lltdio -ErrorAction SilentlyContinue
-                Disable-NetAdapterBinding -InterfaceAlias $iface.InterfaceAlias -ComponentID ms_rspndr -ErrorAction SilentlyContinue
-                Write-Status "Stripped DNS capability from virtual adapter '$($iface.InterfaceAlias)' (ifIndex $($iface.ifIndex))"
+                $vChanged = $false
+                $vDns = Get-DnsClient -InterfaceIndex $iface.ifIndex -ErrorAction SilentlyContinue
+                if ((-not $vDns) -or $vDns.RegisterThisConnectionsAddress -or ($vDns.ConnectionSpecificSuffix -ne '')) {
+                    Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction SilentlyContinue
+                    $vChanged = $true
+                }
+                $vServers = @((Get-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+                if ($vServers.Count -gt 0) {
+                    Set-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -ServerAddresses @() -ErrorAction SilentlyContinue
+                    $vChanged = $true
+                }
+                foreach ($comp in @('ms_lltdio', 'ms_rspndr')) {
+                    $vb = Get-NetAdapterBinding -InterfaceAlias $iface.InterfaceAlias -ComponentID $comp -ErrorAction SilentlyContinue
+                    if ($vb -and $vb.Enabled) {
+                        Disable-NetAdapterBinding -InterfaceAlias $iface.InterfaceAlias -ComponentID $comp -ErrorAction SilentlyContinue
+                        $vChanged = $true
+                    }
+                }
+                if ($vChanged) {
+                    Write-Status "Stripped DNS capability from virtual adapter '$($iface.InterfaceAlias)' (ifIndex $($iface.ifIndex))"
+                }
             }
         }
 
