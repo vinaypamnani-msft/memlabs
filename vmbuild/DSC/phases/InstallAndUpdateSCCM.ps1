@@ -1864,8 +1864,14 @@ else {
         # Replication wait with timeout, failure detection, and reinit
         $drsStartTime = Get-Date
         $drsTimeoutSec = 120 * 60  # 2 hours
-        # WMI ReplicationLinkStatus: Active=2, Initializing=4, NotStarted=5, Error=6, Unknown=7, Degraded=8, Failed=9
-        $failedStates = @(6, 8, 9)  # Error, Degraded, Failed
+        # Get-CMDatabaseReplicationStatus LinkStatus / GlobalState / SiteState enum. Authoritative source:
+        # AdminConsole SMS_ReplicationLinkSummary-LinkStatus.resx (the SAME table backs all four columns):
+        #   0=Deleted, 1=Tombstoned, 2=Active, 3=Interim, 4=Initializing, 5=NotStarted(being configured),
+        #   6=Error, 7=Unknown, 8=Degraded, 9=Failed, 99=N/A
+        # Only 6/8/9 are genuine failures the InitializeData reinit can recover; 3/4/5 are healthy in-progress
+        # states (4=Initializing was previously mislabeled "Failed" by $stateMap, which is what made a healthy
+        # link print as "Link=Failed" while the gate correctly treated it as not-failed).
+        $failedStates = @(6, 8, 9)  # Error, Degraded, Failed -> reinit territory
         $failedSinceTime = @{}     # per-primary tracking
         $reinitAttempted = @{}
         $reinitCooldownMin = 10
@@ -1879,8 +1885,9 @@ else {
         $forceSendCount = @{}           # attempts made, per primary
         $forceSendLastAttempt = @{}     # timestamp of last attempt, per primary
 
-        # Expand stateMap to include all WMI enum values
-        $stateMap = @{ 0 = "Unknown"; 1 = "Initializing"; 2 = "Active"; 3 = "Degraded"; 4 = "Failed"; 5 = "NotStarted"; 6 = "Error"; 7 = "Unknown(7)"; 8 = "Degraded(8)"; 9 = "Failed(9)" }
+        # Display labels for the four replication state columns - values match the authoritative
+        # SMS_ReplicationLinkSummary-LinkStatus.resx enum above (do NOT diverge from it).
+        $stateMap = @{ 0 = "Deleted"; 1 = "Tombstoned"; 2 = "Active"; 3 = "Interim"; 4 = "Initializing"; 5 = "NotStarted"; 6 = "Error"; 7 = "Unknown"; 8 = "Degraded"; 9 = "Failed"; 99 = "N/A" }
 
         while ($waitList.Count -gt 0) {
             foreach ($PSVM in $PSVMs) {
