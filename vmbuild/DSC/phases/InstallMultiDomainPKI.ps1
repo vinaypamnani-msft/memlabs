@@ -205,6 +205,42 @@ if (Test-Path $cm_svc_file) {
         Add-CMBoundaryToGroup -BoundaryName $boundaryName -BoundaryGroupName $boundaryName *>&1 | Write-StatusLogEntry
         "Add-CMBoundaryToGroup -BoundaryName `"$boundaryName`" -BoundaryGroupName `"$boundaryName`"" | Write-StatusLogEntry
     }
+
+    # ---- Force the external site's MP(s) to honor the freshly-created boundary
+    # group(s) NOW. The MP caches the boundary-group list in its w3wp worker and
+    # does NOT pick up a brand-new boundary group for ~10-20 min. So the first
+    # cross-forest client push hits MP GetDPLocations during that window, gets an
+    # EMPTY ContentLocationReply, and ccmsetup fails 0x87d00454 (HTTP 200, no
+    # content location). The deploy self-heals on the client's next ccmsetup
+    # retry, but the new domain's Phase 11 first pass WARNs on every client.
+    # Recycling IIS (WAS + its dependent W3SVC) on each MP drops the cached
+    # boundary list, so the very next GetDPLocations re-reads it from the site DB
+    # (where New-CMBoundary just committed) and returns the DP. RPC remote restart
+    # matches the site-system remoting ScriptWorkFlow already uses for MP bounces;
+    # the CM site-server context is admin on its own MPs. The ~15-min discovery
+    # wait below gives IIS ample time to come back before the explicit push.
+    if ($networks.Count -gt 0) {
+        $externalMPs = @()
+        try {
+            $externalMPs = @((Get-CMManagementPoint -SiteCode $Externaldomainsitecode).NetworkOSPath -replace "\\", "" |
+                Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
+        }
+        catch {
+            Write-DscStatus "MP boundary refresh: failed to enumerate MPs for site $Externaldomainsitecode ($_); skipping (ccmsetup retry will recover)" -Warning
+            $externalMPs = @()
+        }
+        foreach ($mpServer in $externalMPs) {
+            Write-DscStatus "MP boundary refresh: recycling IIS on $mpServer so it honors the new cross-forest boundary group(s)"
+            "Restart-Service -ComputerName $mpServer -Name WAS -Force (IIS recycle to drop MP boundary cache)" | Write-StatusLogEntry
+            try {
+                Restart-Service -ComputerName $mpServer -Name 'WAS' -Force -ErrorAction Stop
+            }
+            catch {
+                Write-DscStatus "MP boundary refresh: IIS recycle on $mpServer failed ($($_.Exception.Message)); auto-push/ccmsetup retry will recover" -Warning
+            }
+        }
+    }
+
     Write-DscStatus "Set-CMClientPushInstallation $cm_svc"
     $accounts = (get-CMClientPushInstallation -SiteCode $Externaldomainsitecode).EmbeddedPropertyLists.Reserved2.values
 
