@@ -242,18 +242,48 @@ function Start-Phase {
     # Remove DNS records for VM's in this config, if existing DC
     if ($deployConfig.parameters.ExistingDCName -and $Phase -eq 1) {
         $existingDC = $deployConfig.parameters.ExistingDCName
-        # When Phase 1 was forced only for AADClient cleanup, scope DNS
-        # removal to just the deleted VMs instead of nuking all records.
+        # Scope DNS removal to ONLY the VMs Phase 1 will actually (re)create.
         if ($global:ForcePhase1VmNames -and $global:ForcePhase1VmNames.Count -gt 0) {
-            $dnsTargets = $deployConfig.virtualMachines | Where-Object { $_.vmName -in $global:ForcePhase1VmNames }
+            # Phase 1 was forced for specific VMs only (e.g. AADClient cleanup).
+            $dnsTargets = @($deployConfig.virtualMachines | Where-Object { $_.vmName -in $global:ForcePhase1VmNames })
             Write-Log "[Phase $Phase] Removing DNS records for re-created VM(s): $($global:ForcePhase1VmNames -join ', ')"
         }
         else {
-            $dnsTargets = $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) }
-            Write-Log "[Phase $Phase] Attempting to remove existing DNS Records"
+            # Only VMs that DON'T already exist as Hyper-V VMs get created this
+            # run -- Phase 1's job loop skips existing ones via the same
+            # $existingVMs check. Removing DNS for VMs we aren't touching
+            # de-registers healthy, running machines and forces a needless
+            # domain-wide DNS re-registration cycle on every partial re-run.
+            $existingVmNameSet = @((Get-List -Type VM -SmartUpdate -DomainName $deployConfig.vmOptions.domainName).vmName)
+            $dnsTargets = @($deployConfig.virtualMachines | Where-Object { -not ($_.hidden) -and ($_.vmName -notin $existingVmNameSet) })
+            if ($dnsTargets.Count -gt 0) {
+                Write-Log "[Phase $Phase] Removing DNS records for VM(s) to be created: $(($dnsTargets.vmName) -join ', ')"
+            }
+            else {
+                Write-Log "[Phase $Phase] No new VMs to create; skipping DNS record removal."
+            }
         }
         foreach ($item in $dnsTargets) {
             Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
+
+            # SQLAO: when a node is recreated, also clear the cluster's virtual
+            # DNS records -- the Cluster Name A record and the AG listener A
+            # record. WSFC and the AG listener register these against the
+            # node/listener IPs; left stale from the prior incarnation they
+            # resolve the cluster/listener name to a dead address until the
+            # rebuilt cluster re-registers (and a stale cluster-name record on
+            # the old subnet is exactly the kind of thing that breaks a rebuilt
+            # cluster). Only the primary node config carries ClusterName /
+            # AlwaysOnListenerName. Remove-DnsRecord no-ops quietly when the
+            # record is already gone.
+            if ($item.role -eq 'SQLAO') {
+                if ($item.ClusterName) {
+                    Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.ClusterName
+                }
+                if ($item.AlwaysOnListenerName) {
+                    Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.AlwaysOnListenerName
+                }
+            }
         }
     }
 
