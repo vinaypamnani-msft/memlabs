@@ -16,10 +16,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Set-Location $PSScriptRoot
+
+# Common.ps1 lives in vmbuild\ (the parent of this tools\ folder).
+$vmbuildRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $vmbuildRoot
 
 # Validate Common.ps1 has UTF-8 BOM before dot-sourcing (PS5.1 needs BOM for non-ASCII chars)
-$commonPath = Join-Path $PSScriptRoot 'Common.ps1'
+$commonPath = Join-Path $vmbuildRoot 'Common.ps1'
 $bomBytes = [System.IO.File]::ReadAllBytes($commonPath)[0..2]
 if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq 0xBF)) {
     Write-Host "ERROR: Common.ps1 is missing UTF-8 BOM. PS5.1 will fail to parse non-ASCII characters." -ForegroundColor Red
@@ -46,7 +49,7 @@ if (-not $VMName) {
 Write-Host "`nTesting against VM: $VMName" -ForegroundColor Cyan
 
 # Create a small test file
-$testDir = Join-Path $PSScriptRoot "temp"
+$testDir = Join-Path $vmbuildRoot "temp"
 if (-not (Test-Path $testDir)) { New-Item -Path $testDir -ItemType Directory -Force | Out-Null }
 $testFile = Join-Path $testDir "copy-regression-test.txt"
 "Test payload $(Get-Date -Format o)" | Set-Content $testFile -Force
@@ -184,7 +187,7 @@ catch {
 # Test 4: Recursive directory copy inside Start-Job (matches Copy-ItemSafe pattern)
 # ────────────────────────────────────────────────
 Write-Host "`n── Test 4: Recursive dir copy inside Start-Job (Copy-ItemSafe pattern) ──" -ForegroundColor Yellow
-$dscPath = Join-Path $PSScriptRoot "DSC"
+$dscPath = Join-Path $vmbuildRoot "DSC"
 $jobScript4 = {
     $ps = New-PSSession -VMId $using:vmId -Credential $using:cred -ErrorAction Stop
     # Create staging dir
