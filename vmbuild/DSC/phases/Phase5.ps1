@@ -1336,21 +1336,30 @@
                     )
                     foreach ($entry in $entries) {
                         if ($entry.IP -match '^10\.250\.250\.') { continue }
-                        $octets = $entry.IP.Split('.')
-                        $zoneName = "$($octets[2]).$($octets[1]).$($octets[0]).in-addr.arpa"
-                        $hostOctet = $octets[3]
+                        # PTR records are a nice-to-have for reverse lookups; never let a
+                        # DNS hiccup here fail the resource and block the DC's final
+                        # [WriteStatus]Complete (which DependsOn this script). Swallow and
+                        # continue on any per-entry error.
+                        try {
+                            $octets = $entry.IP.Split('.')
+                            $zoneName = "$($octets[2]).$($octets[1]).$($octets[0]).in-addr.arpa"
+                            $hostOctet = $octets[3]
 
-                        $zone = Get-DnsServerZone -Name $zoneName -ErrorAction SilentlyContinue
-                        if (-not $zone) {
-                            $networkId = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
-                            Add-DnsServerPrimaryZone -NetworkId $networkId -ReplicationScope Domain -DynamicUpdate Secure -ErrorAction Stop
-                        }
+                            $zone = Get-DnsServerZone -Name $zoneName -ErrorAction SilentlyContinue
+                            if (-not $zone) {
+                                $networkId = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
+                                Add-DnsServerPrimaryZone -NetworkId $networkId -ReplicationScope Domain -DynamicUpdate Secure -ErrorAction Stop
+                            }
 
-                        $existing = Get-DnsServerResourceRecord -ZoneName $zoneName -Name $hostOctet -RRType Ptr -ErrorAction SilentlyContinue
-                        if ($existing) {
-                            Remove-DnsServerResourceRecord -ZoneName $zoneName -InputObject $existing -Force -ErrorAction SilentlyContinue
+                            $existing = Get-DnsServerResourceRecord -ZoneName $zoneName -Name $hostOctet -RRType Ptr -ErrorAction SilentlyContinue
+                            if ($existing) {
+                                Remove-DnsServerResourceRecord -ZoneName $zoneName -InputObject $existing -Force -ErrorAction SilentlyContinue
+                            }
+                            Add-DnsServerResourceRecordPtr -ZoneName $zoneName -Name $hostOctet -PtrDomainName "$($entry.FQDN)." -ErrorAction Stop
                         }
-                        Add-DnsServerResourceRecordPtr -ZoneName $zoneName -Name $hostOctet -PtrDomainName "$($entry.FQDN)." -ErrorAction Stop
+                        catch {
+                            Write-Verbose "ClusterPtrRecords: failed to set PTR for $($entry.IP) -> $($entry.FQDN): $_"
+                        }
                     }
                 }
                 TestScript = {
@@ -1360,12 +1369,31 @@
                     )
                     foreach ($entry in $entries) {
                         if ($entry.IP -match '^10\.250\.250\.') { continue }
-                        $octets = $entry.IP.Split('.')
-                        $zoneName = "$($octets[2]).$($octets[1]).$($octets[0]).in-addr.arpa"
-                        $hostOctet = $octets[3]
+                        # Wrap per-entry so Test NEVER throws -- a thrown Test fails the
+                        # whole resource and DSC then SKIPS SetScript, so the missing
+                        # reverse zone is never created and, because [WriteStatus]Complete
+                        # DependsOn this script, the DC config never reaches 'Complete!'
+                        # (Phase 5 hangs ~30 min, then force-restarts). Any error -> $false
+                        # so SetScript runs and remediates.
+                        try {
+                            $octets = $entry.IP.Split('.')
+                            $zoneName = "$($octets[2]).$($octets[1]).$($octets[0]).in-addr.arpa"
+                            $hostOctet = $octets[3]
 
-                        $ptr = Get-DnsServerResourceRecord -ZoneName $zoneName -Name $hostOctet -RRType Ptr -ErrorAction SilentlyContinue
-                        if (-not $ptr -or $ptr.RecordData.PtrDomainName -ne "$($entry.FQDN).") {
+                            # Probing a missing zone with Get-DnsServerResourceRecord raises
+                            # a terminating 'zone was not found' error that -ErrorAction
+                            # can't suppress. Check zone existence first; if absent we're not
+                            # in desired state -> $false (SetScript creates it).
+                            $zone = Get-DnsServerZone -Name $zoneName -ErrorAction SilentlyContinue
+                            if (-not $zone) { return $false }
+
+                            $ptr = Get-DnsServerResourceRecord -ZoneName $zoneName -Name $hostOctet -RRType Ptr -ErrorAction SilentlyContinue
+                            if (-not $ptr -or $ptr.RecordData.PtrDomainName -ne "$($entry.FQDN).") {
+                                return $false
+                            }
+                        }
+                        catch {
+                            Write-Verbose "ClusterPtrRecords Test: $($entry.IP): $_"
                             return $false
                         }
                     }
