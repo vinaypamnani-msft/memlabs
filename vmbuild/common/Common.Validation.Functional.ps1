@@ -5101,15 +5101,36 @@ function Test-ForestTrustFunctionality {
         }
 
         # --- B: Remote-forest admin in local Administrators (AddRemoteAdmins) ---
-        $results.Details.Add("CMD: Get-LocalGroupMember Administrators (looking for '$remoteNetbios\\*')")
+        # NOTE: Get-LocalGroupMember fails on a DC ("Group Administrators was not
+        # found") because a DC has no local SAM -- the group is the domain-local
+        # BUILTIN\Administrators. Enumerate via ADSI WinNT, which works on both
+        # DCs and member servers and lists foreign-forest principals too.
+        $results.Details.Add("CMD: enumerate Administrators members via ADSI WinNT (looking for '$remoteNetbios\\*')")
         try {
-            $admins = Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop
-            $remoteAdmins = @($admins | Where-Object { "$($_.Name)" -like "$remoteNetbios\*" })
+            $adminGroup = [ADSI]"WinNT://$env:COMPUTERNAME/Administrators,group"
+            $rawMembers = @($adminGroup.psbase.Invoke('Members'))
+            $memberNames = @()
+            foreach ($m in $rawMembers) {
+                try {
+                    $mName = $m.GetType().InvokeMember('Name', 'GetProperty', $null, $m, $null)
+                    $mPath = $m.GetType().InvokeMember('ADsPath', 'GetProperty', $null, $m, $null)
+                    $mDomain = ''
+                    if ("$mPath" -match 'WinNT://([^/]+)/') { $mDomain = $Matches[1] }
+                    if ($mDomain) { $memberNames += "$mDomain\$mName" }
+                    else { $memberNames += "$mName" }
+                }
+                catch {
+                    # Foreign-forest principals can surface as raw SIDs; keep them
+                    # so the diagnostic line still reflects the full membership.
+                    $memberNames += '<unresolved-member>'
+                }
+            }
+            $remoteAdmins = @($memberNames | Where-Object { $_ -like "$remoteNetbios\*" })
             if ($remoteAdmins.Count -gt 0) {
-                $results.Details.Add("OK: Local Administrators includes remote-forest principal(s): $(($remoteAdmins | ForEach-Object { $_.Name }) -join ', ')")
+                $results.Details.Add("OK: Local Administrators includes remote-forest principal(s): $($remoteAdmins -join ', ')")
             }
             else {
-                $results.Details.Add("WARN: No '$remoteNetbios\\*' principal in local Administrators (AddRemoteAdmins may not have applied)")
+                $results.Details.Add("WARN: No '$remoteNetbios\\*' principal in local Administrators (AddRemoteAdmins may not have applied) [members: $($memberNames -join ', ')]")
             }
         }
         catch {
