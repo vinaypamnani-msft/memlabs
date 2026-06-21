@@ -3843,6 +3843,33 @@ $global:VM_Config = {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS preflight fix: $($pf.ScriptBlockOutput)"
                 }
             }
+
+            # Flush the DC's resolver cache before the DC pushes DSC to this node.
+            # Even once the node's A record IS present in the zone, the DC's CLIENT
+            # resolver can still hold a stale NEGATIVE entry (NXDOMAIN) cached from an
+            # earlier push attempt made BEFORE the node registered. That negative
+            # cache makes the DC's Start-DscConfiguration -ComputerName push fail to
+            # resolve the node ("WinRM ... the server name cannot be resolved") even
+            # though DNS is now correct -- which is why a push keeps failing AFTER the
+            # node re-registers. Flush the DC's cache and confirm it resolves the node.
+            # Runs for every SQLAO node (cheap, idempotent), not just the fixed ones,
+            # because the negative cache can exist regardless of needsDnsFix.
+            $pfDcVmName = ($deployConfig.virtualMachines | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1).vmName
+            if ($pfDcVmName) {
+                $pfDcFlush = Invoke-VmCommand -VmName $pfDcVmName -VmDomainName $domainName -ScriptBlock {
+                    param($fqdn)
+                    Clear-DnsClientCache -ErrorAction SilentlyContinue
+                    $a = @(Resolve-DnsName -Name $fqdn -Type A -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq 'A' -and $_.IPAddress })
+                    $ips = @($a | ForEach-Object { $_.IPAddress })
+                    return "flushed; DC resolves $fqdn -> $($ips -join ',')"
+                } -ArgumentList $pfFqdn -DisplayName "Flush DC DNS cache for $($currentItem.vmName)"
+                if ($pfDcFlush.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS preflight: DC ($pfDcVmName) cache flush failed: $($pfDcFlush.ScriptBlockOutput)" -Warning
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS preflight: DC ($pfDcVmName) cache $($pfDcFlush.ScriptBlockOutput)"
+                }
+            }
         }
 
         if ($skipStartDsc) {
