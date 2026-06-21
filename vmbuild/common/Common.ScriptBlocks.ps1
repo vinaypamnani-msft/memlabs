@@ -4982,7 +4982,7 @@ $global:VM_Config = {
             if ($Phase -eq 5 -and $currentItem.role -eq "SQLAO" -and $complete) {
                 Write-Progress2 $Activity -Status "Cleaning heartbeat DNS records" -percentcomplete 98 -force
                 $scrubDns = {
-                    param($hostname, $nodeSubnet)
+                    param($hostname, $nodeSubnet, $clusterVips, $nodeOwnIp)
                     $results = @()
                     # Heartbeat / cluster NICs are the ONLY adapters that must never
                     # publish the host's name in DNS. Identify them POSITIVELY (an IP in
@@ -5009,17 +5009,49 @@ $global:VM_Config = {
                             Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
                         }
                     }
-                    # Self-heal: make sure the DOMAIN NIC (the one carrying this node's own
+                    # Self-heal: ensure the DOMAIN NIC (the one carrying this node's own
                     # subnet IP) is ALLOWED to register, in case a prior buggy run disabled
-                    # it -- then re-register so the host's own domain IP is published.
+                    # it -- then re-register so ONLY the node's own domain IP is published.
+                    #
+                    # CRITICAL: an AG node's domain NIC also carries the cluster core IP and
+                    # the AG listener IP whenever this node owns those groups. Those VIPs must
+                    # NOT register under the NODE's name (that yields round-robin DNS where the
+                    # node name can resolve to a cluster VIP). Mark every VIP SkipAsSource first
+                    # so the DNS client never publishes it under the computer name. A VIP is any
+                    # domain-subnet address that is NOT the node's own IP -- confirmed by the
+                    # passed-in node IP when known, else by an explicit VIP-list match or a
+                    # static (PrefixOrigin=Manual) origin (the node's own IP is the DHCP
+                    # reservation, PrefixOrigin=Dhcp).
+                    $vipSet = @()
+                    if ($clusterVips) { $vipSet = @($clusterVips | Where-Object { $_ }) }
                     foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
-                        $ips = @((Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress)
-                        if ($ips | Where-Object { $_ -like "$nodeSubnet*" }) {
-                            Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue
-                            $results += "Ensured DNS reg ENABLED on domain NIC '$($adapter.InterfaceAlias)' ($($ips -join ','))"
+                        $addrs = @(Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+                        $ips = @($addrs.IPAddress)
+                        if (-not ($ips | Where-Object { $_ -like "$nodeSubnet*" })) { continue }
+                        foreach ($addr in ($addrs | Where-Object { $_.IPAddress -like "$nodeSubnet*" })) {
+                            if ($nodeOwnIp -and $addr.IPAddress -eq $nodeOwnIp) {
+                                # The node's own IP must remain registrable.
+                                if ($addr.SkipAsSource) {
+                                    Set-NetIPAddress -InterfaceIndex $addr.InterfaceIndex -IPAddress $addr.IPAddress -SkipAsSource $false -ErrorAction SilentlyContinue
+                                }
+                                continue
+                            }
+                            # Everything else on the domain subnet is a cluster VIP. When the
+                            # node's own IP is known, that's definitive; otherwise require an
+                            # explicit-list match or a Manual origin so we never skip the node IP.
+                            $isVip = $false
+                            if ($nodeOwnIp) { $isVip = $true }
+                            elseif ($vipSet -contains $addr.IPAddress) { $isVip = $true }
+                            elseif ($addr.PrefixOrigin -eq 'Manual') { $isVip = $true }
+                            if ($isVip -and -not $addr.SkipAsSource) {
+                                Set-NetIPAddress -InterfaceIndex $addr.InterfaceIndex -IPAddress $addr.IPAddress -SkipAsSource $true -ErrorAction SilentlyContinue
+                                $results += "Marked cluster VIP $($addr.IPAddress) SkipAsSource (won't register under node name)"
+                            }
                         }
+                        Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue
+                        $results += "Ensured DNS reg ENABLED on domain NIC '$($adapter.InterfaceAlias)' ($($ips -join ','))"
                     }
-                    # Force re-registration so the domain adapter's IP is published.
+                    # Force re-registration so ONLY the domain adapter's own (non-skip) IP is published.
                     & ipconfig /registerdns 2>&1 | Out-Null
                     # Remove stale heartbeat A records for this hostname (keep the domain IP).
                     try {
@@ -5032,10 +5064,15 @@ $global:VM_Config = {
                             foreach ($rec in $records) {
                                 $ip = $rec.RecordData.IPv4Address.IPAddressToString
                                 $stale = $false
+                                # Stale if on a heartbeat subnet, OR a known cluster VIP that a
+                                # prior buggy run wrongly published under the node's own name.
                                 foreach ($p in $clusterPrefixes) { if ($ip -like "$p*") { $stale = $true; break } }
+                                if (-not $stale -and ($vipSet -contains $ip)) { $stale = $true }
+                                # Never remove the node's own IP.
+                                if ($nodeOwnIp -and $ip -eq $nodeOwnIp) { $stale = $false }
                                 if ($stale) {
                                     Remove-DnsServerResourceRecord -ZoneName $zone -Name $shortName -RRType A -RecordData $ip -ComputerName $dnsServer -Force -ErrorAction SilentlyContinue
-                                    $results += "Removed stale heartbeat DNS A record $ip"
+                                    $results += "Removed stale DNS A record $ip"
                                 }
                             }
                         }
@@ -5050,8 +5087,17 @@ $global:VM_Config = {
                 $nodeNetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
                 $nodeSubnet = ($nodeNetwork -replace '\.\d+$', '.')
                 $fqdn = "$($currentItem.vmName).$($deployConfig.vmOptions.domainName)"
+                # Pass the node's own IP and the known cluster/AG VIPs so the in-guest
+                # self-heal registers ONLY the node's own IP and marks the VIPs
+                # SkipAsSource (so they never resolve under the node's own name).
+                $nodeOwnIp = $currentItem.AssignedIP
+                if (-not $nodeOwnIp) { $nodeOwnIp = $currentItem.LastKnownIP }
+                $clusterVips = @()
+                foreach ($vipProp in @('ClusterIPAddress', 'AGIPAddress')) {
+                    if ($currentItem.$vipProp) { $clusterVips += ($currentItem.$vipProp -replace '/\d+$', '') }
+                }
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName `
-                    -ScriptBlock $scrubDns -ArgumentList @($fqdn, $nodeSubnet) `
+                    -ScriptBlock $scrubDns -ArgumentList @($fqdn, $nodeSubnet, $clusterVips, $nodeOwnIp) `
                     -DisplayName "Scrub heartbeat DNS records"
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS scrub failed: $($result.ScriptBlockOutput)" -Warning
