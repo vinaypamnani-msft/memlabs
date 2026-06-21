@@ -17,6 +17,15 @@
     $netbiosName = $deployConfig.vmOptions.domainNetBiosName
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
+    # Derive the DC name from deployConfig (the full VM list in the JSON), NOT from
+    # $AllNodes. Under the in-guest local-recovery compile path $AllNodes is minimal
+    # (the current node only, no DC entry), so ($AllNodes | Where Role -eq 'DC') is
+    # empty and DCName ends up unset -> the apply fails with "Could not find mandatory
+    # property DCName". deployConfig always has every VM, so this works for both the
+    # DC-pushed compile and the local-recovery compile.
+    $DCNameFromConfig = ($deployConfig.virtualMachines | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1).vmName
+    if (-not $DCNameFromConfig) { $DCNameFromConfig = $deployConfig.parameters.DCName }
+
     # Log share
     $LogFolder = "DSC"
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '')]
@@ -264,7 +273,7 @@
         $nextDepend = "[ModuleAdd]SQLServerModule"
 
         if (-not $clusterIPOnHeartbeat) {
-        $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+        $DC = $DCNameFromConfig
 
         WriteStatus PreClusterNicConfig {
             DependsOn = $nextDepend
@@ -639,7 +648,7 @@
         $listenerNameForDns  = $thisVM.thisParams.SQLAO.AlwaysOnListenerName
         $listenerFqdnForDns  = $thisVM.thisParams.SQLAO.AlwaysOnListenerNameFQDN
         $listenerIpForDns    = ($thisVM.thisParams.SQLAO.AGIPAddress -split '/')[0]  # strip CIDR if present
-        $dcForDns            = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+        $dcForDns            = $DCNameFromConfig
 
         Script VerifyListenerDns {
             GetScript  = { @{ Result = 'N/A' } }
@@ -865,7 +874,7 @@
         $nextDepend = "[ModuleAdd]SQLServerModule"
 
         if (-not $clusterIPOnHeartbeat) {
-        $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+        $DC = $DCNameFromConfig
 
         WriteStatus PreClusterNicConfig {
             DependsOn = $nextDepend
