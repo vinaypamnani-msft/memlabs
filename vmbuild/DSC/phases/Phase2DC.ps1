@@ -42,6 +42,23 @@
         if ($cmo.PrePopulateObjects) { $prePopulate = $true }
     }
 
+    # Cross-forest PKI: this domain's clients enroll their ConfigMgr client-auth
+    # cert from a REMOTE forest's CA (the DC has ForestTrust set AND a remote
+    # RootCA) because the domain runs no CM site / CA of its own. The heuristic
+    # above only sees this deploy's CAS/Primary cmOptions -- the remote managing
+    # site is a hidden stub with no cmOptions -- so $usePKI stays false and the
+    # "Certificate AutoEnrollment" GPO below never gets created/linked. Without
+    # AEPolicy the clients never autoenroll, so they never get a client cert and
+    # ccmsetup fails with CCM_E_NO_CLIENT_PKI_CERT. Treat cross-forest CA use as
+    # PKI so the autoenrollment policy is applied (matches main, which had no gate).
+    if (-not $usePKI) {
+        $crossForestPkiDC = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'DC' -and $_.ForestTrust -and $_.ForestTrust -ne 'NONE' -and
+                $_.thisParams -and $_.thisParams.RootCA
+            })
+        if ($crossForestPkiDC.Count -gt 0) { $usePKI = $true }
+    }
+
 
     # This VM
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
