@@ -209,7 +209,7 @@ $primaryScript = {
         $b = @(Get-WmiObject -Namespace $ns -Class SMS_Boundary -ErrorAction Stop)
         if (-not $b) { W "(none)" }
         foreach ($x in $b) {
-            $typeName = switch ([int]$x.BoundaryType) { 0 {'IPSubnet'} 1 {'ADSite'} 3 {'IPv6'} 4 {'IPRange'} default {"Type$($x.BoundaryType)"} }
+            $typeName = switch ([int]$x.BoundaryType) { 0 {'IPSubnet'} 1 {'ADSite'} 2 {'IPv6'} 3 {'IPRange'} default {"Type$($x.BoundaryType)"} }
             $flag = ''
             if ($ClientNetwork -and ($x.Value -like "*$($ClientNetwork.TrimEnd('0'))*" -or $x.Value -like "*$ClientNetwork*")) { $flag = '   <== matches client network' }
             W ("  [{0}] {1} = {2}   (BoundaryID={3}){4}" -f $typeName, $x.DisplayName, $x.Value, $x.BoundaryID, $flag)
