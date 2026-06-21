@@ -3758,11 +3758,19 @@ $global:VM_Config = {
             $pfResolvedIps = @()
             try {
                 $pfResolved = @(Resolve-DnsName -Name $pfFqdn -Server $pfDcIp -Type A -DnsOnly -ErrorAction SilentlyContinue | Where-Object { $_.Type -eq 'A' })
-                $pfResolvedIps = @($pfResolved.IPAddress)
+                # Filter out null/empty IPs: an empty/partial DC reply can otherwise
+                # yield a phantom 1-element array (@($emptyResult.IPAddress)) that masks
+                # a genuinely-missing record and makes the check wrongly say "no action".
+                $pfResolvedIps = @($pfResolved | ForEach-Object { $_.IPAddress } | Where-Object { $_ })
+                # A node that resolves ONLY to its cluster VIP(s) still needs its own A
+                # record, so judge "healthy" on the non-VIP records only.
+                $pfNodeOwnResolved = @($pfResolvedIps | Where-Object { $pfVips -notcontains $_ })
                 if ($pfOwnIp) {
                     if ($pfResolvedIps -notcontains $pfOwnIp) { $needsDnsFix = $true }
                 }
-                elseif (-not $pfResolvedIps.Count) {
+                elseif (-not $pfNodeOwnResolved.Count) {
+                    # Node's own IP not known host-side: fix unless the DC already
+                    # returns at least one non-VIP A record for this name.
                     $needsDnsFix = $true
                 }
                 # A cluster VIP published under the node's own name is also wrong.
