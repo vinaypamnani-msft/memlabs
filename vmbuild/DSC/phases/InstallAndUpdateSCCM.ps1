@@ -519,148 +519,26 @@ CurrentBranch=1
     $CMSetupDL = "$CMBin\Setupdl.exe"
     $CMRedist = "C:\$CM\REdist"
     $CMLog = "C:\ConfigMgrSetup.log"
-    $success = 0
-    $fail = 0
 
     Write-DscStatus "Starting Pre-Req Download using $CMSetupDL /NOUI $CMRedist"
 
-    $maxTries = 20
-    # Per-attempt timeout for setupdl.exe. Historically we called
-    # Start-Process -Wait with no cap; if setupdl wedged on a single
-    # CDN fetch we'd hang for hours with no progress in the DSC status
-    # stream. Now we cap each attempt at $setupDlTimeoutSec, surface
-    # the tail of ConfigMgrSetup.log every $setupDlPollSec while it
-    # runs, and kill+retry if the cap is hit.
-    $setupDlTimeoutSec = 1800   # 30 min hard cap per attempt
-    $setupDlStallSec = 300      # kill early if log hasn't advanced for 5 min
-    $setupDlFastKillSec = 90    # kill in 90s if log is parked on a known-bad marker
-    $setupDlPollSec = 30        # status cadence while running
-    $lastReportedTail = ''
+    # If the Phase 3 "ScriptWorkflow Download" pre-warm task is still
+    # registered/running, stop it and kill any setupdl.exe it left behind so
+    # our own download below is the only setupdl writing to $CMRedist / $CMLog.
+    # The pre-warm only populates REdist (idempotent); whatever it finished
+    # persists on disk and this run just verifies it -- which is fast.
+    Stop-CMSetupPrereqPrewarm
 
-    # Log lines that immediately precede a known setupdl hang. When the
-    # log is parked on one of these AND stops advancing, we don't need
-    # to wait the full $setupDlStallSec -- kill quickly and let the
-    # retry path re-launch. Pattern is matched case-insensitively as a
-    # substring of the latest log line.
-    $setupDlBadMarkers = @(
-        # MSODBCSQL18 download wedge (observed on CS2-CS1SITE 05/25).
-        # setupdl probes for the driver, finds it missing ("Error = 2"),
-        # then hangs on the Microsoft CDN fetch.
-        'MSODBCSQL18'
-    )
-
-    # We require 2 success entries in a row
-    while ($success -le 1) {
-
-        #Start Setupdl.exe asynchronously so we can poll its log for
-        #progress and enforce a per-attempt timeout.
-        $dlProc = Start-Process -Filepath ($CMSetupDL) -ArgumentList ('/NOUI ' + $CMRedist) -PassThru
-        $dlStart = Get-Date
-        $lastLogAdvanceAt = Get-Date
-        $dlTimedOut = $false
-        $dlStalled = $false
-        while (-not $dlProc.HasExited) {
-            Start-Sleep -Seconds $setupDlPollSec
-            $elapsedSec = [int]((Get-Date) - $dlStart).TotalSeconds
-            $stalledSec = [int]((Get-Date) - $lastLogAdvanceAt).TotalSeconds
-
-            # Tail the setup log and surface the latest activity so the
-            # operator can see whether setupdl is making progress or
-            # stuck on a specific file.
-            $tail = $null
-            try { $tail = Get-Content -Path $CMLog -Tail 1 -ErrorAction SilentlyContinue } catch { }
-            if ($tail -and $tail -ne $lastReportedTail) {
-                $lastReportedTail = $tail
-                $lastLogAdvanceAt = Get-Date
-                $stalledSec = 0
-                Write-DscStatus ("Pre-Req download in progress ({0}s elapsed): {1}" -f $elapsedSec, $tail.Trim())
-            }
-            elseif ($tail) {
-                Write-DscStatus ("Pre-Req download still running ({0}s elapsed, no new log activity for {1}s): {2}" -f $elapsedSec, $stalledSec, $tail.Trim())
-            }
-            else {
-                Write-DscStatus ("Pre-Req download still running ({0}s elapsed; setup log not yet readable)" -f $elapsedSec)
-            }
-
-            # Early-kill: if the setup log has been completely silent for
-            # $setupDlStallSec, setupdl is wedged on a single fetch (CDN
-            # stall, TLS hang, etc.). Kill now rather than waiting the
-            # full 30-min hard cap; the outer retry will relaunch and
-            # setupdl is idempotent (only re-downloads missing files).
-            # Faster-kill: if the latest log line matches a known-bad
-            # wedge marker (e.g. MSODBCSQL18 download), use the shorter
-            # $setupDlFastKillSec threshold so we recover in ~90s instead
-            # of 5 min.
-            $matchedBadMarker = $null
-            if ($tail) {
-                foreach ($marker in $setupDlBadMarkers) {
-                    if ($tail -match [Regex]::Escape($marker)) { $matchedBadMarker = $marker; break }
-                }
-            }
-            $effectiveStallLimit = if ($matchedBadMarker) { $setupDlFastKillSec } else { $setupDlStallSec }
-
-            if ($stalledSec -ge $effectiveStallLimit) {
-                $dlStalled = $true
-                if ($matchedBadMarker) {
-                    Write-DscStatus ("Pre-Req download parked on known-bad marker '{0}' for {1}s (fast-kill threshold {2}s); killing setupdl.exe (PID {3}) and retrying" -f $matchedBadMarker, $stalledSec, $effectiveStallLimit, $dlProc.Id)
-                }
-                else {
-                    Write-DscStatus ("Pre-Req download log stalled for {0}s (threshold {1}s); killing setupdl.exe (PID {2}) and retrying" -f $stalledSec, $effectiveStallLimit, $dlProc.Id)
-                }
-                try { Stop-Process -Id $dlProc.Id -Force -ErrorAction SilentlyContinue } catch { }
-                Get-Process -Name 'setupdl' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $dlProc.Id } | ForEach-Object {
-                    try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch { }
-                }
-                break
-            }
-
-            if ($elapsedSec -ge $setupDlTimeoutSec) {
-                $dlTimedOut = $true
-                Write-DscStatus ("Pre-Req download exceeded {0}s; killing setupdl.exe (PID {1}) and retrying" -f $setupDlTimeoutSec, $dlProc.Id)
-                try { Stop-Process -Id $dlProc.Id -Force -ErrorAction SilentlyContinue } catch { }
-                # Also kill any straggler setupdl/Setupdl children spawned by the bootstrap copy
-                Get-Process -Name 'setupdl' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $dlProc.Id } | ForEach-Object {
-                    try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch { }
-                }
-                break
-            }
-        }
-
-        #Just to make sure the log is flushed.
-        start-sleep -seconds 5
-
-        #Get the last line of the log.  Assumption: No other components are writing to the log at this time.
-        $LogLine = Get-Content -Path $CMLog -Tail 1
-
-        if ($dlStalled) {
-            $LogLine = "STALLED: setupdl log idle for $setupDlStallSec seconds. Last log line: $LogLine"
-        }
-        elseif ($dlTimedOut) {
-            # Treat as a failed attempt and let the retry/fail counter logic below handle it.
-            $LogLine = "TIMEOUT: setupdl exceeded $setupDlTimeoutSec seconds. Last log line: $LogLine"
-        }
-
-        #Check for success indicator.
-        if (-not $dlTimedOut -and -not $dlStalled -and $LogLine -and $LogLine.Contains("INFO: Setup downloader") -and $LogLine.Contains("FINISHED")) {
-            $success++
-            Write-DscStatus "Pre-Req downloading complete Success Count $success out of 2."
-        }
-        else {
-            #If we didn't find it, increment fail count, and bail after 10 fails
-            Clear-DnsClientCache -ErrorAction SilentlyContinue
-            $success = 0
-            $fail++
-            if ($fail -ge 20) {
-                Write-DscStatus "Pre-Req Downloading failed after $maxTries tries. see $CMLog"
-                # Set Status to not 'Running' so it can run again.
-                $Configuration.InstallSCCM.Status = 'Failed'
-                $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-                Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
-                return
-            }
-            Write-DscStatus "Pre-Req downloading Failed. Try $fail out of $maxTries See $CMLog for progress"
-            start-sleep -Seconds 30
-        }
+    # The setupdl loop is single-sourced in ScriptFunctions.ps1 so this path
+    # and the Phase 3 pre-warm (ScriptWorkflow.ps1 -DownloadOnly) stay in sync.
+    $dlOk = Invoke-CMSetupPrereqDownload -CMSetupDL $CMSetupDL -CMRedist $CMRedist -CMLog $CMLog -MaxTries 20
+    if (-not $dlOk) {
+        Write-DscStatus "Pre-Req Downloading failed after 20 tries. see $CMLog"
+        # Set Status to not 'Running' so it can run again.
+        $Configuration.InstallSCCM.Status = 'Failed'
+        $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+        return
     }
 
     # Create ini

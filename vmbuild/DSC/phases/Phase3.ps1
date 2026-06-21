@@ -19,6 +19,17 @@
     $DomainName = $deployConfig.parameters.domainName
     $NetBiosDomainName = $deployConfig.vmoptions.domainNetBiosName
 
+    # Log share + CM admin credential, used by the Phase 3 "ScriptWorkflow
+    # Download" pre-warm task (RegisterTaskScheduler). Mirrors Phase8.ps1 so
+    # the pre-warm runs ScriptWorkflow.ps1 with the same identity/args the real
+    # Phase 8 workflow uses.
+    $DomainAdminName = $deployConfig.vmOptions.adminName
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
+    $AdminUserName = $Admincreds.UserName
+    if ($AdminUserName -match '\\') { $AdminUserName = ($AdminUserName -split '\\', 2)[1] }
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
+
     $l = $ConfigurationData.LocaleSettings
 
     Node $AllNodes.NodeName
@@ -246,6 +257,28 @@
                         DependsOn     = $prevDepend
                     }
                     $prevDepend = "[DownLoadSCCM]DownLoadSCCM"
+
+                    # Pre-warm the ConfigMgr setup pre-req download (~10 min) in
+                    # the background, NOW that the CM media is extracted, so the
+                    # redist folder is already populated by the time Phase 8 runs
+                    # setupdl.exe. Reuses the tried-and-true RegisterTaskScheduler
+                    # infra to launch ScriptWorkflow.ps1 -DownloadOnly, which runs
+                    # ONLY the setupdl download and exits (no workflow steps).
+                    # setupdl is idempotent, so whatever it finishes persists on
+                    # disk; Phase 8 (Stop-CMSetupPrereqPrewarm) stops this task and
+                    # kills any running setupdl.exe before its own download so the
+                    # two never race. Set() returns once the task STARTS, so Phase 3
+                    # does not block on the ~10-min download. Task name MUST match
+                    # Stop-CMSetupPrereqPrewarm in ScriptFunctions.ps1.
+                    RegisterTaskScheduler PreWarmSetupDL {
+                        TaskName       = "ScriptWorkflow Download"
+                        ScriptName     = "ScriptWorkflow.ps1"
+                        ScriptPath     = $PSScriptRoot
+                        ScriptArgument = "$DeployConfigPath $LogPath -DownloadOnly"
+                        AdminCreds     = $CMAdmin
+                        Ensure         = "Present"
+                        DependsOn      = "[DownLoadSCCM]DownLoadSCCM"
+                    }
                 }
 
                 FileReadAccessShare CMSourceSMBShare {

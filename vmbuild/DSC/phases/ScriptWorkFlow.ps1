@@ -1,7 +1,8 @@
 ﻿# ScriptWorkflow.ps1
 param(
     [string]$ConfigFilePath,
-    [string]$LogPath
+    [string]$LogPath,
+    [switch]$DownloadOnly
 )
 
 # dot source functions
@@ -80,6 +81,62 @@ if (Test-Path $ExpectedRunIdFile) {
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
 $CurrentRole = $ThisVM.role
+
+# -DownloadOnly: Phase 3 "ScriptWorkflow Download" pre-warm. Run ONLY the
+# ConfigMgr setup pre-req download (setupdl.exe) so the redist folder is warm
+# by the time Phase 8 runs. We deliberately do NOT touch the ScriptWorkflow.json
+# state machine or run any other workflow step -- this returns before the real
+# workflow begins. Phase 8 (InstallAndUpdateSCCM.ps1 -> Stop-CMSetupPrereqPrewarm)
+# stops this task and kills any running setupdl.exe before its own download, so
+# the two never race. Best-effort: any failure just exits and Phase 8's robust
+# download finishes/verifies. The setupdl loop is single-sourced in
+# ScriptFunctions.ps1 (Invoke-CMSetupPrereqDownload).
+if ($DownloadOnly) {
+    # Repoint the status file so pre-warm progress (which may run during
+    # phases 3-7) doesn't stomp the per-phase DSC_Status.txt the orchestrator
+    # watches. Progress still flows to InstallCMLog.log + the host console.
+    $global:StatusFile = "C:\staging\DSC\DSC_Status_Download.txt"
+    Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: pre-warming ConfigMgr setup pre-req download only (no workflow steps will run)."
+    try {
+        # Don't pre-warm if ConfigMgr is already installed on this site server
+        # -- there's nothing to download for. The SMS Identification 'Site Code'
+        # registry value is the same local "CM installed" signal that
+        # InstallAndUpdateSCCM's ground-truth check uses.
+        $regSiteCode = $null
+        try { $regSiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction SilentlyContinue } catch { }
+        if ($regSiteCode) {
+            Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: ConfigMgr already installed on this site server (Site Code '$regSiteCode'); skipping pre-req pre-warm."
+            return
+        }
+
+        $cmoDl = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        $CMDl = if ($cmoDl.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+        $CMDirDl = "c:\$CMDl"
+        foreach ($sub in @("cd.retail", "cd.retail.LN", "cd.preview")) {
+            $cand = Join-Path "c:\$CMDl" $sub
+            if (Test-Path $cand -PathType Container) { $CMDirDl = $cand; break }
+        }
+        $CMSetupDLDl = "$CMDirDl\SMSSETUP\BIN\X64\Setupdl.exe"
+        $CMRedistDl = "C:\$CMDl\REdist"
+        $CMLogDl = "C:\ConfigMgrSetup.log"
+        if (-not (Test-Path $CMRedistDl)) { New-Item $CMRedistDl -ItemType Directory -Force | Out-Null }
+        if (-not (Test-Path $CMSetupDLDl)) {
+            Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: '$CMSetupDLDl' not found (CM media not extracted yet); nothing to pre-warm. Exiting."
+            return
+        }
+        $dlOk = Invoke-CMSetupPrereqDownload -CMSetupDL $CMSetupDLDl -CMRedist $CMRedistDl -CMLog $CMLogDl -MaxTries 20
+        if ($dlOk) {
+            Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: pre-req download complete. REdist is warm for Phase 8."
+        }
+        else {
+            Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: pre-req download did not fully complete; Phase 8 will finish/verify it. Exiting."
+        }
+    }
+    catch {
+        Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: pre-warm threw '$($_.Exception.Message)'; Phase 8 download is unaffected. Exiting."
+    }
+    return
+}
 
 $scenario = "Standalone"
 if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy" }
