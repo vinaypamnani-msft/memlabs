@@ -4982,26 +4982,46 @@ $global:VM_Config = {
             if ($Phase -eq 5 -and $currentItem.role -eq "SQLAO" -and $complete) {
                 Write-Progress2 $Activity -Status "Cleaning heartbeat DNS records" -percentcomplete 98 -force
                 $scrubDns = {
-                    param($hostname, $domainSubnet)
+                    param($hostname, $nodeSubnet)
                     $results = @()
-                    # Disable DNS registration on every adapter except the domain NIC
+                    # Heartbeat / cluster NICs are the ONLY adapters that must never
+                    # publish the host's name in DNS. Identify them POSITIVELY (an IP in
+                    # a known heartbeat subnet, or a Cluster/isatap virtual adapter) and
+                    # disable registration only on those. The previous logic disabled
+                    # registration on every adapter NOT on the domain's *default* network
+                    # (vmOptions.network) -- which on a node placed on a non-default
+                    # network misclassified that node's own domain NIC as non-domain and
+                    # killed its DNS registration, so the node never published its A record.
+                    $clusterPrefixes = @('10.250.250.', '10.250.251.')
                     foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
-                        $ips = (Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
-                        $isDomain = $ips | Where-Object { $_ -like "$domainSubnet*" }
-                        if (-not $isDomain) {
+                        $ips = @((Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress)
+                        $isCluster = $false
+                        foreach ($p in $clusterPrefixes) { if ($ips | Where-Object { $_ -like "$p*" }) { $isCluster = $true; break } }
+                        if (-not $isCluster -and $adapter.InterfaceAlias -like '*Cluster*') { $isCluster = $true }
+                        if ($isCluster) {
                             Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
-                            $results += "Disabled DNS reg on '$($adapter.InterfaceAlias)' ($($ips -join ','))"
+                            $results += "Disabled DNS reg on heartbeat NIC '$($adapter.InterfaceAlias)' ($($ips -join ','))"
                         }
                     }
-                    # Also cover the cluster virtual adapter (tunnel adapter, not in Get-NetAdapter)
+                    # Cluster virtual / isatap adapters not enumerated by Get-NetAdapter.
                     foreach ($iface in (Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
                         if ($iface.InterfaceAlias -like '*Cluster*' -or $iface.InterfaceAlias -like '*isatap*') {
                             Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
                         }
                     }
-                    # Force re-registration so only the domain adapter's IP remains
+                    # Self-heal: make sure the DOMAIN NIC (the one carrying this node's own
+                    # subnet IP) is ALLOWED to register, in case a prior buggy run disabled
+                    # it -- then re-register so the host's own domain IP is published.
+                    foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
+                        $ips = @((Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress)
+                        if ($ips | Where-Object { $_ -like "$nodeSubnet*" }) {
+                            Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $true -ErrorAction SilentlyContinue
+                            $results += "Ensured DNS reg ENABLED on domain NIC '$($adapter.InterfaceAlias)' ($($ips -join ','))"
+                        }
+                    }
+                    # Force re-registration so the domain adapter's IP is published.
                     & ipconfig /registerdns 2>&1 | Out-Null
-                    # Remove stale A records from DNS for this hostname
+                    # Remove stale heartbeat A records for this hostname (keep the domain IP).
                     try {
                         $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                             Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
@@ -5011,9 +5031,11 @@ $global:VM_Config = {
                             $records = @(Get-DnsServerResourceRecord -ZoneName $zone -Name $shortName -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
                             foreach ($rec in $records) {
                                 $ip = $rec.RecordData.IPv4Address.IPAddressToString
-                                if ($ip -notlike "$domainSubnet*") {
+                                $stale = $false
+                                foreach ($p in $clusterPrefixes) { if ($ip -like "$p*") { $stale = $true; break } }
+                                if ($stale) {
                                     Remove-DnsServerResourceRecord -ZoneName $zone -Name $shortName -RRType A -RecordData $ip -ComputerName $dnsServer -Force -ErrorAction SilentlyContinue
-                                    $results += "Removed DNS A record $ip"
+                                    $results += "Removed stale heartbeat DNS A record $ip"
                                 }
                             }
                         }
@@ -5023,10 +5045,13 @@ $global:VM_Config = {
                     }
                     return ($results -join '; ')
                 }
-                $domainSubnet = ($deployConfig.vmOptions.network -replace '\.\d+$', '.')
+                # Use the NODE's own network (it may sit on a non-default network),
+                # not vmOptions.network, so the domain NIC is correctly identified.
+                $nodeNetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
+                $nodeSubnet = ($nodeNetwork -replace '\.\d+$', '.')
                 $fqdn = "$($currentItem.vmName).$($deployConfig.vmOptions.domainName)"
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName `
-                    -ScriptBlock $scrubDns -ArgumentList @($fqdn, $domainSubnet) `
+                    -ScriptBlock $scrubDns -ArgumentList @($fqdn, $nodeSubnet) `
                     -DisplayName "Scrub heartbeat DNS records"
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS scrub failed: $($result.ScriptBlockOutput)" -Warning
