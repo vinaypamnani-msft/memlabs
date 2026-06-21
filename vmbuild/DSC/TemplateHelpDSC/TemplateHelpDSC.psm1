@@ -7212,11 +7212,20 @@ class DisableClusterNicDnsRegistration {
     }
 
     [bool] Test() {
-        # Always return false -- Set() is idempotent and performs its own checks
-        # before modifying anything. Avoids PS 5.1 class-method output-stream
-        # leak where Resolve-DnsName emits a VerboseRecord to stdout (stream 1),
-        # which DSC collects alongside the boolean and rejects with:
+        # ALWAYS return $false -- never add real Test logic here, and never remove
+        # this comment. The cluster / NetAdapter / DNS cmdlets this resource relies
+        # on (e.g. Get-NetAdapter, Get-NetAdapterBinding, Resolve-DnsName,
+        # Get-ClusterResource) leak records onto the success output stream (stream 1)
+        # from inside a PS 5.1 class method -- a Verbose/Information/object record
+        # gets collected ALONGSIDE the boolean return value. DSC then sees more than
+        # one value coming back from Test-TargetResource and throws:
         #   "Test-TargetResource must be the boolean value True or False"
+        # which hard-fails the whole configuration. There is no reliable way to
+        # suppress every such leak inside a class method, so Test() must stay a
+        # plain, unconditional 'return $false'. Idempotency is handled in Set()
+        # instead: it reads current state and skips any mutation already correct,
+        # so re-running it (which happens every pass because Test is always false)
+        # is a cheap no-op.
         return $false
     }
 
