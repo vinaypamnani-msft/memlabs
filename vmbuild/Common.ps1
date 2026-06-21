@@ -3964,18 +3964,40 @@ function Set-DeployConfigIPAddresses {
     #    from the domain scope. Both IPs must live on the domain subnet so they are
     #    reachable by clients (the heartbeat network is cluster-only / Role 1).
     foreach ($ownerVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden })) {
-        $domainScopeId = $defaultNetwork
+        # Allocate from the node's OWN network, not the domain default. A SQLAO
+        # node placed on a secondary network (e.g. a child Primary's site network)
+        # has its domain NIC -- and therefore its only gateway-bearing
+        # ClusterAndClient network -- on that subnet. Allocating the cluster/AG
+        # virtual IPs from $defaultNetwork instead lands them on a subnet the node
+        # can't host, so New-Cluster -StaticAddress fails with "no appropriate
+        # ClusterAndClient network was found to host it". Mirror the per-VM main-NIC
+        # rule ($vm.network ?? $defaultNetwork).
+        $domainScopeId = if ($ownerVm.network) { $ownerVm.network } else { $defaultNetwork }
         if (-not $scopesNeeded.Contains($domainScopeId)) {
             Write-Log "$($ownerVm.vmName): SQLAO: domain scope $domainScopeId not available; cluster/AG IPs will be allocated in Phase 1." -Warning
             continue
         }
+        $ownerSubnet = (($domainScopeId.Split('.') | Select-Object -First 3) -join '.') + '.'
         foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
             $existing = $ownerVm.$prop
             if ($existing) {
-                # Already set (config or restored from note) -- keep it, strip any /suffix.
                 $clean = $existing -replace '/.+$', ''
-                if ($clean -ne $existing) { $ownerVm | Add-Member -MemberType NoteProperty -Name $prop -Value $clean -Force }
-                continue
+                # Self-heal: a value restored from a note/config that was allocated
+                # against the WRONG subnet (e.g. an earlier build that drew cluster
+                # IPs from the domain default network instead of this node's own
+                # network) would make New-Cluster fail forever. Discard it so it gets
+                # reallocated from $domainScopeId below.
+                if ($clean -notlike "$ownerSubnet*") {
+                    Write-Log "$($ownerVm.vmName): SQLAO: discarding $prop $clean -- not on node subnet $ownerSubnet* (reallocating from scope $domainScopeId)" -Warning
+                    $null = $sqlaoIps.Remove($clean)
+                    $ownerVm.$prop = $null
+                    $existing = $null
+                }
+                else {
+                    # Already set and on the correct subnet -- keep it, strip any /suffix.
+                    if ($clean -ne $existing) { $ownerVm | Add-Member -MemberType NoteProperty -Name $prop -Value $clean -Force }
+                    continue
+                }
             }
             $label = if ($prop -eq 'ClusterIPAddress') { 'Cluster' } else { 'AG listener' }
             $newIp = Get-SqlaoFreeIP -ScopeId $domainScopeId -VmName $ownerVm.vmName -Label $label
@@ -4564,11 +4586,17 @@ function New-VirtualMachine {
                 $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
                 $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterHeartbeatIP" -Value $ip -Force
                 if ($currentItem.OtherNode) {
-                    # Both the cluster IP and AG listener IP are allocated from the domain
-                    # subnet so they're reachable by clients. The heartbeat network is
-                    # set to Role 1 (cluster-only), so virtual IPs on that subnet can't
-                    # come online (WSFC refuses client access on Role 1 networks).
-                    $domainScopeId = $DeployConfig.vmOptions.network
+                    # Both the cluster IP and AG listener IP are allocated from the
+                    # node's OWN domain subnet so they're reachable by clients and
+                    # hostable by the node's ClusterAndClient network. A SQLAO node on a
+                    # secondary network (e.g. a child site's network) has its domain NIC
+                    # there, NOT on vmOptions.network -- using the default network would
+                    # land the cluster IP on a subnet the node can't host (New-Cluster
+                    # fails: "no appropriate ClusterAndClient network ... to host it").
+                    # The heartbeat network is set to Role 1 (cluster-only), so virtual
+                    # IPs on that subnet can't come online (WSFC refuses client access on
+                    # Role 1 networks).
+                    $domainScopeId = if ($currentItem.network) { $currentItem.network } else { $DeployConfig.vmOptions.network }
 
                     # Prefer the cluster/AG IPs pre-allocated by Set-DeployConfigIPAddresses
                     # (reserved up front from .201-.254, above the DHCP pool, alongside every
