@@ -460,6 +460,18 @@
         # Linux via Register-LinuxVmDns). Idempotent: DnsServerADZone is a
         # no-op when the zone already exists.
         $reverseZoneNames = @{}
+        # Always include the deployment's DEFAULT network. VMs that sit on it
+        # inherit vmOptions.network and have NO explicit .network property, so
+        # the per-VM loop below skips them (-not $vm.network) and the default
+        # subnet's reverse zone would never be created -- which breaks PTR
+        # creation for anything on it (e.g. SQLAO cluster/AG listener IPs, where
+        # Phase 5's PTR TestScript then throws 'zone was not found').
+        if ($deployConfig.vmOptions.network) {
+            $defOct = $deployConfig.vmOptions.network.Split('.')
+            if ($defOct.Count -eq 4) {
+                $reverseZoneNames["$($defOct[2]).$($defOct[1]).$($defOct[0]).in-addr.arpa"] = $true
+            }
+        }
         foreach ($vm in $deployConfig.virtualMachines) {
             if (-not $vm.network) { continue }
             $oct = $vm.network.Split('.')
