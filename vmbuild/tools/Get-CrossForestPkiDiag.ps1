@@ -32,6 +32,9 @@
 param(
     [string]$CaVm = 'CST-DC1',
     [string]$ClientVm = 'CSB-W11CLIENT1',
+    [string]$PrimaryVm = 'CST-PRISITE',
+    [string]$SiteCode = 'PRI',
+    [string]$ClientNetwork = '10.8.8.0',
     [string]$CaDomainNetbios = 'cstest8',
     [string]$ClientDomainNetbios = 'cstest8b',
     [string]$TemplateName = 'ConfigMgrClientCertificate',
@@ -164,6 +167,100 @@ $clientScript = {
         W ($k | Out-String)
     } catch { W "ERR: $($_.Exception.Message)" }
 
+    W "### Client IPv4 addresses (confirm this client's boundary subnet) ###"
+    try {
+        $ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+               Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -ne '127.0.0.1' }
+        W (($ips | Select-Object IPAddress, PrefixLength, InterfaceAlias | Out-String))
+    } catch { W "ERR: $($_.Exception.Message)" }
+
+    W "### Is the remote CA root trusted on this client? (certutil -store Root | cstest8 CA) ###"
+    try { W ((& certutil -store Root 2>&1 | Out-String | Select-String 'cstest8|CST-DC1' -Context 1,1 | Out-String)) } catch { W "ERR: $($_.Exception.Message)" }
+
+    W "### ccmsetup.log -- GetDPLocations / content-location / cert lines (last 50 matches) ###"
+    try {
+        $cs = 'C:\Windows\ccmsetup\Logs\ccmsetup.log'
+        if (Test-Path $cs) {
+            $pat = 'GetDPLocations|ContentLocation|distribution point|80092004|NO_CLIENT_PKI_CERT|client certificate|0x87d00454|certificate by issuer|403|HTTP/1.1 |https://|MP_|boundary|Sending request|Retrieved|Found |No (DP|MP|content)'
+            $hits = Select-String -Path $cs -Pattern $pat -ErrorAction SilentlyContinue
+            foreach ($h in ($hits | Select-Object -Last 50)) { W ($h.Line) }
+            W "--- ccmsetup.log raw last 20 lines ---"
+            foreach ($l in (Get-Content $cs -Tail 20 -ErrorAction SilentlyContinue)) { W $l }
+        } else { W "(ccmsetup.log not found at $cs)" }
+    } catch { W "ERR: $($_.Exception.Message)" }
+
+    return ($out -join "`r`n")
+}
+
+# ---------------------------------------------------------------------------
+#  Primary / SMS-provider collection (runs in-guest on CST-PRISITE -- PS5.1)
+#  Diagnoses the GetDPLocations content-location path: boundaries, boundary
+#  groups (members + site systems) and the Client Package distribution.
+# ---------------------------------------------------------------------------
+$primaryScript = {
+    param($SiteCode, $ClientNetwork)
+    $out = [System.Collections.Generic.List[string]]::new()
+    function W { param($t) $script:out.Add([string]$t) }
+    $ns = "root\SMS\site_$SiteCode"
+    W "SMS provider namespace: $ns   (looking for cross-forest client network: $ClientNetwork)"
+
+    W "### Boundaries (SMS_Boundary) ###"
+    try {
+        $b = @(Get-WmiObject -Namespace $ns -Class SMS_Boundary -ErrorAction Stop)
+        if (-not $b) { W "(none)" }
+        foreach ($x in $b) {
+            $typeName = switch ([int]$x.BoundaryType) { 0 {'IPSubnet'} 1 {'ADSite'} 3 {'IPv6'} 4 {'IPRange'} default {"Type$($x.BoundaryType)"} }
+            $flag = ''
+            if ($ClientNetwork -and ($x.Value -like "*$($ClientNetwork.TrimEnd('0'))*" -or $x.Value -like "*$ClientNetwork*")) { $flag = '   <== matches client network' }
+            W ("  [{0}] {1} = {2}   (BoundaryID={3}){4}" -f $typeName, $x.DisplayName, $x.Value, $x.BoundaryID, $flag)
+        }
+    } catch { W "ERR SMS_Boundary: $($_.Exception.Message)" }
+
+    W "### Boundary Groups + members + site systems ###"
+    try {
+        $bgs = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop)
+        if (-not $bgs) { W "(none)" }
+        foreach ($g in $bgs) {
+            W ("BG '{0}'  (GroupID={1}, DefaultSiteCode={2})" -f $g.Name, $g.GroupID, $g.DefaultSiteCode)
+            try {
+                $mem = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupMembers -Filter "GroupID=$($g.GroupID)" -ErrorAction SilentlyContinue)
+                if (-not $mem) { W "    boundaries: (none)" }
+                foreach ($m in $mem) {
+                    $bnd = Get-WmiObject -Namespace $ns -Class SMS_Boundary -Filter "BoundaryID=$($m.BoundaryID)" -ErrorAction SilentlyContinue
+                    if ($bnd) { W ("    boundary: {0} = {1}" -f $bnd.DisplayName, $bnd.Value) } else { W "    boundary: BoundaryID=$($m.BoundaryID) (not found)" }
+                }
+            } catch { W "    ERR members: $($_.Exception.Message)" }
+            try {
+                $ss = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -Filter "GroupID=$($g.GroupID)" -ErrorAction SilentlyContinue)
+                if (-not $ss) { W "    site systems: (NONE -- this BG returns NO content location!)" }
+                foreach ($s in $ss) { W ("    site system: {0}" -f $s.ServerNALPath) }
+            } catch { W "    ERR site systems: $($_.Exception.Message)" }
+        }
+    } catch { W "ERR SMS_BoundaryGroup: $($_.Exception.Message)" }
+
+    W "### ConfigMgr Client Package distribution (the package GetDPLocations looks up) ###"
+    try {
+        $pkgs = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "Name='Configuration Manager Client Package'" -ErrorAction Stop)
+        if (-not $pkgs) { W "(Configuration Manager Client Package not found by name)" }
+        foreach ($p in $pkgs) {
+            W ("Package '{0}'  PackageID={1}" -f $p.Name, $p.PackageID)
+            $st = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($p.PackageID)'" -ErrorAction SilentlyContinue)
+            if (-not $st) { W "  (no distribution rows -- NOT distributed to ANY DP!)" }
+            foreach ($s in $st) {
+                $stateName = switch ([int]$s.State) { 0 {'Installed'} 1 {'InstallPending'} 2 {'InstallRetrying'} 3 {'InstallFailed'} 7 {'ContentValidating'} 8 {'ContentValidationFailed'} default {"State$($s.State)"} }
+                W ("  DP={0}  State={1}" -f $s.ServerNALPath, $stateName)
+            }
+        }
+    } catch { W "ERR package: $($_.Exception.Message)" }
+
+    W "### Management Points / Distribution Points (SMS_SCI_SysResUse) ###"
+    try {
+        $sysres = @(Get-WmiObject -Namespace $ns -Class SMS_SCI_SysResUse -ErrorAction SilentlyContinue |
+                    Where-Object { $_.RoleName -in 'SMS Management Point', 'SMS Distribution Point' })
+        foreach ($r in $sysres) { W ("  {0}: {1}  (SiteCode={2})" -f $r.RoleName, $r.NetworkOSPath, $r.SiteCode) }
+        if (-not $sysres) { W "(no MP/DP rows)" }
+    } catch { W "ERR sysres: $($_.Exception.Message)" }
+
     return ($out -join "`r`n")
 }
 
@@ -181,6 +278,14 @@ try {
     Add-Section -Title "Client: $ClientVm ($ClientDomainNetbios)" -Body $clOut
 } catch {
     Add-Section -Title "Client: $ClientVm -- COLLECTION FAILED" -Body $_.Exception.Message
+}
+
+Write-Host "Collecting from Primary / SMS provider '$PrimaryVm' (site $SiteCode) ..." -ForegroundColor Cyan
+try {
+    $prOut = Invoke-Command -VMName $PrimaryVm -Credential $caCred -ScriptBlock $primaryScript -ArgumentList $SiteCode, $ClientNetwork -ErrorAction Stop
+    Add-Section -Title "Primary / SMS provider: $PrimaryVm (site $SiteCode)" -Body $prOut
+} catch {
+    Add-Section -Title "Primary / SMS provider: $PrimaryVm -- COLLECTION FAILED" -Body $_.Exception.Message
 }
 
 Write-Host ""
