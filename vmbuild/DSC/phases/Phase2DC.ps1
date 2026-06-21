@@ -42,24 +42,6 @@
         if ($cmo.PrePopulateObjects) { $prePopulate = $true }
     }
 
-    # Cross-forest PKI: this domain's clients enroll their ConfigMgr client-auth
-    # cert from a REMOTE forest's CA (the DC has ForestTrust set AND a remote
-    # RootCA) because the domain runs no CM site / CA of its own. The heuristic
-    # above only sees this deploy's CAS/Primary cmOptions -- the remote managing
-    # site is a hidden stub with no cmOptions -- so $usePKI stays false and the
-    # "Certificate AutoEnrollment" GPO below never gets created/linked. Without
-    # AEPolicy the clients never autoenroll, so they never get a client cert and
-    # ccmsetup fails with CCM_E_NO_CLIENT_PKI_CERT. Treat cross-forest CA use as
-    # PKI so the autoenrollment policy is applied (matches main, which had no gate).
-    if (-not $usePKI) {
-        $crossForestPkiDC = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -eq 'DC' -and $_.ForestTrust -and $_.ForestTrust -ne 'NONE' -and
-                $_.thisParams -and $_.thisParams.RootCA
-            })
-        if ($crossForestPkiDC.Count -gt 0) { $usePKI = $true }
-    }
-
-
     # This VM
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
@@ -710,54 +692,59 @@
         }
 
 
-        if ($usePKI) {
-            WriteStatus GroupPolicyStatus {
-                DependsOn = $waitOnDependency
-                Status    = "Installing Auto Enrollment Group Policy"
-            }
-
-            $GPOName = "Certificate AutoEnrollment"
-
-            GroupPolicy GroupPolicyConfig {
-                Name      = $GPOName
-                DependsOn = $waitOnDependency
-            }
-
-            GPLink GPLinkConfig {
-                Path      = $DNName
-                GPOName   = $GPOName
-                DependsOn = "[GroupPolicy]GroupPolicyConfig"
-            }
-
-            GPRegistryValue GPRegistryValueConfig1 {
-                Name      = $GPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
-                ValueName = "AEPolicy"
-                ValueType = "DWord"
-                Value     = "7"
-                DependsOn = "[GPLink]GPLinkConfig"
-            }
-
-            GPRegistryValue GPRegistryValueConfig2 {
-                Name      = $GPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
-                ValueName = "OfflineExpirationPercent"
-                ValueType = "DWord"
-                Value     = "10"
-                DependsOn = "[GPLink]GPLinkConfig"
-            }
-
-            GPRegistryValue GPRegistryValueConfig3 {
-                Name      = $GPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
-                ValueName = "OfflineExpirationStoreNames"
-                ValueType = "String"
-                Value     = "MY"
-                DependsOn = "[GPLink]GPLinkConfig"
-            }
-            $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
-            $waitOnDependency = $nextDepend
+        # Apply the "Certificate AutoEnrollment" GPO UNCONDITIONALLY (matches main).
+        # AEPolicy=7 only ENABLES machine autoenrollment; it is a harmless no-op
+        # unless a cert template grants this domain's computers AutoEnroll. Gating
+        # it on $usePKI under-detected the cross-forest case (clients enroll their
+        # client-auth cert from a REMOTE forest's CA and this domain runs no CM
+        # site, so $usePKI was false), which starved those clients of the
+        # autoenrollment policy -> no client cert -> ccmsetup CCM_E_NO_CLIENT_PKI_CERT.
+        WriteStatus GroupPolicyStatus {
+            DependsOn = $waitOnDependency
+            Status    = "Installing Auto Enrollment Group Policy"
         }
+
+        $GPOName = "Certificate AutoEnrollment"
+
+        GroupPolicy GroupPolicyConfig {
+            Name      = $GPOName
+            DependsOn = $waitOnDependency
+        }
+
+        GPLink GPLinkConfig {
+            Path      = $DNName
+            GPOName   = $GPOName
+            DependsOn = "[GroupPolicy]GroupPolicyConfig"
+        }
+
+        GPRegistryValue GPRegistryValueConfig1 {
+            Name      = $GPOName
+            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+            ValueName = "AEPolicy"
+            ValueType = "DWord"
+            Value     = "7"
+            DependsOn = "[GPLink]GPLinkConfig"
+        }
+
+        GPRegistryValue GPRegistryValueConfig2 {
+            Name      = $GPOName
+            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+            ValueName = "OfflineExpirationPercent"
+            ValueType = "DWord"
+            Value     = "10"
+            DependsOn = "[GPLink]GPLinkConfig"
+        }
+
+        GPRegistryValue GPRegistryValueConfig3 {
+            Name      = $GPOName
+            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+            ValueName = "OfflineExpirationStoreNames"
+            ValueType = "String"
+            Value     = "MY"
+            DependsOn = "[GPLink]GPLinkConfig"
+        }
+        $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
+        $waitOnDependency = $nextDepend
 
         # Certificate template import and publishing is handled by the
         # host-driven PKI orchestrator (Install-PKI) after Phase2 completes.
