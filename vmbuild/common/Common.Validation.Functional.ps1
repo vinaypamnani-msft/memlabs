@@ -564,7 +564,7 @@ function Test-DCFunctionality {
         # NOTE: Invoke-VmCommand declares [string[]]$ArgumentList, so any bool we pass
         # in arrives as the string 'True'/'False' (both truthy in `if`). Compare to
         # the string 'True' explicitly to avoid the BDC branch firing on every DC.
-        param($domainFqdn, $isBdcInner, $expectedDnsCsv, $hasCmSitesInner)
+        param($domainFqdn, $isBdcInner, $expectedDnsCsv, $hasCmSitesInner, $expectedReverseZonesCsv)
         $isBdc = ($isBdcInner -eq 'True')
         $hasCmSites = ($hasCmSitesInner -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
@@ -860,6 +860,28 @@ function Test-DCFunctionality {
             $results.Details.Add("OK: dcdiag Services/Replications/FSMOCheck/Advertising/NetLogons passed")
         }
 
+        # Reverse-lookup zones: one AD-integrated /24 in-addr.arpa per VM network
+        # should exist (created by Phase2DC). A missing reverse zone breaks PTR
+        # creation -- e.g. the SQLAO cluster / AG-listener PTRs in Phase 5, where a
+        # missing zone made the DC's ClusterPtrRecords script throw and hang the
+        # phase. Informational (WARN, never FAIL): the lab's forward DNS still works
+        # without reverse zones. Primary DC only -- AD-integrated zones replicate to
+        # the BDC, so checking once avoids double-reporting.
+        if (-not $isBdc -and $expectedReverseZonesCsv) {
+            $missingRev = New-Object System.Collections.Generic.List[string]
+            $expectedRev = @($expectedReverseZonesCsv -split ',' | Where-Object { $_ })
+            foreach ($rz in $expectedRev) {
+                $z = Get-DnsServerZone -Name $rz -ErrorAction SilentlyContinue
+                if (-not $z) { $missingRev.Add($rz) }
+            }
+            if ($missingRev.Count -gt 0) {
+                $results.Details.Add("WARN: Reverse-lookup zone(s) missing on DC: $($missingRev -join ', '). PTR creation (e.g. SQLAO cluster/listener) will fail -- re-run Phase 2 to create them.")
+            }
+            else {
+                $results.Details.Add("OK: All $($expectedRev.Count) expected reverse-lookup zone(s) present")
+            }
+        }
+
         # SYSVOL + NETLOGON shares -- if these are missing GPOs and logons break.
         foreach ($shr in @('SYSVOL', 'NETLOGON')) {
             $s = Get-SmbShare -Name $shr -ErrorAction SilentlyContinue
@@ -1020,8 +1042,30 @@ function Test-DCFunctionality {
         $hasCmSites = @($DeployConfig.virtualMachines | Where-Object { $_.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite') }).Count -gt 0
     }
 
+    # Expected reverse-lookup zones: one /24 in-addr.arpa per distinct network used
+    # by a non-hidden VM in this domain, plus the deployment's DEFAULT network
+    # (default-network VMs carry no explicit .network). Mirrors what Phase2DC
+    # creates; the DC-side scriptblock WARNs on any that are missing.
+    $expectedReverseZonesCsv = ''
+    if ($DeployConfig) {
+        $revZones = [System.Collections.Generic.HashSet[string]]::new()
+        $revNets = New-Object System.Collections.Generic.List[string]
+        if ($DeployConfig.vmOptions.network) { $revNets.Add($DeployConfig.vmOptions.network) }
+        foreach ($vm in $DeployConfig.virtualMachines) {
+            if ($vm.hidden) { continue }
+            if ($vm.domain -and $vm.domain -ne $Domain) { continue }
+            if ($vm.network) { $revNets.Add($vm.network) }
+        }
+        foreach ($net in $revNets) {
+            $o = $net.Split('.')
+            if ($o.Count -ne 4) { continue }
+            $null = $revZones.Add("$($o[2]).$($o[1]).$($o[0]).in-addr.arpa")
+        }
+        $expectedReverseZonesCsv = ($revZones -join ',')
+    }
+
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent), $expectedDnsCsv, ([string]$hasCmSites) `
+        -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent), $expectedDnsCsv, ([string]$hasCmSites), $expectedReverseZonesCsv `
         -DisplayName "Phase11-$label-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 
