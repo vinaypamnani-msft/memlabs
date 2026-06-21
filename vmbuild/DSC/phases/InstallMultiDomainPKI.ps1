@@ -219,6 +219,83 @@ if (Test-Path $cm_svc_file) {
     Write-DscStatus "Restarting services"
     Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
     Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 30
+
+    # ---- Explicitly discover + push the external domain's clients NOW ----
+    # Set-CMClientPushInstallation above only ENABLES automatic client push, which
+    # then relies on the slow AD Forest Discovery -> device record -> auto-push
+    # cycle (typically 15-60+ min on the first pass). On its own that means the
+    # cross-forest clients are NOT installed by the time the new domain's Phase 11
+    # validates them (observed: discovery/push enabled at deploy time, Phase 11
+    # ran <3 min later -> every client "CcmExec not installed"). To install the
+    # agent DURING the deploy, force a discovery pass and then explicitly
+    # Install-CMClient each external-domain DomainMember, mirroring PushClients.ps1.
+    $externalClients = @($deployConfig.virtualMachines | Where-Object {
+            $_.Role -eq "DomainMember" -and ($_.pushClient -ne $false) -and
+            ($_.ThisParams.vmNetwork -in $networks)
+        } | Select-Object -ExpandProperty vmName | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
+
+    if ($externalClients.Count -gt 0) {
+        Write-DscStatus "External client push: $($externalClients.Count) target(s) [$($externalClients -join ', ')] for site $Externaldomainsitecode"
+        $CollectionName = "All Systems"
+
+        # Force a forest + system discovery pass so the cross-forest machines
+        # become device records we can push to.
+        try { Invoke-CMForestDiscovery -SiteCode $Externaldomainsitecode *>&1 | Write-StatusLogEntry } catch { Write-DscStatus "External client push: Invoke-CMForestDiscovery failed (auto-push still runs): $_" }
+        try { Invoke-CMSystemDiscovery *>&1 | Write-StatusLogEntry } catch { Write-DscStatus "External client push: Invoke-CMSystemDiscovery failed: $_" }
+
+        # Bounded wait shared across ALL targets (forest discovery populates them
+        # in one batch, so wait once rather than per-client) -- caps the total
+        # stall at 15 min regardless of client count.
+        $maxWaitSec = 900
+        $waited = 0
+        $machinelist = @()
+        while ($waited -lt $maxWaitSec) {
+            try { $machinelist = @((Get-CMDevice -CollectionName $CollectionName -ErrorAction Stop).Name) } catch {}
+            $present = @($externalClients | Where-Object { $machinelist -contains $_ })
+            if ($present.Count -ge $externalClients.Count) {
+                Write-DscStatus "External client push: all $($externalClients.Count) target(s) discovered"
+                break
+            }
+            Write-DscStatus "External client push: discovered $($present.Count)/$($externalClients.Count) target(s); waiting for forest discovery (${waited}s/${maxWaitSec}s)"
+            # Re-kick discovery roughly every 3 min.
+            if (($waited % 180) -eq 0) {
+                try { Invoke-CMForestDiscovery -SiteCode $Externaldomainsitecode *>&1 | Out-Null } catch {}
+                try { Invoke-CMSystemDiscovery *>&1 | Out-Null } catch {}
+                try { Invoke-CMDeviceCollectionUpdate -Name $CollectionName *>&1 | Out-Null } catch {}
+            }
+            Start-Sleep -Seconds 30
+            $waited += 30
+        }
+        try { $machinelist = @((Get-CMDevice -CollectionName $CollectionName -ErrorAction Stop).Name) } catch {}
+
+        foreach ($client in $externalClients) {
+            if ($machinelist -notcontains $client) {
+                Write-DscStatus "External client push: $client not discovered within ${maxWaitSec}s; automatic client push will install it on the next discovery cycle"
+                continue
+            }
+            # Auto-push may have already installed it -- a second push races with
+            # the first and can throw E_ABORT (0x80004004).
+            $device = $null
+            try { $device = Get-CMDevice -Name $client -ErrorAction SilentlyContinue } catch {}
+            if ($device -and $device.IsClient) {
+                Write-DscStatus "External client push: $client already has the CM client (auto-push won); skipping explicit push"
+                continue
+            }
+            Write-DscStatus "External client push: Install-CMClient -DeviceName $client -SiteCode $Externaldomainsitecode"
+            try {
+                Install-CMClient -DeviceName $client -SiteCode $Externaldomainsitecode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
+                Start-Sleep -Seconds 5
+            }
+            catch {
+                Write-DscStatus "External client push: Install-CMClient for $client failed: $_ ; automatic push will retry"
+            }
+        }
+        Write-DscStatus "External client push: explicit push pass complete (clients install asynchronously via ccmsetup)"
+    }
+    else {
+        Write-DscStatus "External client push: no external-domain DomainMember clients to push"
+    }
 }
 
 # Update actions file
