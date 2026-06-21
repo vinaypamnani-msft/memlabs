@@ -1463,7 +1463,9 @@ function Get-SQLAOConfig {
 
     # Warn if ClusterIP or AGIP are on the legacy heartbeat subnet.
     # These labs need a full re-deploy to get domain-subnet IPs.
-    $domainNetwork = $deployConfig.vmOptions.network
+    # Use the node's OWN network (it may sit on a secondary network), not the
+    # domain default vmOptions.network, so the warning names the right subnet.
+    $domainNetwork = if ($PrimaryAO.network) { $PrimaryAO.network } else { $deployConfig.vmOptions.network }
     $domainPrefix = ($domainNetwork -replace '\.\d+$', '.')
     if ($PrimaryAO.ClusterIPAddress -match '^10\.250\.250\.') {
         write-log "$vmName`: WARNING: ClusterIPAddress $($PrimaryAO.ClusterIPAddress) is on the heartbeat subnet, not the domain subnet ($domainPrefix*). Cluster steps will be skipped." -Warning

@@ -188,7 +188,10 @@
                 $proxyFqdn = "$($proxyVm.vmName).$DomainName"
                 $proxyServer = "${proxyFqdn}:3128"
                 $bypassEntries = @('<local>', "*.$DomainName", $proxyFqdn)
-                $network = $deployConfig.vmOptions.network
+                # Bypass the proxy for THIS VM's own subnet, not the domain
+                # default network — a member on a secondary network must bypass
+                # for its own subnet, not vmOptions.network.
+                $network = if ($ThisVM.network) { $ThisVM.network } else { $deployConfig.vmOptions.network }
                 if ($network) {
                     $base = ($network -replace '\.0$', '')
                     if ($base -match '^\d+\.\d+\.\d+$') { $bypassEntries += "$base.*" }

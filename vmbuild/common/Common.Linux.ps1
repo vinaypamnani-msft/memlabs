@@ -4056,10 +4056,14 @@ function Set-WindowsClientProxyForConfig {
     }
 
     $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
-    $bypassNet = $deployConfig.vmOptions.network
 
     $ok = $true
     foreach ($vm in $clients) {
+        # Bypass the proxy for the client's OWN subnet, not the domain default
+        # network. A client on a secondary network (e.g. 10.0.2.0) must bypass
+        # for 10.0.2.* — using vmOptions.network would bypass the wrong subnet.
+        $bypassNet = $vm.network
+        if (-not $bypassNet) { $bypassNet = $deployConfig.vmOptions.network }
         Write-Log "[Proxy] Configuring $($vm.vmName) -> $proxyFqdn`:3128"
         $r = Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
                 -ProxyFqdn $proxyFqdn -BypassNetwork $bypassNet
