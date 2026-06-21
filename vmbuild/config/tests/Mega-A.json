@@ -269,7 +269,7 @@
       "vmName": "SS1SITE",
       "role": "Secondary",
       "operatingSystem": "Server 2025",
-      "memory": "3GB",
+      "memory": "8GB",
       "virtualProcs": 4,
       "tpmEnabled": true,
       "installSSMS": true,
