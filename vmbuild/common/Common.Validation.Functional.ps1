@@ -1889,29 +1889,80 @@ function Test-SQLAOFunctionality {
                     }
                 }
 
-                # Validate cluster name DNS points to the correct IP
-                # Query the DC's DNS zone directly instead of Resolve-DnsName
-                # (which can return LLMNR/cache results masking stale records).
+                # Validate cluster name DNS points to the correct IP.
+                # Query the DC's DNS zone directly (Get-DnsServerResourceRecord)
+                # rather than Resolve-DnsName, which can return LLMNR/cache
+                # results that mask stale records. BUT the DnsServer *management*
+                # RPC interface is not always reachable from a SQLAO node -- e.g.
+                # a child-primary cluster on a different subnet than the DC, where
+                # the dynamic DNS-management RPC is blocked cross-subnet even
+                # though ordinary port-53 resolution works fine. That cmdlet then
+                # throws a TERMINATING "Failed to get the zone information for
+                # <domain> on server <dc>" that -ErrorAction SilentlyContinue does
+                # NOT suppress, so it must be caught here -- otherwise it bubbles
+                # to the section catch and hard-FAILs an otherwise perfectly
+                # healthy cluster (observed on FAB-PS2SQLAO1/2: cluster Online, all
+                # nodes Up, all resources Online, listener connects, yet the whole
+                # health check FAILed solely on this cross-subnet RPC error, while
+                # the CAS SQLAO nodes on the DC's own subnet passed). On RPC
+                # failure fall back to a direct port-53 Resolve-DnsName; if that is
+                # also unavailable, downgrade to INFO -- the cluster IP resources
+                # are already validated Online above and the SQL listener connect
+                # in Step 6 is the authoritative DNS test. This mirrors the Step 5b
+                # listener-DNS probe, which already treats this case as
+                # informational only.
                 if ($clusterName) {
+                    $clusterResolvedIPs = @()
+                    $clusterDnsSource = ''
+                    $clusterDnsRpcOk = $false
+                    $clusterDnsErr = $null
                     $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$clusterName' -RRType A -ComputerName '$dnsServer'")
-                    $clusterRecs = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $clusterName -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
-                    $resolvedIPs = @($clusterRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
-                    if ($resolvedIPs.Count -eq 0) {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: Cluster name '$clusterName' does not resolve in DNS")
+                    try {
+                        $clusterRecs = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $clusterName -RRType A -ComputerName $dnsServer -ErrorAction Stop)
+                        $clusterDnsRpcOk = $true
+                        $clusterResolvedIPs = @($clusterRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                     }
-                    else {
-                        $results.Details.Add("OK: Cluster name '$clusterName' resolves to $($resolvedIPs -join ', ')")
-                        if ($clusterIP -and $clusterIP -notin $resolvedIPs) {
+                    catch {
+                        $clusterDnsErr = $_.Exception.Message
+                        $results.Details.Add("  RPC against '$dnsServer' errored: $clusterDnsErr -- falling back to direct DNS (port 53)")
+                        try {
+                            $clusterFqdn = "$clusterName.$domain"
+                            $results.Details.Add("CMD: Resolve-DnsName -Name '$clusterFqdn' -Type A -Server '$dnsServer' -DnsOnly -NoHostsFile")
+                            $clusterDns = @(Resolve-DnsName -Name $clusterFqdn -Type A -Server $dnsServer -DnsOnly -NoHostsFile -ErrorAction Stop)
+                            $clusterResolvedIPs = @($clusterDns | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+                            $clusterDnsSource = ' (direct DNS, port 53)'
+                        }
+                        catch {
+                            # Both the zone RPC and the direct port-53 probe were
+                            # unavailable; handled as INFO below.
+                            $clusterDnsSource = ''
+                        }
+                    }
+
+                    if ($clusterResolvedIPs.Count -gt 0) {
+                        $results.Details.Add("OK: Cluster name '$clusterName' resolves to $($clusterResolvedIPs -join ', ')$clusterDnsSource")
+                        if ($clusterIP -and $clusterIP -notin $clusterResolvedIPs) {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: Expected cluster IP '$clusterIP' not in DNS (found: $($resolvedIPs -join ', '))")
+                            $results.Details.Add("FAIL: Expected cluster IP '$clusterIP' not in DNS (found: $($clusterResolvedIPs -join ', '))")
                         }
                         # Check for stale non-cluster IPs
-                        foreach ($rip in $resolvedIPs) {
+                        foreach ($rip in $clusterResolvedIPs) {
                             if ($clusterIP -and $rip -ne $clusterIP) {
                                 $results.Details.Add("WARN: Cluster DNS has unexpected IP '$rip' (expected '$clusterIP')")
                             }
                         }
+                    }
+                    elseif ($clusterDnsRpcOk) {
+                        # Zone query SUCCEEDED but returned no record -> genuine fault.
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Cluster name '$clusterName' does not resolve in DNS")
+                    }
+                    else {
+                        # Could not query the zone at all (management RPC blocked +
+                        # port-53 fallback unavailable). Not a cluster fault -- the
+                        # cluster IP resources are Online above and Step 6 validates
+                        # DNS authoritatively via the SQL listener connect.
+                        $results.Details.Add("INFO: Could not verify cluster name '$clusterName' via DNS zone query against '$dnsServer' ($clusterDnsErr); cluster IP resources are Online and listener connectivity is validated in Step 6 -- treating explicit zone probe as informational only")
                     }
 
                     # Verify RPC connectivity to cluster name
@@ -2194,9 +2245,23 @@ function Test-SQLAOFunctionality {
                 # the heartbeat IP) even when the DNS server has no stale records.
                 $hostname = $env:COMPUTERNAME
                 $staleRecords = @()
+                $hostZoneRpcOk = $false
                 if ($dnsServer -and $domain) {
-                    $allARecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
-                    $staleRecords = @($allARecords | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -like "${clusterSubnet}*" })
+                    # Same cross-subnet caveat as the cluster-name probe above:
+                    # Get-DnsServerResourceRecord can throw a terminating "Failed to
+                    # get the zone information" when the DNS-management RPC is blocked
+                    # cross-subnet. Catch it so it doesn't bubble to the section catch
+                    # and emit a misleading "Network config validation error" WARN --
+                    # if we can't read the zone we simply can't audit stale heartbeat
+                    # records remotely (informational), which is not a fault.
+                    try {
+                        $allARecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $dnsServer -ErrorAction Stop)
+                        $hostZoneRpcOk = $true
+                        $staleRecords = @($allARecords | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -like "${clusterSubnet}*" })
+                    }
+                    catch {
+                        $results.Details.Add("INFO: Could not query DNS zone '$domain' on '$dnsServer' to audit stale heartbeat A records for '$hostname' ($($_.Exception.Message)); skipping remote stale-record check (cross-subnet DNS-management RPC unavailable)")
+                    }
                 }
                 if ($staleRecords.Count -gt 0) {
                     $staleIPs = @($staleRecords | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
@@ -2246,7 +2311,10 @@ function Test-SQLAOFunctionality {
                     }
                 }
                 else {
-                    $results.Details.Add("OK: Hostname '$hostname' has no stale heartbeat DNS records")
+                    if ($hostZoneRpcOk) {
+                        $results.Details.Add("OK: Hostname '$hostname' has no stale heartbeat DNS records")
+                    }
+                    # else: zone query was unavailable -- already reported INFO above; don't claim OK.
                 }
             }
             catch {
