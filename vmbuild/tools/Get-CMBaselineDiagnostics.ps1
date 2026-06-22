@@ -40,6 +40,15 @@
 .PARAMETER NamePattern
     Only collect baselines whose name matches this wildcard. Default '*'.
 
+.PARAMETER VMName
+    Only collect from these VM(s) (wildcards allowed). The baselines deploy to
+    All Systems and fail identically everywhere, so a couple of clients is plenty.
+
+.PARAMETER Sample
+    Collect from just one Windows 10 + one Windows 11 client instead of every VM
+    (much faster). W10 historically fails one extra baseline vs W11, so sampling
+    both catches that delta.
+
 .PARAMETER TriggerEvaluation
     Ask each client's DCM agent to re-evaluate its baselines (and wait ~90s)
     before collecting, so the compliance detail is current rather than stale.
@@ -61,12 +70,18 @@
     .\tools\Get-CMBaselineDiagnostics.ps1 -DomainName adatum.com -TriggerEvaluation
 
 .EXAMPLE
+    # Fast: one W10 + one W11 client, plus the site CI XML
+    .\tools\Get-CMBaselineDiagnostics.ps1 -DomainName fabrikam.com -Sample -TriggerEvaluation
+
+.EXAMPLE
     .\tools\Get-CMBaselineDiagnostics.ps1            # lists the domains it sees
 #>
 [CmdletBinding()]
 param(
     [string]$DomainName,
     [string]$NamePattern = '*',
+    [string[]]$VMName,
+    [switch]$Sample,
     [switch]$TriggerEvaluation,
     [switch]$ClientsOnly,
     [switch]$SiteOnly,
@@ -254,7 +269,36 @@ $summary.Add("")
 # =====================================================================
 if (-not $SiteOnly) {
     $clientVMs = @($domainVMs | Where-Object { $_.role -notin $skipClientRoles -and $_.state -eq 'Running' } | Sort-Object vmName)
-    Write-Host "Client pass: $($clientVMs.Count) Running VM(s)" -ForegroundColor Yellow
+
+    # The MEMLABS baselines deploy to All Systems, so every client evaluates the
+    # same set -- failures are systemic, not per-VM. Running all 19 takes forever,
+    # so allow narrowing:
+    #   -VMName <names>  : exact VM(s) only (wildcards allowed).
+    #   -Sample          : one Windows 10 + one Windows 11 client (the smallest
+    #                      representative set; W10 historically fails one extra
+    #                      baseline vs W11, so sampling both catches that delta).
+    if ($VMName) {
+        $clientVMs = @($clientVMs | Where-Object { $sel = $_.vmName; ($VMName | Where-Object { $sel -like $_ }) })
+    }
+    elseif ($Sample) {
+        function Get-VmWinVer {
+            param($v)
+            $os = "$($v.operatingSystem)"
+            if ($os -match 'Windows\s*11' -or $v.vmName -match 'W11') { return 'W11' }
+            if ($os -match 'Windows\s*10' -or $v.vmName -match 'W10') { return 'W10' }
+            return $null
+        }
+        $w11 = @($clientVMs | Where-Object { (Get-VmWinVer $_) -eq 'W11' }) | Select-Object -First 1
+        $w10 = @($clientVMs | Where-Object { (Get-VmWinVer $_) -eq 'W10' }) | Select-Object -First 1
+        $pick = @($w11, $w10 | Where-Object { $_ })
+        if ($pick.Count -eq 0) {
+            Write-Host "  -Sample: no W10/W11 client found; falling back to first running client." -ForegroundColor DarkYellow
+            $pick = @($clientVMs | Select-Object -First 1)
+        }
+        $clientVMs = $pick
+    }
+
+    Write-Host "Client pass: $($clientVMs.Count) Running VM(s)$(if ($Sample) { ' (sample)' } elseif ($VMName) { ' (filtered)' })" -ForegroundColor Yellow
     $summary.Add("----- CLIENT compliance ($($clientVMs.Count) VM(s)) -----")
 
     foreach ($vm in $clientVMs) {
