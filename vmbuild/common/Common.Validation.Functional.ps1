@@ -7129,6 +7129,16 @@ function Test-CMSiteWideFunctionality {
         $topLevel = ($isTopLevelInner -eq 'True')
         $isPrimary = ($vmRole -eq 'Primary')
         $hasSup = ($hasSUPInner -eq 'True')
+        # WSUS admin API endpoint for this site's SUP. When the site uses PKI,
+        # WSUS is SSL-configured and its admin API (ApiRemoting30) REQUIRES SSL:
+        # an HTTP call on 8530 returns HTTP 403 Forbidden, so PKI sites MUST use
+        # 8531 + -UseSsl. Non-PKI sites use plain HTTP on 8530. (Confirmed on
+        # fabrikam: 8530 -> 403; 8531 -UseSsl -> works.) The SUP is frequently a
+        # remote site system, so we always target it by -Name $supServer (the
+        # WSUS admin console is present on the site server when the SUP is
+        # remote, a documented CM SUP prerequisite).
+        $wsusPort   = if ($usePki) { 8531 } else { 8530 }
+        $wsusUseSsl = [bool]$usePki
         $expectedApps = if ([string]::IsNullOrEmpty($expectedAppsCsv)) { @() } else { @($expectedAppsCsv -split '\|') }
         $expectedBoundaries = if ([string]::IsNullOrEmpty($expectedBgCsv)) { @() } else { @($expectedBgCsv -split '\|') }
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
@@ -7538,27 +7548,22 @@ function Test-CMSiteWideFunctionality {
                     $syncTime = [Management.ManagementDateTimeConverter]::ToDateTime($syncStatus.LastSyncStateTime)
                     $age = (Get-Date) - $syncTime
                     if ($age.TotalMinutes -gt 30) {
-                        # Long-running sync — gather WSUS-level diagnostics to help
-                        # identify the cause. Target the actual SUP server on port
-                        # 8530 (always listening, even on an HTTPS SUP). A bare
-                        # Get-WsusServer defaults to localhost and throws
-                        # WsusInvalidServerException when the SUP is a remote site
-                        # system rather than this site server.
+                        # Long-running sync — pull live WSUS progress from the SUP
+                        # using the protocol the SUP actually requires ($wsusPort /
+                        # $wsusUseSsl: 8531+SSL on PKI, else 8530). On any failure
+                        # emit a clean note instead of a scary raw exception.
                         $wsusDiag = ""
-                        try {
-                            if ($supServer) {
-                                $wsusSrv = Get-WsusServer -Name $supServer -PortNumber 8530 -ErrorAction Stop
+                        if ($supServer) {
+                            try {
+                                $wsusSrv = Get-WsusServer -Name $supServer -PortNumber $wsusPort -UseSsl:$wsusUseSsl -ErrorAction Stop
+                                $sub = $wsusSrv.GetSubscription()
+                                $wsusState = $sub.GetSynchronizationStatus().ToString()
+                                $prog = $sub.GetSynchronizationProgress()
+                                $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($prog.Phase), Items=$($prog.ProcessedItems)/$($prog.TotalItems)]"
                             }
-                            else {
-                                $wsusSrv = Get-WsusServer -ErrorAction Stop
+                            catch {
+                                $wsusDiag = " [WSUS-native progress not collected from '$($supServer):$wsusPort': $($_.Exception.Message)]"
                             }
-                            $sub = $wsusSrv.GetSubscription()
-                            $wsusState = $sub.GetSynchronizationStatus().ToString()
-                            $prog = $sub.GetSynchronizationProgress()
-                            $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($prog.Phase), Items=$($prog.ProcessedItems)/$($prog.TotalItems)]"
-                        }
-                        catch {
-                            $wsusDiag = " [WSUS-native diag on '$supServer' (8530) unavailable: $($_.Exception.Message)]"
                         }
                         $results.Details.Add("WARN: SUP sync at '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime)$wsusDiag — may be slow or stuck")
                     }
@@ -7596,12 +7601,12 @@ function Test-CMSiteWideFunctionality {
             # dbo.Update (sync 2 / post-subscription update metadata) and
             # legitimately stays at 0 when the subscription is narrow.
             #
-            # Targets the actual SUP server on port 8530 (the SUP is frequently a
-            # remote site system, not this site server); the outer catch reports
-            # an INFO and skips when the SUP can't be reached.
+            # Targets this site's SUP with the protocol it requires ($wsusPort /
+            # $wsusUseSsl: 8531+SSL on PKI, else 8530). The SUP is often a remote
+            # site system; the outer catch reports an INFO and skips on any failure.
             try {
                 if ($supServer) {
-                    $wsusSrv = Get-WsusServer -Name $supServer -PortNumber 8530 -ErrorAction Stop
+                    $wsusSrv = Get-WsusServer -Name $supServer -PortNumber $wsusPort -UseSsl:$wsusUseSsl -ErrorAction Stop
                 }
                 else {
                     $wsusSrv = Get-WsusServer -ErrorAction Stop
@@ -7788,7 +7793,7 @@ function Test-CMSiteWideFunctionality {
                 }
             }
             catch {
-                $results.Details.Add("INFO: WSUS-native cross-check skipped (could not reach SUP '$supServer' on port 8530): $($_.Exception.Message)")
+                $results.Details.Add("INFO: WSUS-native cross-check skipped (could not reach SUP '$($supServer):$wsusPort'): $($_.Exception.Message)")
             }
         }
 
