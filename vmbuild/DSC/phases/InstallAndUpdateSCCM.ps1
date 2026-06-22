@@ -1922,6 +1922,14 @@ else {
                         [int]$replicationStatus.Site1ToSite2GlobalState -in $failedStates -or `
                         [int]$replicationStatus.Site2ToSite1GlobalState -in $failedStates -or `
                         [int]$replicationStatus.Site2ToSite1SiteState -in $failedStates
+                    # The force-send self-heal targets the *idle* NotStarted/Unknown wedge only. If any column is
+                    # actively progressing (Interim=3 / Initializing=4) the link is moving on its own, so a
+                    # force-send would be premature noise - track that so the gate below can hold off.
+                    $progressingStates = @(3, 4)  # Interim, Initializing
+                    $linkIsProgressing = [int]$replicationStatus.LinkStatus -in $progressingStates -or `
+                        [int]$replicationStatus.Site1ToSite2GlobalState -in $progressingStates -or `
+                        [int]$replicationStatus.Site2ToSite1GlobalState -in $progressingStates -or `
+                        [int]$replicationStatus.Site2ToSite1SiteState -in $progressingStates
                     if ($linkInFailedState) {
                         if (-not $failedSinceTime[$PSVM.VmName]) {
                             $failedSinceTime[$PSVM.VmName] = Get-Date
@@ -1968,11 +1976,13 @@ else {
                         $pendingStr = $pending -join ", "
                         Write-DscStatus "Init 100% complete, waiting for link activation. Pending: $pendingStr (${drsElapsedMin}m elapsed)" -RetrySeconds $sleepSeconds -MachineName $PSVM.VmName
 
-                        # DRS stale-status self-heal: 100% init done, link NOT active and NOT in a failed state
-                        # (the NotStarted/Initializing "Publisher not active" wedge the reinit path above does not
-                        # cover). Force-send the primary's global changes to flush its ReplicationActive status up
-                        # to the CAS. Gated, bounded, and fully logged so a bad run is easy to spot.
-                        if (-not $linkInFailedState) {
+                        # DRS stale-status self-heal: 100% init done, link NOT active, NOT failed, and NOT actively
+                        # progressing - i.e. genuinely idle-stuck at NotStarted(5)/Unknown(7) (the "Publisher not
+                        # active" wedge the reinit path above does not cover, since reinit only fires on
+                        # Failed/Degraded/Error). A link that is Interim(3)/Initializing(4) is moving on its own and
+                        # is intentionally left alone. Force-send the primary's global changes to flush its
+                        # ReplicationActive status up to the CAS. Gated, bounded, and fully logged.
+                        if (-not $linkInFailedState -and -not $linkIsProgressing) {
                             if (-not $forceSendStuckSince[$PSVM.VmName]) { $forceSendStuckSince[$PSVM.VmName] = Get-Date }
                             $stuckMin = [int]((Get-Date) - $forceSendStuckSince[$PSVM.VmName]).TotalMinutes
                             $attemptsSoFar = [int]$forceSendCount[$PSVM.VmName]
@@ -1981,7 +1991,7 @@ else {
                             if ($stuckMin -ge $forceSendThresholdMin -and $attemptsSoFar -lt $forceSendMaxAttempts -and $cooldownOk) {
                                 $forceSendCount[$PSVM.VmName] = $attemptsSoFar + 1
                                 $forceSendLastAttempt[$PSVM.VmName] = Get-Date
-                                Write-DscStatus "DRS stale-status self-heal: link stuck ${stuckMin}m at 100% init / not-active / not-failed (Pending: $pendingStr). Force-sending the primary's global changes (spDRSSendChangesForGroup) to flush its status to the CAS [attempt $($attemptsSoFar + 1)/$forceSendMaxAttempts]." -MachineName $PSVM.VmName
+                                Write-DscStatus "DRS stale-status self-heal: link idle-stuck ${stuckMin}m at 100% init (not-active / not-failed / not-progressing) (Pending: $pendingStr). Force-sending the primary's global changes (spDRSSendChangesForGroup) to flush its status to the CAS [attempt $($attemptsSoFar + 1)/$forceSendMaxAttempts]." -MachineName $PSVM.VmName
                                 try {
                                     $fsResult = Invoke-DrsForceSendOnPrimary -PrimaryVM $PSVM -PrimarySiteCode $PSSiteCode -DeployCfg $deployConfig -DomainFqdn $DomainFullName
                                     if ($fsResult.Error) {
@@ -1997,7 +2007,9 @@ else {
                             }
                         }
                         else {
-                            # Link is in a failed state -> handled by the reinit path above; reset the stuck timer.
+                            # Either failed (reinit owns it) or actively progressing (Interim/Initializing - the link
+                            # is moving on its own). Reset the stuck timer so force-send only fires after the link has
+                            # been genuinely idle (NotStarted/Unknown) for the full threshold, with no progress in between.
                             $forceSendStuckSince[$PSVM.VmName] = $null
                         }
 

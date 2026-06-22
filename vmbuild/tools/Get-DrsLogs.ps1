@@ -39,7 +39,8 @@ if (-not ($bom[0] -eq 0xEF -and $bom[1] -eq 0xBB -and $bom[2] -eq 0xBF)) {
 . $commonPath -InJob
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$destRoot = Join-Path $vmbuildRoot "logs\drs-investigation"
+$logsRoot = Join-Path $vmbuildRoot 'logs'
+$destRoot = Join-Path $logsRoot 'drs-investigation'
 New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
 
 $logNames = @('rcmctrl.log', 'rcmctrl.lo_', 'smsexec.log', 'hman.log', 'sender.log', 'despool.log', 'despoolr.log', 'replmgr.log', 'dataldr.log', 'ConfigMgrSetup.log')
@@ -148,6 +149,21 @@ foreach ($vm in $logTargets) {
         catch { Write-Host "  FAILED $(Split-Path $f -Leaf): $($_.Exception.Message)" -ForegroundColor Red }
     }
 
+    # Also drop a flat, clearly-named copy of rcmctrl.log (and its rotated .lo_) straight into the main logs\
+    # folder, next to the build's InstallCMLog / ConfigMgrSetup tail, so it's easy to find and syncs across
+    # checkouts. Only the site servers (CAS/Primary) run RCM, so only flat-copy for them.
+    if ($vm.role -in @('CAS', 'Primary')) {
+        foreach ($rn in @('rcmctrl.log', 'rcmctrl.lo_')) {
+            $localRcm = Join-Path $dest $rn
+            if (Test-Path $localRcm) {
+                $suffix = if ($rn -eq 'rcmctrl.lo_') { 'rcmctrl-prev.log' } else { 'rcmctrl.log' }
+                $flat = Join-Path $logsRoot ("{0}-{1}-{2}" -f $vm.vmName, $stamp, $suffix)
+                try { Copy-Item -Path $localRcm -Destination $flat -Force; Write-Host "  flat copy -> $(Split-Path $flat -Leaf)" -ForegroundColor Gray }
+                catch { Write-Host "  flat copy FAILED ($rn): $($_.Exception.Message)" -ForegroundColor Red }
+            }
+        }
+    }
+
     if ($TailLines -gt 0 -and -not [string]::IsNullOrWhiteSpace($info.LogDir)) {
         $tail = Invoke-Command -Session $session -ScriptBlock { param($d, $n) $f = Join-Path $d 'rcmctrl.log'; if (Test-Path $f) { Get-Content $f -Tail $n } else { @('(no rcmctrl.log)') } } -ArgumentList $info.LogDir, $TailLines
         Write-Host "  --- rcmctrl tail ($TailLines) ---" -ForegroundColor DarkGray
@@ -167,6 +183,9 @@ foreach ($vm in $logTargets) {
             $snapPath = Join-Path $dest "replication-state-$stamp.txt"
             Set-Content -Path $snapPath -Value $snap -Encoding utf8
             Write-Host "  wrote $(Split-Path $snapPath -Leaf)" -ForegroundColor Gray
+            # Flat copy of the snapshot into the main logs\ folder too.
+            $flatSnap = Join-Path $logsRoot ("{0}-replication-state-{1}.txt" -f $vm.vmName, $stamp)
+            try { Copy-Item -Path $snapPath -Destination $flatSnap -Force } catch {}
         }
         else { Write-Host "  could not open SQL session to $($sqlVm.vmName)" -ForegroundColor Red }
     }
