@@ -1687,8 +1687,20 @@ function Test-SQLAOFunctionality {
 
     Write-Log "[Phase $Phase] $VMName [SQLAO]: Testing Availability Group health" -LogOnly
 
-    # Gather SQLAO config from the primary node definition (the one with OtherNode)
-    $primaryAO = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode }
+    # Gather SQLAO config from the primary node definition (the one with OtherNode).
+    # SCOPE TO THIS VM'S CLUSTER: a domain can host more than one SQLAO cluster
+    # (e.g. a CAS hierarchy cluster plus a separate Primary's cluster). A bare
+    # "role -eq 'SQLAO' -and OtherNode" match returns the primary node of EVERY
+    # cluster, so $primaryAO becomes an array and every $primaryAO.<prop> below
+    # collapses to a space-joined string (e.g. listener 'FAB-ALWAYSON2 FAB-ALWAYSON',
+    # cluster 'FAB-SQLCLUSTER2 FAB-SQLCLUSTER', share '\\FAB-FS1 FAB-FS1\...'),
+    # which then fails every DNS/SQL/share check. Restrict to the cluster that
+    # actually contains $VMName: the primary def whose own name is this VM, or
+    # whose OtherNode points at this VM. Select-Object -First 1 is a belt-and-braces
+    # guard so a malformed config can never reintroduce the array.
+    $primaryAO = $DeployConfig.virtualMachines | Where-Object {
+        $_.role -eq 'SQLAO' -and $_.OtherNode -and ($_.vmName -eq $VMName -or $_.OtherNode -eq $VMName)
+    } | Select-Object -First 1
     $listenerName = ''
     $agName = ''
     $otherNode = ''
