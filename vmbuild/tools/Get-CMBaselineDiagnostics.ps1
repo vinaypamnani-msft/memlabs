@@ -1,326 +1,393 @@
 ﻿<#
 .SYNOPSIS
-    Collect everything needed to diagnose why MEMLABS Configuration Baselines
-    (imported by perfloading.ps1) report "Error" or "Non-Compliant" on a client.
+    Collect the data needed to diagnose why MEMLABS Configuration Baselines
+    (imported by perfloading.ps1) report "Error" or "Non-Compliant" on clients.
+
+    Runs ENTIRELY FROM THE HYPER-V HOST. It dot-sources the memlabs Common.ps1
+    and uses Invoke-VmCommand (PowerShell Direct) to reach into every VM it
+    wants data from -- no WinRM, no network logon, no agent on the guest.
 
 .DESCRIPTION
     perfloading.ps1 imports a set of Configuration Items from
-    azureFiles\support\baselines.zip (C:\tools\baselines\*.cab on the site
-    server), wraps each in a Configuration Baseline, and deploys it to
-    "All Systems" with enforcement enabled. Several of those CIs use PowerShell
-    discovery/remediation scripts, which is why perfloading also pushes a
-    "PowerShell execution policy = Bypass" client setting.
+    azureFiles\support\baselines.zip, wraps each in a Configuration Baseline,
+    and deploys it to "All Systems" with enforcement. Several of those CIs use
+    PowerShell discovery/remediation scripts (hence the MEMLABS-powershellbypass
+    client setting). The CAB rule definitions are binary and not in the repo, so
+    the only way to know WHY a given baseline is Error vs Non-Compliant is to
+    read each client's own DCM compliance detail plus the matching CI rule XML
+    from the site server. This script gathers both, from one place.
 
-    The CAB rule definitions are binary and not in the repo, so the only way to
-    know WHY a given baseline is Error vs Non-Compliant is to read the client's
-    own DCM compliance detail plus the matching CI rule XML from the site. This
-    script gathers exactly that.
+    For the named domain it:
+      1. Enumerates every Running Windows VM (Get-List) and PSDirects into each
+         to pull its DCM state: per-baseline SMS_DesiredConfiguration +
+         ComplianceDetails XML (which distinguishes "a rule evaluated False" =
+         Non-Compliant from "a discovery script/WMI threw" = Error), per-CI
+         SMS_DCMCIComplianceState, the effective PowerShell execution policy
+         (OS + CM client setting), and the tail of the relevant CCM\Logs\*.log.
+      2. PSDirects into each CAS/Primary site server to dump every baseline's
+         linked-CI count (flags the empty-baseline bug) and the CI SDMPackageXML
+         (the actual rule: setting source, expected value, remediation on/off,
+         supported platforms).
 
-    Run it TWO ways and diff the two output folders:
+    Everything is written to the host under vmbuild\logs\baseline-diag\. Nothing
+    in any guest is modified (read-only; -TriggerEvaluation only asks the DCM
+    agent to re-evaluate, which it does on its own schedule anyway).
 
-      * ON A CLIENT (default): dumps per-baseline compliance state + the
-        detailed compliance report XML (which distinguishes "a rule evaluated
-        False" = Non-Compliant from "a discovery script threw" = Error), the
-        effective PowerShell execution policy (OS + CM client setting), and the
-        tail of the relevant CCM\Logs\*.log files.
-
-      * ON THE SITE SERVER with -FromSiteServer: dumps each baseline's linked
-        CI(s) and the CI SDMPackageXML (the actual rule: setting source,
-        expected value, remediation on/off, supported platforms) so you can see
-        what each rule is supposed to check. This also flags baselines that have
-        NO CI linked (the classic empty-baseline bug when the CI name != cab
-        filename).
-
-    Nothing is modified. Read-only collection only. PowerShell 5.1 safe.
-
-.PARAMETER OutputPath
-    Folder to write the report + copied logs into.
-    Default: <script>\..\logs\baseline-diag\<COMPUTERNAME>-<timestamp>
+.PARAMETER DomainName
+    The lab domain (e.g. adatum.com). If omitted, the script lists the domains
+    it can see and exits.
 
 .PARAMETER NamePattern
-    Only report baselines whose name matches this wildcard. Default '*'
-    (perfloading names are arbitrary cab basenames, so default to all).
+    Only collect baselines whose name matches this wildcard. Default '*'.
 
 .PARAMETER TriggerEvaluation
-    Trigger a fresh baseline evaluation and wait briefly before collecting, so
-    the compliance detail reflects current state rather than a stale cycle.
+    Ask each client's DCM agent to re-evaluate its baselines (and wait ~90s)
+    before collecting, so the compliance detail is current rather than stale.
 
-.PARAMETER FromSiteServer
-    Run the SITE-side collection (CI rule XML + baseline->CI linkage) instead of
-    the client-side collection. Requires the ConfigurationManager console module
-    (run from an admin PowerShell on the Primary/CAS, or import the module).
+.PARAMETER ClientsOnly
+    Only do the per-client DCM collection (skip the site-server CI-XML dump).
+
+.PARAMETER SiteOnly
+    Only do the site-server CI-XML dump (skip the per-client collection).
+
+.PARAMETER OutputPath
+    Folder to write into. Default: vmbuild\logs\baseline-diag\<domain>-<stamp>.
+
+.PARAMETER TimeoutSeconds
+    Per-VM PSDirect job timeout. Default 300 (covers -TriggerEvaluation's wait).
 
 .EXAMPLE
-    # On a misbehaving client
-    .\Get-CMBaselineDiagnostics.ps1 -TriggerEvaluation
+    cd C:\memlabs\vmbuild
+    .\tools\Get-CMBaselineDiagnostics.ps1 -DomainName adatum.com -TriggerEvaluation
 
 .EXAMPLE
-    # On the Primary site server
-    .\Get-CMBaselineDiagnostics.ps1 -FromSiteServer
+    .\tools\Get-CMBaselineDiagnostics.ps1            # lists the domains it sees
 #>
 [CmdletBinding()]
 param(
-    [string]$OutputPath,
+    [string]$DomainName,
     [string]$NamePattern = '*',
     [switch]$TriggerEvaluation,
-    [switch]$FromSiteServer
+    [switch]$ClientsOnly,
+    [switch]$SiteOnly,
+    [string]$OutputPath,
+    [int]$TimeoutSeconds = 300
 )
 
-$ErrorActionPreference = 'Continue'
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$ErrorActionPreference = 'Stop'
 
-if (-not $OutputPath) {
-    $root = Split-Path -Parent $PSScriptRoot   # vmbuild\
-    $OutputPath = Join-Path $root "logs\baseline-diag\$($env:COMPUTERNAME)-$stamp"
+# --- Load memlabs Common.ps1 (lives in vmbuild\, the parent of tools\) -------
+$vmbuildRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $vmbuildRoot
+$commonPath = Join-Path $vmbuildRoot 'Common.ps1'
+$bomBytes = [System.IO.File]::ReadAllBytes($commonPath)[0..2]
+if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq 0xBF)) {
+    Write-Host "ERROR: Common.ps1 is missing UTF-8 BOM. PS5.1 will fail to parse it." -ForegroundColor Red
+    Write-Host "Run: git checkout -- vmbuild/Common.ps1" -ForegroundColor Yellow
+    exit 1
 }
-if (-not (Test-Path $OutputPath)) { New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null }
+. $commonPath -InJob   # initializes $Common (incl. $Common.LocalAdmin) + Get-List + Invoke-VmCommand
 
-$report = New-Object System.Collections.Generic.List[string]
-function Add-Line { param([string]$Text) $report.Add($Text); Write-Host $Text }
-
-Add-Line "=== MEMLABS Configuration Baseline diagnostics ==="
-Add-Line "Computer : $($env:COMPUTERNAME)"
-Add-Line "When     : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-Add-Line "Mode     : $(if ($FromSiteServer) { 'SITE SERVER (CI rule definitions)' } else { 'CLIENT (compliance detail)' })"
-Add-Line "Output   : $OutputPath"
-Add-Line ""
-
-# Compliance status decode (root\ccm\dcm SMS_DesiredConfiguration.LastComplianceStatus)
-$complianceMap = @{
-    0 = 'Non-Compliant'
-    1 = 'Compliant'
-    2 = 'Submitted'
-    3 = 'Unknown'
-    4 = 'Detecting'
-    5 = 'NotEvaluated'
-}
-
-# ------------------------------------------------------------------ SITE MODE
-if ($FromSiteServer) {
-
-    # Locate + import the ConfigurationManager module and CD into the site drive.
-    $cmModule = $env:SMS_ADMIN_UI_PATH
-    if ($cmModule) {
-        $cmModule = Join-Path (Split-Path $cmModule) 'ConfigurationManager.psd1'
+# --- Resolve the domain / VM list -------------------------------------------
+$allVMs = @(Get-List -Type VM -SmartUpdate)
+if (-not $DomainName) {
+    Write-Host "`nNo -DomainName given. Domains I can see:" -ForegroundColor Yellow
+    $allVMs | Group-Object -Property domain | Sort-Object Name | ForEach-Object {
+        Write-Host ("  {0}  ({1} VM(s))" -f $_.Name, $_.Count)
     }
-    if ($cmModule -and (Test-Path $cmModule)) {
-        Import-Module $cmModule -ErrorAction SilentlyContinue
-    }
-    if (-not (Get-Module ConfigurationManager)) {
-        Add-Line "ERROR: ConfigurationManager module not loaded. Run from an admin PowerShell on the site server (or import ConfigurationManager.psd1 first)."
-        $report | Set-Content -Path (Join-Path $OutputPath 'baseline-report.txt') -Encoding UTF8
-        return
-    }
-
-    $site = Get-PSDrive -PSProvider CMSite -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $site) {
-        Add-Line "ERROR: No CMSite PSDrive found. Connect the console once so the site drive exists."
-        $report | Set-Content -Path (Join-Path $OutputPath 'baseline-report.txt') -Encoding UTF8
-        return
-    }
-    Push-Location ("{0}:\" -f $site.Name)
-    try {
-        $baselines = @(Get-CMBaseline -Fast | Where-Object { $_.LocalizedDisplayName -like $NamePattern })
-        Add-Line "Found $($baselines.Count) baseline(s) matching '$NamePattern'."
-        Add-Line ""
-        foreach ($bl in $baselines) {
-            $blName = $bl.LocalizedDisplayName
-            Add-Line "----- Baseline: $blName (CI_ID=$($bl.CI_ID)) -----"
-
-            # Pull the baseline's own XML to enumerate the CIs it references.
-            $full = Get-CMBaseline -Name $blName
-            $linkedCount = 0
-            try {
-                [xml]$blXml = $full.SDMPackageXML
-                # OS / Application / SoftwareUpdate references all live under the
-                # Baseline node; count every ConfigurationItemReference child.
-                $allRefs = $blXml.SelectNodes("//*[local-name()='ConfigurationItemReference']")
-                $linkedCount = @($allRefs).Count
-            }
-            catch { }
-
-            if ($linkedCount -eq 0) {
-                Add-Line "  *** WARNING: baseline has NO Configuration Item linked (empty baseline). ***"
-                Add-Line "      This is the classic 'CI name != cab filename' / wrong -Add*ConfigurationItem bug."
-            }
-            else {
-                Add-Line "  Linked Configuration Items: $linkedCount"
-            }
-
-            # Dump the matching CI's rule XML by name (perfloading uses same name for CI + baseline).
-            $ci = Get-CMConfigurationItem -Name $blName -Fast -ErrorAction SilentlyContinue
-            if ($ci) {
-                $ciFull = Get-CMConfigurationItem -Name $blName
-                $xmlFile = Join-Path $OutputPath ("CI-{0}.sdmpackage.xml" -f ($blName -replace '[^\w\-]', '_'))
-                try {
-                    $ciFull.SDMPackageXML | Set-Content -Path $xmlFile -Encoding UTF8
-                    Add-Line "  CI rule XML  -> $(Split-Path $xmlFile -Leaf)"
-                }
-                catch {
-                    Add-Line "  WARNING: could not read SDMPackageXML: $($_.Exception.Message)"
-                }
-            }
-            else {
-                Add-Line "  WARNING: no Configuration Item named '$blName' found (lookup by name failed)."
-            }
-
-            # Deployment compliance summary (how many clients in each state).
-            try {
-                $sc = $site.Name
-                $dep = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_DCMDeploymentCompliantStatus -Filter "ConfigurationItemID='$($bl.CI_ID)'" -ErrorAction SilentlyContinue
-                $err = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_DCMDeploymentErrorStatus -Filter "ConfigurationItemID='$($bl.CI_ID)'" -ErrorAction SilentlyContinue
-                Add-Line "  Compliance rows: compliant=$(@($dep).Count) error=$(@($err).Count)"
-            }
-            catch { }
-            Add-Line ""
-        }
-    }
-    finally { Pop-Location }
-
-    $report | Set-Content -Path (Join-Path $OutputPath 'baseline-report.txt') -Encoding UTF8
-    Add-Line "Site-side collection complete. CI rule XML + report in: $OutputPath"
+    Write-Host "`nRe-run with -DomainName <domain>." -ForegroundColor Cyan
     return
 }
 
-# ---------------------------------------------------------------- CLIENT MODE
-$dcmNs = 'root\ccm\dcm'
-
-$baselines = @()
-try {
-    $baselines = @(Get-CimInstance -Namespace $dcmNs -ClassName SMS_DesiredConfiguration -ErrorAction Stop |
-            Where-Object { $_.Name -like $NamePattern })
-}
-catch {
-    Add-Line "ERROR: cannot read $dcmNs SMS_DesiredConfiguration: $($_.Exception.Message)"
-    Add-Line "Is the ConfigMgr client (CcmExec) installed and running on this machine?"
+$domainVMs = @($allVMs | Where-Object { $_.domain -eq $DomainName })
+if ($domainVMs.Count -eq 0) {
+    Write-Host "No VMs found for domain '$DomainName'. Known domains:" -ForegroundColor Red
+    $allVMs | Group-Object -Property domain | ForEach-Object { Write-Host "  $($_.Name)" }
+    return
 }
 
-Add-Line "Found $($baselines.Count) deployed baseline(s) matching '$NamePattern'."
-Add-Line ""
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+if (-not $OutputPath) {
+    $OutputPath = Join-Path $vmbuildRoot "logs\baseline-diag\$DomainName-$stamp"
+}
+if (-not (Test-Path $OutputPath)) { New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null }
 
-# Optionally trigger a fresh evaluation so detail isn't stale.
-if ($TriggerEvaluation -and $baselines.Count -gt 0) {
-    Add-Line "Triggering evaluation for $($baselines.Count) baseline(s)..."
-    foreach ($bl in $baselines) {
-        try {
-            Invoke-CimMethod -Namespace $dcmNs -ClassName SMS_DesiredConfiguration -MethodName TriggerEvaluation `
-                -Arguments @{ Name = $bl.Name; Version = $bl.Version } -ErrorAction SilentlyContinue | Out-Null
-        }
-        catch { }
+Write-Host "`n=== MEMLABS Configuration Baseline diagnostics ===" -ForegroundColor Cyan
+Write-Host "Domain : $DomainName"
+Write-Host "Output : $OutputPath"
+Write-Host ""
+
+# Roles that never run a CM client (skip on the client pass).
+$skipClientRoles = @('OSDClient', 'AADClient', 'StandaloneRootCA', 'Linux')
+$complianceMap = @{ 0 = 'Non-Compliant'; 1 = 'Compliant'; 2 = 'Submitted'; 3 = 'Unknown'; 4 = 'Detecting'; 5 = 'NotEvaluated' }
+$psPolMap = @{ 0 = 'AllSigned'; 1 = 'Bypass'; 2 = 'Restricted'; 3 = 'Unrestricted' }
+
+# =====================================================================
+# Client-side scriptblock (runs IN each guest via PowerShell Direct).
+# Returns a single PSCustomObject of strings/arrays -- serializes cleanly.
+# =====================================================================
+$clientSB = {
+    param($pattern, $doTrigger)
+    $dcmNs = 'root\ccm\dcm'
+    $out = [pscustomobject]@{
+        Computer   = $env:COMPUTERNAME
+        Error      = $null
+        Baselines  = @()
+        CIStates   = @()
+        ExecPolicy = @()
+        CMPsPolicy = $null
+        Logs       = @()
     }
-    Add-Line "Waiting 90s for evaluation to settle..."
-    Start-Sleep -Seconds 90
-    $baselines = @(Get-CimInstance -Namespace $dcmNs -ClassName SMS_DesiredConfiguration -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like $NamePattern })
-    Add-Line ""
-}
-
-foreach ($bl in $baselines) {
-    $code = $bl.LastComplianceStatus
-    $stateName = $complianceMap[[int]$code]
-    if (-not $stateName) { $stateName = "raw=$code" }
-    Add-Line "----- $($bl.Name) (v$($bl.Version)) -----"
-    Add-Line "  LastComplianceStatus : $code ($stateName)"
-    Add-Line "  LastEvalTime         : $($bl.LastEvalTime)"
-    Add-Line "  IsMachineTarget      : $($bl.IsMachineTarget)   PolicyType: $($bl.PolicyType)"
-
-    # The detailed compliance report (ComplianceDetails) is the gold: it lists
-    # each CI / rule with its individual result AND any error text, which is the
-    # ONLY reliable way to tell "rule evaluated False" (Non-Compliant) apart from
-    # "discovery script/WMI query threw" (Error).
-    if ($bl.ComplianceDetails) {
-        $safeName = ($bl.Name -replace '[^\w\-]', '_')
-        $detailFile = Join-Path $OutputPath ("compliance-{0}.xml" -f $safeName)
-        try {
-            $bl.ComplianceDetails | Set-Content -Path $detailFile -Encoding UTF8
-            Add-Line "  ComplianceDetails    -> $(Split-Path $detailFile -Leaf)"
-            # Surface any error/exception text inline so the report is useful at a glance.
-            $hit = Select-String -Path $detailFile -Pattern 'Error|Exception|0x[0-9A-Fa-f]{8}|ScriptExecution|not be loaded|execution policy' -ErrorAction SilentlyContinue |
-                Select-Object -First 6
-            foreach ($h in $hit) {
-                $t = $h.Line.Trim()
-                if ($t.Length -gt 200) { $t = $t.Substring(0, 200) }
-                Add-Line "    detail> $t"
-            }
-        }
-        catch {
-            Add-Line "  WARNING: could not write ComplianceDetails: $($_.Exception.Message)"
-        }
+    try {
+        $bls = @(Get-CimInstance -Namespace $dcmNs -ClassName SMS_DesiredConfiguration -ErrorAction Stop | Where-Object { $_.Name -like $pattern })
     }
-    else {
-        Add-Line "  (no ComplianceDetails yet — baseline may not have evaluated; try -TriggerEvaluation)"
+    catch {
+        $out.Error = "DCM read failed (client installed?): $($_.Exception.Message)"
+        return $out
     }
-    Add-Line ""
-}
-
-# Per-CI compliance state (finer than per-baseline).
-try {
-    $ciStates = @(Get-CimInstance -Namespace $dcmNs -ClassName SMS_DCMCIComplianceState -ErrorAction SilentlyContinue)
-    if ($ciStates.Count -gt 0) {
-        Add-Line "----- Per-CI compliance (SMS_DCMCIComplianceState) -----"
-        foreach ($s in $ciStates) {
-            Add-Line "  $($s.DisplayName)  state=$($s.ComplianceState)  lastEval=$($s.LastComplianceStatusChange)"
+    if ($doTrigger -and $bls.Count -gt 0) {
+        foreach ($b in $bls) {
+            try { Invoke-CimMethod -Namespace $dcmNs -ClassName SMS_DesiredConfiguration -MethodName TriggerEvaluation -Arguments @{ Name = $b.Name; Version = $b.Version } -ErrorAction SilentlyContinue | Out-Null } catch { }
         }
-        Add-Line ""
+        Start-Sleep -Seconds 90
+        $bls = @(Get-CimInstance -Namespace $dcmNs -ClassName SMS_DesiredConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $pattern })
     }
-}
-catch { }
-
-# ---- Effective PowerShell execution policy (the #1 cause of script-CI Error) ----
-Add-Line "----- PowerShell execution policy -----"
-try {
-    $epList = Get-ExecutionPolicy -List | ForEach-Object { "  OS  $($_.Scope) = $($_.ExecutionPolicy)" }
-    foreach ($e in $epList) { Add-Line $e }
-}
-catch { Add-Line "  (Get-ExecutionPolicy -List failed: $($_.Exception.Message))" }
-
-# CM client agent setting (root\ccm\Policy\Machine\ActualConfig). 0=AllSigned 1=Bypass 2=Restricted 3=Unrestricted (per CM client policy schema)
-try {
-    $psPolMap = @{ 0 = 'AllSigned'; 1 = 'Bypass'; 2 = 'Restricted'; 3 = 'Unrestricted' }
-    $cfg = Get-CimInstance -Namespace 'root\ccm\Policy\Machine\ActualConfig' -ClassName CCM_ConfigurationManagementClientConfig -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($cfg -and ($null -ne $cfg.PowerShellExecutionPolicy)) {
-        $p = $cfg.PowerShellExecutionPolicy
-        $pName = $psPolMap[[int]$p]
-        if (-not $pName) { $pName = "raw=$p" }
-        Add-Line "  CM client setting PowerShellExecutionPolicy = $p ($pName)"
-        if ([int]$p -ne 1 -and [int]$p -ne 3) {
-            Add-Line "  *** This is NOT Bypass/Unrestricted — script-based CIs will likely report ERROR until the MEMLABS-powershellbypass client setting applies. ***"
+    foreach ($b in $bls) {
+        $out.Baselines += [pscustomobject]@{
+            Name                 = $b.Name
+            Version              = $b.Version
+            LastComplianceStatus = $b.LastComplianceStatus
+            LastEvalTime         = "$($b.LastEvalTime)"
+            IsMachineTarget      = $b.IsMachineTarget
+            PolicyType           = $b.PolicyType
+            ComplianceDetails    = $b.ComplianceDetails
         }
     }
-    else {
-        Add-Line "  CM client setting PowerShellExecutionPolicy = (not set / policy not yet received)"
-        Add-Line "  *** The MEMLABS-powershellbypass client setting has not reached this client — script CIs will ERROR. ***"
+    try {
+        $out.CIStates = @(Get-CimInstance -Namespace $dcmNs -ClassName SMS_DCMCIComplianceState -ErrorAction SilentlyContinue | ForEach-Object {
+                [pscustomobject]@{ DisplayName = $_.DisplayName; ComplianceState = $_.ComplianceState; LastChange = "$($_.LastComplianceStatusChange)" }
+            })
     }
+    catch { }
+    try { $out.ExecPolicy = @(Get-ExecutionPolicy -List | ForEach-Object { "$($_.Scope)=$($_.ExecutionPolicy)" }) } catch { }
+    try {
+        $cfg = Get-CimInstance -Namespace 'root\ccm\Policy\Machine\ActualConfig' -ClassName CCM_ConfigurationManagementClientConfig -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cfg -and ($null -ne $cfg.PowerShellExecutionPolicy)) { $out.CMPsPolicy = $cfg.PowerShellExecutionPolicy }
+    }
+    catch { }
+    $ccmLogDir = Join-Path $env:WinDir 'CCM\Logs'
+    foreach ($n in @('DCMAgent.log', 'DCMReporting.log', 'CIAgent.log', 'CITaskMgr.log', 'CIStateStore.log', 'CIDownloader.log', 'PolicyEvaluator.log')) {
+        $p = Join-Path $ccmLogDir $n
+        if (Test-Path $p) {
+            try { $out.Logs += [pscustomobject]@{ Name = $n; Text = ((Get-Content $p -Tail 1500 -ErrorAction SilentlyContinue) -join "`r`n") } } catch { }
+        }
+    }
+    return $out
 }
-catch { Add-Line "  (CM client policy read failed: $($_.Exception.Message))" }
-Add-Line ""
 
-# ---- Copy the relevant CCM logs (tail) ----
-$ccmLogDir = Join-Path $env:WinDir 'CCM\Logs'
-$wanted = @('DCMAgent.log', 'DCMReporting.log', 'CIAgent.log', 'CITaskMgr.log', 'CIStateStore.log', 'CIDownloader.log', 'PolicyAgent.log', 'PolicyEvaluator.log')
-Add-Line "----- CCM logs (tail copied to output) -----"
-if (Test-Path $ccmLogDir) {
-    $logDest = Join-Path $OutputPath 'ccmlogs'
-    if (-not (Test-Path $logDest)) { New-Item -ItemType Directory -Path $logDest -Force | Out-Null }
-    foreach ($name in $wanted) {
-        $src = Join-Path $ccmLogDir $name
-        if (Test-Path $src) {
+# =====================================================================
+# Site-side scriptblock (runs ON each CAS/Primary via PowerShell Direct).
+# =====================================================================
+$siteSB = {
+    param($pattern)
+    $out = [pscustomobject]@{ Computer = $env:COMPUTERNAME; Error = $null; Baselines = @() }
+    $mod = $env:SMS_ADMIN_UI_PATH
+    if ($mod) { $mod = Join-Path (Split-Path $mod) 'ConfigurationManager.psd1' }
+    if ($mod -and (Test-Path $mod)) { Import-Module $mod -ErrorAction SilentlyContinue }
+    if (-not (Get-Module ConfigurationManager)) { $out.Error = 'ConfigurationManager module not available on this box'; return $out }
+    $site = Get-PSDrive -PSProvider CMSite -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $site) { $out.Error = 'No CMSite PSDrive (console never connected here)'; return $out }
+    Push-Location ("$($site.Name):\")
+    try {
+        $bls = @(Get-CMBaseline -Fast | Where-Object { $_.LocalizedDisplayName -like $pattern })
+        foreach ($bl in $bls) {
+            $linked = 0
+            $ciXml = $null
             try {
-                Get-Content -Path $src -Tail 2000 -ErrorAction SilentlyContinue |
-                    Set-Content -Path (Join-Path $logDest $name) -Encoding UTF8
-                Add-Line "  copied $name"
+                $full = Get-CMBaseline -Name $bl.LocalizedDisplayName
+                [xml]$x = $full.SDMPackageXML
+                $linked = @($x.SelectNodes("//*[local-name()='ConfigurationItemReference']")).Count
             }
-            catch { Add-Line "  WARNING: could not copy $name : $($_.Exception.Message)" }
+            catch { }
+            try {
+                $ciFull = Get-CMConfigurationItem -Name $bl.LocalizedDisplayName | Select-Object -First 1
+                if ($ciFull) { $ciXml = $ciFull.SDMPackageXML }
+            }
+            catch { }
+            $out.Baselines += [pscustomobject]@{ Name = $bl.LocalizedDisplayName; CI_ID = $bl.CI_ID; LinkedCount = $linked; CiXml = $ciXml }
         }
     }
+    finally { Pop-Location }
+    return $out
 }
-else {
-    Add-Line "  WARNING: $ccmLogDir not found (client not installed?)"
-}
-Add-Line ""
 
-$report | Set-Content -Path (Join-Path $OutputPath 'baseline-report.txt') -Encoding UTF8
-Add-Line "Client-side collection complete."
-Add-Line "Report + compliance XML + logs in: $OutputPath"
-Add-Line ""
-Add-Line "NEXT: re-run with -FromSiteServer on the Primary to capture the CI rule XML, then diff against the client compliance detail."
+# --- helper: safe filename ---------------------------------------------------
+function ConvertTo-SafeName { param([string]$n) return ($n -replace '[^\w\-]', '_') }
+
+$summary = New-Object System.Collections.Generic.List[string]
+$summary.Add("=== MEMLABS Configuration Baseline diagnostics ===")
+$summary.Add("Domain : $DomainName")
+$summary.Add("When   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+$summary.Add("")
+
+# =====================================================================
+# Pass 1: per-client DCM collection
+# =====================================================================
+if (-not $SiteOnly) {
+    $clientVMs = @($domainVMs | Where-Object { $_.role -notin $skipClientRoles -and $_.state -eq 'Running' } | Sort-Object vmName)
+    Write-Host "Client pass: $($clientVMs.Count) Running VM(s)" -ForegroundColor Yellow
+    $summary.Add("----- CLIENT compliance ($($clientVMs.Count) VM(s)) -----")
+
+    foreach ($vm in $clientVMs) {
+        $vmName = $vm.vmName
+        Write-Host "  PSDirect -> $vmName ..." -ForegroundColor DarkGray -NoNewline
+        $res = Invoke-VmCommand -VmName $vmName -VmDomainName $DomainName -ScriptBlock $clientSB `
+            -ArgumentList @($NamePattern, [bool]$TriggerEvaluation) -DisplayName "BaselineDiag-Client" `
+            -SuppressLog -AsJob -TimeoutSeconds $TimeoutSeconds
+
+        if (-not $res -or $res.ScriptBlockFailed -or -not $res.ScriptBlockOutput) {
+            $reason = if ($res -and $res.TimedOut) { 'timed out' } elseif ($res -and $res.ScriptBlockFailed) { 'scriptblock failed' } else { 'no session/output' }
+            Write-Host " $reason" -ForegroundColor Red
+            $summary.Add("  $vmName : SKIPPED ($reason)")
+            continue
+        }
+        $data = $res.ScriptBlockOutput
+        if ($data.Error) {
+            Write-Host " $($data.Error)" -ForegroundColor DarkYellow
+            $summary.Add("  $vmName : $($data.Error)")
+            continue
+        }
+
+        $vmDir = Join-Path $OutputPath "clients\$vmName"
+        if (-not (Test-Path $vmDir)) { New-Item -ItemType Directory -Path $vmDir -Force | Out-Null }
+
+        $rep = New-Object System.Collections.Generic.List[string]
+        $rep.Add("Computer : $($data.Computer)")
+        $rep.Add("Baselines: $(@($data.Baselines).Count)")
+        $rep.Add("")
+
+        $badCount = 0
+        foreach ($b in @($data.Baselines)) {
+            $code = $b.LastComplianceStatus
+            $stateName = $complianceMap[[int]$code]
+            if (-not $stateName) { $stateName = "raw=$code" }
+            if ($stateName -ne 'Compliant') { $badCount++ }
+            $rep.Add("----- $($b.Name) (v$($b.Version)) -----")
+            $rep.Add("  LastComplianceStatus : $code ($stateName)")
+            $rep.Add("  LastEvalTime         : $($b.LastEvalTime)")
+            if ($b.ComplianceDetails) {
+                $xmlFile = Join-Path $vmDir ("compliance-{0}.xml" -f (ConvertTo-SafeName $b.Name))
+                Set-Content -Path $xmlFile -Value $b.ComplianceDetails -Encoding UTF8
+                $rep.Add("  ComplianceDetails    -> $(Split-Path $xmlFile -Leaf)")
+                $hits = Select-String -Path $xmlFile -Pattern 'Error|Exception|0x[0-9A-Fa-f]{8}|ScriptExecution|not be loaded|execution policy' -ErrorAction SilentlyContinue | Select-Object -First 6
+                foreach ($h in $hits) {
+                    $t = $h.Line.Trim(); if ($t.Length -gt 200) { $t = $t.Substring(0, 200) }
+                    $rep.Add("    detail> $t")
+                }
+            }
+            else {
+                $rep.Add("  (no ComplianceDetails yet -- try -TriggerEvaluation)")
+            }
+            $rep.Add("")
+        }
+
+        if (@($data.CIStates).Count -gt 0) {
+            $rep.Add("----- Per-CI compliance (SMS_DCMCIComplianceState) -----")
+            foreach ($s in @($data.CIStates)) { $rep.Add("  $($s.DisplayName)  state=$($s.ComplianceState)  lastChange=$($s.LastChange)") }
+            $rep.Add("")
+        }
+
+        $rep.Add("----- PowerShell execution policy -----")
+        foreach ($e in @($data.ExecPolicy)) { $rep.Add("  OS  $e") }
+        if ($null -ne $data.CMPsPolicy) {
+            $pName = $psPolMap[[int]$data.CMPsPolicy]; if (-not $pName) { $pName = "raw=$($data.CMPsPolicy)" }
+            $rep.Add("  CM client setting PowerShellExecutionPolicy = $($data.CMPsPolicy) ($pName)")
+            if ([int]$data.CMPsPolicy -ne 1 -and [int]$data.CMPsPolicy -ne 3) {
+                $rep.Add("  *** NOT Bypass/Unrestricted -- script-based CIs will likely ERROR until MEMLABS-powershellbypass applies. ***")
+            }
+        }
+        else {
+            $rep.Add("  CM client setting PowerShellExecutionPolicy = (not set / policy not received)")
+            $rep.Add("  *** MEMLABS-powershellbypass has not reached this client -- script CIs will ERROR. ***")
+        }
+        $rep.Add("")
+
+        if (@($data.Logs).Count -gt 0) {
+            $logDest = Join-Path $vmDir 'ccmlogs'
+            if (-not (Test-Path $logDest)) { New-Item -ItemType Directory -Path $logDest -Force | Out-Null }
+            foreach ($lg in @($data.Logs)) { Set-Content -Path (Join-Path $logDest $lg.Name) -Value $lg.Text -Encoding UTF8 }
+            $rep.Add("CCM logs copied: $((@($data.Logs)).Name -join ', ')")
+        }
+
+        $rep | Set-Content -Path (Join-Path $vmDir 'baseline-report.txt') -Encoding UTF8
+        Write-Host " $(@($data.Baselines).Count) baseline(s), $badCount not-compliant/error" -ForegroundColor Green
+        $summary.Add("  $vmName : $(@($data.Baselines).Count) baseline(s), $badCount not-compliant/error")
+    }
+    $summary.Add("")
+}
+
+# =====================================================================
+# Pass 2: site-server CI rule XML
+# =====================================================================
+if (-not $ClientsOnly) {
+    $siteVMs = @($domainVMs | Where-Object { $_.role -in @('CAS', 'Primary') -and $_.state -eq 'Running' } | Sort-Object vmName)
+    Write-Host "Site pass: $($siteVMs.Count) site server(s)" -ForegroundColor Yellow
+    $summary.Add("----- SITE CI definitions ($($siteVMs.Count) site server(s)) -----")
+
+    foreach ($vm in $siteVMs) {
+        $vmName = $vm.vmName
+        Write-Host "  PSDirect -> $vmName ..." -ForegroundColor DarkGray -NoNewline
+        $res = Invoke-VmCommand -VmName $vmName -VmDomainName $DomainName -ScriptBlock $siteSB `
+            -ArgumentList @($NamePattern) -DisplayName "BaselineDiag-Site" `
+            -SuppressLog -AsJob -TimeoutSeconds $TimeoutSeconds
+
+        if (-not $res -or $res.ScriptBlockFailed -or -not $res.ScriptBlockOutput) {
+            $reason = if ($res -and $res.TimedOut) { 'timed out' } elseif ($res -and $res.ScriptBlockFailed) { 'scriptblock failed' } else { 'no session/output' }
+            Write-Host " $reason" -ForegroundColor Red
+            $summary.Add("  $vmName : SKIPPED ($reason)")
+            continue
+        }
+        $data = $res.ScriptBlockOutput
+        if ($data.Error) {
+            Write-Host " $($data.Error)" -ForegroundColor DarkYellow
+            $summary.Add("  $vmName : $($data.Error)")
+            continue
+        }
+
+        $siteDir = Join-Path $OutputPath "site\$vmName"
+        if (-not (Test-Path $siteDir)) { New-Item -ItemType Directory -Path $siteDir -Force | Out-Null }
+
+        $rep = New-Object System.Collections.Generic.List[string]
+        $rep.Add("Site server: $($data.Computer)")
+        $rep.Add("Baselines  : $(@($data.Baselines).Count)")
+        $rep.Add("")
+        $empty = 0
+        foreach ($bl in @($data.Baselines)) {
+            $rep.Add("----- $($bl.Name) (CI_ID=$($bl.CI_ID)) -----")
+            if ([int]$bl.LinkedCount -eq 0) {
+                $empty++
+                $rep.Add("  *** WARNING: baseline has NO Configuration Item linked (empty baseline). ***")
+            }
+            else {
+                $rep.Add("  Linked Configuration Items: $($bl.LinkedCount)")
+            }
+            if ($bl.CiXml) {
+                $xmlFile = Join-Path $siteDir ("CI-{0}.sdmpackage.xml" -f (ConvertTo-SafeName $bl.Name))
+                Set-Content -Path $xmlFile -Value $bl.CiXml -Encoding UTF8
+                $rep.Add("  CI rule XML -> $(Split-Path $xmlFile -Leaf)")
+            }
+            else {
+                $rep.Add("  WARNING: no CI named '$($bl.Name)' found (lookup by name failed).")
+            }
+            $rep.Add("")
+        }
+        $rep | Set-Content -Path (Join-Path $siteDir 'site-report.txt') -Encoding UTF8
+        Write-Host " $(@($data.Baselines).Count) baseline(s), $empty empty" -ForegroundColor Green
+        $summary.Add("  $vmName : $(@($data.Baselines).Count) baseline(s), $empty with NO CI linked")
+    }
+    $summary.Add("")
+}
+
+$summary | Set-Content -Path (Join-Path $OutputPath 'summary.txt') -Encoding UTF8
+Write-Host "`nDone. Report tree under: $OutputPath" -ForegroundColor Cyan
+Write-Host "Diff a client's compliance-*.xml against the site's CI-*.sdmpackage.xml to pinpoint each baseline." -ForegroundColor DarkGray
