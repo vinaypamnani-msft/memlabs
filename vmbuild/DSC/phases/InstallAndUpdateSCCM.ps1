@@ -1825,7 +1825,7 @@ else {
         }
         function Invoke-DrsForceSendOnPrimary {
             param($PrimaryVM, $PrimarySiteCode, $DeployCfg, $DomainFqdn)
-            $r = [pscustomobject]@{ DataSource = $null; Database = $null; Groups = 0; Sent = 0; Failed = 0; Error = $null }
+            $r = [pscustomobject]@{ DataSource = $null; Database = $null; Groups = 0; Sent = 0; Failed = 0; Error = $null; SelfStatus = $null; Skipped = $false }
             try {
                 $ds = Get-PrimarySqlDataSourceForResync -PrimaryVM $PrimaryVM -DeployCfg $DeployCfg -DomainFqdn $DomainFqdn
                 $db = "CM_$PrimarySiteCode"
@@ -1835,6 +1835,24 @@ else {
                 $conn = New-Object System.Data.SqlClient.SqlConnection $cs
                 $conn.Open()
                 try {
+                    # Self-active precheck: the force-send only does real work when the primary has already
+                    # flipped its OWN ServerData.SiteStatus to ReplicationActive(125) but the CAS hasn't yet
+                    # observed it (the stale-status wedge). On fabrikam the gate could fire while the primary
+                    # was still in ReplicationMaintenance(120) / "Site is NOT active" - at which point there is
+                    # no status row to flush and the sproc is a pure no-op. Read the primary's own status row
+                    # first and only force-send when it is genuinely self-active.
+                    $statusCmd = $conn.CreateCommand()
+                    $statusCmd.CommandText = "SELECT SiteStatus FROM ServerData WHERE SiteCode = @sc"
+                    $statusCmd.CommandTimeout = 30
+                    [void]$statusCmd.Parameters.AddWithValue("@sc", $PrimarySiteCode)
+                    $statusVal = $statusCmd.ExecuteScalar()
+                    if ($null -ne $statusVal -and $statusVal -isnot [System.DBNull]) { $r.SelfStatus = [int]$statusVal }
+                    if ($r.SelfStatus -ne 125) {
+                        # Not self-active yet (e.g. 120 ReplicationMaintenance / 115 ReplicationInitializing).
+                        # Nothing to flush - skip the send so we don't fire prematurely.
+                        $r.Skipped = $true
+                        return $r
+                    }
                     $listCmd = $conn.CreateCommand()
                     $listCmd.CommandText = "SELECT ReplicationGroup FROM ReplicationData WHERE ReplicationPattern = 'global' ORDER BY ReplicationGroup"
                     $listCmd.CommandTimeout = 30
@@ -1997,8 +2015,18 @@ else {
                                     if ($fsResult.Error) {
                                         Write-DscStatus "DRS force-send could NOT run on the primary's SQL ($($fsResult.DataSource) / $($fsResult.Database)): $($fsResult.Error). No change made; continuing the normal wait." -MachineName $PSVM.VmName
                                     }
+                                    elseif ($fsResult.Skipped) {
+                                        # Primary has not yet flipped its own ServerData.SiteStatus to ReplicationActive(125)
+                                        # - there is nothing pending to flush, so the send would be a no-op (this is what
+                                        # happened on fabrikam PS2, which was still in ReplicationMaintenance when the gate
+                                        # first fired). Roll back this attempt so the real force-send window (once the primary
+                                        # self-activates) still has all $forceSendMaxAttempts available.
+                                        $forceSendCount[$PSVM.VmName] = $attemptsSoFar
+                                        $forceSendLastAttempt[$PSVM.VmName] = $lastFs
+                                        Write-DscStatus "DRS force-send skipped: primary $PSSiteCode is not self-active yet (its own ServerData.SiteStatus=$($fsResult.SelfStatus); ReplicationActive is 125). Nothing to flush - waiting for the primary to finish activating before force-sending." -MachineName $PSVM.VmName
+                                    }
                                     else {
-                                        Write-DscStatus "DRS force-send done on $($fsResult.DataSource) / $($fsResult.Database): $($fsResult.Sent)/$($fsResult.Groups) global groups sent ($($fsResult.Failed) failed). Watching for the CAS to see the primary active." -MachineName $PSVM.VmName
+                                        Write-DscStatus "DRS force-send done on $($fsResult.DataSource) / $($fsResult.Database) (primary self-active, SiteStatus=$($fsResult.SelfStatus)): $($fsResult.Sent)/$($fsResult.Groups) global groups sent ($($fsResult.Failed) failed). Watching for the CAS to see the primary active." -MachineName $PSVM.VmName
                                     }
                                 }
                                 catch {
