@@ -290,19 +290,22 @@ if (-not $SiteOnly) {
         }
         $w11 = @($clientVMs | Where-Object { (Get-VmWinVer $_) -eq 'W11' }) | Select-Object -First 1
         $w10 = @($clientVMs | Where-Object { (Get-VmWinVer $_) -eq 'W10' }) | Select-Object -First 1
-        $pick = @($w11, $w10 | Where-Object { $_ })
+        $pick = New-Object System.Collections.Generic.List[object]
+        if ($w11) { $pick.Add($w11) }
+        if ($w10) { $pick.Add($w10) }
         if ($pick.Count -eq 0) {
             Write-Host "  -Sample: no W10/W11 client found; falling back to first running client." -ForegroundColor DarkYellow
-            $pick = @($clientVMs | Select-Object -First 1)
+            $first = $clientVMs | Select-Object -First 1
+            if ($first) { $pick.Add($first) }
         }
-        $clientVMs = $pick
+        $clientVMs = @($pick)
     }
 
     Write-Host "Client pass: $($clientVMs.Count) Running VM(s)$(if ($Sample) { ' (sample)' } elseif ($VMName) { ' (filtered)' })" -ForegroundColor Yellow
     $summary.Add("----- CLIENT compliance ($($clientVMs.Count) VM(s)) -----")
 
     foreach ($vm in $clientVMs) {
-        $vmName = $vm.vmName
+        $vmName = [string]($vm.vmName | Select-Object -First 1)
         Write-Host "  PSDirect -> $vmName ..." -ForegroundColor DarkGray -NoNewline
         $res = Invoke-VmCommand -VmName $vmName -VmDomainName $DomainName -ScriptBlock $clientSB `
             -ArgumentList @($NamePattern, [bool]$TriggerEvaluation) -DisplayName "BaselineDiag-Client" `
@@ -407,7 +410,7 @@ if (-not $ClientsOnly) {
     $summary.Add("----- SITE CI definitions ($($siteVMs.Count) site server(s)) -----")
 
     foreach ($vm in $siteVMs) {
-        $vmName = $vm.vmName
+        $vmName = [string]($vm.vmName | Select-Object -First 1)
         Write-Host "  PSDirect -> $vmName ..." -ForegroundColor DarkGray -NoNewline
         $res = Invoke-VmCommand -VmName $vmName -VmDomainName $DomainName -ScriptBlock $siteSB `
             -ArgumentList @($NamePattern) -DisplayName "BaselineDiag-Site" `
