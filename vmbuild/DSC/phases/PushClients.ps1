@@ -98,11 +98,26 @@ if ($CurrentRole -ne "CAS") {
         $retries = 0
         $found = $false
         do {
-            # Add cm_svc domain account as CM account
+            # Add cm_svc domain account as CM account.
+            # SCOPE TO THIS SITE: Configuration Manager accounts are per-site
+            # (SMS_SCI_Reserved in the site control file). In a CAS+child-primary
+            # hierarchy the account *object* replicates down via DRS so a bare
+            # Get-CMAccount returns cm_svc on the child even though the encrypted
+            # password secret was only seeded at the site where New-CMAccount
+            # actually ran (the CAS / a sibling primary). The secret does NOT
+            # replicate, so the child has no usable credential -- and the later
+            # Set-CMClientPushInstallation -AddAccount fails with "User account
+            # ... was not found at site '<child>'", leaving the site with an
+            # EMPTY client-push account and falling back to the site-server
+            # machine account (which isn't a local admin on workstation clients),
+            # so ccmsetup never reaches them (no ccmsetup.log on the client).
+            # Get-CMAccount -SiteCode <thisSite> returns only accounts seeded at
+            # THIS site, so a child that hasn't run New-CMAccount yet correctly
+            # falls into the creation branch below and seeds its own local secret.
             $ExistingAccount = $null
             try {
-                Write-DscStatus "[ClientPush][Retry $retries] Running: Get-CMAccount | Where-Object { \\_.UserName -eq $cm_svc }"
-                $ExistingAccount = Get-CMAccount | Where-Object { $_.UserName -eq $cm_svc }
+                Write-DscStatus "[ClientPush][Retry $retries] Running: Get-CMAccount -SiteCode $SiteCode -UserName $cm_svc"
+                $ExistingAccount = Get-CMAccount -SiteCode $SiteCode -UserName $cm_svc | Where-Object { $_.UserName -eq $cm_svc }
             } catch {
                 Write-DscStatus "[ClientPush][Retry $retries] Exception while checking for existing CM account: $_. Exception: $($_.Exception.Message)"
             }
