@@ -68,13 +68,26 @@ function Test-PKIStepResult {
         $err = if ($Result.ScriptBlockFailed) { $Result.ScriptBlockFailed } else { $Result.ScriptBlockOutput.Error }
         Write-Log "${Indent}[$LogPrefix] $StepName FAILED: $err" -Failure
         if ($Result.ScriptBlockOutput.Log) {
-            foreach ($line in $Result.ScriptBlockOutput.Log) { Write-Log "${Indent}  [$LogPrefix][$LogSource] $line" }
+            # On failure show everything (strip the [LogOnly] marker so it isn't noise).
+            foreach ($line in $Result.ScriptBlockOutput.Log) {
+                $lineText = ([string]$line) -replace '\[LogOnly\]\s*', ''
+                Write-Log "${Indent}  [$LogPrefix][$LogSource] $lineText"
+            }
         }
         return $false
     }
     foreach ($line in $Result.ScriptBlockOutput.Log) {
-        if ($LogOnly) { Write-Log "${Indent}  [$LogPrefix][$LogSource] $line" -LogOnly }
-        else { Write-Log "${Indent}  [$LogPrefix][$LogSource] $line" }
+        # A line tagged with [LogOnly] (anywhere -- _Log prepends a timestamp) is
+        # routed to the build log file only, keeping verbose/long output (e.g.
+        # ldifde dumps) off the console. The marker is stripped before writing.
+        $lineText = [string]$line
+        $lineLogOnly = $LogOnly
+        if ($lineText -match '\[LogOnly\]') {
+            $lineLogOnly = $true
+            $lineText = $lineText -replace '\[LogOnly\]\s*', ''
+        }
+        if ($lineLogOnly) { Write-Log "${Indent}  [$LogPrefix][$LogSource] $lineText" -LogOnly }
+        else { Write-Log "${Indent}  [$LogPrefix][$LogSource] $lineText" }
     }
     return $true
 }
@@ -229,7 +242,7 @@ function Install-PKICertificateTemplates {
                 _Log "Importing template '$tplName' via ldifde..."
                 $output = & ldifde.exe -i -k -f $ldfTarget 2>&1
                 _Log "  ldifde exit code: $LASTEXITCODE"
-                if ($output) { _Log "  ldifde output: $($output -join ' ')" }
+                if ($output) { _Log "[LogOnly]  ldifde output: $($output -join ' ')" }
 
                 $verify = Find-TemplateInAD $tplName
                 if (-not $verify) {
