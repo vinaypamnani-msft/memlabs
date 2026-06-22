@@ -305,7 +305,9 @@ if (-not $SiteOnly) {
     $summary.Add("----- CLIENT compliance ($($clientVMs.Count) VM(s)) -----")
 
     foreach ($vm in $clientVMs) {
-        $vmName = [string]($vm.vmName | Select-Object -First 1)
+        $vmNameRaw = $vm.vmName
+        if ($vmNameRaw -is [System.Array]) { $vmNameRaw = $vmNameRaw[0] }
+        [string]$vmName = "$vmNameRaw"
         Write-Host "  PSDirect -> $vmName ..." -ForegroundColor DarkGray -NoNewline
         $res = Invoke-VmCommand -VmName $vmName -VmDomainName $DomainName -ScriptBlock $clientSB `
             -ArgumentList @($NamePattern, [bool]$TriggerEvaluation) -DisplayName "BaselineDiag-Client" `
@@ -410,7 +412,9 @@ if (-not $ClientsOnly) {
     $summary.Add("----- SITE CI definitions ($($siteVMs.Count) site server(s)) -----")
 
     foreach ($vm in $siteVMs) {
-        $vmName = [string]($vm.vmName | Select-Object -First 1)
+        $vmNameRaw = $vm.vmName
+        if ($vmNameRaw -is [System.Array]) { $vmNameRaw = $vmNameRaw[0] }
+        [string]$vmName = "$vmNameRaw"
         Write-Host "  PSDirect -> $vmName ..." -ForegroundColor DarkGray -NoNewline
         $res = Invoke-VmCommand -VmName $vmName -VmDomainName $DomainName -ScriptBlock $siteSB `
             -ArgumentList @($NamePattern) -DisplayName "BaselineDiag-Site" `
