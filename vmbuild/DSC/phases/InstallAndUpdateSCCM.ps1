@@ -1912,6 +1912,51 @@ else {
             catch { $r.Error = $_.Exception.Message }
             return $r
         }
+        # --- DRS ground-truth health check (trust SQL data, NOT the lagging monitoring summary) ---
+        # Get-CMDatabaseReplicationStatus reads the RCM link-summary view ("Summarizing all replication links
+        # for monitoring UI"), which is recomputed lazily and can sit at Failed/NotStarted for many minutes
+        # AFTER replication has actually recovered. The authoritative truth lives in the CAS's own site DB:
+        #   * ServerData.SiteStatus = ReplicationActive(125) for BOTH the CAS site and this child primary, AND
+        #   * no DRS_MessageActivity_Send row for the primary has LastSendResult < 0 (a real send error).
+        # When both hold, the link is functionally Active regardless of what the summary still says. Proven on
+        # fabrikam (2026-06-22): summary stuck Link=Failed for 45m while ServerData was CS1=125/PS1=125 and
+        # every send result was >= 0. Runs against the CAS's own CM_<CAS> over the already-resolved CAS SQL
+        # data source; on any error it returns Healthy=$false so the loop falls back to the normal wait.
+        function Test-DrsLinkHealthyViaSql {
+            param($CasSqlDataSource, $CasDbName, $CasSiteCode, $PriSiteCode)
+            $h = [pscustomobject]@{ Healthy = $false; CasStatus = $null; PriStatus = $null; NegativeSends = $null; Error = $null }
+            try {
+                $cs = "Data Source=$CasSqlDataSource;Initial Catalog=$CasDbName;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+                $conn = New-Object System.Data.SqlClient.SqlConnection $cs
+                $conn.Open()
+                try {
+                    $sdCmd = $conn.CreateCommand()
+                    $sdCmd.CommandText = "SELECT SiteCode, SiteStatus FROM ServerData WHERE SiteCode IN (@cas, @pri)"
+                    $sdCmd.CommandTimeout = 30
+                    [void]$sdCmd.Parameters.AddWithValue("@cas", $CasSiteCode)
+                    [void]$sdCmd.Parameters.AddWithValue("@pri", $PriSiteCode)
+                    $rdr = $sdCmd.ExecuteReader()
+                    while ($rdr.Read()) {
+                        $sc = [string]$rdr['SiteCode']
+                        $st = [int]$rdr['SiteStatus']
+                        if ($sc -eq $CasSiteCode) { $h.CasStatus = $st }
+                        elseif ($sc -eq $PriSiteCode) { $h.PriStatus = $st }
+                    }
+                    $rdr.Close()
+                    $negCmd = $conn.CreateCommand()
+                    $negCmd.CommandText = "SELECT COUNT(*) FROM DRS_MessageActivity_Send WHERE SiteCode = @pri AND LastSendResult < 0"
+                    $negCmd.CommandTimeout = 30
+                    [void]$negCmd.Parameters.AddWithValue("@pri", $PriSiteCode)
+                    $h.NegativeSends = [int]$negCmd.ExecuteScalar()
+                    if ($h.CasStatus -eq 125 -and $h.PriStatus -eq 125 -and $h.NegativeSends -eq 0) {
+                        $h.Healthy = $true
+                    }
+                }
+                finally { $conn.Close() }
+            }
+            catch { $h.Error = $_.Exception.Message }
+            return $h
+        }
 
         # Replication wait with timeout, failure detection, and reinit
         $drsStartTime = Get-Date
@@ -1941,6 +1986,13 @@ else {
         # SMS_ReplicationLinkSummary-LinkStatus.resx enum above (do NOT diverge from it).
         $stateMap = @{ 0 = "Deleted"; 1 = "Tombstoned"; 2 = "Active"; 3 = "Interim"; 4 = "Initializing"; 5 = "NotStarted"; 6 = "Error"; 7 = "Unknown"; 8 = "Degraded"; 9 = "Failed"; 99 = "N/A" }
 
+        # CAS's own site DB data source (for the SQL ground-truth health check below). Mirrors the CAS SQL
+        # resolution used elsewhere in this script (honors named instance / non-default or SQLAO port).
+        $casSqlDataSource = $sqlServerName
+        if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') { $casSqlDataSource = "$sqlServerName\$sqlInstanceName" }
+        if ($sqlPort -and $sqlPort -ne 1433) { $casSqlDataSource = "$sqlServerName,$sqlPort" }
+        $casDbName = "CM_$SiteCode"
+
         while ($waitList.Count -gt 0) {
             foreach ($PSVM in $PSVMs) {
                 if ($waitList -notcontains $PSVM.VmName) {
@@ -1968,6 +2020,23 @@ else {
                     $g12Name = $stateMap[[int]$replicationStatus.Site1ToSite2GlobalState]; if (-not $g12Name) { $g12Name = "$($replicationStatus.Site1ToSite2GlobalState)" }
                     $g21Name = $stateMap[[int]$replicationStatus.Site2ToSite1GlobalState]; if (-not $g21Name) { $g21Name = "$($replicationStatus.Site2ToSite1GlobalState)" }
                     $s21Name = $stateMap[[int]$replicationStatus.Site2ToSite1SiteState]; if (-not $s21Name) { $s21Name = "$($replicationStatus.Site2ToSite1SiteState)" }
+
+                    # AUTHORITATIVE GROUND TRUTH: before trusting the (lagging) monitoring summary's Failed/
+                    # NotStarted verdict - which would trigger a needless reinit and a long false wait - ask the
+                    # CAS's own site DB directly. If ServerData shows BOTH the CAS and this primary at
+                    # ReplicationActive(125) and there are no failed sends for the primary, the link is
+                    # functionally Active and we complete now, regardless of the stale summary.
+                    $sqlHealth = Test-DrsLinkHealthyViaSql -CasSqlDataSource $casSqlDataSource -CasDbName $casDbName -CasSiteCode $SiteCode -PriSiteCode $PSSiteCode
+                    if ($sqlHealth.Healthy) {
+                        Write-DscStatus "Replication link is Active per SQL ground truth (ServerData: $SiteCode=125, $PSSiteCode=125; 0 failed sends) - the monitoring summary still lags (Link=$linkName, CAS->PRI=$g12Name, PRI->CAS=$g21Name, Site=$s21Name) (${drsElapsedMin}m elapsed)" -MachineName $PSVM.VmName
+                        Write-DscStatus "$SiteCode -> $PSSiteCode replication link Active (SQL ground truth)"
+                        $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
+                        $propName = "PSReadyToUse" + $PSVM.VmName
+                        $Configuration.$propName.Status = 'Completed'
+                        $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+                        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+                        continue
+                    }
 
                     # Detect failed/degraded link and attempt reinit
                     $linkInFailedState = [int]$replicationStatus.LinkStatus -in $failedStates -or `
