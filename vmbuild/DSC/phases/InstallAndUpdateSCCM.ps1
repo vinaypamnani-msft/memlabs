@@ -4,6 +4,40 @@ param(
     [string]$LogPath
 )
 Write-DscStatus "Started InstallAndUpdateSCCM.ps1"
+
+# Invoke-Command against a remote host (the DC or a SQLAO node) uses WinRM,
+# which has NO native timeout -- if the target's WinRM/CIM is briefly wedged
+# the call blocks for minutes and stalls this Phase 8 DSC script. Run it via
+# -AsJob and bound it with Wait-Job -Timeout; on overrun the job (and its
+# stuck WinRM session) is killed and we return $null so the best-effort
+# recovery caller continues instead of hanging. PS5.1-safe.
+function Invoke-CommandWithTimeout {
+    param(
+        [Parameter(Mandatory)] [string] $ComputerName,
+        [Parameter(Mandatory)] [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList = @(),
+        [int] $TimeoutSec = 120
+    )
+    $job = $null
+    try {
+        $job = Invoke-Command -ComputerName $ComputerName -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
+        if (Wait-Job -Job $job -Timeout $TimeoutSec) {
+            return (Receive-Job -Job $job -ErrorAction SilentlyContinue)
+        }
+        Write-DscStatus "Invoke-CommandWithTimeout: remote command on '$ComputerName' did not finish within ${TimeoutSec}s -- killing it and continuing."
+        return $null
+    }
+    catch {
+        return $null
+    }
+    finally {
+        if ($job) {
+            try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+            try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+}
+
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
@@ -602,10 +636,10 @@ CurrentBranch=1
                 if ($dnsTry -eq 1) {
                     Write-DscStatus "SQL pre-flight DNS: forcing AD replication across $($allDCs.Count) DC(s)"
                     try {
-                        Invoke-Command -ComputerName $dcName -ScriptBlock {
+                        Invoke-CommandWithTimeout -ComputerName $dcName -TimeoutSec 120 -ScriptBlock {
                             param($dcNames)
                             $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
-                        } -ArgumentList (,$dcShortNames) -ErrorAction SilentlyContinue
+                        } -ArgumentList (,$dcShortNames)
                         Start-Sleep -Seconds 5
                         Clear-DnsClientCache -ErrorAction SilentlyContinue
                     }
@@ -621,7 +655,7 @@ CurrentBranch=1
                 if ($dnsTry -eq 2 -and $sqlNode1) {
                     Write-DscStatus "SQL pre-flight DNS: bouncing cluster Network Name for '$sqlServerName' on $sqlNode1"
                     try {
-                        Invoke-Command -ComputerName $sqlNode1 -ScriptBlock {
+                        Invoke-CommandWithTimeout -ComputerName $sqlNode1 -TimeoutSec 90 -ScriptBlock {
                             param($listenerName)
                             Import-Module FailoverClusters -ErrorAction SilentlyContinue
                             $nnRes = Get-ClusterResource -ErrorAction SilentlyContinue |
@@ -632,13 +666,13 @@ CurrentBranch=1
                                 $nnRes | Start-ClusterResource -ErrorAction SilentlyContinue
                                 Start-Sleep -Seconds 5
                             }
-                        } -ArgumentList $sqlServerName -ErrorAction Stop
+                        } -ArgumentList $sqlServerName
                         $clusterBounced = $true
                         # Force replication again after the cluster re-registered
-                        Invoke-Command -ComputerName $dcName -ScriptBlock {
+                        Invoke-CommandWithTimeout -ComputerName $dcName -TimeoutSec 120 -ScriptBlock {
                             param($dcNames)
                             $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
-                        } -ArgumentList (,$dcShortNames) -ErrorAction SilentlyContinue
+                        } -ArgumentList (,$dcShortNames)
                         Start-Sleep -Seconds 5
                         Clear-DnsClientCache -ErrorAction SilentlyContinue
                     }
@@ -653,7 +687,7 @@ CurrentBranch=1
                         $agIPAddr = $null
                         # Try Get-ClusterResource on the SQLAO node to find the listener IP
                         if ($sqlNode1) {
-                            $agIPAddr = Invoke-Command -ComputerName $sqlNode1 -ScriptBlock {
+                            $agIPAddr = Invoke-CommandWithTimeout -ComputerName $sqlNode1 -TimeoutSec 60 -ScriptBlock {
                                 param($listenerName)
                                 Import-Module FailoverClusters -ErrorAction SilentlyContinue
                                 $ipRes = Get-ClusterResource -ErrorAction SilentlyContinue |
@@ -662,7 +696,7 @@ CurrentBranch=1
                                 if ($ipRes) {
                                     return ($ipRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
                                 }
-                            } -ArgumentList $sqlServerName -ErrorAction SilentlyContinue
+                            } -ArgumentList $sqlServerName
                         }
                         # Fallback: resolve the short name via NetBIOS/LLMNR
                         if (-not $agIPAddr) {
@@ -672,20 +706,20 @@ CurrentBranch=1
                         }
                         if ($agIPAddr) {
                             Write-DscStatus "SQL pre-flight DNS: registering A record '$sqlServerName' -> $agIPAddr on DC '$dcName'"
-                            Invoke-Command -ComputerName $dcName -ScriptBlock {
+                            Invoke-CommandWithTimeout -ComputerName $dcName -TimeoutSec 60 -ScriptBlock {
                                 param($zone, $name, $ip)
                                 # Remove any stale record first, then add fresh
                                 $existing = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ErrorAction SilentlyContinue
                                 if (-not $existing) {
                                     Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $ip -ErrorAction Stop
                                 }
-                            } -ArgumentList $DomainFullName, $sqlServerName, $agIPAddr -ErrorAction Stop
+                            } -ArgumentList $DomainFullName, $sqlServerName, $agIPAddr
                             # Force replication after registration
                             if ($allDCs.Count -gt 1) {
-                                Invoke-Command -ComputerName $dcName -ScriptBlock {
+                                Invoke-CommandWithTimeout -ComputerName $dcName -TimeoutSec 120 -ScriptBlock {
                                     param($dcNames)
                                     $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
-                                } -ArgumentList (,$dcShortNames) -ErrorAction SilentlyContinue
+                                } -ArgumentList (,$dcShortNames)
                             }
                             Start-Sleep -Seconds 5
                             Clear-DnsClientCache -ErrorAction SilentlyContinue

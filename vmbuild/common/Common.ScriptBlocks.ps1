@@ -5122,6 +5122,42 @@ $global:VM_Config = {
                 $scrubDns = {
                     param($hostname, $nodeSubnet, $clusterVips, $nodeOwnIp)
                     $results = @()
+                    # Watchdog: run a risky call under Start-ThreadJob (or Start-Job
+                    # fallback) with a per-attempt timeout + retry, so a DC-side DNS
+                    # cmdlet that hangs with no native timeout is KILLED instead of
+                    # blocking the whole phase. Mirrors the validator's Invoke-WithWatchdog.
+                    function Invoke-WithWatchdog {
+                        param(
+                            [Parameter(Mandatory)] [scriptblock] $ScriptBlock,
+                            [object[]] $ArgumentList = @(),
+                            [int] $TimeoutSec = 20,
+                            [int] $MaxAttempts = 2
+                        )
+                        $useThreadJob = $null -ne (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+                        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+                            $job = $null
+                            try {
+                                $job = if ($useThreadJob) {
+                                    Start-ThreadJob -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
+                                } else {
+                                    Start-Job -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
+                                }
+                                if (Wait-Job -Job $job -Timeout $TimeoutSec) {
+                                    $jobErrors = $null
+                                    $output = Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jobErrors
+                                    try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                                    $status = if ($jobErrors -and $jobErrors.Count -gt 0) { 'Error' } else { 'OK' }
+                                    return [pscustomobject]@{ Status = $status; Output = $output }
+                                }
+                                try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+                                try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                            }
+                            catch {
+                                if ($job) { try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {} }
+                            }
+                        }
+                        return [pscustomobject]@{ Status = 'TimedOut'; Output = $null }
+                    }
                     # Heartbeat / cluster NICs are the ONLY adapters that must never
                     # publish the host's name in DNS. Identify them POSITIVELY (an IP in
                     # a known heartbeat subnet, or a Cluster/isatap virtual adapter) and
@@ -5192,25 +5228,76 @@ $global:VM_Config = {
                     # Force re-registration so ONLY the domain adapter's own (non-skip) IP is published.
                     & ipconfig /registerdns 2>&1 | Out-Null
                     # Remove stale heartbeat A records for this hostname (keep the domain IP).
+                    #
+                    # Both the lookup and the delete go to the DC via Get/Remove-DnsServerResourceRecord
+                    # -- CDXML/WMI cmdlets that open an implicit CIM session to the DC with NO native
+                    # timeout. If the DC's WinRM/CIM is briefly wedged the call BLOCKS for the full outer
+                    # Invoke-VmCommand budget (observed on FAB-CS1SQLAO1: DSC 'Complete!' then a multi-minute
+                    # stall here). A bare try/catch only catches THROWS, not HANGS -- so (a) gate the
+                    # expensive DC query behind a cheap, bounded local resolve and (b) run every DC-side
+                    # DNS call under the kill-and-retry watchdog above.
                     try {
                         $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                             Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
                         $zone = ($hostname -split '\.', 2)[1]
                         $shortName = ($hostname -split '\.')[0]
                         if ($dnsServer -and $zone) {
-                            $records = @(Get-DnsServerResourceRecord -ZoneName $zone -Name $shortName -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
-                            foreach ($rec in $records) {
-                                $ip = $rec.RecordData.IPv4Address.IPAddressToString
-                                $stale = $false
-                                # Stale if on a heartbeat subnet, OR a known cluster VIP that a
-                                # prior buggy run wrongly published under the node's own name.
-                                foreach ($p in $clusterPrefixes) { if ($ip -like "$p*") { $stale = $true; break } }
-                                if (-not $stale -and ($vipSet -contains $ip)) { $stale = $true }
-                                # Never remove the node's own IP.
-                                if ($nodeOwnIp -and $ip -eq $nodeOwnIp) { $stale = $false }
-                                if ($stale) {
-                                    Remove-DnsServerResourceRecord -ZoneName $zone -Name $shortName -RRType A -RecordData $ip -ComputerName $dnsServer -Force -ErrorAction SilentlyContinue
-                                    $results += "Removed stale DNS A record $ip"
+                            # Helper: is this IP a heartbeat/VIP record that must NOT live under the node name?
+                            $isBadIp = {
+                                param($ip)
+                                $bad = $false
+                                foreach ($p in $clusterPrefixes) { if ($ip -like "$p*") { $bad = $true; break } }
+                                if (-not $bad -and ($vipSet -contains $ip)) { $bad = $true }
+                                if ($nodeOwnIp -and $ip -eq $nodeOwnIp) { $bad = $false }
+                                return $bad
+                            }
+
+                            # Pre-check (cheap, bounded): resolve our own name locally and see if any
+                            # heartbeat/VIP IP is actually published under it. The expensive DC RPC only
+                            # runs when there's genuinely something to remove -- on a clean deploy this
+                            # short-circuits and we never touch the DC at all.
+                            $badIps = @()
+                            $resolveWd = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($hostname) -ScriptBlock {
+                                param($fqdn)
+                                @(Resolve-DnsName -Name $fqdn -Type A -ErrorAction SilentlyContinue |
+                                    Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress)
+                            }
+                            if ($resolveWd.Status -eq 'OK') {
+                                foreach ($ip in @($resolveWd.Output)) { if (& $isBadIp $ip) { $badIps += $ip } }
+                            }
+                            else {
+                                # Local resolve itself timed out/failed -- fall back to the authoritative
+                                # DC query (still watchdog'd) so we don't miss a stale record just because
+                                # the local resolver was slow.
+                                $listWd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($zone, $shortName, $dnsServer) -ScriptBlock {
+                                    param($z, $n, $srv)
+                                    @(Get-DnsServerResourceRecord -ZoneName $z -Name $n -RRType A -ComputerName $srv -ErrorAction SilentlyContinue |
+                                        ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                                }
+                                if ($listWd.Status -eq 'OK') {
+                                    foreach ($ip in @($listWd.Output)) { if (& $isBadIp $ip) { $badIps += $ip } }
+                                }
+                                else {
+                                    $results += "DNS record cleanup skipped (DC DNS query did not respond: $($listWd.Status))"
+                                }
+                            }
+
+                            $badIps = @($badIps | Select-Object -Unique)
+                            if ($badIps.Count -eq 0) {
+                                $results += "No stale heartbeat/VIP DNS records to clean"
+                            }
+                            else {
+                                foreach ($ip in $badIps) {
+                                    $delWd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($zone, $shortName, $ip, $dnsServer) -ScriptBlock {
+                                        param($z, $n, $rip, $srv)
+                                        Remove-DnsServerResourceRecord -ZoneName $z -Name $n -RRType A -RecordData $rip -ComputerName $srv -Force -ErrorAction SilentlyContinue
+                                    }
+                                    if ($delWd.Status -eq 'OK') {
+                                        $results += "Removed stale DNS A record $ip"
+                                    }
+                                    else {
+                                        $results += "Stale DNS A record $ip removal did not complete ($($delWd.Status))"
+                                    }
                                 }
                             }
                         }

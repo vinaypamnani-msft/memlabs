@@ -2531,6 +2531,45 @@ function Write-Status {
 
 }
 
+function Invoke-WithTimeoutJob {
+    # Run a scriptblock under Start-ThreadJob (or Start-Job fallback) with a
+    # hard per-attempt timeout + retry, then KILL it if it overruns. Used to
+    # bound CDXML/CIM cmdlets such as Get/Remove-DnsServerResourceRecord
+    # -ComputerName <DC>, which have no native timeout and can block for
+    # minutes when the DC's WinRM/CIM is briefly wedged -- stalling the DSC
+    # apply (and the whole phase) with it. Returns the scriptblock output on
+    # success, or $null on timeout/error (caller treats that as 'skip').
+    param(
+        [Parameter(Mandatory)] [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList = @(),
+        [int] $TimeoutSec = 30,
+        [int] $MaxAttempts = 2
+    )
+    $useThreadJob = $null -ne (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $job = $null
+        try {
+            $job = if ($useThreadJob) {
+                Start-ThreadJob -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
+            }
+            else {
+                Start-Job -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
+            }
+            if (Wait-Job -Job $job -Timeout $TimeoutSec) {
+                $out = Receive-Job -Job $job -ErrorAction SilentlyContinue
+                try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                return $out
+            }
+            try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+            try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        catch {
+            if ($job) { try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {} }
+        }
+    }
+    return $null
+}
+
 [DscResource()]
 class WriteStatus {
     [DscProperty(key)]
@@ -7152,12 +7191,24 @@ class DisableClusterNicDnsRegistration {
         # 2. Remove stale hostname A records that point to the cluster subnet.
         $hostname = $env:COMPUTERNAME
         try {
-            $records = Get-DnsServerResourceRecord -ZoneName $_domain -Name $hostname -RRType A -ComputerName $_dc -ErrorAction Stop
-            $stale = $records | Where-Object { $_.RecordData.IPv4Address.ToString() -like "${_subnet}*" }
-            foreach ($rec in $stale) {
-                $ip = $rec.RecordData.IPv4Address.ToString()
+            # Get/Remove-DnsServerResourceRecord -ComputerName <DC> are CDXML/CIM
+            # cmdlets with NO native timeout; an intermittently-wedged DC can block
+            # them for minutes and stall this DSC apply (and the phase). Run each
+            # under a kill+retry watchdog so a hang degrades to a skipped cleanup
+            # instead of a hung phase. The stale-subnet filter runs inside the job
+            # so only plain strings cross the job boundary.
+            $staleIps = Invoke-WithTimeoutJob -TimeoutSec 30 -MaxAttempts 2 -ArgumentList @($_domain, $hostname, $_dc, $_subnet) -ScriptBlock {
+                param($zone, $name, $dc, $subnet)
+                @(Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dc -ErrorAction Stop |
+                    ForEach-Object { $_.RecordData.IPv4Address.ToString() } |
+                    Where-Object { $_ -like "${subnet}*" })
+            }
+            foreach ($ip in @($staleIps)) {
                 Write-Status "Removing stale DNS A record $hostname -> $ip from $_dc"
-                Remove-DnsServerResourceRecord -ZoneName $_domain -Name $hostname -RRType A -RecordData $ip -ComputerName $_dc -Force -ErrorAction Stop
+                $null = Invoke-WithTimeoutJob -TimeoutSec 30 -MaxAttempts 2 -ArgumentList @($_domain, $hostname, $_dc, $ip) -ScriptBlock {
+                    param($zone, $name, $dc, $rip)
+                    Remove-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -RecordData $rip -ComputerName $dc -Force -ErrorAction Stop
+                }
             }
         }
         catch {
