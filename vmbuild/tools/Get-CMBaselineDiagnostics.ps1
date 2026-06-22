@@ -290,13 +290,13 @@ if (-not $SiteOnly) {
         }
         $w11 = @($clientVMs | Where-Object { (Get-VmWinVer $_) -eq 'W11' }) | Select-Object -First 1
         $w10 = @($clientVMs | Where-Object { (Get-VmWinVer $_) -eq 'W10' }) | Select-Object -First 1
-        $pick = New-Object System.Collections.Generic.List[object]
-        if ($w11) { $pick.Add($w11) }
-        if ($w10) { $pick.Add($w10) }
+        $pick = @()
+        if ($w11) { $pick += $w11 }
+        if ($w10) { $pick += $w10 }
         if ($pick.Count -eq 0) {
             Write-Host "  -Sample: no W10/W11 client found; falling back to first running client." -ForegroundColor DarkYellow
             $first = $clientVMs | Select-Object -First 1
-            if ($first) { $pick.Add($first) }
+            if ($first) { $pick += $first }
         }
         $clientVMs = @($pick)
     }
