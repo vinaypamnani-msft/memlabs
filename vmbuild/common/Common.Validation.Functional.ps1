@@ -7081,6 +7081,20 @@ function Test-CMSiteWideFunctionality {
         ($_.installSUP -or $_.InstallSUP) -and $_.siteCode -eq $siteCode
     } | Select-Object -First 1)
 
+    # Resolve the SUP server FQDN so the WSUS-native diagnostics target the ACTUAL
+    # WSUS box. The SUP is frequently a SEPARATE site system (e.g. a remote
+    # DPMPSUP) rather than the site server this validator runs on, so a bare
+    # Get-WsusServer -- which defaults to localhost -- throws
+    # WsusInvalidServerException on a site server that has no local WSUS. CM
+    # requires the WSUS administration console on the site server whenever the
+    # SUP is remote, so Get-WsusServer -Name <supFqdn> -PortNumber 8530 works
+    # from here. Port 8530 (HTTP) is ALWAYS listening even on an HTTPS-enabled
+    # SUP, so we always use it.
+    $supVmObj = $DeployConfig.virtualMachines | Where-Object {
+        ($_.installSUP -or $_.InstallSUP) -and $_.siteCode -eq $siteCode
+    } | Select-Object -First 1
+    $supServer = if ($supVmObj) { "$($supVmObj.vmName).$domain" } else { '' }
+
     # Expected boundary groups + their subnet boundaries, mirroring
     # InstallBoundaryGroups.ps1: one boundary group named by site code, each
     # containing an IPRange boundary for that site's subnet (.1-.254 over /24).
@@ -7109,7 +7123,7 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv)
+        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer)
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
@@ -7524,17 +7538,27 @@ function Test-CMSiteWideFunctionality {
                     $syncTime = [Management.ManagementDateTimeConverter]::ToDateTime($syncStatus.LastSyncStateTime)
                     $age = (Get-Date) - $syncTime
                     if ($age.TotalMinutes -gt 30) {
-                        # Long-running sync — gather WSUS-level diagnostics to help identify cause
+                        # Long-running sync — gather WSUS-level diagnostics to help
+                        # identify the cause. Target the actual SUP server on port
+                        # 8530 (always listening, even on an HTTPS SUP). A bare
+                        # Get-WsusServer defaults to localhost and throws
+                        # WsusInvalidServerException when the SUP is a remote site
+                        # system rather than this site server.
                         $wsusDiag = ""
                         try {
-                            $wsusSrv = Get-WsusServer -ErrorAction Stop
+                            if ($supServer) {
+                                $wsusSrv = Get-WsusServer -Name $supServer -PortNumber 8530 -ErrorAction Stop
+                            }
+                            else {
+                                $wsusSrv = Get-WsusServer -ErrorAction Stop
+                            }
                             $sub = $wsusSrv.GetSubscription()
                             $wsusState = $sub.GetSynchronizationStatus().ToString()
                             $prog = $sub.GetSynchronizationProgress()
-                            $wsusDiag = " [WSUS: $wsusState, Phase=$($prog.Phase), Items=$($prog.ProcessedItems)/$($prog.TotalItems)]"
+                            $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($prog.Phase), Items=$($prog.ProcessedItems)/$($prog.TotalItems)]"
                         }
                         catch {
-                            $wsusDiag = " [WSUS diag failed: $($_.Exception.Message)]"
+                            $wsusDiag = " [WSUS-native diag on '$supServer' (8530) unavailable: $($_.Exception.Message)]"
                         }
                         $results.Details.Add("WARN: SUP sync at '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime)$wsusDiag — may be slow or stuck")
                     }
@@ -7572,10 +7596,16 @@ function Test-CMSiteWideFunctionality {
             # dbo.Update (sync 2 / post-subscription update metadata) and
             # legitimately stays at 0 when the subscription is narrow.
             #
-            # Only meaningful when WSUS is local to this site server; the
-            # outer catch skips silently otherwise.
+            # Targets the actual SUP server on port 8530 (the SUP is frequently a
+            # remote site system, not this site server); the outer catch reports
+            # an INFO and skips when the SUP can't be reached.
             try {
-                $wsusSrv = Get-WsusServer -ErrorAction Stop
+                if ($supServer) {
+                    $wsusSrv = Get-WsusServer -Name $supServer -PortNumber 8530 -ErrorAction Stop
+                }
+                else {
+                    $wsusSrv = Get-WsusServer -ErrorAction Stop
+                }
                 $wStatus = $wsusSrv.GetStatus()
 
                 # ---- gather raw signals (each guarded; never throws) ----
@@ -7758,7 +7788,7 @@ function Test-CMSiteWideFunctionality {
                 }
             }
             catch {
-                $results.Details.Add("INFO: WSUS not local to this site server (skipped UpdateCount check): $($_.Exception.Message)")
+                $results.Details.Add("INFO: WSUS-native cross-check skipped (could not reach SUP '$supServer' on port 8530): $($_.Exception.Message)")
             }
         }
 
@@ -7767,7 +7797,7 @@ function Test-CMSiteWideFunctionality {
 
     $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
