@@ -9,7 +9,7 @@
     SQL host (which may be a remote SQL VM, e.g. CST-PRISITE -> CST-PRISQL).
 
 .PARAMETER Domain        Domain FQDN to scope to. Auto-detected if only one CAS hierarchy exists.
-.PARAMETER PrimaryName   Specific child-primary VM name when a CAS has more than one.
+.PARAMETER PrimaryName   Limit collection to a specific child-primary VM. Omit to collect from ALL child primaries under the CAS.
 .PARAMETER TailLines     Tail size for the on-screen preview of rcmctrl.log (default 30; 0 = no preview).
 
 .EXAMPLE
@@ -70,16 +70,15 @@ $priList = @($allVms | Where-Object { $_.role -eq 'Primary' -and $_.domain -eq $
 if ($priList.Count -eq 0) { Write-Host "FATAL: no child Primary under CAS $($cas.vmName) (site $($cas.siteCode))." -ForegroundColor Red; return }
 if ($PrimaryName) { $priList = @($priList | Where-Object { $_.vmName -eq $PrimaryName }) }
 if ($priList.Count -eq 0) { Write-Host "FATAL: -PrimaryName '$PrimaryName' did not match." -ForegroundColor Red; return }
-if ($priList.Count -gt 1) { Write-Host "FATAL: multiple child primaries ($($priList.vmName -join ', ')). Re-run with -PrimaryName <one>." -ForegroundColor Red; return }
-$pri = $priList[0]
+# Multiple child primaries are fine - we collect from all of them (use -PrimaryName to narrow to one).
 
-$siteCodes = @($cas.siteCode, $pri.siteCode)
+$siteCodes = @($cas.siteCode) + @($priList | Select-Object -ExpandProperty siteCode)
 $siteSystems = @($allVms | Where-Object { $_.role -in @('SiteSystem', 'DPMP') -and $_.domain -eq $dom -and ($_.siteCode -in $siteCodes -or $_.parentSiteCode -in $siteCodes) })
 
-$logTargets = @($cas, $pri) + $siteSystems | Sort-Object vmName -Unique
+$logTargets = @($cas) + $priList + $siteSystems | Sort-Object vmName -Unique
 Write-Host "Domain  : $dom" -ForegroundColor Gray
 Write-Host "CAS     : $($cas.vmName) (site $($cas.siteCode))  SQL: $((Resolve-SqlVm $cas $allVms).vmName)" -ForegroundColor Gray
-Write-Host "Primary : $($pri.vmName) (site $($pri.siteCode))  SQL: $((Resolve-SqlVm $pri $allVms).vmName)" -ForegroundColor Gray
+foreach ($p in $priList) { Write-Host "Primary : $($p.vmName) (site $($p.siteCode))  SQL: $((Resolve-SqlVm $p $allVms).vmName)" -ForegroundColor Gray }
 if ($siteSystems.Count) { Write-Host "SiteSys : $($siteSystems.vmName -join ', ')" -ForegroundColor Gray }
 Write-Host ""
 
