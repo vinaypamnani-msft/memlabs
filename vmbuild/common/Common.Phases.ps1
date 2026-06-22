@@ -1486,6 +1486,11 @@ function Wait-Phase {
                     }
 
                     $jobs.Remove($job)
+                    # Reap the failed job from the PS session job table. $jobs.Remove only
+                    # drops it from this local tracking list; without Remove-Job the dead job
+                    # lingers in the session until New-Lab's end-of-run sweep, so jobs from
+                    # every phase pile up (e.g. 19+18+6+6 = 49 at "Removing N job(s)").
+                    try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
                     $return.Failed++
                 }
             }
@@ -1609,6 +1614,11 @@ function Wait-Phase {
 
                 #Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
                 $jobs.Remove($job)
+                # Reap the completed job from the PS session job table. Its output/streams
+                # were already drained above; $jobs.Remove only updates this local list, so
+                # without Remove-Job the finished job survives in the session and accumulates
+                # across phases until the end-of-run cleanup sweep.
+                try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
             }
 
             # End synchronized output — terminal renders all progress updates as one frame.
