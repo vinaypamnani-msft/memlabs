@@ -492,18 +492,70 @@ function Install-SingleTierPKI {
             return $false
         }
 
-        try {
-            # Check if CA is already installed (idempotency)
-            $caAlreadyInstalled = $false
-            try {
-                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
-                if ($svc) {
-                    $caAlreadyInstalled = $true
-                    _Log "CA service already exists (state: $($svc.Status)) - skipping installation"
-                }
-            } catch {}
+        # A CA is only "installed" once it has been CONFIGURED. The ADCS
+        # role feature alone registers the certsvc service but leaves it
+        # unconfigured; configuration writes Active=<CAName> under
+        # CertSvc\Configuration. Testing the service alone made a FAILED
+        # config look "installed", so a retry would skip the real work and
+        # then fail trying to start an unconfigured service.
+        function Test-CaConfigured {
+            $cfgRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+            if (-not (Test-Path $cfgRoot)) { return $false }
+            $active = (Get-ItemProperty -Path $cfgRoot -Name 'Active' -ErrorAction SilentlyContinue).Active
+            if ([string]::IsNullOrWhiteSpace($active)) { return $false }
+            if (-not (Test-Path (Join-Path $cfgRoot $active))) { return $false }
+            return $true
+        }
 
-            if (-not $caAlreadyInstalled) {
+        # Enterprise CA setup PUBLISHES to AD (NTAuth / AIA / Enrollment
+        # Services under the Configuration NC). On a freshly promoted forest
+        # the directory may not be ready to accept those writes yet, which
+        # surfaces as 0x80072082 ERROR_DS_RANGE_CONSTRAINT. Gate the install
+        # on the Public Key Services container being reachable (proves a DC
+        # is answering and the PKI containers exist), and that NTDS is up
+        # when the CA is co-located on the DC (the single-tier case).
+        function Wait-AdDsReady {
+            param([int]$TimeoutSec = 300)
+            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $ntds = Get-Service -Name NTDS -ErrorAction SilentlyContinue
+                    if ($ntds -and $ntds.Status -ne 'Running') { Start-Sleep -Seconds 5; continue }
+                    $rootDSE = [ADSI]"LDAP://RootDSE"
+                    $configNC = $rootDSE.configurationNamingContext
+                    if ($configNC) {
+                        $pks = [ADSI]"LDAP://CN=Public Key Services,CN=Services,$configNC"
+                        if ($pks.distinguishedName) { return $true }
+                    }
+                } catch {}
+                Start-Sleep -Seconds 5
+            }
+            return $false
+        }
+
+        try {
+            # Idempotency: only skip when the CA is genuinely CONFIGURED.
+            if (Test-CaConfigured) {
+                _Log "CA already configured (Active CA present) - skipping installation"
+                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -ne 'Running') {
+                    _Log "Starting certsvc (was $($svc.Status))..."
+                    Start-Service certsvc -ErrorAction SilentlyContinue
+                }
+                if (-not (Wait-CertSvcReady -TimeoutSec 90)) {
+                    _Log "WARNING: configured CA service slow to respond"
+                }
+            }
+            else {
+                # Service present but not configured => a prior attempt was
+                # killed/failed mid-config. Tear down the partial config so a
+                # clean re-config can run (the role feature stays installed).
+                $svcPre = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                if ($svcPre) {
+                    _Log "certsvc present but not configured (partial/failed prior install) - removing partial CA config before (re)install..."
+                    try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch { _Log "Uninstall of partial CA config returned: $($_.Exception.Message)" }
+                }
+
                 # Write CAPolicy.inf
                 _Log "Writing CAPolicy.inf..."
                 $caPolicyContent = @"
@@ -522,35 +574,67 @@ LoadDefaultTemplates=0
 "@
                 Set-Content -Path "C:\Windows\CAPolicy.inf" -Value $caPolicyContent -Force
 
-                # Install ADCS role
+                # Install ADCS role (idempotent)
                 _Log "Installing ADCS role..."
                 Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
 
-                # Install Enterprise Root CA
-                _Log "Installing Enterprise Root CA '$CAName'..."
-                Install-AdcsCertificationAuthority -CAType EnterpriseRootCa `
-                    -CACommonName $CAName `
-                    -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
-                    -KeyLength 2048 `
-                    -HashAlgorithmName SHA256 `
-                    -ValidityPeriod Years `
-                    -ValidityPeriodUnits 5 `
-                    -Force | Out-Null
-
-                _Log "Waiting for CA service to become ready..."
-                if (-not (Wait-CertSvcReady -TimeoutSec 60)) {
-                    throw "CA service did not become responsive within 60 seconds"
+                # Gate on AD readiness before publishing the Enterprise CA.
+                _Log "Verifying AD DS / Public Key Services container is ready before CA config..."
+                if (-not (Wait-AdDsReady -TimeoutSec 300)) {
+                    _Log "WARNING: AD DS / PKI container not confirmed ready after 300s - proceeding; the retry loop will remediate transient publish errors"
                 }
-                _Log "CA service is ready."
-            }
-            else {
-                # Ensure service is running
-                if ((Get-Service certsvc).Status -ne 'Running') {
-                    Start-Service certsvc
-                    if (-not (Wait-CertSvcReady -TimeoutSec 30)) {
-                        throw "Could not start existing CA service"
+
+                # Install Enterprise Root CA with retry + remediation. The AD
+                # publish can transiently fail (ERROR_DS_RANGE_CONSTRAINT /
+                # ERROR_DS_BUSY) right after forest promotion; each failed
+                # attempt is torn down and retried after AD settles. This is
+                # the exact failure that cost an 8h deploy on fabrikam.
+                $caConfigured = $false
+                $caLastErr = $null
+                $maxCaTries = 6
+                for ($caTry = 1; $caTry -le $maxCaTries; $caTry++) {
+                    try {
+                        _Log "Installing Enterprise Root CA '$CAName' (attempt $caTry/$maxCaTries)..."
+                        Install-AdcsCertificationAuthority -CAType EnterpriseRootCa `
+                            -CACommonName $CAName `
+                            -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
+                            -KeyLength 2048 `
+                            -HashAlgorithmName SHA256 `
+                            -ValidityPeriod Years `
+                            -ValidityPeriodUnits 5 `
+                            -Force | Out-Null
+                        $caConfigured = $true
+                        break
+                    }
+                    catch {
+                        $caLastErr = $_.Exception.Message
+                        # Config may have actually landed even though the cmdlet threw.
+                        if (Test-CaConfigured) {
+                            _Log "CA reports configured despite error on attempt $caTry ($caLastErr) - accepting."
+                            $caConfigured = $true
+                            break
+                        }
+                        $transient = $caLastErr -match '0x80072082|ERROR_DS_RANGE_CONSTRAINT|0x8007200E|ERROR_DS_BUSY|0x8007200F|ERROR_DS_UNWILLING_TO_PERFORM|0x80072030|ERROR_DS_NO_SUCH_OBJECT|acceptable range|directory service'
+                        if (-not $transient) {
+                            _Log "Non-transient CA install error on attempt $caTry : $caLastErr"
+                            throw
+                        }
+                        _Log "Transient AD-publish error on attempt $caTry : $caLastErr -- remediating (tear down partial config, wait for AD, retry)."
+                        try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+                        try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
+                        Wait-AdDsReady -TimeoutSec 180 | Out-Null
+                        Start-Sleep -Seconds (15 * $caTry)
                     }
                 }
+                if (-not $caConfigured) {
+                    throw "Enterprise Root CA configuration failed after $maxCaTries attempts. Last error: $caLastErr"
+                }
+
+                _Log "Waiting for CA service to become ready..."
+                if (-not (Wait-CertSvcReady -TimeoutSec 90)) {
+                    throw "CA service did not become responsive within 90 seconds"
+                }
+                _Log "CA service is ready."
             }
 
             # Configure CDP/AIA
@@ -1276,6 +1360,28 @@ Critical=Yes
                 # Install ADCS role (idempotent)
                 _Log "Installing ADCS role..."
                 Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
+
+                # Enterprise Subordinate CA setup writes Enrollment Services /
+                # NTAuth objects to the Configuration NC. If AD isn't ready to
+                # accept those writes the install fails with 0x80072082
+                # ERROR_DS_RANGE_CONSTRAINT. Gate on the Public Key Services
+                # container being reachable (proves a DC is answering and the
+                # PKI containers exist) before launching setup, so a transient
+                # AD-not-ready window doesn't burn the install.
+                $adReadyDeadline = (Get-Date).AddSeconds(180)
+                $adReady = $false
+                while ((Get-Date) -lt $adReadyDeadline) {
+                    try {
+                        $cfgNcWait = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+                        if ($cfgNcWait) {
+                            $pksWait = [ADSI]"LDAP://CN=Public Key Services,CN=Services,$cfgNcWait"
+                            if ($pksWait.distinguishedName) { $adReady = $true; break }
+                        }
+                    } catch {}
+                    Start-Sleep -Seconds 5
+                }
+                if ($adReady) { _Log "AD DS / Public Key Services container is ready for subordinate CA publish." }
+                else { _Log "WARNING: AD DS / PKI container not confirmed ready after 180s - proceeding anyway." }
 
                 # Install Enterprise Subordinate CA with offline request file
                 _Log "Installing Enterprise Subordinate CA '$IntCAName' (offline enrollment)..."
