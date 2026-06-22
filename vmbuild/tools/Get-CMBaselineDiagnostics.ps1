@@ -197,24 +197,43 @@ $siteSB = {
     if (-not (Get-Module ConfigurationManager)) { $out.Error = 'ConfigurationManager module not available on this box'; return $out }
     $site = Get-PSDrive -PSProvider CMSite -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $site) { $out.Error = 'No CMSite PSDrive (console never connected here)'; return $out }
+    $sc = $site.Name
     Push-Location ("$($site.Name):\")
     try {
         $bls = @(Get-CMBaseline -Fast | Where-Object { $_.LocalizedDisplayName -like $pattern })
         foreach ($bl in $bls) {
-            $linked = 0
+            $linked = -1   # -1 = unknown (could not read DCD XML); >=0 = real count
             $ciXml = $null
+            $blXml = $null
+            # Authoritative DCD XML: the baseline IS a Configuration Item; its
+            # SDMPackageXML lives on the lazy SMS_ConfigurationItem class, NOT on
+            # the SMS_ConfigurationBaselineInfo object Get-CMBaseline returns
+            # (that one's SDMPackageXML is null, which made every baseline look
+            # 'empty'). Pull it by CI_ID and force-load the lazy props.
             try {
-                $full = Get-CMBaseline -Name $bl.LocalizedDisplayName
-                [xml]$x = $full.SDMPackageXML
-                $linked = @($x.SelectNodes("//*[local-name()='ConfigurationItemReference']")).Count
+                $ciObj = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_ConfigurationItem -Filter "CI_ID=$($bl.CI_ID)" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($ciObj) { $blXml = ([wmi]$ciObj.__PATH).SDMPackageXML }
             }
             catch { }
+            if (-not $blXml) {
+                try { $blXml = (Get-CMBaseline -Name $bl.LocalizedDisplayName).SDMPackageXML } catch { }
+            }
+            if ($blXml) {
+                try {
+                    [xml]$x = $blXml
+                    # CM's DCD schema names CI references differently across
+                    # versions; match any *Reference element carrying a LogicalName.
+                    $refs = @($x.SelectNodes("//*[local-name()='ConfigurationItemReference' or local-name()='Reference' or local-name()='CIReference']") | Where-Object { $_.LogicalName -or ($_.Attributes -and $_.Attributes['LogicalName']) })
+                    $linked = $refs.Count
+                }
+                catch { $linked = -1 }
+            }
             try {
                 $ciFull = Get-CMConfigurationItem -Name $bl.LocalizedDisplayName | Select-Object -First 1
                 if ($ciFull) { $ciXml = $ciFull.SDMPackageXML }
             }
             catch { }
-            $out.Baselines += [pscustomobject]@{ Name = $bl.LocalizedDisplayName; CI_ID = $bl.CI_ID; LinkedCount = $linked; CiXml = $ciXml }
+            $out.Baselines += [pscustomobject]@{ Name = $bl.LocalizedDisplayName; CI_ID = $bl.CI_ID; LinkedCount = $linked; BaselineXml = $blXml; CiXml = $ciXml }
         }
     }
     finally { Pop-Location }
@@ -266,20 +285,22 @@ if (-not $SiteOnly) {
         $rep.Add("Baselines: $(@($data.Baselines).Count)")
         $rep.Add("")
 
-        $badCount = 0
+        $nonCompliantCount = 0
+        $errorCount = 0
         foreach ($b in @($data.Baselines)) {
             $code = $b.LastComplianceStatus
             $stateName = $complianceMap[[int]$code]
             if (-not $stateName) { $stateName = "raw=$code" }
-            if ($stateName -ne 'Compliant') { $badCount++ }
             $rep.Add("----- $($b.Name) (v$($b.Version)) -----")
             $rep.Add("  LastComplianceStatus : $code ($stateName)")
             $rep.Add("  LastEvalTime         : $($b.LastEvalTime)")
+            $hasErrorDetail = $false
             if ($b.ComplianceDetails) {
                 $xmlFile = Join-Path $vmDir ("compliance-{0}.xml" -f (ConvertTo-SafeName $b.Name))
                 Set-Content -Path $xmlFile -Value $b.ComplianceDetails -Encoding UTF8
                 $rep.Add("  ComplianceDetails    -> $(Split-Path $xmlFile -Leaf)")
                 $hits = Select-String -Path $xmlFile -Pattern 'Error|Exception|0x[0-9A-Fa-f]{8}|ScriptExecution|not be loaded|execution policy' -ErrorAction SilentlyContinue | Select-Object -First 6
+                if ($hits) { $hasErrorDetail = $true }
                 foreach ($h in $hits) {
                     $t = $h.Line.Trim(); if ($t.Length -gt 200) { $t = $t.Substring(0, 200) }
                     $rep.Add("    detail> $t")
@@ -287,6 +308,13 @@ if (-not $SiteOnly) {
             }
             else {
                 $rep.Add("  (no ComplianceDetails yet -- try -TriggerEvaluation)")
+            }
+            # Classify: an evaluation that threw (script blocked / WMI error /
+            # exec-policy) shows error markers in the detail XML = Error; a rule
+            # that simply evaluated False = Non-Compliant.
+            if ($stateName -ne 'Compliant') {
+                if ($hasErrorDetail) { $errorCount++; $rep.Add("  >> classified: ERROR (evaluation threw)") }
+                else { $nonCompliantCount++; $rep.Add("  >> classified: NON-COMPLIANT (rule evaluated false)") }
             }
             $rep.Add("")
         }
@@ -320,8 +348,8 @@ if (-not $SiteOnly) {
         }
 
         $rep | Set-Content -Path (Join-Path $vmDir 'baseline-report.txt') -Encoding UTF8
-        Write-Host " $(@($data.Baselines).Count) baseline(s), $badCount not-compliant/error" -ForegroundColor Green
-        $summary.Add("  $vmName : $(@($data.Baselines).Count) baseline(s), $badCount not-compliant/error")
+        Write-Host " $(@($data.Baselines).Count) baseline(s): $errorCount error, $nonCompliantCount non-compliant" -ForegroundColor Green
+        $summary.Add("  $vmName : $(@($data.Baselines).Count) baseline(s): $errorCount error, $nonCompliantCount non-compliant")
     }
     $summary.Add("")
 }
@@ -362,14 +390,24 @@ if (-not $ClientsOnly) {
         $rep.Add("Baselines  : $(@($data.Baselines).Count)")
         $rep.Add("")
         $empty = 0
+        $unknown = 0
         foreach ($bl in @($data.Baselines)) {
             $rep.Add("----- $($bl.Name) (CI_ID=$($bl.CI_ID)) -----")
-            if ([int]$bl.LinkedCount -eq 0) {
+            if ([int]$bl.LinkedCount -lt 0) {
+                $unknown++
+                $rep.Add("  Linked Configuration Items: UNKNOWN (could not read baseline DCD XML)")
+            }
+            elseif ([int]$bl.LinkedCount -eq 0) {
                 $empty++
                 $rep.Add("  *** WARNING: baseline has NO Configuration Item linked (empty baseline). ***")
             }
             else {
                 $rep.Add("  Linked Configuration Items: $($bl.LinkedCount)")
+            }
+            if ($bl.BaselineXml) {
+                $blFile = Join-Path $siteDir ("BL-{0}.dcd.xml" -f (ConvertTo-SafeName $bl.Name))
+                Set-Content -Path $blFile -Value $bl.BaselineXml -Encoding UTF8
+                $rep.Add("  Baseline DCD XML -> $(Split-Path $blFile -Leaf)")
             }
             if ($bl.CiXml) {
                 $xmlFile = Join-Path $siteDir ("CI-{0}.sdmpackage.xml" -f (ConvertTo-SafeName $bl.Name))
@@ -377,13 +415,13 @@ if (-not $ClientsOnly) {
                 $rep.Add("  CI rule XML -> $(Split-Path $xmlFile -Leaf)")
             }
             else {
-                $rep.Add("  WARNING: no CI named '$($bl.Name)' found (lookup by name failed).")
+                $rep.Add("  (no standalone CI named '$($bl.Name)' -- the rule may live only inside the baseline DCD above)")
             }
             $rep.Add("")
         }
         $rep | Set-Content -Path (Join-Path $siteDir 'site-report.txt') -Encoding UTF8
-        Write-Host " $(@($data.Baselines).Count) baseline(s), $empty empty" -ForegroundColor Green
-        $summary.Add("  $vmName : $(@($data.Baselines).Count) baseline(s), $empty with NO CI linked")
+        Write-Host " $(@($data.Baselines).Count) baseline(s): $empty empty, $unknown unknown" -ForegroundColor Green
+        $summary.Add("  $vmName : $(@($data.Baselines).Count) baseline(s): $empty empty, $unknown unknown-linkage")
     }
     $summary.Add("")
 }
