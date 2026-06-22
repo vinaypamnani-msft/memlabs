@@ -1916,26 +1916,43 @@ function Test-SQLAOFunctionality {
                     $clusterDnsSource = ''
                     $clusterDnsRpcOk = $false
                     $clusterDnsErr = $null
+                    # CRITICAL: the DnsServer management RPC has NO native timeout
+                    # and can BLOCK (not merely error) for many minutes against a
+                    # busy/contended DC. A bare call here stalls the whole per-VM
+                    # job past its heartbeat budget and surfaces as an opaque
+                    # 'ScriptBlock failed (no error detail)' FAIL (observed on
+                    # FAB-CS1SQLAO2: the job's last progress line was exactly this
+                    # Get-DnsServerResourceRecord, then a 600s heartbeat stall ->
+                    # killed). Run BOTH the zone-RPC probe and the port-53 fallback
+                    # under Invoke-WithWatchdog (kill+retry on hang), exactly like
+                    # the Step 5b listener-DNS probe.
                     $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$clusterName' -RRType A -ComputerName '$dnsServer'")
-                    try {
-                        $clusterRecs = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $clusterName -RRType A -ComputerName $dnsServer -ErrorAction Stop)
-                        $clusterDnsRpcOk = $true
-                        $clusterResolvedIPs = @($clusterRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                    $cwd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $clusterName, $dnsServer) -ScriptBlock {
+                        param($zone, $name, $server)
+                        Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
                     }
-                    catch {
-                        $clusterDnsErr = $_.Exception.Message
-                        $results.Details.Add("  RPC against '$dnsServer' errored: $clusterDnsErr -- falling back to direct DNS (port 53)")
-                        try {
-                            $clusterFqdn = "$clusterName.$domain"
-                            $results.Details.Add("CMD: Resolve-DnsName -Name '$clusterFqdn' -Type A -Server '$dnsServer' -DnsOnly -NoHostsFile")
-                            $clusterDns = @(Resolve-DnsName -Name $clusterFqdn -Type A -Server $dnsServer -DnsOnly -NoHostsFile -ErrorAction Stop)
-                            $clusterResolvedIPs = @($clusterDns | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
-                            $clusterDnsSource = ' (direct DNS, port 53)'
+                    if ($cwd.Status -eq 'OK') {
+                        $clusterDnsRpcOk = $true
+                        $clusterResolvedIPs = @($cwd.Output | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                    }
+                    else {
+                        if ($cwd.Status -eq 'Error') {
+                            $clusterDnsErr = if ($cwd.Errors -and $cwd.Errors[0].Exception) { $cwd.Errors[0].Exception.Message } else { ($cwd.Errors -join '; ') }
+                            $results.Details.Add("  RPC against '$dnsServer' errored: $clusterDnsErr -- falling back to direct DNS (port 53)")
                         }
-                        catch {
-                            # Both the zone RPC and the direct port-53 probe were
-                            # unavailable; handled as INFO below.
-                            $clusterDnsSource = ''
+                        else {
+                            $clusterDnsErr = "DnsServer RPC timed out after $($cwd.Attempts) attempt(s)"
+                            $results.Details.Add("  RPC against '$dnsServer' timed out -- falling back to direct DNS (port 53)")
+                        }
+                        $clusterFqdn = "$clusterName.$domain"
+                        $results.Details.Add("CMD: Resolve-DnsName -Name '$clusterFqdn' -Type A -Server '$dnsServer' -DnsOnly -NoHostsFile")
+                        $cwd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($clusterFqdn, $dnsServer) -ScriptBlock {
+                            param($n, $s)
+                            Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                        }
+                        if ($cwd2.Status -eq 'OK') {
+                            $clusterResolvedIPs = @($cwd2.Output | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+                            if ($clusterResolvedIPs.Count -gt 0) { $clusterDnsSource = ' (direct DNS, port 53)' }
                         }
                     }
 
@@ -2247,20 +2264,29 @@ function Test-SQLAOFunctionality {
                 $staleRecords = @()
                 $hostZoneRpcOk = $false
                 if ($dnsServer -and $domain) {
-                    # Same cross-subnet caveat as the cluster-name probe above:
-                    # Get-DnsServerResourceRecord can throw a terminating "Failed to
-                    # get the zone information" when the DNS-management RPC is blocked
-                    # cross-subnet. Catch it so it doesn't bubble to the section catch
-                    # and emit a misleading "Network config validation error" WARN --
-                    # if we can't read the zone we simply can't audit stale heartbeat
-                    # records remotely (informational), which is not a fault.
-                    try {
-                        $allARecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $dnsServer -ErrorAction Stop)
-                        $hostZoneRpcOk = $true
-                        $staleRecords = @($allARecords | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -like "${clusterSubnet}*" })
+                    # Same cross-subnet caveat as the cluster-name probe above PLUS the
+                    # same CIM-hang risk: Get-DnsServerResourceRecord is a CDXML/WMI
+                    # cmdlet that opens an implicit CIM session to the DC, so it can both
+                    # (a) throw a terminating "Failed to get the zone information" when the
+                    # DNS-management interface is blocked cross-subnet, and (b) BLOCK with
+                    # no native timeout when the DC's WinRM/CIM is busy/wedged. Run it
+                    # under Invoke-WithWatchdog (kill+retry) so a hang is bounded and we
+                    # fall through to the informational skip instead of stalling the whole
+                    # per-VM job. If we can't read the zone we simply can't audit stale
+                    # heartbeat records remotely (informational), which is not a fault.
+                    $hwd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $hostname, $dnsServer) -ScriptBlock {
+                        param($zone, $name, $server)
+                        Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
                     }
-                    catch {
-                        $results.Details.Add("INFO: Could not query DNS zone '$domain' on '$dnsServer' to audit stale heartbeat A records for '$hostname' ($($_.Exception.Message)); skipping remote stale-record check (cross-subnet DNS-management RPC unavailable)")
+                    if ($hwd.Status -eq 'OK') {
+                        $hostZoneRpcOk = $true
+                        $staleRecords = @($hwd.Output | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -like "${clusterSubnet}*" })
+                    }
+                    else {
+                        $hwdErr = if ($hwd.Status -eq 'Error' -and $hwd.Errors -and $hwd.Errors[0].Exception) { $hwd.Errors[0].Exception.Message }
+                                  elseif ($hwd.Status -eq 'Error') { ($hwd.Errors -join '; ') }
+                                  else { "DnsServer CIM query timed out after $($hwd.Attempts) attempt(s)" }
+                        $results.Details.Add("INFO: Could not query DNS zone '$domain' on '$dnsServer' to audit stale heartbeat A records for '$hostname' ($hwdErr); skipping remote stale-record check (DNS-management CIM unavailable or unresponsive)")
                     }
                 }
                 if ($staleRecords.Count -gt 0) {
