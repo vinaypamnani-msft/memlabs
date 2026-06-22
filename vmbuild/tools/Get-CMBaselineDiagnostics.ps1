@@ -336,6 +336,7 @@ if (-not $SiteOnly) {
 
         $nonCompliantCount = 0
         $errorCount = 0
+        $discoveryFailCount = 0
         foreach ($b in @($data.Baselines)) {
             $code = $b.LastComplianceStatus
             $stateName = $complianceMap[[int]$code]
@@ -344,11 +345,22 @@ if (-not $SiteOnly) {
             $rep.Add("  LastComplianceStatus : $code ($stateName)")
             $rep.Add("  LastEvalTime         : $($b.LastEvalTime)")
             $hasErrorDetail = $false
+            $hasDiscoveryFailure = $false
             if ($b.ComplianceDetails) {
                 $xmlFile = Join-Path $vmDir ("compliance-{0}.xml" -f (ConvertTo-SafeName $b.Name))
                 Set-Content -Path $xmlFile -Value $b.ComplianceDetails -Encoding UTF8
                 $rep.Add("  ComplianceDetails    -> $(Split-Path $xmlFile -Leaf)")
-                $hits = Select-String -Path $xmlFile -Pattern 'Error|Exception|0x[0-9A-Fa-f]{8}|ScriptExecution|not be loaded|execution policy' -ErrorAction SilentlyContinue | Select-Object -First 6
+                # DiscoveryFailure="True" or a "Setting Discovery Error" node means
+                # the CI's DISCOVERY SCRIPT produced no usable value (it Exit'd
+                # without writing the discovered value to stdout, or threw). CM
+                # ignores a script's exit code -- the discovered value MUST be
+                # emitted to the output stream -- so an Exit-only script reads as
+                # an empty value and trips DiscoveryFailure. This is the #1 reason
+                # MEMLABS script CIs report Non-Compliant/Error (see repo memory
+                # perfloading-baselines-rootcause.md).
+                $discHits = Select-String -Path $xmlFile -Pattern 'DiscoveryFailure="True"|Setting Discovery Error' -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($discHits) { $hasDiscoveryFailure = $true }
+                $hits = Select-String -Path $xmlFile -Pattern 'ErrorType="[^"]*"|ErrorCode="0x[0-9A-Fa-f]{8}"|ErrorDescription="[^"]*"|Exception|ScriptExecution|not be loaded|execution policy' -ErrorAction SilentlyContinue | Select-Object -First 6
                 if ($hits) { $hasErrorDetail = $true }
                 foreach ($h in $hits) {
                     $t = $h.Line.Trim(); if ($t.Length -gt 200) { $t = $t.Substring(0, 200) }
@@ -358,12 +370,15 @@ if (-not $SiteOnly) {
             else {
                 $rep.Add("  (no ComplianceDetails yet -- try -TriggerEvaluation)")
             }
-            # Classify: an evaluation that threw (script blocked / WMI error /
-            # exec-policy) shows error markers in the detail XML = Error; a rule
-            # that simply evaluated False = Non-Compliant.
+            # Classify. DiscoveryFailure dominates: whether CM surfaced it as
+            # Error (script Exit'd non-zero) or Non-Compliant (script Exit'd 0 but
+            # emitted no value), the underlying fault is the same -- a broken
+            # discovery script that returns no stdout value. Only a clean
+            # DiscoveryFailure-free false result is a genuine "rule evaluated false".
             if ($stateName -ne 'Compliant') {
-                if ($hasErrorDetail) { $errorCount++; $rep.Add("  >> classified: ERROR (evaluation threw)") }
-                else { $nonCompliantCount++; $rep.Add("  >> classified: NON-COMPLIANT (rule evaluated false)") }
+                if ($hasDiscoveryFailure) { $discoveryFailCount++; $rep.Add("  >> classified: DISCOVERY FAILURE (script emitted no value / errored -- fix the CI script to Write-Output its result instead of Exit codes)") }
+                elseif ($hasErrorDetail) { $errorCount++; $rep.Add("  >> classified: ERROR (evaluation threw)") }
+                else { $nonCompliantCount++; $rep.Add("  >> classified: NON-COMPLIANT (rule genuinely evaluated false)") }
             }
             $rep.Add("")
         }
@@ -380,12 +395,12 @@ if (-not $SiteOnly) {
             $pName = $psPolMap[[int]$data.CMPsPolicy]; if (-not $pName) { $pName = "raw=$($data.CMPsPolicy)" }
             $rep.Add("  CM client setting PowerShellExecutionPolicy = $($data.CMPsPolicy) ($pName)")
             if ([int]$data.CMPsPolicy -ne 1 -and [int]$data.CMPsPolicy -ne 3) {
-                $rep.Add("  *** NOT Bypass/Unrestricted -- script-based CIs will likely ERROR until MEMLABS-powershellbypass applies. ***")
+                $rep.Add("  NOTE: not Bypass/Unrestricted, but if any script CI is Compliant then scripts ARE running -- a DISCOVERY FAILURE above is the script not emitting a value (Exit codes), not exec policy.")
             }
         }
         else {
             $rep.Add("  CM client setting PowerShellExecutionPolicy = (not set / policy not received)")
-            $rep.Add("  *** MEMLABS-powershellbypass has not reached this client -- script CIs will ERROR. ***")
+            $rep.Add("  NOTE: MEMLABS-powershellbypass not seen here. But if any script CI above is Compliant, scripts ARE running -- check for DISCOVERY FAILURE (Exit-only scripts that emit no stdout value) before blaming exec policy.")
         }
         $rep.Add("")
 
@@ -397,8 +412,8 @@ if (-not $SiteOnly) {
         }
 
         $rep | Set-Content -Path (Join-Path $vmDir 'baseline-report.txt') -Encoding UTF8
-        Write-Host " $(@($data.Baselines).Count) baseline(s): $errorCount error, $nonCompliantCount non-compliant" -ForegroundColor Green
-        $summary.Add("  $vmName : $(@($data.Baselines).Count) baseline(s): $errorCount error, $nonCompliantCount non-compliant")
+        Write-Host " $(@($data.Baselines).Count) baseline(s): $discoveryFailCount discovery-fail, $errorCount error, $nonCompliantCount non-compliant" -ForegroundColor Green
+        $summary.Add("  $vmName : $(@($data.Baselines).Count) baseline(s): $discoveryFailCount discovery-fail, $errorCount error, $nonCompliantCount non-compliant")
     }
     $summary.Add("")
 }
