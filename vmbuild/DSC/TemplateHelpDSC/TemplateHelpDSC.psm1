@@ -3495,6 +3495,15 @@ class OpenFirewallPortForSCCM {
     [void] Set() {
         $_Role = $this.Role
 
+        # Hardening: opening firewall ports is BEST-EFFORT. A single bad / unsupported / duplicate
+        # rule must NEVER abort the DSC apply and strand the whole configuration. (Observed: an
+        # invalid -LocalPort value made New-NetFirewallRule throw a non-terminating error, which the
+        # LCM recorded as a Set failure -> pending.mof retained -> node parked in PendingConfiguration
+        # for the rest of Phase 2.) Suppress per-call errors for the whole method, then surface a
+        # single summary at the end so a genuine problem is still visible without failing the deploy.
+        $ErrorActionPreference = 'SilentlyContinue'
+        $Error.Clear()
+
         Write-Status "Opening firewall ports for Role:$_Role"
 
         New-NetFirewallRule -DisplayName "Cluster Network Outbound" -Profile Any -Direction Outbound -Action Allow -RemoteAddress @("10.250.250.0/24", "10.250.251.0/24")
@@ -3602,7 +3611,7 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM PXE SP"
 
-            New-NetFirewallRule -DisplayName 'DHCP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(67.68) -Group "For SCCM PXE SP"
+            New-NetFirewallRule -DisplayName 'DHCP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(67, 68) -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'TFTP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 69  -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'BINL Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4011 -Group "For SCCM PXE SP"
         }
@@ -3693,7 +3702,7 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1500' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SQL Server"
             New-NetFirewallRule -DisplayName 'SQL HADR Endpoint Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5022 -Group "For SQL Server"
             New-NetFirewallRule -DisplayName 'SQL Browser Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol UDP -LocalPort 1434 -Group "For SQL Server"
-            New-NetFirewallRule -DisplayName 'WMI' -Program "%systemroot%\system32\svchost.exe" -Service "winmgmt" -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort Domain -Group "For SQL Server WMI"
+            New-NetFirewallRule -DisplayName 'WMI' -Program "%systemroot%\system32\svchost.exe" -Service "winmgmt" -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort RPC -Group "For SQL Server WMI"
             New-NetFirewallRule -DisplayName 'DCOM' -Program "%systemroot%\system32\svchost.exe" -Service "rpcss" -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SQL Server DCOM"
             New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SQL Server"
         }
@@ -3764,6 +3773,15 @@ class OpenFirewallPortForSCCM {
                 $global:DSCMachineStatus = 1
             }
         }
+
+        # Best-effort visibility: every entry in $Error here is a suppressed firewall-rule failure
+        # ($Error was cleared at the top of Set and only firewall cmdlets run in between). Report a
+        # summary so a real misconfiguration still shows up in the DSC log even though it no longer
+        # strands the node. $Error[0] is the most recent failure.
+        if ($Error.Count -gt 0) {
+            Write-Status "WARNING: $($Error.Count) firewall rule(s) reported errors and were skipped (continuing). First: $(($Error[0].Exception.Message).Trim())"
+        }
+
         $StatusPath = "$env:windir\temp\OpenFirewallStatus.txt"
         "Finished" >> $StatusPath
     }
