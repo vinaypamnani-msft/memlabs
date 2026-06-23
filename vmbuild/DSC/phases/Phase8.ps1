@@ -529,39 +529,31 @@
         }
 
         # WSUS categories baseline cab import for this Secondary's SUP.
-        # By the time WaitPrimary returns the Primary's InstallRoles has
-        # added the SUP role to this Secondary, which installs WSUS +
-        # runs wsusutil postinstall via CM's site component manager.
         #
-        # A Secondary's SUP is ALWAYS a DOWNSTREAM/replica that syncs from
-        # the parent primary's SUP -- so it must NOT actually import the
-        # MU-sourced cab (that corrupts the sync anchor -> UssInternalError).
-        # We still call Start-WsusBaselineImportBackground here, but the
-        # function self-guards on the live WSUS upstream config and returns
-        # 'downstream-skip' for a downstream SUP, so this is now a clean no-op
-        # on a Secondary; its categories replicate from the upstream instead.
-        # (Kept as a single shared entry point; idempotent + non-fatal.)
+        # A Secondary's SUP is ALWAYS a DOWNSTREAM/replica that syncs from the
+        # parent primary's SUP -- there is NO topology in which a Secondary is a
+        # top-level Microsoft Update source. `wsusutil import` of the MU-sourced
+        # cab is only valid for a top-level MU SUP; importing it into a downstream
+        # WSUS stamps a foreign sync anchor and the next upstream sync fails with
+        # UssInternalError (confirmed live on FAB-PS2DPMPSUP1). So this node must
+        # NEVER import -- it is an UNCONDITIONAL, topology-based no-op.
+        #
+        # We do NOT rely on the function's runtime downstream-skip guard here: a
+        # freshly-postinstalled WSUS defaults to SyncFromMicrosoftUpdate=True with
+        # no upstream set, and CM only flips it to downstream when WCM reconciles
+        # the SUP component -- so there is a window after WaitPrimary where the
+        # runtime config still looks top-level. Gating on topology (Secondary =
+        # always downstream) closes that race entirely. Categories replicate from
+        # the upstream SUP instead. (Resource kept only for the DependsOn chain.)
         Script ImportWsusBaseline {
             GetScript  = { @{ Result = '' } }
-            TestScript = {
-                if (-not (Test-Path 'C:\staging\wsus\WsusCategoriesBaseline.cab')) { return $true }
-                try {
-                    [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
-                    $srv = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
-                    return ($srv.GetUpdateCategories().Count -ge 100)
-                }
-                catch { return $false }
-            }
+            TestScript = { return $true }
             SetScript  = {
                 try {
                     . C:\staging\DSC\phases\ScriptFunctions.ps1
-                    Start-WsusBaselineImportBackground -Tag '[Phase8-Secondary]' | Out-Null
-                    Wait-WsusBaselineImport -Tag '[Phase8-Secondary]'
+                    Write-DscStatus '[Phase8-Secondary] Secondary SUP is always downstream - skipping WSUS cab import (categories replicate from the upstream SUP; importing the MU cab would corrupt the sync anchor / UssInternalError).'
                 }
-                catch {
-                    # Non-fatal: downstream sync from upstream SUP will eventually populate
-                    # the taxonomy, just slower. Don't break the Secondary's DSC over this.
-                }
+                catch { }
             }
             DependsOn  = "[WaitForEvent]WaitPrimary"
         }
