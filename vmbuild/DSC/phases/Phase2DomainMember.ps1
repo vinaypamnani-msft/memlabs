@@ -103,44 +103,21 @@
             }
         }
 
-        WriteStatus WaitDomain {
-            DependsOn = "[Script]DisableWindowsUpdate"
-            Status    = "Waiting for domain $DomainName to be ready (Trying to ping the DC)"
-        }
-
-        WaitForDomainReady WaitForDomain {
-            DependsOn  = "[WriteStatus]WaitDomain"
-            Ensure     = "Present"
-            DomainName = $DomainName
-            DCName     = $DCName
-        }
-
-        WriteStatus DomainJoin {
-            DependsOn = "[WaitForDomainReady]WaitForDomain"
-            Status    = "Joining computer to the domain"
-        }
-
-        JoinDomain JoinDomain {
-            DomainName = $DomainName
-            Credential = $DomainCreds
-            DependsOn  = "[WriteStatus]DomainJoin"
-        }
-
-        # Validate secure channel after the post-JoinDomain reboot. If the machine
-        # secret drifted (e.g. JoinDomain's retry loop fired Add-Computer twice
-        # against a half-promoted DC), Reset-ComputerMachinePassword or a full
-        # rejoin recovers automatically before any downstream resource depends on
-        # AD auth.
-        TestDomainJoin TestDomainJoin {
-            DomainName = $DomainName
-            DCName     = $DCName
-            Credential = $DomainCreds
-            DependsOn  = "[JoinDomain]JoinDomain"
-        }
-
+        # ---------------------------------------------------------------------
+        # Domain-independent local OS configuration — run BEFORE the domain
+        # wait/join, not after the post-join reboot.
+        #
+        # None of these resources need AD membership (pure local icacls/takeown,
+        # a local SMB share, local firewall rules, a local registry value). On a
+        # fresh deploy the member otherwise sits idle in WaitForDomainReady while
+        # the DC promotes; doing this local work first overlaps it with that
+        # wait. After the join reboot DSC just re-Tests these (fast no-op), so the
+        # expensive Sets stay off the post-join critical path. All of them persist
+        # across the domain-join reboot.
+        # ---------------------------------------------------------------------
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
-            DependsOn = "[TestDomainJoin]TestDomainJoin"
+            DependsOn = "[Script]DisableWindowsUpdate"
         }
 
         File ShareFolder {
@@ -176,12 +153,52 @@
             ValueData = "1"
         }
 
+        WriteStatus WaitDomain {
+            DependsOn = "[Registry]DisableUACRemoteRestrictions"
+            Status    = "Waiting for domain $DomainName to be ready (Trying to ping the DC)"
+        }
+
+        WaitForDomainReady WaitForDomain {
+            DependsOn  = "[WriteStatus]WaitDomain"
+            Ensure     = "Present"
+            DomainName = $DomainName
+            DCName     = $DCName
+        }
+
+        WriteStatus DomainJoin {
+            DependsOn = "[WaitForDomainReady]WaitForDomain"
+            Status    = "Joining computer to the domain"
+        }
+
+        JoinDomain JoinDomain {
+            DomainName = $DomainName
+            Credential = $DomainCreds
+            DependsOn  = "[WriteStatus]DomainJoin"
+        }
+
+        # Validate secure channel after the post-JoinDomain reboot. If the machine
+        # secret drifted (e.g. JoinDomain's retry loop fired Add-Computer twice
+        # against a half-promoted DC), Reset-ComputerMachinePassword or a full
+        # rejoin recovers automatically before any downstream resource depends on
+        # AD auth.
+        TestDomainJoin TestDomainJoin {
+            DomainName = $DomainName
+            DCName     = $DCName
+            Credential = $DomainCreds
+            DependsOn  = "[JoinDomain]JoinDomain"
+        }
+
         # Configure system proxy if this VM is a proxy client. Runs as SYSTEM
         # so there are no UAC/PSDirect elevation issues. Sets WinHTTP, machine
         # env vars, HKLM/HKU\.DEFAULT registry, and machine.config <defaultProxy>
         # with retry logic. By the time Phase 3 DSC starts, all proxy layers are
         # in place and downloads go through Squid.
-        $proxyDepend = '[Registry]DisableUACRemoteRestrictions'
+        #
+        # Chains off TestDomainJoin (not DisableUACRemoteRestrictions, which now
+        # runs before the domain wait) so the proxy is configured after the box
+        # is joined and its secure channel validated — keeping the join path free
+        # of any proxy interference.
+        $proxyDepend = '[TestDomainJoin]TestDomainJoin'
         if ($ThisVM.useProxy -eq $true) {
             $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
             if ($proxyVm) {
@@ -199,7 +216,7 @@
                 $proxyBypass = ($bypassEntries | Select-Object -Unique) -join ';'
 
                 WriteStatus ConfigureProxy {
-                    DependsOn = '[Registry]DisableUACRemoteRestrictions'
+                    DependsOn = '[TestDomainJoin]TestDomainJoin'
                     Status    = "Configuring system proxy: $proxyServer"
                 }
 
