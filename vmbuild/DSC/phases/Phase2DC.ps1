@@ -178,8 +178,21 @@
             DependsOn = "[InitializeDisks]InitDisks"
         }
 
+        # Configure the custom page file BEFORE promoting the DC and suppress its
+        # own reboot. The page-file change only needs *a* reboot to take effect,
+        # and the ADDomain promotion below always reboots — so it applies the new
+        # page file for free, eliminating a dedicated post-promotion reboot.
+        $PageFileSize = ($thisVM.memory) / 2MB
+        SetCustomPagingFile PagingSettings {
+            DependsOn      = "[InstallFeatureForSCCM]InstallFeature"
+            Drive          = 'C:'
+            InitialSize    = $PageFileSize
+            MaximumSize    = $PageFileSize
+            SuppressReboot = $true
+        }
+
         WriteStatus FirstDS {
-            DependsOn = "[InstallFeatureForSCCM]InstallFeature"
+            DependsOn = "[SetCustomPagingFile]PagingSettings"
             Status    = "Configuring ADDS and setting up the domain. The computer will reboot a couple of times."
         }
 
@@ -232,16 +245,8 @@
             DependsOn = '[ADDomain]FirstDS'
         }
 
-        $PageFileSize = ($thisVM.memory) / 2MB
-        SetCustomPagingFile PagingSettings {
-            DependsOn   = "[ADDomain]FirstDS"
-            Drive       = 'C:'
-            InitialSize = $PageFileSize
-            MaximumSize = $PageFileSize
-        }
-
         WriteStatus CreateAccounts {
-            DependsOn = "[SetCustomPagingFile]PagingSettings"
+            DependsOn = "[Registry]ReplNotifyPauseBetweenDSAs"
             Status    = "Creating user accounts and groups"
         }
 

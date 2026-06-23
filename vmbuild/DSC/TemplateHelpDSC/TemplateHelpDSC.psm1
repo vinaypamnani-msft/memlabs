@@ -3832,13 +3832,16 @@ class InstallFeatureForSCCM {
             $features = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
             # All servers
-            [void]$features.Add("Web-Windows-Auth")
-            [void]$features.Add("Web-ISAPI-Ext")
             [void]$features.Add("RSAT-AD-PowerShell")
             [void]$features.Add("AD-Domain-Services")
 
             if ($_Role -notcontains "DC" -and $_Role -notcontains "BDC") {
-                # Non-DC servers get BITS and IIS metabase
+                # Non-DC servers get the IIS auth/ISAPI bits, BITS and IIS metabase.
+                # DCs/BDCs don't host IIS for our roles — the CA web-enrollment path
+                # (Common.PKI.ps1) installs its own Web-Server on demand — so these
+                # IIS features are skipped on DC/BDC to shorten the feature install.
+                [void]$features.Add("Web-Windows-Auth")
+                [void]$features.Add("Web-ISAPI-Ext")
                 [void]$features.Add("BITS")
                 [void]$features.Add("BITS-IIS-Ext")
                 [void]$features.Add("Web-WMI")
@@ -3972,6 +3975,15 @@ class SetCustomPagingFile {
     [DscProperty(Mandatory)]
     [string] $MaximumSize
 
+    # When $true, configure the page file but do NOT force a reboot here.
+    # The page-file size change still requires a reboot to take effect, but the
+    # caller is responsible for ensuring a subsequent reboot happens (e.g. the
+    # DC config places this BEFORE the ADDomain promotion, whose reboot applies
+    # the change for free — saving one dedicated reboot per DC). Default $false
+    # preserves the original always-reboot behavior for every other caller.
+    [DscProperty()]
+    [bool] $SuppressReboot = $false
+
     [void] Set() {
         $_Drive = $this.Drive
         $_InitialSize = $this.InitialSize
@@ -3990,9 +4002,14 @@ class SetCustomPagingFile {
         else {
             Set-CimInstance $currentpagingfile -Property @{InitialSize = $_InitialSize ; MaximumSize = $_MaximumSize }
         }
-        Write-Status "Page file configured. $_Drive\pagefile.sys Size: $_MaximumSize MB. Rebooting."
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-        $global:DSCMachineStatus = 1
+        if ($this.SuppressReboot) {
+            Write-Status "Page file configured. $_Drive\pagefile.sys Size: $_MaximumSize MB. Reboot deferred to a subsequent step."
+        }
+        else {
+            Write-Status "Page file configured. $_Drive\pagefile.sys Size: $_MaximumSize MB. Rebooting."
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+        }
     }
 
     [bool] Test() {

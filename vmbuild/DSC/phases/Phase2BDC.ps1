@@ -60,10 +60,11 @@
 
         $PageFileSize = ($thisVM.memory) / 2MB
         SetCustomPagingFile PagingSettings {
-            DependsOn   = "[InitializeDisks]InitDisks"
-            Drive       = 'C:'
-            InitialSize = $PageFileSize
-            MaximumSize = $PageFileSize
+            DependsOn      = "[InitializeDisks]InitDisks"
+            Drive          = 'C:'
+            InitialSize    = $PageFileSize
+            MaximumSize    = $PageFileSize
+            SuppressReboot = $true
         }
         
         WriteStatus InstallFeature {
