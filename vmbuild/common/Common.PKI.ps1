@@ -483,7 +483,7 @@ function Install-SingleTierPKI {
     Write-Log "[SingleTierPKI] Step 1: Installing Enterprise Root CA on $caVMName..." -NoIndent
 
     $singleTierScript = {
-        param($CAName, $DomainName, $WebURL, $WebFolderPath)
+        param($CAName, $DomainName, $WebURL, $WebFolderPath, $FastFail)
 
         $ErrorActionPreference = 'Stop'
         $report = [System.Collections.Generic.List[string]]::new()
@@ -695,13 +695,24 @@ LoadDefaultTemplates=0
                 Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
 
                 # Gate on AD readiness before publishing the Enterprise CA.
-                _Log "Verifying AD DS will ACCEPT a Configuration-NC write before CA config (post-boot readiness probe)..."
-                _Progress "waiting for AD DS to accept a Configuration-NC write..."
-                if (-not (Wait-AdDsReady -TimeoutSec 600 -RequireWritable)) {
-                    _Log "WARNING: AD DS Configuration-NC write not confirmed ready after 600s - proceeding; the retry loop will remediate transient publish errors"
+                if ($FastFail) {
+                    # EXPERIMENT fast-fail pass: do NOT wait for writability -- attempt
+                    # immediately so a still-settling directory fails fast and the HOST
+                    # can reboot on the first RANGE_CONSTRAINT. (Reachable-only check.)
+                    _Log "Verifying AD DS / PKI container reachable (fast-fail experiment pass; NOT waiting for writability)..."
+                    if (-not (Wait-AdDsReady -TimeoutSec 60)) {
+                        _Log "WARNING: AD DS / PKI container not confirmed reachable after 60s - proceeding (fast-fail)."
+                    }
                 }
                 else {
-                    _Log "AD DS accepted a Configuration-NC probe write - directory is ready for the Enterprise CA publish."
+                    _Log "Verifying AD DS will ACCEPT a Configuration-NC write before CA config (post-boot readiness probe)..."
+                    _Progress "waiting for AD DS to accept a Configuration-NC write..."
+                    if (-not (Wait-AdDsReady -TimeoutSec 600 -RequireWritable)) {
+                        _Log "WARNING: AD DS Configuration-NC write not confirmed ready after 600s - proceeding; the retry loop will remediate transient publish errors"
+                    }
+                    else {
+                        _Log "AD DS accepted a Configuration-NC probe write - directory is ready for the Enterprise CA publish."
+                    }
                 }
 
                 # Install Enterprise Root CA with retry + remediation. The AD
@@ -725,6 +736,9 @@ LoadDefaultTemplates=0
                 $caConfigured = $false
                 $caLastErr = $null
                 $maxCaTries = 18
+                # EXPERIMENT fast-fail pass: only a few attempts so the scriptblock
+                # returns the failure to the host quickly (the host then reboots).
+                if ($FastFail) { $maxCaTries = 3 }
                 $feEnabled = $false
                 $feLevelPrior = $null
                 $caLoopStart = Get-Date
@@ -895,18 +909,65 @@ LoadDefaultTemplates=0
     }
 
     Flush-LogBuffer -All
+
+    # EXPERIMENT (2026-06-23): on the FIRST CA-publish RANGE_CONSTRAINT failure, reboot
+    # the CA/DC VM ONCE from the host and retry, to test whether a reboot clears the
+    # post-dcpromo settling window faster than waiting it out. The host (this function)
+    # detects the error and initiates the reboot; the in-guest job can't reboot itself.
+    # Our data says the cure is elapsed-time-since-NTDS-start and a reboot RESETS that
+    # clock, so this is EXPECTED TO NOT HELP -- but it's gated + reversible: set this to
+    # $false (or delete this block + the FastFail plumbing) to disable.
+    $rebootOnRangeConstraintExperiment = $true
+
     # -AsJob -PollProgress: forward the guest's Write-Progress heartbeats LIVE to
-    # the console so the (now up to ~20-30 min) post-dcpromo CA retry loop shows a
+    # the console so the (now up to ~45 min) post-dcpromo CA retry loop shows a
     # counting-down status instead of appearing hung. -TimeoutSeconds here is a
     # STALL timeout (resets on every guest heartbeat, ~5s during backoff), NOT an
     # absolute deadline; the inner absolute ceiling (max(TimeoutSeconds*6,1800)s
     # = 60 min) hard-bounds a CA install that never settles -- it must EXCEED the
     # widened ~45-min retry budget or it would kill the job mid-wait.
-    $result = Invoke-VmCommand -VmName $caVMName -VmDomainName $domainName `
-        -ScriptBlock $singleTierScript `
-        -ArgumentList $caName, $domainName, $webURL, $webFolderPath `
-        -DisplayName "SingleTierPKI: Install Enterprise Root CA" `
-        -AsJob -PollProgress -TimeoutSeconds 600
+    $rebootedForExperiment = $false
+    # First pass fails fast (when the experiment is on) so we can reboot on the first
+    # RANGE_CONSTRAINT; if the experiment is off this is $false = the robust path.
+    $fastFail = $rebootOnRangeConstraintExperiment
+    $result = $null
+    while ($true) {
+        $result = Invoke-VmCommand -VmName $caVMName -VmDomainName $domainName `
+            -ScriptBlock $singleTierScript `
+            -ArgumentList $caName, $domainName, $webURL, $webFolderPath, $fastFail `
+            -DisplayName "SingleTierPKI: Install Enterprise Root CA" `
+            -AsJob -PollProgress -TimeoutSeconds 600
+
+        $sbOut = $null
+        if ($result -and $result.ScriptBlockOutput) { $sbOut = $result.ScriptBlockOutput } else { $sbOut = $result }
+        $caSucceeded = ($sbOut -and $sbOut.Success)
+        $caErrText = ""
+        if ($sbOut -and $sbOut.Error) { $caErrText = "$($sbOut.Error)" }
+        $isRange = $caErrText -match '0x80072082|ERROR_DS_RANGE_CONSTRAINT|acceptable range'
+
+        if ($caSucceeded) { break }
+
+        if ($rebootOnRangeConstraintExperiment -and $isRange -and (-not $rebootedForExperiment)) {
+            Write-Log "[SingleTierPKI] EXPERIMENT: first CA-publish attempt failed with ERROR_DS_RANGE_CONSTRAINT. Rebooting $caVMName ONCE from the host to test whether a reboot clears the post-dcpromo window (our data predicts it will NOT, since a reboot resets the settle clock)..." -Warning
+            try {
+                $rebooted = Restart-VM2Smart -Name $caVMName -AllowTurnOff -Reason "PKI RANGE_CONSTRAINT reboot experiment"
+                Write-Log "[SingleTierPKI] EXPERIMENT: $caVMName restart issued (restarted=$rebooted); waiting for it to come back ready for PSDirect/AD..."
+                $null = Wait-ForVm -VmName $caVMName -PathToVerify "C:\Users" -VmDomainName $domainName -TimeoutMinutes 15
+            }
+            catch {
+                Write-Log "[SingleTierPKI] EXPERIMENT: reboot/wait of $caVMName errored: $($_.Exception.Message) - falling through to the robust retry path." -Warning
+            }
+            $rebootedForExperiment = $true
+            # After the reboot, run the ROBUST path (write-probe gate + full ~45-min
+            # budget) so the CA installs regardless of whether the reboot helped.
+            $fastFail = $false
+            continue
+        }
+
+        # Experiment off, not a RANGE_CONSTRAINT, or we already rebooted once:
+        # stop looping and let Test-PKIStepResult report the final result below.
+        break
+    }
 
     if (-not (Test-PKIStepResult -Result $result -StepName "CA installation" -LogPrefix "SingleTierPKI" -LogSource "CA" -LogOnly)) {
         return $false
