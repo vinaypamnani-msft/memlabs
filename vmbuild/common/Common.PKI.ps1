@@ -540,8 +540,40 @@ function Install-SingleTierPKI {
         # on the Public Key Services container being reachable (proves a DC
         # is answering and the PKI containers exist), and that NTDS is up
         # when the CA is co-located on the DC (the single-tier case).
+        # Probe whether the local directory will actually ACCEPT a write into the
+        # Configuration NC PKI subtree -- the operation the Enterprise CA publish
+        # performs. PROVEN ground truth (fabrikam 2026-06-23, Diag-PKICAConstraint):
+        # right after a DC (re)boot the PKI container is READABLE immediately but a
+        # Configuration-NC WRITE is rejected with 0x80072082 ERROR_DS_RANGE_CONSTRAINT
+        # for a transient window that closes purely on elapsed time (failed at
+        # boot+22..40min, SUCCEEDED at boot+64min with the directory otherwise fully
+        # healthy). A create+delete of a throwaway container under Public Key Services
+        # is the closest safe proxy for the CA's own publish write, so gating attempt 1
+        # on it makes attempt 1 wait until the directory is genuinely writable instead
+        # of burning real (destructive) CA install/uninstall cycles against a not-yet-
+        # ready directory. NOTE: a reboot would RESET this post-boot clock and make the
+        # wait LONGER, so we wait it out rather than reboot.
+        function Test-ConfigNCWritable {
+            try {
+                $rootDSE = [ADSI]"LDAP://RootDSE"
+                $configNC = $rootDSE.configurationNamingContext
+                if (-not $configNC) { return @{ Ready = $false; Transient = $true; Err = "no configNC" } }
+                $pks = [ADSI]"LDAP://CN=Public Key Services,CN=Services,$configNC"
+                $probeName = "memlabs-pkiprobe-" + ([guid]::NewGuid().ToString('N').Substring(0, 8))
+                $child = $pks.Create("container", "CN=$probeName")
+                $child.SetInfo()
+                try { $pks.Delete("container", "CN=$probeName") } catch {}
+                return @{ Ready = $true; Transient = $false; Err = $null }
+            }
+            catch {
+                $m = "$($_.Exception.Message)"
+                $transient = $m -match '0x80072082|RANGE_CONSTRAINT|acceptable range|0x8007200E|ERROR_DS_BUSY|0x8007200F|UNWILLING_TO_PERFORM|busy'
+                return @{ Ready = $false; Transient = $transient; Err = $m }
+            }
+        }
+
         function Wait-AdDsReady {
-            param([int]$TimeoutSec = 300)
+            param([int]$TimeoutSec = 300, [switch]$RequireWritable)
             $deadline = (Get-Date).AddSeconds($TimeoutSec)
             while ((Get-Date) -lt $deadline) {
                 try {
@@ -551,10 +583,19 @@ function Install-SingleTierPKI {
                     $configNC = $rootDSE.configurationNamingContext
                     if ($configNC) {
                         $pks = [ADSI]"LDAP://CN=Public Key Services,CN=Services,$configNC"
-                        if ($pks.distinguishedName) { return $true }
+                        if ($pks.distinguishedName) {
+                            if (-not $RequireWritable) { return $true }
+                            $probe = Test-ConfigNCWritable
+                            if ($probe.Ready) { return $true }
+                            # Keep waiting only while the directory is TRANSIENTLY
+                            # rejecting the write; a non-transient probe error
+                            # (schema/rights) shouldn't block the real install.
+                            if (-not $probe.Transient) { return $true }
+                            try { _Progress "AD DS not yet accepting Configuration-NC writes; waiting..." } catch {}
+                        }
                     }
                 } catch {}
-                Start-Sleep -Seconds 5
+                Start-Sleep -Seconds 10
             }
             return $false
         }
@@ -654,9 +695,13 @@ LoadDefaultTemplates=0
                 Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
 
                 # Gate on AD readiness before publishing the Enterprise CA.
-                _Log "Verifying AD DS / Public Key Services container is ready before CA config..."
-                if (-not (Wait-AdDsReady -TimeoutSec 300)) {
-                    _Log "WARNING: AD DS / PKI container not confirmed ready after 300s - proceeding; the retry loop will remediate transient publish errors"
+                _Log "Verifying AD DS will ACCEPT a Configuration-NC write before CA config (post-boot readiness probe)..."
+                _Progress "waiting for AD DS to accept a Configuration-NC write..."
+                if (-not (Wait-AdDsReady -TimeoutSec 600 -RequireWritable)) {
+                    _Log "WARNING: AD DS Configuration-NC write not confirmed ready after 600s - proceeding; the retry loop will remediate transient publish errors"
+                }
+                else {
+                    _Log "AD DS accepted a Configuration-NC probe write - directory is ready for the Enterprise CA publish."
                 }
 
                 # Install Enterprise Root CA with retry + remediation. The AD
@@ -667,7 +712,8 @@ LoadDefaultTemplates=0
                 # settles. PROVEN on fabrikam (2026-06-23): a cold promote failed
                 # ALL retries at T+0, then succeeded on the FIRST try ~22 min
                 # later with NO reboot -- the cure is TIME, not a reboot. So:
-                #   (1) a generous time budget (~20-30 min) of retries;
+                #   (1) a generous time budget (~45 min) of retries that OUTLASTS the
+                #       post-boot window (PROVEN to close as late as boot+64min);
                 #   (2) on RANGE_CONSTRAINT specifically, force an IMMEDIATE schema
                 #       cache reload (schemaUpdateNow) to collapse that ~5-min
                 #       post-dcpromo window instead of waiting it out;
@@ -678,7 +724,7 @@ LoadDefaultTemplates=0
                 # (which is rare -- most promotes are ready by the time PKI runs).
                 $caConfigured = $false
                 $caLastErr = $null
-                $maxCaTries = 10
+                $maxCaTries = 18
                 $feEnabled = $false
                 $feLevelPrior = $null
                 $caLoopStart = Get-Date
@@ -732,7 +778,7 @@ LoadDefaultTemplates=0
                             Wait-AdDsReady -TimeoutSec 180 | Out-Null
                             # Backoff with a ~5s heartbeat so the wait is visibly counting
                             # down (not 'hung') and -PollProgress's stall timer keeps resetting.
-                            $backoffSec = [Math]::Min(150, 30 * $caTry)
+                            $backoffSec = [Math]::Min(180, 30 * $caTry)
                             $backoffDeadline = (Get-Date).AddSeconds($backoffSec)
                             while ((Get-Date) -lt $backoffDeadline) {
                                 $remain = [int]($backoffDeadline - (Get-Date)).TotalSeconds
@@ -854,12 +900,13 @@ LoadDefaultTemplates=0
     # counting-down status instead of appearing hung. -TimeoutSeconds here is a
     # STALL timeout (resets on every guest heartbeat, ~5s during backoff), NOT an
     # absolute deadline; the inner absolute ceiling (max(TimeoutSeconds*6,1800)s
-    # = 36 min) hard-bounds a CA install that never settles.
+    # = 60 min) hard-bounds a CA install that never settles -- it must EXCEED the
+    # widened ~45-min retry budget or it would kill the job mid-wait.
     $result = Invoke-VmCommand -VmName $caVMName -VmDomainName $domainName `
         -ScriptBlock $singleTierScript `
         -ArgumentList $caName, $domainName, $webURL, $webFolderPath `
         -DisplayName "SingleTierPKI: Install Enterprise Root CA" `
-        -AsJob -PollProgress -TimeoutSeconds 360
+        -AsJob -PollProgress -TimeoutSeconds 600
 
     if (-not (Test-PKIStepResult -Result $result -StepName "CA installation" -LogPrefix "SingleTierPKI" -LogSource "CA" -LogOnly)) {
         return $false
