@@ -4833,6 +4833,11 @@ function Wait-ForVm {
         $wwahostrunning = $false
         $readySmb = $false
 
+        # Sysprep-settle tracking for the OOBE gate (see readiness check below).
+        $lastOobeName = $null
+        $oobeCompleteFirstSeen = $null
+        [int]$oobeSettleCapSeconds = 180
+
         [int]$failures = 0
         [int]$maxFailures = 40  # ~10 min at ~15s per failure increment (power-cycle threshold, independent of total timeout)
         [int]$powerCycles = 0
@@ -4986,7 +4991,54 @@ function Wait-ForVm {
                 Write-Log "$VmName`: OOBE State is $($out.ScriptBlockOutput)"
                 $status = $originalStatus
                 $status += "Current State: $($out.ScriptBlockOutput)"
-                $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
+                if ("IMAGE_STATE_COMPLETE" -ne $out.ScriptBlockOutput) {
+                    $readyOobe = $false
+                }
+                else {
+                    # IMAGE_STATE_COMPLETE flips BEFORE Setup finalizes the specialize
+                    # pass. Under heavy host disk I/O (many parallel VM creates) specialize
+                    # can be interrupted and re-armed, re-randomizing the computer name on a
+                    # later boot -- which then collides with DSC's rename/pagefile reboots and
+                    # kicks off a rename loop (the FAB-W10CLIENT2 failure). Before declaring
+                    # the VM ready, confirm sysprep has actually settled: SetupType=0 +
+                    # OOBEInProgress=0, and the computer name hasn't changed since the prior
+                    # COMPLETE read. This is bounded and best-effort by design so it can NEVER
+                    # fail or meaningfully delay a healthy VM: a settled box passes immediately,
+                    # a not-yet-settled box is accepted anyway after $oobeSettleCapSeconds, and
+                    # if the probe can't run we fall back to trusting IMAGE_STATE_COMPLETE.
+                    $settle = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock {
+                        $s = Get-ItemProperty "HKLM:\SYSTEM\Setup" -Name SetupType, OOBEInProgress -ErrorAction SilentlyContinue
+                        [pscustomobject]@{ SetupType = [int]$s.SetupType; OOBE = [int]$s.OOBEInProgress; Name = $env:COMPUTERNAME }
+                    }
+                    if ($null -eq $oobeCompleteFirstSeen) { $oobeCompleteFirstSeen = [DateTime]::UtcNow }
+                    if ($settle.ScriptBlockOutput -and $settle.ScriptBlockOutput.Name) {
+                        $so = $settle.ScriptBlockOutput
+                        if ($lastOobeName -and ($so.Name -ne $lastOobeName)) {
+                            # Name changed since the last COMPLETE read -> specialize is
+                            # re-running (re-randomizing). Restart the settle clock.
+                            Write-Log "$VmName`: computer name changed ($lastOobeName -> $($so.Name)) after IMAGE_STATE_COMPLETE -- sysprep specialize is re-running; waiting for it to finalize before DSC." -Warning
+                            $oobeCompleteFirstSeen = [DateTime]::UtcNow
+                        }
+                        $lastOobeName = $so.Name
+                        $oobeSettled = ($so.SetupType -eq 0) -and ($so.OOBE -eq 0)
+                        $waitedSettleSecs = ([DateTime]::UtcNow - $oobeCompleteFirstSeen).TotalSeconds
+                        if ($oobeSettled) {
+                            $readyOobe = $true
+                        }
+                        elseif ($waitedSettleSecs -ge $oobeSettleCapSeconds) {
+                            Write-Log "$VmName`: ImageState COMPLETE but sysprep still not settled (SetupType=$($so.SetupType) OOBEInProgress=$($so.OOBE)) after $([int]$waitedSettleSecs)s -- accepting anyway." -Warning
+                            $readyOobe = $true
+                        }
+                        else {
+                            $readyOobe = $false
+                            Write-Log "$VmName`: ImageState COMPLETE but sysprep not settled yet (SetupType=$($so.SetupType) OOBEInProgress=$($so.OOBE) Name=$($so.Name)); waiting for specialize to finalize before DSC."
+                        }
+                    }
+                    else {
+                        # Settle probe unavailable -> preserve prior behavior.
+                        $readyOobe = $true
+                    }
+                }
                 try {
                     Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
                 }

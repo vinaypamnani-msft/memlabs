@@ -153,8 +153,33 @@
             ValueData = "1"
         }
 
+        # Confirm the rename actually applied to the ACTIVE computer name before
+        # we join the domain. The stock 'Computer NewName' resource's Test trusts
+        # the PENDING-rename registry value, so if Windows re-ran its specialize
+        # pass on a reboot (observed under heavy host disk I/O, which re-randomizes
+        # the computer name) the ACTIVE name can still be the random DESKTOP-* even
+        # though Computer.Test reported success. Joining the domain under that
+        # transient name permanently breaks the rename ("the specified computer
+        # account could not be found") and strands the config. Gate here: if the
+        # active name isn't the target yet, (re)stage the rename and reboot so the
+        # name lands FIRST. The box is still in a workgroup at this point, so a
+        # plain Rename-Computer needs no domain credential. A genuinely stuck
+        # re-specialize loop now parks on this gate (a clean, detectable failure)
+        # instead of silently joining under the wrong name and bricking the VM.
+        Script ConfirmComputerName {
+            DependsOn  = "[Registry]DisableUACRemoteRestrictions"
+            GetScript  = { return @{ Result = $env:COMPUTERNAME } }
+            TestScript = [string]"return (`$env:COMPUTERNAME -eq '$ThisMachineName')"
+            SetScript  = [string]"
+                if (`$env:COMPUTERNAME -ne '$ThisMachineName') {
+                    try { Rename-Computer -NewName '$ThisMachineName' -Force -ErrorAction Stop } catch { }
+                    `$global:DSCMachineStatus = 1
+                }
+            "
+        }
+
         WriteStatus WaitDomain {
-            DependsOn = "[Registry]DisableUACRemoteRestrictions"
+            DependsOn = "[Script]ConfirmComputerName"
             Status    = "Waiting for domain $DomainName to be ready (Trying to ping the DC)"
         }
 
