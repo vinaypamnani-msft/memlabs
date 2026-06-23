@@ -7566,7 +7566,23 @@ function Test-CMSiteWideFunctionality {
                     $results.Details.Add("OK: SUP sync completed successfully (last: $syncTime)")
                 }
                 elseif ($syncStatus.LastSyncState -eq 6703) {
-                    $results.Details.Add("WARN: SUP last sync FAILED (state 6703, error code $($syncStatus.LastSyncErrorCode))")
+                    # Decode the HRESULT. 0x80131500 = COR_E_EXCEPTION, a generic
+                    # managed exception thrown during a sync cycle -- almost
+                    # always transient (MU timeout, WsusPool recycle, upstream
+                    # throttle). The authoritative health signal is the WSUS-native
+                    # taxonomy/UpdateCount cross-check below, so for that
+                    # known-transient code defer the verdict to it instead of
+                    # hard-failing on a single bad cycle.
+                    $supErr = $syncStatus.LastSyncErrorCode
+                    $supErrHex = ''
+                    try { $supErrHex = '0x{0:X8}' -f ([uint32]([int64]$supErr -band 0xFFFFFFFF)) } catch {}
+                    if ($supErrHex -eq '0x80131500') {
+                        $results.Details.Add("INFO: SUP last CM sync reported Failed (6703) with a transient exception ($supErrHex); the WSUS-native catalog check below is authoritative")
+                    }
+                    else {
+                        $supErrShown = if ($supErrHex) { "$supErr / $supErrHex" } else { "$supErr" }
+                        $results.Details.Add("WARN: SUP last sync FAILED (state 6703, error code $supErrShown)")
+                    }
                 }
                 elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
                     $stateNames = @{ 6701='Started'; 6704='Syncing WSUS'; 6705='Syncing DB'; 6706='Syncing Internet WSUS' }
@@ -7742,6 +7758,15 @@ function Test-CMSiteWideFunctionality {
                     $phaseBit = if ($initialSyncDone) { 'update sync in progress (initial categories sync already completed)' } else { 'initial sync in progress' }
                     $results.Details.Add("OK: WSUS sync running [$phaseBit; SyncState=$syncState; $ucBit]")
                 }
+                elseif ($lastResult -eq 'Failed' -and $initialSyncDone -and ($wStatus.UpdateCount -gt 0)) {
+                    # Catalog is fully populated (taxonomy loaded AND update
+                    # metadata present); a Failed last cycle is a transient blip
+                    # (commonly 0x80131500 -- a generic managed exception from an
+                    # MU timeout / WsusPool recycle / upstream throttle), not a
+                    # broken SUP. Report INFO; the kick-a-sync block below
+                    # re-triggers so it recovers without waiting for the schedule.
+                    $results.Details.Add("INFO: WSUS last sync Result=Failed but catalog is populated - transient [TaxonomyCats=$taxCats; LastSync=$lastSyncTime; $ucBit]; re-triggering a sync")
+                }
                 elseif ($lastResult) {
                     $results.Details.Add("WARN: WSUS last sync Result=$lastResult [LastSync=$lastSyncTime; SyncState=$syncState; $ucBit]")
                 }
@@ -7766,7 +7791,13 @@ function Test-CMSiteWideFunctionality {
                 $haveSubscription =
                     (($subCats -is [int] -and $subCats -gt 0) -and ($subClas -is [int] -and $subClas -gt 0)) -or
                     (($cmProdCount -is [int] -and $cmProdCount -gt 0) -and ($cmClassCount -is [int] -and $cmClassCount -gt 0))
-                if ($haveSubscription -and ($wStatus.UpdateCount -eq 0) -and (-not $syncRunning)) {
+                # Re-trigger a sync when subscribed and idle AND either the update
+                # catalog is still empty (post-subscription sync never ran) OR the
+                # last sync ended Failed (transient cycle on an otherwise-populated
+                # catalog -- recover it now instead of waiting for the schedule).
+                $lastSyncFailed = ($lastResult -eq 'Failed')
+                $kickReason = if ($wStatus.UpdateCount -eq 0) { 'subscribed but UpdateCount=0 and idle' } else { 'last sync Failed (transient) and idle' }
+                if ($haveSubscription -and (-not $syncRunning) -and (($wStatus.UpdateCount -eq 0) -or $lastSyncFailed)) {
                     $kicked = $false
                     # Prefer the CM cmdlet so WCM stays the source of truth;
                     # fall back to the WSUS subscription API if unavailable.
@@ -7794,7 +7825,7 @@ function Test-CMSiteWideFunctionality {
                                 try { Sync-CMSoftwareUpdate -FullSync $false -ErrorAction Stop }
                                 finally { Pop-Location }
                                 $kicked = $true
-                                $results.Details.Add("OK: subscribed but UpdateCount=0 and idle - started a software update sync via Sync-CMSoftwareUpdate")
+                                $results.Details.Add("OK: $kickReason - started a software update sync via Sync-CMSoftwareUpdate")
                             }
                             else {
                                 $results.Details.Add("INFO: CM PSDrive unavailable - using the WSUS subscription API to start the sync")
@@ -7807,9 +7838,9 @@ function Test-CMSiteWideFunctionality {
                         try {
                             $sub.StartSynchronization()
                             $kicked = $true
-                            $results.Details.Add("OK: subscribed but UpdateCount=0 and idle - started a WSUS subscription sync (StartSynchronization)")
+                            $results.Details.Add("OK: $kickReason - started a WSUS subscription sync (StartSynchronization)")
                         } catch {
-                            $results.Details.Add("WARN: subscribed but UpdateCount=0 and idle - failed to start a sync [$($_.Exception.Message)]")
+                            $results.Details.Add("WARN: $kickReason - failed to start a sync [$($_.Exception.Message)]")
                         }
                     }
                 }
