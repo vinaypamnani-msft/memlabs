@@ -546,6 +546,55 @@ function Install-SingleTierPKI {
             return $false
         }
 
+        # Forces an IMMEDIATE schema cache reload on the local DC by writing the
+        # schemaUpdateNow operational attribute on RootDSE. This is the supported
+        # instant alternative to the ~5-min automatic reload (or a reboot) and is
+        # the precise lever for the post-dcpromo window where the freshly-promoted
+        # Configuration NC rejects the Enterprise CA publish with
+        # 0x80072082 ERROR_DS_RANGE_CONSTRAINT.
+        function Invoke-SchemaCacheReload {
+            try {
+                $rootDSE = [ADSI]"LDAP://RootDSE"
+                $rootDSE.Put("schemaUpdateNow", 1)
+                $rootDSE.SetInfo()
+                return $true
+            } catch {
+                return $false
+            }
+        }
+
+        # One-shot diagnostic: bump NTDS '15 Field Engineering' so the next failed
+        # publish records the EXACT offending object/attribute in the Directory
+        # Service log. Returns the prior value so the caller can restore it.
+        function Set-NtdsFieldEngineering {
+            param([int]$Level)
+            $diagPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics'
+            $prior = $null
+            try {
+                if (Test-Path $diagPath) {
+                    $prior = (Get-ItemProperty -Path $diagPath -Name '15 Field Engineering' -ErrorAction SilentlyContinue).'15 Field Engineering'
+                    Set-ItemProperty -Path $diagPath -Name '15 Field Engineering' -Value $Level -Type DWord -Force -ErrorAction SilentlyContinue
+                }
+            } catch {}
+            return $prior
+        }
+
+        # Pull any constraint/range/attribute Directory Service events since a
+        # given time so the exact failing attribute lands in the build log.
+        function Get-DsConstraintEvents {
+            param([datetime]$Since)
+            $out = @()
+            try {
+                $evts = Get-WinEvent -FilterHashtable @{ LogName = 'Directory Service'; StartTime = $Since } -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Message -match 'constraint|range|attribute' } | Select-Object -First 5
+                foreach ($e in $evts) {
+                    $flat = ($e.Message -replace '\s+', ' ')
+                    $out += "DS-Event $($e.Id) @ $($e.TimeCreated.ToString('HH:mm:ss')): " + $flat.Substring(0, [Math]::Min(220, $flat.Length))
+                }
+            } catch {}
+            return $out
+        }
+
         try {
             # Idempotency: only skip when the CA is genuinely CONFIGURED.
             if (Test-CaConfigured) {
@@ -598,45 +647,84 @@ LoadDefaultTemplates=0
                 }
 
                 # Install Enterprise Root CA with retry + remediation. The AD
-                # publish can transiently fail (ERROR_DS_RANGE_CONSTRAINT /
-                # ERROR_DS_BUSY) right after forest promotion; each failed
-                # attempt is torn down and retried after AD settles. This is
-                # the exact failure that cost an 8h deploy on fabrikam.
+                # publish (CCertSrvSetup::SetCASetupProperty -> LDAP writes into
+                # the Configuration NC) is REJECTED BY ntdsa with
+                # 0x80072082 ERROR_DS_RANGE_CONSTRAINT for a window right after
+                # dcpromo, until the freshly-promoted directory / schema cache
+                # settles. PROVEN on fabrikam (2026-06-23): a cold promote failed
+                # ALL retries at T+0, then succeeded on the FIRST try ~22 min
+                # later with NO reboot -- the cure is TIME, not a reboot. So:
+                #   (1) a generous time budget (~20-30 min) of retries;
+                #   (2) on RANGE_CONSTRAINT specifically, force an IMMEDIATE schema
+                #       cache reload (schemaUpdateNow) to collapse that ~5-min
+                #       post-dcpromo window instead of waiting it out;
+                #   (3) one-shot NTDS field-engineering logging so the exact
+                #       offending attribute is captured if it still fails.
+                # Happy path is untouched: attempt 1 runs immediately and the
+                # extra machinery only engages on an actual transient failure
+                # (which is rare -- most promotes are ready by the time PKI runs).
                 $caConfigured = $false
                 $caLastErr = $null
-                $maxCaTries = 6
-                for ($caTry = 1; $caTry -le $maxCaTries; $caTry++) {
-                    try {
-                        _Log "Installing Enterprise Root CA '$CAName' (attempt $caTry/$maxCaTries)..."
-                        Install-AdcsCertificationAuthority -CAType EnterpriseRootCa `
-                            -CACommonName $CAName `
-                            -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
-                            -KeyLength 2048 `
-                            -HashAlgorithmName SHA256 `
-                            -ValidityPeriod Years `
-                            -ValidityPeriodUnits 5 `
-                            -Force | Out-Null
-                        $caConfigured = $true
-                        break
-                    }
-                    catch {
-                        $caLastErr = $_.Exception.Message
-                        # Config may have actually landed even though the cmdlet threw.
-                        if (Test-CaConfigured) {
-                            _Log "CA reports configured despite error on attempt $caTry ($caLastErr) - accepting."
+                $maxCaTries = 10
+                $feEnabled = $false
+                $feLevelPrior = $null
+                $caLoopStart = Get-Date
+                try {
+                    for ($caTry = 1; $caTry -le $maxCaTries; $caTry++) {
+                        try {
+                            _Log "Installing Enterprise Root CA '$CAName' (attempt $caTry/$maxCaTries)..."
+                            Install-AdcsCertificationAuthority -CAType EnterpriseRootCa `
+                                -CACommonName $CAName `
+                                -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
+                                -KeyLength 2048 `
+                                -HashAlgorithmName SHA256 `
+                                -ValidityPeriod Years `
+                                -ValidityPeriodUnits 5 `
+                                -Force | Out-Null
                             $caConfigured = $true
                             break
                         }
-                        $transient = $caLastErr -match '0x80072082|ERROR_DS_RANGE_CONSTRAINT|0x8007200E|ERROR_DS_BUSY|0x8007200F|ERROR_DS_UNWILLING_TO_PERFORM|0x80072030|ERROR_DS_NO_SUCH_OBJECT|acceptable range|directory service'
-                        if (-not $transient) {
-                            _Log "Non-transient CA install error on attempt $caTry : $caLastErr"
-                            throw
+                        catch {
+                            $caLastErr = $_.Exception.Message
+                            # Config may have actually landed even though the cmdlet threw.
+                            if (Test-CaConfigured) {
+                                _Log "CA reports configured despite error on attempt $caTry ($caLastErr) - accepting."
+                                $caConfigured = $true
+                                break
+                            }
+                            $isRange = $caLastErr -match '0x80072082|ERROR_DS_RANGE_CONSTRAINT|acceptable range'
+                            $transient = $isRange -or ($caLastErr -match '0x8007200E|ERROR_DS_BUSY|0x8007200F|ERROR_DS_UNWILLING_TO_PERFORM|0x80072030|ERROR_DS_NO_SUCH_OBJECT|directory service')
+                            if (-not $transient) {
+                                _Log "Non-transient CA install error on attempt $caTry : $caLastErr"
+                                throw
+                            }
+                            _Log "Transient AD-publish error on attempt $caTry : $caLastErr -- remediating (tear down partial config, wait for AD, retry)."
+                            try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+                            try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
+                            if ($isRange) {
+                                # Post-dcpromo schema-cache window: force an immediate
+                                # reload instead of waiting it out (or rebooting).
+                                if (Invoke-SchemaCacheReload) { _Log "Forced schema cache reload (schemaUpdateNow) to clear the post-dcpromo publish window." }
+                                else { _Log "schemaUpdateNow reload attempt did not take (continuing)." }
+                                # One-shot: capture the exact failing attribute next time.
+                                if (-not $feEnabled) {
+                                    $feLevelPrior = Set-NtdsFieldEngineering -Level 5
+                                    $feEnabled = $true
+                                    _Log "Enabled NTDS '15 Field Engineering'=5 to capture the exact constraint attribute on the next attempt (prior=$feLevelPrior)."
+                                }
+                            }
+                            Wait-AdDsReady -TimeoutSec 180 | Out-Null
+                            Start-Sleep -Seconds ([Math]::Min(150, 30 * $caTry))
                         }
-                        _Log "Transient AD-publish error on attempt $caTry : $caLastErr -- remediating (tear down partial config, wait for AD, retry)."
-                        try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
-                        try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
-                        Wait-AdDsReady -TimeoutSec 180 | Out-Null
-                        Start-Sleep -Seconds (15 * $caTry)
+                    }
+                }
+                finally {
+                    if ($feEnabled) {
+                        $feRestore = 0
+                        if ($null -ne $feLevelPrior) { $feRestore = [int]$feLevelPrior }
+                        Set-NtdsFieldEngineering -Level $feRestore | Out-Null
+                        _Log "Restored NTDS '15 Field Engineering' to $feRestore."
+                        foreach ($ev in (Get-DsConstraintEvents -Since $caLoopStart)) { _Log "[DS diag] $ev" }
                     }
                 }
                 if (-not $caConfigured) {
