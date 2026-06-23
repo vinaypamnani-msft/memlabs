@@ -1026,6 +1026,81 @@ function Stop-VM2 {
 }
 
 
+function Restart-VM2Smart {
+    # Graceful-first VM restart with an optional last-resort hard power-off.
+    #
+    # A hard -TurnOff landing in a fragile guest window (OOBE / specialize /
+    # rename or domain-join reboot) can corrupt the guest onto the Windows
+    # recovery screen, so this helper ALWAYS tries a graceful guest-OS shutdown
+    # first (bounded by -GracefulTimeoutSeconds so a hung guest can't block the
+    # caller forever). It only escalates to a hard power-off when -AllowTurnOff
+    # is set AND the graceful shutdown did not bring the VM down.
+    #
+    # Returns $true if the VM was restarted (graceful succeeded, or TurnOff was
+    # used), $false if the graceful shutdown did not complete and TurnOff was
+    # not permitted (the VM is left running for the caller to keep waiting on).
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $false)]
+        [switch]$AllowTurnOff,
+        [Parameter(Mandatory = $false)]
+        [int]$GracefulTimeoutSeconds = 180,
+        [Parameter(Mandatory = $false)]
+        [string]$Reason = "restart",
+        [Parameter(Mandatory = $false)]
+        [object]$Stopwatch,
+        [Parameter(Mandatory = $false)]
+        [object]$Timespan
+    )
+
+    $vm = Get-VM2 -Name $Name -Fallback
+    if (-not $vm) {
+        Write-Log "${Name}: Restart-VM2Smart ($Reason): VM not found." -Warning
+        return $false
+    }
+
+    # 1) Graceful guest-OS shutdown first, bounded so a hung guest can't block.
+    if ($vm.State -eq 'Running') {
+        Write-Log "${Name}: Restart ($Reason): attempting graceful shutdown (up to ${GracefulTimeoutSeconds}s)..." -LogOnly
+        try {
+            $gracefulJob = Stop-VM -VM $vm -Force -WarningAction SilentlyContinue -AsJob
+            $null = $gracefulJob | Wait-Job -Timeout $GracefulTimeoutSeconds
+            if ($gracefulJob.State -eq 'Running') { Stop-Job $gracefulJob -ErrorAction SilentlyContinue }
+            Remove-Job $gracefulJob -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+            Write-Log "${Name}: Restart ($Reason): graceful shutdown attempt errored: $_" -LogOnly
+        }
+    }
+
+    # 2) Did graceful bring it down? If not, escalate only when permitted.
+    $vm = Get-VM2 -Name $Name -Fallback
+    if (-not ($vm -and $vm.State -eq 'Off')) {
+        if ($AllowTurnOff) {
+            Write-Log "${Name}: Restart ($Reason): graceful shutdown did not complete; escalating to a hard TurnOff (last resort)." -Warning
+            Stop-VM2 -Name $Name -TurnOff
+        }
+        else {
+            Write-Log "${Name}: Restart ($Reason): graceful shutdown did not complete and TurnOff is not permitted; leaving VM running." -Warning
+            return $false
+        }
+    }
+
+    # 3) Start it back up and wait for it to respond.
+    Start-Sleep -Seconds 10
+    Start-VM2 -Name $Name
+    if ($Stopwatch -and $Timespan) {
+        Wait-ForHeartbeat -VmName $Name -Stopwatch $Stopwatch -Timespan $Timespan | Out-Null
+    }
+    else {
+        Wait-ForHeartbeat -VmName $Name | Out-Null
+    }
+    return $true
+}
+
+
 function Get-VMCheckpoint2 {
     [CmdletBinding()]
     param (

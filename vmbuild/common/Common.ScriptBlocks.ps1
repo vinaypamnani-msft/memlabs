@@ -4046,10 +4046,7 @@ $global:VM_Config = {
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Rebooting. $($result.ScriptBlockOutput)" -Warning
-                    stop-vm2 -name $currentItem.vmName
-                    start-sleep -seconds 10
-                    start-vm2 -name $currentItem.vmName
-                    Wait-ForHeartbeat -VmName $currentItem.vmName | Out-Null
+                    Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "DSC start retry" | Out-Null
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
                     if ($result.ScriptBlockFailed) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -4102,7 +4099,22 @@ $global:VM_Config = {
         $currentStatus = $null
         $suppressNoisyLogging = $Common.VerboseEnabled -eq $false
         [int]$failedHeartbeats = 0
-        [int]$failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
+        # Reboot is a LAST resort. Scale heartbeat patience by host load: when
+        # many VMs deploy at once, PSDirect/CPU/disk contention makes a HEALTHY
+        # guest legitimately go silent far longer (especially across a
+        # rename/OOBE/specialize reboot), so we must wait longer before assuming
+        # it is hung. Base ~100 tries + 25 per running VM over 8 (each try ~3-10s).
+        $heartbeatRunningVmCount = @(Get-VM -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' }).Count
+        $heartbeatExtraVms = [Math]::Max(0, $heartbeatRunningVmCount - 8)
+        [int]$failedHeartbeatThreshold = 100 + ($heartbeatExtraVms * 25)
+        # A guest that has NOT yet produced any DSC status this phase is most
+        # likely still in first-boot / OOBE / specialize / rename-reboot, where a
+        # forced power-off corrupts it (lands at the Windows recovery screen,
+        # unrecoverable). Demand a much longer silence before the FIRST restart.
+        [int]$firstRestartHeartbeatThreshold = $failedHeartbeatThreshold * 3
+        [int]$forcedRestartCount = 0   # restarts since the last status progress
+        [int]$forcedRestartMax = 3     # after this many with no progress, FAIL the VM instead of power-cycling forever
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): heartbeat-recovery: $heartbeatRunningVmCount running VMs -> threshold=$failedHeartbeatThreshold (first restart at $firstRestartHeartbeatThreshold), maxRestarts=$forcedRestartMax" -LogOnly
 
         $noStatus = $true
         $lastStatusChangeTime = [DateTime]::UtcNow
@@ -4111,6 +4123,8 @@ $global:VM_Config = {
         $staleRestartCount = 0
         $staleRestartMax = 2
         $lastStaleWarningTime = [DateTime]::MinValue
+        $lcmIdleSince = $null              # when the DSC LCM was FIRST seen continuously idle (null = not idle / unknown)
+        $lastLcmSampleTime = [DateTime]::MinValue  # throttle for the guest LCM-state poll
         $certPulseDone = $false   # one-shot guard for the PKI cert pre-stage handshake
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Started Monitoring $($currentItem.role) configuration."
@@ -4394,10 +4408,7 @@ $global:VM_Config = {
                                     Write-ProgressElapsed -stopwatch $FailStopWatch -timespan $FailtimeSpan -text "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) (Currently Retrying) : $msg"
                                     if ($msg.Contains("ADServerDownException")) {
                                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: ADServerDownException from VM. Restarting the VM" -Warning
-                                        Stop-VM2 -name $currentItem.vmName
-                                        Start-Sleep -Seconds 10
-                                        Start-VM2 -Name $currentItem.vmName
-                                        Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
+                                        Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "ADServerDownException" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
                                         Continue
                                     }
                                     if (-not $failure) {
@@ -4505,18 +4516,56 @@ $global:VM_Config = {
                     [int]$failedHeartbeats = 0
                 }
 
-                if ($failedHeartbeats -ge $failedHeartbeatThreshold) {
+                # Reboot is a LAST resort. A guest that has never produced a DSC
+                # status this phase is most likely still mid first-boot / OOBE /
+                # specialize / rename-reboot, where a power-cycle can corrupt it,
+                # so demand a much longer silence before the FIRST restart.
+                $effectiveThreshold = $failedHeartbeatThreshold
+                if ($noStatus) { $effectiveThreshold = $firstRestartHeartbeatThreshold }
+
+                if ($failedHeartbeats -ge $effectiveThreshold) {
+                    if ($forcedRestartCount -ge $forcedRestartMax) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: VM still unresponsive after $forcedRestartCount restart attempt(s) and $failedHeartbeats heartbeat tries. Failing this VM instead of power-cycling it again (a forced power-off mid-OOBE/specialize corrupts the guest)." -Failure -OutputStream
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "VM unresponsive; failing after $forcedRestartCount restart attempt(s)"
+                        return
+                    }
                     try {
-                        #Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null # Try the command one more time to get failure in logs
+                        $forcedRestartCount++
+                        $isLastAttempt = ($forcedRestartCount -ge $forcedRestartMax)
+                        # Hard power-off is permitted ONLY on the final attempt AND
+                        # only for a guest that already reached a running OS this
+                        # phase (past OOBE). A guest that never produced any status is
+                        # most likely still in first-boot / OOBE / specialize, where a
+                        # hard TurnOff would corrupt it and would not recover it anyway
+                        # -- so we keep trying graceful and ultimately fail it cleanly.
+                        $allowTurnOff = ($isLastAttempt -and (-not $noStatus))
+                        if ($allowTurnOff) {
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Job status not retrievable; last-resort restart $forcedRestartCount/$forcedRestartMax (hard TurnOff permitted)" -failcount $failedHeartbeats -failcountMax $effectiveThreshold
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Job status not retrievable after $failedHeartbeats tries. Final restart $forcedRestartCount/$forcedRestartMax; graceful first, hard TurnOff permitted as a last resort (guest reached a running OS earlier this phase)." -Warning
+                        }
+                        else {
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Job status not retrievable; gentle restart $forcedRestartCount/$forcedRestartMax (graceful only)" -failcount $failedHeartbeats -failcountMax $effectiveThreshold
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Job status not retrievable after $failedHeartbeats tries. Gentle (graceful-only) restart $forcedRestartCount/$forcedRestartMax; hard TurnOff reserved for the final attempt." -Warning
+                        }
 
-                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, forcefully restarting the VM" -failcount $failedHeartbeats -failcountMax $failedHeartbeatThreshold
-
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
-                        Stop-VM2 -name $currentItem.vmName
-                        Start-Sleep -Seconds 10
-                        Start-VM2 -Name $currentItem.vmName
-                        Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
-                        $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up
+                        $restarted = Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff:$allowTurnOff -Reason "heartbeat recovery $forcedRestartCount/$forcedRestartMax" -Stopwatch $stopWatch -Timespan $timespan
+                        if ($restarted) {
+                            # Graceful shutdown succeeded (or TurnOff was used on the
+                            # final attempt) and the VM was restarted -> give it a
+                            # fresh window to come back and report status.
+                            $failedHeartbeats = 0
+                        }
+                        else {
+                            # Graceful shutdown did not complete and TurnOff was not
+                            # permitted (still a gentler attempt, or a never-booted
+                            # guest we won't power-cut). Leave it running and keep
+                            # waiting; half-reset so we don't re-trigger every
+                            # iteration but still re-reach the threshold (and the
+                            # restart cap / TurnOff escalation) after more silence.
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: graceful shutdown did not complete; continuing to wait (no hard power-off this attempt)." -Warning
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Graceful shutdown did not complete; waiting (TurnOff reserved for final attempt)"
+                            $failedHeartbeats = [int]($effectiveThreshold * 0.5)
+                        }
                     }
                     catch {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Heartbeat recovery failed: $_" -Failure
@@ -4552,6 +4601,8 @@ $global:VM_Config = {
                         $previousStatus = $currentStatus
                         $lastStatusChangeTime = [DateTime]::UtcNow
                         $lastStaleWarningTime = [DateTime]::MinValue
+                        $lcmIdleSince = $null   # status advanced -> work is progressing; reset the idle-stuck clock
+                        $forcedRestartCount = 0 # real progress -> reset the reboot-of-last-resort budget
 
                         # Cross-tier PKI pre-stage. The guest ScriptWorkflow emits this
                         # sentinel right before client push, then sleeps ~60s. It cannot
@@ -4645,65 +4696,73 @@ $global:VM_Config = {
                         }
                     }
                     else {
-                        # Status unchanged — check for stale progress
+                        # Status text unchanged. A frozen status by itself does NOT mean the VM is stuck:
+                        # a node can legitimately hold one status for hours (e.g. a PassiveSite sitting in a
+                        # cross-node WaitForAll, or a long ConfigMgr setup step). The only reliable "stuck"
+                        # signal is the DSC LCM being CONTINUOUSLY IDLE for a sustained window -- if the LCM
+                        # is Busy/Pending it is still applying (or queued to auto-re-apply) the configuration.
+                        # We require the LCM to stay idle for the full $staleRestartMinutes (>= the DSC
+                        # consistency-engine interval) before concluding it is wedged, so the LCM gets a
+                        # complete chance to auto-rerun its configuration on its own before we reboot. A
+                        # momentary idle (a step that just completed, or the gap between DSC resources) resets
+                        # the idle clock on the next sample and never triggers a restart. This is intentionally
+                        # independent of the status TEXT -- we never branch on what the status string says.
                         $staleMins = [int]([DateTime]::UtcNow - $lastStatusChangeTime).TotalMinutes
-                        if ($staleMins -ge $staleRestartMinutes -and $staleRestartCount -lt $staleRestartMax) {
-                            # Before restarting, check if DSC is still actively running
+
+                        # Sample the LCM (throttled to once/min; we do NOT poll the guest on every ~3s
+                        # heartbeat) once the status has been stalled past the warning threshold.
+                        if ($staleMins -ge $staleWarningMinutes -and ([DateTime]::UtcNow - $lastLcmSampleTime).TotalSeconds -ge 60) {
+                            $lastLcmSampleTime = [DateTime]::UtcNow
                             $lcmCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
                                 (Get-DscLocalConfigurationManager).LCMState
                             } -SuppressLog
-                            if (-not $lcmCheck.ScriptBlockFailed -and $lcmCheck.ScriptBlockOutput -eq 'Busy') {
-                                # LCM is still actively applying configuration — not stuck
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())') but LCM is still Busy. Not restarting." -Warning
-                                $lastStatusChangeTime = [DateTime]::UtcNow
+                            $lcmReadable = (-not $lcmCheck.ScriptBlockFailed) -and $lcmCheck.ScriptBlockOutput
+                            $lcmState = if ($lcmCheck.ScriptBlockFailed) { 'unreachable' } else { [string]$lcmCheck.ScriptBlockOutput }
+                            if ($lcmReadable -and $lcmState -eq 'Idle') {
+                                # Idle this sample -- start the idle clock on the FIRST idle observation.
+                                if (-not $lcmIdleSince) { $lcmIdleSince = [DateTime]::UtcNow }
+                            }
+                            else {
+                                # Busy / Pending* (actively applying or queued to auto-rerun), or unreadable
+                                # (can't confirm idle) -> reset the idle clock. Not stuck.
+                                $lcmIdleSince = $null
+                            }
+                        }
+
+                        $idleMins = if ($lcmIdleSince) { [int]([DateTime]::UtcNow - $lcmIdleSince).TotalMinutes } else { 0 }
+
+                        if ($lcmIdleSince -and $idleMins -ge $staleRestartMinutes -and $staleRestartCount -lt $staleRestartMax) {
+                            # LCM has been continuously idle for >= the restart window (it had a full
+                            # consistency-engine cycle to auto-rerun and did not). Before rebooting, check the
+                            # ScriptWorkflow task -- Phase 8/9 keep a scheduled task running after DSC goes
+                            # idle (e.g. during WSUS sync waits); restarting would kill it mid-work.
+                            $swTaskRunning = $false
+                            $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
+                                $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
+                                if ($t -and $t.State -eq 'Running') { 'Running' } else { $null }
+                            } -SuppressLog
+                            if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput -eq 'Running') {
+                                $swTaskRunning = $true
+                            }
+                            if ($swTaskRunning) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM idle ${idleMins}m but ScriptWorkflow task is still running. Not restarting." -Warning
+                                $lcmIdleSince = [DateTime]::UtcNow   # task is doing work -- restart the idle window
                                 $lastStaleWarningTime = [DateTime]::MinValue
                             }
                             else {
-                                # LCM is Idle/unreachable — check if ScriptWorkflow task is still running
-                                # Phase 8/9 use a scheduled task that keeps running after DSC completes;
-                                # restarting the VM would kill it mid-work (e.g. during WSUS sync waits).
-                                $lcmState = if ($lcmCheck.ScriptBlockFailed) { "unreachable" } else { $lcmCheck.ScriptBlockOutput }
-                                $swTaskRunning = $false
-                                if (-not $lcmCheck.ScriptBlockFailed) {
-                                    $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
-                                        $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
-                                        if ($t -and $t.State -eq 'Running') { 'Running' } else { $null }
-                                    } -SuppressLog
-                                    if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput -eq 'Running') {
-                                        $swTaskRunning = $true
-                                    }
-                                }
-                                if ($swTaskRunning) {
-                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())') but ScriptWorkflow task is still running. Not restarting." -Warning
-                                    $lastStatusChangeTime = [DateTime]::UtcNow
-                                    $lastStaleWarningTime = [DateTime]::MinValue
-                                }
-                                else {
-                                    # VM is genuinely stuck
-                                    $staleRestartCount++
-                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). LCM state: $lcmState. Forcefully restarting VM (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
-                                    Stop-VM2 -name $currentItem.vmName
-                                    Start-Sleep -Seconds 10
-                                    Start-VM2 -Name $currentItem.vmName
-                                    Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
-                                    $lastStatusChangeTime = [DateTime]::UtcNow
-                                    $lastStaleWarningTime = [DateTime]::MinValue
-                                }
+                                # Genuinely stuck: LCM idle >= $staleRestartMinutes, status frozen, no task running.
+                                $staleRestartCount++
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM idle for ${idleMins}m with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Restarting VM (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
+                                Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "stale LCM/status" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
+                                $lastStatusChangeTime = [DateTime]::UtcNow
+                                $lcmIdleSince = $null
+                                $lastStaleWarningTime = [DateTime]::MinValue
                             }
                         }
                         elseif ($staleMins -ge $staleWarningMinutes -and ([DateTime]::UtcNow - $lastStaleWarningTime).TotalMinutes -ge 5) {
-                            # VMs waiting on upstream sites emit identical warnings every 5 min.
-                            # After the first warning, widen the interval to 15 min for "Waiting" statuses
-                            # so the log isn't flooded with non-actionable entries.
-                            $isWaitingStatus = $currentStatus -match 'Waiting (on|for) '
-                            $sinceLastWarn = ([DateTime]::UtcNow - $lastStaleWarningTime).TotalMinutes
-                            if ($isWaitingStatus -and $lastStaleWarningTime -ne [DateTime]::MinValue -and $sinceLastWarn -lt 15) {
-                                # suppress — not enough time since last warning for a waiting status
-                            }
-                            else {
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())')" -Warning
-                                $lastStaleWarningTime = [DateTime]::UtcNow
-                            }
+                            $idleNote = if ($lcmIdleSince) { " (LCM idle ${idleMins}m)" } else { " (LCM busy/applying)" }
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m${idleNote} ('$($currentStatus.Trim())')" -Warning
+                            $lastStaleWarningTime = [DateTime]::UtcNow
                         }
                     }
 
