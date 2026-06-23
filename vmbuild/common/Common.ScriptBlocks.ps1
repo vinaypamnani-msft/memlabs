@@ -4182,6 +4182,12 @@ $global:VM_Config = {
         $staleRestartMax = 2
         $lastStaleWarningTime = [DateTime]::MinValue
         $lcmIdleSince = $null              # when the DSC LCM was FIRST seen continuously idle (null = not idle / unknown)
+        $lcmRebootPendingSince = $null     # when the DSC LCM was FIRST seen parked reboot-pending (null = not parked / unknown)
+        $lcmProbeStartMinutes = 5          # begin sampling the guest LCM once the status has been frozen this long
+        $rebootStuckMinutes = 4            # restart the VM once the LCM stays reboot-pending this long with frozen status
+        $lcmPendingNoRebootSince = $null   # when the LCM was FIRST seen PendingConfiguration with NO reboot owed (stranded apply)
+        $dscResumeCount = 0                # in-place Stop+Start-DscConfiguration -UseExisting attempts this stall episode
+        $dscResumeMax = 1                  # gentle in-place resumes before escalating a stranded PendingConfiguration to a reboot
         $lastLcmSampleTime = [DateTime]::MinValue  # throttle for the guest LCM-state poll
         $certPulseDone = $false   # one-shot guard for the PKI cert pre-stage handshake
 
@@ -4659,7 +4665,10 @@ $global:VM_Config = {
                         $previousStatus = $currentStatus
                         $lastStatusChangeTime = [DateTime]::UtcNow
                         $lastStaleWarningTime = [DateTime]::MinValue
-                        $lcmIdleSince = $null   # status advanced -> work is progressing; reset the idle-stuck clock
+                        $lcmIdleSince = $null   # status advanced -> work is progressing; reset every stuck clock
+                        $lcmRebootPendingSince = $null
+                        $lcmPendingNoRebootSince = $null
+                        $dscResumeCount = 0
                         $forcedRestartCount = 0 # real progress -> reset the reboot-of-last-resort budget
 
                         # Cross-tier PKI pre-stage. The guest ScriptWorkflow emits this
@@ -4768,28 +4777,137 @@ $global:VM_Config = {
                         $staleMins = [int]([DateTime]::UtcNow - $lastStatusChangeTime).TotalMinutes
 
                         # Sample the LCM (throttled to once/min; we do NOT poll the guest on every ~3s
-                        # heartbeat) once the status has been stalled past the warning threshold.
-                        if ($staleMins -ge $staleWarningMinutes -and ([DateTime]::UtcNow - $lastLcmSampleTime).TotalSeconds -ge 60) {
+                        # heartbeat) once the status has been stalled past the probe threshold.
+                        if ($staleMins -ge $lcmProbeStartMinutes -and ([DateTime]::UtcNow - $lastLcmSampleTime).TotalSeconds -ge 60) {
                             $lastLcmSampleTime = [DateTime]::UtcNow
+                            # Sample LCMState AND the last apply's RebootRequested flag in one guest round-trip.
+                            # Per the Windows DSC LCM source (EngineHelper.c GetLCMState): LCMState reports
+                            # 'PendingConfiguration' whenever a pending.mof exists on disk, and 'PendingReboot'
+                            # is the IN-MEMORY state set right after a resource sets DSCMachineStatus=1 -- a fresh
+                            # query process reads from disk and sees PendingConfiguration. Neither word alone
+                            # proves a reboot is needed, so we also read Get-DscConfigurationStatus.RebootRequested
+                            # (the recorded fact that the last apply asked for a restart). Get-DscConfigurationStatus
+                            # throws while the LCM is Busy, so a populated RebootRequested also implies 'not Busy'.
                             $lcmCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
-                                (Get-DscLocalConfigurationManager).LCMState
+                                $st = try { (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState } catch { 'unreachable' }
+                                $rr = $false
+                                try { $rr = [bool]((Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1).RebootRequested) } catch { }
+                                [PSCustomObject]@{ LCMState = $st; RebootRequested = $rr }
                             } -SuppressLog
                             $lcmReadable = (-not $lcmCheck.ScriptBlockFailed) -and $lcmCheck.ScriptBlockOutput
-                            $lcmState = if ($lcmCheck.ScriptBlockFailed) { 'unreachable' } else { [string]$lcmCheck.ScriptBlockOutput }
+                            $lcmState = if ($lcmReadable) { [string]$lcmCheck.ScriptBlockOutput.LCMState } else { 'unreachable' }
+                            $rebootRequested = $lcmReadable -and $lcmCheck.ScriptBlockOutput.RebootRequested
+                            # A reboot is genuinely OWED only when the last apply asked for one (RebootRequested)
+                            # or the in-memory state is PendingReboot. A bare PendingConfiguration (pending.mof on
+                            # disk) with RebootRequested=False is a STRANDED apply -- interrupted mid-flight, NOT
+                            # waiting on a restart; and because every phase config runs ConfigurationMode=ApplyOnly,
+                            # the consistency engine never auto-reruns, so it sits there forever unless we resume it.
+                            $needsReboot = $lcmReadable -and ($rebootRequested -or ($lcmState -eq 'PendingReboot'))
+                            $pendingNoReboot = $lcmReadable -and ($lcmState -eq 'PendingConfiguration') -and -not $needsReboot
                             if ($lcmReadable -and $lcmState -eq 'Idle') {
                                 # Idle this sample -- start the idle clock on the FIRST idle observation.
                                 if (-not $lcmIdleSince) { $lcmIdleSince = [DateTime]::UtcNow }
+                                $lcmRebootPendingSince = $null
+                                $lcmPendingNoRebootSince = $null
+                            }
+                            elseif ($needsReboot) {
+                                # Parked waiting for a reboot that's actually owed -- start the reboot-stuck clock.
+                                if (-not $lcmRebootPendingSince) { $lcmRebootPendingSince = [DateTime]::UtcNow }
+                                $lcmIdleSince = $null
+                                $lcmPendingNoRebootSince = $null
+                            }
+                            elseif ($pendingNoReboot) {
+                                # Stranded apply (pending.mof on disk, no reboot owed) -- start the pending clock.
+                                if (-not $lcmPendingNoRebootSince) { $lcmPendingNoRebootSince = [DateTime]::UtcNow }
+                                $lcmIdleSince = $null
+                                $lcmRebootPendingSince = $null
                             }
                             else {
-                                # Busy / Pending* (actively applying or queued to auto-rerun), or unreadable
-                                # (can't confirm idle) -> reset the idle clock. Not stuck.
+                                # Busy (actively applying) or unreadable (can't confirm) -> reset all clocks. Not stuck.
                                 $lcmIdleSince = $null
+                                $lcmRebootPendingSince = $null
+                                $lcmPendingNoRebootSince = $null
                             }
                         }
 
                         $idleMins = if ($lcmIdleSince) { [int]([DateTime]::UtcNow - $lcmIdleSince).TotalMinutes } else { 0 }
+                        $rebootMins = if ($lcmRebootPendingSince) { [int]([DateTime]::UtcNow - $lcmRebootPendingSince).TotalMinutes } else { 0 }
+                        $pendingMins = if ($lcmPendingNoRebootSince) { [int]([DateTime]::UtcNow - $lcmPendingNoRebootSince).TotalMinutes } else { 0 }
 
-                        if ($lcmIdleSince -and $idleMins -ge $staleRestartMinutes -and $staleRestartCount -lt $staleRestartMax) {
+                        if ($lcmRebootPendingSince -and $rebootMins -ge $rebootStuckMinutes -and $staleRestartCount -lt $staleRestartMax) {
+                            # The LCM has been parked reboot-pending (PendingReboot / PendingConfiguration /
+                            # RebootRequested) with the status frozen for the confirmation window -- the restart
+                            # DSC scheduled never fired. Observed on Win10/11 client renames, where the LCM logs
+                            # 'A reboot is scheduled to progress further' but the box never restarts, leaving the
+                            # whole phase waiting forever. Unlike a Busy LCM, a reboot-pending park is literally
+                            # asking for a restart, so a host reboot is the correct, non-destructive recovery -- it
+                            # lets the LCM resume from pending.mof. Respect a running ScriptWorkflow task (Phase 8/9
+                            # can legitimately hold a reboot-pending state while a task does background work).
+                            $swTaskRunning = $false
+                            $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
+                                $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
+                                if ($t -and $t.State -eq 'Running') { 'Running' } else { $null }
+                            } -SuppressLog
+                            if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput -eq 'Running') {
+                                $swTaskRunning = $true
+                            }
+                            if ($swTaskRunning) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM reboot-pending ${rebootMins}m but ScriptWorkflow task is still running. Not restarting." -Warning
+                                $lcmRebootPendingSince = [DateTime]::UtcNow   # task is doing work -- restart the reboot-pending window
+                                $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                            else {
+                                $staleRestartCount++
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM parked reboot-pending ($lcmState) for ${rebootMins}m with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). The DSC-scheduled reboot never fired -- restarting VM to let the LCM resume (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
+                                Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "DSC reboot-pending stuck" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
+                                $lastStatusChangeTime = [DateTime]::UtcNow
+                                $lcmRebootPendingSince = $null
+                                $lcmIdleSince = $null
+                                $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                        }
+                        elseif ($lcmPendingNoRebootSince -and $pendingMins -ge $rebootStuckMinutes -and ($dscResumeCount -lt $dscResumeMax -or $staleRestartCount -lt $staleRestartMax)) {
+                            # Stranded PendingConfiguration with NO reboot owed (pending.mof staged, last apply
+                            # didn't request a restart). In ApplyOnly mode nothing auto-resumes it. Tier 1: resume
+                            # the pending config IN PLACE via Stop + Start-DscConfiguration -UseExisting (no reboot --
+                            # pending.mof is already on disk). Tier 2 (if it's STILL stranded a window later): restart
+                            # the VM so the boot-resume path re-applies pending.mof. Respect a running ScriptWorkflow task.
+                            $swTaskRunning = $false
+                            $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
+                                $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
+                                if ($t -and $t.State -eq 'Running') { 'Running' } else { $null }
+                            } -SuppressLog
+                            if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput -eq 'Running') {
+                                $swTaskRunning = $true
+                            }
+                            if ($swTaskRunning) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM PendingConfiguration ${pendingMins}m but ScriptWorkflow task is still running. Not intervening." -Warning
+                                $lcmPendingNoRebootSince = [DateTime]::UtcNow   # task is doing work -- restart the window
+                                $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                            elseif ($dscResumeCount -lt $dscResumeMax) {
+                                # TIER 1: gentle in-place resume (fire-and-forget, bounded). No reboot.
+                                $dscResumeCount++
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM stranded PendingConfiguration for ${pendingMins}m (no reboot owed) with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Resuming the pending config in place: Stop + Start-DscConfiguration -UseExisting (resume $dscResumeCount/$dscResumeMax)." -Warning -OutputStream
+                                $null = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -ScriptBlock {
+                                    Stop-DscConfiguration -Force -ErrorAction SilentlyContinue
+                                    Start-DscConfiguration -UseExisting -Force -ErrorAction SilentlyContinue
+                                } -SuppressLog
+                                $lcmPendingNoRebootSince = [DateTime]::UtcNow   # give the resume a window to apply before escalating
+                                $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                            else {
+                                # TIER 2: the in-place resume did not clear it -- escalate to a VM restart.
+                                $staleRestartCount++
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: in-place resume did not clear the stranded PendingConfiguration (${pendingMins}m) -- restarting VM so the boot-resume path re-applies pending.mof (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
+                                Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "DSC stranded PendingConfiguration" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
+                                $lastStatusChangeTime = [DateTime]::UtcNow
+                                $lcmPendingNoRebootSince = $null
+                                $lcmIdleSince = $null
+                                $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                        }
+                        elseif ($lcmIdleSince -and $idleMins -ge $staleRestartMinutes -and $staleRestartCount -lt $staleRestartMax) {
                             # LCM has been continuously idle for >= the restart window (it had a full
                             # consistency-engine cycle to auto-rerun and did not). Before rebooting, check the
                             # ScriptWorkflow task -- Phase 8/9 keep a scheduled task running after DSC goes
@@ -4818,7 +4936,7 @@ $global:VM_Config = {
                             }
                         }
                         elseif ($staleMins -ge $staleWarningMinutes -and ([DateTime]::UtcNow - $lastStaleWarningTime).TotalMinutes -ge 5) {
-                            $idleNote = if ($lcmIdleSince) { " (LCM idle ${idleMins}m)" } else { " (LCM busy/applying)" }
+                            $idleNote = if ($lcmIdleSince) { " (LCM idle ${idleMins}m)" } elseif ($lcmRebootPendingSince) { " (LCM reboot-pending ${rebootMins}m)" } elseif ($lcmPendingNoRebootSince) { " (LCM PendingConfiguration ${pendingMins}m)" } else { " (LCM busy/applying)" }
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m${idleNote} ('$($currentStatus.Trim())')" -Warning
                             $lastStaleWarningTime = [DateTime]::UtcNow
                         }
