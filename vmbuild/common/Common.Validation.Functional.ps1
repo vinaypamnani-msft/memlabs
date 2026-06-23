@@ -7662,6 +7662,28 @@ function Test-CMSiteWideFunctionality {
                 }
                 $wStatus = $wsusSrv.GetStatus()
 
+                # Is this SUP a DOWNSTREAM/replica (syncs from an upstream WSUS,
+                # not Microsoft Update)? A downstream SUP intentionally does NOT
+                # import the MU categories cab -- importing it corrupts the local
+                # sync anchor -> UssInternalError -- so its taxonomy replicates
+                # from the upstream instead, which is slower to first-populate.
+                # Read it the SAME way the DSC import guard does (Phase8.ps1 /
+                # ScriptFunctions.ps1): SyncFromMicrosoftUpdate=False AND an
+                # upstream server name set. Used below to downgrade a
+                # "taxonomy not yet populated" / "no sync history" verdict from
+                # WARN to INFO for a still-replicating downstream (a genuine
+                # downstream sync FAILURE still WARNs via the per-VM SUP check's
+                # Result=Failed path and the SMS_SUPSyncStatus 6703 branch).
+                $isDownstreamSup = $false; $upstreamSupName = $null
+                try {
+                    $wsusCfgChk = $wsusSrv.GetConfiguration()
+                    if ((-not $wsusCfgChk.SyncFromMicrosoftUpdate) -and $wsusCfgChk.UpstreamWsusServerName) {
+                        $isDownstreamSup = $true
+                        $upstreamSupName = $wsusCfgChk.UpstreamWsusServerName
+                    }
+                }
+                catch {}
+
                 # ---- gather raw signals (each guarded; never throws) ----
                 $taxCats = $null; $taxClas = $null
                 try { $taxCats = @($wsusSrv.GetUpdateCategories()).Count } catch {}
@@ -7703,6 +7725,13 @@ function Test-CMSiteWideFunctionality {
                 # import or full MU categories sync).
                 if ($taxCats -is [int] -and $taxCats -ge 100) {
                     $results.Details.Add("OK: WSUS initial sync (taxonomy) populated [TaxonomyCats=$taxCats; TaxonomyClas=$taxClas]")
+                }
+                elseif ($isDownstreamSup) {
+                    # Downstream SUP: the cab is intentionally NOT imported here;
+                    # categories replicate from the upstream and just haven't
+                    # arrived on this first pass. Pending state, not a failure.
+                    $taxShown = if ($taxCats -is [int]) { $taxCats } else { '<unknown>' }
+                    $results.Details.Add("INFO: WSUS taxonomy not yet replicated [TaxonomyCats=$taxShown; TaxonomyClas=$taxClas] - downstream SUP replicates categories from upstream '$upstreamSupName' (MU cab import intentionally skipped); populates after the first upstream sync completes")
                 }
                 else {
                     $taxShown = if ($taxCats -is [int]) { $taxCats } else { '<unknown>' }
@@ -7776,6 +7805,13 @@ function Test-CMSiteWideFunctionality {
                     # The update sync (dbo.Update rows) may simply not have run
                     # yet for a narrow subscription; that's not a failure.
                     $results.Details.Add("OK: WSUS initial sync completed (taxonomy populated) [TaxonomyCats=$taxCats; SyncState=$syncState; $ucBit] - no retained sync-history row yet; update sync may not have run for this subscription")
+                }
+                elseif ($isDownstreamSup) {
+                    # Downstream SUP whose first upstream replication hasn't
+                    # completed yet -- pending, not broken. A real downstream
+                    # sync failure (e.g. UssInternalError) surfaces as Result=Failed
+                    # above / SMS_SUPSyncStatus 6703, not here.
+                    $results.Details.Add("INFO: WSUS downstream first sync pending [SyncState=$syncState; $ucBit] - downstream SUP replicates from upstream '$upstreamSupName'; the first upstream sync has not completed yet")
                 }
                 else {
                     $results.Details.Add("WARN: WSUS has no sync history and taxonomy not populated [SyncState=$syncState; $ucBit] - first sync has not run")
