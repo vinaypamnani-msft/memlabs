@@ -7597,6 +7597,13 @@ function Test-CMSiteWideFunctionality {
                         $results.Details.Add("OK: SUP sync in progress ($sName, $([math]::Round($age.TotalMinutes,1)) min)")
                     }
                 }
+                elseif (-not $syncStatus.LastSyncState) {
+                    # 0 / null / empty LastSyncState = the SUP has simply never
+                    # synced yet (fresh SUP whose first categories sync hasn't
+                    # run, common on a remote SUP that syncs from an upstream).
+                    # That's a pending state, not an "unexpected" failure.
+                    $results.Details.Add("INFO: SUP has not synced yet [LastSyncState=$($syncStatus.LastSyncState)] - first categories sync has not run")
+                }
                 else {
                     $results.Details.Add("WARN: SUP sync in unexpected state $($syncStatus.LastSyncState)")
                 }
@@ -7765,9 +7772,33 @@ function Test-CMSiteWideFunctionality {
                     # fall back to the WSUS subscription API if unavailable.
                     try {
                         if (Get-Command Sync-CMSoftwareUpdate -ErrorAction SilentlyContinue) {
-                            Sync-CMSoftwareUpdate -FullSync $false -ErrorAction Stop
-                            $kicked = $true
-                            $results.Details.Add("OK: subscribed but UpdateCount=0 and idle - started a software update sync via Sync-CMSoftwareUpdate")
+                            # Sync-CMSoftwareUpdate (like every CM cmdlet) only
+                            # runs from a ConfigMgr PSDrive. This scriptblock
+                            # starts on the filesystem, so without connecting to
+                            # the site drive first the call throws "This command
+                            # cannot be run from the current drive." Establish /
+                            # reuse the CMSite drive, then run the sync inside it.
+                            $cmDriveOk = $false
+                            try {
+                                if (-not (Get-PSDrive -Name $sc -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                                    $rk = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+                                    $uiPath = $rk.OpenSubKey('SOFTWARE\Microsoft\ConfigMgr10\Setup').GetValue('UI Installation Directory')
+                                    Import-Module (Join-Path $uiPath 'bin\ConfigurationManager.psd1') -ErrorAction Stop
+                                    $smsProv = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+                                    $null = New-PSDrive -Name $sc -PSProvider CMSite -Root $smsProv -ErrorAction SilentlyContinue
+                                }
+                                $cmDriveOk = [bool](Get-PSDrive -Name $sc -PSProvider CMSite -ErrorAction SilentlyContinue)
+                            } catch {}
+                            if ($cmDriveOk) {
+                                Push-Location "${sc}:\"
+                                try { Sync-CMSoftwareUpdate -FullSync $false -ErrorAction Stop }
+                                finally { Pop-Location }
+                                $kicked = $true
+                                $results.Details.Add("OK: subscribed but UpdateCount=0 and idle - started a software update sync via Sync-CMSoftwareUpdate")
+                            }
+                            else {
+                                $results.Details.Add("INFO: CM PSDrive unavailable - using the WSUS subscription API to start the sync")
+                            }
                         }
                     } catch {
                         $results.Details.Add("WARN: Sync-CMSoftwareUpdate failed to start a sync [$($_.Exception.Message)] - will try the WSUS subscription API")

@@ -110,6 +110,65 @@
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
 
+        # WSUS categories baseline cab import for a REMOTE SUP site system.
+        # When the SUP/WSUS role lives on a dedicated site system (this box)
+        # rather than co-located on the site server, nobody else imports the
+        # categories cab onto THIS WSUS host: InstallRoles (Primary/CAS) and
+        # the Secondary Phase 8 path both run the import against their OWN
+        # localhost WSUS, which a remote SUP is not. Without this block the
+        # SUP's taxonomy stays at the ~17-row postinstall default until a slow
+        # upstream categories sync lands (observed on a remote SUP: Phase 11
+        # "WSUS initial sync (taxonomy) not populated [TaxonomyCats=17]").
+        # The cab was already staged to C:\staging\wsus\ in Phase <=7, and
+        # WSUS + its postinstall (SUSDB) are guaranteed present once the owning
+        # site server's ScriptWorkflow (which adds the SUP role) has completed.
+        # Idempotent: Start-WsusBaselineImportBackground short-circuits with
+        # 'already-imported' / 'no-cab' / 'no-wsusutil' as appropriate.
+        if ($ThisVM.installSUP -eq $true) {
+            $supSiteServer = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") -and $_.Sitecode -eq $ThisVM.Sitecode } | Select-Object -First 1
+            if ($supSiteServer) {
+                WriteStatus WaitSupSiteServer {
+                    Status = "Waiting for site server $($supSiteServer.vmName) before importing the WSUS categories baseline."
+                }
+
+                WaitForEvent WaitSupSiteServer {
+                    MachineName   = $supSiteServer.vmName
+                    LogFolder     = $LogFolder
+                    FileName      = "ScriptWorkflow"
+                    ReadNode      = "ScriptWorkflow"
+                    ReadNodeValue = "Completed"
+                    Ensure        = "Present"
+                    DependsOn     = "[WriteStatus]WaitSupSiteServer"
+                }
+
+                Script ImportWsusBaseline {
+                    GetScript  = { @{ Result = '' } }
+                    TestScript = {
+                        if (-not (Test-Path 'C:\staging\wsus\WsusCategoriesBaseline.cab')) { return $true }
+                        try {
+                            [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+                            $srv = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+                            return ($srv.GetUpdateCategories().Count -ge 100)
+                        }
+                        catch { return $false }
+                    }
+                    SetScript  = {
+                        try {
+                            . C:\staging\DSC\phases\ScriptFunctions.ps1
+                            Start-WsusBaselineImportBackground -Tag '[Phase8-SiteSystem]' | Out-Null
+                            Wait-WsusBaselineImport -Tag '[Phase8-SiteSystem]'
+                        }
+                        catch {
+                            # Non-fatal: an upstream categories sync will eventually
+                            # populate the taxonomy, just slower. Don't break DSC.
+                        }
+                    }
+                    DependsOn  = "[WaitForEvent]WaitSupSiteServer"
+                }
+                $nextDepend = '[Script]ImportWsusBaseline'
+            }
+        }
+
         if ($ThisVM.InstallPatchMyPC) {
             $WaitFor = @()
 
