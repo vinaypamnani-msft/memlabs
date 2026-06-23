@@ -3658,9 +3658,6 @@ The name of the virtual switch to connect the virtual machine to.
 .PARAMETER DiskControllerType
 The type of disk controller to use for the virtual machine. Default value is "SCSI".
 
-.PARAMETER SwitchName2
-The name of an additional virtual switch to connect the virtual machine to.
-
 .PARAMETER AdditionalDisks
 Additional disks to attach to the virtual machine.
 
@@ -4158,8 +4155,6 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $false)]
         [string]$DiskControllerType = "SCSI",
         [Parameter(Mandatory = $false)]
-        [string]$SwitchName2,
-        [Parameter(Mandatory = $false)]
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
@@ -4518,199 +4513,11 @@ function New-VirtualMachine {
             }
         }
 
-        if ($SwitchName2) {
-            Write-Progress2 $Activity -Status "SQLAO: Waiting to add 2nd NIC" -percentcomplete 90 -force
-            $mtx = New-Object System.Threading.Mutex($false, "GetIP")
-            write-log "Attempting to acquire 'GetIP' Mutex" -LogOnly
-            [void]$mtx.WaitOne()
-            write-log "acquired 'GetIP' Mutex" -LogOnly
-            try {
-                Write-Progress2 $Activity -Status "SQLAO: Adding 2nd NIC" -percentcomplete 95 -force
-                write-log "$VmName`: Adding 2nd NIC attached to $SwitchName2" -LogOnly
-                $Global:ProgressPreference = 'SilentlyContinue'
-                $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
-                write-log "$VmName`: NIC added MAC: $($vmnet.MacAddress)" -LogOnly
-
-                if (-not $($vmnet.MacAddress)) {
-                    start-sleep -Seconds 60
-                    if (-not $($vmnet.MacAddress)) {
-                        #Investigate deleting and re-adding
-                        write-log "$VmName`: 2nd NIC does not have a MAC address: $($vmnet)" -Failure
-                        return $false
-                    }
-                }
-
-                # Allocate a static heartbeat IP from 10.250.251.x.
-                # No DHCP scope is used; we scan VM notes to find IPs already assigned.
-                $heartbeatSubnet = "10.250.251"
-                $heartbeatRangeStart = 20
-                $heartbeatRangeEnd = 199
-
-                # Collect IPs already in use from existing VM notes
-                $usedHeartbeatIPs = @()
-                try {
-                    $allVMs = Get-List -Type VM -SmartUpdate
-                    foreach ($existingVM in $allVMs) {
-                        if ($existingVM.ClusterHeartbeatIP) {
-                            $usedHeartbeatIPs += $existingVM.ClusterHeartbeatIP
-                        }
-                    }
-                }
-                catch {
-                    Write-Log "$VmName`: Warning: Could not enumerate existing VMs for heartbeat IP check: $_" -Warning
-                }
-
-                # Also check VMs in the current deploy config (handles parallel creation)
-                foreach ($vm in $DeployConfig.virtualMachines) {
-                    if ($vm.ClusterHeartbeatIP -and $vm.ClusterHeartbeatIP -notin $usedHeartbeatIPs) {
-                        $usedHeartbeatIPs += $vm.ClusterHeartbeatIP
-                    }
-                }
-
-                $ip = $null
-                for ($i = $heartbeatRangeStart; $i -le $heartbeatRangeEnd; $i++) {
-                    $candidate = "$heartbeatSubnet.$i"
-                    if ($candidate -notin $usedHeartbeatIPs) {
-                        $ip = $candidate
-                        break
-                    }
-                }
-
-                if (-not $ip) {
-                    Write-Log "$VmName`: Could not find a free heartbeat IP in ${heartbeatSubnet}.${heartbeatRangeStart}-${heartbeatRangeEnd}" -Failure
-                    return $false
-                }
-
-                Write-Log "$VmName`: Assigned static heartbeat IP $ip on $SwitchName2 (Mac: $($vmnet.MacAddress))"
-
-                $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
-                $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterHeartbeatIP" -Value $ip -Force
-                if ($currentItem.OtherNode) {
-                    # Both the cluster IP and AG listener IP are allocated from the
-                    # node's OWN domain subnet so they're reachable by clients and
-                    # hostable by the node's ClusterAndClient network. A SQLAO node on a
-                    # secondary network (e.g. a child site's network) has its domain NIC
-                    # there, NOT on vmOptions.network -- using the default network would
-                    # land the cluster IP on a subnet the node can't host (New-Cluster
-                    # fails: "no appropriate ClusterAndClient network ... to host it").
-                    # The heartbeat network is set to Role 1 (cluster-only), so virtual
-                    # IPs on that subnet can't come online (WSFC refuses client access on
-                    # Role 1 networks).
-                    $domainScopeId = if ($currentItem.network) { $currentItem.network } else { $DeployConfig.vmOptions.network }
-
-                    # Prefer the cluster/AG IPs pre-allocated by Set-DeployConfigIPAddresses
-                    # (reserved up front from .201-.254, above the DHCP pool, alongside every
-                    # other VM). Only fall back to a live pick if they're missing -- e.g. an
-                    # older note or a path that skipped the pre-pass.
-                    $clusterIP = if ($currentItem.ClusterIPAddress) { $currentItem.ClusterIPAddress -replace '/.+$', '' } else { $null }
-                    $AGIP = if ($currentItem.AGIPAddress) { $currentItem.AGIPAddress -replace '/.+$', '' } else { $null }
-
-                    if ($clusterIP -and $AGIP) {
-                        Write-Log "$VmName`: SQLAO: Setting pre-allocated ClusterIPAddress and AG IPAddress" -LogOnly
-                        write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP (pre-allocated, domain scope $domainScopeId)"
-                    }
-                    else {
-                        # Fallback only -- pre-allocation normally fills these in. Allocate
-                        # from the TOP of the subnet (.201-.254), ABOVE the DHCP pool
-                        # (.20-.199) and the .200 gateway, so a cluster virtual IP can never
-                        # collide with a regular VM's pool reservation.
-                        $domainPrefix = ($domainScopeId -replace '\.\d+$', '.')
-
-                        # Build the set of cluster/AG IPs already taken by ANY cluster in
-                        # the domain (existing VMs + this deployConfig) so the next 2 free
-                        # addresses we pick don't collide. These IPs are above the DHCP pool
-                        # (.201-.254), so no exclusion is needed or possible -- collision
-                        # avoidance is purely this in-memory check.
-                        $sqlaoTaken = @{}
-                        try {
-                            foreach ($evm in (Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName -SmartUpdate | Where-Object { $_.role -eq 'SQLAO' })) {
-                                foreach ($p in 'ClusterIPAddress', 'AGIPAddress') {
-                                    if ($evm.$p) { $sqlaoTaken[($evm.$p -replace '/.+$', '')] = $true }
-                                }
-                            }
-                        }
-                        catch {}
-                        foreach ($cvm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
-                            foreach ($p in 'ClusterIPAddress', 'AGIPAddress') {
-                                if ($cvm.$p) { $sqlaoTaken[($cvm.$p -replace '/.+$', '')] = $true }
-                            }
-                        }
-
-                        $clusterIP = $null
-                        $AGIP = $null
-                        for ($octet = 201; $octet -le 254; $octet++) {
-                            $candidate = "$domainPrefix$octet"
-                            if ($sqlaoTaken.ContainsKey($candidate)) { continue }
-                            $existingResv = $null
-                            try { $existingResv = Get-DhcpServerv4Reservation -ScopeId $domainScopeId -IPAddress $candidate -ErrorAction SilentlyContinue } catch {}
-                            if ($existingResv) { continue }
-                            $sqlaoTaken[$candidate] = $true
-                            if (-not $clusterIP) { $clusterIP = $candidate; continue }
-                            $AGIP = $candidate
-                            break
-                        }
-
-                        Write-Log "$VmName`: SQLAO: Setting New ClusterIPAddress and AG IPAddress" -LogOnly
-                        write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP (domain scope $domainScopeId, .201-.254 range)"
-                    }
-
-                    if ($clusterIP) {
-                        Remove-DHCPReservation -ip $clusterIP -vmName $VmName
-                    }
-                    if ($AGIP) {
-                        Remove-DHCPReservation -ip $AGIP -vmName $VmName
-                    }
-
-
-                    if (-not $clusterIP -or -not $AGIP) {
-                        write-log -failure "$VmName`:Failed to acquire Cluster or AGIP for SQLAO"
-                        return $false
-                    }
-
-                    if ($clusterIP -eq $AGIP) {
-                        write-log -failure "$VmName`: ClusterIP and AGIP are the same ($clusterIP). DHCP scope $domainScopeId may be exhausted."
-                        return $false
-                    }
-
-                    # Validate both IPs are on the domain subnet, not the heartbeat subnet.
-                    # If they land on the heartbeat subnet, the cluster can't come online (Role 1 network).
-                    $domainPrefix = ($domainScopeId -replace '\.\d+$', '.')
-                    foreach ($entry in @(@{Name='ClusterIP'; IP=$clusterIP}, @{Name='AGIP'; IP=$AGIP})) {
-                        if ($entry.IP -notmatch [regex]::Escape($domainPrefix)) {
-                            write-log -failure "$VmName`: $($entry.Name) $($entry.IP) is NOT on the domain subnet $domainScopeId. Expected $domainPrefix*"
-                            return $false
-                        }
-                    }
-
-                    $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
-                    $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
-
-                    # Cluster/AG IPs normally live above the pool (.201-.254) where a DHCP
-                    # exclusion is neither needed nor allowed. Only a legacy in-pool IP
-                    # (.20-.199) needs an exclusion so the pool can't lease it to a VM.
-                    foreach ($vip in @($clusterIP, $AGIP)) {
-                        $vipOctet = [int]($vip.Split('.')[-1])
-                        if ($vipOctet -ge 20 -and $vipOctet -le 199) {
-                            Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $vip -EndRange $vip -ErrorAction SilentlyContinue | out-null
-                        }
-                    }
-                }
-            }
-            catch {
-                Write-Progress2 $Activity -Status "SQLAO: $_" -percentcomplete 99 -force
-                Start-Sleep -seconds 5
-                Write-Exception $_
-                Write-Log "$vmName`: Failed adding 2nd NIC $_"
-                return $false
-            }
-            finally {
-                [void]$mtx.ReleaseMutex()
-                [void]$mtx.Dispose()
-            }
-
-            New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
-            Write-Progress2 $Activity -Status "SQLAO: 2nd NIC Added" -percentcomplete 100 -force
-        }
+        # The SQLAO cluster heartbeat (2nd) NIC and its heartbeat/cluster/AG IPs are no
+        # longer added here. They are provisioned at the start of Phase 5 (see the
+        # "$Phase -eq 5 -and role -eq SQLAO" block in Common.ScriptBlocks.ps1), which is
+        # both faster (host has settled past the Phase 1 parallel-OOBE storm) and
+        # convergent (safe to re-run).
 
         Write-Progress2 $Activity -Status "VM Created in Hyper-V successfully" -percentcomplete 100 -force -Completed
         return $true
