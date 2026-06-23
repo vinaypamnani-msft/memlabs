@@ -231,7 +231,18 @@ if ($SUPNames) {
 # import. The function is idempotent: 'already-imported' (TaxonomyCats >= 100)
 # / 'no-cab' / 'no-wsusutil' all short-circuit cleanly, so it's safe to fire
 # on every InstallRoles run regardless of SUP state.
-Start-WsusBaselineImportBackground -Tag "[InstallRoles]" | Out-Null
+#
+# TOP-LEVEL ONLY: only the top-level SUP (syncs from Microsoft Update) may
+# import the MU-sourced cab. On a downstream child primary, a local SUP (if any)
+# syncs from the CAS upstream; importing would corrupt the sync anchor and break
+# it with UssInternalError. Gate on no parentSiteCode. (The function also
+# self-guards on the live WSUS upstream config.)
+if (-not $ThisVM.parentSiteCode) {
+    Start-WsusBaselineImportBackground -Tag "[InstallRoles]" | Out-Null
+}
+else {
+    Write-DscStatus "[InstallRoles] Downstream site (parent=$($ThisVM.parentSiteCode)) - skipping WSUS cab import; categories replicate from the upstream SUP."
+}
 
 # Quick check: if all SUPs are already installed, skip the entire install+sync
 $allSUPsInstalled = $true

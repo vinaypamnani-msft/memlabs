@@ -132,7 +132,18 @@
         # C:\staging\wsus\ in Phase <=7. Idempotent + non-fatal:
         # Start-WsusBaselineImportBackground short-circuits with
         # 'already-imported' / 'no-cab' / 'no-wsusutil' as appropriate.
-        if ($ThisVM.installSUP -eq $true) {
+        #
+        # TOP-LEVEL ONLY: `wsusutil import` is valid ONLY for a SUP that syncs
+        # from Microsoft Update (the cab is an MU-sourced catalog). A DOWNSTREAM
+        # SUP (a child primary's / secondary's SUP that syncs from the CAS/parent
+        # upstream WSUS) must NOT import -- it corrupts the local sync anchor and
+        # the next upstream sync fails with UssInternalError ("updates pipeline
+        # broken"). Downstream SUPs get their categories via replication from the
+        # upstream. So gate on the owning site server being top-level (no
+        # parentSiteCode). Start-WsusBaselineImportBackground also self-guards on
+        # the live WSUS upstream config as a belt-and-suspenders.
+        $supSiteServer = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") -and $_.Sitecode -eq $ThisVM.Sitecode } | Select-Object -First 1
+        if ($ThisVM.installSUP -eq $true -and $supSiteServer -and -not $supSiteServer.parentSiteCode) {
             WriteStatus ImportWsusBaselineStatus {
                 Status = "Importing the WSUS categories baseline once CM postinstalls WSUS on this SUP."
             }
@@ -520,17 +531,16 @@
         # WSUS categories baseline cab import for this Secondary's SUP.
         # By the time WaitPrimary returns the Primary's InstallRoles has
         # added the SUP role to this Secondary, which installs WSUS +
-        # runs wsusutil postinstall via CM's site component manager. The
-        # cab was already staged to C:\staging\wsus\ during Phase <=7
-        # by the host orchestrator. Fire the import locally now -- CM's
-        # ScriptWorkflow on the Primary never runs on a Secondary, so
-        # this is the only point where the import can be triggered with
-        # WSUS guaranteed-installed and the cab guaranteed-present.
-        # Start-WsusBaselineImportBackground + Wait-WsusBaselineImport
-        # are defined in C:\staging\DSC\phases\ScriptFunctions.ps1 and
-        # are idempotent (short-circuit with 'no-cab' / 'already-imported'
-        # / 'no-wsusutil' as appropriate), so this is safe on re-runs and
-        # on Secondaries that for any reason don't have a SUP role.
+        # runs wsusutil postinstall via CM's site component manager.
+        #
+        # A Secondary's SUP is ALWAYS a DOWNSTREAM/replica that syncs from
+        # the parent primary's SUP -- so it must NOT actually import the
+        # MU-sourced cab (that corrupts the sync anchor -> UssInternalError).
+        # We still call Start-WsusBaselineImportBackground here, but the
+        # function self-guards on the live WSUS upstream config and returns
+        # 'downstream-skip' for a downstream SUP, so this is now a clean no-op
+        # on a Secondary; its categories replicate from the upstream instead.
+        # (Kept as a single shared entry point; idempotent + non-fatal.)
         Script ImportWsusBaseline {
             GetScript  = { @{ Result = '' } }
             TestScript = {

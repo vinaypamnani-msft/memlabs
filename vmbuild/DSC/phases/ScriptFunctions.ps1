@@ -986,6 +986,25 @@ function Start-WsusBaselineImportBackground {
         return 'no-cab'
     }
 
+    # NEVER import the cab into a DOWNSTREAM / replica WSUS. `wsusutil import`
+    # is valid ONLY for a top-level WSUS that syncs from Microsoft Update -- the
+    # cab is generated from an MU-sourced catalog, so importing it into a WSUS
+    # configured to sync from an UPSTREAM WSUS server (a child primary's or
+    # secondary's SUP -> the CAS/parent SUP) corrupts the local sync anchor and
+    # the very next upstream sync fails with UssInternalError ("updates pipeline
+    # broken"). Downstream SUPs get their categories via replication from the
+    # upstream, not via import. Skip only on a POSITIVE downstream determination
+    # (SyncFromMicrosoftUpdate=false AND an upstream server name set) so an
+    # unconfigured / genuinely top-level SUP still imports.
+    try {
+        [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+        $wsusCfgChk = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer().GetConfiguration()
+        if ((-not $wsusCfgChk.SyncFromMicrosoftUpdate) -and $wsusCfgChk.UpstreamWsusServerName) {
+            Write-DscStatus "$Tag WSUS is a downstream/replica (syncs from upstream '$($wsusCfgChk.UpstreamWsusServerName)') - skipping cab import; categories replicate from the upstream (importing would break the sync with UssInternalError)."
+            return 'downstream-skip'
+        }
+    } catch {}
+
     # Skip if a prior pass already imported a healthy taxonomy.
     $preCount = Get-WsusTaxonomyCategoryCount
     if ($preCount -ge $ExpectedCount) {
