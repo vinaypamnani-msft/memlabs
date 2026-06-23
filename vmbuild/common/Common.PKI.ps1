@@ -489,6 +489,19 @@ function Install-SingleTierPKI {
         $report = [System.Collections.Generic.List[string]]::new()
         function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
 
+        # Live heartbeat to the host. _Log is BUFFERED and only returns when the
+        # whole scriptblock finishes, so the long post-dcpromo CA retry loop looks
+        # frozen in real time. _Progress emits a Write-Progress record that
+        # Invoke-VmCommand -PollProgress forwards live to the operator's console
+        # (every call also grows the guest's Progress stream -> a stall heartbeat).
+        $caProgressStart = Get-Date
+        function _Progress($status) {
+            try {
+                $el = [int]((Get-Date) - $caProgressStart).TotalSeconds
+                Write-Progress -Activity "Enterprise Root CA '$CAName'" -Status "$status (elapsed ${el}s)"
+            } catch {}
+        }
+
         function Wait-CertSvcReady {
             param([int]$TimeoutSec = 60)
             $deadline = (Get-Date).AddSeconds($TimeoutSec)
@@ -673,6 +686,7 @@ LoadDefaultTemplates=0
                     for ($caTry = 1; $caTry -le $maxCaTries; $caTry++) {
                         try {
                             _Log "Installing Enterprise Root CA '$CAName' (attempt $caTry/$maxCaTries)..."
+                            _Progress "publishing CA to AD (attempt $caTry/$maxCaTries)..."
                             Install-AdcsCertificationAuthority -CAType EnterpriseRootCa `
                                 -CACommonName $CAName `
                                 -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
@@ -699,6 +713,7 @@ LoadDefaultTemplates=0
                                 throw
                             }
                             _Log "Transient AD-publish error on attempt $caTry : $caLastErr -- remediating (tear down partial config, wait for AD, retry)."
+                            _Progress "attempt $caTry/$maxCaTries hit a transient AD error; remediating..."
                             try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
                             try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
                             if ($isRange) {
@@ -713,8 +728,17 @@ LoadDefaultTemplates=0
                                     _Log "Enabled NTDS '15 Field Engineering'=5 to capture the exact constraint attribute on the next attempt (prior=$feLevelPrior)."
                                 }
                             }
+                            _Progress "attempt $caTry/${maxCaTries}: waiting for AD DS readiness after remediation..."
                             Wait-AdDsReady -TimeoutSec 180 | Out-Null
-                            Start-Sleep -Seconds ([Math]::Min(150, 30 * $caTry))
+                            # Backoff with a ~5s heartbeat so the wait is visibly counting
+                            # down (not 'hung') and -PollProgress's stall timer keeps resetting.
+                            $backoffSec = [Math]::Min(150, 30 * $caTry)
+                            $backoffDeadline = (Get-Date).AddSeconds($backoffSec)
+                            while ((Get-Date) -lt $backoffDeadline) {
+                                $remain = [int]($backoffDeadline - (Get-Date)).TotalSeconds
+                                _Progress "attempt $caTry/$maxCaTries failed (post-dcpromo AD settling); next retry in ${remain}s"
+                                Start-Sleep -Seconds 5
+                            }
                         }
                     }
                 }
@@ -732,6 +756,7 @@ LoadDefaultTemplates=0
                 }
 
                 _Log "Waiting for CA service to become ready..."
+                _Progress "CA published; waiting for CertSvc to come online..."
                 if (-not (Wait-CertSvcReady -TimeoutSec 90)) {
                     throw "CA service did not become responsive within 90 seconds"
                 }
@@ -824,10 +849,17 @@ LoadDefaultTemplates=0
     }
 
     Flush-LogBuffer -All
+    # -AsJob -PollProgress: forward the guest's Write-Progress heartbeats LIVE to
+    # the console so the (now up to ~20-30 min) post-dcpromo CA retry loop shows a
+    # counting-down status instead of appearing hung. -TimeoutSeconds here is a
+    # STALL timeout (resets on every guest heartbeat, ~5s during backoff), NOT an
+    # absolute deadline; the inner absolute ceiling (max(TimeoutSeconds*6,1800)s
+    # = 36 min) hard-bounds a CA install that never settles.
     $result = Invoke-VmCommand -VmName $caVMName -VmDomainName $domainName `
         -ScriptBlock $singleTierScript `
         -ArgumentList $caName, $domainName, $webURL, $webFolderPath `
-        -DisplayName "SingleTierPKI: Install Enterprise Root CA"
+        -DisplayName "SingleTierPKI: Install Enterprise Root CA" `
+        -AsJob -PollProgress -TimeoutSeconds 360
 
     if (-not (Test-PKIStepResult -Result $result -StepName "CA installation" -LogPrefix "SingleTierPKI" -LogSource "CA" -LogOnly)) {
         return $false
