@@ -2581,20 +2581,63 @@ $global:VM_Config = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
             New-Item -Path "C:\staging\DSC" -ItemType Directory -Force | Out-Null
             $flagPath = "C:\staging\DSC\DSC.zip.Installed"
+            $sigPath  = "C:\staging\DSC\DSC.SourceSignature"
             [PSCustomObject]@{
-                Hash         = (Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
-                FlagExists   = Test-Path $flagPath
-                InstalledHash = if (Test-Path $flagPath) { $c = Get-Content $flagPath -First 1 -ErrorAction SilentlyContinue; if ($c) { $c.Trim() } } else { $null }
+                Hash            = (Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
+                FlagExists      = Test-Path $flagPath
+                InstalledHash   = if (Test-Path $flagPath) { $c = Get-Content $flagPath -First 1 -ErrorAction SilentlyContinue; if ($c) { $c.Trim() } } else { $null }
+                SourceSignature = if (Test-Path $sigPath) { $s = Get-Content $sigPath -First 1 -ErrorAction SilentlyContinue; if ($s) { $s.Trim() } } else { $null }
             }
         } -DisplayName "DSC: Detect modules and ensure staging directory."
         $guestZipHash = $result.ScriptBlockOutput.Hash
         $guestFlagExists = $result.ScriptBlockOutput.FlagExists
         $guestInstalledHash = $result.ScriptBlockOutput.InstalledHash
+        $guestSourceSignature = $result.ScriptBlockOutput.SourceSignature
 
         $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
 
+        # Signature of the ENTIRE DSC payload we copy, not just DSC.zip.
+        # Copy-ItemSafe below ships the whole DSC folder -- DSC.zip PLUS the
+        # loose phase scripts (phases\*.ps1, ScriptWorkflow.ps1, helper .ps1s,
+        # etc.). The DSC.zip MD5 only fingerprints the compiled module archive
+        # and does NOT change when a loose script is edited, so the zip hash
+        # alone could not gate the copy -- which is why the old gate fell back
+        # to "-not $alreadyCopiedDSC" and force-recopied the whole folder on the
+        # first sight of every VM each run (the reported "recopies every re-run
+        # even when the guest is up to date").
+        #
+        # Composite signature = DSC.zip content hash + newest loose-file write
+        # time (UTC ticks) + loose-file count. It advances on ANY change to ANY
+        # copied file (zip rebuild via content hash; loose-script edit via
+        # mtime; loose-script add/delete via mtime+count) and stays identical
+        # across re-runs when nothing changed. Both sides of the comparison are
+        # host-generated values (the guest just stores whatever the host last
+        # wrote), so there is no host/guest clock-skew concern.
+        $dscSourceSignature = $dscZipHash
+        try {
+            $looseFiles = @(Get-ChildItem -Path "$rootPath\DSC" -File -Recurse -ErrorAction Stop | Where-Object { $_.Name -ne 'DSC.zip' })
+            $looseCount = $looseFiles.Count
+            $looseMaxTicks = 0
+            if ($looseCount -gt 0) {
+                $looseMaxTicks = ($looseFiles | ForEach-Object { $_.LastWriteTimeUtc.Ticks } | Measure-Object -Maximum).Maximum
+            }
+            $dscSourceSignature = "$dscZipHash`:$looseMaxTicks`:$looseCount"
+        }
+        catch {
+            # If the host folder scan fails, fall back to the zip hash alone so
+            # the gate still functions (it just loses loose-file-change detection).
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC source-signature scan failed: $($_.Exception.Message). Falling back to DSC.zip hash." -Warning
+            $dscSourceSignature = $dscZipHash
+        }
 
-        if (-not $alreadyCopiedDSC -or ($guestZipHash -ne $dscZipHash)) {
+        # Copy when the guest's recorded signature differs from the host
+        # signature (payload changed, or the VM has never been copied to), OR
+        # the guest's DSC.zip hash drifted (defensive). $alreadyCopiedDSC short-
+        # circuits the copy on subsequent phases within the SAME run -- the host
+        # payload cannot change mid-run, so once we've copied (and stamped the
+        # signature) there is nothing to re-evaluate. It no longer FORCES a copy.
+        $signatureMatches = ($guestSourceSignature -eq $dscSourceSignature) -and ($guestZipHash -eq $dscZipHash)
+        if (-not $alreadyCopiedDSC -and -not $signatureMatches) {
 
             # PS5.1 parse-check all guest scripts once per build (not per VM).
             # Guest VMs run PS 5.1 which reads non-BOM files as Windows-1252;
@@ -2649,6 +2692,21 @@ $global:VM_Config = {
             if ($copyResults -eq $false) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC files to the VM after $copyAttempt attempts." -Failure -OutputStream
                 return
+            }
+
+            # Stamp the host payload signature on the guest so a later re-run
+            # whose DSC folder is unchanged skips this copy entirely. Written
+            # only AFTER a confirmed-successful copy, so a partial/failed copy
+            # never leaves a matching signature that would suppress the next copy.
+            $sigResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ArgumentList $dscSourceSignature -ScriptBlock {
+                param($sig)
+                New-Item -Path "C:\staging\DSC" -ItemType Directory -Force | Out-Null
+                $sig | Out-File "C:\staging\DSC\DSC.SourceSignature" -Force -Encoding ascii
+            } -DisplayName "DSC: Record source signature on guest"
+            if ($sigResult.ScriptBlockFailed) {
+                # Non-fatal: the copy already succeeded. Without the stamp the
+                # next run just recopies (the prior, safe default), so warn only.
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Could not write source-signature flag on guest; next run will recopy DSC files. $($sigResult.ScriptBlockOutput)" -Warning
             }
         }
         else {
