@@ -306,7 +306,29 @@
         }
 
         $nextDepend = "[Service]ADWS"
-        $waitOnDependency = "[Service]ADWS"
+
+        # The ADWS *service* being "Running" does NOT mean the AD Web Services
+        # *endpoint* is answering directory queries yet. Right after the ADDomain
+        # promotion reboot, ADWS reports Running but Get-ADUser/Get-ADComputer
+        # still throw "Unable to find a default server with Active Directory Web
+        # Services running" for the first several seconds/minutes while ADWS
+        # discovers the directory. Running the ADUser/ADComputer resources in
+        # that window makes their Test-TargetResource throw, DSC records the
+        # failure, the pending.mof is retained, and the LCM strands in
+        # PendingConfiguration (no reboot owed) until the host watchdog resumes
+        # it. Gate the AD-object resources behind a real readiness probe -- the
+        # same WaitForADDomain pattern Phase2BDC already uses -- so they only run
+        # once ADWS actually serves the domain.
+        WaitForADDomain WaitForADWSReady {
+            DomainName              = $DomainName
+            Credential              = $DomainCreds
+            WaitForValidCredentials = $true
+            WaitTimeout             = 900
+            DependsOn               = $nextDepend
+        }
+
+        $nextDepend = "[WaitForADDomain]WaitForADWSReady"
+        $waitOnDependency = "[WaitForADDomain]WaitForADWSReady"
 
         $adObjectDependency = @($nextDepend)
         $i = 0
