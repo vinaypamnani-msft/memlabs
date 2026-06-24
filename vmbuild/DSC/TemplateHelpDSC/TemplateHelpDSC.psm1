@@ -3782,17 +3782,18 @@ class OpenFirewallPortForSCCM {
             Write-Status "WARNING: $($Error.Count) firewall rule(s) reported errors and were skipped (continuing). First: $(($Error[0].Exception.Message).Trim())"
         }
 
-        $StatusPath = "$env:windir\temp\OpenFirewallStatus.txt"
-        "Finished" >> $StatusPath
+        # Durable marker under C:\staging (survives reboots + %windir%\temp cleanup, which was
+        # purging the old marker between runs -- re-running every firewall rule, and a
+        # WorkgroupMember reboot, on every Phase 3).
+        $StatusPath = "C:\staging\OpenFirewallStatus.txt"
+        if (-not (Test-Path 'C:\staging')) { New-Item -ItemType Directory -Path 'C:\staging' -Force | Out-Null }
+        "Finished" | Out-File -FilePath $StatusPath -Append -Encoding ascii
     }
 
     [bool] Test() {
-        $StatusPath = "$env:windir\temp\OpenFirewallStatus.txt"
-        if (Test-Path $StatusPath) {
-            return $true
-        }
-
-        return $false
+        # Durable marker, falling back to the legacy %windir%\temp marker so a device already
+        # provisioned under the old scheme (old marker not yet cleaned) isn't re-run/rebooted.
+        return ([bool]((Test-Path "C:\staging\OpenFirewallStatus.txt") -or (Test-Path "$env:windir\temp\OpenFirewallStatus.txt")))
     }
 
     [OpenFirewallPortForSCCM] Get() {
@@ -3824,121 +3825,11 @@ class InstallFeatureForSCCM {
         }
         catch {}
 
-        # Server OS?
-        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
-        if ($os) {
-            $IsServerOS = $true
-            if ($os.ProductType -eq 1) {
-                $IsServerOS = $false
-            }
-        }
-        else {
-            $IsServerOS = $false
-        }
-
-        if ($IsServerOS) {
-
-            #
-            #
-            #
-            #   If you add roles here, please update the Version number so existing Machines will get the new roles
-            #
-            #
-            #
-
-            # Collect all features into a single list, then install once for speed.
-            $features = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
-            # All servers
-            [void]$features.Add("RSAT-AD-PowerShell")
-            [void]$features.Add("AD-Domain-Services")
-
-            if ($_Role -notcontains "DC" -and $_Role -notcontains "BDC") {
-                # Non-DC servers get the IIS auth/ISAPI bits, BITS and IIS metabase.
-                # DCs/BDCs don't host IIS for our roles — the CA web-enrollment path
-                # (Common.PKI.ps1) installs its own Web-Server on demand — so these
-                # IIS features are skipped on DC/BDC to shorten the feature install.
-                [void]$features.Add("Web-Windows-Auth")
-                [void]$features.Add("Web-ISAPI-Ext")
-                [void]$features.Add("BITS")
-                [void]$features.Add("BITS-IIS-Ext")
-                [void]$features.Add("Web-WMI")
-                [void]$features.Add("Web-Metabase")
-
-                if ($_Role -notcontains "DomainMember") {
-                    [void]$features.Add("Rdc")
-                }
-            }
-
-            if ($_Role -contains "SQLAO") {
-                foreach ($f in @("Failover-Clustering", "RSAT-Clustering-PowerShell", "RSAT-Clustering-CmdInterface", "RSAT-Clustering-Mgmt", "RSAT-DNS-Server")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Site Server") {
-                foreach ($f in @("Net-Framework-Core", "NET-Framework-45-Core",
-                    "Web-Basic-Auth", "Web-IP-Security", "Web-Url-Auth", "Web-ASP", "Web-Asp-Net",
-                    "Web-Mgmt-Console", "Web-Lgcy-Scripting", "Web-Mgmt-Service", "Web-Mgmt-Tools", "Web-Scripting-Tools",
-                    "Web-WMI", "Web-Metabase", "Rdc", "UpdateServices-UI", "BITS", "BITS-IIS-Ext")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Application Catalog website point") {
-                foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Application Catalog web service point") {
-                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Certificate registration point") {
-                foreach ($f in @("Web-Asp-Net", "Web-Asp-Net45", "Web-Metabase", "Web-WMI")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Distribution point") {
-                foreach ($f in @("Web-WMI", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Enrollment point") {
-                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Enrollment proxy point") {
-                foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Fallback status point") {
-                [void]$features.Add("Web-Metabase")
-            }
-
-            if ($_Role -contains "Management point") {
-                foreach ($f in @("BITS", "BITS-IIS-Ext", "Web-WMI", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "State migration point") {
-                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            # Install all collected features in a single call
-            $featureList = @($features)
+        # Required server features for this role (empty on client OS). The list is
+        # computed once in GetRequiredFeatures() and shared with Test() so the two can
+        # never drift.
+        $featureList = @($this.GetRequiredFeatures())
+        if ($featureList.Count -gt 0) {
             Write-Status "Installing $($featureList.Count) Windows Features: $($featureList -join ', ')"
             $result = Install-WindowsFeature -Name $featureList -IncludeManagementTools
             if ($result.RestartNeeded -eq "Yes") {
@@ -3947,34 +3838,154 @@ class InstallFeatureForSCCM {
             }
         }
 
-        $StatusPath = "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt"
-        "Finished" >> $StatusPath
+        # Durable completion breadcrumb (diagnostics + client-OS fast-path). Lives under
+        # C:\staging so it survives reboots and %windir%\temp cleanup -- the old
+        # %windir%\temp marker was being purged between runs (Phase 10 maintenance / the
+        # reboots during Phase 8 CM install), which made the full feature install +
+        # reboot re-run on every Phase 3 for the SiteSystem boxes. Server-OS idempotency
+        # is now keyed on the ACTUAL installed feature set in Test(), not on this file.
+        $markerPath = $this.MarkerPath()
+        try {
+            $markerDir = Split-Path -Parent $markerPath
+            if (-not (Test-Path $markerDir)) { New-Item -ItemType Directory -Path $markerDir -Force | Out-Null }
+            "Finished" | Out-File -FilePath $markerPath -Append -Encoding ascii
+        }
+        catch {}
     }
 
     [bool] Test() {
-        $StatusPath = "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt"
-        if (Test-Path $StatusPath) {
-            $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
-            if ($os) {
-                $IsServerOS = $true
-                if ($os.ProductType -eq 1) {
-                    $IsServerOS = $false
-                }
-            }
-            else {
-                $IsServerOS = $false
-            }
-
-            if ($IsServerOS) {
-                if ((Get-WindowsFeature -name AD-Domain-Services).InstallState -ne "Installed") {
-                    return $false
-                }
-            }
-
-            return $true
+        # Idempotency is keyed on the ACTUAL installed feature set, not a stamp file, so
+        # a fully-provisioned server never re-runs the install + reboot just because the
+        # marker was cleaned up. Adding a feature in GetRequiredFeatures() is also
+        # auto-detected here (no Version bump needed): a newly-required-but-missing
+        # feature makes Test() return $false and Set() installs only what's missing.
+        $featureList = @($this.GetRequiredFeatures())
+        if ($featureList.Count -eq 0) {
+            # Client OS -- no server features to verify; gate on the durable marker so
+            # the one-time TelnetClient enable in Set() isn't re-run forever. Fall back to
+            # the legacy %windir%\temp marker so devices provisioned under the old scheme
+            # (whose old marker hasn't been cleaned yet) aren't re-run on the first pass.
+            return ([bool]((Test-Path $this.MarkerPath()) -or (Test-Path "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt")))
         }
-        return $false
-       
+        # Assigned + wrapped in @() so Get-WindowsFeature objects never leak onto the
+        # success stream (a non-boolean leak hard-fails a PS5.1 DSC Test method).
+        $missing = @(Get-WindowsFeature -Name $featureList -ErrorAction SilentlyContinue | Where-Object { $_.InstallState -ne "Installed" })
+        return ($missing.Count -eq 0)
+    }
+
+    [string] MarkerPath() {
+        # Join the role array deterministically so the filename is stable across runs
+        # regardless of how the role[] is ordered/stringified.
+        $roleTag = ($this.Role -join '-')
+        return "C:\staging\InstallFeatureStatus$roleTag$($this.Version).txt"
+    }
+
+    [string[]] GetRequiredFeatures() {
+        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $IsServerOS = $true
+        if (-not $os -or $os.ProductType -eq 1) {
+            $IsServerOS = $false
+        }
+        if (-not $IsServerOS) {
+            return @()
+        }
+
+        $_Role = $this.Role
+
+        # Collect all features into a single set, deduped case-insensitively.
+        # NOTE: adding a feature here is picked up automatically on the next run --
+        # Test() checks actual install state, so no Version bump is needed.
+        $features = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+        # All servers
+        [void]$features.Add("RSAT-AD-PowerShell")
+        [void]$features.Add("AD-Domain-Services")
+
+        if ($_Role -notcontains "DC" -and $_Role -notcontains "BDC") {
+            # Non-DC servers get the IIS auth/ISAPI bits, BITS and IIS metabase.
+            # DCs/BDCs don't host IIS for our roles — the CA web-enrollment path
+            # (Common.PKI.ps1) installs its own Web-Server on demand — so these
+            # IIS features are skipped on DC/BDC to shorten the feature install.
+            [void]$features.Add("Web-Windows-Auth")
+            [void]$features.Add("Web-ISAPI-Ext")
+            [void]$features.Add("BITS")
+            [void]$features.Add("BITS-IIS-Ext")
+            [void]$features.Add("Web-WMI")
+            [void]$features.Add("Web-Metabase")
+
+            if ($_Role -notcontains "DomainMember") {
+                [void]$features.Add("Rdc")
+            }
+        }
+
+        if ($_Role -contains "SQLAO") {
+            foreach ($f in @("Failover-Clustering", "RSAT-Clustering-PowerShell", "RSAT-Clustering-CmdInterface", "RSAT-Clustering-Mgmt", "RSAT-DNS-Server")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Site Server") {
+            foreach ($f in @("Net-Framework-Core", "NET-Framework-45-Core",
+                "Web-Basic-Auth", "Web-IP-Security", "Web-Url-Auth", "Web-ASP", "Web-Asp-Net",
+                "Web-Mgmt-Console", "Web-Lgcy-Scripting", "Web-Mgmt-Service", "Web-Mgmt-Tools", "Web-Scripting-Tools",
+                "Web-WMI", "Web-Metabase", "Rdc", "UpdateServices-UI", "BITS", "BITS-IIS-Ext")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Application Catalog website point") {
+            foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Application Catalog web service point") {
+            foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Certificate registration point") {
+            foreach ($f in @("Web-Asp-Net", "Web-Asp-Net45", "Web-Metabase", "Web-WMI")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Distribution point") {
+            foreach ($f in @("Web-WMI", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Enrollment point") {
+            foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Enrollment proxy point") {
+            foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Fallback status point") {
+            [void]$features.Add("Web-Metabase")
+        }
+
+        if ($_Role -contains "Management point") {
+            foreach ($f in @("BITS", "BITS-IIS-Ext", "Web-WMI", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "State migration point") {
+            foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        return @($features)
     }
 
     [InstallFeatureForSCCM] Get() {
@@ -4098,8 +4109,11 @@ class UpdateCAPrefs {
         try {
             certutil -setreg Policy\EditFlags +EDITF_ENABLELDAPREFERRALS
             Restart-Service -Name certsvc
-            $StatusPath = "$env:windir\temp\UpdateCAStatus.txt"
-            "Finished" >> $StatusPath
+            # Durable marker under C:\staging (survives %windir%\temp cleanup; the old temp marker
+            # was lost between runs, needlessly re-running certutil + restarting certsvc each pass).
+            $StatusPath = "C:\staging\UpdateCAStatus.txt"
+            if (-not (Test-Path 'C:\staging')) { New-Item -ItemType Directory -Path 'C:\staging' -Force | Out-Null }
+            "Finished" | Out-File -FilePath $StatusPath -Append -Encoding ascii
 
             Write-Status "Finished installing CA."
         }
@@ -4109,12 +4123,9 @@ class UpdateCAPrefs {
     }
 
     [bool] Test() {
-        $StatusPath = "$env:windir\temp\UpdateCAStatus.txt"
-        if (Test-Path $StatusPath) {
-            return $true
-        }
-
-        return $false
+        # Durable marker, falling back to the legacy %windir%\temp marker so an existing CA
+        # provisioned under the old scheme isn't needlessly re-run (certutil + certsvc restart).
+        return ([bool]((Test-Path "C:\staging\UpdateCAStatus.txt") -or (Test-Path "$env:windir\temp\UpdateCAStatus.txt")))
     }
 
     [UpdateCAPrefs] Get() {
