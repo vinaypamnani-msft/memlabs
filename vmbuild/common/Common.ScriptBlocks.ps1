@@ -2384,18 +2384,19 @@ $global:VM_Config = {
 
 
         if ($Phase -eq 5 -and $currentItem.role -eq "SQLAO") {
-            # --- Provision the cluster heartbeat (2nd) NIC + its IPs HERE, at the start
-            # of Phase 5, instead of during Phase 1 VM creation. Hot-adding the NIC while
-            # every VM hammers OOBE in parallel was slow; by Phase 5 the host has settled.
-            # SQLAO VMs are Gen2, so the NIC hot-adds to the running VM.
+            # --- Hot-add the cluster heartbeat (2nd) NIC here, at the start of Phase 5,
+            # instead of during Phase 1 VM creation (slow under the parallel-OOBE storm).
+            # SQLAO VMs are Gen2 so the NIC hot-adds to the running VM. The host adapter is
+            # named "Cluster"; the in-guest connection is also renamed to "Cluster" by the
+            # DisableClusterNicDnsRegistration DSC resource (keyed off the 10.250.251.* subnet).
+            # Idempotent: never add a 2nd NIC if a ClusterV2/Cluster NIC already exists --
+            # a duplicate heartbeat NIC breaks the cluster network.
             #
-            # This MUST be convergent -- Phase 5 can re-run (retries, local recovery,
-            # -StartPhase). Two hazards to avoid:
-            #   * DOUBLE NIC: never Add-VMNetworkAdapter if a ClusterV2/Cluster NIC already
-            #     exists (a second heartbeat NIC breaks the cluster network).
-            #   * IP DRIFT: always REUSE the node's own persisted heartbeat/cluster/AG IPs;
-            #     re-allocating would drift the IP away from the one the cluster formed on.
-            # So each resource is resolved independently from observed state, not "first run".
+            # Heartbeat / cluster / AG IPs are pre-allocated SERIALLY by
+            # Set-DeployConfigIPAddresses before Phase 1, so there is NO per-node allocation
+            # and NO GetIP-mutex contention here in the common path. (The old per-node Phase 5
+            # allocation raced across multiple clusters and handed the same 10.250.251.20 to
+            # several nodes -> Windows flagged it Duplicate -> APIPA -> no cluster network.)
             Write-Progress2 $Activity -Status "SQLAO: Preparing heartbeat NIC" -percentcomplete 5 -force
 
             $vmObj = Get-VM2 $currentItem.vmName
@@ -2404,198 +2405,76 @@ $global:VM_Config = {
                 $hasClusterNic = [bool]($vmObj.NetworkAdapters | Where-Object { $_.SwitchName -in @("ClusterV2", "Cluster") })
             }
 
-            # Reuse any already-persisted IPs (config first, then VM Note).
-            $sqlaoNote = Get-VMNote -VMName $currentItem.vmName
-            $existingHeartbeatIP = $currentItem.ClusterHeartbeatIP
-            if (-not $existingHeartbeatIP -and $sqlaoNote) { $existingHeartbeatIP = $sqlaoNote.ClusterHeartbeatIP }
-            $existingClusterIP = if ($currentItem.ClusterIPAddress) { $currentItem.ClusterIPAddress } elseif ($sqlaoNote) { $sqlaoNote.ClusterIPAddress } else { $null }
-            $existingAGIP = if ($currentItem.AGIPAddress) { $currentItem.AGIPAddress } elseif ($sqlaoNote) { $sqlaoNote.AGIPAddress } else { $null }
-            $isClusterOwner = [bool]$currentItem.OtherNode
-
-            $needNic = -not $hasClusterNic
-            $needHeartbeat = -not $existingHeartbeatIP
-            $needVips = $isClusterOwner -and ((-not $existingClusterIP) -or (-not $existingAGIP))
-
-            if ($needNic -or $needHeartbeat -or $needVips) {
-                # Serialize allocation across parallel SQLAO Phase 5 jobs (both nodes of a
-                # cluster + any other clusters) so two nodes can't grab the same heartbeat IP.
-                $mtx = New-Object System.Threading.Mutex($false, "GetIP")
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Attempting to acquire 'GetIP' Mutex" -LogOnly
-                [void]$mtx.WaitOne()
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): acquired 'GetIP' Mutex" -LogOnly
-                $nicFailure = $null
+            $nicFailure = $null
+            $addedNic = $false
+            if (-not $hasClusterNic) {
+                Write-Progress2 $Activity -Status "SQLAO: Adding heartbeat NIC" -percentcomplete 6 -force
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Adding heartbeat NIC 'Cluster' on switch ClusterV2" -OutputStream
+                $Global:ProgressPreference = 'SilentlyContinue'
                 try {
-                    # 1. Hot-add the ClusterV2 NIC only if absent (idempotent).
-                    if ($needNic) {
-                        Write-Progress2 $Activity -Status "SQLAO: Adding heartbeat NIC" -percentcomplete 6 -force
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Adding 2nd NIC attached to ClusterV2" -OutputStream
-                        $Global:ProgressPreference = 'SilentlyContinue'
-                        $vmnet = Add-VMNetworkAdapter -VMName $currentItem.vmName -SwitchName "ClusterV2" -Passthru
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): NIC added MAC: $($vmnet.MacAddress)" -LogOnly
-                        if (-not $($vmnet.MacAddress)) {
-                            Start-Sleep -Seconds 60
-                            if (-not $($vmnet.MacAddress)) {
-                                $nicFailure = "2nd NIC does not have a MAC address: $($vmnet)"
-                            }
-                        }
-                    }
-
-                    # 2. Allocate a static heartbeat IP from 10.250.251.x only if missing.
-                    # No DHCP scope is used; we scan VM notes + deployConfig for used IPs.
-                    if (-not $nicFailure -and $needHeartbeat) {
-                        $heartbeatSubnet = "10.250.251"
-                        $heartbeatRangeStart = 20
-                        $heartbeatRangeEnd = 199
-                        $usedHeartbeatIPs = @()
-                        try {
-                            foreach ($existingVM in (Get-List -Type VM -SmartUpdate)) {
-                                if ($existingVM.ClusterHeartbeatIP) { $usedHeartbeatIPs += $existingVM.ClusterHeartbeatIP }
-                            }
-                        }
-                        catch {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not enumerate existing VMs for heartbeat IP check: $_" -Warning
-                        }
-                        foreach ($vm in $deployConfig.virtualMachines) {
-                            if ($vm.ClusterHeartbeatIP -and $vm.ClusterHeartbeatIP -notin $usedHeartbeatIPs) { $usedHeartbeatIPs += $vm.ClusterHeartbeatIP }
-                        }
-                        $newHeartbeatIP = $null
-                        for ($i = $heartbeatRangeStart; $i -le $heartbeatRangeEnd; $i++) {
-                            $candidate = "$heartbeatSubnet.$i"
-                            if ($candidate -notin $usedHeartbeatIPs) { $newHeartbeatIP = $candidate; break }
-                        }
-                        if (-not $newHeartbeatIP) {
-                            $nicFailure = "Could not find a free heartbeat IP in ${heartbeatSubnet}.${heartbeatRangeStart}-${heartbeatRangeEnd}"
-                        }
-                        else {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Assigned static heartbeat IP $newHeartbeatIP on ClusterV2" -OutputStream
-                            $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterHeartbeatIP" -Value $newHeartbeatIP -Force
-                        }
-                    }
-
-                    # 3. Allocate cluster + AG listener virtual IPs only for an owner node
-                    # still missing them. Both are allocated from the node's OWN domain
-                    # subnet so they're client-reachable and hostable by the node's
-                    # ClusterAndClient network. A SQLAO node on a secondary network has its
-                    # domain NIC there, NOT on vmOptions.network -- using the default network
-                    # would land the cluster IP on a subnet the node can't host (New-Cluster
-                    # fails: "no appropriate ClusterAndClient network ... to host it"). The
-                    # heartbeat network is Role 1 (cluster-only), so VIPs there can't come online.
-                    if (-not $nicFailure -and $needVips) {
-                        $domainScopeId = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
-
-                        # Prefer the cluster/AG IPs pre-allocated by Set-DeployConfigIPAddresses
-                        # (reserved up front from .201-.254, above the DHCP pool). Only fall back
-                        # to a live pick if they're missing -- e.g. an older note or a path that
-                        # skipped the pre-pass.
-                        $clusterIP = if ($currentItem.ClusterIPAddress) { $currentItem.ClusterIPAddress -replace '/.+$', '' } else { $null }
-                        $AGIP = if ($currentItem.AGIPAddress) { $currentItem.AGIPAddress -replace '/.+$', '' } else { $null }
-
-                        if ($clusterIP -and $AGIP) {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): SQLAO: Using pre-allocated ClusterIP $clusterIP / AGIP $AGIP (domain scope $domainScopeId)" -LogOnly
-                        }
-                        else {
-                            # Fallback only. Allocate from the TOP of the subnet (.201-.254),
-                            # ABOVE the DHCP pool (.20-.199) and the .200 gateway, so a cluster
-                            # virtual IP can never collide with a regular VM's pool reservation.
-                            $domainPrefix = ($domainScopeId -replace '\.\d+$', '.')
-                            $sqlaoTaken = @{}
-                            try {
-                                foreach ($evm in (Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName -SmartUpdate | Where-Object { $_.role -eq 'SQLAO' })) {
-                                    foreach ($p in 'ClusterIPAddress', 'AGIPAddress') {
-                                        if ($evm.$p) { $sqlaoTaken[($evm.$p -replace '/.+$', '')] = $true }
-                                    }
-                                }
-                            }
-                            catch {}
-                            foreach ($cvm in ($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
-                                foreach ($p in 'ClusterIPAddress', 'AGIPAddress') {
-                                    if ($cvm.$p) { $sqlaoTaken[($cvm.$p -replace '/.+$', '')] = $true }
-                                }
-                            }
-                            $clusterIP = $null
-                            $AGIP = $null
-                            for ($octet = 201; $octet -le 254; $octet++) {
-                                $candidate = "$domainPrefix$octet"
-                                if ($sqlaoTaken.ContainsKey($candidate)) { continue }
-                                $existingResv = $null
-                                try { $existingResv = Get-DhcpServerv4Reservation -ScopeId $domainScopeId -IPAddress $candidate -ErrorAction SilentlyContinue } catch {}
-                                if ($existingResv) { continue }
-                                $sqlaoTaken[$candidate] = $true
-                                if (-not $clusterIP) { $clusterIP = $candidate; continue }
-                                $AGIP = $candidate
-                                break
-                            }
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): SQLAO: Allocated new ClusterIP $clusterIP / AGIP $AGIP (domain scope $domainScopeId, .201-.254 range)" -LogOnly
-                        }
-
-                        if ($clusterIP) { Remove-DHCPReservation -ip $clusterIP -vmName $currentItem.vmName }
-                        if ($AGIP) { Remove-DHCPReservation -ip $AGIP -vmName $currentItem.vmName }
-
-                        if (-not $clusterIP -or -not $AGIP) {
-                            $nicFailure = "Failed to acquire Cluster or AG IP for SQLAO (domain scope $domainScopeId may be exhausted)"
-                        }
-                        elseif ($clusterIP -eq $AGIP) {
-                            $nicFailure = "ClusterIP and AGIP are the same ($clusterIP). Domain scope $domainScopeId may be exhausted."
-                        }
-                        else {
-                            # Validate both IPs are on the domain subnet, not the heartbeat subnet.
-                            $domainPrefix = ($domainScopeId -replace '\.\d+$', '.')
-                            foreach ($entry in @(@{Name = 'ClusterIP'; IP = $clusterIP }, @{Name = 'AGIP'; IP = $AGIP })) {
-                                if ($entry.IP -notmatch [regex]::Escape($domainPrefix)) {
-                                    $nicFailure = "$($entry.Name) $($entry.IP) is NOT on the domain subnet $domainScopeId. Expected $domainPrefix*"
-                                    break
-                                }
-                            }
-                            if (-not $nicFailure) {
-                                $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
-                                $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
-                                # Only a legacy in-pool IP (.20-.199) needs an exclusion so the
-                                # pool can't lease it to a VM; .201-.254 are above the pool.
-                                foreach ($vip in @($clusterIP, $AGIP)) {
-                                    $vipOctet = [int]($vip.Split('.')[-1])
-                                    if ($vipOctet -ge 20 -and $vipOctet -le 199) {
-                                        Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $vip -EndRange $vip -ErrorAction SilentlyContinue | Out-Null
-                                    }
-                                }
-                            }
-                        }
+                    $vmnet = Add-VMNetworkAdapter -VMName $currentItem.vmName -SwitchName "ClusterV2" -Name "Cluster" -Passthru
+                    $addedNic = $true
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): NIC added MAC: $($vmnet.MacAddress)" -LogOnly
+                    if (-not $($vmnet.MacAddress)) {
+                        Start-Sleep -Seconds 60
+                        if (-not $($vmnet.MacAddress)) { $nicFailure = "Heartbeat NIC has no MAC address: $($vmnet)" }
                     }
                 }
                 catch {
                     Write-Exception $_
-                    $nicFailure = "Failed adding heartbeat NIC/IPs: $_"
+                    $nicFailure = "Failed to add heartbeat NIC: $_"
                 }
-                finally {
-                    # Persist the allocation INSIDE the mutex so the partner node's parallel
-                    # Phase 5 job sees these IPs (via Get-List / VM Note) before IT allocates,
-                    # closing the cross-node race the old Phase 1 path had.
-                    if (-not $nicFailure) {
-                        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
-                    }
-                    [void]$mtx.ReleaseMutex()
-                    [void]$mtx.Dispose()
-                }
+            }
 
-                if ($nicFailure) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): $nicFailure. SQLAO cluster network will not form without the heartbeat NIC." -Failure -OutputStream
+            # Rare safety net: if the heartbeat IP wasn't pre-allocated (config) and isn't
+            # in the VM Note -- e.g. an ad-hoc -StartPhase 5 on a config that never went
+            # through the pre-pass -- allocate ONE here under the GetIP mutex so concurrent
+            # SQLAO nodes can't collide. The common path skips this entirely.
+            if (-not $nicFailure) {
+                $hbResolved = $currentItem.ClusterHeartbeatIP
+                if (-not $hbResolved) {
+                    $hbNote = Get-VMNote -VMName $currentItem.vmName
+                    if ($hbNote) { $hbResolved = $hbNote.ClusterHeartbeatIP }
                 }
-                elseif ($needNic) {
-                    # Hot-add: give the guest a moment to enumerate the new adapter before the
-                    # static-IP config below looks it up by MAC (handled with a retry there too).
-                    Start-Sleep -Seconds 3
+                if (-not $hbResolved) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): heartbeat IP not pre-allocated; allocating a fallback under the GetIP mutex" -Warning -OutputStream
+                    $mtx = New-Object System.Threading.Mutex($false, "GetIP")
+                    [void]$mtx.WaitOne()
+                    try {
+                        $usedHb = [System.Collections.Generic.HashSet[string]]::new()
+                        try { foreach ($e in (Get-List -Type VM -SmartUpdate)) { if ($e.ClusterHeartbeatIP) { $null = $usedHb.Add($e.ClusterHeartbeatIP) } } } catch {}
+                        foreach ($v in $deployConfig.virtualMachines) { if ($v.ClusterHeartbeatIP) { $null = $usedHb.Add($v.ClusterHeartbeatIP) } }
+                        for ($o = 20; $o -le 199; $o++) { $cand = "10.250.251.$o"; if (-not $usedHb.Contains($cand)) { $hbResolved = $cand; break } }
+                        if ($hbResolved) {
+                            $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterHeartbeatIP" -Value $hbResolved -Force
+                            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Allocated fallback heartbeat IP $hbResolved" -OutputStream
+                        }
+                        else {
+                            $nicFailure = "Could not find a free heartbeat IP in 10.250.251.20-199"
+                        }
+                    }
+                    finally { [void]$mtx.ReleaseMutex(); [void]$mtx.Dispose() }
                 }
+            }
+
+            if ($nicFailure) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): $nicFailure. SQLAO cluster network will not form without the heartbeat NIC." -Failure -OutputStream
+            }
+            elseif ($addedNic) {
+                # Hot-add: give the guest a moment to enumerate the new adapter before the
+                # static-IP config below looks it up by MAC (handled with a retry there too).
+                Start-Sleep -Seconds 3
             }
 
             # Set static IP on the cluster heartbeat NIC before DSC runs.
             # The heartbeat NIC has no DHCP — we configure it directly via
-            # PowerShell Direct using the IP allocated above.
+            # PowerShell Direct using the pre-allocated IP.
             Write-Progress2 $Activity -Status "Configuring heartbeat NIC" -percentcomplete 9 -force
             $heartbeatIP = $currentItem.ClusterHeartbeatIP
             if (-not $heartbeatIP) {
-                # ClusterHeartbeatIP is added via Add-Member in the provisioning block
-                # above, so it doesn't survive back to the parent process (the deploy
-                # config is deep-copied per job). Fall back to the VM Note, which
-                # New-VmNote persists inside the mutex above.
+                # Pre-allocated on the deploy config by Set-DeployConfigIPAddresses; on a
+                # deep-copied per-job config or a later rerun, fall back to the VM Note.
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): ClusterHeartbeatIP not in deploy config, reading from VM Note" -LogOnly
                 $vmNote = Get-VMNote -VMName $currentItem.vmName
                 if ($vmNote) { $heartbeatIP = $vmNote.ClusterHeartbeatIP }
