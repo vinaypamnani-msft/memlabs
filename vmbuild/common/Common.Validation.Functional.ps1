@@ -4174,44 +4174,62 @@ function Test-SiteSystemFunctionality {
 
             # End-to-end MP probe: fetch the MP list (proves the MP is actually serving).
             # Some sites are HTTPS-only -- try HTTPS first, then HTTP. Treat 401/403 as
-            # serving-OK (auth required); only fail on connection refused / 404.
+            # serving-OK (auth required). A freshly-installed MP routinely returns HTTP
+            # 500 (and an HTTPS bind may not be ready / still time out) on .sms_aut?MPLIST
+            # for the first few minutes while MP Control Manager validates the role
+            # (mpcontrol.log) and the ISAPI handler warms up -- so retry with backoff
+            # before warning instead of failing on the very first probe.
             $fqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
             $mpProbed = $false
-            foreach ($scheme in @('https', 'http')) {
-                $url = "$scheme`://$fqdn/sms_mp/.sms_aut?MPLIST"
-                $results.Details.Add("CMD: Invoke-WebRequest -Uri '$url' -UseBasicParsing")
-                try {
-                    $req = [System.Net.HttpWebRequest]::Create($url)
-                    $req.Timeout = 15000
-                    $req.UseDefaultCredentials = $true
-                    $req.AllowAutoRedirect = $false
-                    if ($scheme -eq 'https') {
-                        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+            $lastProbeDetail = ''
+            $maxProbeAttempts = 6
+            for ($probeAttempt = 1; $probeAttempt -le $maxProbeAttempts; $probeAttempt++) {
+                foreach ($scheme in @('https', 'http')) {
+                    $url = "$scheme`://$fqdn/sms_mp/.sms_aut?MPLIST"
+                    if ($probeAttempt -eq 1) {
+                        $results.Details.Add("CMD: Invoke-WebRequest -Uri '$url' -UseBasicParsing")
                     }
-                    $resp = $req.GetResponse()
-                    $sc = [int]$resp.StatusCode
-                    $resp.Close()
-                    $results.Details.Add("OK: MP probe '$url' returned $sc")
-                    $mpProbed = $true
-                    break
-                }
-                catch [System.Net.WebException] {
-                    $sc = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-                    if ($sc -in 401, 403) {
-                        $results.Details.Add("OK: MP probe '$url' returned $sc (auth required = serving)")
+                    try {
+                        $req = [System.Net.HttpWebRequest]::Create($url)
+                        $req.Timeout = 15000
+                        $req.UseDefaultCredentials = $true
+                        $req.AllowAutoRedirect = $false
+                        if ($scheme -eq 'https') {
+                            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                        }
+                        $resp = $req.GetResponse()
+                        $sc = [int]$resp.StatusCode
+                        $resp.Close()
+                        $results.Details.Add("OK: MP probe '$url' returned $sc (attempt $probeAttempt)")
                         $mpProbed = $true
                         break
                     }
-                    $results.Details.Add("  $scheme failed: $($_.Exception.Message)")
+                    catch [System.Net.WebException] {
+                        $sc = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                        if ($sc -in 401, 403) {
+                            $results.Details.Add("OK: MP probe '$url' returned $sc (auth required = serving, attempt $probeAttempt)")
+                            $mpProbed = $true
+                            break
+                        }
+                        # HTTP 500/503 here = MP installed but Control Manager hasn't
+                        # validated it yet; retryable like a connection-level failure.
+                        $lastProbeDetail = if ($sc) { "$scheme returned HTTP $sc" } else { "$scheme failed: $($_.Exception.Message)" }
+                    }
+                    catch {
+                        $lastProbeDetail = "$scheme failed: $($_.Exception.Message)"
+                    }
                 }
-                catch {
-                    $results.Details.Add("  $scheme failed: $($_.Exception.Message)")
+                if ($mpProbed) { break }
+                if ($probeAttempt -lt $maxProbeAttempts) {
+                    Start-Sleep -Seconds 30
                 }
             }
             if (-not $mpProbed) {
-                # Don't fail the build -- if W3SVC + SMS_MP app pool are OK, the
-                # endpoint may just be authenticating differently. Warn loudly.
-                $results.Details.Add("WARN: MP HTTP probe did not succeed on http or https. App is configured but not serving as expected.")
+                # Don't fail the build -- if W3SVC + SMS_MP app pool are OK, the MP is
+                # installed and normally starts serving once MP Control Manager validates
+                # it. Warn with the last probe result so the WARN is actionable.
+                $waitedMin = [Math]::Round((($maxProbeAttempts - 1) * 30) / 60, 1)
+                $results.Details.Add("WARN: MP HTTP probe did not succeed after $maxProbeAttempts attempts over ~$waitedMin min (last: $lastProbeDetail). App is configured but not serving as expected; check mpcontrol.log and the SMS_MP_CONTROL_MANAGER component status on the site server.")
             }
 
             return $results
@@ -4219,7 +4237,7 @@ function Test-SiteSystemFunctionality {
 
         $mpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock $mpScript -DisplayName "Phase11-MP-Test" -SuppressLog `
-            -AsJob -TimeoutSeconds 300
+            -AsJob -TimeoutSeconds 600
 
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'MP' -Result $mpResult)) {
             $allPassed = $false
