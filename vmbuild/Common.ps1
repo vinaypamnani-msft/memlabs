@@ -3505,26 +3505,69 @@ function Add-DHCPReservationIsolated {
                 Invoke-IsolatedCim -ArgumentList $ScopeId, $IPAddress, $Mac, $Description -ScriptBlock {
                     param($scopeId, $ip, $mac, $desc)
 
-                    # Pre-clean: orphaned reservation on this IP under a different
-                    # MAC (e.g. a previous deploy that wasn't fully torn down) is
-                    # the most common cause of Add-DhcpServerv4Reservation throwing
-                    # "Failed to reserve IP address ... in scope ...". If the
-                    # existing reservation is already ours, the Add below will
-                    # report duplicate -- caller treats that as success via retry.
-                    try {
-                        $existing = Get-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ErrorAction SilentlyContinue
-                        if ($existing) {
-                            $existingMac = ($existing.ClientId -replace '-', '')
-                            if ($existingMac -ne $mac) {
-                                Remove-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null
-                            }
-                            else {
-                                # Reservation already exists with our MAC -- idempotent success.
-                                return
+                    # Pre-clean: a reservation OR active lease already sitting on
+                    # this IP under a DIFFERENT client is the most common cause of
+                    # Add-DhcpServerv4Reservation throwing "Failed to reserve IP
+                    # address ... in scope ...". Such an occupant is either:
+                    #   (a) an ORPHAN  -- left by a deleted VM, or held by a VM that
+                    #       now lives on a different vSwitch (e.g. a capture box) --
+                    #       in which case we safely reclaim the IP; or
+                    #   (b) a LIVE VM currently attached to THIS scope's switch --
+                    #       a genuine in-lab IP collision -- in which case stealing
+                    #       it would break a working VM, so we refuse and surface it.
+                    # The scope id equals the vSwitch name (the switch is created as
+                    # New-VMSwitch -Name <network>), so "legitimately owns this IP"
+                    # == "MAC is attached to the switch named $scopeId". Membership
+                    # is resolved lazily (only when a conflict must be adjudicated)
+                    # so the common no-conflict path does no Get-VM enumeration.
+                    $ourMac = ($mac -replace '[-:]', '').ToLower()
+                    $switchMacs = $null
+                    $resolveSwitchMacs = {
+                        $m = @{}
+                        try {
+                            Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
+                                Where-Object { $_.SwitchName -eq $scopeId -and $_.MacAddress -and $_.MacAddress -ne '000000000000' } |
+                                ForEach-Object { $m[($_.MacAddress -replace '[-:]', '').ToLower()] = $_.VMName }
+                        }
+                        catch { }
+                        $m
+                    }
+
+                    $existing = $null
+                    try { $existing = Get-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
+                    if ($existing) {
+                        $existingMac = ($existing.ClientId -replace '[-:]', '').ToLower()
+                        if ($existingMac -eq $ourMac) {
+                            # Reservation already exists with our MAC -- idempotent success.
+                            return
+                        }
+                        if ($null -eq $switchMacs) { $switchMacs = & $resolveSwitchMacs }
+                        if ($switchMacs.ContainsKey($existingMac)) {
+                            throw "DHCP in-lab IP collision: $ip on scope $scopeId is already reserved to live switch member '$($switchMacs[$existingMac])' (MAC $existingMac); refusing to reassign it to MAC $mac. Fix the IP assignment for one of these VMs."
+                        }
+                        # Orphan reservation -- reclaim the IP (drop any matching lease too).
+                        Remove-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null
+                        try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null } catch { }
+                    }
+                    else {
+                        # No reservation, but a stale ACTIVE LEASE held by a
+                        # different, non-member client can still make the Add fail
+                        # with "Failed to reserve IP address". Clear that orphan
+                        # lease -- never one belonging to a live switch member.
+                        # (Get-DhcpServerv4Lease rejects -ScopeId + -IPAddress
+                        # together, so query by -IPAddress alone.)
+                        $lease = $null
+                        try { $lease = Get-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
+                        if ($lease) {
+                            $leaseMac = ($lease.ClientId -replace '[-:]', '').ToLower()
+                            if ($leaseMac -ne $ourMac) {
+                                if ($null -eq $switchMacs) { $switchMacs = & $resolveSwitchMacs }
+                                if (-not $switchMacs.ContainsKey($leaseMac)) {
+                                    try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null } catch { }
+                                }
                             }
                         }
                     }
-                    catch { }
 
                     Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ClientId $mac -Description $desc -ErrorAction Stop | Out-Null
                 } | Out-Null
@@ -3593,6 +3636,9 @@ function Remove-DHCPReservation {
                     $out += "$vmName Removing Reservation for $ip"
                     Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue
                 }
+                # Also drop any active lease so the IP is fully released, not just
+                # the reservation (an orphan lease can still block a later Add).
+                try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
             }
 
             if ($mac) {
@@ -3602,6 +3648,7 @@ function Remove-DHCPReservation {
                     if ($reservation) {
                         $out += "$vmName Removing Reservation for $mac"
                         Remove-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -ErrorAction SilentlyContinue
+                        try { Remove-DhcpServerv4Lease -IPAddress $reservation.IPAddress -ErrorAction SilentlyContinue } catch { }
                         break
                     }
                 }

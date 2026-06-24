@@ -2182,10 +2182,17 @@ $global:VM_Config = {
                                         Start-Sleep -Seconds 3
                                         Connect-VMNetworkAdapter -VMNetworkAdapter $vmNic -SwitchName $savedSwitch -ErrorAction SilentlyContinue
                                     }
-                                    # Restart DHCP service to clear any stale state
-                                    Stop-Service "DHCPServer" -ErrorAction SilentlyContinue | Out-Null
-                                    Start-Sleep -Seconds 3
-                                    $null = Start-DHCP
+                                    # Restart DHCP service to clear any stale state.
+                                    # Serialize under the host-wide DHCP mutex so this
+                                    # VM's recovery doesn't take the shared DHCP server
+                                    # down while other VMs' parallel Phase 2 jobs are
+                                    # mid-reservation (that cascades "Failed to reserve
+                                    # IP address" onto every concurrent job).
+                                    Invoke-WithDhcpMutex -ScriptBlock {
+                                        Stop-Service "DHCPServer" -ErrorAction SilentlyContinue | Out-Null
+                                        Start-Sleep -Seconds 3
+                                        $null = Start-DHCP
+                                    }
                                     Start-Sleep -Seconds 10
                                     $null = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
                                 }
@@ -2196,9 +2203,12 @@ $global:VM_Config = {
                             }
                             if ($retryCount -eq 0) {
                                 try {
-                                    stop-service "DHCPServer" | Out-Null
-                                    start-sleep -seconds 5
-                                    $null = Start-DHCP
+                                    # Serialize the shared-DHCP-server bounce (see retry 1 above).
+                                    Invoke-WithDhcpMutex -ScriptBlock {
+                                        Stop-Service "DHCPServer" -ErrorAction SilentlyContinue | Out-Null
+                                        Start-Sleep -Seconds 5
+                                        $null = Start-DHCP
+                                    }
                                     $null = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
                                 }
                                 catch {                                   
