@@ -4978,6 +4978,38 @@ $global:VM_Config = {
                                 # TIER 1: gentle in-place resume (fire-and-forget, bounded). No reboot.
                                 $dscResumeCount++
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM stranded PendingConfiguration for ${pendingMins}m (no reboot owed) with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Resuming the pending config in place: Stop + Start-DscConfiguration -UseExisting (resume $dscResumeCount/$dscResumeMax)." -Warning -OutputStream
+                                # Capture the tail of the guest's most recent DSC ConfigurationStatus record
+                                # (C:\Windows\System32\Configuration\ConfigurationStatus\*.json -- the actual last
+                                # LCM run, what Get-DscConfigurationStatus reads) so the build log shows which
+                                # resource the last apply died on before we resume it.
+                                $dscEventsTail = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
+                                    $scPath = Join-Path $env:windir 'System32\Configuration\ConfigurationStatus'
+                                    $f = Get-ChildItem -Path $scPath -Filter *.json -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                                    if (-not $f) { return $null }
+                                    $lines = $null
+                                    try {
+                                        # The LCM may hold the file open; open shared read/write so we can still read it.
+                                        $fs = [System.IO.File]::Open($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                                        try {
+                                            $sr = New-Object System.IO.StreamReader($fs)
+                                            $lines = ($sr.ReadToEnd() -split "`r?`n")
+                                            $sr.Dispose()
+                                        }
+                                        finally { $fs.Dispose() }
+                                    }
+                                    catch {
+                                        $lines = Get-Content -Path $f.FullName -ErrorAction SilentlyContinue
+                                    }
+                                    $tail = ($lines | Select-Object -Last 10) -join "`r`n"
+                                    [pscustomobject]@{ File = $f.Name; LastWrite = $f.LastWriteTime; Tail = $tail }
+                                } -SuppressLog
+                                if (-not $dscEventsTail.ScriptBlockFailed -and $dscEventsTail.ScriptBlockOutput) {
+                                    $sbo = $dscEventsTail.ScriptBlockOutput
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: last ConfigurationStatus record $($sbo.File) (written $($sbo.LastWrite)); last 10 lines:`r`n$($sbo.Tail)" -LogOnly
+                                }
+                                else {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: could not read the last ConfigurationStatus record at stranded point." -LogOnly
+                                }
                                 $null = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -ScriptBlock {
                                     Stop-DscConfiguration -Force -ErrorAction SilentlyContinue
                                     Start-DscConfiguration -UseExisting -Force -ErrorAction SilentlyContinue
