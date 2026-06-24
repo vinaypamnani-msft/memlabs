@@ -5776,7 +5776,6 @@ function Test-DomainMemberFunctionality {
     $domain = $DeployConfig.vmOptions.domainName
 
     $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
-    $pushExpected = ($CurrentItem.pushClient -ne $false)
 
     # Cross-forest client management: a domain whose DC has
     # externalDomainJoinSiteCode is NOT managed by a local Primary -- its clients
@@ -5789,6 +5788,15 @@ function Test-DomainMemberFunctionality {
     $isExternallyManaged = [bool]($extSiteCode -and $extSiteCode -ne 'NONE')
     $expectedSiteCode = if ($isExternallyManaged) { "$extSiteCode" } else { '' }
     $externalSiteServer = if ($isExternallyManaged -and $domainDC.thisParams) { $domainDC.thisParams.ExternalSiteServer } else { $null }
+
+    # A client push is only possible when a ConfigMgr site actually manages this
+    # domain -- either a local CAS/Primary/Secondary site server in the deployment,
+    # or a remote site (cross-forest externally-managed). On a no-ConfigMgr lab
+    # there is nothing to push from, so pushClient (which is left unset, NOT
+    # explicitly false) must not make us expect/warn about a missing client.
+    $hasLocalCmSite = @($DeployConfig.virtualMachines | Where-Object { $_.role -in @('CAS', 'Primary', 'Secondary') }).Count -gt 0
+    $cmManagesDomain = ($hasLocalCmSite -or $isExternallyManaged)
+    $pushExpected = $cmManagesDomain -and ($CurrentItem.pushClient -ne $false)
 
     Write-Log "[Phase $Phase] $VMName [DomainMember]: Testing domain join and CCM client (if present)" -LogOnly
 
@@ -6268,7 +6276,12 @@ function Test-DomainMemberFunctionality {
             $result.ScriptBlockOutput.Details.Add("  Check ccmsetup on ${pushTarget}: Get-CMDevice -Name '$VMName' | Select IsClient,ClientActiveStatus")
         }
         else {
-            $result.ScriptBlockOutput.Details[-1] = "OK: CcmExec not installed (pushClient=false in config)"
+            if (-not $cmManagesDomain) {
+                $result.ScriptBlockOutput.Details[-1] = "OK: CcmExec not installed (no ConfigMgr site manages this domain)"
+            }
+            else {
+                $result.ScriptBlockOutput.Details[-1] = "OK: CcmExec not installed (pushClient=false in config)"
+            }
         }
     }
 
