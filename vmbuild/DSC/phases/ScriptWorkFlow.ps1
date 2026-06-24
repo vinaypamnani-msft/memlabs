@@ -159,6 +159,18 @@ else {
     $containsSecondary = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
 }
 
+# Parallel passive install (Phase 8 critical-path speedup, measured from
+# InstallCMLog: on a child primary the secondary (~1h08) and passive (~56m)
+# installs ran strictly back-to-back on this single workflow thread). When this
+# site server has BOTH a secondary AND a passive, launch the passive as a
+# background job (Start-ParallelPassiveJob) so it overlaps the secondary install;
+# join it at the end. Only when both exist -- a lone passive still runs inline at
+# the end exactly as before. Set $ParallelPassiveInstall = $false to revert to
+# fully-serial behavior.
+$ParallelPassiveInstall = $true
+$parallelPassive = [bool]($ParallelPassiveInstall -and $containsPassive -and $containsSecondary)
+$passiveJob = $null
+
 
 # Script Workflow json file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
@@ -442,6 +454,10 @@ if ($scenario -eq "Standalone") {
     }
     Set-Location $LogPath
 
+    if ($parallelPassive -and -not $passiveJob) {
+        $passiveJob = Start-ParallelPassiveJob -ConfigFilePath $ConfigFilePath -LogPath $LogPath -ScriptRoot $PSScriptRoot -ConfigurationFile $ConfigurationFile
+    }
+
     if ($containsSecondary) {
         # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
         Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
@@ -551,6 +567,10 @@ if ($scenario -eq "Hierarchy") {
         }
         Set-Location $LogPath
                
+        if ($parallelPassive -and -not $passiveJob) {
+            $passiveJob = Start-ParallelPassiveJob -ConfigFilePath $ConfigFilePath -LogPath $LogPath -ScriptRoot $PSScriptRoot -ConfigurationFile $ConfigurationFile
+        }
+
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
             Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
@@ -580,16 +600,59 @@ if ($scenario -eq "Hierarchy") {
 }
 
 if ($containsPassive) {
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-    $DomainFullName = $deployConfig.vmOptions.domainName
-    $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
-    $passiveExists = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
-    if ($Configuration.InstallPassive.Status -ne "Completed" -or -not $passiveExists) {
-        Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
-        Set-Location $LogPath
-        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    $passiveRan = $false
 
+    if ($passiveJob) {
+        # Parallel mode: the passive install was launched as a background job
+        # BEFORE the secondary install (Start-ParallelPassiveJob), so the two
+        # overlapped. Join it now. The job ran with -SkipStatusFileUpdate, so the
+        # main thread owns the InstallPassive status (Running stamped at launch;
+        # Completed stamped below, gated on the role actually being present).
+        Write-DscStatus "Waiting for parallel InstallPassiveSiteServer.ps1 job to complete"
+        try {
+            Wait-Job -Job $passiveJob | Out-Null
+            # The job writes its own status/log to disk via Write-DscStatus; just
+            # drain the pipeline. A terminating failure rethrows on Receive-Job.
+            Receive-Job -Job $passiveJob | Out-Null
+        }
+        catch {
+            Write-DscStatus "Parallel passive job: $_" -Warning
+        }
+        Remove-Job -Job $passiveJob -Force -ErrorAction SilentlyContinue
+
+        # Ground-truth completion: only stamp Completed if the passive role is
+        # actually present, so a failed/partial job leaves InstallPassive
+        # != Completed and a re-run retries it.
+        $DomainFullName = $deployConfig.vmOptions.domainName
+        $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
+        $passiveExists = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+        if ($passiveExists) {
+            $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Completed' -StampEndTime
+            Write-DscStatus "Parallel passive: InstallPassiveSiteServer.ps1 completed; passive role present on $($containsPassive.vmName)."
+        }
+        else {
+            Write-DscStatus "WARNING: parallel passive job finished but the passive SMS Site Server role is not present on $passiveFQDN yet; InstallPassive left not-Completed for retry." -Warning
+        }
+        $passiveRan = $true
+    }
+    else {
+        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+        $DomainFullName = $deployConfig.vmOptions.domainName
+        $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
+        $passiveExists = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+        if ($Configuration.InstallPassive.Status -ne "Completed" -or -not $passiveExists) {
+            Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
+            Set-Location $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+            $passiveRan = $true
+        }
+        else {
+            Write-DscStatus "ContainsPassive Skipping InstallPassiveSiteServer.ps1 (passive role verified on $($containsPassive.vmName))"
+        }
+    }
+
+    if ($passiveRan) {
         # Wait for SMS_EXECUTIVE to start on the passive node before proceeding.
         # InstallPassiveSiteServer.ps1 exits at SubStageId 917515, but the
         # SMS_EXECUTIVE service may still be starting on the passive node.
@@ -613,9 +676,6 @@ if ($containsPassive) {
         if (-not $passiveSmsSvc -or $passiveSmsSvc.Status -ne 'Running') {
             Write-DscStatus "WARNING: SMS_EXECUTIVE not Running on $($containsPassive.vmName) after $maxPassiveWait attempts" -Warning
         }
-    }
-    else {
-        Write-DscStatus "ContainsPassive Skipping InstallPassiveSiteServer.ps1 (passive role verified on $($containsPassive.vmName))"
     }
 }
 

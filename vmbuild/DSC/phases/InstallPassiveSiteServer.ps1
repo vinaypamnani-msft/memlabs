@@ -1,7 +1,12 @@
 ﻿# InstallPassiveSiteServer.ps1
 param(
     [string]$ConfigFilePath,
-    [string]$LogPath
+    [string]$LogPath,
+    # When set (parallel-Phase8 mode, launched as a background job by
+    # Start-ParallelPassiveJob), this script does NOT touch ScriptWorkflow.json --
+    # the main ScriptWorkflow thread owns the InstallPassive status before/after
+    # the job, so there is never a second concurrent writer to the file.
+    [switch]$SkipStatusFileUpdate
 )
 
 # Read config json
@@ -14,11 +19,13 @@ $DomainName = $deployConfig.vmOptions.domainNetBiosName
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
-$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-
-$Configuration.InstallPassive.Status = 'Running'
-$Configuration.InstallPassive.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+# Atomic, mutex-guarded so when this script runs as a background job in parallel
+# with the main ScriptWorkflow thread (secondary install / roles / boundary
+# groups) neither side clobbers the other's whole-file rewrite. In parallel mode
+# (-SkipStatusFileUpdate) the main thread owns this status, so skip the write.
+if (-not $SkipStatusFileUpdate) {
+    $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Running' -StampStartTime
+}
 
 # Read Site Code from registry
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -303,7 +310,9 @@ do {
 
 } until ($state.SubStageId -eq 917515 -or $prereqFailure -or $installFailure)
 
-# Update actions file
-$Configuration.InstallPassive.Status = 'Completed'
-$Configuration.InstallPassive.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+# Update actions file (mutex-guarded; safe under parallel execution). In parallel
+# mode the main ScriptWorkflow thread stamps Completed after joining the job
+# (gated on the passive role actually being present), so skip the write here.
+if (-not $SkipStatusFileUpdate) {
+    $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Completed' -StampEndTime
+}

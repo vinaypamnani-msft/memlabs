@@ -131,6 +131,147 @@ function Invoke-DotSource {
     }
 }
 
+# ---------------------------------------------------------------------------
+# ScriptWorkflow.json concurrency helpers
+# ---------------------------------------------------------------------------
+# Phase 8 can run a long-poller step (e.g. the secondary-site install monitor,
+# or InstallPassiveSiteServer) in a BACKGROUND JOB so it overlaps the rest of
+# the workflow instead of blocking it. Start-Job spawns a child process; both
+# it and the main ScriptWorkflow process update DIFFERENT properties of the
+# SAME ScriptWorkflow.json with a read-whole / modify / write-whole cycle.
+# Without serialization one writer's update silently clobbers the other's
+# (last-writer-wins on the entire file), so e.g. the background job stamping
+# InstallPassive=Completed could wipe out the main thread's InstallSecondary
+# progress, or vice-versa. A machine-wide named mutex makes each update atomic.
+#
+# PS5.1-safe (no ternary / null-conditional). Mirrors the Global\MemLabs_DHCP
+# pattern in Common.ps1, but self-contained because this file is dot-sourced
+# in-guest where Common.ps1 isn't present. The mutex is per-machine and each
+# site server VM owns exactly one ScriptWorkflow.json, so a single global name
+# is correctly scoped.
+function Invoke-WithScriptWorkflowJsonMutex {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $mutexName = 'Global\MemLabs_ScriptWorkflowJson'
+    $mutex = $null
+    $owned = $false
+    try {
+        try { $mutex = New-Object System.Threading.Mutex($false, $mutexName) }
+        catch { $mutex = $null }
+
+        if ($mutex) {
+            try { $owned = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds)) }
+            catch [System.Threading.AbandonedMutexException] {
+                # A prior holder died without releasing; ownership transfers to
+                # us and the wait is considered satisfied.
+                $owned = $true
+            }
+            catch { $owned = $false }
+        }
+
+        # Run the update whether or not the mutex was acquired -- a failed/timed
+        # out acquisition must never deadlock the deploy; worst case is the
+        # (rare) unsynchronized write the mutex was meant to prevent.
+        return (& $ScriptBlock @ArgumentList)
+    }
+    finally {
+        if ($mutex) {
+            if ($owned) { try { [void]$mutex.ReleaseMutex() } catch { } }
+            try { $mutex.Dispose() } catch { }
+        }
+    }
+}
+
+# Atomically update one step's fields in ScriptWorkflow.json under the mutex.
+# This is the safe replacement for the scattered
+#   $c = Get-Content $ConfigurationFile | ConvertFrom-Json
+#   $c.<Step>.Status = '...'; $c | ConvertTo-Json | Out-File $ConfigurationFile
+# read-modify-write blocks. Returns the refreshed configuration object so the
+# caller can keep using $Configuration with no stale-state surprises.
+function Set-ScriptWorkflowStep {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ConfigurationFile,
+        [Parameter(Mandatory)]
+        [string]$Step,
+        [string]$Status,
+        [switch]$StampStartTime,
+        [switch]$StampEndTime
+    )
+
+    $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $hasStatus = $PSBoundParameters.ContainsKey('Status')
+
+    return (Invoke-WithScriptWorkflowJsonMutex -ArgumentList $ConfigurationFile, $Step, $Status, $hasStatus, ([bool]$StampStartTime), ([bool]$StampEndTime), $now -ScriptBlock {
+            param($file, $step, $status, $hasStatus, $stampStart, $stampEnd, $now)
+
+            $cfg = Get-Content -Path $file -Raw | ConvertFrom-Json
+            if (-not $cfg.$step) {
+                $cfg | Add-Member -MemberType NoteProperty -Name $step -Value ([pscustomobject]@{ Status = 'NotStart'; StartTime = ''; EndTime = '' }) -Force
+            }
+            if ($hasStatus) { $cfg.$step.Status = $status }
+            if ($stampStart) { $cfg.$step.StartTime = $now }
+            if ($stampEnd) { $cfg.$step.EndTime = $now }
+            $cfg | ConvertTo-Json | Out-File -FilePath $file -Force
+            return $cfg
+        })
+}
+
+# Launch InstallPassiveSiteServer.ps1 in a BACKGROUND JOB so the passive-site
+# install overlaps the (separate, also long) secondary-site install on the same
+# site server's single workflow thread. Measured on a child primary: secondary
+# ~1h08 + passive ~56m ran strictly back-to-back, so the passive was pure serial
+# tail on the Phase 8 critical path; overlapping removes ~the shorter one.
+#
+# Runspace isolation is what makes this safe: the job's Set-CMSiteProvider imports
+# its OWN ConfigurationManager module + CMSite PSDrive (scope = the JOB's global),
+# so it never touches the main thread's CM drive. The job runs the passive script
+# with -SkipStatusFileUpdate, so it NEVER writes ScriptWorkflow.json -- the main
+# thread owns the InstallPassive status (Running stamped here before launch;
+# Completed stamped after the join, gated on the role actually being present).
+# That leaves the main thread as the SOLE writer of the file for the whole overlap
+# window, so there is no concurrent-writer race with InstallRoles / BoundaryGroups.
+# Dot-sources ScriptFunctions.ps1 for Write-DscStatus / CM helpers, matching the
+# existing InstallProvider background-job pattern. Returns the job, or $null when
+# the passive is already installed (caller falls back to the inline path).
+function Start-ParallelPassiveJob {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ConfigFilePath,
+        [Parameter(Mandatory)][string]$LogPath,
+        [Parameter(Mandatory)][string]$ScriptRoot,
+        [Parameter(Mandatory)][string]$ConfigurationFile
+    )
+
+    # Already installed (re-run / -StartPhase)? Don't launch a job; let the caller
+    # fall through to the inline path which logs the skip.
+    try {
+        $cfg = Get-Content -Path $ConfigurationFile -Raw | ConvertFrom-Json
+        if ($cfg.InstallPassive -and $cfg.InstallPassive.Status -eq 'Completed') {
+            return $null
+        }
+    }
+    catch { }
+
+    # Stamp Running now (single-threaded, before the secondary install starts).
+    $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Running' -StampStartTime
+
+    Write-DscStatus "Parallel passive: launching InstallPassiveSiteServer.ps1 in a background job to overlap the secondary-site install."
+    return Start-Job -Name "InstallPassive" -ScriptBlock {
+        param($jobConfigFilePath, $jobLogPath, $jobScriptRoot)
+        . (Join-Path -Path $jobScriptRoot -ChildPath "ScriptFunctions.ps1")
+        Set-Location $jobLogPath
+        & (Join-Path -Path $jobScriptRoot -ChildPath "InstallPassiveSiteServer.ps1") -ConfigFilePath $jobConfigFilePath -LogPath $jobLogPath -SkipStatusFileUpdate
+    } -ArgumentList $ConfigFilePath, $LogPath, $ScriptRoot
+}
+
 function Write-DscStatusSetup {
     $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
     $StatusPrefix | Out-File $global:StatusFile -Force

@@ -12,10 +12,9 @@ $DomainFullName = $deployConfig.parameters.domainName
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
-$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-$Configuration.InstallSecondary.Status = 'Running'
-$Configuration.InstallSecondary.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+# Atomic, mutex-guarded so a concurrent background step (e.g. the passive-site
+# install running in parallel) can't clobber this update on the shared file.
+$Configuration = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallSecondary' -Status 'Running' -StampStartTime
 
 # Get info for Secondary Site Servers
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
@@ -650,20 +649,26 @@ $Install_Secondary = {
 
 }
 
+$secondaryJobNames = @()
 foreach ($SecondaryVM in $SecondaryVMs) {
     $job = Start-Job -ScriptBlock $Install_Secondary -Name $SecondaryVM.vmName -ErrorAction Stop -ErrorVariable Err
     if (-not $job) {
         Write-DscStatus "Failed to create install job for Secondary VM $($SecondaryVM.vmName). $Err" -Failure -MachineName $SecondaryVM.vmName
     }
     else {
+        $secondaryJobNames += $SecondaryVM.vmName
         Write-DscStatus "Created an install job for Secondary VM $($SecondaryVM.vmName). $Err" -NoStatus
     }
 }
 
-Get-Job | Wait-Job
+# Wait ONLY for this script's own secondary-install job(s). A bare
+# 'Get-Job | Wait-Job' would also block on any unrelated background job in this
+# session -- e.g. the parallel InstallPassive job launched by
+# Start-ParallelPassiveJob -- which would defeat the secondary/passive overlap.
+if ($secondaryJobNames.Count -gt 0) {
+    Get-Job -Name $secondaryJobNames -ErrorAction SilentlyContinue | Wait-Job | Out-Null
+}
 
-# Update actions file
-$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-$Configuration.InstallSecondary.Status = 'Completed'
-$Configuration.InstallSecondary.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+# Update actions file (mutex-guarded so a parallel passive-site install can't
+# clobber this whole-file rewrite).
+$Configuration = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallSecondary' -Status 'Completed' -StampEndTime
