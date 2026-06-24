@@ -11,6 +11,48 @@ function Get-JobStreamSource {
     return $Job
 }
 
+# A Start-Job whose scriptblock RAN TO COMPLETION (emitting its terminal
+# "VM Creation completed successfully" / "...Preparation completed successfully"
+# line) can still end up State=Failed when the runspace/transport Close that
+# happens AFTER the scriptblock returns times out. The usual trigger: an
+# Invoke-VmCommand -AsJob step inside the scriptblock timed out under
+# concurrent-boot load and was abandoned via StopJobAsync (Common.ps1) -- the
+# abandoned PSDirect pipeline never acknowledges cancellation, so closing the
+# parent runspace hits its 60s CancelTimeout and surfaces a
+# PSRemotingTransportException (ErrorCode 2106: "The client did not receive a
+# response for a Close operation in the specified time interval. This can happen
+# when a command is not responding to a Stop message in a timely manner.").
+# The VM was actually created fine -- only the teardown failed. Detect that exact
+# shape so Wait-Phase scores the job by its own output instead of as a spurious
+# phase failure. Conservative by design: requires BOTH the transport-close reason
+# AND a terminal success sentinel AND the absence of any failure-level (LogLevel 3)
+# output, so a genuine scriptblock failure is never misclassified.
+function Test-JobTransportCloseFalseFailure {
+    param($Job)
+    if (-not $Job -or $Job.State -ne "Failed") { return $false }
+    $streamSource = Get-JobStreamSource -Job $Job
+    if (-not $streamSource) { return $false }
+
+    # 1. The terminating reason must be the remoting transport teardown, not a
+    #    genuine scriptblock error.
+    $reason = $null
+    try { $reason = $streamSource.JobStateInfo.Reason } catch {}
+    if (-not $reason) { try { $reason = $Job.JobStateInfo.Reason } catch {} }
+    if (-not $reason) { return $false }
+    $reasonText = "$($reason.Message)"
+    try { $reasonText += " $($reason.GetType().FullName)" } catch {}
+    try { if ($reason.ErrorRecord -and $reason.ErrorRecord.Exception) { $reasonText += " $($reason.ErrorRecord.Exception.Message)" } } catch {}
+    try { if ($reason.FullyQualifiedErrorId) { $reasonText += " $($reason.FullyQualifiedErrorId)" } } catch {}
+    $isTransportClose = $reasonText -match 'Close operation in the specified time interval|not responding to a Stop message|PSRemotingTransportException|PSRemotingDataStructureException'
+    if (-not $isTransportClose) { return $false }
+
+    # 2. No failure-level output, AND a terminal VM-create success line present.
+    $jobOutput = @($streamSource | Select-Object -ExpandProperty Output -ErrorAction SilentlyContinue)
+    if ($jobOutput | Where-Object { $_.LogLevel -eq 3 }) { return $false }
+    $hasSuccessSentinel = $jobOutput | Where-Object { $_.LogLevel -eq 1 -and $_.Text -match 'VM Creation completed successfully|Preparation completed successfully' }
+    return [bool]$hasSuccessSentinel
+}
+
 # Diagnostic (gated by $global:ProgressDiag): log the volume and last record of a
 # running job's Progress stream, throttled to ~2s per job. Tags each record
 # MANAGED (Activity carries the VM-name prefix) vs RAW (child's own ActivityId-0
@@ -1425,6 +1467,59 @@ function Wait-Phase {
 
             $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
             foreach ($job in $failedJobs) {
+                # The job's State is Failed, but if its scriptblock actually ran to
+                # completion (emitted its terminal "...completed successfully" line) and
+                # only the post-scriptblock runspace Close timed out
+                # (PSRemotingTransportException 2106), this is a FALSE failure -- the VM
+                # was created. Score it by the scriptblock's own output the same way a
+                # Completed job is scored, instead of failing the whole phase.
+                if (Test-JobTransportCloseFalseFailure -Job $job) {
+                    $streamSource = Get-JobStreamSource -Job $job
+                    $jobName = $job | Select-Object -ExpandProperty Name
+                    Write-Log "[Phase $Phase] Job $jobName ended State=Failed, but its scriptblock completed successfully; only the runspace Close/transport teardown timed out after the work finished (PSRemotingTransportException). Scoring by job output, not as a failure." -LogOnly
+                    $jobOutput = @($streamSource | Select-Object -ExpandProperty Output)
+                    $worstLogLevel = 0
+                    $alreadyShown = if ($outputDisplayed.ContainsKey($job.Id)) { $outputDisplayed[$job.Id] } else { 0 }
+                    $outputIndex = 0
+                    foreach ($OutputObject in $jobOutput) {
+                        $outputIndex++
+                        $line = $OutputObject.text
+                        if (-not $line) { continue }
+                        $line = $line.ToString().Trim()
+                        if ($OutputObject.LogLevel -gt $worstLogLevel) { $worstLogLevel = $OutputObject.LogLevel }
+                        # Skip warning items already surfaced while the job was running.
+                        if ($outputIndex -le $alreadyShown -and $OutputObject.LogLevel -ge 2) { continue }
+                        if ($OutputObject.LogLevel -eq 2) {
+                            Write-OrangePoint $line -ForegroundColor $OutputObject.ForegroundColor
+                        }
+                        else {
+                            Write-GreenCheck $line -ForegroundColor $OutputObject.ForegroundColor
+                        }
+                    }
+                    if ($worstLogLevel -ge 2) { $return.Warning++ } else { $return.Success++ }
+
+                    # Per-VM timing: record as a successful (not failed) phase.
+                    if ($global:BuildStats -and $job.Name -match '^(.+?)\s+\[(.+?)\]') {
+                        $svmName = $Matches[1]
+                        $sRole = $Matches[2]
+                        $sStart = if ($job.PSBeginTime) { $job.PSBeginTime } else { $StartTime }
+                        $sEnd = if ($job.PSEndTime) { $job.PSEndTime } else { Get-Date }
+                        if (-not $global:BuildStats.VMs.ContainsKey($svmName)) {
+                            $global:BuildStats.VMs[$svmName] = @{ Role = $sRole; Phases = @{} }
+                        }
+                        $global:BuildStats.VMs[$svmName].Phases[$Phase] = @{
+                            Elapsed = ($sEnd - $sStart)
+                            Start   = $sStart
+                            End     = $sEnd
+                        }
+                    }
+
+                    Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
+                    $jobs.Remove($job)
+                    try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                    continue
+                }
+
                 $FailRetry = $FailRetry + 1
                 if ($FailRetry -gt 30) {
                     try {
