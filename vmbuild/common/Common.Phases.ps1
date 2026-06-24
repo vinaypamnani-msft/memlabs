@@ -458,6 +458,7 @@ function Start-Phase {
     # no Proxy VM or no opted-in clients are present.
     if ($Phase -eq 2) {
         $postPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        $postPhaseScope = [System.Collections.Generic.List[string]]::new()
 
         # Flip Linux VMs (incl. the Proxy itself) from bootstrap public DNS
         # to the DC's DNS first, so the Proxy can resolve internal names
@@ -465,6 +466,7 @@ function Start-Phase {
         $hasLinux = @($deployConfig.virtualMachines | Where-Object { (Test-VmIsLinux -Vm $_) -and -not $_.hidden }).Count -gt 0
         if ($hasLinux) {
             $null = Set-LinuxVmsDcDns -DeployConfig $deployConfig
+            $postPhaseScope.Add("Linux DNS")
         }
 
         # NOTE: Set-WindowsClientProxyForConfig used to run here as a serial
@@ -474,8 +476,14 @@ function Start-Phase {
         # Fix-* scripts and manual reruns.
 
         # Per-deploy enforcement covers brand-new VMs whose useProxy lives only
-        # in deployConfig (VM Notes not yet written on first-run cases).
-        Set-VmProxyEnforcementForConfig -deployConfig $deployConfig | Out-Null
+        # in deployConfig (VM Notes not yet written on first-run cases). Only
+        # run/label when a VM actually opts into the proxy -- with no useProxy
+        # VM the call is a pure no-op, so there's nothing to log.
+        $hasProxy = @($deployConfig.virtualMachines | Where-Object { $_.useProxy -eq $true -and -not $_.hidden }).Count -gt 0
+        if ($hasProxy) {
+            Set-VmProxyEnforcementForConfig -deployConfig $deployConfig | Out-Null
+            $postPhaseScope.Add("Proxy config")
+        }
         # NOTE: Cross-lab reconciliation (Set-VmProxyEnforcementForAllLabs)
         # runs from New-Lab.ps1 after Phase 11 succeeds, to clear stale ACLs
         # from VMs whose useProxy was flipped off. The ACL set itself is
@@ -487,7 +495,9 @@ function Start-Phase {
         Clean-StaleToolZips
 
         $postPhaseTimer.Stop()
-        Write-Log "[Phase 2] Post-processing (Linux DNS, Proxy config) completed. Time: $($postPhaseTimer.Elapsed.ToString("hh\:mm\:ss"))"
+        if ($postPhaseScope.Count -gt 0) {
+            Write-Log "[Phase 2] Post-processing ($($postPhaseScope -join ', ')) completed. Time: $($postPhaseTimer.Elapsed.ToString("hh\:mm\:ss"))"
+        }
         if ($global:BuildStats -and $global:BuildStats.Phases.ContainsKey(2)) {
             $global:BuildStats.Phases[2].Elapsed += $postPhaseTimer.Elapsed
         }
