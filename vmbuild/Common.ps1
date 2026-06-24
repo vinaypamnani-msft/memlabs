@@ -2994,7 +2994,7 @@ function New-VmNote {
             $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
         }
 
-        Write-Log "Checking if we can write out domainDefaults"
+        Write-Log "Checking if we can write out domainDefaults" -Verbose
         if ($null -ne $DeployConfig.domainDefaults -and $ThisVm.role -eq "DC") {
             Write-Log "Writing out domainDefaults Value: $($DeployConfig.domainDefaults.DeploymentType)"
             $vmNote | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $($DeployConfig.domainDefaults) -Force
@@ -3706,6 +3706,12 @@ function Set-SQLAOHeartbeatIPs {
         handed the next free address. The result is stamped on the deployConfig (so
         the per-job copies inherit it) AND written to every SQLAO VM Note at once (so
         reruns / -StartPhase 5 reuse it).
+
+        ClusterV2 (10.250.251.0/24) is a SINGLE host-internal switch SHARED by every
+        domain on the host, so two SQLAO clusters in DIFFERENT domains share the same
+        L2 segment. The in-use scan below therefore enumerates EVERY VM on the host
+        (no -DomainName filter) -- a heartbeat IP held by a node in another domain is
+        just as much a collision as one in this domain.
     #>
     param(
         [Parameter(Mandatory)]
@@ -3719,20 +3725,20 @@ function Set-SQLAOHeartbeatIPs {
     $rangeStart = 20
     $rangeEnd = 199
 
-    # 1. Collect every heartbeat IP already in use. Out-of-config SQLAO VMs in the
-    #    domain (other clusters) are authoritative; exclude this config's own VMs so a
-    #    node never counts its own IP as someone else's.
+    # 1. Collect every heartbeat IP already in use ACROSS ALL DOMAINS on the host --
+    #    ClusterV2 is one shared L2 segment, so an SQLAO node in any domain holding a
+    #    10.250.251.x is a real collision. Exclude this config's own VMs (matched by
+    #    vmName, which is prefix-unique host-wide) so a node never counts its own IP
+    #    as someone else's on a -StartPhase 5 rerun.
     $cfgNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($v in $sqlaoVMs) { if ($v.vmName) { $null = $cfgNames.Add($v.vmName) } }
     $used = [System.Collections.Generic.HashSet[string]]::new()
-    if ($DeployConfig.vmOptions.domainName) {
-        try {
-            foreach ($evm in (Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName -SmartUpdate | Where-Object { $_.role -eq 'SQLAO' -and (-not $cfgNames.Contains($_.vmName)) })) {
-                if ($evm.ClusterHeartbeatIP) { $null = $used.Add($evm.ClusterHeartbeatIP) }
-            }
+    try {
+        foreach ($evm in (Get-List -Type VM -SmartUpdate | Where-Object { $_.ClusterHeartbeatIP -and (-not $cfgNames.Contains($_.vmName)) })) {
+            $null = $used.Add($evm.ClusterHeartbeatIP)
         }
-        catch {}
     }
+    catch {}
 
     # 2. Reuse each node's existing IP when it's unique; everything else (missing or a
     #    duplicate) goes in $needIP to be (re)allocated below.
