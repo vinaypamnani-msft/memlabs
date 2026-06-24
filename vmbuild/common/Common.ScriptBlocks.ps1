@@ -2392,11 +2392,12 @@ $global:VM_Config = {
             # Idempotent: never add a 2nd NIC if a ClusterV2/Cluster NIC already exists --
             # a duplicate heartbeat NIC breaks the cluster network.
             #
-            # Heartbeat / cluster / AG IPs are pre-allocated SERIALLY by
-            # Set-DeployConfigIPAddresses before Phase 1, so there is NO per-node allocation
-            # and NO GetIP-mutex contention here in the common path. (The old per-node Phase 5
-            # allocation raced across multiple clusters and handed the same 10.250.251.20 to
-            # several nodes -> Windows flagged it Duplicate -> APIPA -> no cluster network.)
+            # Heartbeat IPs are pre-allocated SERIALLY by Set-SQLAOHeartbeatIPs immediately
+            # before the Phase 5 jobs fan out, so there is NO per-node allocation and NO
+            # GetIP-mutex contention here. (The old per-node Phase 5 allocation raced across
+            # multiple clusters and handed the same 10.250.251.20 to several nodes -> Windows
+            # flagged it Duplicate -> APIPA -> no cluster network.) Add-VMNetworkAdapter below
+            # acts on this one distinct VM, so it needs no mutex either.
             Write-Progress2 $Activity -Status "SQLAO: Preparing heartbeat NIC" -percentcomplete 5 -force
 
             $vmObj = Get-VM2 $currentItem.vmName
@@ -2426,38 +2427,6 @@ $global:VM_Config = {
                 }
             }
 
-            # Rare safety net: if the heartbeat IP wasn't pre-allocated (config) and isn't
-            # in the VM Note -- e.g. an ad-hoc -StartPhase 5 on a config that never went
-            # through the pre-pass -- allocate ONE here under the GetIP mutex so concurrent
-            # SQLAO nodes can't collide. The common path skips this entirely.
-            if (-not $nicFailure) {
-                $hbResolved = $currentItem.ClusterHeartbeatIP
-                if (-not $hbResolved) {
-                    $hbNote = Get-VMNote -VMName $currentItem.vmName
-                    if ($hbNote) { $hbResolved = $hbNote.ClusterHeartbeatIP }
-                }
-                if (-not $hbResolved) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): heartbeat IP not pre-allocated; allocating a fallback under the GetIP mutex" -Warning -OutputStream
-                    $mtx = New-Object System.Threading.Mutex($false, "GetIP")
-                    [void]$mtx.WaitOne()
-                    try {
-                        $usedHb = [System.Collections.Generic.HashSet[string]]::new()
-                        try { foreach ($e in (Get-List -Type VM -SmartUpdate)) { if ($e.ClusterHeartbeatIP) { $null = $usedHb.Add($e.ClusterHeartbeatIP) } } } catch {}
-                        foreach ($v in $deployConfig.virtualMachines) { if ($v.ClusterHeartbeatIP) { $null = $usedHb.Add($v.ClusterHeartbeatIP) } }
-                        for ($o = 20; $o -le 199; $o++) { $cand = "10.250.251.$o"; if (-not $usedHb.Contains($cand)) { $hbResolved = $cand; break } }
-                        if ($hbResolved) {
-                            $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterHeartbeatIP" -Value $hbResolved -Force
-                            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $true
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Allocated fallback heartbeat IP $hbResolved" -OutputStream
-                        }
-                        else {
-                            $nicFailure = "Could not find a free heartbeat IP in 10.250.251.20-199"
-                        }
-                    }
-                    finally { [void]$mtx.ReleaseMutex(); [void]$mtx.Dispose() }
-                }
-            }
-
             if ($nicFailure) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): $nicFailure. SQLAO cluster network will not form without the heartbeat NIC." -Failure -OutputStream
             }
@@ -2473,7 +2442,7 @@ $global:VM_Config = {
             Write-Progress2 $Activity -Status "Configuring heartbeat NIC" -percentcomplete 9 -force
             $heartbeatIP = $currentItem.ClusterHeartbeatIP
             if (-not $heartbeatIP) {
-                # Pre-allocated on the deploy config by Set-DeployConfigIPAddresses; on a
+                # Pre-allocated on the deploy config by Set-SQLAOHeartbeatIPs; on a
                 # deep-copied per-job config or a later rerun, fall back to the VM Note.
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): ClusterHeartbeatIP not in deploy config, reading from VM Note" -LogOnly
                 $vmNote = Get-VMNote -VMName $currentItem.vmName

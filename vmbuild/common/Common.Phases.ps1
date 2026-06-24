@@ -397,6 +397,13 @@ function Start-Phase {
         Mount-SqlIsoForPhase -deployConfig $deployConfig
     }
 
+    # Allocate the SQLAO cluster heartbeat IPs (10.250.251.x) once, serially, here
+    # -- before the parallel Phase 5 jobs fan out -- so every node gets a unique IP
+    # with no mutex and no cross-job race. Only Phase 5 needs these.
+    if ($Phase -eq 5) {
+        Set-SQLAOHeartbeatIPs -DeployConfig $deployConfig
+    }
+
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     # Hard-fail when a phase's preflight (e.g. the Phase 8 SQL-admin self-heal)

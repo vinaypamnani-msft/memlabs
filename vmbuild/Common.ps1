@@ -3686,6 +3686,98 @@ This example creates a new virtual machine named "MyVM" with 4GB of memory, 2 pr
 
 #>
 
+function Set-SQLAOHeartbeatIPs {
+    <#
+    .SYNOPSIS
+        Allocate the SQLAO cluster heartbeat IP (10.250.251.x) for every SQLAO node
+        ONCE, single-threaded, right before the parallel Phase 5 jobs fan out.
+    .DESCRIPTION
+        Only Phase 5 needs these IPs, so they are allocated here -- on the main
+        thread, before any Phase 5 job starts -- in a single pass: gather every IP
+        already in use, work out how many nodes still need one, grab that many free
+        addresses, and dole them out. Because it is serial there is no race and NO
+        mutex (and the per-node Add-VMNetworkAdapter in the Phase 5 job acts on
+        distinct VMs, so it doesn't need one either).
+
+        The heartbeat subnet (10.250.251.0/24) has no DHCP scope, so collision
+        avoidance is purely this in-memory dedup over .20-.199. A node's existing IP
+        (deployConfig or VM Note) is reused when unique; a node with no IP -- or whose
+        stored IP collides with another node (a bad config from an older build) -- is
+        handed the next free address. The result is stamped on the deployConfig (so
+        the per-job copies inherit it) AND written to every SQLAO VM Note at once (so
+        reruns / -StartPhase 5 reuse it).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [object]$DeployConfig
+    )
+
+    $sqlaoVMs = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and -not $_.hidden })
+    if ($sqlaoVMs.Count -eq 0) { return }
+
+    $subnet = '10.250.251'
+    $rangeStart = 20
+    $rangeEnd = 199
+
+    # 1. Collect every heartbeat IP already in use. Out-of-config SQLAO VMs in the
+    #    domain (other clusters) are authoritative; exclude this config's own VMs so a
+    #    node never counts its own IP as someone else's.
+    $cfgNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($v in $sqlaoVMs) { if ($v.vmName) { $null = $cfgNames.Add($v.vmName) } }
+    $used = [System.Collections.Generic.HashSet[string]]::new()
+    if ($DeployConfig.vmOptions.domainName) {
+        try {
+            foreach ($evm in (Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName -SmartUpdate | Where-Object { $_.role -eq 'SQLAO' -and (-not $cfgNames.Contains($_.vmName)) })) {
+                if ($evm.ClusterHeartbeatIP) { $null = $used.Add($evm.ClusterHeartbeatIP) }
+            }
+        }
+        catch {}
+    }
+
+    # 2. Reuse each node's existing IP when it's unique; everything else (missing or a
+    #    duplicate) goes in $needIP to be (re)allocated below.
+    $needIP = [System.Collections.Generic.List[object]]::new()
+    foreach ($v in $sqlaoVMs) {
+        $cur = $v.ClusterHeartbeatIP
+        if (-not $cur) {
+            $note = $null
+            try { $note = Get-VMNote -VMName $v.vmName -ErrorAction SilentlyContinue } catch {}
+            if ($note -and $note.ClusterHeartbeatIP) { $cur = $note.ClusterHeartbeatIP }
+        }
+        if ($cur -and -not $used.Contains($cur)) {
+            $null = $used.Add($cur)
+            $v | Add-Member -MemberType NoteProperty -Name ClusterHeartbeatIP -Value $cur -Force
+        }
+        else {
+            if ($cur) { Write-Log "$($v.vmName): SQLAO: heartbeat IP $cur is a duplicate -- reallocating" -Warning }
+            $needIP.Add($v)
+        }
+    }
+
+    # 3. Grab one free IP per node that needs one and dole them out.
+    foreach ($v in $needIP) {
+        $ip = $null
+        for ($o = $rangeStart; $o -le $rangeEnd; $o++) {
+            $cand = "$subnet.$o"
+            if (-not $used.Contains($cand)) { $ip = $cand; break }
+        }
+        if (-not $ip) {
+            Write-Log "$($v.vmName): SQLAO: no free heartbeat IP in $subnet.$rangeStart-$rangeEnd (range exhausted)" -Failure
+            continue
+        }
+        $null = $used.Add($ip)
+        $v | Add-Member -MemberType NoteProperty -Name ClusterHeartbeatIP -Value $ip -Force
+        Write-Log "$($v.vmName): SQLAO: assigned heartbeat IP $ip" -LogOnly
+    }
+
+    # 4. Persist to every SQLAO VM Note at once so reruns reuse the same IPs.
+    foreach ($v in $sqlaoVMs) {
+        if ($v.ClusterHeartbeatIP) {
+            New-VmNote -VmName $v.vmName -DeployConfig $DeployConfig -InProgress $true
+        }
+    }
+}
+
 function Set-DeployConfigIPAddresses {
     <#
     .SYNOPSIS
@@ -4005,82 +4097,6 @@ function Set-DeployConfigIPAddresses {
         }
         if ($ownerVm.ClusterIPAddress -and $ownerVm.AGIPAddress -and $ownerVm.ClusterIPAddress -eq $ownerVm.AGIPAddress) {
             Write-Log "$($ownerVm.vmName): SQLAO: Cluster and AG IP are identical ($($ownerVm.ClusterIPAddress)). Domain scope $domainScopeId may be exhausted." -Failure
-        }
-    }
-
-    # SQLAO heartbeat IPs (10.250.251.x, no DHCP scope) -- assign a UNIQUE static
-    # heartbeat IP to EVERY SQLAO node (both replicas in every cluster) here,
-    # single-threaded, exactly like the cluster/AG VIPs above. This replaces the old
-    # per-node allocation that ran inside the parallel Phase 5 jobs: with multiple
-    # clusters (up to 6 -> 12 nodes) those jobs raced and handed the SAME 10.250.251.20
-    # to several nodes, so Windows flagged it (Duplicate) and fell back to APIPA and the
-    # cluster network never formed. The heartbeat subnet has no DHCP scope, so collision
-    # avoidance is purely this in-memory dedup over the .20-.199 range. On rerun, an
-    # existing value (deployConfig or VM Note) is restored and kept UNLESS it is a
-    # duplicate (two nodes share it, or it collides with another domain cluster's node)
-    # -- a bad config left behind by an older build -- in which case it is discarded and
-    # reallocated, the same self-heal pattern the cluster/AG VIP loop above uses for a
-    # wrong-subnet IP.
-    $hbSubnet = '10.250.251'
-
-    # IPs owned by OTHER (out-of-config) domain SQLAO VMs are authoritative -- a node in
-    # THIS config must yield if it collides with one. Exclude config VMs (which also show
-    # up in Get-List once created) so a node never counts its own IP as someone else's.
-    $hbConfigNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($svm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
-        if ($svm.vmName) { $null = $hbConfigNames.Add($svm.vmName) }
-    }
-    $hbOthers = [System.Collections.Generic.HashSet[string]]::new()
-    if ($DeployConfig.vmOptions.domainName) {
-        try {
-            foreach ($evm in (Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName -SmartUpdate | Where-Object { $_.role -eq 'SQLAO' -and (-not $hbConfigNames.Contains($_.vmName)) })) {
-                if ($evm.ClusterHeartbeatIP) { $null = $hbOthers.Add($evm.ClusterHeartbeatIP) }
-            }
-        }
-        catch {}
-    }
-
-    # Restore persisted values, then detect + discard duplicates. $hbTaken starts with
-    # every out-of-config IP and grows as each in-config node CLAIMS a unique value.
-    $hbTaken = [System.Collections.Generic.HashSet[string]]::new($hbOthers)
-    foreach ($svm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
-        if (-not $svm.ClusterHeartbeatIP) {
-            $hbNote = $null
-            try { $hbNote = Get-VMNote -VMName $svm.vmName -ErrorAction SilentlyContinue } catch {}
-            if ($hbNote -and $hbNote.ClusterHeartbeatIP) {
-                $svm | Add-Member -MemberType NoteProperty -Name ClusterHeartbeatIP -Value ($hbNote.ClusterHeartbeatIP) -Force
-            }
-        }
-        $cur = $svm.ClusterHeartbeatIP
-        if ($cur) {
-            if ($hbTaken.Contains($cur)) {
-                # Duplicate (another in-config node already claimed it, or an out-of-config
-                # cluster owns it). Drop it so the assignment loop hands this node a free one.
-                Write-Log "$($svm.vmName): SQLAO: discarding duplicate heartbeat IP $cur (collides with another node) -- reallocating" -Warning
-                $svm.ClusterHeartbeatIP = $null
-            }
-            else {
-                $null = $hbTaken.Add($cur)
-            }
-        }
-    }
-
-    # Assign a free heartbeat IP to every node still missing one (fresh nodes + the
-    # duplicates just cleared above).
-    foreach ($svm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and -not $_.hidden })) {
-        if ($svm.ClusterHeartbeatIP) { continue }
-        $hbIp = $null
-        for ($o = 20; $o -le 199; $o++) {
-            $cand = "$hbSubnet.$o"
-            if (-not $hbTaken.Contains($cand)) { $hbIp = $cand; break }
-        }
-        if ($hbIp) {
-            $null = $hbTaken.Add($hbIp)
-            $svm | Add-Member -MemberType NoteProperty -Name ClusterHeartbeatIP -Value $hbIp -Force
-            Write-Log "$($svm.vmName): SQLAO: Pre-assigned heartbeat IP $hbIp (10.250.251.0, no DHCP)" -LogOnly
-        }
-        else {
-            Write-Log "$($svm.vmName): SQLAO: No free heartbeat IP in $hbSubnet.20-199 (range exhausted)" -Warning
         }
     }
 
