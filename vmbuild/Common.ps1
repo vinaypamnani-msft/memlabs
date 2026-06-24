@@ -3546,7 +3546,7 @@ function Add-DHCPReservationIsolated {
                             throw "DHCP in-lab IP collision: $ip on scope $scopeId is already reserved to live switch member '$($switchMacs[$existingMac])' (MAC $existingMac); refusing to reassign it to MAC $mac. Fix the IP assignment for one of these VMs."
                         }
                         # Orphan reservation -- reclaim the IP (drop any matching lease too).
-                        Remove-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null
+                        Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null
                         try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null } catch { }
                     }
                     else {
@@ -3660,7 +3660,8 @@ function Remove-DHCPReservation {
                     $reservation = Get-DhcpServerv4Reservation -ScopeId $scope -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
                     if ($reservation) {
                         $out += "$vmName Removing Reservation for $vmName"
-                        Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IPAddress -ErrorAction SilentlyContinue
+                        Remove-DhcpServerv4Reservation -IPAddress $reservation.IPAddress -ErrorAction SilentlyContinue
+                        try { Remove-DhcpServerv4Lease -IPAddress $reservation.IPAddress -ErrorAction SilentlyContinue } catch { }
                         break
                     }
                 }

@@ -232,7 +232,7 @@ if ($dhcpAvailable) {
                 Write-Host "  [orphaned] $label" -ForegroundColor Red
             }
             elseif (Confirm-Removal $label) {
-                Remove-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $res.IPAddress -ErrorAction SilentlyContinue
+                Remove-DhcpServerv4Reservation -IPAddress $res.IPAddress -ErrorAction SilentlyContinue
                 Remove-DhcpServerv4Lease -IPAddress $res.IPAddress -ErrorAction SilentlyContinue
                 Write-Host "  [removed]  $label" -ForegroundColor Green
                 $stats.Reservation.Removed++
