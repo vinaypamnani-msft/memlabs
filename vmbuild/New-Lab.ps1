@@ -1107,8 +1107,11 @@ try {
                     if ($proxyVm) {
                         $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
                         Write-Log "[Proxy] Enabling proxy on existing VM $($vm.vmName) -> $proxyFqdn`:3128"
+                        # Bypass the VM's OWN subnet (a VM on a secondary subnet must not
+                        # proxy its local traffic); fall back to the deployment default.
+                        $bypassNet = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
                         Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
-                            -ProxyFqdn $proxyFqdn -BypassNetwork $deployConfig.vmOptions.network
+                            -ProxyFqdn $proxyFqdn -BypassNetwork $bypassNet
                         Set-VmProxyEnforcement -VmName $vm.vmName
                     }
                     else {

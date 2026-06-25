@@ -1317,7 +1317,12 @@ function New-LinuxVirtualMachine {
                 try {
                     $vmMac2 = Get-VMMacIsolated -VmName $VmName
                     if ($vmMac2 -and $vmMac2 -ne '000000000000') {
-                        $scopeId2 = if ($thisVmConfig2.network) { $thisVmConfig2.network } else { $DeployConfig.vmOptions.network }
+                        # Scope must be the /24 that contains AssignedIP -- a VM on a secondary
+                        # subnet must reserve in its own scope, not vmOptions.network.
+                        $ipOctets2 = ([string]$thisVmConfig2.AssignedIP).Split('.')
+                        $scopeId2 = if ($ipOctets2.Count -eq 4) { "$($ipOctets2[0]).$($ipOctets2[1]).$($ipOctets2[2]).0" }
+                                    elseif ($thisVmConfig2.network) { $thisVmConfig2.network }
+                                    else { $DeployConfig.vmOptions.network }
                         $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2
                         if ($existing2) {
                             Write-Log "$VmName`: DHCP reservation already exists: $existing2 (MAC=$vmMac2); keeping" -LogOnly

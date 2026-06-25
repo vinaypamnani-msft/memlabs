@@ -5444,8 +5444,11 @@ $global:VM_Config = {
                     }
                     if ($proxyVm) {
                         $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+                        # Bypass this VM's OWN subnet; fall back to the deployment default
+                        # only when the VM has no explicit network (e.g. default subnet).
+                        $bypassNet = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
                         $null = Set-WindowsClientProxy -VmName $currentItem.vmName -Domain $deployConfig.vmOptions.domainName `
-                            -ProxyFqdn $proxyFqdn -BypassNetwork $deployConfig.vmOptions.network
+                            -ProxyFqdn $proxyFqdn -BypassNetwork $bypassNet
                     }
                     else {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): useProxy=true but no Proxy VM in config or domain; skipping client config" -Warning
