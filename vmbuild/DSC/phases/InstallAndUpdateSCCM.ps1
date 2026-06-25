@@ -1916,14 +1916,18 @@ else {
         # Get-CMDatabaseReplicationStatus reads the RCM link-summary view ("Summarizing all replication links
         # for monitoring UI"), which is recomputed lazily and can sit at Failed/NotStarted for many minutes
         # AFTER replication has actually recovered. The authoritative truth lives in the CAS's own site DB:
-        #   * ServerData.SiteStatus = ReplicationActive(125) for BOTH the CAS site and this child primary, AND
+        #   * ServerData.SiteStatus = ReplicationActive for BOTH the CAS site and this child primary, AND
         #   * no DRS_MessageActivity_Send row for the primary has LastSendResult < 0 (a real send error).
-        # When both hold, the link is functionally Active regardless of what the summary still says. Proven on
-        # fabrikam (2026-06-22): summary stuck Link=Failed for 45m while ServerData was CS1=125/PS1=125 and
-        # every send result was >= 0. Runs against the CAS's own CM_<CAS> over the already-resolved CAS SQL
-        # data source; on any error it returns Healthy=$false so the loop falls back to the normal wait.
+        # ReplicationActive is 125 on a child primary; the CAS reports its OWN status as 225 (the top-level /
+        # central-administration site uses the 200-series), though some hierarchies show the CAS at 125 too -
+        # so we treat BOTH 125 and 225 as active and don't assume which side reports which. When this holds the
+        # link is functionally Active regardless of what the summary still says. Proven on fabrikam (2026-06-22):
+        # summary stuck Link=Failed for 45m while ServerData was active on both sides and every send result was
+        # >= 0. Runs against the CAS's own CM_<CAS> over the already-resolved CAS SQL data source; on any error
+        # it returns Healthy=$false so the loop falls back to the normal wait.
+        $drsActiveStatuses = @(125, 225)  # ReplicationActive: 125 (child primary), 225 (CAS / top-level)
         function Test-DrsLinkHealthyViaSql {
-            param($CasSqlDataSource, $CasDbName, $CasSiteCode, $PriSiteCode)
+            param($CasSqlDataSource, $CasDbName, $CasSiteCode, $PriSiteCode, $ActiveStatuses)
             $h = [pscustomobject]@{ Healthy = $false; CasStatus = $null; PriStatus = $null; NegativeSends = $null; Error = $null }
             try {
                 $cs = "Data Source=$CasSqlDataSource;Initial Catalog=$CasDbName;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
@@ -1948,7 +1952,7 @@ else {
                     $negCmd.CommandTimeout = 30
                     [void]$negCmd.Parameters.AddWithValue("@pri", $PriSiteCode)
                     $h.NegativeSends = [int]$negCmd.ExecuteScalar()
-                    if ($h.CasStatus -eq 125 -and $h.PriStatus -eq 125 -and $h.NegativeSends -eq 0) {
+                    if (($h.CasStatus -in $ActiveStatuses) -and ($h.PriStatus -in $ActiveStatuses) -and $h.NegativeSends -eq 0) {
                         $h.Healthy = $true
                     }
                 }
@@ -2024,11 +2028,11 @@ else {
                     # AUTHORITATIVE GROUND TRUTH: before trusting the (lagging) monitoring summary's Failed/
                     # NotStarted verdict - which would trigger a needless reinit and a long false wait - ask the
                     # CAS's own site DB directly. If ServerData shows BOTH the CAS and this primary at
-                    # ReplicationActive(125) and there are no failed sends for the primary, the link is
-                    # functionally Active and we complete now, regardless of the stale summary.
-                    $sqlHealth = Test-DrsLinkHealthyViaSql -CasSqlDataSource $casSqlDataSource -CasDbName $casDbName -CasSiteCode $SiteCode -PriSiteCode $PSSiteCode
+                    # ReplicationActive (125 child / 225 CAS) and there are no failed sends for the primary, the
+                    # link is functionally Active and we complete now, regardless of the stale summary.
+                    $sqlHealth = Test-DrsLinkHealthyViaSql -CasSqlDataSource $casSqlDataSource -CasDbName $casDbName -CasSiteCode $SiteCode -PriSiteCode $PSSiteCode -ActiveStatuses $drsActiveStatuses
                     if ($sqlHealth.Healthy) {
-                        Write-DscStatus "Replication link is Active per SQL ground truth (ServerData: $SiteCode=125, $PSSiteCode=125; 0 failed sends) - the monitoring summary still lags (Link=$linkName, CAS->PRI=$g12Name, PRI->CAS=$g21Name, Site=$s21Name) (${drsElapsedMin}m elapsed)" -MachineName $PSVM.VmName
+                        Write-DscStatus "Replication link is Active per SQL ground truth (ServerData: $SiteCode=$($sqlHealth.CasStatus), $PSSiteCode=$($sqlHealth.PriStatus); 0 failed sends) - the monitoring summary still lags (Link=$linkName, CAS->PRI=$g12Name, PRI->CAS=$g21Name, Site=$s21Name) (${drsElapsedMin}m elapsed)" -MachineName $PSVM.VmName
                         Write-DscStatus "$SiteCode -> $PSSiteCode replication link Active (SQL ground truth)"
                         $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                         $propName = "PSReadyToUse" + $PSVM.VmName
