@@ -2111,7 +2111,38 @@ $global:VM_Config = {
             }
             return $false
         }
-        $rebootCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Check pending reboot"
+        # Host-side gate (Hyper-V only -- no PSDirect): skip the in-guest pending-
+        # reboot probe when the hypervisor already tells us the guest can't have a
+        # meaningful pending-reboot state. This also eliminates the recurring
+        # "An error occurred while creating the pipeline" PSDirect error the probe
+        # throws against a guest whose session isn't ready yet.
+        #   - not Running        -> powered off / mid power-cycle: nothing to check.
+        #   - Uptime < 60s        -> VM was just (re)started at the HOST level; any
+        #                            pending reboot was already consumed by that boot.
+        #   - Heartbeat not 'Ok*' -> Integration Services aren't answering, so the
+        #                            guest is still coming up. A soft/in-guest reboot
+        #                            (DSC RebootNow) does NOT reset Hyper-V Uptime, so
+        #                            this is what catches the freshly-rebooted-guest
+        #                            case that Uptime alone would miss (PSDirect isn't
+        #                            ready either, which is exactly the pipeline error).
+        # Any host-query failure -> fall through to the probe (preserves old behavior).
+        $rebootCheck = $null
+        $skipRebootProbe = $null
+        try {
+            $vmInfoRb = Get-VM2 -Name $currentItem.vmName
+            if (-not $vmInfoRb) { $skipRebootProbe = 'not found in Hyper-V' }
+            elseif ($vmInfoRb.State -ne 'Running') { $skipRebootProbe = "state=$($vmInfoRb.State)" }
+            elseif ($vmInfoRb.Uptime.TotalSeconds -lt 60) { $skipRebootProbe = "uptime $([int]$vmInfoRb.Uptime.TotalSeconds)s < 60s (just started)" }
+            elseif ($vmInfoRb.Heartbeat -and $vmInfoRb.Heartbeat -notlike 'Ok*') { $skipRebootProbe = "heartbeat '$($vmInfoRb.Heartbeat)' (guest not ready / mid-reboot)" }
+        }
+        catch { $skipRebootProbe = $null }
+
+        if ($skipRebootProbe) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Skipping pending-reboot check -- $skipRebootProbe." -LogOnly
+        }
+        else {
+            $rebootCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Check pending reboot"
+        }
         if ($rebootCheck.ScriptBlockOutput -and $rebootCheck.ScriptBlockOutput -ne $false) {
             $rebootResult = $rebootCheck.ScriptBlockOutput
             # Delete-only PendingFileRename ops don't require a reboot
