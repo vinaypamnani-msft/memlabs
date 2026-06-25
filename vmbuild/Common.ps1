@@ -5331,6 +5331,28 @@ function Wait-ForVm {
     return $ready
 }
 
+function Get-VmHostSideDiag {
+    # Best-effort host-side (Hyper-V) snapshot of a VM, used to annotate PSDirect
+    # readiness/channel failures ("An error occurred while creating the pipeline",
+    # broken transport, etc.) in the build log. All fields come straight from the
+    # hypervisor -- no PSDirect round-trip -- so they're available even when the
+    # guest's session can't be created. Reviewing these alongside the failure tells
+    # us whether the failure correlates with a freshly-(re)started/booting guest
+    # (low Uptime / non-Ok Heartbeat) and therefore whether the readiness gate
+    # thresholds (e.g. the 60s pending-reboot skip) need tuning. Never throws.
+    param([string]$VmName)
+    try {
+        $vm = Get-VM2 -Name $VmName
+        if (-not $vm) { return "[host-diag: VM '$VmName' not found in Hyper-V]" }
+        $up = if ($vm.Uptime) { "$([int]$vm.Uptime.TotalSeconds)s" } else { "n/a" }
+        $hb = if ($vm.Heartbeat) { "$($vm.Heartbeat)" } else { "n/a" }
+        return "[host-diag: State=$($vm.State) Uptime=$up Heartbeat=$hb Status='$($vm.Status)']"
+    }
+    catch {
+        return "[host-diag: unavailable ($($_.Exception.Message))]"
+    }
+}
+
 function Invoke-VmCommand {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
@@ -5680,6 +5702,21 @@ function Invoke-VmCommand {
             if ($null -eq $return.ScriptBlockOutput) {
                 if ($return.ErrorDetails) {
                     $return.ScriptBlockOutput = $return.ErrorDetails[0]
+                }
+            }
+            # When the failure is a PSDirect readiness/channel issue (the recurring
+            # "An error occurred while creating the pipeline", a broken transport, a
+            # session that won't connect, etc.) emit a companion host-side diagnostic
+            # line so post-run log review can correlate these failures with the VM's
+            # actual Hyper-V uptime/heartbeat. Over many runs this tells us whether the
+            # failures cluster on freshly-booting guests (=> a readiness gate/threshold
+            # needs tuning) or hit settled VMs (=> something else). Gated on the error
+            # signature (and ChannelBroken) so ordinary scriptblock failures don't
+            # trigger a host query or add log noise. -LogOnly: file only, not console.
+            if (-not $SuppressLog) {
+                $errBlob = "$($return.ErrorDetails -join ' ')"
+                if ($return.ChannelBroken -or $errBlob -match 'creating the pipeline|pipeline is not|transport|channel|broken|Cannot connect|not connected|session is in') {
+                    Write-Log "$VmName`: '$DisplayName' PSDirect readiness diag -- $(Get-VmHostSideDiag -VmName $VmName)" -LogOnly
                 }
             }
         }
