@@ -4263,7 +4263,8 @@ $global:VM_Config = {
         $lcmIdleSince = $null              # when the DSC LCM was FIRST seen continuously idle (null = not idle / unknown)
         $lcmRebootPendingSince = $null     # when the DSC LCM was FIRST seen parked reboot-pending (null = not parked / unknown)
         $lcmProbeStartMinutes = 5          # begin sampling the guest LCM once the status has been frozen this long
-        $rebootStuckMinutes = 4            # restart the VM once the LCM stays reboot-pending this long with frozen status
+        $rebootStuckMinutes = 4            # resume/restart the VM once a stranded PendingConfiguration stays this long with frozen status
+        $rebootPendingStuckMinutes = 2     # restart the VM once the LCM stays reboot-pending (reboot genuinely owed) this long with frozen status -- shorter than the stranded case because the LCM is literally asking for a restart
         $lcmPendingNoRebootSince = $null   # when the LCM was FIRST seen PendingConfiguration with NO reboot owed (stranded apply)
         $dscResumeCount = 0                # in-place Stop+Start-DscConfiguration -UseExisting attempts this stall episode
         $dscResumeMax = 1                  # gentle in-place resumes before escalating a stranded PendingConfiguration to a reboot
@@ -4913,7 +4914,7 @@ $global:VM_Config = {
                         $rebootMins = if ($lcmRebootPendingSince) { [int]([DateTime]::UtcNow - $lcmRebootPendingSince).TotalMinutes } else { 0 }
                         $pendingMins = if ($lcmPendingNoRebootSince) { [int]([DateTime]::UtcNow - $lcmPendingNoRebootSince).TotalMinutes } else { 0 }
 
-                        if ($lcmRebootPendingSince -and $rebootMins -ge $rebootStuckMinutes -and $staleRestartCount -lt $staleRestartMax) {
+                        if ($lcmRebootPendingSince -and $rebootMins -ge $rebootPendingStuckMinutes -and $staleRestartCount -lt $staleRestartMax) {
                             # The LCM has been parked reboot-pending (PendingReboot / PendingConfiguration /
                             # RebootRequested) with the status frozen for the confirmation window -- the restart
                             # DSC scheduled never fired. Observed on Win10/11 client renames, where the LCM logs
