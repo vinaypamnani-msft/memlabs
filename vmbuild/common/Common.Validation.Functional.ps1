@@ -1929,11 +1929,19 @@ function Test-SQLAOFunctionality {
                     $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$clusterName' -RRType A -ComputerName '$dnsServer'")
                     $cwd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $clusterName, $dnsServer) -ScriptBlock {
                         param($zone, $name, $server)
-                        Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
+                        # Project to plain IP strings INSIDE the job. The watchdog runs this
+                        # under Start-Job when Start-ThreadJob is unavailable (the in-guest
+                        # WinPS 5.1 case), and Receive-Job then hands back DESERIALIZED CIM
+                        # records whose RecordData.IPv4Address has lost its IPAddress type --
+                        # .IPAddressToString returns $null, which surfaced as a spurious
+                        # "cluster IP not in DNS (found: )" FAIL even though DNS was correct.
+                        # Strings serialize losslessly, so do the extraction here.
+                        $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
+                        @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                     }
                     if ($cwd.Status -eq 'OK') {
                         $clusterDnsRpcOk = $true
-                        $clusterResolvedIPs = @($cwd.Output | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                        $clusterResolvedIPs = @($cwd.Output | Where-Object { $_ })
                     }
                     else {
                         if ($cwd.Status -eq 'Error') {
@@ -1948,10 +1956,12 @@ function Test-SQLAOFunctionality {
                         $results.Details.Add("CMD: Resolve-DnsName -Name '$clusterFqdn' -Type A -Server '$dnsServer' -DnsOnly -NoHostsFile")
                         $cwd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($clusterFqdn, $dnsServer) -ScriptBlock {
                             param($n, $s)
-                            Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                            # Project to plain IP strings inside the job (Start-Job serialization-safe).
+                            $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                            @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
                         }
                         if ($cwd2.Status -eq 'OK') {
-                            $clusterResolvedIPs = @($cwd2.Output | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+                            $clusterResolvedIPs = @($cwd2.Output | Where-Object { $_ })
                             if ($clusterResolvedIPs.Count -gt 0) { $clusterDnsSource = ' (direct DNS, port 53)' }
                         }
                     }
@@ -2276,11 +2286,16 @@ function Test-SQLAOFunctionality {
                     # heartbeat records remotely (informational), which is not a fault.
                     $hwd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $hostname, $dnsServer) -ScriptBlock {
                         param($zone, $name, $server)
-                        Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
+                        # Project to plain IP strings inside the job: deserialized CIM records
+                        # from the Start-Job fallback lose RecordData.IPv4Address, so the
+                        # subnet match below must run on strings, not record objects.
+                        $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
+                        @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                     }
                     if ($hwd.Status -eq 'OK') {
                         $hostZoneRpcOk = $true
-                        $staleRecords = @($hwd.Output | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -like "${clusterSubnet}*" })
+                        # $hwd.Output is now plain IP strings; $staleRecords holds IP strings.
+                        $staleRecords = @($hwd.Output | Where-Object { $_ -and $_ -like "${clusterSubnet}*" })
                     }
                     else {
                         $hwdErr = if ($hwd.Status -eq 'Error' -and $hwd.Errors -and $hwd.Errors[0].Exception) { $hwd.Errors[0].Exception.Message }
@@ -2290,7 +2305,8 @@ function Test-SQLAOFunctionality {
                     }
                 }
                 if ($staleRecords.Count -gt 0) {
-                    $staleIPs = @($staleRecords | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                    # $staleRecords already holds plain IP strings (projected inside the watchdog job).
+                    $staleIPs = @($staleRecords)
                     # Attempt remediation: disable DNS reg on heartbeat/virtual adapters,
                     # remove stale A records, and recheck. The cluster service recreates
                     # virtual adapters with default DNS settings on every boot, so stale
@@ -2313,9 +2329,8 @@ function Test-SQLAOFunctionality {
                                 Set-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -ServerAddresses @() -ErrorAction SilentlyContinue
                             }
                         }
-                        # Remove stale A records from DNS server
-                        foreach ($rec in $staleRecords) {
-                            $ip = $rec.RecordData.IPv4Address.IPAddressToString
+                        # Remove stale A records from DNS server ($staleRecords = IP strings)
+                        foreach ($ip in $staleRecords) {
                             Remove-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -RecordData $ip -ComputerName $dnsServer -Force -ErrorAction SilentlyContinue
                             $results.Details.Add("REMEDIATE: Removed stale A record $hostname -> $ip")
                         }
@@ -2633,11 +2648,15 @@ WHERE drs.is_local = 1
                         $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$listenerName' -RRType A -ComputerName '$candidate'")
                         $wd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $listenerName, $candidate) -ScriptBlock {
                             param($zone, $name, $server)
-                            Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
+                            # Project to plain IP strings inside the job (Start-Job-safe);
+                            # deserialized CIM records lose RecordData.IPv4Address otherwise,
+                            # producing a spurious blank "'<listener>' resolves to" line.
+                            $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
+                            @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                         }
                         $rpcStatus = $wd.Status
                         if ($wd.Status -eq 'OK') {
-                            $resolvedIPs = @($wd.Output | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                            $resolvedIPs = @($wd.Output | Where-Object { $_ })
                             $attemptNote = if ($wd.Attempts -gt 1) { ", attempt $($wd.Attempts)" } else { '' }
                             if ($candidate -ne $dnsCandidates[0] -or $wd.Attempts -gt 1) {
                                 $sourceNote = " (via '$candidate'$attemptNote)"
@@ -2659,10 +2678,12 @@ WHERE drs.is_local = 1
                             $results.Details.Add("CMD: Resolve-DnsName -Name '$fqdn' -Type A -Server '$candidate' -DnsOnly -NoHostsFile")
                             $wd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($fqdn, $candidate) -ScriptBlock {
                                 param($n, $s)
-                                Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                                # Project to plain IP strings inside the job (Start-Job-safe).
+                                $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                                @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
                             }
                             if ($wd2.Status -eq 'OK') {
-                                $resolvedIPs = @($wd2.Output | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+                                $resolvedIPs = @($wd2.Output | Where-Object { $_ })
                                 if ($resolvedIPs.Count -gt 0) {
                                     $sourceNote = " (direct DNS via '$candidate')"
                                     break
