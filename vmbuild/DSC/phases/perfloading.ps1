@@ -1923,14 +1923,15 @@ SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SM
 FROM SMS_R_System
 WHERE DATEDIFF(day, SMS_R_SYSTEM.LastLogonTimestamp, GETDATE()) > 90
 "@
-        }
+        },
         @{
             Name  = "MEMLABS-Devices Missing Critical Updates"
             Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
-INNER JOIN SMS_G_System_UPDATE_STATUS ON SMS_G_System_UPDATE_STATUS.ResourceID = SMS_R_System.ResourceId
-WHERE SMS_G_System_UPDATE_STATUS.Status = 2 AND SMS_G_System_UPDATE_STATUS.UpdateType = 'Critical'
+INNER JOIN SMS_UpdateComplianceStatus ON SMS_UpdateComplianceStatus.MachineID = SMS_R_System.ResourceID
+INNER JOIN SMS_SoftwareUpdate ON SMS_SoftwareUpdate.CI_ID = SMS_UpdateComplianceStatus.CI_ID
+WHERE SMS_UpdateComplianceStatus.Status = 2 AND SMS_SoftwareUpdate.SeverityName = 'Critical'
 "@
         },
         @{
