@@ -4445,7 +4445,11 @@ function New-VirtualMachine {
                         $scopeId = if ($thisVmConfig.role -in 'InternetClient', 'AADClient') {
                             '172.31.250.0'
                         } else {
-                            if ($thisVmConfig.network) { $thisVmConfig.network } else { $DeployConfig.vmOptions.network }
+                            # Scope must be the /24 that contains AssignedIP -- a VM on a
+                            # secondary subnet must reserve in its own scope, not vmOptions.network.
+                            $ipOctets = ([string]$assignedIP).Split('.')
+                            if ($ipOctets.Count -eq 4) { "$($ipOctets[0]).$($ipOctets[1]).$($ipOctets[2]).0" }
+                            elseif ($thisVmConfig.network) { $thisVmConfig.network } else { $DeployConfig.vmOptions.network }
                         }
                         # Check if a reservation already exists for this MAC
                         $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
@@ -4633,7 +4637,11 @@ function New-VirtualMachine {
                         $scopeId2 = if ($thisVmConfig2.role -in 'InternetClient', 'AADClient') {
                             '172.31.250.0'
                         } else {
-                            if ($thisVmConfig2.network) { $thisVmConfig2.network } else { $DeployConfig.vmOptions.network }
+                            # Scope must be the /24 that contains AssignedIP -- a VM on a
+                            # secondary subnet must reserve in its own scope, not vmOptions.network.
+                            $ipOctets2 = ([string]$thisVmConfig2.AssignedIP).Split('.')
+                            if ($ipOctets2.Count -eq 4) { "$($ipOctets2[0]).$($ipOctets2[1]).$($ipOctets2[2]).0" }
+                            elseif ($thisVmConfig2.network) { $thisVmConfig2.network } else { $DeployConfig.vmOptions.network }
                         }
                         $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2
                         if ($existing2) {

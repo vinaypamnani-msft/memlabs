@@ -2317,7 +2317,18 @@ $global:VM_Config = {
                                     $realnetwork = "172.31.250.0"
                                 }
                                 else {
-                                    $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
+                                    # Derive the scope from the IP we're actually reserving so a VM on a
+                                    # secondary subnet (e.g. an existing DC on a different network than the
+                                    # VMs being added this run) reserves in ITS OWN /24 scope rather than
+                                    # vmOptions.network (which is the NEW deployment's network). A DHCP
+                                    # reservation must live in the scope that contains the IP, so reserving
+                                    # a .110.1 address against a .112.0 scope fails every retry.
+                                    $ipOctets = ([string]$resolvedIP).Split('.')
+                                    if ($ipOctets.Count -eq 4) {
+                                        $realnetwork = "$($ipOctets[0]).$($ipOctets[1]).$($ipOctets[2]).0"
+                                    }
+                                    elseif ($currentItem.network) { $realnetwork = $currentItem.network }
+                                    else { $realnetwork = $deployConfig.vmOptions.network }
                                 }
                                 Remove-DHCPReservation -mac $vmMac -vmName $currentItem.vmName
                                 Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $resolvedIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName)"
