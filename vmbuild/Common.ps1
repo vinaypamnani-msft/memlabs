@@ -8108,6 +8108,7 @@ else {
 . $PSScriptRoot\common\Common.mRemoteNG.ps1
 . $PSScriptRoot\common\Common.Remove.ps1
 . $PSScriptRoot\common\Common.Maintenance.ps1
+. $PSScriptRoot\common\Common.DownloadCache.ps1
 . $PSScriptRoot\common\Common.ScriptBlocks.ps1
 . $PSScriptRoot\common\Common.GenConfig.ps1
 . $PSScriptRoot\common\Common.GenConfig.NewDomain.ps1

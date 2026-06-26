@@ -2823,6 +2823,31 @@ $global:VM_Config = {
             Write-Progress2 $Activity -Status "Skip copying DSC files to the VM." -percentcomplete 35 -force -Log
         }
 
+        # Download cache: ensure the host has this deployment's small Tier-1
+        # installers (SSMS, .NET, ODBC, OleDB, SQLClient, VCredist, ReportBuilder,
+        # PMPC) baked into a content-addressed, read-only ISO and mount it on this
+        # VM, so the guest's Invoke-DownloadFile serves them off the local DVD
+        # instead of downloading over the slow internal NAT. Pure optimization:
+        # fully gated ($env:MEMLABS_NO_DOWNLOAD_CACHE kill switch + needed-key
+        # gating), with a guest-side fall-through to direct download on any miss.
+        # Gen1/OSD VMs are skipped (the cache only targets Gen2 server VMs, whose
+        # SCSI DVD can be hot-added while running). Build is once-per-content
+        # (content-addressed ISO + mutex), so concurrent VMs/deploys are safe.
+        try {
+            if (Test-MemlabsDownloadCacheEnabled) {
+                $cacheVm = Get-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue
+                if ($cacheVm -and $cacheVm.Generation -ne 1) {
+                    $cacheIso = Get-MemlabsCacheIsoForDeploy -DeployConfig $deployConfig -StartPhase $Phase
+                    if ($cacheIso -and (Mount-MemlabsCacheIsoToVm -VmName $currentItem.vmName -IsoPath $cacheIso)) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounted download cache $([System.IO.Path]::GetFileName($cacheIso))." -LogOnly
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Download cache step failed (non-fatal): $($_.Exception.Message)" -LogOnly
+        }
+
         # WSUS categories baseline cab. Ship to EVERY SUP/WSUS VM (not just
         # top-of-hierarchy) so InstallRoles (Phase 8) can run `wsusutil import`
         # locally and pre-populate dbo.UpdateCategories before CM's first

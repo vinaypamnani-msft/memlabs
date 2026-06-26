@@ -18,11 +18,75 @@ function Get-InstalledProducts {
 }
 
 
+function Copy-MemlabsCachedFile {
+    # Cache-first delivery: if the MemLabs download-cache DVD (volume label
+    # MEMLABSCACHE) is mounted and contains the file for $Url, verify it against
+    # the on-disc manifest (size + SHA1) and copy it to $Dest. Returns $true on a
+    # verified hit; $false (never throws) on any miss so the caller downloads
+    # normally. The manifest is keyed by URL -- the same URL the DSC resource
+    # already passes in -- so no per-resource filename knowledge is required.
+    param([string] $Url, [string] $Dest)
+    if ([string]::IsNullOrWhiteSpace($Url) -or [string]::IsNullOrWhiteSpace($Dest)) { return $false }
+    try {
+        $drive = $null
+        foreach ($cd in (Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=5" -ErrorAction SilentlyContinue)) {
+            if ($cd.VolumeName -eq 'MEMLABSCACHE' -and $cd.DeviceID) { $drive = $cd.DeviceID; break }
+        }
+        if (-not $drive) { return $false }
+
+        $manifestPath = Join-Path "$drive\" 'manifest.json'
+        if (-not (Test-Path $manifestPath)) { return $false }
+        $manifest = Get-Content -Path $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        if (-not $manifest -or -not $manifest.files) { return $false }
+
+        $entry = $null
+        $urlTrim = $Url.Trim()
+        foreach ($prop in $manifest.files.psobject.properties) {
+            if ($prop.Name -eq $Url -or [string]::Equals($prop.Name.Trim(), $urlTrim, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $entry = $prop.Value
+                break
+            }
+        }
+        if (-not $entry -or -not $entry.file) { return $false }
+
+        $src = Join-Path "$drive\" $entry.file
+        if (-not (Test-Path $src)) { return $false }
+
+        $srcItem = Get-Item $src -ErrorAction Stop
+        if ($entry.size -and ([int64]$srcItem.Length -ne [int64]$entry.size)) { return $false }
+        if ($entry.sha1) {
+            $h = (Get-FileHash -Algorithm SHA1 -Path $src -ErrorAction Stop).Hash.ToLowerInvariant()
+            if ($h -ne ([string]$entry.sha1).ToLowerInvariant()) { return $false }
+        }
+
+        $destDir = Split-Path $Dest -Parent
+        if ($destDir -and -not (Test-Path $destDir)) { New-Item -ItemType Directory -Force -Path $destDir | Out-Null }
+        if (Test-Path $Dest) { Remove-Item $Dest -Force -ErrorAction SilentlyContinue | Out-Null }
+        Copy-Item -Path $src -Destination $Dest -Force -ErrorAction Stop
+        if (-not (Test-Path $Dest)) { return $false }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+
 function Invoke-DownloadFile {
     param(
         [string] $url,
         [string] $dest
     )
+
+    # Cache-first: serve from the mounted MemLabs cache DVD when available. On any
+    # miss this is a no-op and we fall through to the normal download chain.
+    try {
+        if (Copy-MemlabsCachedFile -Url $url -Dest $dest) {
+            Write-Status "Using cached $([System.IO.Path]::GetFileName($dest)) from MemLabs cache DVD"
+            return
+        }
+    }
+    catch { Write-Verbose "Cache-first lookup failed: $($_.Exception.Message)" }
 
     if ((Test-Path $dest)) {
         Remove-Item $dest -Force -ErrorAction SilentlyContinue | Out-Null

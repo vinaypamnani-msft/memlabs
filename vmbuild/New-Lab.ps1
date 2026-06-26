@@ -1164,6 +1164,22 @@ finally {
     $global:mutexes = @()
     $global:BuildStats = $null
 
+    # Eject the download-cache DVD from THIS deployment's VMs and evict stale
+    # cache ISOs. Per-VM and scoped to our own VMs only, so a concurrently-running
+    # deployment's mounts are never disturbed. Eviction never deletes an ISO any
+    # VM on the host still has mounted.
+    if ($deployConfig -and $deployConfig.virtualMachines) {
+        try {
+            foreach ($cacheVm in $deployConfig.virtualMachines) {
+                if ($cacheVm.vmName) { Dismount-MemlabsCacheIsoFromVm -VmName $cacheVm.vmName }
+            }
+            Remove-StaleMemlabsCacheIso
+        }
+        catch {
+            Write-Log "Download cache cleanup failed (non-fatal): $_" -LogOnly
+        }
+    }
+
     if ($enableDebug) {
         Write-Host 'Config Stored in $global:DebugConfig'
         $global:DebugConfig = $deployConfig
