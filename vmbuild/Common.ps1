@@ -3971,8 +3971,19 @@ function Set-DeployConfigIPAddresses {
                     if ($rHost -and $domainVmNames.Contains($rHost)) {
                         $ownedByDomain = $true
                     }
-                    elseif ($rDesc -match '^Reservation for (.+)$' -and $domainVmNames.Contains($Matches[1].Trim())) {
-                        $ownedByDomain = $true
+                    elseif ($rDesc -match '^Reservation for (.+)$') {
+                        # Linux VM reservations carry a " (Linux)" suffix in the Description
+                        # (Common.Linux.ps1: "Reservation for <vm> (Linux)"). Strip it before
+                        # matching the bare VM name, otherwise the proxy's fixed-role reservation
+                        # (e.g. .2) -- which also has no FQDN Name yet (its DNS A-record is
+                        # deferred to Phase 2) -- can NEVER be attributed to the domain and is
+                        # never swept. A surviving stale .2 reservation then gets inherited by a
+                        # later VM that Hyper-V hands the proxy's recycled MAC, booting it onto
+                        # .2 and colliding with the proxy.
+                        $resvVmName = $Matches[1].Trim() -replace '\s*\(Linux\)$', ''
+                        if ($domainVmNames.Contains($resvVmName)) {
+                            $ownedByDomain = $true
+                        }
                     }
                 }
                 if (-not $ownedByDomain) { continue }   # unknown / other domain -- never touch
