@@ -23,7 +23,6 @@
 
 $script:MemlabsCacheTier1Keys = @('DotNet', 'SSMS', 'ODBC', 'OleDB', 'SQLClient', 'VCredist', 'VCredistX86', 'ReportBuilder', 'PMPC')
 $script:MemlabsCacheVolumeLabel = 'MEMLABSCACHE'
-$script:MemlabsCacheRollingMaxAgeDays = 14
 
 function Test-MemlabsDownloadCacheEnabled {
     # Kill switch.
@@ -79,15 +78,32 @@ function Get-MemlabsCacheUrlForKey {
     return $null
 }
 
-function Test-MemlabsCacheKeyRolling {
-    # rollingLatest keys (SSMS, VCredist[x86], ...) resolve to a "latest" redirect
-    # whose content changes over time, so the cached copy must be refreshed
-    # periodically. Pinned keys never change and are cached indefinitely.
-    param($Key)
-    if (-not $Common.AzureFileList -or -not $Common.AzureFileList.UrlsMeta) { return $false }
-    $m = $Common.AzureFileList.UrlsMeta.psobject.properties[$Key]
-    if ($m -and $m.Value -and $m.Value.rollingLatest) { return $true }
-    return $false
+function Get-MemlabsRemoteFileSignature {
+    # Best-effort HEAD probe (following redirects) returning the server's change
+    # signals -- Content-Length, Last-Modified, ETag. Returns $null on any failure
+    # so callers treat "can't probe" as "no change" and keep the cached copy.
+    # The filelist carries no per-URL hashes, so this is how we detect that a
+    # rolling "latest" redirect (aka.ms/...) changed underneath a stable URL.
+    param([string] $Url)
+    try {
+        $resp = Invoke-WebRequest -Uri $Url -Method Head -MaximumRedirection 5 -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
+        $h = $resp.Headers
+        $val = {
+            param($name)
+            if ($h -and $h.ContainsKey($name)) {
+                $v = $h[$name]
+                if ($v -is [System.Array]) { return [string]($v | Select-Object -First 1) }
+                return [string]$v
+            }
+            return ''
+        }
+        return [PSCustomObject]@{
+            Size         = (& $val 'Content-Length')
+            LastModified = (& $val 'Last-Modified')
+            ETag         = (& $val 'ETag')
+        }
+    }
+    catch { return $null }
 }
 
 function Get-MemlabsCacheNeededKeys {
@@ -145,13 +161,37 @@ function Get-MemlabsCacheIsoForDeploy {
             if (-not $url) { continue }
             $leaf = Get-MemlabsCacheLeaf -Key $key -Url $url
             $path = Join-Path $store $leaf
+            $sidecarPath = "$path.src"
 
-            # Refresh rolling-latest keys that have aged out; pinned keys are
-            # skip-if-exists (Get-File handles that internally, with no hashing).
+            # No time-based expiry: the store keeps files indefinitely. We
+            # re-download ONLY when the source actually changed, detected by
+            # comparing the configured URL plus the server's HEAD signature
+            # (Content-Length / Last-Modified / ETag) against what we recorded
+            # in the per-file sidecar when we last fetched it. This catches a
+            # filelist URL bump (pinned keys) AND a rolling 'latest' redirect
+            # changing underneath a stable URL (SSMS, VCredist, PMPC, ...).
             $force = $false
-            if ((Test-Path $path) -and (Test-MemlabsCacheKeyRolling -Key $key)) {
-                $ageDays = (New-TimeSpan -Start (Get-Item $path).LastWriteTime -End (Get-Date)).TotalDays
-                if ($ageDays -ge $script:MemlabsCacheRollingMaxAgeDays) { $force = $true }
+            $remoteSig = $null
+            if (-not (Test-Path $path)) {
+                $force = $true
+            }
+            else {
+                $prev = $null
+                if (Test-Path $sidecarPath) {
+                    try { $prev = Get-Content -Path $sidecarPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch { $prev = $null }
+                }
+                if (-not $prev -or [string]$prev.url -ne $url) {
+                    $force = $true
+                }
+                else {
+                    $remoteSig = Get-MemlabsRemoteFileSignature -Url $url
+                    if ($remoteSig) {
+                        if ($remoteSig.Size -and ([string]$prev.size -ne [string]$remoteSig.Size)) { $force = $true }
+                        if ($remoteSig.LastModified -and ([string]$prev.lastModified -ne [string]$remoteSig.LastModified)) { $force = $true }
+                        if ($remoteSig.ETag -and ([string]$prev.etag -ne [string]$remoteSig.ETag)) { $force = $true }
+                    }
+                    # HEAD unavailable (server doesn't answer / no headers) => keep the cached copy.
+                }
             }
 
             $ok = Get-File -Source $url -Destination $path -Action Downloading -Silent -ForceDownload:$force
@@ -161,6 +201,21 @@ function Get-MemlabsCacheIsoForDeploy {
             }
             $fi = Get-Item $path
             if ($fi.Length -le 0) { continue }
+
+            # Record the source signature so the next run can detect a change.
+            # Only rewrite on a fresh download so we don't churn the sidecar.
+            if ($force) {
+                if (-not $remoteSig) { $remoteSig = Get-MemlabsRemoteFileSignature -Url $url }
+                $sidecar = [ordered]@{
+                    url           = $url
+                    size          = if ($remoteSig) { [string]$remoteSig.Size } else { '' }
+                    lastModified  = if ($remoteSig) { [string]$remoteSig.LastModified } else { '' }
+                    etag          = if ($remoteSig) { [string]$remoteSig.ETag } else { '' }
+                    downloadedUtc = (Get-Date).ToUniversalTime().ToString('o')
+                }
+                try { ($sidecar | ConvertTo-Json) | Out-File -FilePath $sidecarPath -Encoding utf8 -Force } catch {}
+            }
+
             $entries += [ordered]@{ Key = $key; Url = $url; File = $leaf; Size = $fi.Length; Ticks = $fi.LastWriteTimeUtc.Ticks; Path = $path; Sha1 = $null }
         }
 
