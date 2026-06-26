@@ -7216,6 +7216,16 @@ class DisableClusterNicDnsRegistration {
         $_domain = $this.DomainName
         $_dc     = $this.DCName
 
+        # Per-block elapsed instrumentation. Test() always returns $false so this
+        # Set() runs on EVERY pass (and twice per Phase 5 deploy: a 'Pre' stage and
+        # a 'Post' stage). One stage has been observed taking ~3.5 min even on a
+        # re-run where nothing needs changing; this records how long each major
+        # block takes and emits a single summary line so the dominant cost is
+        # visible in the build log / [DscTiming] resource detail. Cheap (Get-Date
+        # deltas only); no behavior change.
+        $blockTimes = [ordered]@{}
+        $lapStart = [datetime]::UtcNow
+
         # Pre-import modules quietly so DSC verbose logging doesn't flood
         # with hundreds of "Exporting function ..." lines. Import-Module
         # -Verbose:$false is insufficient because DSC sets $VerbosePreference
@@ -7230,6 +7240,7 @@ class DisableClusterNicDnsRegistration {
         finally {
             $global:VerbosePreference = $savedVerbose
         }
+        $blockTimes['ModuleImport'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1); $lapStart = [datetime]::UtcNow
 
         # 1. Disable DNS registration on cluster/heartbeat adapters and rename NICs.
         $allAdapters = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })
@@ -7323,6 +7334,8 @@ class DisableClusterNicDnsRegistration {
             }
         }
 
+        $blockTimes['ClusterNicLoop'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1); $lapStart = [datetime]::UtcNow
+
         # Also rename the domain adapter for consistency and ensure low metric.
         foreach ($adapter in $domainAdapters) {
             $curMetric = (Get-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).InterfaceMetric
@@ -7340,6 +7353,8 @@ class DisableClusterNicDnsRegistration {
                 }
             }
         }
+
+        $blockTimes['DomainNicLoop'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1); $lapStart = [datetime]::UtcNow
 
         # Disable DNS registration on cluster virtual adapters that don't appear
         # in Get-NetAdapter (e.g. Microsoft Failover Cluster Virtual Adapter,
@@ -7380,6 +7395,8 @@ class DisableClusterNicDnsRegistration {
             }
         }
 
+        $blockTimes['VirtualNicLoop'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1); $lapStart = [datetime]::UtcNow
+
         # Re-register only the domain adapter so the correct A record stays.
         Register-DnsClient -ErrorAction SilentlyContinue
 
@@ -7418,6 +7435,7 @@ class DisableClusterNicDnsRegistration {
         #    IP caused OpenCluster() failures because the Cluster Name resource
         #    serves on the domain-network IP, not the cluster-subnet IP.
         Clear-DnsClientCache -ErrorAction SilentlyContinue
+        $blockTimes['DnsCleanupAndDcQuery'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1); $lapStart = [datetime]::UtcNow
 
         # 4. Scope cluster heartbeat firewall rule to cluster subnet only.
         #    Derive CIDR from the subnet property (e.g. '10.250.250.' -> '10.250.250.0/24')
@@ -7455,6 +7473,9 @@ class DisableClusterNicDnsRegistration {
                 Write-Verbose "Could not set RegisterAllProvidersIP: $_"
             }
         }
+        $blockTimes['ClusterOps'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1)
+        $__bt = ($blockTimes.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)s" }) -join ' '
+        Write-Status "DisableClusterNicDnsRegistration [$($this.Stage)] block timing: $__bt"
     }
 
     [bool] Test() {
