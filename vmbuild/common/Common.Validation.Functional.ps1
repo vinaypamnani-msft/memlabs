@@ -1642,10 +1642,14 @@ function Test-SqlIsoNotMounted {
         Phase 4 mounts the SQL ISO to install SQL, then the host ejects it on a
         successful phase (Dismount-SqlIsoForPhase). On a failed Phase 4 the ISO
         is deliberately left mounted for debugging. By Phase 11 a healthy SQL VM
-        should have an empty DVD drive; a still-attached ISO indicates the eject
-        was skipped (e.g. a prior failed run that was never re-run cleanly).
+        should have no SQL ISO attached; a still-attached SQL ISO indicates the
+        eject was skipped (e.g. a prior failed run that was never re-run cleanly).
+        The transient DownloadCache tools ISO (cache-<hash>.iso) is explicitly
+        ignored: it is mounted on every VM during tools injection and ejected
+        separately (Dismount-MemlabsCacheIsoFromVm), and that eject can still be
+        in flight when this host-side check runs.
         Buffers a FAIL line into $script:Phase11OutputBuffer like the other
-        host-side Phase 11 tests, and returns $true when the DVD is empty.
+        host-side Phase 11 tests, and returns $true when no SQL ISO is mounted.
     #>
     [CmdletBinding()]
     param(
@@ -1657,8 +1661,17 @@ function Test-SqlIsoNotMounted {
     $Phase = 11
     $label = 'SQL-ISO'
 
+    # Only the SQL install ISO is a genuine "left mounted after a failed Phase 4"
+    # signal. The DownloadCache tools ISO (cache-<hash>.iso) is mounted on every
+    # VM during tools injection and ejected separately by
+    # Dismount-MemlabsCacheIsoFromVm; that eject can still be in flight when this
+    # host-side check runs, so a cache-*.iso must NOT fail the VM (it caused a
+    # spurious Phase 11 FAIL on every SQL/SQLAO VM whose cache eject lagged the
+    # validator). Ignore cache-*.iso here and only flag a real SQL ISO.
     $dvd = Get-VMDvdDrive -VMName $VMName -ErrorAction SilentlyContinue
-    $mountedPath = ($dvd | Where-Object { $_.Path } | Select-Object -First 1).Path
+    $mountedPath = ($dvd | Where-Object {
+            $_.Path -and ([System.IO.Path]::GetFileName($_.Path)) -notlike 'cache-*.iso'
+        } | Select-Object -First 1).Path
 
     if ($mountedPath) {
         $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: FAIL: $VMName still has an ISO mounted ($mountedPath); SQL ISO should be ejected after Phase 4"; Level = 'Failure' })
@@ -1666,7 +1679,7 @@ function Test-SqlIsoNotMounted {
         return $false
     }
 
-    Write-Log "[Phase $Phase] [$label]: $VMName DVD drive is empty (SQL ISO not mounted)" -LogOnly
+    Write-Log "[Phase $Phase] [$label]: $VMName DVD drive is empty (no SQL ISO mounted; cache-*.iso ignored)" -LogOnly
     return $true
 }
 
