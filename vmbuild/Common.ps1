@@ -1652,12 +1652,11 @@ function Start-CurlTransfer {
             }
             default {
                 # When -Silent (e.g. the optional download cache, which falls through
-                # to a direct download on any miss), keep the retry noise out of the
-                # console -- log it only. The interactive path keeps its spacing.
-                if ($Silent) {
-                    Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $($result.ExitCode). Will retry $(($maxRetries - $retryCount)) more time(s)." -LogOnly
-                }
-                else {
+                # to a direct download on any miss), a transient failure that's about to
+                # be retried logs NOTHING -- only a genuine give-up (all retries
+                # exhausted, below) is worth recording. The interactive path keeps its
+                # on-console retry message and spacing.
+                if (-not $Silent) {
                     Write-Host
                     Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $($result.ExitCode). Will retry $(($maxRetries - $retryCount)) more time(s)."
                     Write-Host
