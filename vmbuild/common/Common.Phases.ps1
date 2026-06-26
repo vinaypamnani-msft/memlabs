@@ -986,8 +986,10 @@ function Start-PhaseJobs {
         # answer them -- producing a cascade of transient Phase 11 failures (broken
         # secure channel, dcdiag Replications, cluster not formed, provider not
         # loaded). Starting DCs first lets AD converge before its dependents arrive.
-        # This is a no-op when the DCs are already Running (e.g. a full end-to-end
-        # deploy where Phase 11 follows Phase 10 without a reboot).
+        # This is nearly a no-op when the DCs are already Running and healthy (a
+        # single readiness probe per DC), and additionally self-heals an
+        # already-running DC whose PowerShell Direct channel is wedged (see the
+        # readiness/recovery loop below) before the per-VM jobs fan out.
         $dcRoleSet = @("DC", "BDC")
         $dcNames = @()
         foreach ($vmName in $vmsToStart) {
@@ -1002,24 +1004,32 @@ function Start-PhaseJobs {
         $startedCount = 0
 
         # Start DCs first
-        $startedDcs = @()
         foreach ($vmName in $dcNames) {
             $vmObj = $existingVMs | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
             if ($vmObj -and $vmObj.State -ne 'Running') {
                 Write-Progress2 "Preparing Phase $Phase" -Status "Starting domain controller $vmName ($($vmObj.State))" -PercentComplete $global:preparePhasePercent
                 Start-VM2 -Name $vmName -ErrorAction SilentlyContinue
                 $startedCount++
-                $startedDcs += $vmName
             }
         }
 
-        # Only wait if we actually started a DC from a non-running state. Poll each
-        # for AD DS / DNS / Netlogon up (bounded) before releasing dependent VMs.
-        if ($startedDcs.Count -gt 0) {
+        # Confirm EVERY domain controller is actually serving AD DS / DNS / Netlogon
+        # over PowerShell Direct before releasing the dependent VMs and dispatching
+        # the per-VM maintenance/validation jobs. This runs for ALL DCs -- not just
+        # the ones we started above -- because an ALREADY-running DC can have a
+        # wedged PSDirect/VMBus channel: the guest is up with a healthy heartbeat,
+        # but New-PSSession -VMId times out. When that DC is the (only) DC, its
+        # Phase 10/11 job fails with "Start-VMMaintenance returned no data" and,
+        # being the DC, stops the entire phase. A healthy already-running DC passes
+        # the first probe instantly, so the normal end-to-end case (Phase 11 right
+        # after Phase 10, no reboot) adds negligible delay.
+        if ($dcNames.Count -gt 0) {
             $dcWaitTimeoutSec = 300
-            foreach ($dcName in $startedDcs) {
+            foreach ($dcName in $dcNames) {
                 Write-Progress2 "Preparing Phase $Phase" -Status "Waiting for domain controller $dcName (AD DS / DNS / Netlogon)" -PercentComplete $global:preparePhasePercent
                 $dcReady = $false
+                $dcChannelBrokenCount = 0
+                $dcChannelRebootDone = $false
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
                 while ($sw.Elapsed.TotalSeconds -lt $dcWaitTimeoutSec) {
                     $probe = Invoke-VmCommand -VmName $dcName -VmDomainName $deployConfig.vmOptions.domainName `
@@ -1032,6 +1042,33 @@ function Start-PhaseJobs {
                     if ($probe -and -not $probe.ScriptBlockFailed -and $probe.ScriptBlockOutput -eq $true) {
                         $dcReady = $true
                         break
+                    }
+
+                    # Probe did not succeed. If the DC is Running with a healthy
+                    # heartbeat but PowerShell Direct is wedged (ChannelBroken),
+                    # recover the VMBus with a single reboot -- the same recovery
+                    # Wait-ForVm performs. One-shot per DC, and only after a few
+                    # consecutive channel-broken probes so a transient timeout
+                    # during boot doesn't trigger a needless reboot.
+                    $vmCheck = Get-VM2 -Name $dcName -ErrorAction SilentlyContinue
+                    $vmStateNow = if ($vmCheck) { "$($vmCheck.State)" } else { "NotFound" }
+                    $hbNow = if ($vmCheck) { "$($vmCheck.Heartbeat)" } else { "N/A" }
+                    $channelBroken = ($probe -and $probe.ChannelBroken)
+                    $heartbeatAlive = ($hbNow -ne 'NoContact' -and $hbNow -ne 'N/A')
+                    if ($vmStateNow -eq 'Running' -and $channelBroken -and $heartbeatAlive) {
+                        $dcChannelBrokenCount++
+                        if (-not $dcChannelRebootDone -and $dcChannelBrokenCount -ge 3 -and $sw.Elapsed.TotalSeconds -ge 45) {
+                            $dcChannelRebootDone = $true
+                            Write-Log "[Phase $Phase] Domain controller $dcName is Running with a healthy heartbeat ($hbNow) but its PowerShell Direct channel is wedged after $dcChannelBrokenCount probes. Rebooting to recover VMBus before dispatching jobs." -Warning
+                            Write-Progress2 "Preparing Phase $Phase" -Status "Rebooting domain controller $dcName to recover PowerShell Direct channel" -PercentComplete $global:preparePhasePercent
+                            Stop-VM2 -Name $dcName -TurnOff | Out-Null
+                            Start-Sleep -Seconds 10
+                            Start-VM2 -Name $dcName -ErrorAction SilentlyContinue | Out-Null
+                            $dcChannelBrokenCount = 0
+                        }
+                    }
+                    else {
+                        $dcChannelBrokenCount = 0
                     }
                     Start-Sleep -Seconds 10
                 }

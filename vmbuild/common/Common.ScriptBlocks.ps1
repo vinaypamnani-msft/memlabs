@@ -53,6 +53,12 @@ $global:Phase10Job = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM (role '$($currentItem.role)'); Windows maintenance not applicable. Skipping." -OutputStream -Success
             return
         }
+        # Pre-flight: a VM can be Running with a healthy heartbeat yet have a
+        # wedged PSDirect/VMBus channel, which would make Start-VMMaintenance
+        # fail with "returned no data". Recover it (reboot once to clear VMBus)
+        # before maintenance. Healthy VMs pass the probe instantly; Linux /
+        # OSDClient / AADClient / StandaloneRootCA are skipped inside the helper.
+        $null = Repair-VmPSDirectChannel -VmName $currentItem.vmName -VmDomainName $domainNameForLogging -Phase "$Phase"
         $worked = Start-VMMaintenance -VMName $currentItem.vmName -FreshDeployOnly:$FreshDeployOnly
         if (-not $worked) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance returned no data." -OutputStream -Failure
@@ -101,6 +107,14 @@ $global:Phase11Job = {
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting functional validation for role '$($currentItem.role)'" -LogOnly
+
+        # Pre-flight: recover a wedged PSDirect/VMBus channel before validation so
+        # a VM that is Running-but-unreachable is remediated (reboot once to clear
+        # VMBus) instead of failing validation with "no error detail returned".
+        # Healthy VMs pass the probe instantly; Linux / OSDClient / AADClient /
+        # StandaloneRootCA are skipped inside the helper. If this reboots the VM,
+        # Test-VmFunctionality's own uptime settle-gate then lets it converge.
+        $null = Repair-VmPSDirectChannel -VmName $currentItem.vmName -VmDomainName $domainNameForLogging -Phase "$Phase"
 
         $passed = Test-VmFunctionality -VMName $currentItem.vmName -CurrentItem $currentItem -DeployConfig $deployConfig
 

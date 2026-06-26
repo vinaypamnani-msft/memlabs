@@ -6035,6 +6035,96 @@ function Invoke-VmLivenessRecovery {
     return $outcome
 }
 
+# Pre-flight channel remediation for the Phase 10 (maintenance) and Phase 11
+# (validation) per-VM jobs. A VM can be fully Running with a healthy heartbeat
+# yet have a WEDGED PowerShell Direct / VMBus channel -- New-PSSession -VMId
+# times out, so the per-VM job can never open a session and fails with an opaque
+# "Start-VMMaintenance returned no data" (Phase 10) or "ScriptBlock failed (no
+# error detail returned)" (Phase 11). This probes the channel and, ONLY when it
+# is genuinely wedged (guest Running + heartbeat alive + ChannelBroken), reboots
+# the VM once to recover VMBus and re-probes to confirm.
+#
+# A healthy VM passes the first probe instantly (one cheap PSDirect round-trip,
+# zero recovery cost), so the helper is safe to call unconditionally at the top
+# of every per-VM job: only genuinely-broken machines pay the reboot, and each
+# runs in its own parallel job. Linux guests and roles that aren't PSDirect-
+# managed here (OSDClient / AADClient / StandaloneRootCA) are skipped via the
+# VM note so they are never probed or rebooted.
+function Repair-VmPSDirectChannel {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $false)]
+        [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $false)]
+        [string]$Phase = ""
+    )
+
+    $tag = if ($Phase) { "[Phase $Phase]: " } else { "" }
+
+    $vm = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+    if (-not $vm) { return $true }                  # caller's normal path will report a missing VM
+    if ($vm.State -ne 'Running') { return $true }   # never wake an intentionally-off VM here
+
+    # Skip roles / OS that don't use the Windows PSDirect maintenance pipeline.
+    # Mirrors the Linux + excluded-role checks in Start-VMMaintenance so a Linux
+    # guest (no PSDirect) or an OSD/AAD client / offline root CA is never probed
+    # or rebooted by this helper.
+    $note = Get-VMNote -VMName $VmName
+    if ($note) {
+        if ($note.role -in @('OSDClient', 'AADClient', 'StandaloneRootCA')) { return $true }
+        $noteIsLinux = $false
+        if ($note.role -eq 'Proxy') { $noteIsLinux = $true }
+        elseif ($note.PSObject.Properties.Name -contains 'osFamily' -and $note.osFamily -eq 'Linux') { $noteIsLinux = $true }
+        elseif ($note.operatingSystem -and ($note.operatingSystem -like 'Ubuntu*' -or $note.operatingSystem -like 'Debian*' -or $note.operatingSystem -like 'Linux*')) { $noteIsLinux = $true }
+        elseif ($note.deployedOS -and ($note.deployedOS -like 'Ubuntu*' -or $note.deployedOS -like 'Debian*' -or $note.deployedOS -like 'Linux*')) { $noteIsLinux = $true }
+        if ($noteIsLinux) { return $true }
+    }
+
+    # Quick health probe. A healthy VM returns instantly -> no recovery cost.
+    $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog `
+        -DisplayName "PSDirect channel probe" -CommandReturnsBool -SessionMaxRetries 2 `
+        -ScriptBlock { $true }
+    if ($probe -and -not $probe.ScriptBlockFailed -and $probe.ScriptBlockOutput -eq $true) {
+        return $true
+    }
+
+    # Probe failed. Only a wedged VMBus/PSDirect channel (guest Running, heartbeat
+    # alive, ChannelBroken) is recoverable by a reboot. Auth / other failures are
+    # left to the caller's normal path to report.
+    $vm = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+    $hb = if ($vm) { "$($vm.Heartbeat)" } else { "N/A" }
+    $channelBroken = ($probe -and $probe.ChannelBroken)
+    $heartbeatAlive = ($hb -ne 'NoContact' -and $hb -ne 'N/A')
+    if (-not ($channelBroken -and $heartbeatAlive)) {
+        return $true
+    }
+
+    Write-Log "$tag$VmName`: PowerShell Direct channel is wedged (VM Running, heartbeat $hb). Rebooting once to recover VMBus before continuing." -Warning
+
+    # Drop the dead cached session so the post-reboot guest gets a fresh channel.
+    Remove-VmSessionFromCache -VmName $VmName -LeakSession
+
+    $rebooted = Restart-UnresponsiveVm -VmName $VmName -MaxRetries 1 -WaitTimeSeconds 240
+    if (-not $rebooted) {
+        Write-Log "$tag$VmName`: VM did not come back responsive after recovery reboot; continuing -- the caller's normal path will report any remaining failure." -Warning
+        return $false
+    }
+
+    # Restart-UnresponsiveVm only confirms RDP; confirm PSDirect specifically.
+    $probe2 = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog `
+        -DisplayName "PSDirect channel re-probe" -CommandReturnsBool -SessionMaxRetries 3 `
+        -ScriptBlock { $true }
+    if ($probe2 -and -not $probe2.ScriptBlockFailed -and $probe2.ScriptBlockOutput -eq $true) {
+        Write-Log "$tag$VmName`: PowerShell Direct channel recovered after reboot." -Success
+        return $true
+    }
+
+    Write-Log "$tag$VmName`: PowerShell Direct channel still not responding after recovery reboot." -Warning
+    return $false
+}
+
 function Get-VmSession {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
