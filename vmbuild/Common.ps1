@@ -1622,7 +1622,7 @@ function Start-CurlTransfer {
     $retryCount = 0
     $success = $false
 
-    Write-Host
+    if (-not $Silent) { Write-Host }
 
     do {
         $retryCount++
@@ -1639,21 +1639,29 @@ function Start-CurlTransfer {
             0 {
                 # Success
                 $success = $true
-                Write-Host
+                if (-not $Silent) { Write-Host }
                 break
             }
             33 {
                 # Range request not satisfied — partial file is likely corrupt or already complete
                 # Delete and restart from scratch
-                Write-Host
+                if (-not $Silent) { Write-Host }
                 Write-Log "Start-CurlTransfer: Resume failed (exit 33) for '$Source'. Removing partial file and restarting." -Warning
                 Remove-Item -Path $Destination -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 2
             }
             default {
-                Write-Host
-                Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $($result.ExitCode). Will retry $(($maxRetries - $retryCount)) more time(s)."
-                Write-Host
+                # When -Silent (e.g. the optional download cache, which falls through
+                # to a direct download on any miss), keep the retry noise out of the
+                # console -- log it only. The interactive path keeps its spacing.
+                if ($Silent) {
+                    Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $($result.ExitCode). Will retry $(($maxRetries - $retryCount)) more time(s)." -LogOnly
+                }
+                else {
+                    Write-Host
+                    Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $($result.ExitCode). Will retry $(($maxRetries - $retryCount)) more time(s)."
+                    Write-Host
+                }
                 Start-Sleep -Seconds 5
             }
         }
