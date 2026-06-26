@@ -5467,7 +5467,12 @@ function Invoke-VmCommand {
         }
 
         # Run script block inside VM
+        $inflightToken = $null
         if (-not $failed) {
+            # Mark this scriptblock as in-flight on $ps so a concurrent pipeline on
+            # the SAME cached session (the suspected cause of "An error occurred while
+            # creating the pipeline") is visible to the failure-site diagnostic below.
+            $inflightToken = Enter-VmSessionInflight -Session $ps -DisplayName $DisplayName
             try {
                 if ($AsJob) {
                     $job = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue -AsJob
@@ -5721,6 +5726,11 @@ function Invoke-VmCommand {
 
         # Capture error details on the return object for callers to inspect
         if ($failed) {
+            # Snapshot whether the scriptblock produced NO output BEFORE the block
+            # below back-fills ScriptBlockOutput with error text -- a genuine
+            # no-output failure (output null) distinguishes a real pipeline-create
+            # collision from a scriptblock that ran and returned but errored.
+            $sbOutputWasNull = ($null -eq $return.ScriptBlockOutput)
             if ($Err2 -and $Err2.Count -gt 0) {
                 $return.ErrorDetails = @($Err2 | ForEach-Object { $_.ToString().Trim() })
             }
@@ -5744,11 +5754,21 @@ function Invoke-VmCommand {
             # trigger a host query or add log noise. -LogOnly: file only, not console.
             if (-not $SuppressLog) {
                 $errBlob = "$($return.ErrorDetails -join ' ')"
-                if ($return.ChannelBroken -or $errBlob -match 'creating the pipeline|pipeline is not|transport|channel|broken|Cannot connect|not connected|session is in') {
+                if ($return.ChannelBroken -or $errBlob -match 'creating the pipeline|pipeline is not|transport|channel|broken|Cannot connect|not connected|session is in|availability is Busy|No valid sessions') {
                     Write-Log "$VmName`: '$DisplayName' PSDirect readiness diag -- $(Get-VmHostSideDiag -VmName $VmName)" -LogOnly
+                    # Mechanism diagnostic: was a SECOND pipeline running on this same
+                    # cached session from another thread when the error fired (the
+                    # concurrency hypothesis), and was the runspace Busy / output null?
+                    # This is what tells us whether the fix needs per-session
+                    # serialization (concurrency) vs the AsJob settle-wait already in
+                    # place (transitional) vs something else (Available + idle).
+                    Write-Log "$VmName`: '$DisplayName' pipeline-race diag -- $(Get-VmSessionConcurrencyDiag -Session $ps -SelfToken $inflightToken -OutputWasNull $sbOutputWasNull)" -LogOnly
                 }
             }
         }
+
+        # Release the in-flight marker AFTER the diagnostic above has read it.
+        Exit-VmSessionInflight -Token $inflightToken
 
         # Set Command Result state in return object
         if (-not $failed) {
@@ -5760,6 +5780,9 @@ function Invoke-VmCommand {
     }
     catch {
         Write-Log "$VmName`: Invoke-VMCommand Exception $_"
+        # Ensure the in-flight marker is released even on an unexpected throw, so a
+        # leaked entry can't produce a false-positive concurrency reading later.
+        Exit-VmSessionInflight -Token $inflightToken
     }
     return $return
 
@@ -5770,6 +5793,81 @@ $global:ps_cache = @{}
 # cold connect can try it first, avoiding 30s timeout on wrong creds.
 # Values: 'primary' | 'local' | 'domain-lookup' | 'administrator'.
 $global:ps_lastGoodCred = @{}
+
+# In-flight tracker for the "An error occurred while creating the pipeline"
+# investigation. Keyed by PSSession.InstanceId; value is a synchronized list of
+# @{ ThreadId; Display; At } for every Invoke-VmCommand currently executing a
+# scriptblock on that session. Lets the failure-site diagnostic state, with
+# proof, whether a second pipeline was running on the SAME cached session from
+# another thread at the moment the pipeline-create error fired (the concurrency
+# mechanism) vs the session being idle (something else). Cheap: two locked list
+# mutations per call, only ever read on a failure.
+$global:ps_inflight = [System.Collections.Hashtable]::Synchronized(@{})
+
+function Enter-VmSessionInflight {
+    # Mark a scriptblock as executing on $Session. Returns an opaque token to pass
+    # to Exit-VmSessionInflight. Never throws.
+    param($Session, [string]$DisplayName)
+    try {
+        if (-not $Session) { return $null }
+        $key = "$($Session.InstanceId)"
+        $entry = @{ ThreadId = [System.Threading.Thread]::CurrentThread.ManagedThreadId; Display = $DisplayName; At = (Get-Date) }
+        [System.Threading.Monitor]::Enter($global:ps_inflight.SyncRoot)
+        try {
+            if (-not $global:ps_inflight.ContainsKey($key)) { $global:ps_inflight[$key] = (New-Object System.Collections.ArrayList) }
+            [void]$global:ps_inflight[$key].Add($entry)
+        }
+        finally { [System.Threading.Monitor]::Exit($global:ps_inflight.SyncRoot) }
+        return @{ Key = $key; Entry = $entry }
+    }
+    catch { return $null }
+}
+
+function Exit-VmSessionInflight {
+    param($Token)
+    try {
+        if (-not $Token) { return }
+        [System.Threading.Monitor]::Enter($global:ps_inflight.SyncRoot)
+        try {
+            if ($global:ps_inflight.ContainsKey($Token.Key)) {
+                $global:ps_inflight[$Token.Key].Remove($Token.Entry)
+                if ($global:ps_inflight[$Token.Key].Count -eq 0) { [void]$global:ps_inflight.Remove($Token.Key) }
+            }
+        }
+        finally { [System.Threading.Monitor]::Exit($global:ps_inflight.SyncRoot) }
+    }
+    catch { }
+}
+
+function Get-VmSessionConcurrencyDiag {
+    # Build a one-line diagnostic describing the session's runspace availability and
+    # any OTHER in-flight scriptblock on the same session right now (i.e. genuine
+    # concurrent use). $SelfToken is excluded so the calling op doesn't list itself.
+    # Never throws.
+    param($Session, $SelfToken, [bool]$OutputWasNull)
+    try {
+        $avail = '<no-session>'
+        if ($Session) { try { $avail = [string]$Session.Runspace.RunspaceAvailability } catch { $avail = '<unknown>' } }
+        $concurrent = @()
+        if ($Session) {
+            $key = "$($Session.InstanceId)"
+            [System.Threading.Monitor]::Enter($global:ps_inflight.SyncRoot)
+            try {
+                if ($global:ps_inflight.ContainsKey($key)) {
+                    foreach ($e in @($global:ps_inflight[$key])) {
+                        if ($SelfToken -and [object]::ReferenceEquals($e, $SelfToken.Entry)) { continue }
+                        $concurrent += "tid=$($e.ThreadId) op='$($e.Display)' for=$([int]((Get-Date) - $e.At).TotalMilliseconds)ms"
+                    }
+                }
+            }
+            finally { [System.Threading.Monitor]::Exit($global:ps_inflight.SyncRoot) }
+        }
+        $concStr = if ($concurrent.Count) { ($concurrent -join ' | ') } else { '<none>' }
+        $rsId = try { [string][System.Management.Automation.Runspaces.Runspace]::DefaultRunspace.Id } catch { '?' }
+        return "runspaceAvail=$avail outputWasNull=$OutputWasNull thisThread=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) defaultRunspace=$rsId concurrentOnSameSession=[$concStr]"
+    }
+    catch { return "concurrency-diag-unavailable ($($_.Exception.Message))" }
+}
 
 # New-PSSessionWithTimeout
 # Wraps New-PSSession -VMId in a separate runspace so the call can be
