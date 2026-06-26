@@ -147,6 +147,25 @@ function Get-MemlabsCacheIsoForDeploy {
         $store = Get-MemlabsCacheRoot
         $entries = @()
 
+        # Sweep orphaned per-PID staging dirs (cache-build-<hash>-<PID>) left by a
+        # prior crashed/killed/failed build. The build's own try/finally cleans the
+        # CURRENT process's dir, but a dir whose owning PID is already dead has no
+        # one to clean it -- so we remove any cache-build-* dir whose trailing PID
+        # is not a live process. Live builds (their PID still running) are skipped,
+        # so a concurrent builder is never disturbed. Runs on every call, including
+        # the pre-phase pre-build in New-Lab, so leftovers self-clean next deploy.
+        try {
+            foreach ($bd in (Get-ChildItem -Path (Get-MemlabsCacheIsoDir) -Directory -Filter 'cache-build-*' -ErrorAction SilentlyContinue)) {
+                $bpid = ($bd.Name -split '-')[-1]
+                $alive = $false
+                if ($bpid -as [int]) {
+                    if (Get-Process -Id ([int]$bpid) -ErrorAction SilentlyContinue) { $alive = $true }
+                }
+                if (-not $alive) { Remove-Item $bd.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+        }
+        catch { }
+
         foreach ($key in $keys) {
             $url = Get-MemlabsCacheUrlForKey -Key $key
             if (-not $url) { continue }
