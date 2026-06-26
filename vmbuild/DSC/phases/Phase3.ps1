@@ -188,7 +188,7 @@
             # Check if false, for older configs that didn't have this prop
 
             $ssmsDownloadUrl = $deployConfig.URLS.SSMS
-            if ($l.LanguageTag -ne "en-US") {
+            if ($l -and $l.LanguageTag -and $l.LanguageTag -ne "en-US" -and $l.LanguageID) {
                 $ssmsDownloadUrl = $ssmsDownloadUrl + "?clcid=" + $l.LanguageID
             }
 

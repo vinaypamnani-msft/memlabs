@@ -33,8 +33,93 @@ function Invoke-DownloadFile {
         $dirname = Split-Path $dest -Parent
         New-Item -ItemType Directory -Force -Path $dirname
         try {
+            # Best-effort expected size (for a percentage display); aka.ms redirects are followed.
+            $expectedBytes = 0
+            try {
+                $head = [System.Net.HttpWebRequest]::Create($url)
+                $head.Method = "HEAD"
+                $head.AllowAutoRedirect = $true
+                $head.UserAgent = "memlabs-dsc"
+                $headResp = $head.GetResponse()
+                $expectedBytes = [int64]$headResp.ContentLength
+                $headResp.Close()
+            }
+            catch { $expectedBytes = 0 }
+
+            # Async download so we can report progress while it runs (the synchronous
+            # DownloadFile blocks with no feedback, which makes long downloads look hung).
             $wc = New-Object System.Net.WebClient
-            $wc.DownloadFile($url, $dest)
+            $dlState = [hashtable]::Synchronized(@{ Done = $false; Error = $null })
+            $completedSub = Register-ObjectEvent -InputObject $wc -EventName DownloadFileCompleted -MessageData $dlState -Action {
+                $s = $Event.MessageData
+                if ($EventArgs.Error) { $s.Error = $EventArgs.Error.Message }
+                elseif ($EventArgs.Cancelled) { $s.Error = "Cancelled" }
+                $s.Done = $true
+            }
+            # Stall / overall-budget guards: a wedged TCP transfer keeps IsBusy true
+            # forever (WebClient has no overall timeout), so abort and fall through to
+            # the BITS / Invoke-WebRequest fallback instead of hanging the LCM.
+            $stallTimeoutSec = 120   # no byte growth for this long => stalled
+            $maxDownloadSec = 1800   # 30 min hard cap for the whole transfer
+            $stallReason = $null
+            try {
+                $wc.DownloadFileAsync([uri]$url, $dest)
+                $startTime = Get-Date
+                $lastStatusTime = [DateTime]::MinValue
+                $lastSize = -1
+                $lastGrowthTime = Get-Date
+                while ($wc.IsBusy -and -not $dlState.Done) {
+                    Start-Sleep -Milliseconds 500
+                    $now = Get-Date
+                    $sizeNow = 0
+                    try { if (Test-Path $dest) { $sizeNow = (Get-Item $dest -ErrorAction SilentlyContinue).Length } } catch { $sizeNow = 0 }
+                    if ($sizeNow -gt $lastSize) {
+                        $lastSize = $sizeNow
+                        $lastGrowthTime = $now
+                    }
+                    elseif (($now - $lastGrowthTime).TotalSeconds -ge $stallTimeoutSec) {
+                        $stallReason = "no data received for $stallTimeoutSec s (stalled at $([math]::Round($sizeNow / 1MB, 1)) MB)"
+                        break
+                    }
+                    if (($now - $startTime).TotalSeconds -ge $maxDownloadSec) {
+                        $stallReason = "exceeded $maxDownloadSec s overall budget (at $([math]::Round($sizeNow / 1MB, 1)) MB)"
+                        break
+                    }
+                    if (($now - $lastStatusTime).TotalSeconds -ge 5) {
+                        $lastStatusTime = $now
+                        $mbNow = [math]::Round($sizeNow / 1MB, 1)
+                        $elapsed = [int]($now - $startTime).TotalSeconds
+                        if ($expectedBytes -gt 0) {
+                            $pct = [math]::Min(100, [math]::Round(($sizeNow / $expectedBytes) * 100, 0))
+                            $mbTotal = [math]::Round($expectedBytes / 1MB, 1)
+                            Write-Status "Downloading $dest : $mbNow / $mbTotal MB ($pct%) [$elapsed s]"
+                        }
+                        else {
+                            Write-Status "Downloading $dest : $mbNow MB downloaded [$elapsed s]"
+                        }
+                    }
+                }
+                if ($stallReason) {
+                    Write-Status "Download stalled: $stallReason. Cancelling and switching to fallback."
+                    try { $wc.CancelAsync() } catch {}
+                    Start-Sleep -Milliseconds 500
+                }
+            }
+            finally {
+                if ($completedSub) {
+                    Unregister-Event -SourceIdentifier $completedSub.Name -ErrorAction SilentlyContinue
+                    Remove-Job -Name $completedSub.Name -Force -ErrorAction SilentlyContinue
+                }
+                $wc.Dispose()
+            }
+            if ($stallReason) {
+                # Remove the partial file so the fallback path starts clean.
+                if (Test-Path $dest) { Remove-Item $dest -Force -ErrorAction SilentlyContinue | Out-Null }
+                throw "WebClient async download stalled: $stallReason"
+            }
+            if ($dlState.Error) {
+                throw "WebClient async download failed: $($dlState.Error)"
+            }
             #Start-BitsTransfer -Source $url -Destination $dest -Priority Foreground -ErrorAction Stop
         }
         catch {
