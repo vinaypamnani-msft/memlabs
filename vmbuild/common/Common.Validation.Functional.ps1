@@ -7178,10 +7178,32 @@ function Test-CMSiteWideFunctionality {
     # containing an IPRange boundary for that site's subnet (.1-.254 over /24).
     # Encoded as "SiteCode~Subnet~First-Last" pairs joined by '|' for the
     # remote scriptblock to verify existence AND membership.
+    #
+    # Scope to the site codes THIS server actually owns -- its own siteCode plus
+    # any child site whose parentSiteCode points here -- mirroring the creator's
+    # $ValidSiteCodes (own + Get-CMSite ReportingSiteCode children). thisParams
+    # .sitesAndNetworks is DOMAIN-WIDE (every Primary/Secondary in the config, so
+    # the DC can build all AD sites), so iterating it verbatim made each Primary
+    # expect a boundary group for EVERY site in the domain. For independent
+    # standalone primaries (no CAS / no DRS link) that produced spurious
+    # "Expected boundary group 'X' not found" WARNs for the sites this server
+    # legitimately doesn't own -- boundary groups don't replicate between
+    # independent standalone primaries. Scoping here makes the validator match
+    # what InstallBoundaryGroups.ps1 actually creates on this box.
+    $ownedSiteCodes = @($siteCode)
+    try {
+        $ownedSiteCodes += @($DeployConfig.virtualMachines | Where-Object {
+                $_.role -in @('Primary', 'Secondary') -and $_.parentSiteCode -and $_.parentSiteCode -eq $siteCode
+            } | Select-Object -ExpandProperty siteCode)
+    }
+    catch {}
+    $ownedSiteCodes = @($ownedSiteCodes | Where-Object { $_ } | Select-Object -Unique)
+
     $expectedBoundaryPairs = @()
     try {
         foreach ($sn in @($CurrentItem.thisParams.sitesAndNetworks)) {
             if (-not $sn -or -not $sn.SiteCode -or -not $sn.Subnet) { continue }
+            if ($sn.SiteCode -notin $ownedSiteCodes) { continue }
             $octets = "$($sn.Subnet)" -split '\.'
             if ($octets.Count -ne 4) { continue }
             $range = "$($octets[0]).$($octets[1]).$($octets[2]).1-$($octets[0]).$($octets[1]).$($octets[2]).254"
