@@ -967,11 +967,25 @@ WHERE drs.is_suspended = 1
                     $snapshot = ($replicas | ForEach-Object { "$($_.Name)[$($_.Role)/$($_.Conn)/$($_.Health)/op=$($_.Op)/rec=$($_.Rec)]" }) -join '; '
                     $allHealthy = $true
                     foreach ($r in $replicas) {
-                        if ($r.Conn -ne 'CONNECTED' -or $r.Health -ne 'HEALTHY' -or
-                            $r.Op   -eq 'UNKNOWN'   -or $r.Op    -eq 'OFFLINE' -or
-                            $r.Rec  -eq 'UNKNOWN'   -or $r.Rec   -eq 'ONLINE_IN_PROGRESS') {
+                        # Connected + synchronization-health are populated for EVERY replica
+                        # (local and remote) -- these are the authoritative cross-replica gates.
+                        if ($r.Conn -ne 'CONNECTED' -or $r.Health -ne 'HEALTHY') {
                             $allHealthy = $false
                             break
+                        }
+                        # operational_state / recovery_health are ONLY populated for the LOCAL
+                        # replica in sys.dm_hadr_availability_replica_states; they come back NULL
+                        # (-> 'UNKNOWN' here) for any remote replica. Since this pre-flight queries
+                        # through the listener it always lands on the PRIMARY, so only the primary's
+                        # row carries real op/rec values -- enforce them there only. Gating op/rec on
+                        # the (remote) secondary would make this loop NEVER reach HEALTHY on a
+                        # perfectly healthy AG (the long-standing 'op=UNKNOWN/rec=UNKNOWN' false WARN).
+                        if ($r.Role -eq 'PRIMARY') {
+                            if ($r.Op  -eq 'UNKNOWN' -or $r.Op  -eq 'OFFLINE' -or
+                                $r.Rec -eq 'UNKNOWN' -or $r.Rec -eq 'ONLINE_IN_PROGRESS') {
+                                $allHealthy = $false
+                                break
+                            }
                         }
                     }
                     if ($allHealthy) {
