@@ -1162,7 +1162,75 @@ function Start-PhaseJobs {
         }
     }
 
-    foreach ($currentItem in $deployConfig.virtualMachines) {
+    # ---------------------------------------------------------------------
+    # Phase 2 DC head start
+    #
+    # On a FRESH deploy every VM's Phase 2 (single-node) DSC job is dispatched
+    # back-to-back, so the DC's promotion (Phase2DC) competes with every domain
+    # member's config for host CPU/disk while the members sit idle in
+    # WaitForDomainReady polling a DC that isn't up yet. Give the DC a head
+    # start proportional to the number of members that will wait on it: dispatch
+    # the DC (and the non-domain-joined VMs, which don't wait on it) first, then
+    # hold the domain-joined members' dispatch for ~10s per fresh member (capped)
+    # so the DC can get ahead in its promotion before the herd arrives.
+    #
+    # Gating: ONLY engages when the DC itself has never completed Phase 2. If the
+    # DC has already completed Phase 2 (a re-run / -StartPhase 2 on an already-
+    # promoted DC), $phase2HeadStartSeconds stays 0 and NO VM is delayed -- the
+    # dispatch list and loop behave exactly as before. Members that already
+    # completed Phase 2 don't count toward the 10s/member multiplier either.
+    # ---------------------------------------------------------------------
+    $phase2HeadStartSeconds = 0
+    $phase2HeadStartDone = $false
+    $phase2HeadStartCapSeconds = 180
+    $phase2NonDomainJoinedRoles = @('DC', 'OtherDC', 'WorkgroupMember', 'AADClient', 'InternetClient', 'StandaloneRootCA', 'OSDClient')
+    if ($Phase -eq 2 -and -not $WhatIf) {
+        $dcVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' -and -not $_.hidden } | Select-Object -First 1
+        $dcFresh = $false
+        if ($dcVm) {
+            $dcNote = Get-VMNote -VMName $dcVm.vmName
+            $dcFresh = (-not $dcNote -or -not $dcNote.lastPhaseComplete -or [int]$dcNote.lastPhaseComplete -lt 2)
+        }
+        if ($dcVm -and $dcFresh) {
+            $freshMemberCount = 0
+            foreach ($mv in $deployConfig.virtualMachines) {
+                if ($mv.hidden) { continue }
+                if ($mv.role -in $phase2NonDomainJoinedRoles) { continue }
+                if (Test-VmIsLinux -Vm $mv) { continue }
+                $mNote = Get-VMNote -VMName $mv.vmName
+                if (-not $mNote -or -not $mNote.lastPhaseComplete -or [int]$mNote.lastPhaseComplete -lt 2) {
+                    $freshMemberCount++
+                }
+            }
+            $phase2HeadStartSeconds = [Math]::Min($freshMemberCount * 10, $phase2HeadStartCapSeconds)
+            if ($phase2HeadStartSeconds -gt 0) {
+                Write-Log "[Phase 2] DC head start: $($dcVm.vmName) is fresh; $freshMemberCount fresh domain-joined member(s) -> holding member dispatch ${phase2HeadStartSeconds}s after the DC starts (10s/member, capped ${phase2HeadStartCapSeconds}s)." -LogOnly
+            }
+        }
+        else {
+            Write-Log "[Phase 2] DC head start: skipped (DC already completed Phase 2 or not found); no VMs delayed." -LogOnly
+        }
+    }
+
+    # Phase 2 head start active: dispatch the DC first, then the non-domain-joined
+    # VMs, then the domain-joined members last (the head-start sleep is injected at
+    # the first member's dispatch site below). Stable secondary sort on original
+    # index preserves config order within each priority group. Every other phase
+    # (and Phase 2 when the head start is inactive) iterates the unmodified list.
+    $vmDispatchList = $deployConfig.virtualMachines
+    if ($Phase -eq 2 -and $phase2HeadStartSeconds -gt 0) {
+        $phase2Idx = 0
+        $phase2Tagged = foreach ($v in $deployConfig.virtualMachines) {
+            $pri = if ($v.role -eq 'DC') { 0 }
+                   elseif (($v.role -in $phase2NonDomainJoinedRoles) -or (Test-VmIsLinux -Vm $v)) { 1 }
+                   else { 2 }
+            [PSCustomObject]@{ Vm = $v; Pri = $pri; Idx = $phase2Idx }
+            $phase2Idx++
+        }
+        $vmDispatchList = @($phase2Tagged | Sort-Object Pri, Idx | ForEach-Object { $_.Vm })
+    }
+
+    foreach ($currentItem in $vmDispatchList) {
 
         $global:preparePhasePercent++
         Write-Progress2 "Preparing Phase $Phase" -Status "Evaluating virtual machine $($currentItem.vmName)" -PercentComplete $global:preparePhasePercent
@@ -1395,6 +1463,22 @@ function Start-PhaseJobs {
                 $global:WU_Quieted += $currentItem.VmName
             }
             Write-Log -verbose "[Phase $Phase] $($currentItem.vmName) quietWUThisRun = $quietWUThisRun"
+
+            # Phase 2 DC head start: the dispatch list above puts the DC (and the
+            # non-domain-joined VMs) first, so by the time we reach the FIRST
+            # domain-joined member the DC's VM_Config job is already running. Hold
+            # the member herd for the computed head-start window so the DC can get
+            # ahead in its promotion before the members start competing for host
+            # CPU/disk and polling it in WaitForDomainReady. One-shot per phase
+            # run; never fires when the head start is inactive (DC already did
+            # Phase 2), so no VM is delayed in that case.
+            if ($Phase -eq 2 -and $phase2HeadStartSeconds -gt 0 -and -not $phase2HeadStartDone -and
+                ($currentItem.role -notin $phase2NonDomainJoinedRoles) -and -not (Test-VmIsLinux -Vm $currentItem)) {
+                $phase2HeadStartDone = $true
+                Write-Log "[Phase 2] DC head start: holding domain-joined member dispatch for ${phase2HeadStartSeconds}s so the DC can get ahead (first member: $($currentItem.vmName))." -Activity
+                Write-Progress2 "Preparing Phase $Phase" -Status "DC head start: letting the domain controller get ahead (${phase2HeadStartSeconds}s) before joining $($currentItem.vmName) and the other members" -PercentComplete $global:preparePhasePercent
+                Start-Sleep -Seconds $phase2HeadStartSeconds
+            }
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
                 Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
