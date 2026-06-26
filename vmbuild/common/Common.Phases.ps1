@@ -1690,6 +1690,90 @@ function Wait-Phase {
                     }
                 }
 
+                # Per-resource DSC timing diagnostic (LogOnly). After a DSC phase job
+                # completes, pull the guest's last ConfigurationStatus record and log the
+                # slowest resources, so a re-run that still spends minutes in a phase shows
+                # exactly WHICH DSC resource consumed the time (SQL setup, cluster
+                # formation, a download, etc.) AND how much of the wall-clock was actually
+                # outside DSC resources (host push/copy + LCM warmup). Only for DSC phases,
+                # only for roles that apply DSC, and only when the job ran a while -- so the
+                # extra guest round-trip never touches fast/no-op phases (90s threshold).
+                if ($Phase -ge 2 -and $Phase -le 9 -and $DeployConfig -and $jobName -match '^(.+?)\s+\[(.+?)\]') {
+                    $dtVmName = $Matches[1]
+                    $dtRole = $Matches[2]
+                    $dtStart = if ($job.PSBeginTime) { $job.PSBeginTime } else { $StartTime }
+                    $dtEnd = if ($job.PSEndTime) { $job.PSEndTime } else { Get-Date }
+                    $dtElapsedSec = [int]($dtEnd - $dtStart).TotalSeconds
+                    if ($dtRole -notin $dscDiagSkipRoles -and $dtElapsedSec -ge 90) {
+                        try {
+                            $dtResult = Invoke-VmCommand -VmName $dtVmName -VmDomainName $DeployConfig.vmOptions.domainName `
+                                -SuppressLog -TimeoutSeconds 45 -SessionMaxRetries 1 -ScriptBlock {
+                                param($topN)
+                                # Canonical source first: Get-DscConfigurationStatus returns the LCM's
+                                # last run with per-resource DurationInSeconds. It refuses while the LCM
+                                # is mid-apply -- which it isn't, the job just finished -- but on the off
+                                # chance it throws, fall back to parsing the newest ConfigurationStatus
+                                # .json directly (same record the LCM persists).
+                                $resAll = @()
+                                $meta = @{ Source = 'Get-DscConfigurationStatus'; Reboot = $null; Start = $null }
+                                $st = $null
+                                try { $st = Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1 } catch { $st = $null }
+                                if ($st) {
+                                    $meta.Reboot = $st.RebootRequested
+                                    $meta.Start = $st.StartDate
+                                    foreach ($r in (@($st.ResourcesInDesiredState) + @($st.ResourcesNotInDesiredState))) {
+                                        if ($null -eq $r) { continue }
+                                        $resAll += [pscustomobject]@{ Id = $r.ResourceId; Dur = [double]$r.DurationInSeconds; Ok = $r.InDesiredState }
+                                    }
+                                }
+                                if ($resAll.Count -eq 0) {
+                                    $statusPath = "$env:SystemRoot\System32\Configuration\ConfigurationStatus"
+                                    if (-not (Test-Path $statusPath)) { return $null }
+                                    $f = Get-ChildItem -Path $statusPath -Filter '*.json' -ErrorAction SilentlyContinue |
+                                        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                                    if (-not $f) { return $null }
+                                    try {
+                                        $obj = [System.IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json
+                                    }
+                                    catch { return @{ ErrorLine = "json parse failed: $($_.Exception.Message)"; File = $f.Name } }
+                                    $meta.Source = $f.Name
+                                    $meta.Reboot = $obj.RebootRequested
+                                    $meta.Start = $obj.StartDate
+                                    foreach ($r in (@($obj.ResourcesInDesiredState) + @($obj.ResourcesNotInDesiredState))) {
+                                        if ($null -eq $r) { continue }
+                                        $resAll += [pscustomobject]@{ Id = $r.ResourceId; Dur = [double]$r.DurationInSeconds; Ok = $r.InDesiredState }
+                                    }
+                                }
+                                if ($resAll.Count -eq 0) { return $null }
+                                $top = $resAll | Sort-Object Dur -Descending | Select-Object -First $topN
+                                $total = ($resAll | Measure-Object Dur -Sum).Sum
+                                return @{
+                                    Source          = $meta.Source
+                                    Reboot          = $meta.Reboot
+                                    ResourceCount   = $resAll.Count
+                                    TotalSec        = [math]::Round([double]$total, 1)
+                                    Top             = @($top | ForEach-Object { '{0,7:N1}s  {1}  [InDesiredState={2}]' -f $_.Dur, $_.Id, $_.Ok })
+                                }
+                            } -ArgumentList 8
+                            $dt = $dtResult.ScriptBlockOutput
+                            if ($dt -and $dt.Top) {
+                                $dtOutsideSec = [int]($dtElapsedSec - $dt.TotalSec)
+                                if ($dtOutsideSec -lt 0) { $dtOutsideSec = 0 }
+                                Write-Log "[DscTiming] $dtVmName [$dtRole] Phase $Phase job=${dtElapsedSec}s; record '$($dt.Source)': $($dt.ResourceCount) resources, applied-sum $($dt.TotalSec)s, ~${dtOutsideSec}s outside resources (host push/copy + LCM warmup), reboot=$($dt.Reboot). Slowest resources:" -LogOnly
+                                foreach ($tl in $dt.Top) {
+                                    Write-Log "[DscTiming]   $dtVmName - $tl" -LogOnly
+                                }
+                            }
+                            elseif ($dt -and $dt.ErrorLine) {
+                                Write-Log "[DscTiming] $dtVmName [$dtRole] Phase ${Phase}: $($dt.ErrorLine)" -LogOnly
+                            }
+                        }
+                        catch {
+                            Write-Log "[DscTiming] ${dtVmName}: failed to read DSC timing - $_" -LogOnly -Verbose
+                        }
+                    }
+                }
+
                 # ThreadJob has no ChildJobs -- streams live directly on the job.
                 $streamSource = Get-JobStreamSource -Job $job
                 $jobOutput = $streamSource | Select-Object -ExpandProperty Output

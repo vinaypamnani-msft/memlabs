@@ -4051,18 +4051,27 @@ $global:VM_Config = {
                 }
             }
 
-            # Flush the DC's resolver cache before the DC pushes DSC to this node.
+            # Flush the DC's resolver cache before the DC pushes DSC to this node --
+            # but ONLY when we just re-registered the node above ($needsDnsFix).
             # Even once the node's A record IS present in the zone, the DC's CLIENT
-            # resolver can still hold a stale NEGATIVE entry (NXDOMAIN) cached from an
-            # earlier push attempt made BEFORE the node registered. That negative
-            # cache makes the DC's Start-DscConfiguration -ComputerName push fail to
-            # resolve the node ("WinRM ... the server name cannot be resolved") even
-            # though DNS is now correct -- which is why a push keeps failing AFTER the
-            # node re-registers. Flush the DC's cache and confirm it resolves the node.
-            # Runs for every SQLAO node (cheap, idempotent), not just the fixed ones,
-            # because the negative cache can exist regardless of needsDnsFix.
+            # resolver can hold a stale NEGATIVE entry (NXDOMAIN) cached from a push
+            # attempt made BEFORE the node registered. That negative cache makes the
+            # DC's Start-DscConfiguration -ComputerName push fail to resolve the node
+            # ("WinRM ... the server name cannot be resolved") even though DNS is now
+            # correct. That stale negative entry is only created when the node was
+            # NOT yet published, i.e. exactly the $needsDnsFix path -- so the flush is
+            # only meaningful there.
+            #
+            # When the node was already correctly published (the common re-run case,
+            # "node A record OK ... no action"), nothing this run poisoned the DC's
+            # cache and any older negative entry has long since aged out (default
+            # negative TTL <= 15 min). Skipping the flush there avoids a needless
+            # PSDirect round-trip to the DC -- which, with every SQLAO node hitting the
+            # DC's PSDirect channel concurrently, was contending and TIMING OUT at
+            # ~54s per node ("cache flush failed:") and adding ~1 min to the critical
+            # path of phases 3/4/5 for no benefit (the push succeeds regardless).
             $pfDcVmName = ($deployConfig.virtualMachines | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1).vmName
-            if ($pfDcVmName) {
+            if ($needsDnsFix -and $pfDcVmName) {
                 $pfDcFlush = Invoke-VmCommand -VmName $pfDcVmName -VmDomainName $domainName -ScriptBlock {
                     param($fqdn)
                     Clear-DnsClientCache -ErrorAction SilentlyContinue
