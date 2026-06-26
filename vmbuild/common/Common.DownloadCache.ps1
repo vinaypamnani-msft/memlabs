@@ -10,9 +10,12 @@
 #
 # Concurrency model: ISOs are CONTENT-ADDRESSED and IMMUTABLE. The ISO file name
 # encodes a hash of its contents (cache-<hash>.iso), so a mounted ISO is never
-# rewritten and two deployments that need different files simply use different
-# ISO files. Mount/eject is scoped to the deploying domain's own VMs; eviction
-# never deletes an ISO that any VM on the host still has mounted.
+# rewritten. The cache always bakes the FULL Tier-1 toolset (independent of
+# StartPhase and the deployment's role mix), so every deployment normally
+# resolves the SAME content set and shares a SINGLE canonical ISO; only a
+# transient download difference (a tool's URL temporarily unreachable) would ever
+# produce a second one. Mount/eject is scoped to the deploying domain's own VMs;
+# eviction never deletes an ISO that any VM on the host still has mounted.
 #
 # EXCLUDED by design: ADK/ADKPE (~1GB) and ConfigMgr media (newest CM is ISO-based;
 # downloaded CM versions are legacy). Those keep their existing delivery paths.
@@ -32,7 +35,7 @@ function Test-MemlabsDownloadCacheEnabled {
 
 function Get-MemlabsCacheRoot {
     # The download store (azureFiles\cache). Created on demand. This is the
-    # accumulating set of downloaded installers; ISOs are built from subsets of it.
+    # accumulating set of downloaded installers; the cache ISO is built from it.
     if ($env:MEMLABS_DOWNLOAD_CACHE) {
         $root = $env:MEMLABS_DOWNLOAD_CACHE
     }
@@ -107,37 +110,25 @@ function Get-MemlabsRemoteFileSignature {
 }
 
 function Get-MemlabsCacheNeededKeys {
-    # The subset of Tier-1 cacheable keys this deployment will actually request,
-    # mirroring the StartPhase + role gating used by the pre-deploy URL test in
-    # Common.Validation.ps1 so we never download (or bake) installers no VM uses.
+    # The set of Tier-1 cacheable keys to bake into the cache ISO. By DESIGN this
+    # is the COMPLETE Tier-1 toolset and is INDEPENDENT of StartPhase and of the
+    # deployment's role mix: every deployment -- whether it starts at Phase 2 or
+    # Phase 5, with or without SQL/site-server/PMPC roles -- asks for the SAME
+    # content set, so they all share a SINGLE content-addressed cache-<hash>.iso
+    # instead of accumulating per-phase / per-role subset ISOs.
+    #
+    # Always asking for the full set is safe: a key whose URL isn't in the
+    # resolved filelist, or whose download fails, is simply skipped by the
+    # populate loop in Get-MemlabsCacheIsoForDeploy, and the content hash reflects
+    # whatever actually landed on the ISO. The extra installers are all small
+    # Tier-1 items (ADK/ADKPE and CM media are excluded), so baking them all costs
+    # little disk and a one-time download.
+    #
+    # $DeployConfig / $StartPhase are accepted for call-site compatibility but are
+    # intentionally not used to narrow the set (that's what produced multiple
+    # ISOs); the only thing that scopes inclusion is whether a tool is downloadable.
     param($DeployConfig, [int]$StartPhase = 1)
-    $vms = $DeployConfig.virtualMachines
-    $needed = New-Object System.Collections.Generic.List[string]
-
-    $hasSQL = @($vms | Where-Object { $_.sqlVersion }).Count -gt 0
-    $hasSSMS = @($vms | Where-Object { $_.installSSMS -eq $true }).Count -gt 0
-    $roles = @($vms | ForEach-Object { $_.role })
-    $hasSiteServer = ($roles -contains 'CAS') -or ($roles -contains 'Primary') -or ($roles -contains 'PassiveSite')
-    $hasSecondary = ($roles -contains 'Secondary')
-    $hasPMPC = @($vms | Where-Object { $_.InstallPatchMyPC -eq $true }).Count -gt 0
-
-    if ($StartPhase -le 2) {
-        $needed.Add('DotNet')
-    }
-    if ($StartPhase -le 3) {
-        $needed.Add('VCredist'); $needed.Add('VCredistX86'); $needed.Add('SQLClient'); $needed.Add('OleDB'); $needed.Add('ODBC')
-        if ($hasSQL -or $hasSSMS) { $needed.Add('SSMS') }
-    }
-    if ($StartPhase -le 8) {
-        if ($hasSiteServer -or $hasSecondary) { $needed.Add('ReportBuilder'); $needed.Add('ODBC') }
-        if ($hasPMPC) { $needed.Add('PMPC') }
-    }
-
-    $out = @()
-    foreach ($k in ($needed | Select-Object -Unique)) {
-        if ($script:MemlabsCacheTier1Keys -contains $k) { $out += $k }
-    }
-    return $out
+    return @($script:MemlabsCacheTier1Keys)
 }
 
 function Get-MemlabsCacheIsoForDeploy {
