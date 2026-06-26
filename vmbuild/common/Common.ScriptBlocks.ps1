@@ -1672,6 +1672,7 @@ $global:VM_Config = {
         $reservation = $using:reservation
         $alreadyCopiedDSC = $using:alreadyCopiedDSC
         $phaseRunGuid = $using:phaseRunGuid
+        $quietWUThisRun = $using:quietWUThisRun
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
@@ -1823,6 +1824,41 @@ $global:VM_Config = {
             if (-not $ps) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
                 return
+            }
+        }
+
+
+        # Re-assert the Windows Update service stop+disable once per run per VM
+        # (gated by $quietWUThisRun, computed in Common.Phases.ps1 -- mirrors the
+        # once-per-run $alreadyCopiedDSC gate). The create-time disable only runs
+        # at VM-create (Phase 1); a -StartPhase re-run skips it and the prior
+        # deploy's Phase 11 re-enabled these services, so without this a re-run
+        # services Windows Updates mid-build and slows every feature install.
+        # Only the two services are touched (NOT TrustedInstaller -- DSC feature
+        # installs need it, and NOT the WU policy keys -- those are Phase 2's to
+        # set and Phase 11's marker-gated revert to clear). Phase 11 re-enables
+        # wuauserv/UsoSvc unconditionally at the end, so disabling only the
+        # services is self-cleaning without touching the marker design.
+        if ($quietWUThisRun) {
+            try {
+                $wuResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Quiet Windows Update (stop+disable wuauserv/UsoSvc)" -ScriptBlock {
+                    $acted = @()
+                    foreach ($svc in @('wuauserv', 'UsoSvc')) {
+                        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                        if ($s) {
+                            if ($s.Status -eq 'Running') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
+                            if ($s.StartType -ne 'Disabled') { Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue }
+                            $acted += $svc
+                        }
+                    }
+                    if ($acted.Count -gt 0) { "stopped+disabled: $($acted -join ', ')" } else { "no WU services present" }
+                }
+                if ($wuResult.ScriptBlockOutput) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows Update quieted for build ($($wuResult.ScriptBlockOutput))." -LogOnly
+                }
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Quiet Windows Update step failed (non-fatal): $($_.Exception.Message)" -Warning -LogOnly
             }
         }
 

@@ -1375,6 +1375,26 @@ function Start-PhaseJobs {
                 $global:DSC_CopiedTime = Get-Date
             }
             Write-Log -verbose "[Phase $Phase] $($currentItem.vmName) alreadyCopiedDSC = $alreadyCopiedDSC"
+
+            # Quiet Windows Update once per run per VM (mirrors $global:DSC_Copied above).
+            # The create-time WU service stop+disable only runs at VM-create (Phase 1).
+            # A -StartPhase re-run skips Phase 1, and the PRIOR deploy's Phase 11 revert
+            # re-enabled wuauserv/UsoSvc (by design, so the SUP can deploy updates after
+            # the build) -- so a re-run would otherwise service Windows Updates mid-build,
+            # holding the CBS/TrustedInstaller lock (slow Install-WindowsFeature) and
+            # injecting reboots. Re-assert the stop+disable the FIRST time we touch each
+            # VM in this run, for build phases only ($Phase -lt 11). Phase 11 validation
+            # re-enables both services unconditionally at the end, exactly as today, so
+            # this is self-cleaning and the post-build SUP behavior is unchanged.
+            $quietWUThisRun = $false
+            if (-not $global:WU_Quieted) {
+                $global:WU_Quieted = @()
+            }
+            if ($Phase -lt 11 -and $currentItem.VmName -notin $global:WU_Quieted) {
+                $quietWUThisRun = $true
+                $global:WU_Quieted += $currentItem.VmName
+            }
+            Write-Log -verbose "[Phase $Phase] $($currentItem.vmName) quietWUThisRun = $quietWUThisRun"
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
                 Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
