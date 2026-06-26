@@ -306,33 +306,38 @@ function Get-MemlabsCacheIsoForDeploy {
             try {
                 if (-not (Test-Path $isoPath)) {
                     $stage = Join-Path $isoDir "cache-build-$hash-$PID"
-                    if (Test-Path $stage) { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
-                    New-Item -Path $stage -ItemType Directory -Force | Out-Null
-
-                    $manifest = [ordered]@{
-                        version = 1
-                        created = (Get-Date).ToUniversalTime().ToString('o')
-                        files   = [ordered]@{}
-                    }
-                    foreach ($e in $entries) {
-                        Copy-Item -Path $e.Path -Destination (Join-Path $stage $e.File) -Force
-                        $manifest.files[$e.Url] = [ordered]@{ file = $e.File; size = $e.Size; sha1 = $e.Sha1 }
-                    }
-                    ($manifest | ConvertTo-Json -Depth 6) | Out-File (Join-Path $stage 'manifest.json') -Encoding utf8 -Force
-
                     $tmpIso = "$isoPath.$PID.tmp"
-                    if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
-                    New-NoCloudSeedIsoWithImapi -SourceDir $stage -OutputIsoPath $tmpIso -VolumeLabel $script:MemlabsCacheVolumeLabel
-                    if (-not (Test-Path $tmpIso)) { throw "ISO build produced no output for $isoPath" }
+                    try {
+                        if (Test-Path $stage) { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+                        New-Item -Path $stage -ItemType Directory -Force | Out-Null
 
-                    if (-not (Test-Path $isoPath)) {
-                        Move-Item -Path $tmpIso -Destination $isoPath -Force
+                        $manifest = [ordered]@{
+                            version = 1
+                            created = (Get-Date).ToUniversalTime().ToString('o')
+                            files   = [ordered]@{}
+                        }
+                        foreach ($e in $entries) {
+                            Copy-Item -Path $e.Path -Destination (Join-Path $stage $e.File) -Force
+                            $manifest.files[$e.Url] = [ordered]@{ file = $e.File; size = $e.Size; sha1 = $e.Sha1 }
+                        }
+                        ($manifest | ConvertTo-Json -Depth 6) | Out-File (Join-Path $stage 'manifest.json') -Encoding utf8 -Force
+
+                        if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
+                        New-NoCloudSeedIsoWithImapi -SourceDir $stage -OutputIsoPath $tmpIso -VolumeLabel $script:MemlabsCacheVolumeLabel
+                        if (-not (Test-Path $tmpIso)) { throw "ISO build produced no output for $isoPath" }
+
+                        if (-not (Test-Path $isoPath)) {
+                            Move-Item -Path $tmpIso -Destination $isoPath -Force
+                        }
+                        Write-Log "DownloadCache: built $([System.IO.Path]::GetFileName($isoPath)) with $($entries.Count) file(s) [$([string]::Join(', ', $keys))]." -LogOnly
                     }
-                    else {
-                        Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue
+                    finally {
+                        # Always clean the per-PID staging dir + temp ISO, even if the
+                        # IMAPI build threw, so failed/contended attempts never leak
+                        # cache-build-* folders (or *.tmp) next to the store.
+                        if (Test-Path $stage) { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+                        if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
                     }
-                    Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
-                    Write-Log "DownloadCache: built $([System.IO.Path]::GetFileName($isoPath)) with $($entries.Count) file(s) [$([string]::Join(', ', $keys))]." -LogOnly
                 }
             }
             finally {

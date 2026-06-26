@@ -882,6 +882,24 @@ try {
     $start = 1
     $maxPhase = 11
     $global:StartPhase = $StartPhase
+
+    # Pre-build the host download-cache ISO ONCE, before any phase fans out to
+    # per-VM jobs. Building it here (single host process) instead of lazily inside
+    # each VM's DSC step avoids N separate processes racing to build the same
+    # content-addressed ISO (and leaking per-PID cache-build-* staging dirs on
+    # contention). The per-VM step then just finds the already-built ISO and mounts
+    # it. Pure optimization: any failure is logged and ignored (guests fall back to
+    # direct download). Skipped under -WhatIf and when the cache is disabled.
+    if (-not $WhatIf -and (Test-MemlabsDownloadCacheEnabled)) {
+        try {
+            Write-Log "Pre-building host download-cache ISO before phases..." -LogOnly
+            $null = Get-MemlabsCacheIsoForDeploy -DeployConfig $deployConfig -StartPhase ([int]$StartPhase)
+        }
+        catch {
+            Write-Log "Download-cache pre-build failed (non-fatal): $($_.Exception.Message)" -LogOnly
+        }
+    }
+
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {

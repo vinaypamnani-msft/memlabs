@@ -228,6 +228,21 @@ public class MemlabsIsoFile {
         try {
             $fsi.FileSystemsToCreate = 3   # ISO9660 (1) | Joliet (2)
             $fsi.VolumeName = $VolumeLabel
+
+            # IMAPI defaults the result-image size cap to a small (CD-sized) media
+            # profile, so AddTree throws "result image ... larger than the current
+            # configured limit" once the payload exceeds ~650MB (e.g. the download-
+            # cache ISO that now carries SSMS). Raise FreeMediaBlocks (2048-byte
+            # blocks) to cover the actual source size with margin so arbitrarily
+            # large ISOs build. Harmless for the tiny cloud-init seed (a few KB).
+            try {
+                $srcBytes = (Get-ChildItem -LiteralPath $SourceDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                if (-not $srcBytes) { $srcBytes = 0 }
+                $needBlocks = [math]::Ceiling((([double]$srcBytes * 1.2) + (64 * 1MB)) / 2048)
+                if ($needBlocks -gt [double]$fsi.FreeMediaBlocks) { $fsi.FreeMediaBlocks = [int]$needBlocks }
+            }
+            catch { }
+
             $fsi.Root.AddTree($SourceDir, $false)
             $result = $fsi.CreateResultImage()
             [MemlabsIsoFile]::Create($OutputIsoPath, $result.ImageStream, $result.BlockSize, $result.TotalBlocks)
