@@ -1418,18 +1418,29 @@ function Start-PhaseJobs {
         MaxRoleNameLength = $maxRoleNameLength + 2
     }
 
+    # If no jobs were dispatched and none failed to dispatch, nothing in this
+    # phase applied to any VM (e.g. Phase 10 where every VM is already up to
+    # date / kept Off by design). Report Applicable=$false so the caller emits
+    # the same "[Phase N] No VMs need this step. Skipping." line that the
+    # earlier-phase Get-ConfigurationData short-circuit produces, instead of a
+    # misleading "Created 0 jobs. Waiting for jobs."
+    $applicable = -not ($job_created_yes -eq 0 -and $job_created_no -eq 0)
+
     # Create return object
     $return = [PSCustomObject]@{
         Failed         = $job_created_no
         Success        = $job_created_yes
         Jobs           = $jobs
-        Applicable     = $true
+        Applicable     = $applicable
         AdditionalData = $additionalData
     }
 
     Write-Progress2 "Preparing Phase $Phase" -Status "Created $job_created_yes jobs." -PercentComplete 100 -Completed
 
-    if ($job_created_no -eq 0) {
+    if (-not $applicable) {
+        Write-Log "[Phase $Phase] No VMs need this step." -LogOnly
+    }
+    elseif ($job_created_no -eq 0) {
         Write-Log "[Phase $Phase] Created $job_created_yes jobs. Waiting for jobs."
     }
     else {
