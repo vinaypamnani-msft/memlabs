@@ -5550,6 +5550,35 @@ function Invoke-VmCommand {
                         # that kills the whole phase child process. Receive-Job already drained the
                         # output, so removing it here is safe and closes that race.
                         Remove-Job $job -Force -ErrorAction SilentlyContinue
+
+                        # The PSRemotingJob above ran ON the cached session's runspace
+                        # (Invoke-Command -Session $ps -AsJob). Wait-Job + Remove-Job return as
+                        # soon as the job object is reaped, but the runspace transitions
+                        # Busy -> Available ASYNCHRONOUSLY -- there is a brief settle window where
+                        # RunspaceAvailability is not yet Available. If the very next caller issues
+                        # a SYNCHRONOUS Invoke-Command on this same cached session during that
+                        # window (e.g. Stop-DSC -AsJob immediately followed by the synchronous
+                        # "Check pending reboot" probe in Common.ScriptBlocks.ps1), the
+                        # pipeline-create races the runspace teardown and surfaces the
+                        # non-terminating engine error "An error occurred while creating the
+                        # pipeline." (or, caught a few ms earlier while the job is still live, the
+                        # clean "session availability is Busy" guard). Both are the same collision.
+                        # Block here until the runspace has settled back to Available so the next
+                        # synchronous reuse never lands mid-transition. Bounded (10s) so a
+                        # genuinely wedged runspace can't hang the caller.
+                        try {
+                            $rs = $ps.Runspace
+                            if ($rs) {
+                                $settleDeadline = (Get-Date).AddSeconds(10)
+                                while ($rs.RunspaceAvailability -ne [System.Management.Automation.Runspaces.RunspaceAvailability]::Available -and (Get-Date) -lt $settleDeadline) {
+                                    Start-Sleep -Milliseconds 50
+                                }
+                                if ($rs.RunspaceAvailability -ne [System.Management.Automation.Runspaces.RunspaceAvailability]::Available -and -not $SuppressLog) {
+                                    Write-Log "$VmName`: Session runspace did not return to Available within 10s after job '$DisplayName' (state=$($rs.RunspaceAvailability)); proceeding." -LogOnly
+                                }
+                            }
+                        }
+                        catch { }
                     }
                     else {
                         Write-Log "$VmName`: Job '$DisplayName' Failed State: $($job.State)" -LogOnly
