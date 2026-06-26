@@ -4451,12 +4451,19 @@ function New-VirtualMachine {
                             if ($ipOctets.Count -eq 4) { "$($ipOctets[0]).$($ipOctets[1]).$($ipOctets[2]).0" }
                             elseif ($thisVmConfig.network) { $thisVmConfig.network } else { $DeployConfig.vmOptions.network }
                         }
-                        # Check if a reservation already exists for this MAC
+                        # Check if a reservation already exists for this MAC.
+                        # Only KEEP it when it points at this VM's AssignedIP; a reservation
+                        # for this MAC at a DIFFERENT IP is stale (e.g. left over pointing at
+                        # another VM's fixed-role IP) and MUST be corrected, or the VM boots
+                        # onto the wrong address and collides with the IP's rightful owner.
                         $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
-                        if ($existing) {
+                        if ($existing -and $existing -eq $assignedIP) {
                             Write-Log "$VmName`: DHCP reservation already exists: $existing (MAC=$vmMac); keeping" -LogOnly
                         }
                         else {
+                            if ($existing) {
+                                Write-Log "$VmName`: DHCP reservation for MAC=$vmMac points to $existing but AssignedIP is $assignedIP; correcting to avoid an address collision" -LogOnly
+                            }
                             Remove-DHCPReservation -mac $vmMac -vmName $VmName
                             Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName"
                             Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
@@ -4643,11 +4650,17 @@ function New-VirtualMachine {
                             if ($ipOctets2.Count -eq 4) { "$($ipOctets2[0]).$($ipOctets2[1]).$($ipOctets2[2]).0" }
                             elseif ($thisVmConfig2.network) { $thisVmConfig2.network } else { $DeployConfig.vmOptions.network }
                         }
+                        # Only KEEP an existing reservation for this MAC when it points at the
+                        # VM's AssignedIP; a reservation at a different IP is stale and would put
+                        # the VM on the wrong address (and collide with that IP's rightful owner).
                         $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2
-                        if ($existing2) {
+                        if ($existing2 -and $existing2 -eq $thisVmConfig2.AssignedIP) {
                             Write-Log "$VmName`: DHCP reservation already exists: $existing2 (MAC=$vmMac2); keeping" -LogOnly
                         }
                         else {
+                            if ($existing2) {
+                                Write-Log "$VmName`: DHCP reservation for MAC=$vmMac2 points to $existing2 but AssignedIP is $($thisVmConfig2.AssignedIP); correcting to avoid an address collision" -LogOnly
+                            }
                             Remove-DHCPReservation -mac $vmMac2 -vmName $VmName
                             Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName" -LogContext $VmName
                             Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
