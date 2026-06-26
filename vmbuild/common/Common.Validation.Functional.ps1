@@ -7685,20 +7685,46 @@ function Test-CMSiteWideFunctionality {
                         # using the protocol the SUP actually requires ($wsusPort /
                         # $wsusUseSsl: 8531+SSL on PKI, else 8530). On any failure
                         # emit a clean note instead of a scary raw exception.
+                        #
+                        # Age alone does NOT mean "stuck": a top-level SUP's FIRST
+                        # full sync pulls the entire upstream Microsoft Update
+                        # catalog (routinely 10k+ items) and legitimately runs well
+                        # past 30 min, while a child SUP syncing from that upstream
+                        # finishes in minutes. So when WSUS reports the sync still
+                        # Running, take two ProcessedItems samples a few seconds
+                        # apart: if it is still advancing the sync is healthy (OK,
+                        # not stuck); only a sync that is genuinely not moving warns.
                         $wsusDiag = ""
+                        $progressing = $false
                         if ($supServer) {
                             try {
                                 $wsusSrv = Get-WsusServer -Name $supServer -PortNumber $wsusPort -UseSsl:$wsusUseSsl -ErrorAction Stop
                                 $sub = $wsusSrv.GetSubscription()
                                 $wsusState = $sub.GetSynchronizationStatus().ToString()
-                                $prog = $sub.GetSynchronizationProgress()
-                                $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($prog.Phase), Items=$($prog.ProcessedItems)/$($prog.TotalItems)]"
+                                $prog1 = $sub.GetSynchronizationProgress()
+                                $p1 = [int]$prog1.ProcessedItems
+                                $total = [int]$prog1.TotalItems
+                                if ($wsusState -match 'Running|Progress|Syncing') {
+                                    Start-Sleep -Seconds 12
+                                    $prog2 = $sub.GetSynchronizationProgress()
+                                    $p2 = [int]$prog2.ProcessedItems
+                                    if ($p2 -gt $p1) { $progressing = $true }
+                                    $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($prog2.Phase), Items=$p2/$total (+$($p2 - $p1) in 12s)]"
+                                }
+                                else {
+                                    $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($prog1.Phase), Items=$p1/$total]"
+                                }
                             }
                             catch {
                                 $wsusDiag = " [WSUS-native progress not collected from '$($supServer):$wsusPort': $($_.Exception.Message)]"
                             }
                         }
-                        $results.Details.Add("WARN: SUP sync at '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime)$wsusDiag — may be slow or stuck")
+                        if ($progressing) {
+                            $results.Details.Add("OK: SUP sync at '$sName' actively progressing after $([math]::Round($age.TotalMinutes,0)) min$wsusDiag (initial full catalog sync; not stuck)")
+                        }
+                        else {
+                            $results.Details.Add("WARN: SUP sync at '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime)$wsusDiag — may be slow or stuck")
+                        }
                     }
                     else {
                         $results.Details.Add("OK: SUP sync in progress ($sName, $([math]::Round($age.TotalMinutes,1)) min)")
