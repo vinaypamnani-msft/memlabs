@@ -1189,9 +1189,13 @@ finally {
     if ($deployConfig -and $deployConfig.virtualMachines) {
         try {
             foreach ($cacheVm in $deployConfig.virtualMachines) {
-                if ($cacheVm.vmName) { Dismount-MemlabsCacheIsoFromVm -VmName $cacheVm.vmName }
+                if ($cacheVm.vmName) {
+                    Dismount-MemlabsCacheIsoFromVm -VmName $cacheVm.vmName
+                    Dismount-MemlabsDscIsoFromVm -VmName $cacheVm.vmName
+                }
             }
             Remove-StaleMemlabsCacheIso
+            Remove-StaleMemlabsDscIso
         }
         catch {
             Write-Log "Download cache cleanup failed (non-fatal): $_" -LogOnly

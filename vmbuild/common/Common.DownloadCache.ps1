@@ -26,6 +26,7 @@
 
 $script:MemlabsCacheTier1Keys = @('DotNet', 'SSMS', 'ODBC', 'OleDB', 'SQLClient', 'VCredist', 'VCredistX86', 'ReportBuilder', 'PMPC')
 $script:MemlabsCacheVolumeLabel = 'MEMLABSCACHE'
+$script:MemlabsDscVolumeLabel = 'MEMLABSDSC'
 
 function Test-MemlabsDownloadCacheEnabled {
     # Kill switch.
@@ -499,6 +500,127 @@ function Remove-StaleMemlabsCacheIso {
             if ((New-TimeSpan -Start $iso.LastWriteTime -End (Get-Date)).TotalDays -lt 1) { continue }
             Remove-Item $iso.FullName -Force -ErrorAction SilentlyContinue
             Write-Log "DownloadCache: evicted stale cache ISO $($iso.Name)." -LogOnly
+        }
+    }
+    catch {}
+}
+
+function Get-MemlabsDscIsoForPayload {
+    # Build (once per content) a read-only, content-addressed ISO that carries the
+    # ENTIRE host DSC payload -- DSC.zip (the compiled modules) PLUS the loose phase
+    # scripts -- i.e. exactly what Copy-ItemSafe ships to C:\staging\DSC today. The
+    # ISO is just a faster TRANSPORT for that same payload: mounting it + copying off
+    # the local DVD in-guest beats a host->guest PSDirect transfer of the zip and the
+    # many small loose scripts (PSDirect's worst case). Named dsc-<sig12>.iso where
+    # sig = the caller's whole-folder signature (DSC.zip MD5 + newest loose-file
+    # mtime + loose count), so the ISO is immutable and rebuilt ONLY when the DSC
+    # payload actually changes. Old ones are evicted by Remove-StaleMemlabsDscIso.
+    #
+    # Returns the ISO path, or $null on any failure (caller then direct-copies).
+    param([string]$RootPath, [string]$Signature)
+    try {
+        $srcDir = Join-Path $RootPath 'DSC'
+        if (-not (Test-Path $srcDir)) { return $null }
+        if ([string]::IsNullOrWhiteSpace($Signature)) { return $null }
+
+        $isoDir = Get-MemlabsCacheIsoDir
+        $hash = (Get-MemlabsCacheStringHash -Text $Signature).Substring(0, 12)
+        $isoPath = Join-Path $isoDir "dsc-$hash.iso"
+        if (Test-Path $isoPath) { return $isoPath }
+
+        # New-NoCloudSeedIsoWithImapi takes the IMAPI mutex itself (and sizes
+        # FreeMediaBlocks for large payloads), so no outer lock is needed -- and
+        # there is no staging folder to assemble because AddTree reads the live DSC
+        # folder directly ($false = put its CONTENTS at the ISO root, matching the
+        # C:\staging\DSC layout Copy-ItemSafe produces). Concurrent builders of the
+        # SAME hash are safe: each writes a per-PID temp then Move-Items; identical
+        # content means whoever lands first wins and the rest no-op.
+        $tmpIso = "$isoPath.$PID.tmp"
+        try {
+            if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
+            New-NoCloudSeedIsoWithImapi -SourceDir $srcDir -OutputIsoPath $tmpIso -VolumeLabel $script:MemlabsDscVolumeLabel
+            if (-not (Test-Path $tmpIso)) { throw "DSC ISO build produced no output for $isoPath" }
+            if (-not (Test-Path $isoPath)) { Move-Item -Path $tmpIso -Destination $isoPath -Force }
+            Write-Log "DownloadCache: built $([System.IO.Path]::GetFileName($isoPath)) (DSC payload)." -LogOnly
+        }
+        finally {
+            if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
+        }
+        return $isoPath
+    }
+    catch {
+        Write-Log "DownloadCache: Get-MemlabsDscIsoForPayload failed: $($_.Exception.Message). Caller will direct-copy DSC." -Warning
+        return $null
+    }
+}
+
+function Mount-MemlabsDscIsoToVm {
+    # Mount the DSC payload ISO read-only on the VM's single DVD drive, honoring the
+    # SAME single-DVD invariant as Mount-MemlabsCacheIsoToVm: mount only to an
+    # existing EMPTY drive, or add one when there is none (0->1 is unambiguous).
+    # If the one drive is busy (CM/SQL/OS ISO), yield $false -- the caller then
+    # direct-copies. The DSC ISO is mounted only transiently (the caller ejects it
+    # right after the in-guest copy), so it never lingers to break a later mount.
+    param([string]$VmName, [string]$IsoPath)
+    if (-not $IsoPath -or -not (Test-Path $IsoPath)) { return $false }
+    try {
+        $dvds = @(Get-VMDvdDrive -VMName $VmName -ErrorAction Stop)
+        foreach ($d in $dvds) {
+            if ($d.Path -and $d.Path -eq $IsoPath) { return $true }
+        }
+        $empty = $dvds | Where-Object { -not $_.Path } | Select-Object -First 1
+        if ($empty) {
+            Set-VMDvdDrive -VMName $VmName -ControllerNumber $empty.ControllerNumber -ControllerLocation $empty.ControllerLocation -Path $IsoPath -ErrorAction Stop
+            return $true
+        }
+        if ($dvds.Count -eq 0) {
+            Add-VMDvdDrive -VMName $VmName -Path $IsoPath -ErrorAction Stop
+            return $true
+        }
+        Write-Log "DownloadCache: $VmName DVD drive busy; DSC ISO not mounted (caller will direct-copy)." -LogOnly
+        return $false
+    }
+    catch {
+        Write-Log "DownloadCache: failed to mount DSC ISO to $VmName : $($_.Exception.Message)" -LogOnly
+        return $false
+    }
+}
+
+function Dismount-MemlabsDscIsoFromVm {
+    # Eject only OUR dsc-*.iso from this VM (leaves any OS/cache/other DVD alone).
+    param([string]$VmName)
+    try {
+        foreach ($d in @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue)) {
+            if ($d.Path -and ([System.IO.Path]::GetFileName($d.Path)) -like 'dsc-*.iso') {
+                Set-VMDvdDrive -VMName $VmName -ControllerNumber $d.ControllerNumber -ControllerLocation $d.ControllerLocation -Path $null -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch {}
+}
+
+function Remove-StaleMemlabsDscIso {
+    # Evict old dsc-*.iso (dev rebuilds mint a new one each time the DSC payload
+    # changes). Same host-wide-safe rules as Remove-StaleMemlabsCacheIso: never the
+    # newest, never one younger than a day, never one any VM still has mounted.
+    param([string]$KeepIsoPath)
+    try {
+        $all = @(Get-ChildItem -Path (Get-MemlabsCacheIsoDir) -Filter 'dsc-*.iso' -File -ErrorAction SilentlyContinue)
+        if ($all.Count -le 1) { return }
+
+        $mounted = @{}
+        foreach ($d in (Get-VM | Get-VMDvdDrive -ErrorAction SilentlyContinue)) {
+            if ($d.Path) { $mounted[$d.Path.ToLowerInvariant()] = $true }
+        }
+
+        $newest = $all | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        foreach ($iso in $all) {
+            if ($KeepIsoPath -and $iso.FullName -eq $KeepIsoPath) { continue }
+            if ($iso.FullName -eq $newest.FullName) { continue }
+            if ($mounted.ContainsKey($iso.FullName.ToLowerInvariant())) { continue }
+            if ((New-TimeSpan -Start $iso.LastWriteTime -End (Get-Date)).TotalDays -lt 1) { continue }
+            Remove-Item $iso.FullName -Force -ErrorAction SilentlyContinue
+            Write-Log "DownloadCache: evicted stale DSC ISO $($iso.Name)." -LogOnly
         }
     }
     catch {}

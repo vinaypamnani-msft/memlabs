@@ -1667,10 +1667,14 @@ function Test-SqlIsoNotMounted {
     # Dismount-MemlabsCacheIsoFromVm; that eject can still be in flight when this
     # host-side check runs, so a cache-*.iso must NOT fail the VM (it caused a
     # spurious Phase 11 FAIL on every SQL/SQLAO VM whose cache eject lagged the
-    # validator). Ignore cache-*.iso here and only flag a real SQL ISO.
+    # validator). The DSC payload ISO (dsc-<hash>.iso) is mounted+ejected within
+    # the per-VM DSC copy step and is likewise not a SQL ISO. Ignore both here and
+    # only flag a real SQL ISO.
     $dvd = Get-VMDvdDrive -VMName $VMName -ErrorAction SilentlyContinue
     $mountedPath = ($dvd | Where-Object {
-            $_.Path -and ([System.IO.Path]::GetFileName($_.Path)) -notlike 'cache-*.iso'
+            $_.Path -and
+            ([System.IO.Path]::GetFileName($_.Path)) -notlike 'cache-*.iso' -and
+            ([System.IO.Path]::GetFileName($_.Path)) -notlike 'dsc-*.iso'
         } | Select-Object -First 1).Path
 
     if ($mountedPath) {
@@ -1679,7 +1683,7 @@ function Test-SqlIsoNotMounted {
         return $false
     }
 
-    Write-Log "[Phase $Phase] [$label]: $VMName DVD drive is empty (no SQL ISO mounted; cache-*.iso ignored)" -LogOnly
+    Write-Log "[Phase $Phase] [$label]: $VMName DVD drive is empty (no SQL ISO mounted; cache-*.iso/dsc-*.iso ignored)" -LogOnly
     return $true
 }
 

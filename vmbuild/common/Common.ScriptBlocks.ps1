@@ -2801,20 +2801,79 @@ $global:VM_Config = {
             Write-Progress2 $Activity -Status "Copying DSC files to the VM" -percentcomplete 35 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."
 
-            # Copy-ItemSafe has 3 internal retries (~12 min worst case).
-            # DSC copy is critical, so retry up to 2 more times at the caller level.
             $copyResults = $false
-            for ($copyAttempt = 1; $copyAttempt -le 3; $copyAttempt++) {
-                if ($copyAttempt -gt 1) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Caller retry $($copyAttempt - 1)/2 after 30s delay..." -Warning
-                    Start-Sleep -Seconds 30
-                    Write-Progress2 $Activity -Status "Copying DSC files to the VM (retry $($copyAttempt - 1)/2)" -percentcomplete 36 -force
+
+            # FAST PATH (optimization): deliver the DSC payload via a content-
+            # addressed, read-only ISO mounted on the VM's DVD, then copy it off the
+            # local DVD INSIDE the guest. This replaces the slow host->guest PSDirect
+            # transfer (Copy-ItemSafe over the VMBus pipe -- minutes for the modules
+            # zip plus many small loose scripts) with an instant mount + a fast local
+            # disk copy. The ISO carries the SAME $rootPath\DSC folder Copy-ItemSafe
+            # ships (DSC.zip + loose scripts), so the guest ends with an identical
+            # C:\staging\DSC regardless of which path delivered it. Fully reversible:
+            # any miss (Gen1 VM, busy single DVD, build/mount/copy failure, or the
+            # $env:MEMLABS_NO_DSC_ISO kill switch) falls through to the legacy copy.
+            if (-not $env:MEMLABS_NO_DSC_ISO) {
+                try {
+                    $dscVm = Get-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue
+                    if ($dscVm -and $dscVm.Generation -ne 1) {
+                        $dscIso = Get-MemlabsDscIsoForPayload -RootPath $rootPath -Signature $dscSourceSignature
+                        if ($dscIso -and (Mount-MemlabsDscIsoToVm -VmName $currentItem.vmName -IsoPath $dscIso)) {
+                            Write-Progress2 $Activity -Status "Copying DSC files from mounted ISO" -percentcomplete 35 -force
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files from mounted ISO $([System.IO.Path]::GetFileName($dscIso))."
+                            try {
+                                $isoCopy = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                                    # Locate the MEMLABSDSC volume and copy its contents into C:\staging\DSC.
+                                    $vol = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'MEMLABSDSC' -and $_.DriveLetter } | Select-Object -First 1
+                                    if (-not $vol) { return [PSCustomObject]@{ Ok = $false; Reason = 'MEMLABSDSC volume not found' } }
+                                    $src = "$($vol.DriveLetter):\"
+                                    New-Item -Path "C:\staging\DSC" -ItemType Directory -Force | Out-Null
+                                    try {
+                                        Copy-Item -Path (Join-Path $src '*') -Destination "C:\staging\DSC" -Recurse -Force -ErrorAction Stop
+                                        if (-not (Test-Path "C:\staging\DSC\DSC.zip")) { return [PSCustomObject]@{ Ok = $false; Reason = 'DSC.zip missing after copy' } }
+                                        return [PSCustomObject]@{ Ok = $true; Reason = '' }
+                                    }
+                                    catch { return [PSCustomObject]@{ Ok = $false; Reason = $_.Exception.Message } }
+                                } -DisplayName "DSC: Copy payload from mounted ISO"
+                                if (-not $isoCopy.ScriptBlockFailed -and $isoCopy.ScriptBlockOutput -and $isoCopy.ScriptBlockOutput.Ok) {
+                                    $copyResults = $true
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC payload delivered via ISO." -LogOnly
+                                }
+                                else {
+                                    $reason = if ($isoCopy.ScriptBlockOutput) { $isoCopy.ScriptBlockOutput.Reason } else { 'in-guest copy failed' }
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC ISO in-guest copy did not complete ($reason); falling back to direct copy." -Warning
+                                }
+                            }
+                            finally {
+                                # Always eject our DSC ISO so the single DVD is free for the
+                                # cache-ISO mount that follows (and any later SQL/CM/OS mount).
+                                Dismount-MemlabsDscIsoFromVm -VmName $currentItem.vmName
+                            }
+                        }
+                    }
                 }
-                $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
-                if ($copyResults -ne $false) { break }
+                catch {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC ISO delivery failed (non-fatal, will direct-copy): $($_.Exception.Message)" -Warning
+                    try { Dismount-MemlabsDscIsoFromVm -VmName $currentItem.vmName } catch {}
+                }
+            }
+
+            # LEGACY/FALLBACK PATH: host->guest PSDirect copy. Runs when the ISO path
+            # was skipped or failed. Copy-ItemSafe has 3 internal retries (~12 min
+            # worst case); DSC copy is critical, so retry up to 2 more times here.
+            if (-not $copyResults) {
+                for ($copyAttempt = 1; $copyAttempt -le 3; $copyAttempt++) {
+                    if ($copyAttempt -gt 1) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Caller retry $($copyAttempt - 1)/2 after 30s delay..." -Warning
+                        Start-Sleep -Seconds 30
+                        Write-Progress2 $Activity -Status "Copying DSC files to the VM (retry $($copyAttempt - 1)/2)" -percentcomplete 36 -force
+                    }
+                    $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+                    if ($copyResults -ne $false) { break }
+                }
             }
             if ($copyResults -eq $false) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC files to the VM after $copyAttempt attempts." -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC files to the VM." -Failure -OutputStream
                 return
             }
 
