@@ -7913,6 +7913,20 @@ function Test-CMSiteWideFunctionality {
                     # re-triggers so it recovers without waiting for the schedule.
                     $results.Details.Add("INFO: WSUS last sync Result=Failed but catalog is populated - transient [TaxonomyCats=$taxCats; LastSync=$lastSyncTime; $ucBit]; re-triggering a sync")
                 }
+                elseif ($lastResult -eq 'Canceled' -and $initialSyncDone) {
+                    # A 'Canceled' WSUS sync is benign churn, NOT a failure:
+                    # WSUS records Canceled when a NEWER sync request supersedes
+                    # an in-flight one (common in a CAS -> child hierarchy as the
+                    # downstream SUP re-requests while the upstream catalog is
+                    # still moving) or when WsusService cycled mid-sync. With the
+                    # taxonomy already fully populated (initialSyncDone -- the
+                    # initial categories sync demonstrably ran) the canceled cycle
+                    # left a healthy catalog behind, and the CM-side
+                    # SMS_SUPSyncStatus check above is the authoritative sync
+                    # verdict. Report INFO; the kick-a-sync block below re-triggers
+                    # a fresh cycle (UpdateCount=0) so it completes on its own.
+                    $results.Details.Add("INFO: WSUS last sync Result=Canceled but catalog is populated - benign (a newer sync superseded the canceled cycle) [TaxonomyCats=$taxCats; LastSync=$lastSyncTime; $ucBit]")
+                }
                 elseif ($lastResult) {
                     $results.Details.Add("WARN: WSUS last sync Result=$lastResult [LastSync=$lastSyncTime; SyncState=$syncState; $ucBit]")
                 }
@@ -7950,7 +7964,19 @@ function Test-CMSiteWideFunctionality {
                 # catalog -- recover it now instead of waiting for the schedule).
                 $lastSyncFailed = ($lastResult -eq 'Failed')
                 $kickReason = if ($wStatus.UpdateCount -eq 0) { 'subscribed but UpdateCount=0 and idle' } else { 'last sync Failed (transient) and idle' }
-                if ($haveSubscription -and (-not $syncRunning) -and (($wStatus.UpdateCount -eq 0) -or $lastSyncFailed)) {
+                # Do NOT kick a sync on a DOWNSTREAM SUP. A downstream replica
+                # WSUS pulls its update metadata from the upstream SUP (the CAS),
+                # not from a locally-forced sync. Forcing one here while the
+                # upstream is still doing its initial full catalog sync just
+                # produces a superseded/Canceled cycle (the exact churn that
+                # surfaced as 'WSUS last sync Result=Canceled'); once the upstream
+                # finishes, WCM's scheduled downstream sync replicates the catalog
+                # on its own. So on a downstream SUP, report INFO and let
+                # replication drive it instead of manufacturing a canceled cycle.
+                if ($isDownstreamSup -and $haveSubscription -and (-not $syncRunning) -and (($wStatus.UpdateCount -eq 0) -or $lastSyncFailed)) {
+                    $results.Details.Add("INFO: $kickReason on a downstream SUP - not forcing a sync; catalog replicates from upstream '$upstreamSupName' once its sync completes")
+                }
+                elseif ($haveSubscription -and (-not $syncRunning) -and (($wStatus.UpdateCount -eq 0) -or $lastSyncFailed)) {
                     $kicked = $false
                     # Prefer the CM cmdlet so WCM stays the source of truth;
                     # fall back to the WSUS subscription API if unavailable.

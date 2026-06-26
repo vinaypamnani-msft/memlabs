@@ -2708,7 +2708,21 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 Write-DscStatus "$Tag An error occurred while creating the ADR for O365 Updates"
             }
             ##this sync will take a long time as it will almost pull 3k-5k updates down so don't wait for the process to finish
-            Invoke-FullSync
+            # Only FORCE a full sync on a TOP-LEVEL SUP (standalone Primary / CAS)
+            # that syncs from Microsoft Update directly. On a DOWNSTREAM child
+            # Primary the SUP is a replica that pulls its catalog from the upstream
+            # CAS, so forcing a sync here -- while the CAS is typically still doing
+            # its multi-thousand-item initial MU sync -- just produces a
+            # superseded/Canceled cycle (surfaced later as the Phase 11 'WSUS last
+            # sync Result=Canceled' warning). The downstream catalog replicates
+            # automatically on WCM's schedule once the upstream completes, so on a
+            # child Primary we skip the forced trigger.
+            if ($isTopLevel) {
+                Invoke-FullSync
+            }
+            else {
+                Write-DscStatus "$Tag Downstream SUP (parent=$($ThisVM.parentSiteCode)) - skipping forced full WSUS sync; catalog replicates from the upstream SUP once its sync completes"
+            }
         }
 
         } # end Primary-only update packages/ADR block
