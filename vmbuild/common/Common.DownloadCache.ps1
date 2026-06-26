@@ -172,7 +172,8 @@ function Get-MemlabsCacheIsoForDeploy {
             # changing underneath a stable URL (SSMS, VCredist, PMPC, ...).
             $force = $false
             $remoteSig = $null
-            if (-not (Test-Path $path)) {
+            $preExisting = Test-Path $path
+            if (-not $preExisting) {
                 $force = $true
             }
             else {
@@ -194,17 +195,50 @@ function Get-MemlabsCacheIsoForDeploy {
                 }
             }
 
-            $ok = Get-File -Source $url -Destination $path -Action Downloading -Silent -ForceDownload:$force
-            if (-not $ok -or -not (Test-Path $path)) {
-                Write-Log "DownloadCache: skipping '$key' (download failed); guests will fetch it directly." -LogOnly
+            # (Re)download. A FORCED re-download goes to a temp file first so a
+            # failed fetch (URL down / offline) never clobbers the good cached
+            # copy -- we only swap it in on success. If the fetch fails and we
+            # already have a cached copy, we keep using it (offline mode), so a
+            # fully pre-populated host builds the cache with no network at all.
+            $freshDownload = $false
+            if ($force) {
+                if ($preExisting) {
+                    $tmp = "$path.download"
+                    if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+                    $ok = Get-File -Source $url -Destination $tmp -Action Downloading -Silent -ForceDownload
+                    if ($ok -and (Test-Path $tmp) -and ((Get-Item $tmp).Length -gt 0)) {
+                        Move-Item -Path $tmp -Destination $path -Force
+                        $freshDownload = $true
+                    }
+                    else {
+                        if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+                        Write-Log "DownloadCache: '$key' re-download failed (URL down?); keeping previously-cached copy." -LogOnly
+                    }
+                }
+                else {
+                    $ok = Get-File -Source $url -Destination $path -Action Downloading -Silent -ForceDownload
+                    if ($ok -and (Test-Path $path) -and ((Get-Item $path).Length -gt 0)) { $freshDownload = $true }
+                }
+            }
+            else {
+                # Not forced: the cached copy is current (or HEAD was unreachable,
+                # so we keep it). Get-File is skip-if-exists, so this is a no-op
+                # network-wise when the file is already present.
+                $ok = Get-File -Source $url -Destination $path -Action Downloading -Silent
+                if ($ok -and -not $preExisting -and (Test-Path $path)) { $freshDownload = $true }
+            }
+
+            if (-not (Test-Path $path)) {
+                Write-Log "DownloadCache: skipping '$key' (no cached copy and download failed); guests will fetch it directly." -LogOnly
                 continue
             }
             $fi = Get-Item $path
             if ($fi.Length -le 0) { continue }
 
-            # Record the source signature so the next run can detect a change.
-            # Only rewrite on a fresh download so we don't churn the sidecar.
-            if ($force) {
+            # Record the source signature only on a real fresh download so the
+            # next run can detect a change (and so an offline fallback keeps the
+            # sidecar matching the copy we actually still have on disk).
+            if ($freshDownload) {
                 if (-not $remoteSig) { $remoteSig = Get-MemlabsRemoteFileSignature -Url $url }
                 $sidecar = [ordered]@{
                     url           = $url
