@@ -357,7 +357,24 @@ function Get-MemlabsCacheIsoForDeploy {
                             files   = [ordered]@{}
                         }
                         foreach ($e in $entries) {
-                            Copy-Item -Path $e.Path -Destination (Join-Path $stage $e.File) -Force
+                            $dst = Join-Path $stage $e.File
+                            if (Test-Path $dst) { Remove-Item $dst -Force -ErrorAction SilentlyContinue }
+                            # HARDLINK the tool into the stage instead of copying it. A hardlink is a
+                            # second NTFS directory entry to the SAME file data (zero extra bytes, and
+                            # instant -- no 700MB copy), and IMAPI's AddTree reads the content through
+                            # it exactly like a normal file (a hardlink is NOT a reparse point). The
+                            # store and the stage are both under azureFiles (same volume), which
+                            # hardlinks require, and no admin is needed (unlike symlinks). Deleting the
+                            # stage in the finally only drops this extra entry; the store's own entry
+                            # keeps the bytes alive. Falls back to a real copy if the link can't be made
+                            # (different volume / non-NTFS / unsupported) so the ISO always gets built.
+                            $linked = $false
+                            try {
+                                New-Item -ItemType HardLink -Path $dst -Target $e.Path -ErrorAction Stop | Out-Null
+                                $linked = (Test-Path $dst)
+                            }
+                            catch { $linked = $false }
+                            if (-not $linked) { Copy-Item -Path $e.Path -Destination $dst -Force }
                             $manifest.files[$e.Url] = [ordered]@{ file = $e.File; size = $e.Size; sha1 = $e.Sha1 }
                         }
                         ($manifest | ConvertTo-Json -Depth 6) | Out-File (Join-Path $stage 'manifest.json') -Encoding utf8 -Force
