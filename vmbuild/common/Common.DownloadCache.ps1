@@ -374,6 +374,17 @@ function Get-MemlabsCacheStringHash {
 function Mount-MemlabsCacheIsoToVm {
     # Mount the cache ISO read-only on a VM's DVD drive (Gen2 SCSI = hot-add OK).
     # Idempotent: a no-op if this ISO is already mounted.
+    #
+    # IMPORTANT -- single-DVD invariant: the create-time CM/OS media copy
+    # (Common.ScriptBlocks.ps1) and the Phase 4 SQL ISO mount (Mount-SqlIsoForPhase)
+    # both drive the VM's DVD with Set-VMDvdDrive WITHOUT a controller selector,
+    # which is only unambiguous when the VM has exactly ONE DVD drive. So the cache
+    # must never create a SECOND drive. It mounts only to an existing EMPTY drive,
+    # or -- only when the VM has no DVD drive at all (0 -> 1 is unambiguous) -- adds
+    # one. If the single drive is busy (CM/SQL/OS ISO present), the cache YIELDS
+    # this pass and re-mounts on a later phase once the drive is free. The cache is
+    # opportunistic, so being transiently evicted by a CM/SQL mount/eject is fine
+    # (the guest just falls back to a direct download until the cache is back).
     param([string]$VmName, [string]$IsoPath)
     if (-not $IsoPath -or -not (Test-Path $IsoPath)) { return $false }
     try {
@@ -384,11 +395,16 @@ function Mount-MemlabsCacheIsoToVm {
         $empty = $dvds | Where-Object { -not $_.Path } | Select-Object -First 1
         if ($empty) {
             Set-VMDvdDrive -VMName $VmName -ControllerNumber $empty.ControllerNumber -ControllerLocation $empty.ControllerLocation -Path $IsoPath -ErrorAction Stop
+            return $true
         }
-        else {
+        if ($dvds.Count -eq 0) {
             Add-VMDvdDrive -VMName $VmName -Path $IsoPath -ErrorAction Stop
+            return $true
         }
-        return $true
+        # The only DVD drive is occupied by a CM/SQL/OS ISO. Do NOT add a 2nd drive
+        # (it would break the no-controller Set-VMDvdDrive calls above); defer.
+        Write-Log "DownloadCache: $VmName DVD drive busy; deferring cache mount to a later phase." -LogOnly
+        return $false
     }
     catch {
         Write-Log "DownloadCache: failed to mount cache ISO to $VmName : $($_.Exception.Message)" -LogOnly
