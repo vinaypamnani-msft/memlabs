@@ -2995,6 +2995,10 @@ class RegisterTaskScheduler {
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
+    # Internal: LastRunTime captured just before we start the task, so a fresh start
+    # can be detected even when the launched script completes quickly.
+    hidden [datetime] $StartBaseline = [datetime]::MinValue
+
     [void] Set() {
         $_TaskName = $this.TaskName
         $_ScriptName = $this.ScriptName
@@ -3003,56 +3007,46 @@ class RegisterTaskScheduler {
 
 
 
-        $RegisterTime = [datetime]::UtcNow
         $waitTime = 30
 
         $success = $this.RegisterTask()
         if (-not $success) {
             throw "Failed to register task $_TaskName after multiple attempts. Check domain trust and AD replication."
         }
-        $lastRunTime = $this.GetLastRunTime()
-        $failCount = 0
         Write-Status "Starting task $_Taskname from $_ScriptPath $_ScriptName $_ScriptArgument"
-        Write-Verbose "lastRunTime: $lastRunTime   RegisterTime: $RegisterTime"
-        while ($lastRunTime -lt $RegisterTime) {
-            Write-Verbose "Checking to see if task has started Attempt $failCount"
-            Write-Verbose "lastRunTime(UTC): $lastRunTime   RegisterTime(UTC): $RegisterTime"
 
-            if ($failCount -gt 2) {
-                # Verify task still exists before trying to start it
-                $taskExists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
-                if (-not $taskExists) {
-                    Write-Status "$_TaskName disappeared. Re-registering..."
-                    $success = $this.RegisterTask()
-                    if (-not $success) {
-                        throw "Failed to re-register task $_TaskName."
-                    }
-                }
-                else {
-                    Write-Verbose "Manually starting the task"
-                    Start-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
-                }
-                Start-Sleep $waitTime
-                $lastRunTime = $this.GetLastRunTime()
-            }
-
-            if ($failCount -eq 8) {
-                Write-Status "$_TaskName failed to run after 8 retries. Exiting. Please check Task Scheduler for Task: $_TaskName"
-                throw "Task failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
-            }
-
-            if ($lastRunTime -gt $RegisterTime) {
-                Write-Status "$_Taskname was successfully started at $lastRunTime"
+        # RegisterTask() already started the task and confirmed it entered the Running
+        # state. Re-verify here using live task state (Get-ScheduledTask /
+        # Get-ScheduledTaskInfo) -- which updates immediately, unlike the laggy
+        # TaskScheduler/Operational event log -- and, if it somehow isn't running,
+        # re-register / re-start it (bounded) before giving up.
+        $failCount = 0
+        $maxRetries = 8
+        while ($true) {
+            if ($this.IsTaskRunning()) {
+                Write-Status "$_TaskName confirmed running."
                 break
             }
-            else {
-                Write-Status "$_Taskname has not started. Last run time was: $lastRunTime (UTC), registered at: $RegisterTime (UTC), attempt $failCount"
-                $failCount++
+            if ($failCount -ge $maxRetries) {
+                Write-Status "$_TaskName failed to run after $maxRetries retries. Exiting. Please check Task Scheduler for Task: $_TaskName"
+                throw "Task failed to run after $maxRetries retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
             }
-            start-sleep -Seconds $waitTime
-            $lastRunTime = $this.GetLastRunTime()
+
+            $taskExists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
+            if (-not $taskExists) {
+                Write-Status "$_TaskName disappeared. Re-registering..."
+                if (-not $this.RegisterTask()) {
+                    throw "Failed to re-register task $_TaskName."
+                }
+            }
+            else {
+                Write-Status "$_TaskName not running yet (attempt $failCount). Starting it."
+                Start-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
+            }
+            $failCount++
+            Start-Sleep -Seconds $waitTime
         }
-        Write-Status "$_TaskName was successfully started at $lastRunTime"
+        Write-Status "$_TaskName was successfully started."
 
 
 
@@ -3130,8 +3124,6 @@ class RegisterTaskScheduler {
         $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
         Write-Verbose "New-ScheduledTaskAction : $TaskCommand $TaskArg"
 
-        # Seconds to wait to start task
-        $waitTime = 15
         #$Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
         #Write-Verbose "Time is now: $RegisterTime Task Scheduled to run at $TaskStartTime"
 
@@ -3168,39 +3160,65 @@ class RegisterTaskScheduler {
             return $false
         }
 
-        Start-Sleep -Seconds $waitTime
+        # Make sure the task isn't already Running before we start it (a leftover run
+        # from a prior pass would make "is it running?" ambiguous). Capture the
+        # current LastRunTime as a baseline so a fresh start can be detected even if
+        # the launched script completes quickly.
+        $this.StartBaseline = [datetime]::MinValue
+        try {
+            $preInfo = Get-ScheduledTaskInfo -TaskName $($this.TaskName) -ErrorAction Stop
+            if ($preInfo.LastRunTime) { $this.StartBaseline = $preInfo.LastRunTime }
+            $preState = (Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction Stop).State
+            if ($preState -eq 'Running') {
+                Write-Status "$($this.TaskName) is already Running before start; stopping it for a clean start."
+                Stop-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+            }
+        }
+        catch {
+            Write-Status "Could not read pre-start state for $($this.TaskName): $($_.Exception.Message)"
+        }
 
         Write-Status "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) is starting"
         Start-ScheduledTask -TaskName $($this.TaskName)
-        Write-Status "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) has Started."
+
+        # Confirm the task actually entered the Running state (or already ran to
+        # completion for a fast no-op script) instead of sleeping a fixed interval and
+        # hoping. State / LastRunTime update almost immediately.
+        $startConfirmed = $false
+        for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Seconds 2
+            if ($this.IsTaskRunning()) {
+                $startConfirmed = $true
+                break
+            }
+        }
+        if ($startConfirmed) {
+            Write-Status "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) has Started."
+        }
+        else {
+            Write-Status "WARNING: $($this.TaskName) did not confirm Running within 30s after start; caller will retry."
+        }
 
         return $true
 
     }
 
-    [datetime] GetLastRunTime() {
-
-        $filterXML = @'
-        <QueryList>
-         <Query Id="0" Path="Microsoft-Windows-TaskScheduler/Operational">
-          <Select Path="Microsoft-Windows-TaskScheduler/Operational">
-           *[EventData/Data[@Name='TaskName']='\TEMPLATE']
-          </Select>
-         </Query>
-        </QueryList>
-'@
-
-        $filterXML = $filterXML -replace ("TEMPLATE", $this.TaskName)
-        $Lastevent = (Get-WinEvent  -FilterXml $filterXML -ErrorAction Stop) | Where-Object { $_.ID -eq 100 } | Select-Object -First 1
-
-        if ($Lastevent) {
-            $utcTime = $Lastevent.TimeCreated.ToUniversalTime()
-            Write-Verbose "Last Run Time is $utcTime (UTC) [local: $($Lastevent.TimeCreated)]"
-            return $utcTime
+    [bool] IsTaskRunning() {
+        # True when the scheduled task is actively Running, or (for a fast no-op script
+        # that already finished) when it has run since we captured StartBaseline.
+        try {
+            $state = (Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction Stop).State
+            if ($state -eq 'Running') { return $true }
+            $info = Get-ScheduledTaskInfo -TaskName $($this.TaskName) -ErrorAction Stop
+            # 267009 = SCHED_S_TASK_RUNNING
+            if ($info.LastTaskResult -eq 267009) { return $true }
+            if ($info.LastRunTime -and $info.LastRunTime -gt $this.StartBaseline) { return $true }
         }
-        Write-Verbose "No Last Run Time found returning $([datetime]::MinValue)"
-        return [datetime]::MinValue
-
+        catch {
+            Write-Verbose "IsTaskRunning check failed for $($this.TaskName): $($_.Exception.Message)"
+        }
+        return $false
     }
 }
 
