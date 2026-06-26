@@ -195,29 +195,56 @@ function Get-MemlabsCacheIsoForDeploy {
                 }
             }
 
-            # (Re)download. A FORCED re-download goes to a temp file first so a
-            # failed fetch (URL down / offline) never clobbers the good cached
-            # copy -- we only swap it in on success. If the fetch fails and we
-            # already have a cached copy, we keep using it (offline mode), so a
-            # fully pre-populated host builds the cache with no network at all.
+            # (Re)download with completeness verification. A FORCED re-download
+            # goes to a temp file first so a failed/partial fetch (URL down /
+            # offline / truncated) never clobbers the good cached copy -- we only
+            # swap it in once it's verified complete. Completeness = the bytes on
+            # disk match the server's Content-Length (from HEAD) when that's
+            # known; if the server doesn't report a size we fall back to a
+            # non-empty check. A pre-populated host with all files current does
+            # no network at all (handled by the not-forced skip-if-exists path).
             $freshDownload = $false
             if ($force) {
+                if (-not $remoteSig) { $remoteSig = Get-MemlabsRemoteFileSignature -Url $url }
+                [int64]$expectedSize = 0
+                if ($remoteSig -and $remoteSig.Size) { [void][int64]::TryParse([string]$remoteSig.Size, [ref]$expectedSize) }
+
                 if ($preExisting) {
                     $tmp = "$path.download"
                     if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
                     $ok = Get-File -Source $url -Destination $tmp -Action Downloading -Silent -ForceDownload
-                    if ($ok -and (Test-Path $tmp) -and ((Get-Item $tmp).Length -gt 0)) {
+                    $tmpLen = 0; if (Test-Path $tmp) { $tmpLen = (Get-Item $tmp).Length }
+                    $complete = $ok -and ($tmpLen -gt 0) -and (($expectedSize -le 0) -or ($tmpLen -eq $expectedSize))
+                    if ($complete) {
                         Move-Item -Path $tmp -Destination $path -Force
                         $freshDownload = $true
                     }
                     else {
                         if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
-                        Write-Log "DownloadCache: '$key' re-download failed (URL down?); keeping previously-cached copy." -LogOnly
+                        if ($expectedSize -gt 0 -and $tmpLen -gt 0 -and $tmpLen -ne $expectedSize) {
+                            Write-Log "DownloadCache: '$key' re-download incomplete ($tmpLen of $expectedSize bytes); keeping previously-cached copy." -LogOnly
+                        }
+                        else {
+                            Write-Log "DownloadCache: '$key' re-download failed (URL down?); keeping previously-cached copy." -LogOnly
+                        }
                     }
                 }
                 else {
                     $ok = Get-File -Source $url -Destination $path -Action Downloading -Silent -ForceDownload
-                    if ($ok -and (Test-Path $path) -and ((Get-Item $path).Length -gt 0)) { $freshDownload = $true }
+                    $dlLen = 0; if (Test-Path $path) { $dlLen = (Get-Item $path).Length }
+                    $complete = $ok -and ($dlLen -gt 0) -and (($expectedSize -le 0) -or ($dlLen -eq $expectedSize))
+                    if ($complete) {
+                        $freshDownload = $true
+                    }
+                    else {
+                        # Truncated/bad download and nothing to fall back to: drop it
+                        # so a half file never lands on the ISO (the guest downloads
+                        # directly), and leave no sidecar so the next run retries.
+                        if ($expectedSize -gt 0 -and $dlLen -gt 0 -and $dlLen -ne $expectedSize) {
+                            Write-Log "DownloadCache: '$key' download incomplete ($dlLen of $expectedSize bytes); discarding." -LogOnly
+                        }
+                        if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+                    }
                 }
             }
             else {
