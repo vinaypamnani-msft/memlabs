@@ -5243,19 +5243,25 @@ function Wait-ForVm {
                 }
             }
 
-            # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
-            # Use -SessionMaxRetries 1: the outer do/until loop already retries, and
+            # Single round-trip: probe the readiness marker AND C:\ (liveness)
+            # together so the "channel alive but path not present yet" branch
+            # below no longer needs a SECOND PSDirect call per poll -- this loop
+            # runs on every VM boot wait, so halving the round-trips while the
+            # path is still appearing adds up. SuppressLog since we're in a loop.
+            # -SessionMaxRetries 1: the outer do/until loop already retries, and
             # 3 retries x 3 credentials x 30s timeout = 4.5 min per call freezes the
             # progress display and starves the timeout check.
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SessionMaxRetries 1 -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
-            $ready = $true -eq $out.ScriptBlockOutput
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SessionMaxRetries 1 -ScriptBlock {
+                [PSCustomObject]@{ Path = (Test-Path $using:PathToVerify); Root = (Test-Path "C:\") }
+            } -SuppressLog
+            $ready = $true -eq $out.ScriptBlockOutput.Path
             if ($ready) {
                 $channelBrokenCount = 0
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
             }
             elseif ($count -gt 1) {
-                $outtest = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SessionMaxRetries 1 -ScriptBlock { Test-Path "C:\" } -SuppressLog
-                $readytest = $true -eq $outtest.ScriptBlockOutput
+                # C:\ liveness already came back in the same round-trip above.
+                $readytest = $true -eq $out.ScriptBlockOutput.Root
 
                 if ($readytest) {
                     $channelBrokenCount = 0
@@ -5268,9 +5274,10 @@ function Wait-ForVm {
                     $hb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
 
                     # Detect channel-broken from the actual session diagnostics.
-                    # Either call timing out or returning a VMBus error is evidence
+                    # The call timing out or returning a VMBus error is evidence
                     # the PSDirect channel is hung — distinct from auth failures.
-                    $channelBrokenNow = ($out.ChannelBroken -or $outtest.ChannelBroken)
+                    # (Single coalesced probe now, so one ChannelBroken flag.)
+                    $channelBrokenNow = $out.ChannelBroken
                     $hbText = "heartbeat: $hb"
                     if ($channelBrokenNow) { $hbText += ", channel broken" }
                     Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding ($hbText)"
