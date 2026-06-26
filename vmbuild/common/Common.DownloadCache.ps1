@@ -146,6 +146,7 @@ function Get-MemlabsCacheIsoForDeploy {
 
         $store = Get-MemlabsCacheRoot
         $entries = @()
+        $resolvableKeys = @()
 
         # Sweep orphaned per-PID staging dirs (cache-build-<hash>-<PID>) left by a
         # prior crashed/killed/failed build. The build's own try/finally cleans the
@@ -169,6 +170,7 @@ function Get-MemlabsCacheIsoForDeploy {
         foreach ($key in $keys) {
             $url = Get-MemlabsCacheUrlForKey -Key $key
             if (-not $url) { continue }
+            $resolvableKeys += $key
             $leaf = Get-MemlabsCacheLeaf -Key $key -Url $url
             $path = Join-Path $store $leaf
             $sidecarPath = "$path.src"
@@ -291,6 +293,25 @@ function Get-MemlabsCacheIsoForDeploy {
         }
 
         if ($entries.Count -eq 0) { return $null }
+
+        # COMPLETENESS GATE: only ever build an ISO from the FULL resolvable tool
+        # set. The ISO is content-addressed over the files actually included, so
+        # baking a partial set (e.g. one tool's download transiently failed this
+        # pass while the rest succeeded) mints a DIFFERENT-hash ISO than the full
+        # set -- which is exactly how a second ISO appears once the missing tool
+        # later lands in the store. If anything expected is still missing, DON'T
+        # build a partial ISO: return no-cache for this pass (guests direct-
+        # download) and let a later pass -- with the store fully populated --
+        # build the single canonical full-set ISO. This self-heals within one
+        # deploy: the up-front pre-build downloads the whole set synchronously,
+        # and each per-VM call re-attempts any missing download, so the first
+        # call that sees a complete store builds the one canonical ISO.
+        $haveKeys = @($entries | ForEach-Object { $_.Key })
+        $missingKeys = @($resolvableKeys | Where-Object { $haveKeys -notcontains $_ })
+        if ($missingKeys.Count -gt 0) {
+            Write-Log "DownloadCache: tool set incomplete ($($haveKeys.Count)/$($resolvableKeys.Count) present; missing: $($missingKeys -join ', ')). Deferring ISO build until the full set is in the store (avoids minting a partial-set ISO)." -LogOnly
+            return $null
+        }
 
         $isoDir = Get-MemlabsCacheIsoDir
 
