@@ -74,7 +74,7 @@
       "vmName": "NEBULA",
       "role": "SiteSystem",
       "operatingSystem": "Server 2025",
-      "memory": "*GB",
+      "memory": "8GB",
       "virtualProcs": 4,
       "tpmEnabled": true,
       "installSSMS": true,
