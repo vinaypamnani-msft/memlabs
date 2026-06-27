@@ -6754,12 +6754,18 @@ function Test-SSMSInstall {
     $scriptBlock = {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        $results.Details.Add("CMD: Test-Path 'C:\Program Files (x86)\Microsoft SQL Server Management Studio *\Common7\IDE\ssms.exe'")
-        $ssms = Get-ChildItem "C:\Program Files (x86)\Microsoft SQL Server Management Studio *\Common7\IDE\ssms.exe" -ErrorAction SilentlyContinue |
+        $results.Details.Add("CMD: Test-Path 'C:\Program Files*\Microsoft SQL Server Management Studio *\...\Common7\IDE\ssms.exe'")
+        # Version-agnostic: v18/19/20 install 32-bit under 'Program Files (x86)\...\Common7\IDE';
+        # v21/22+ install 64-bit under 'Program Files\...\Release\Common7\IDE'. Match any of them.
+        $ssms = Get-ChildItem -Path @(
+            "C:\Program Files\Microsoft SQL Server Management Studio *\Release\Common7\IDE\Ssms.exe",
+            "C:\Program Files\Microsoft SQL Server Management Studio *\Common7\IDE\Ssms.exe",
+            "C:\Program Files (x86)\Microsoft SQL Server Management Studio *\Common7\IDE\ssms.exe"
+        ) -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending | Select-Object -First 1
         if (-not $ssms) {
             $results.Passed = $false
-            $results.Details.Add("FAIL: ssms.exe not found under 'C:\Program Files (x86)\Microsoft SQL Server Management Studio *'")
+            $results.Details.Add("FAIL: ssms.exe not found under any 'Microsoft SQL Server Management Studio *' path (Program Files or Program Files (x86))")
             return $results
         }
         $results.Details.Add("OK: SSMS found at '$($ssms.FullName)' (version $($ssms.VersionInfo.ProductVersion))")

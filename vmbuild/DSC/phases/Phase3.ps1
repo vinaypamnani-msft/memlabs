@@ -189,7 +189,10 @@
 
             $ssmsDownloadUrl = $deployConfig.URLS.SSMS
             if ($l -and $l.LanguageTag -and $l.LanguageTag -ne "en-US" -and $l.LanguageID) {
-                $ssmsDownloadUrl = $ssmsDownloadUrl + "?clcid=" + $l.LanguageID
+                # Use & when the URL already has a query string (e.g. go.microsoft.com/fwlink/?linkid=...),
+                # otherwise ? (e.g. a bare aka.ms link). Appending a 2nd ? would corrupt the fwlink.
+                $clcidSep = if ($ssmsDownloadUrl -like "*`?*") { "&" } else { "?" }
+                $ssmsDownloadUrl = $ssmsDownloadUrl + $clcidSep + "clcid=" + $l.LanguageID
             }
 
             WriteStatus SSMS {

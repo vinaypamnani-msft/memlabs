@@ -785,71 +785,148 @@ class InstallSSMS {
 
     [void] Set() {
         # Download SSMS
-
         $ssmsSetup = "C:\temp\SSMS-Setup-ENU.exe"
 
         Invoke-DownloadFile $this.DownloadUrl $ssmsSetup
-                
-        # Install SSMS
-        $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
-        $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
-        $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE"
 
-        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2) -or (Test-Path $smssinstallpath3)) {
-            Write-Status "SSMS Installed Successfully! (Tested Out)"
+        # Version-agnostic detection paths. v18/19/20 install 32-bit under
+        # "...(x86)\Microsoft SQL Server Management Studio NN\Common7\IDE"; v21/22+ install 64-bit under
+        # "...\Microsoft SQL Server Management Studio NN\Release\Common7\IDE". Match any of them so a future
+        # version bump never re-triggers a needless reinstall + reboot on every pass.
+        $ssmsExePaths = @(
+            "C:\Program Files\Microsoft SQL Server Management Studio *\Release\Common7\IDE\Ssms.exe",
+            "C:\Program Files\Microsoft SQL Server Management Studio *\Common7\IDE\Ssms.exe",
+            "C:\Program Files (x86)\Microsoft SQL Server Management Studio *\Common7\IDE\ssms.exe"
+        )
+
+        $ssmsExe = Get-ChildItem -Path $ssmsExePaths -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+        if ($ssmsExe) {
+            Write-Status "SSMS Installed Successfully! (Tested Out) - $($ssmsExe.FullName)"
             return
         }
+
+        # Pick the correct SILENT arguments for whichever installer the URL actually served, so the install
+        # is bullet-proof no matter which SSMS the link resolves to now or later:
+        #   - WiX Burn standalone (SSMS <= 20, SSMS-Setup-ENU.exe):       /install /quiet /norestart
+        #   - Visual Studio bootstrapper (SSMS 21/22+, vs_SSMS.exe):      --quiet --norestart --wait
+        # The file was saved under a fixed name, so classify by CONTENT: the VS stub is tiny (~5 MB) and its
+        # version info references Visual Studio; the Burn package is hundreds of MB.
+        $burnArgs = @('/install', '/quiet', '/norestart')
+        $vsArgs = @('--quiet', '--norestart', '--wait')
+
+        $looksVs = $false
+        try {
+            $fi = Get-Item -LiteralPath $ssmsSetup -ErrorAction Stop
+            $sizeMB = [math]::Round($fi.Length / 1MB, 1)
+            $vi = $fi.VersionInfo
+            $viText = ("{0}|{1}|{2}" -f $vi.FileDescription, $vi.ProductName, $vi.OriginalFilename)
+            if ($sizeMB -lt 60) { $looksVs = $true }
+            if ($viText -match 'Visual Studio|vs_setup|bootstrap') { $looksVs = $true }
+            if ($looksVs) { $kindText = 'VS bootstrapper' } else { $kindText = 'Burn standalone' }
+            Write-Status ("SSMS installer classified as {0} ({1} MB; '{2}')" -f $kindText, $sizeMB, $viText)
+        }
+        catch {
+            Write-Status "Could not read SSMS installer metadata ($($_.Exception.Message)); defaulting to Burn-style args."
+        }
+
+        # Try the most-likely arg style first; fall back to the other only if the first EXITED without
+        # installing (a misclassification). Each attempt runs under a hard timeout + kill so a wedged
+        # installer or a UI dialog in session 0 can never hang the phase for hours.
+        if ($looksVs) {
+            $attempts = @(
+                @{ Name = 'VS bootstrapper'; Args = $vsArgs },
+                @{ Name = 'Burn standalone'; Args = $burnArgs }
+            )
+        }
         else {
+            $attempts = @(
+                @{ Name = 'Burn standalone'; Args = $burnArgs },
+                @{ Name = 'VS bootstrapper'; Args = $vsArgs }
+            )
+        }
 
-            $cmd = $ssmsSetup
-            $arg1 = "/install"
-            $arg2 = "/quiet"
-            $arg3 = "/norestart"
+        $timeoutSeconds = 2700   # 45-min hard cap per attempt; never hang the phase for hours.
+        $installed = $false
+        $timedOut = $false
+        $lastDetail = 'no attempt ran'
 
+        foreach ($attempt in $attempts) {
+            Write-Status ("Installing SSMS [{0}]: `"{1}`" {2}" -f $attempt.Name, $ssmsSetup, ($attempt.Args -join ' '))
+            $proc = $null
             try {
-                Write-Status "Installing SSMS..."
-                & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Status "SSMS Installed Successfully!"
-
-                # Reboot
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-                $global:DSCMachineStatus = 1
+                $proc = Start-Process -FilePath $ssmsSetup -ArgumentList $attempt.Args -PassThru -WindowStyle Hidden -ErrorAction Stop
             }
             catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to install SSMS with below error: $ErrorMessage"
-                throw "Failed to install SSMS with below error: $ErrorMessage"
+                $lastDetail = "Start-Process failed: $($_.Exception.Message)"
+                Write-Status "SSMS install [$($attempt.Name)] could not start: $($_.Exception.Message)"
+                continue
             }
+
+            if ($proc.WaitForExit($timeoutSeconds * 1000)) {
+                $lastDetail = "exit code $($proc.ExitCode)"
+                Write-Status ("SSMS install [{0}] exited with code {1}" -f $attempt.Name, $proc.ExitCode)
+            }
+            else {
+                $timedOut = $true
+                $lastDetail = "timed out after ${timeoutSeconds}s"
+                Write-Status ("SSMS install [{0}] did not finish within {1}s -- killing it and any child installers" -f $attempt.Name, $timeoutSeconds)
+                try { $proc.Kill() } catch { }
+                foreach ($pn in @('vs_installer', 'vs_installershell', 'vs_bootstrapper', 'vs_setup_bootstrapper', 'setup', 'SSMS-Setup-ENU')) {
+                    Get-Process -Name $pn -ErrorAction SilentlyContinue | ForEach-Object { try { $_.Kill() } catch { } }
+                }
+            }
+
+            # Verify by ground truth (the file on disk), NOT the exit code: installers use different codes and
+            # 3010/1641 mean success-with-reboot. So just re-scan for ssms.exe.
+            Start-Sleep -Seconds 5
+            $ssmsExe = Get-ChildItem -Path $ssmsExePaths -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+            if ($ssmsExe) {
+                Write-Status "SSMS Installed Successfully! - $($ssmsExe.FullName)"
+                $installed = $true
+                break
+            }
+
+            if ($timedOut) {
+                # A hang on this binary will almost certainly hang again with the other arg style on the SAME
+                # file, so stop here and fail rather than burn another 45 minutes.
+                Write-Status "SSMS installer hung; not retrying the alternate argument style on the same hung binary."
+                break
+            }
+
+            Write-Status ("SSMS not present after the [{0}] attempt; retrying with the alternate installer arguments." -f $attempt.Name)
         }
+
+        if (-not $installed) {
+            $msg = "Failed to install SSMS (tried Burn '/install /quiet /norestart' and VS '--quiet --norestart --wait'). Last detail: $lastDetail"
+            Write-Status $msg
+            throw $msg
+        }
+
+        # Reboot to finalize the install (matches prior behavior).
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        $global:DSCMachineStatus = 1
     }
 
     [bool] Test() {
         Write-Status "Checking SSMS installation status"
-        $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
-        $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
-        $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE\ssms.exe"
 
-        if (Test-Path $smssinstallpath) {
-            If ((Get-Item $smssinstallpath).length -gt 0kb) {
-                Write-Verbose "Test - Installing SSMS... $smssinstallpath exists"
-                return $true
-            }
+        # Version-agnostic detection. Match any installed SSMS across every layout:
+        #   - v18/19/20: 32-bit, "C:\Program Files (x86)\Microsoft SQL Server Management Studio NN\Common7\IDE\ssms.exe"
+        #   - v21/22+  : 64-bit (VS-based), "C:\Program Files\Microsoft SQL Server Management Studio NN\Release\Common7\IDE\Ssms.exe"
+        # Assigning Get-ChildItem to a variable consumes its pipeline output so nothing leaks onto the
+        # success stream (a DSC class Test() must return ONLY a boolean, or the LCM hard-fails).
+        $ssmsExe = Get-ChildItem -Path @(
+            "C:\Program Files\Microsoft SQL Server Management Studio *\Release\Common7\IDE\Ssms.exe",
+            "C:\Program Files\Microsoft SQL Server Management Studio *\Common7\IDE\Ssms.exe",
+            "C:\Program Files (x86)\Microsoft SQL Server Management Studio *\Common7\IDE\ssms.exe"
+        ) -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Sort-Object FullName -Descending | Select-Object -First 1
+
+        if ($ssmsExe) {
+            Write-Verbose "Test - Installing SSMS... $($ssmsExe.FullName) exists"
+            return $true
         }
 
-        if (Test-Path $smssinstallpath2) {
-            If ((Get-Item $smssinstallpath2).length -gt 0kb) {
-                Write-Verbose "Test - Installing SSMS... $smssinstallpath2 exists"
-                return $true
-            }
-        }
-        if (Test-Path $smssinstallpath3) {
-            If ((Get-Item $smssinstallpath3).length -gt 0kb) {
-                Write-Verbose "Test - Installing SSMS... $smssinstallpath3 exists"
-                return $true
-            }
-        }
-
-        Write-Verbose "Test - Installing SSMS... $smssinstallpath3 does not exist"
+        Write-Verbose "Test - Installing SSMS... no ssms.exe found under any 'Microsoft SQL Server Management Studio *' path"
         return $false
     }
 
