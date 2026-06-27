@@ -902,9 +902,32 @@ class InstallSSMS {
             throw $msg
         }
 
-        # Reboot to finalize the install (matches prior behavior).
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-        $global:DSCMachineStatus = 1
+        # Reboot ONLY if one is genuinely pending. SSMS is an application install and does
+        # not require a reboot to function. The old code rebooted unconditionally, but on
+        # the boxes SSMS lands on (installSSMS => CAS/Primary site servers) the IIS-group
+        # RebootNow later in this same Phase 3 pass already provides a reboot, making this
+        # one redundant -- and an extra reboot here just lengthens Phase 3 and (when files
+        # were in use) can re-trigger the whole post-reboot MOF re-apply. So probe the
+        # standard pending-reboot signals and only set DSCMachineStatus when the install
+        # actually staged in-use files; otherwise let the downstream reboot (or Phase 4
+        # SQL, on a SQL-only SSMS box) finalize.
+        $rebootPending = $false
+        try {
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $rebootPending = $true }
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $rebootPending = $true }
+            $sm = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
+            if ($sm -and $sm.PendingFileRenameOperations) { $rebootPending = $true }
+        }
+        catch { }
+
+        if ($rebootPending) {
+            Write-Status "SSMS install left a pending reboot; rebooting to finalize."
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+        }
+        else {
+            Write-Status "SSMS installed; no reboot pending (a later step will reboot if needed)."
+        }
     }
 
     [bool] Test() {
