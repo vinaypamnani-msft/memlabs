@@ -89,45 +89,73 @@ function Invoke-DotSource {
     param(
         [Parameter(Mandatory)]
         [string]$Script,
-        [object[]]$Arguments
+        [object[]]$Arguments,
+        # By default a runtime exception in the dot-sourced script is logged as a
+        # WARNING and swallowed (see the catch note below). Set -Rethrow when the
+        # CALLER owns retry/recovery for that script (e.g. the perfloading retry
+        # loop in ScriptWorkFlow.ps1): the exception is still logged, then re-thrown
+        # so the caller's try/catch can act on it.
+        [switch]$Rethrow
     )
 
-    $scriptName = Split-Path $Script -Leaf
+    # HARDENING: `. $Script` runs the script in THIS function's scope, so any
+    # variable the dot-sourced script assigns clobbers a like-named local here.
+    # That is not theoretical: perfloading.ps1 sets $ScriptName in its CM-script
+    # import loop, which used to overwrite our $scriptName and made the END /
+    # exception log line show the wrong name (e.g. "MEMLABS-CheckFilesToBe-
+    # CleanedUp" instead of "Perfloading.ps1") -- and a script that happened to
+    # assign $Rethrow or $sw could flip the rethrow decision or break the
+    # finally. Capture everything the catch / finally / rethrow decision need
+    # into collision-proof $__ids* locals up front; a dot-sourced script won't
+    # define those. ($Script / $Arguments are consumed by the dot-source call
+    # itself before the script body runs, so they can't be clobbered in flight.)
+    $__idsScriptName = Split-Path $Script -Leaf
+    $__idsRethrow = [bool]$Rethrow
 
     # Pre-flight: verify the file exists
     if (-not (Test-Path $Script)) {
-        Write-DscStatus "FAILED to dot-source $scriptName -- file not found: $Script" -Failure
+        Write-DscStatus "FAILED to dot-source $__idsScriptName -- file not found: $Script" -Failure
         return
     }
 
     # Pre-flight: verify the file parses without errors
-    $tokens = $null
-    $parseErrors = $null
-    [void][System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$tokens, [ref]$parseErrors)
-    if ($parseErrors -and $parseErrors.Count -gt 0) {
-        $firstErr = $parseErrors[0]
-        Write-DscStatus "FAILED to dot-source $scriptName -- parse error at line $($firstErr.Extent.StartLineNumber): $($firstErr.Message)" -Failure
+    $__idsTokens = $null
+    $__idsParseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$__idsTokens, [ref]$__idsParseErrors)
+    if ($__idsParseErrors -and $__idsParseErrors.Count -gt 0) {
+        $__idsFirstErr = $__idsParseErrors[0]
+        Write-DscStatus "FAILED to dot-source $__idsScriptName -- parse error at line $($__idsFirstErr.Extent.StartLineNumber): $($__idsFirstErr.Message)" -Failure
         return
     }
 
-    # Dot-source with error handling.
+    # Run with error handling.
+    # We use the CALL operator (&), not dot-source (.), so the script runs in its
+    # OWN child scope: it can still READ ambient state up the scope chain
+    # ($deployConfig, $SiteCode, Write-DscStatus, etc.) but its variable WRITES
+    # are isolated and cannot clobber this wrapper's bookkeeping. Audited safe:
+    # no phase script communicates via $script: scope (which is the only construct
+    # that behaves differently under & vs .), and none relies on writing a plain
+    # variable back to the caller (the function boundary already blocked that).
+    # The collision-proof $__ids* locals below are now belt-and-suspenders.
     # The catch logs runtime errors from within the script for diagnostics but
-    # does NOT mark them as -Failure. The pre-flight checks above catch the
-    # real infrastructure failures (missing file, parse errors). Runtime errors
-    # from CM cmdlets are transient and the scripts have their own retry logic;
-    # marking them as JOBFAILURE would abort the phase prematurely.
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-DscStatus "[Invoke-DotSource] START $scriptName" -NoStatus
+    # does NOT mark them as -Failure (unless the caller passed -Rethrow). The
+    # pre-flight checks above catch the real infrastructure failures (missing
+    # file, parse errors). Runtime errors from CM cmdlets are otherwise transient
+    # and the scripts have their own retry logic; marking them as JOBFAILURE
+    # would abort the phase prematurely.
+    $__idsStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-DscStatus "[Invoke-DotSource] START $__idsScriptName" -NoStatus
     try {
-        . $Script @Arguments
+        & $Script @Arguments
     }
     catch {
-        Write-DscStatus "WARNING: exception in ${scriptName}: $_"
+        Write-DscStatus "WARNING: exception in ${__idsScriptName}: $_"
+        if ($__idsRethrow) { throw }
     }
     finally {
-        $sw.Stop()
-        $elapsed = $sw.Elapsed.ToString('hh\:mm\:ss')
-        Write-DscStatus "[Invoke-DotSource] END   $scriptName  ($elapsed elapsed)" -NoStatus
+        $__idsStopwatch.Stop()
+        $__idsElapsed = $__idsStopwatch.Elapsed.ToString('hh\:mm\:ss')
+        Write-DscStatus "[Invoke-DotSource] END   $__idsScriptName  ($__idsElapsed elapsed)" -NoStatus
     }
 }
 

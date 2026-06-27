@@ -715,14 +715,58 @@ else {
     }
 }
 
-# Kick off remote SMS Provider installs (InstallProvider.ps1) as a background
-# job BEFORE perfloading so the per-provider setupwpf.exe runs (~5-15 min each)
-# overlap the long perfloading work instead of running dead-last/sequentially.
-# InstallProvider.ps1 only needs the site installed (roles done by here in both
-# the standalone and hierarchy paths) and is idempotent via SMS_ProviderLocation.
-# The matching join is below, where the inline call used to be. When perfloading
-# doesn't run (CAS, or PrePopulate=false) the job starts then immediately joins,
-# so behavior is no worse than today.
+# Object pre-population (perfloading) runs FIRST, while the only SMS Provider
+# is the one CM setup installed on this site server and is therefore stable.
+# It MUST NOT overlap the additional/remote SMS Provider install below:
+# setupwpf /SDKINST registers a provider, which recycles the site's SMS
+# Provider host / root\SMS\site_<code> WMI namespace, and perfloading makes
+# heavy WMI calls into that namespace. Running them concurrently crashed
+# perfloading mid-run with a terminating WBEM critical error (the SMS_Collection
+# ExecQuery for 'MEMLABS-Office Install Targets' threw 0x8004108A, preceded by
+# 5 baseline imports failing 'The SMS Provider reported an error'), which left
+# the ~50 MEMLABS device collections and the Office Install Targets collection
+# uncreated on every hierarchy Primary. So: perfloading to completion first,
+# provider install strictly after.
+if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateObjects -eq $true) {
+    Write-DScStatus "Loading object pre-population for MEMLABS"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
+    Set-Location $LogPath
+    # Retry the whole perfloading run: it is idempotent (every create is guarded
+    # by a Get-CM* existence check / already-subscribed check), so a re-run picks
+    # up wherever a transient SMS Provider / WMI hiccup aborted the prior pass.
+    $perfMaxAttempts = 3
+    for ($perfAttempt = 1; $perfAttempt -le $perfMaxAttempts; $perfAttempt++) {
+        try {
+            if ($perfAttempt -gt 1) {
+                Write-DscStatus "Retrying perfloading (attempt $perfAttempt of $perfMaxAttempts)"
+            }
+            # -Rethrow: Invoke-DotSource normally swallows a script's runtime
+            # exception (logs a WARNING and returns). We OWN the retry here, so
+            # ask it to re-throw on failure -- otherwise the loop could never see
+            # an aborted perfloading run and would 'succeed' on the first pass
+            # even when perfloading died partway (e.g. the SMS Provider/WMI crash).
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+            break
+        }
+        catch {
+            Write-DscStatus "Perfloading.ps1 failed (attempt $perfAttempt of $perfMaxAttempts): $_" -Warning
+            if ($perfAttempt -lt $perfMaxAttempts) {
+                Start-Sleep -Seconds 30
+            }
+            else {
+                Write-DscStatus "Perfloading.ps1 did not complete after $perfMaxAttempts attempts; continuing. Some MEMLABS objects may be missing -- re-run Phase 8 to finish pre-population." -Warning
+            }
+        }
+    }
+}
+
+# Additional/remote SMS Provider installs (InstallProvider.ps1) — kicked off
+# AFTER perfloading (NOT overlapping it; see the note above). Still a background
+# job + immediate join so InstallProvider's runspace isolation and the existing
+# failure handling are unchanged. The join completes before PushClients /
+# EnableBLM / the collection re-eval sweep below, all of which also need a
+# stable SMS Provider. When perfloading doesn't run (CAS, or PrePopulate=false)
+# this is reached directly, so those paths are no worse than before.
 $installProviderJob = Start-Job -Name "InstallProvider" -ScriptBlock {
     param($jobConfigFilePath, $jobLogPath, $jobScriptRoot)
     # Dot-source ScriptFunctions.ps1 so InstallProvider.ps1 can call Write-DscStatus.
@@ -730,23 +774,10 @@ $installProviderJob = Start-Job -Name "InstallProvider" -ScriptBlock {
     Set-Location $jobLogPath
     & (Join-Path -Path $jobScriptRoot -ChildPath "InstallProvider.ps1") -ConfigFilePath $jobConfigFilePath -LogPath $jobLogPath
 } -ArgumentList $ConfigFilePath, $LogPath, $PSScriptRoot
-Write-DscStatus "Started background InstallProvider.ps1 job (overlaps perfloading)"
+Write-DscStatus "Started InstallProvider.ps1 job (after perfloading)"
 
-if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateObjects -eq $true) {
-    Write-DScStatus "Loading object pre-population for MEMLABS"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
-    Set-Location $LogPath
-    try {
-        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
-    }
-    catch {
-        Write-DscStatus "Perfloading.ps1 failed: $_" -Warning
-    }
-
-}
-
-  # Install Providers — join the background job started before perfloading.
-  Write-DscStatus "Waiting for background InstallProvider.ps1 job to complete"
+  # Install Providers — join the background job started above.
+  Write-DscStatus "Waiting for InstallProvider.ps1 job to complete"
   try {
       Wait-Job -Job $installProviderJob | Out-Null
       # Write-DscStatus writes status/log to disk from the job runspace, so the
