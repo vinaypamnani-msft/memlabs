@@ -967,10 +967,14 @@ class InstallDotNet4 {
         try {
             Write-Status "Installing .NET $($this.FileName)..."
 
+            $exitCode = $null
             $proc = Start-Process -FilePath $setup -ArgumentList @('/q', '/norestart') -PassThru -WindowStyle Hidden -ErrorAction Stop
             if (-not $proc.WaitForExit($launchTimeoutSeconds * 1000)) {
                 Write-Status ".NET installer launcher did not exit within ${launchTimeoutSeconds}s -- killing it"
                 try { $proc.Kill() } catch { }
+            }
+            else {
+                try { $exitCode = $proc.ExitCode } catch { }
             }
 
             # Bounded wait for the extracted child installer to clear (replaces the unbounded while ($true) loop).
@@ -988,8 +992,7 @@ class InstallDotNet4 {
             }
             Start-Sleep -Seconds 10 ## Buffer Wait
 
-            # Verify by ground truth (the same NDP\v4\Full Release the Test() method checks), not by the
-            # process exiting. Throw on failure so the resource fails cleanly instead of falsely succeeding.
+            # Read ground truth (the same NDP\v4\Full Release the Test() method checks).
             $installed = $false
             try {
                 $netVal = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Name "Release" -ErrorAction Stop
@@ -997,13 +1000,28 @@ class InstallDotNet4 {
             }
             catch { }
 
-            if (-not $installed) {
-                throw ".NET $($this.FileName) did not register (NDP\v4\Full Release < $($this.NetVersion)) after the install attempt."
+            # The .NET 4.8 offline installer (ndp48-x86-x64-allos-enu.exe) almost always returns 3010
+            # (ERROR_SUCCESS_REBOOT_REQUIRED) -- or 1641 -- on Server 2016/2019/2022 because in-use .NET
+            # assemblies force PendingFileRenameOperations, and the NDP\v4\Full Release value is NOT raised
+            # to the new build until AFTER that reboot. So a pre-reboot registry read legitimately still
+            # shows the OLD (< NetVersion) value on a perfectly successful install. Treat 0/3010/1641 as
+            # success-needs-reboot: set DSCMachineStatus and let Test() verify the Release value AFTER the
+            # reboot (this is the original, tried-and-true behavior). Only HARD-FAIL on a genuinely bad
+            # installer exit code, so a wedged/failed installer still surfaces cleanly instead of looping.
+            $okExitCodes = @(0, 3010, 1641)
+            if (-not $installed -and $null -ne $exitCode -and ($okExitCodes -notcontains $exitCode)) {
+                throw ".NET $($this.FileName) failed to install (installer exit code $exitCode; NDP\v4\Full Release still < $($this.NetVersion))."
             }
 
-            Write-Status ".NET $($this.FileName) Installed Successfully!"
+            if ($installed) {
+                Write-Status ".NET $($this.FileName) Installed Successfully!"
+            }
+            else {
+                Write-Status ".NET $($this.FileName) staged (installer exit code $(if ($null -eq $exitCode) { 'unknown' } else { $exitCode })); rebooting to finalize registration."
+            }
 
-            # Reboot
+            # Reboot. Registration of the new Release value completes on this reboot when files were in use;
+            # Test() re-verifies NDP\v4\Full Release >= NetVersion after the machine comes back up.
             [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
         }
