@@ -5637,6 +5637,24 @@ function Invoke-VmCommand {
                             Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $OutErr." -Failure
                         }
                         $jobTimedOut = ($job.State -eq "Running")
+                        # Was this terminal failure caused by a broken PSDirect/VMBus channel
+                        # (vs an ordinary scriptblock error)? Inspect the job's failure reason
+                        # + error streams NOW, while the job is still alive (Remove-Job below
+                        # would dispose it). Used to decide whether the job must be abandoned
+                        # rather than disposed -- see the terminal-state branch below.
+                        $jobChannelBroken = $false
+                        if (-not $jobTimedOut) {
+                            $jobErrBlob = "$OutErr"
+                            try {
+                                foreach ($cj in @($job.ChildJobs)) {
+                                    if ($cj.JobStateInfo -and $cj.JobStateInfo.Reason) { $jobErrBlob += " " + $cj.JobStateInfo.Reason.ToString() }
+                                    if ($cj.Error -and $cj.Error.Count -gt 0) { $jobErrBlob += " " + (@($cj.Error | ForEach-Object { $_.ToString() }) -join ' ') }
+                                }
+                                if ($job.JobStateInfo -and $job.JobStateInfo.Reason) { $jobErrBlob += " " + $job.JobStateInfo.Reason.ToString() }
+                            }
+                            catch {}
+                            $jobChannelBroken = $jobErrBlob -match 'creating the pipeline|pipeline is not|transport|channel|broken|Cannot connect|not connected|session is in|availability is Busy|No valid sessions|has been closed|socket target process|VMBus|target process has ended'
+                        }
                         if ($jobTimedOut) {
                             Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
                             # A timed-out PSDirect/PSRemoting job is wedged on a dead or hung
@@ -5652,10 +5670,27 @@ function Invoke-VmCommand {
                             try { $job.StopJobAsync() } catch {}
                         }
                         else {
-                            # Job is in a terminal state (Failed / Stopped) -- its pipeline is
-                            # already done, so stop+remove are instant and safe.
-                            Stop-Job $job -ErrorAction SilentlyContinue | Out-Null
-                            Remove-Job $job -Force -ErrorAction SilentlyContinue
+                            # Job is in a terminal state (Failed / Stopped). Inspect WHY before
+                            # disposing it. A plain scriptblock error is safe to Stop+Remove
+                            # (its pipeline is done and no transport break is imminent). But a
+                            # failure caused by a BROKEN PSDIRECT CHANNEL is different: the
+                            # caller (e.g. Wait-ForVm's channel-broken recovery) is about to
+                            # stop-vm2 -TurnOff / reboot the VM to recover VMBus, which breaks
+                            # this session's transport. Disposing the job now (Remove-Job) lets
+                            # that later transport break fire a StateChanged callback on a
+                            # threadpool thread against the already-disposed job ->
+                            # PSObjectDisposedException ('object "PSJob" has already been
+                            # disposed') that crashes the whole phase child process (observed on
+                            # ZZ-CREPE in Phase 2). So for a channel-broken terminal failure,
+                            # treat it like the timeout path: ABANDON the job (do NOT dispose --
+                            # a later callback then finds a live object) and leak its session.
+                            if ($jobChannelBroken) {
+                                try { $job.StopJobAsync() } catch {}
+                            }
+                            else {
+                                Stop-Job $job -ErrorAction SilentlyContinue | Out-Null
+                                Remove-Job $job -Force -ErrorAction SilentlyContinue
+                            }
                         }
                         if ($jobTimedOut) {
                             # The job never finished within the timeout: the guest
@@ -5683,6 +5718,16 @@ function Invoke-VmCommand {
                                 $recovery = Invoke-VmLivenessRecovery -VmName $VmName -VmDomainName $VmDomainName -Quiet:$SuppressLog
                                 $return.Rebooted = [bool]$recovery.Rebooted
                             }
+                        }
+                        elseif ($jobChannelBroken) {
+                            # Channel-broken terminal failure: the abandoned job above was NOT
+                            # disposed. Surface it to the caller and evict the cache ENTRY while
+                            # LEAKING the session object (do NOT dispose -- same disposed-object
+                            # callback hazard) so the next call builds a fresh channel and the
+                            # imminent VM reboot/TurnOff can't crash the process via this
+                            # session's transport break.
+                            $return.ChannelBroken = $true
+                            Remove-VmSessionFromCache -VmName $VmName -LeakSession
                         }
                     }
                 }
