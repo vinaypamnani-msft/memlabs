@@ -768,14 +768,28 @@ function Test-ValidVmMemory {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify desired memory with MB/GB; For example: 4GB" -ReturnObject $ReturnObject -Failure
         }
 
-        # memory less than 512MB
-        if ($vmMemory.ToUpperInvariant().EndsWith("MB") -and $([int]$vmMemory.ToUpperInvariant().Replace("MB", "")) -lt 512 ) {
-            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be more than 512MB" -ReturnObject $ReturnObject -Failure
-        }
+        # numeric portion (everything before the MB/GB suffix) must be a whole number;
+        # guard the [int] casts below so a non-numeric value (e.g. "*GB") yields a clean
+        # validation message instead of throwing "Cannot convert value '*' to type System.Int32".
+        if ($vmMemory -is [string] -and ($vmMemory.ToUpperInvariant().EndsWith("MB") -or $vmMemory.ToUpperInvariant().EndsWith("GB"))) {
 
-        # memory greater than 64GB
-        if ($vmMemory.ToUpperInvariant().EndsWith("GB") -and $([int]$vmMemory.ToUpperInvariant().Replace("GB", "")) -gt 64 ) {
-            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be less than 64GB" -ReturnObject $ReturnObject -Failure
+            $vmMemoryNumber = $vmMemory.ToUpperInvariant().Replace("MB", "").Replace("GB", "")
+            $parsedMemory = 0
+
+            if (-not [int]::TryParse($vmMemoryNumber, [ref]$parsedMemory)) {
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify a whole number with MB/GB; For example: 4GB" -ReturnObject $ReturnObject -Failure
+            }
+            else {
+                # memory less than 512MB
+                if ($vmMemory.ToUpperInvariant().EndsWith("MB") -and $parsedMemory -lt 512 ) {
+                    Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be more than 512MB" -ReturnObject $ReturnObject -Failure
+                }
+
+                # memory greater than 64GB
+                if ($vmMemory.ToUpperInvariant().EndsWith("GB") -and $parsedMemory -gt 64 ) {
+                    Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be less than 64GB" -ReturnObject $ReturnObject -Failure
+                }
+            }
         }
     }
 
