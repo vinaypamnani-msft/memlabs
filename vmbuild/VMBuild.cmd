@@ -158,6 +158,26 @@ IF ERRORLEVEL 1 (
 )
 
 REM ============================================================
+REM Remove the winget 'msstore' source to stop Microsoft Store
+REM "This content is blocked by your IT admin" toast spam.
+REM The msstore source background-refreshes against
+REM storeedgefd/displaycatalog.mp.microsoft.com, which Defender
+REM Network Protection blocks -- firing a toast each time. MemLabs
+REM only ever uses the 'winget' source (New-LinuxBaseImage.ps1),
+REM so removing msstore has no functional impact. Guarded so it
+REM only runs when winget exists AND msstore is still present,
+REM making it a silent no-op on every subsequent launch.
+REM ============================================================
+where winget >NUL 2>&1
+IF NOT ERRORLEVEL 1 (
+    winget source list 2>NUL | findstr /I "msstore" >NUL 2>&1
+    IF NOT ERRORLEVEL 1 (
+        ECHO Removing winget 'msstore' source to suppress Store block-page toasts...
+        winget source remove msstore >NUL 2>&1
+    )
+)
+
+REM ============================================================
 REM Determine launch prerequisites after maintenance
 REM ============================================================
 
