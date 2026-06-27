@@ -955,25 +955,52 @@ class InstallDotNet4 {
         $setup = "C:\temp\$($this.FileName)"
         
         Invoke-DownloadFile $this.DownloadUrl $setup
-        
-        # Install
-        $cmd = $setup
-        $arg1 = "/q"
-        $arg2 = "/norestart"
+
+        $processName = ($this.FileName -split ".exe")[0]
+
+        # Bounded install. The .NET bootstrapper (ndp48...exe /q /norestart) extracts and runs a child
+        # installer named after the file; the OLD code polled for that child in a `while ($true)` loop with
+        # NO upper bound, so a wedged installer span forever. Cap every wait and verify by registry.
+        $launchTimeoutSeconds = 1800   # 30-min cap for the launcher stub to exit
+        $childTimeoutSeconds = 1800    # 30-min cap waiting for the extracted child installer to finish
 
         try {
             Write-Status "Installing .NET $($this.FileName)..."
-            & $cmd $arg1 $arg2 | out-null
 
-            $processName = ($this.FileName -split ".exe")[0]
+            $proc = Start-Process -FilePath $setup -ArgumentList @('/q', '/norestart') -PassThru -WindowStyle Hidden -ErrorAction Stop
+            if (-not $proc.WaitForExit($launchTimeoutSeconds * 1000)) {
+                Write-Status ".NET installer launcher did not exit within ${launchTimeoutSeconds}s -- killing it"
+                try { $proc.Kill() } catch { }
+            }
+
+            # Bounded wait for the extracted child installer to clear (replaces the unbounded while ($true) loop).
+            $waited = 0
             while ($true) {
-                Start-Sleep -Seconds 10
-                $process = Get-Process $processName -ErrorAction SilentlyContinue
-                if ($null -eq $process) {
+                $child = Get-Process $processName -ErrorAction SilentlyContinue
+                if ($null -eq $child) { break }
+                if ($waited -ge $childTimeoutSeconds) {
+                    Write-Status ".NET child installer '$processName' still running after ${childTimeoutSeconds}s -- killing it"
+                    foreach ($c in $child) { try { $c.Kill() } catch { } }
                     break
                 }
+                Start-Sleep -Seconds 10
+                $waited += 10
             }
             Start-Sleep -Seconds 10 ## Buffer Wait
+
+            # Verify by ground truth (the same NDP\v4\Full Release the Test() method checks), not by the
+            # process exiting. Throw on failure so the resource fails cleanly instead of falsely succeeding.
+            $installed = $false
+            try {
+                $netVal = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Name "Release" -ErrorAction Stop
+                if ($netVal.Release -ge $this.NetVersion) { $installed = $true }
+            }
+            catch { }
+
+            if (-not $installed) {
+                throw ".NET $($this.FileName) did not register (NDP\v4\Full Release < $($this.NetVersion)) after the install attempt."
+            }
+
             Write-Status ".NET $($this.FileName) Installed Successfully!"
 
             # Reboot

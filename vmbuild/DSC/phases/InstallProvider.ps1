@@ -71,19 +71,57 @@ foreach ($prov in $deployConfig.virtualMachines | Where-Object { $_.InstallSMSPr
     }
 
     if ($Install) {
+        # Bounded wait for any leftover setupwpf from a prior pass to finish, then kill the stale instance
+        # if it's wedged -- the old loop had NO cap and could spin forever on a stuck prior run.
+        $preWaited = 0
+        $preCap = 600   # 10 min
         $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue
         while ($running) {
+            if ($preWaited -ge $preCap) {
+                Write-DscStatus "[InstallProv] setupWPF still running after $preCap s -- killing the stale instance so we can proceed"
+                foreach ($p in $running) { try { $p.Kill() } catch { } }
+                Start-Sleep -Seconds 5
+                break
+            }
             Write-DscStatus "[InstallProv] setupWPF is already running.. Waiting for it to stop"
             start-sleep -seconds 60
+            $preWaited += 60
             $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue
-        }        
-        Write-DscStatus "[InstallProv] Running & $setupWPF /HIDDEN /SDKINST $machine"
-        & $setupWPF /HIDDEN /SDKINST $machine
-        $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue
+        }
 
+        Write-DscStatus "[InstallProv] Running & $setupWPF /HIDDEN /SDKINST $machine"
+        # Run under a hard timeout so a wedged setupwpf can't hang the phase forever (was a bare '&' call
+        # followed by an unbounded poll loop).
+        $installCap = 1800   # 30 min
+        $proc = $null
+        try {
+            $proc = Start-Process -FilePath $setupWPF -ArgumentList @('/HIDDEN', '/SDKINST', $machine) -PassThru -WindowStyle Hidden -ErrorAction Stop
+        }
+        catch {
+            Write-DscStatus "[InstallProv] Failed to start setupWPF: $($_.Exception.Message)" -Failure
+        }
+
+        if ($proc) {
+            if (-not $proc.WaitForExit($installCap * 1000)) {
+                Write-DscStatus "[InstallProv] setupWPF did not finish within $installCap s on $machine -- killing it" -Failure
+                try { $proc.Kill() } catch { }
+                Get-Process "setupwpf" -ErrorAction SilentlyContinue | ForEach-Object { try { $_.Kill() } catch { } }
+            }
+        }
+
+        # Belt-and-braces: bounded wait for any lingering setupwpf to clear (was an unbounded loop).
+        $postWaited = 0
+        $postCap = 300   # 5 min
+        $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue
         while ($running) {
+            if ($postWaited -ge $postCap) {
+                Write-DscStatus "[InstallProv] setupWPF lingering after $postCap s -- killing it"
+                foreach ($p in $running) { try { $p.Kill() } catch { } }
+                break
+            }
             Write-DscStatus "[InstallProv] setupWPF is running to install the provider on $machine. Please Wait"
             start-sleep -seconds 60
+            $postWaited += 60
             $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue
         }
         Write-DscStatus "[InstallProv] setupWPF has completed"
