@@ -7167,6 +7167,13 @@ function Test-CMSiteWideFunctionality {
     $expectedAppNames = @()
     $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
     $prePopulate = [bool]$effectiveCmOptions.PrePopulateObjects
+
+    # OfflineSUP deployments deliberately skip subscribing any products /
+    # classifications and skip the update sync (perfloading sets $Sups=$false
+    # and returns early). On such a site an EMPTY WSUS subscription is the
+    # intended end state, not a failure -- so the subscription-parity test
+    # below must report OK/INFO rather than WARN when OfflineSUP is set.
+    $offlineSup = [bool]$effectiveCmOptions.OfflineSUP
     if ($prePopulate -and $role -ne 'CAS') {
         try {
             $enabledTools = @($DeployConfig.Tools | Where-Object { $_.Appinstall -eq $true })
@@ -7246,12 +7253,13 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer)
+        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner)
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
         $isPrimary = ($vmRole -eq 'Primary')
         $hasSup = ($hasSUPInner -eq 'True')
+        $offlineSup = ($offlineSupInner -eq 'True')
         # WSUS admin API endpoint for this site's SUP. When the site uses PKI,
         # WSUS is SSL-configured and its admin API (ApiRemoting30) REQUIRES SSL:
         # an HTTP call on 8530 returns HTTP 403 Forbidden, so PKI sites MUST use
@@ -7866,7 +7874,16 @@ function Test-CMSiteWideFunctionality {
                 # WSUS-side subscription matches what CM has configured.
                 $haveCm = ($cmProdCount -is [int]) -and ($cmClassCount -is [int])
                 $wcmBit = if ($wcmName) { "; WCM=$wcmName" } else { '' }
-                if ($haveCm) {
+                if ($offlineSup) {
+                    # OfflineSUP: perfloading intentionally never subscribes any
+                    # product/classification and never runs the update sync, so an
+                    # empty subscription is the correct, intended end state. The
+                    # categories taxonomy (Test A) still loads from the cab when
+                    # WsusImportBaseline is set, so update metadata can be added
+                    # offline later. Report OK, not WARN.
+                    $results.Details.Add("OK: WSUS subscription empty by design (OfflineSUP) [SubCats=$subCats; SubClas=$subClas$wcmBit] - no products subscribed for an offline SUP")
+                }
+                elseif ($haveCm) {
                     if ($cmProdCount -eq 0 -or $cmClassCount -eq 0) {
                         $results.Details.Add("WARN: CM SUP has nothing subscribed [CM-Products=$cmProdCount; CM-Classifications=$cmClassCount; WSUS-Sub=$subCats/$subClas$wcmBit] - configure SUP products/classifications")
                     }
@@ -8075,7 +8092,7 @@ function Test-CMSiteWideFunctionality {
 
     $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup) `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
