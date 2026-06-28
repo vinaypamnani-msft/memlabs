@@ -849,11 +849,29 @@ CurrentBranch=1
         # for setup.exe's prereq pass to surface it minutes later. The
         # Phase 8 per-VM job's outer timeout would otherwise let the
         # whole deploy hang while dependent nodes wait.
+        #
+        # IMPORTANT (SQLAO): probe the physical AG NODES only, NEVER the
+        # listener. On an AO install $sqlServerName is the AlwaysOn
+        # LISTENER name (a virtual cluster network name / VCO), not a
+        # real machine. Get-CimInstance -ComputerName <listener> opens a
+        # WinRM/Kerberos session that resolves to whichever node currently
+        # owns the listener IP, and that node's WinRM rejects the
+        # HOST/<listener> service ticket as the wrong principal -> error
+        # 0x80090322 (SEC_E_WRONG_PRINCIPAL, "An unknown security error
+        # occurred"). This is inherently flaky (depends on listener
+        # ownership / SPN registration / ticket cache at that instant), so
+        # it spuriously hard-failed Phase 8 on a perfectly healthy site.
+        # CM Setup's own prereq pass walks the physical nodes (zz-fries /
+        # zz-shake) via WMI, NOT the listener, so the nodes are the
+        # correct -- and only -- thing to validate here.
         $wmiTargets = New-Object System.Collections.Generic.List[string]
-        if ($sqlServerName -and $sqlServerName -ne $env:COMPUTERNAME) { $wmiTargets.Add($sqlServerName) | Out-Null }
         if ($installToAO) {
             if ($sqlNode1 -and $sqlNode1 -ne $env:COMPUTERNAME -and -not $wmiTargets.Contains($sqlNode1)) { $wmiTargets.Add($sqlNode1) | Out-Null }
             if ($sqlNode2 -and $sqlNode2 -ne $env:COMPUTERNAME -and -not $wmiTargets.Contains($sqlNode2)) { $wmiTargets.Add($sqlNode2) | Out-Null }
+        }
+        elseif ($sqlServerName -and $sqlServerName -ne $env:COMPUTERNAME) {
+            # Non-AO: $sqlServerName is a real remote SQL machine; probe it.
+            $wmiTargets.Add($sqlServerName) | Out-Null
         }
         if ($wmiTargets.Count -gt 0) {
             $wmiFailures = New-Object System.Collections.Generic.List[string]
