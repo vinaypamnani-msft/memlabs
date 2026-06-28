@@ -7290,6 +7290,19 @@ function Test-CMSiteWideFunctionality {
             if ($bgs.Count -ge 1) {
                 $results.Details.Add("OK: $($bgs.Count) boundary group(s) defined: $(($bgs | Select-Object -First 5 -ExpandProperty Name) -join ', ')")
             }
+            elseif ($vmRole -eq 'CAS') {
+                # A CAS is a central administration site: it owns NO boundaries or
+                # boundary groups of its own, and InstallBoundaryGroups.ps1 never
+                # runs on the CAS (ScriptWorkFlow's Hierarchy/CAS branch omits it;
+                # only the Primary branch calls it). Child-primary boundary groups
+                # are global data that replicate UP to the CAS via DRS, so they
+                # only appear in the CAS DB after replication converges -- which
+                # frequently has NOT happened by the time Phase 11 runs. Zero
+                # boundary groups on a CAS is therefore the expected state, not a
+                # failure. (The per-expected-site loop below still WARNs, never
+                # FAILs, if a specific child BG hasn't replicated yet.)
+                $results.Details.Add("INFO: No boundary groups on CAS '$sc' (expected; a CAS hosts none of its own, child-site BGs replicate up via DRS)")
+            }
             else {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: No boundary groups defined for site '$sc'")
@@ -7603,22 +7616,31 @@ function Test-CMSiteWideFunctionality {
             }
         }
 
-        # 8. Collections — MEMLABS-* device collections should exist
-        try {
-            $cols = @(Get-WmiObject -Namespace $ns -Class SMS_Collection `
-                -Filter "Name LIKE 'MEMLABS-%' AND CollectionType=2" -ErrorAction Stop)
-            if ($cols.Count -ge 5) {
-                $results.Details.Add("OK: $($cols.Count) MEMLABS device collection(s) found")
+        # 8. Collections — MEMLABS-* device collections should exist.
+        # Primary-only (like the task-sequence / package checks above): perfloading
+        # authors the MEMLABS device collections under 'if (CurrentRole -ne CAS)'
+        # -- they are Primary-tier content. A CAS has none of its own (and they do
+        # not necessarily replicate up by Phase 11), so skip rather than WARN.
+        if ($isPrimary) {
+            try {
+                $cols = @(Get-WmiObject -Namespace $ns -Class SMS_Collection `
+                    -Filter "Name LIKE 'MEMLABS-%' AND CollectionType=2" -ErrorAction Stop)
+                if ($cols.Count -ge 5) {
+                    $results.Details.Add("OK: $($cols.Count) MEMLABS device collection(s) found")
+                }
+                elseif ($cols.Count -ge 1) {
+                    $results.Details.Add("WARN: Only $($cols.Count) MEMLABS device collection(s) found (expected 20+)")
+                }
+                else {
+                    $results.Details.Add("WARN: No MEMLABS-* device collections found")
+                }
             }
-            elseif ($cols.Count -ge 1) {
-                $results.Details.Add("WARN: Only $($cols.Count) MEMLABS device collection(s) found (expected 20+)")
-            }
-            else {
-                $results.Details.Add("WARN: No MEMLABS-* device collections found")
+            catch {
+                $results.Details.Add("WARN: SMS_Collection query failed: $($_.Exception.Message)")
             }
         }
-        catch {
-            $results.Details.Add("WARN: SMS_Collection query failed: $($_.Exception.Message)")
+        elseif ($vmRole -eq 'CAS') {
+            $results.Details.Add("INFO: Skipping MEMLABS device-collection check (CAS authors none; Primary-tier content)")
         }
 
         # 9. Packages (Primary only) — MEMLABS-* should exist
@@ -7638,22 +7660,30 @@ function Test-CMSiteWideFunctionality {
             }
         }
 
-        # 10. Scripts — MEMLABS-* should exist
-        try {
-            $scripts = @(Get-WmiObject -Namespace $ns -Class SMS_Scripts `
-                -Filter "ScriptName LIKE 'MEMLABS-%'" -ErrorAction Stop)
-            if ($scripts.Count -ge 5) {
-                $results.Details.Add("OK: $($scripts.Count) MEMLABS script(s) imported")
+        # 10. Scripts — MEMLABS-* should exist.
+        # Primary-only: New-CMScript on a CAS is a no-op (CM Scripts are authored on
+        # the Primary; the CAS has no script library -- see perfloading.ps1), so a
+        # CAS legitimately has zero. Only check on a Primary; INFO on the CAS.
+        if ($isPrimary) {
+            try {
+                $scripts = @(Get-WmiObject -Namespace $ns -Class SMS_Scripts `
+                    -Filter "ScriptName LIKE 'MEMLABS-%'" -ErrorAction Stop)
+                if ($scripts.Count -ge 5) {
+                    $results.Details.Add("OK: $($scripts.Count) MEMLABS script(s) imported")
+                }
+                elseif ($scripts.Count -ge 1) {
+                    $results.Details.Add("WARN: Only $($scripts.Count) MEMLABS script(s) found (expected 50+)")
+                }
+                else {
+                    $results.Details.Add("WARN: No MEMLABS-* scripts found")
+                }
             }
-            elseif ($scripts.Count -ge 1) {
-                $results.Details.Add("WARN: Only $($scripts.Count) MEMLABS script(s) found (expected 50+)")
-            }
-            else {
-                $results.Details.Add("WARN: No MEMLABS-* scripts found")
+            catch {
+                $results.Details.Add("WARN: SMS_Scripts query failed: $($_.Exception.Message)")
             }
         }
-        catch {
-            $results.Details.Add("WARN: SMS_Scripts query failed: $($_.Exception.Message)")
+        elseif ($vmRole -eq 'CAS') {
+            $results.Details.Add("INFO: Skipping MEMLABS scripts check (CAS has no script library; Primary-tier content)")
         }
 
         } # end prePop checks
