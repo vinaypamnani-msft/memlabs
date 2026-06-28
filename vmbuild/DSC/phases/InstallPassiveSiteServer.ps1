@@ -203,26 +203,75 @@ $add_local_admin = {
 }
 
 Write-DscStatus "Verifying/adding Active and Passive computer accounts on all site system servers"
-$siteSystems = Get-CMSiteSystemServer -SiteCode $SiteCode | Select-Object -Expand NetworkOSPath
-$siteSystems += "\\$remoteLibVMName"
-$localSiteServer = "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
-foreach ($server in $siteSystems) {
-    $serverName = $server.Substring(2, $server.Length - 2) # NetworkOSPath = \\server.domain.dom
-    if ($serverName -eq $localSiteServer) {
-        Invoke-Command -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $DomainName -ErrorVariable Err3
-    }
-    else {
-        Invoke-Command -Session (New-PSSession -ComputerName $serverName) -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $DomainName -ErrorVariable Err3
-    }
 
-    $displayName = $computersToAdd -join ","
-    if ($Err3.Count -ne 0) {
-        Write-DscStatus "Failed to add [$displayName] to local Administrators group on $serverName. Error: $Err3" -Failure
-        return
+# Build a clean, de-duplicated list of site-system computer names. NetworkOSPath
+# is normally "\\server.domain.dom", but it can occasionally come back null/blank
+# or with stray separators. An unsanitized value handed to New-PSSession throws a
+# TERMINATING "One or more computer names are not valid ... pass a URI" error that
+# the per-iteration -ErrorVariable cannot trap, so it aborts the WHOLE passive
+# install before Move-CMContentLibrary / Add-CMPassiveSite ever run (observed
+# deterministically on CSTest1-C: the loop died on the first bad entry, the throw
+# was swallowed by Invoke-DotSource, and the passive node stayed empty).
+$rawSiteSystems = @()
+$rawSiteSystems += @(Get-CMSiteSystemServer -SiteCode $SiteCode | Select-Object -ExpandProperty NetworkOSPath -ErrorAction SilentlyContinue)
+$rawSiteSystems += "\\$remoteLibVMName"
+
+$siteSystemNames = New-Object System.Collections.Generic.List[string]
+foreach ($raw in $rawSiteSystems) {
+    if ([string]::IsNullOrWhiteSpace($raw)) { continue }
+    # Strip the leading \\ (NetworkOSPath / the appended \\FS form) and any whitespace.
+    $name = ([string]$raw).Trim().TrimStart('\').Trim()
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    # A valid computer / DNS name contains no path or URI separators; skipping one
+    # malformed entry no longer kills the whole install.
+    if ($name -match '[\\/:]') {
+        Write-DscStatus "Skipping malformed site-system name '$raw' (not a valid computer name)"
+        continue
     }
-    else {
+    $dup = $false
+    foreach ($existing in $siteSystemNames) { if ($existing -eq $name) { $dup = $true; break } }
+    if (-not $dup) { $siteSystemNames.Add($name) }
+}
+
+$localSiteServer = "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
+$displayName = $computersToAdd -join ","
+$adminAddFailures = New-Object System.Collections.Generic.List[string]
+foreach ($serverName in $siteSystemNames) {
+    $isLocal = ($serverName -eq $localSiteServer) -or ($serverName -eq $env:COMPUTERNAME)
+    $session = $null
+    try {
+        if ($isLocal) {
+            Invoke-Command -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $DomainName -ErrorAction Stop
+        }
+        else {
+            $session = New-PSSession -ComputerName $serverName -ErrorAction Stop
+            Invoke-Command -Session $session -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $DomainName -ErrorAction Stop
+        }
         Write-DscStatus "Verified/added [$displayName] as members of local Administrators group on $serverName."
     }
+    catch {
+        $adminAddFailures.Add($serverName)
+        Write-DscStatus "WARNING: could not add [$displayName] to local Administrators on $serverName`: $($_.Exception.Message)"
+    }
+    finally {
+        if ($session) { Remove-PSSession $session -ErrorAction SilentlyContinue }
+    }
+}
+
+# The content-library file server MUST have the accounts (the site server writes
+# the moved content library there), so a failure there is fatal -- leave
+# InstallPassive not-Completed for a retry. The local site server is added via the
+# local path above. Every other site system is best-effort: a single flaky or
+# renamed one no longer aborts HA setup.
+$libName = ([string]$remoteLibVMName).Trim().TrimStart('\').Trim()
+$libFailed = $false
+foreach ($f in $adminAddFailures) { if ($f -eq $libName) { $libFailed = $true; break } }
+if ($libFailed) {
+    Write-DscStatus "Failed to grant [$displayName] local admin on the content-library file server $libName; cannot proceed with passive install." -Failure
+    return
+}
+if ($adminAddFailures.Count -gt 0) {
+    Write-DscStatus "Proceeding with passive install; the (best-effort) local-admin add was skipped/failed on: $($adminAddFailures -join ', ')"
 }
 
 # Remove SCP?
