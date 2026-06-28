@@ -677,6 +677,51 @@ if ($containsPassive) {
             Write-DscStatus "WARNING: SMS_EXECUTIVE not Running on $($containsPassive.vmName) after $maxPassiveWait attempts" -Warning
         }
     }
+
+    # Authoritative passive completion gate (runs for BOTH the parallel-join and
+    # the synchronous-dot-source paths above). InstallPassiveSiteServer.ps1 can
+    # abort EARLY -- before it ever reaches its own install-monitoring loop --
+    # e.g. when the remote content-library file server isn't ready yet, or a
+    # remote-session call throws and is swallowed by Invoke-DotSource. In that
+    # case there is nothing for the join/Wait-Job to wait on, the passive node is
+    # left empty, and Phase 8 would otherwise stamp Completed on a broken passive
+    # (Phase 11 then fails on the missing SMS_EXECUTIVE). Verify the ground truth
+    # here and self-heal with ONE inline retry before Phase 8 moves on; if it
+    # still isn't healthy, leave InstallPassive not-Completed so the next Phase 8
+    # pass retries it (InstallPassiveSiteServer.ps1 is idempotent).
+    $DomainFullName = $deployConfig.vmOptions.domainName
+    $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
+
+    $passiveHealthy = {
+        $role = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+        if (-not $role) { return $false }
+        try {
+            $svc = Get-Service -ComputerName $containsPassive.vmName -Name 'SMS_EXECUTIVE' -ErrorAction Stop
+            return ($svc.Status -eq 'Running')
+        }
+        catch { return $false }
+    }
+
+    if (-not (& $passiveHealthy)) {
+        Write-DscStatus "Passive site server on $($containsPassive.vmName) is not healthy after install (SMS Site Server role and/or SMS_EXECUTIVE missing). Retrying InstallPassiveSiteServer.ps1 once before completing Phase 8." -Warning
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+
+        # Settle wait for SMS_EXECUTIVE to come up after the retry (5 min).
+        for ($pw = 1; $pw -le 10; $pw++) {
+            if (& $passiveHealthy) { break }
+            Start-Sleep -Seconds 30
+        }
+    }
+
+    if (& $passiveHealthy) {
+        $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Completed' -StampEndTime
+        Write-DscStatus "Passive site server verified healthy on $($containsPassive.vmName) (SMS Site Server role present, SMS_EXECUTIVE Running)."
+    }
+    else {
+        Write-DscStatus "WARNING: passive site server on $($containsPassive.vmName) still not healthy after an inline retry; InstallPassive left not-Completed so the next Phase 8 pass retries it." -Warning
+    }
 }
 
 Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"

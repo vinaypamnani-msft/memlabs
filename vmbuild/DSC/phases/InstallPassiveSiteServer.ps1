@@ -74,6 +74,46 @@ if ($exists) {
     return
 }
 
+# Wait for the remote content-library file server to be READY before touching it.
+# On an ADD-passive deploy (active site already installed) the active site's
+# Phase 8 ScriptWorkflow runs while the brand-new file server is still completing
+# its own Phase 2/3 setup. Standing up the content-library share / running
+# Move-CMContentLibrary / Add-CMPassiveSite against a not-yet-ready file server
+# aborts the passive install (often via a swallowed New-PSSession error in the
+# site-system loop below) and leaves the passive node completely empty -- the
+# active site then stamps Phase 8 complete and Phase 11 fails on a missing
+# SMS_EXECUTIVE. Gate on WinRM reachability + the content-library volume (E:)
+# being present and writable first. Bounded; on timeout we leave InstallPassive
+# NOT Completed so a later Phase 8 pass retries (this script is idempotent).
+if ($remoteLibVMName) {
+    Write-DscStatus "Waiting for content-library file server $remoteLibVMName to be ready (WinRM + E: volume)"
+    $libReady = $false
+    for ($rl = 1; $rl -le 60; $rl++) {
+        # up to ~30 min (60 x 30s)
+        try {
+            $libSession = New-PSSession -ComputerName $remoteLibVMName -ErrorAction Stop
+            try {
+                $probe = Invoke-Command -Session $libSession -ErrorAction Stop -ScriptBlock {
+                    $vol = Get-Volume -DriveLetter 'E' -ErrorAction SilentlyContinue
+                    [pscustomobject]@{ HasE = [bool]$vol; Writable = (Test-Path 'E:\') }
+                }
+            }
+            finally { Remove-PSSession $libSession -ErrorAction SilentlyContinue }
+            if ($probe -and $probe.HasE -and $probe.Writable) { $libReady = $true; break }
+            Write-DscStatus "Content-library file server $remoteLibVMName reachable but E: not ready yet (attempt $rl/60)" -RetrySeconds 30
+        }
+        catch {
+            Write-DscStatus "Content-library file server $remoteLibVMName not reachable yet (attempt $rl/60): $($_.Exception.Message)" -RetrySeconds 30
+        }
+        Start-Sleep -Seconds 30
+    }
+    if (-not $libReady) {
+        Write-DscStatus "Content-library file server $remoteLibVMName not ready after ~30 min; aborting passive install (InstallPassive left not-Completed for retry)." -Failure
+        return
+    }
+    Write-DscStatus "Content-library file server $remoteLibVMName is ready."
+}
+
 # Create share on remote FS to host Content Library
 $create_Share = {
 
