@@ -649,42 +649,51 @@ function Start-VMFixesBatched {
             $fixDefs = $json | ConvertFrom-Json
             $results = @()
             foreach ($def in $fixDefs) {
+                $markerPath = "C:\staging\Fix\$($def.Name).result.json"
+                # Pre-clean the marker so a crash that never reaches the wrapper's
+                # finally{} write leaves NO marker (= failure).
+                if (Test-Path $markerPath) { Remove-Item $markerPath -Force -ErrorAction SilentlyContinue }
+
                 $sb = [scriptblock]::Create($def.Script)
-                $r = $null
+                $threw = $null
                 try {
+                    # Pipeline output is deliberately DISCARDED ($null = ...): the
+                    # verdict comes from the marker file, not the return value.
                     if ($def.Args) {
                         $fixArgs = @($def.Args)
-                        $r = & $sb @fixArgs
+                        $null = & $sb @fixArgs
                     }
                     else {
-                        $r = & $sb
+                        $null = & $sb
                     }
                 }
                 catch {
-                    # The wrapper should normally catch its own exceptions; this
-                    # catches only catastrophic failures (e.g. wrapper compilation).
-                    $r = [pscustomobject]@{
-                        FixName       = $def.Name
-                        Success       = $false
-                        Message       = $null
-                        Errors        = @()
-                        ExceptionInfo = "$($_.Exception.Message)`n$($_.ScriptStackTrace)"
-                        ComputerName  = $env:COMPUTERNAME
-                        DurationSec   = 0
-                        IsStructured  = $true
-                    }
+                    # The wrapper normally catches its own exceptions and records them
+                    # in the marker; this catches only catastrophic failures (e.g.
+                    # wrapper compilation).
+                    $threw = "$($_.Exception.Message)`n$($_.ScriptStackTrace)"
                 }
-                # Normalize whatever came back into a structured record
-                if ($r -is [pscustomobject] -and ($r.PSObject.Properties.Name -contains 'IsStructured')) {
-                    $results += $r
+
+                # AUTHORITATIVE: derive the result from the marker file the wrapper
+                # wrote, NOT from the pipeline return value. Cmdlet output leaking
+                # onto the success stream can turn the pipeline value into an array,
+                # which then coerces to Success=$true ([bool]@(...) is true) -- exactly
+                # how a fix that never created its scheduled task got stamped
+                # 'applied'. An explicit marker is REQUIRED to call a fix successful.
+                $rec = $null
+                if (Test-Path $markerPath) {
+                    try { $rec = Get-Content -Path $markerPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch { $rec = $null }
+                }
+                if ($rec -and ($rec.PSObject.Properties.Name -contains 'IsStructured')) {
+                    $results += $rec
                 }
                 else {
                     $results += [pscustomobject]@{
                         FixName       = $def.Name
-                        Success       = [bool]$r
+                        Success       = $false
                         Message       = $null
                         Errors        = @()
-                        ExceptionInfo = $null
+                        ExceptionInfo = $(if ($threw) { $threw } else { "No result marker produced ($markerPath missing/unreadable); treating as failure (no explicit success)." })
                         ComputerName  = $env:COMPUTERNAME
                         DurationSec   = 0
                         IsStructured  = $true
@@ -712,31 +721,56 @@ function Start-VMFixesBatched {
 
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Executing $($groupFixes.Count) fixes in batch (account: $(if ($key -eq '__default__') {'default'} else {$key}))..." -force
 
-        try {
-            $rawOutput = Invoke-Command -Session $ps -ScriptBlock $batchRunner -ArgumentList $fixDefsJson -ErrorVariable batchErr -ErrorAction SilentlyContinue
-        }
-        catch {
-            Write-Log "$VMName`: Batched fix execution failed with exception: $_" -Warning
-            return $return
+        # Run the in-guest batch, then read each fix's authoritative result marker.
+        # If any fix did not report explicit success, retry the WHOLE group once:
+        # fixes are idempotent and the group is fail-fast, so a re-run re-attempts
+        # the one that failed (and continues past it). Only the final $results is
+        # processed/stamped below, so there is no double-stamping.
+        $maxGroupAttempts = 2
+        $groupAttempt = 0
+        $results = @()
+        while ($groupAttempt -lt $maxGroupAttempts) {
+            $groupAttempt++
+            $batchErr = $null
+
+            try {
+                $rawOutput = Invoke-Command -Session $ps -ScriptBlock $batchRunner -ArgumentList $fixDefsJson -ErrorVariable batchErr -ErrorAction SilentlyContinue
+            }
+            catch {
+                Write-Log "$VMName`: Batched fix execution failed with exception (attempt $groupAttempt): $_" -Warning
+                $rawOutput = $null
+            }
+
+            if ($batchErr -and $batchErr.Count -ne 0) {
+                Write-Log "$VMName`: Batched fix execution had errors (attempt $groupAttempt): $($batchErr[0].ToString().Trim())" -Warning
+            }
+
+            if (-not $rawOutput) {
+                Write-Log "$VMName`: Batched fix returned no output (attempt $groupAttempt)." -Warning
+                $results = @()
+            }
+            else {
+                try {
+                    $results = $rawOutput | ConvertFrom-Json
+                    if ($results -isnot [array]) { $results = @($results) }
+                }
+                catch {
+                    Write-Log "$VMName`: Failed to parse batched fix results (attempt $groupAttempt): $_" -Warning
+                    $results = @()
+                }
+            }
+
+            $allOk = ($results.Count -ge $groupFixes.Count) -and (@($results | Where-Object { -not $_.Success }).Count -eq 0)
+            if ($allOk -or ($groupAttempt -ge $maxGroupAttempts)) { break }
+
+            $failedNames = @($results | Where-Object { -not $_.Success } | ForEach-Object { $_.FixName }) -join ', '
+            if (-not $failedNames) { $failedNames = '(no/partial results)' }
+            Write-Log "$VMName`: Fix(es) did not report explicit success on attempt $groupAttempt [$failedNames]; retrying batch once." -Warning
+            Start-Sleep -Seconds 5
         }
 
-        if ($batchErr.Count -ne 0) {
-            Write-Log "$VMName`: Batched fix execution had errors: $($batchErr[0].ToString().Trim())" -Warning
-        }
-
-        # Parse results
-        if (-not $rawOutput) {
-            Write-Log "$VMName`: Batched fix returned no output." -Warning
-            return $return
-        }
-
-        try {
-            $results = $rawOutput | ConvertFrom-Json
-            # Ensure it's an array
-            if ($results -isnot [array]) { $results = @($results) }
-        }
-        catch {
-            Write-Log "$VMName`: Failed to parse batched fix results: $_" -Warning
+        if (-not $results -or $results.Count -eq 0) {
+            Write-Log "$VMName`: Batched fixes produced no usable results after $groupAttempt attempt(s)." -Warning
             return $return
         }
 
@@ -993,39 +1027,70 @@ function Start-VMFix {
     # Wrap the fix body so we get a structured return + transcript on the VM
     $HashArguments.ScriptBlock = New-VMFixScriptBlock -FixName $fixName -Body $vmFix.ScriptBlock
 
-    # Drop -CommandReturnsBool: output is now a structured PSCustomObject.
-    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
-    $rawOut = $result.ScriptBlockOutput
-    $isStructured = ($null -ne $rawOut) -and ($rawOut -is [pscustomobject]) -and `
-                    ($rawOut.PSObject.Properties.Name -contains 'IsStructured')
-
+    # Output is a structured PSCustomObject, but the AUTHORITATIVE success signal
+    # is the marker file the wrapper writes (read below in a separate call), not
+    # the pipeline return value -- cmdlet output leaking onto the success stream
+    # can't be allowed to mask the real result. A fix is stamped 'applied' ONLY on
+    # an explicit success marker, and a non-success result is retried once.
     $fixSucceeded = $false
-    if ($result.ScriptBlockFailed) {
-        # Transport/session failure - body never ran (or failed catastrophically).
-        $fixSucceeded = $false
-    }
-    elseif ($isStructured) {
-        $fixSucceeded = [bool]$rawOut.Success
-        if ($rawOut.Message) {
-            Write-Log "$VMName`: [$fixName] $($rawOut.Message)"
+    $rawOut = $null
+    $isStructured = $false
+    $maxFixAttempts = 2
+    for ($fixAttempt = 1; $fixAttempt -le $maxFixAttempts; $fixAttempt++) {
+        $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
+
+        # Authoritative: read the marker file in a SEPARATE transaction.
+        $marker = Get-VMFixResultMarker -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount
+        if ($marker -and ($marker.PSObject.Properties.Name -contains 'IsStructured')) {
+            $rawOut = $marker
+            $isStructured = $true
         }
-        if ($rawOut.Errors -and $rawOut.Errors.Count -gt 0) {
-            foreach ($e in $rawOut.Errors) {
-                Write-Log "$VMName`: [$fixName] ERROR: $e" -Warning
+        else {
+            # Fall back to the pipeline ONLY if it is itself an explicit structured
+            # record; a bare/array value is NOT accepted as success.
+            $pipe = $result.ScriptBlockOutput
+            if (($null -ne $pipe) -and ($pipe -is [pscustomobject]) -and ($pipe.PSObject.Properties.Name -contains 'IsStructured')) {
+                $rawOut = $pipe
+                $isStructured = $true
+            }
+            else {
+                $rawOut = $null
+                $isStructured = $false
             }
         }
-        if ($rawOut.ExceptionInfo) {
-            Write-Log "$VMName`: [$fixName] EXCEPTION on VM: $($rawOut.ExceptionInfo)" -Warning
-        }
-        Write-Log -LogOnly "$VMName`: [$fixName] Success=$($rawOut.Success) DurationSec=$($rawOut.DurationSec)"
-    }
-    else {
-        # Legacy bool return (back-compat)
-        $fixSucceeded = ($rawOut -eq $true)
-    }
 
-    # Always pull the on-VM transcript and dump it to the host log (LogOnly).
-    Get-VMFixTranscript -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount
+        if ($result.ScriptBlockFailed) {
+            # Transport/session failure - body never ran (or failed catastrophically).
+            $fixSucceeded = $false
+        }
+        elseif ($isStructured) {
+            $fixSucceeded = [bool]$rawOut.Success
+            if ($rawOut.Message) {
+                Write-Log "$VMName`: [$fixName] $($rawOut.Message)"
+            }
+            if ($rawOut.Errors -and $rawOut.Errors.Count -gt 0) {
+                foreach ($e in $rawOut.Errors) {
+                    Write-Log "$VMName`: [$fixName] ERROR: $e" -Warning
+                }
+            }
+            if ($rawOut.ExceptionInfo) {
+                Write-Log "$VMName`: [$fixName] EXCEPTION on VM: $($rawOut.ExceptionInfo)" -Warning
+            }
+            Write-Log -LogOnly "$VMName`: [$fixName] Success=$($rawOut.Success) DurationSec=$($rawOut.DurationSec)"
+        }
+        else {
+            # No explicit success marker -> NOT applied (legacy bool no longer trusted).
+            $fixSucceeded = $false
+            Write-Log "$VMName`: [$fixName] produced no explicit success marker (attempt $fixAttempt)." -Warning
+        }
+
+        # Always pull the on-VM transcript for this attempt (LogOnly).
+        Get-VMFixTranscript -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount
+
+        if ($fixSucceeded -or ($fixAttempt -ge $maxFixAttempts)) { break }
+        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) did not report success on attempt $fixAttempt; retrying once." -Warning
+        Start-Sleep -Seconds 5
+    }
 
     if (-not $fixSucceeded) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
@@ -1138,6 +1203,12 @@ if (-not (Test-Path 'C:\staging\Fix')) {
     New-Item -Path 'C:\staging\Fix' -ItemType Directory -Force | Out-Null
 }
 `$__transcriptPath = "C:\staging\Fix\`$__FixName.txt"
+`$__resultPath = "C:\staging\Fix\`$__FixName.result.json"
+# Clear any stale result marker up front. A catastrophic failure that prevents
+# the finally{} write then leaves NO marker, and the host treats 'no marker' as
+# 'the fix did NOT succeed' -- an explicit success marker is REQUIRED to stamp a
+# fix as applied (so cmdlet output leaking onto the pipeline can never mask it).
+try { if (Test-Path `$__resultPath) { Remove-Item `$__resultPath -Force -ErrorAction SilentlyContinue } } catch { }
 `$__result = [pscustomobject]@{
     FixName       = `$__FixName
     Success       = `$false
@@ -1193,6 +1264,13 @@ finally {
     `$__sw.Stop()
     `$__result.DurationSec = [math]::Round(`$__sw.Elapsed.TotalSeconds, 2)
     try { Stop-Transcript | Out-Null } catch { }
+    # Authoritative result marker: the batch runner / host read THIS file (in a
+    # separate step), not the scriptblock's pipeline return value. Written last so
+    # it reflects the final Success/Message/Errors after the body + catch ran.
+    try {
+        if (-not (Test-Path 'C:\staging\Fix')) { New-Item -Path 'C:\staging\Fix' -ItemType Directory -Force | Out-Null }
+        `$__result | ConvertTo-Json -Depth 6 -Compress | Set-Content -Path `$__resultPath -Encoding UTF8 -Force
+    } catch { }
 }
 `$__result
 "@
@@ -1242,6 +1320,55 @@ function Get-VMFixTranscript {
     catch {
         Write-Log "$VMName`: Failed to pull transcript for [$FixName]: $_" -LogOnly -Warning
     }
+}
+
+function Get-VMFixResultMarker {
+    <#
+    .SYNOPSIS
+        Reads C:\staging\Fix\<FixName>.result.json from a VM (written by the
+        New-VMFixScriptBlock wrapper) and returns the parsed structured result,
+        or $null if the marker is missing/unreadable.
+    .DESCRIPTION
+        This is the AUTHORITATIVE success signal for a fix. It is read in a
+        SEPARATE call from the fix execution so that pipeline-stream leakage from
+        the fix body (cmdlet output that turns the scriptblock's return value into
+        an array and coerces to a bogus Success=$true) can never affect the
+        verdict. No marker == the fix did NOT report explicit success.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $true)][string]$VMDomain,
+        [Parameter(Mandatory = $true)][string]$FixName,
+        [string]$VMDomainAccount
+    )
+    $sb = {
+        param($name)
+        $p = "C:\staging\Fix\$name.result.json"
+        if (Test-Path $p) { Get-Content -Path $p -Raw -ErrorAction SilentlyContinue }
+    }
+    $args = @{
+        VmName       = $VMName
+        VMDomainName = $VMDomain
+        ScriptBlock  = $sb
+        ArgumentList = @($FixName)
+        DisplayName  = "Pull result marker: $FixName"
+        SuppressLog  = $true
+    }
+    if ($VMDomainAccount) { $args.VmDomainAccount = $VMDomainAccount }
+    try {
+        $r = Invoke-VmCommand @args
+        if ($r -and $r.ScriptBlockOutput) {
+            $raw = (@($r.ScriptBlockOutput) -join "`n")
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                return ($raw | ConvertFrom-Json)
+            }
+        }
+    }
+    catch {
+        Write-Log "$VMName`: Failed to read result marker for [$FixName]: $_" -LogOnly -Warning
+    }
+    return $null
 }
 
 function Get-MaintenanceInjectPaths {
