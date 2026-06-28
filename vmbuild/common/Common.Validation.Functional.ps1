@@ -5506,68 +5506,106 @@ function Test-DscIdle {
             return $results
         }
 
-        # Any other state means DSC is still running after the build finished.
-        $stateLine = "WARN: DSC LCM is '$lcmState' (expected 'Idle' after the build) - DSC is still running after deployment and wasting resources"
-        if ($lcmDetail) { $stateLine += " [LCM: $lcmDetail]" }
-        $results.Details.Add($stateLine)
-
-        # Pull a wider window of operational-log events so we can reconstruct
-        # exactly WHAT is running, WHO started it, and HOW LONG it has been
-        # going -- instead of just dumping the last few raw lines.
+        # The LCM is not Idle. Read a wide window of operational-log events FIRST
+        # so we can both (a) reconstruct what is running and (b) decide whether
+        # this is the benign "Phase 8 site-server MOF still unwinding" case on a
+        # CAS/Primary before we emit a scary WARN.
         $events = $null
         try {
             $events = Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 60 -ErrorAction Stop |
                 Sort-Object TimeCreated
         }
         catch {
+            $stateLine = "WARN: DSC LCM is '$lcmState' (expected 'Idle' after the build) - DSC is still running after deployment and wasting resources"
+            if ($lcmDetail) { $stateLine += " [LCM: $lcmDetail]" }
+            $results.Details.Add($stateLine)
             $results.Details.Add("WARN: Could not read DSC operational log to identify the running configuration ($($_.Exception.Message))")
             return $results
         }
         if (-not $events) {
+            $stateLine = "WARN: DSC LCM is '$lcmState' (expected 'Idle' after the build) - DSC is still running after deployment and wasting resources"
+            if ($lcmDetail) { $stateLine += " [LCM: $lcmDetail]" }
+            $results.Details.Add($stateLine)
             $results.Details.Add("WARN: No DSC operational-log events found to identify the running configuration")
             return $results
         }
 
         $now = Get-Date
 
-        # 1) The in-flight apply: the most recent "Start-DscConfiguration ...
-        #    started" operation that has not been followed by a completion. This
-        #    tells us how long DSC has been busy and -- crucially -- WHO kicked
-        #    it off. A remote "from computer <DC>" means the deploy orchestrator
-        #    re-pushed the phase config (expected, transient); the local computer
-        #    name means the consistency-engine timer fired on its own schedule.
+        # In-flight apply provenance: the most recent "Start-DscConfiguration ...
+        # started" operation -- WHO kicked it off and HOW LONG ago. A remote
+        # "from computer <DC>" means the deploy orchestrator re-pushed the phase
+        # config (expected, transient); the local computer name means the
+        # consistency-engine timer fired on its own schedule.
         $startEvt = $events | Where-Object { $_.Message -match 'Start-DscConfiguration' -and $_.Message -match 'started' } |
             Select-Object -Last 1
+        $isRemoteOrchestrator = $false
+        $originDesc = $null
+        $applyStartedStr = $null
         if ($startEvt) {
             $elapsed = $now - $startEvt.TimeCreated
             $elapsedStr = if ($elapsed.TotalMinutes -ge 1) { "{0:n1} min" -f $elapsed.TotalMinutes } else { "{0:n0} sec" -f $elapsed.TotalSeconds }
             $fromComputer = if ($startEvt.Message -match 'from computer\s+([^\s\.\,]+)') { $Matches[1] } else { 'unknown' }
-            $origin = if ($fromComputer -and $fromComputer -ne 'unknown' -and $fromComputer -ne $env:COMPUTERNAME -and $fromComputer -ne 'NULL') {
-                "remote orchestrator '$fromComputer' (a deploy step re-pushed the config)"
+            if ($fromComputer -and $fromComputer -ne 'unknown' -and $fromComputer -ne $env:COMPUTERNAME -and $fromComputer -ne 'NULL') {
+                $isRemoteOrchestrator = $true
+                $originDesc = "remote orchestrator '$fromComputer' (a deploy step re-pushed the config)"
             }
             elseif ($fromComputer -eq $env:COMPUTERNAME) {
-                "local consistency-engine timer"
+                $originDesc = "local consistency-engine timer"
             }
             else {
-                "computer '$fromComputer'"
+                $originDesc = "computer '$fromComputer'"
             }
-            $results.Details.Add("WARN: Active apply started $($startEvt.TimeCreated.ToString('HH:mm:ss')) ($elapsedStr ago) by $origin")
+            $applyStartedStr = "Active apply started $($startEvt.TimeCreated.ToString('HH:mm:ss')) ($elapsedStr ago) by $originDesc"
+        }
+
+        # Resource execution sequence: the ordered list of resources in the
+        # configuration currently applying. This fingerprints WHICH phase MOF is
+        # running (e.g. ADKInstall / ReportBuilder / ODBCDriver = the site-server
+        # config).
+        $seqEvt = $events | Where-Object { $_.Message -match 'Resource execution sequence' } | Select-Object -Last 1
+        $resList = @()
+        if ($seqEvt) {
+            $seq = ($seqEvt.Message -replace '\s+', ' ').Trim()
+            $seq = $seq -replace '^.*Resource execution sequence\s*::\s*', ''
+            $resList = @($seq -split '\s*,\s*' | Where-Object { $_ })
+        }
+        # The CAS/Primary/Secondary site-server (Phase 8) MOF is uniquely
+        # identified by its WaitForEvent on the ScriptWorkflow completion flag
+        # (RegisterTaskScheduler RunScriptWorkflow + WaitForEvent WorkflowComplete).
+        # No other role's configuration contains those resources.
+        $isSiteWorkflowMof = [bool](($resList -match 'WorkflowComplete') -or ($resList -match 'RunScriptWorkflow'))
+
+        # BENIGN CASE (ignore Phase 8 DSC noise on CAS/Primary): the site-server
+        # Phase 8 config is pushed FROM the DC, and ScriptWorkflow stamps its
+        # completion flag EARLY so the orchestrator can advance the phase / start
+        # the child Primary. The LCM then needs a short tail to unwind the
+        # WaitForEvent -> WriteStatus Complete resources back to Idle. When the
+        # apply was (a) pushed by a remote orchestrator AND (b) is the site-server
+        # workflow MOF, this non-Idle state is that expected tail, not wasted
+        # work -- report INFO, not WARN, and skip the verbose dump.
+        if ($isRemoteOrchestrator -and $isSiteWorkflowMof) {
+            $line = "OK: DSC LCM is '$lcmState' but this is the expected Phase 8 site-server workflow MOF still finishing on this site server"
+            if ($applyStartedStr) { $line += " ($applyStartedStr)" }
+            $results.Details.Add($line)
+            $results.Details.Add("OK: ScriptWorkflow stamps completion early so the phase advances; the LCM returns to Idle shortly after - not wasted work, no action needed")
+            return $results
+        }
+
+        # Otherwise this is a genuinely non-Idle LCM after the build -- WARN and
+        # dump the full diagnostics.
+        $stateLine = "WARN: DSC LCM is '$lcmState' (expected 'Idle' after the build) - DSC is still running after deployment and wasting resources"
+        if ($lcmDetail) { $stateLine += " [LCM: $lcmDetail]" }
+        $results.Details.Add($stateLine)
+
+        if ($applyStartedStr) {
+            $results.Details.Add("WARN: $applyStartedStr")
         }
         else {
             $results.Details.Add("WARN: No in-flight Start-DscConfiguration found; LCM may be mid consistency-check or pending a queued config/reboot")
         }
 
-        # 2) The resource execution sequence: the ordered list of resources in
-        #    the configuration currently applying. This is the single most
-        #    useful line -- it fingerprints WHICH phase MOF is running (e.g.
-        #    ADKInstall / ReportBuilder / ODBCDriver = the site-server config).
-        #    The old code truncated it to 220 chars and buried it; print it in
-        #    full, wrapped, so the operator can see every resource.
-        $seqEvt = $events | Where-Object { $_.Message -match 'Resource execution sequence' } | Select-Object -Last 1
-        if ($seqEvt) {
-            $seq = ($seqEvt.Message -replace '\s+', ' ').Trim()
-            $seq = $seq -replace '^.*Resource execution sequence\s*::\s*', ''
-            $resList = $seq -split '\s*,\s*' | Where-Object { $_ }
+        if ($resList.Count -gt 0) {
             $results.Details.Add("WARN: Configuration applying contains $($resList.Count) resource(s) (this identifies which phase MOF is running):")
             # Emit in chunks of 6 so a long sequence stays readable in the log.
             for ($i = 0; $i -lt $resList.Count; $i += 6) {
@@ -5576,9 +5614,9 @@ function Test-DscIdle {
             }
         }
 
-        # 3) The currently-executing resource: the latest "[Start Set]/[Start
-        #    Resource]/[Start Test]" without a matching end line, so the operator
-        #    sees the specific resource that is blocking idle right now.
+        # The currently-executing resource: the latest "[Start Set]/[Start
+        # Resource]/[Start Test]", so the operator sees the specific resource
+        # that is blocking idle right now.
         $currentResEvt = $events | Where-Object { $_.Message -match '\[\s*(Start Set|Start Resource|Start Test)\s*\]' } |
             Select-Object -Last 1
         if ($currentResEvt) {
@@ -5588,8 +5626,8 @@ function Test-DscIdle {
             $results.Details.Add("WARN: Currently executing: [$($currentResEvt.TimeCreated.ToString('HH:mm:ss'))] $curMsg")
         }
 
-        # 4) The raw recent activity tail, kept as a fallback for anything the
-        #    structured extraction above did not capture.
+        # The raw recent activity tail, kept as a fallback for anything the
+        # structured extraction above did not capture.
         $results.Details.Add("WARN: Most recent DSC operational-log activity (oldest -> newest):")
         foreach ($e in ($events | Select-Object -Last 8)) {
             $msg = ($e.Message -replace '\s+', ' ').Trim()
