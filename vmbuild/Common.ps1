@@ -2100,8 +2100,10 @@ function Add-SwitchAndDhcp {
     # below would throw "Could not find a part of the path ...format.ps1xml"
     # before we ever reach Start-DHCP. Repair the temp dir up front so the whole
     # switch/NAT/DHCP creation flow is covered, not just the DhcpServer import.
-    # If the dir had to be recreated, also reset any stale cached compat proxy.
-    if (Repair-CimProxyTempPath) {
+    # Reset any stale cached compat proxy if the dir was recreated OR an
+    # already-loaded proxy points at a now-deleted folder (Test-CimProxyStale).
+    $needReset = Repair-CimProxyTempPath
+    if ($needReset -or (Test-CimProxyStale)) {
         Reset-CimProxyModuleState | Out-Null
     }
 
@@ -2723,6 +2725,35 @@ function Reset-CimProxyModuleState {
     return $didReset
 }
 
+function Test-CimProxyStale {
+    # Returns $true when PS7 has a WinPS-compat proxy cached in-process whose
+    # backing %TEMP% folder has been DELETED -- the exact precondition for the
+    # "remoteIpMoProxy_...format.ps1xml could not be found" failure. Letting the
+    # proactive guard detect this lets it reset the stale session BEFORE the
+    # first import is attempted, so the (recoverable but alarming) warning never
+    # prints. Cheap and side-effect-free: it only inspects already-loaded
+    # modules -- no Import-Module, no session creation, no temp writes -- so it's
+    # safe to call on every Start-DHCP / Add-SwitchAndDhcp pass. A healthy
+    # session (proxy folder still present) returns $false, so nothing is torn
+    # down needlessly.
+    try {
+        $proxies = @(Get-Module | Where-Object {
+                $_.Name -like 'remoteIpMoProxy_*' -or
+                (($_.Name -in @('DhcpServer', 'ServerManager')) -and $_.Path -and $_.Path -like '*remoteIpMoProxy_*')
+            })
+        foreach ($m in $proxies) {
+            if ($m.Path) {
+                $dir = Split-Path -Parent $m.Path
+                if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+                    return $true
+                }
+            }
+        }
+    }
+    catch { }
+    return $false
+}
+
 function Start-DHCP {
     # Install DHCP, if not found
     param (
@@ -2799,9 +2830,14 @@ function Start-DHCP {
     # (and prune any leaked proxy folders) BEFORE importing, so the common
     # "Could not find a part of the path '...remoteIpMoProxy_...format.ps1xml'"
     # failure is avoided outright rather than only handled after it throws.
-    # If the temp dir actually had to be RECREATED, any WinPS-compat proxy PS7
-    # cached in-process now points at a deleted folder, so reset it too.
-    if (Repair-CimProxyTempPath) {
+    # Reset the cached WinPS-compat proxy if EITHER the temp dir had to be
+    # recreated OR a proxy already loaded in-process points at a now-deleted
+    # folder (Test-CimProxyStale) -- the latter is the common case where the
+    # parent temp dir still exists but the GUID proxy subfolder was wiped, so a
+    # dir-recreate alone wouldn't fire. Resetting here pre-empts the first-import
+    # failure (and its alarming-but-recoverable warning) entirely.
+    $needReset = Repair-CimProxyTempPath
+    if ($needReset -or (Test-CimProxyStale)) {
         Reset-CimProxyModuleState | Out-Null
     }
 
