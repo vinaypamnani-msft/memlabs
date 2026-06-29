@@ -3027,9 +3027,44 @@ function Get-List {
         if (-not $global:vm_List) {
             $diskCached = Read-VMListDiskCache
             if ($diskCached) {
-                $global:vm_List = $diskCached
-                # Leave vm_List_LastUpdate null so SmartUpdate forces a
-                # refresh pass (cheap: just Get-VM + Update-VMFromHyperV).
+                # The disk cache persists across PowerShell restarts and is
+                # trusted for up to MaxAgeMinutes. A VM deleted out-of-band
+                # (e.g. removed in Hyper-V, or a partial Remove-Lab) since the
+                # cache was written would otherwise be RESURRECTED as a ghost
+                # VM on the very first plain Get-List of a fresh process --
+                # before any -SmartUpdate pass reconciles. So reconcile the
+                # seed against live Hyper-V right here (interactive host only;
+                # job workers seed cheaply and target a specific VM by name).
+                if (-not $Common.InJob) {
+                    try {
+                        $liveVms = Get-VM -ErrorAction Stop
+                        $beforeCount = @($diskCached).Count
+                        $diskCached = @($diskCached | Where-Object { $liveVms.vmId -contains $_.vmID })
+                        $droppedCount = $beforeCount - $diskCached.Count
+                        if ($droppedCount -gt 0) {
+                            Write-Log "Get-List: dropped $droppedCount stale VM(s) from disk-cache seed (no longer in Hyper-V); rewriting cache." -LogOnly
+                        }
+                    }
+                    catch {
+                        Write-Log "Get-List: disk-cache seed reconcile (Get-VM) failed; using seed as-is. $_" -LogOnly
+                        $droppedCount = 0
+                    }
+                }
+                else {
+                    $droppedCount = 0
+                }
+
+                if ($diskCached -and $diskCached.Count -gt 0) {
+                    $global:vm_List = $diskCached
+                    # Persist the reconciled list so the next plain
+                    # (non-SmartUpdate) Get-List in this process doesn't
+                    # re-read the stale file.
+                    if ($droppedCount -gt 0) { Save-VMListDiskCache }
+                    # Leave vm_List_LastUpdate null so SmartUpdate forces a
+                    # refresh pass (cheap: just Get-VM + Update-VMFromHyperV).
+                }
+                # If reconcile emptied the seed entirely, leave $global:vm_List
+                # null so the full rebuild-from-Hyper-V path below runs.
             }
         }
 

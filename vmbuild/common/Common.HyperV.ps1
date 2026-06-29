@@ -94,25 +94,33 @@ function Get-VM2 {
         return (Get-VM -Name $Name -ErrorAction SilentlyContinue)
     }
 
+    # NOTE: Get-VM -Id is queried with -ErrorAction SilentlyContinue throughout.
+    # Get-List can return a STALE cache entry whose vmId no longer exists in
+    # Hyper-V (e.g. the VM was deleted out-of-band, or Remove-Lab is cleaning up
+    # after a partial teardown). A bare Get-VM -Id THROWS "Hyper-V was unable to
+    # find a virtual machine with id ..." on such an entry, which aborted callers
+    # like Remove-Lab. Returning $null on a stale id and falling through to a
+    # cache refresh lets the caller treat the VM as gone (which it is).
     $vmFromList = Get-List -Type VM | Where-Object { $_.vmName -eq $Name }
 
     if ($vmFromList) {
-        return (Get-VM -Id $vmFromList.vmId)
+        $vm = Get-VM -Id $vmFromList.vmId -ErrorAction SilentlyContinue
+        if ($vm) { return $vm }
+        # Stale cache entry: id no longer in Hyper-V. Fall through to refresh.
     }
-    else {
-        $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $Name }
-        if ($vmFromList) {
-            return (Get-VM -Id $vmFromList.vmId)
-        }
-        else {
-            # VM may exist, without vmNotes object, try fallback if caller explicitly wants it.
-            if ($Fallback.IsPresent) {
-                return (Get-VM -Name $Name -ErrorAction SilentlyContinue)
-            }
 
-            return [System.Management.Automation.Internal.AutomationNull]::Value
-        }
+    $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $Name }
+    if ($vmFromList) {
+        $vm = Get-VM -Id $vmFromList.vmId -ErrorAction SilentlyContinue
+        if ($vm) { return $vm }
     }
+
+    # VM may exist, without vmNotes object, try fallback if caller explicitly wants it.
+    if ($Fallback.IsPresent) {
+        return (Get-VM -Name $Name -ErrorAction SilentlyContinue)
+    }
+
+    return [System.Management.Automation.Internal.AutomationNull]::Value
 }
 
 function Get-VMSwitch2 {
