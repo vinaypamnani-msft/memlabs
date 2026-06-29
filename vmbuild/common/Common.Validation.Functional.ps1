@@ -1745,6 +1745,19 @@ function Test-SQLAOFunctionality {
         $clusterIP = $primaryAO.ClusterIPAddress   # raw IP without CIDR
     }
 
+    # Degraded / single-node Availability Group: the partner node (OtherNode)
+    # was removed, so Add-ExistingVMsToDeployConfig cleared OtherNode and no
+    # primary node definition carries the AG / listener / cluster config
+    # ($primaryAO is null). The basic SQL test above already validated the
+    # surviving instance; there is no second replica or AG to probe. Skip the
+    # AG health scriptblock -- running it with an empty listener/AG name would
+    # fire pointless DNS/listener probes that spuriously WARN -- and report the
+    # basic SQL result instead.
+    if (-not $primaryAO) {
+        Write-Log "[Phase $Phase] $VMName [SQLAO]: no AG partner found in config (single-node / degraded Availability Group). AG health check skipped; using basic SQL validation result." -Warning
+        return $sqlOk
+    }
+
     $sqlInstName = $CurrentItem.sqlInstanceName
     if (-not $sqlInstName) { $sqlInstName = 'MSSQLSERVER' }
 

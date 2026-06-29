@@ -1216,6 +1216,33 @@ function Add-ExistingVMsToDeployConfig {
             }
         }
     }
+
+    # Heal a SQLAO node whose partner (OtherNode) no longer exists. If the
+    # second AG node was removed (e.g. via the remove script / Remove-Lab),
+    # the surviving node's note still carries a dangling OtherNode pointing at
+    # a VM that isn't on the host -- the OtherNode add above
+    # (Add-ExistingVMToDeployConfig) silently skips it because the VM is gone,
+    # so it never lands in virtualMachines. Left in place, every OtherNode-keyed
+    # step tries to reach the missing node and fails: the Phase 8 host preflight
+    # admin-add (Common.Phases.ps1), the Phase 8 DSC SQL pre-flight $sqlNode2
+    # WMI probe (InstallAndUpdateSCCM.ps1), the Phase 11 AG-health validator
+    # (Common.Validation.Functional.ps1), and Get-SQLAOConfig's 2-node cluster
+    # build. Clear OtherNode here so the node degrades cleanly to a single-node
+    # (degraded) Availability Group: the cluster / AG / listener built in Phase 5
+    # still physically exist on the surviving node, AlwaysOnListenerName stays
+    # set so $installToAO and CM Setup keep using the existing listener, and
+    # every OtherNode-gated step naturally no-ops (Get-SQLAOConfig already
+    # returns $null without OtherNode by design -- "we don't care about
+    # secondary"). This runs in Test-Configuration's Add-Existing pass, before
+    # ConvertTo-DeployConfigEx, so the whole deploy (every phase + ScriptWorkflow)
+    # sees the healed config.
+    foreach ($sqlao in @($config.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode })) {
+        $partnerPresent = $config.virtualMachines | Where-Object { $_.vmName -eq $sqlao.OtherNode } | Select-Object -First 1
+        if (-not $partnerPresent) {
+            Write-Log "$($sqlao.vmName): SQLAO partner node '$($sqlao.OtherNode)' was not found on this host (it appears to have been removed). Clearing OtherNode and treating '$($sqlao.vmName)' as a single-node (degraded) Availability Group -- CM Setup will keep using the existing AG listener '$($sqlao.AlwaysOnListenerName)'." -Warning
+            $sqlao.PSObject.Properties.Remove('OtherNode')
+        }
+    }
 }
 
 function Add-ModifiedExistingVMToDeployConfig {
