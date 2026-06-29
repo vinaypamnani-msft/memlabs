@@ -2092,6 +2092,16 @@ function Add-SwitchAndDhcp {
 
     Write-Log "Creating/verifying Hyper-V switch and DHCP Scopes for '$NetworkName' network." -Activity
 
+    # This is the host-side networking chokepoint (runs once per network at the
+    # start of a deploy) and the first thing it does is call CDXML cmdlets that
+    # auto-load their module: Get-NetNat (NetNat), the vSwitch cmdlets, and
+    # Get/Remove-DhcpServerv4Scope. Each generates a remoteIpMoProxy_* proxy in
+    # %TEMP%, so if that dir was wiped mid-session the very first Get-NetNat
+    # below would throw "Could not find a part of the path ...format.ps1xml"
+    # before we ever reach Start-DHCP. Repair the temp dir up front so the whole
+    # switch/NAT/DHCP creation flow is covered, not just the DhcpServer import.
+    Repair-CimProxyTempPath | Out-Null
+
     # ── NetNat scavenge ─────────────────────────────────────────────────────
     # Too many NetNat entries can cause WinNAT to silently drop traffic.
     # If the count exceeds the threshold, remove orphans automatically
@@ -2588,6 +2598,74 @@ function Test-NetworkNat {
 }
 
 
+function Repair-CimProxyTempPath {
+    # CDXML/CIM-based modules (DhcpServer, ServerManager/Install-WindowsFeature,
+    # NetTCPIP, etc.) generate temporary proxy module files
+    # (remoteIpMoProxy_*.format.ps1xml) under the process TEMP directory at
+    # import time. If that directory has been deleted mid-session -- e.g. a
+    # cleanup task clearing %TEMP%, Storage Sense, or another process wiping
+    # the user's temp folder -- Import-Module fails hard with:
+    #   "Could not find a part of the path '...remoteIpMoProxy_...format.ps1xml'".
+    # The module files themselves are still on disk, so -ListAvailable lies and
+    # says everything's fine. Ensure every temp path the proxy generator might
+    # use actually exists, recreating any that vanished. Returns $true if it had
+    # to recreate at least one directory (i.e. a retry is worthwhile).
+    #
+    # NOTE: a FULL temp dir is NOT this failure (that surfaces as an
+    # IOException / "not enough space on the disk"). But every CIM/CDXML import
+    # LEAKS a remoteIpMoProxy_* folder here, and on a long-lived lab host these
+    # accumulate into the thousands -- bloating enumeration and raising the odds
+    # of a name collision during proxy generation. So we also opportunistically
+    # prune stale leaked proxy folders (age-gated so an in-flight import is
+    # never touched).
+    $recreated = $false
+    $tempPaths = @(
+        ([System.IO.Path]::GetTempPath()),
+        $env:TEMP,
+        $env:TMP
+    ) | Where-Object { $_ } | Select-Object -Unique
+
+    foreach ($tp in $tempPaths) {
+        try {
+            if (-not (Test-Path -LiteralPath $tp)) {
+                New-Item -ItemType Directory -Path $tp -Force -ErrorAction Stop | Out-Null
+                Write-Log "Repair-CimProxyTempPath: Recreated missing temp directory '$tp' (CIM proxy module generation needs it)." -Warning
+                $recreated = $true
+                continue   # freshly created -- nothing to prune
+            }
+
+            # Hygiene: prune leaked CIM proxy folders older than 1 hour. The
+            # 1-hour age gate guarantees we never delete the proxy folder of a
+            # currently-running import (those are minutes old at most), so this
+            # is safe to run unconditionally before every import. Only acts when
+            # the leak has actually built up (>200 folders) to keep it cheap.
+            $leaked = @(Get-ChildItem -LiteralPath $tp -Directory -Filter 'remoteIpMoProxy_*' -ErrorAction SilentlyContinue)
+            if ($leaked.Count -gt 200) {
+                $cutoff = (Get-Date).AddHours(-1)
+                $stale = @($leaked | Where-Object { $_.LastWriteTime -lt $cutoff })
+                $pruned = 0
+                foreach ($dir in $stale) {
+                    try {
+                        Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+                        $pruned++
+                    }
+                    catch {
+                        # In-use / locked folder -- skip it, it'll age out later.
+                    }
+                }
+                if ($pruned -gt 0) {
+                    Write-Log "Repair-CimProxyTempPath: Pruned $pruned stale leaked CIM proxy folder(s) from '$tp' ($($leaked.Count) total)." -LogOnly
+                }
+            }
+        }
+        catch {
+            Write-Log "Repair-CimProxyTempPath: Failed to ensure/clean temp directory '$tp': $_" -Warning
+        }
+    }
+
+    return $recreated
+}
+
 function Start-DHCP {
     # Install DHCP, if not found
     param (
@@ -2659,6 +2737,13 @@ function Start-DHCP {
     # check -ListAvailable (files on disk) — the module is CDXML-based and
     # depends on the WMI/CIM service. If winmgmt is wedged the files exist
     # but Import-Module fails with "module could not be loaded".
+    #
+    # Proactively ensure the temp dir the CIM proxy generator writes to exists
+    # (and prune any leaked proxy folders) BEFORE importing, so the common
+    # "Could not find a part of the path '...remoteIpMoProxy_...format.ps1xml'"
+    # failure is avoided outright rather than only handled after it throws.
+    Repair-CimProxyTempPath | Out-Null
+
     $moduleLoaded = $false
     try {
         Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
@@ -2668,10 +2753,27 @@ function Start-DHCP {
         $importError = $_
         Write-Log "Start-DHCP: DhcpServer module failed to load: $importError" -Warning
 
+        # First, classify the "missing temp path" failure explicitly. This is
+        # the remoteIpMoProxy_*.format.ps1xml case: the module IS on disk, so
+        # the -ListAvailable branch below would mis-route it to a pointless
+        # winmgmt restart. Recreate the temp dir and retry before anything else.
+        if ("$importError" -match 'remoteIpMoProxy|Could not find a part of the path') {
+            Write-Log "Start-DHCP: Failure is a missing CIM-proxy temp path, not a WMI fault. Repairing temp directory and retrying..." -Warning
+            Repair-CimProxyTempPath | Out-Null
+            try {
+                Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+                $moduleLoaded = $true
+                Write-GreenCheck "DhcpServer module loaded after repairing the CIM-proxy temp directory."
+            }
+            catch {
+                Write-Log "Start-DHCP: Module still won't load after temp-path repair: $_" -Warning
+            }
+        }
+
         # Diagnose: are the module files even on disk?
         $moduleOnDisk = [bool](Get-Module DhcpServer -ListAvailable -ErrorAction SilentlyContinue)
 
-        if ($moduleOnDisk) {
+        if (-not $moduleLoaded -and $moduleOnDisk) {
             # Files present but module won't load — likely WMI/CIM service
             # is in a bad state (CDXML modules use CIM under the hood).
             Write-Log "Start-DHCP: Module files exist on disk but won't load. Restarting WMI service (winmgmt)..." -Warning
@@ -2690,7 +2792,7 @@ function Start-DHCP {
                 Write-Log "Start-DHCP: A host reboot may be required. Original error: $importError" -Failure
             }
         }
-        else {
+        elseif (-not $moduleLoaded) {
             # Module files missing — RSAT tools were stripped (e.g. by a Windows Update).
             Write-OrangePoint "DhcpServer module is not installed. Reinstalling DHCP management tools..."
             if (Get-Command -Name "Install-WindowsFeature" -ErrorAction SilentlyContinue) {
