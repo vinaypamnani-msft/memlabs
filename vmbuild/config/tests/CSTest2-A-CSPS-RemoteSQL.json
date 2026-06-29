@@ -36,7 +36,7 @@
       "additionalDisks": {
         "E": "250GB"
       },
-      "memory": "5GB",
+      "memory": "8GB",
       "virtualProcs": 4,
       "remoteSQLVM": "CS1SQL",
       "InstallRP": true,

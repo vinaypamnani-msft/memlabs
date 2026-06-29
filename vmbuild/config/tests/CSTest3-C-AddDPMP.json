@@ -14,7 +14,7 @@
       "vmName": "PS1DPMPSUP1",
       "role": "SiteSystem",
       "operatingSystem": "Server 2022",
-      "memory": "3GB",
+      "memory": "8GB",
       "virtualProcs": 4,
       "additionalDisks": {
         "E": "250GB"

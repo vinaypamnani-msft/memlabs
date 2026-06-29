@@ -26,7 +26,7 @@
       "vmName": "CS1RPSUP1",
       "role": "SiteSystem",
       "operatingSystem": "Server 2022",
-      "memory": "3GB",
+      "memory": "8GB",
       "virtualProcs": 4,
       "tpmEnabled": true,
       "installSSMS": true,
