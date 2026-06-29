@@ -356,6 +356,80 @@ while ($true) {
 
 $i = 0
 $failureCount = 0
+
+# --- CM-accurate failure detection + retry (mirrors the admin console) -------
+# The console / Set-CMSite read ONE authoritative value for a passive site
+# server: SMS_SCI_SysResUse.ServerState (root\SMS\Site_<code>), filtered to the
+# passive row (RoleName='SMS Site Server', SiteSystemStatus=0). Verified against
+# ConfigMgr source (Constants.cs, Utils.cs ShowStatus/Retry gate, and
+# SetSite.cs::RunRetryInstallationForPassiveSite):
+#   131071 0x0001FFFF SiteServerInstallationFailed  -> console "Installation failed"
+#   196607 0x0002FFFF PREREQ_ERROR                  -> prereq failed
+#   generic failure  : (ServerState % 65536) as 4-hex starts with 'F'
+#   196608 0x00030000 OK category (Active/Passive/Ready) -> healthy/complete
+#   SiteSystemStatus : 0 = Passive, 1 = Active
+# The substage tables (SMS_HA_SiteServerDetailedMonitoring.IsComplete=4) do NOT
+# reliably flag failure -- that is why the old IsComplete=4 query found nothing
+# while the console showed "Installation failed" and the monitor hung. ServerState
+# is the real signal, so it now drives both completion and failure here.
+# The "Retry installation" console action / Set-CMSite both do exactly one thing
+# on failure: call the SMS_SCI_SysResUse.RetryInstallation(SiteCode, ServerName)
+# WMI method. We reproduce that here (bounded) instead of hanging or giving up.
+$SiteServerInstallationFailed = 131071   # 0x0001FFFF
+$PrereqError = 196607                    # 0x0002FFFF
+$OkCategoryMask = 0x00030000             # high word -> ready for failover
+
+function Test-CMServerStateFailed {
+    param([int]$ServerState)
+    if ($ServerState -le 0) { return $false }
+    $sub = $ServerState % 65536
+    return (('{0:X4}' -f $sub).Substring(0, 1) -eq 'F')
+}
+
+function Get-CMPassiveNode {
+    param($ProviderFqdn, $Namespace, $Site)
+    try {
+        Get-WmiObject -ComputerName $ProviderFqdn -Namespace $Namespace -Class SMS_SCI_SysResUse `
+            -Filter "RoleName = 'SMS Site Server' AND SiteCode = '$Site' AND SiteSystemStatus = 0" -ErrorAction Stop |
+        Select-Object -First 1
+    }
+    catch { $null }
+}
+
+function Get-PassiveSetupFailureDetail {
+    param($PassiveVmName)
+    try {
+        $lines = Invoke-Command -ComputerName $PassiveVmName -ErrorAction Stop -ScriptBlock {
+            $log = 'C:\ConfigMgrSetup.log'
+            if (Test-Path $log) {
+                Get-Content -Path $log -Tail 4000 -ErrorAction SilentlyContinue |
+                Where-Object { $_ -match 'error|fail|fatal' } |
+                Select-Object -Last 12
+            }
+        }
+        if ($lines) { return ($lines -join " | ") }
+    }
+    catch { return "Could not read C:\ConfigMgrSetup.log on $PassiveVmName ($($_.Exception.Message))" }
+    return $null
+}
+
+function Invoke-CMPassiveRetry {
+    param($ProviderFqdn, $Namespace, $Node)
+    $serverName = ([string]$Node.NetworkOSPath).Replace('\\', '')
+    $cmClass = [wmiclass]"\\$ProviderFqdn\${Namespace}:SMS_SCI_SysResUse"
+    $mp = $cmClass.GetMethodParameters('RetryInstallation')
+    $mp.SiteCode = [string]$Node.SiteCode
+    $mp.ServerName = $serverName
+    $null = $cmClass.InvokeMethod('RetryInstallation', $mp, $null)
+}
+
+# --- Completion / stall watchdog state --------------------------------------
+$passiveComplete = $false
+$lastProgressSig = $null
+$lastProgressChange = Get-Date
+$stallHardMinutes = 75   # no forward progress AND CM not-failed/not-ready -> give up
+$maxCMRetries = 2        # automatic equivalents of the console "Retry installation" click
+$cmRetryCount = 0
 do {
 
     $i++
@@ -364,40 +438,125 @@ do {
         Write-DscStatus "Failed to add passive site server on $passiveFQDN due to prereq failure. Reason: $($prereqFailure.SubStageName)" -Failure
     }
 
-    $installFailure = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 4 AND Applicable = 1 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
-    if ($installFailure) {
+    # Informational only: substage rows do not reliably mark failure (see note).
+    $installFailure = $false
+    $installFailureRow = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 4 AND Applicable = 1 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
+
+    $state = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 2 AND Applicable = 1 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
+
+    if ($state) {
+        Write-DscStatus "Adding passive site server on $passiveFQDN`: $($state.SubStageName)" -RetrySeconds 30
+
+        # No-forward-progress stall detection. A genuinely advancing install
+        # changes its SubStageId / MessageTime / Progress; a wedged one keeps
+        # reporting the same in-progress row.
+        $progressSig = "$($state.SubStageId)|$($state.MessageTime)|$($state.Progress)"
+        if ($progressSig -ne $lastProgressSig) {
+            $lastProgressSig = $progressSig
+            $lastProgressChange = Get-Date
+        }
+    }
+
+    # --- Authoritative CM state (the value the console reads) -----------------
+    $cmNode = Get-CMPassiveNode -ProviderFqdn $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Site $SiteCode
+    if ($cmNode -and ($null -ne $cmNode.ServerState)) {
+        $serverState = [int]$cmNode.ServerState
+        $serverStateHex = '0x{0:X8}' -f $serverState
+        $cmReady = (($serverState -band 0xFFFF0000) -eq $OkCategoryMask)
+        $cmFailed = Test-CMServerStateFailed -ServerState $serverState
+
+        if ($cmReady) {
+            Write-DscStatus "ConfigMgr reports passive site server on $passiveFQDN ready (ServerState=$serverStateHex); add complete."
+            $passiveComplete = $true
+        }
+        elseif ($cmFailed) {
+            # CM has declared failure -- exactly what the console surfaces as
+            # "Installation failed" (and what gates its Retry installation button:
+            # ServerState == SiteServerInstallationFailed or PREREQ_ERROR).
+            $failKind = if ($serverState -eq $PrereqError) { "prereq check failed" } elseif ($serverState -eq $SiteServerInstallationFailed) { "installation failed" } else { "failed" }
+            $detail = Get-PassiveSetupFailureDetail -PassiveVmName $SSVM.vmName
+            if ($detail) {
+                Write-DscStatus "ConfigMgr reports passive site server on $passiveFQDN $failKind (ServerState=$serverStateHex). Setup log: $detail"
+            }
+            else {
+                Write-DscStatus "ConfigMgr reports passive site server on $passiveFQDN $failKind (ServerState=$serverStateHex)."
+            }
+
+            if ($cmRetryCount -lt $maxCMRetries) {
+                $cmRetryCount++
+                try {
+                    Write-DscStatus "Retrying passive install the same way the console does (SMS_SCI_SysResUse.RetryInstallation), attempt $cmRetryCount/$maxCMRetries."
+                    Invoke-CMPassiveRetry -ProviderFqdn $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Node $cmNode
+                    # Retry re-enters the install pipeline; reset the stall clock
+                    # so the watchdog measures the fresh attempt, not the wait.
+                    $lastProgressChange = Get-Date
+                    $lastProgressSig = $null
+                    Start-Sleep -Seconds 60
+                }
+                catch {
+                    Write-DscStatus "Failed to invoke RetryInstallation on $passiveFQDN. Error: $($_.Exception.Message)" -Failure
+                    $installFailure = $true
+                }
+            }
+            else {
+                Write-DscStatus "Passive site server on $passiveFQDN still $failKind after $maxCMRetries retries (ServerState=$serverStateHex); giving up. Check ConfigMgrSetup.log on $passiveFQDN." -Failure
+                $installFailure = $true
+            }
+        }
+    }
+    elseif ($installFailureRow) {
+        # Fall back to the substage failure row only when CM exposes no ServerState
+        # (older provider). Give recoverable transients ~10 min before failing.
         $failureCount++
         if ($failureCount -gt 10) {
-            # Some failures are recovered, give it enough time to try to recover - 10 mins should be sufficient
-            Write-DscStatus "Failed to add passive site server on $passiveFQDN. Failure State: $($state.SubStageName): $($state.Description)" -Failure
+            Write-DscStatus "Failed to add passive site server on $passiveFQDN. Failure State: $($installFailureRow.SubStageName): $($installFailureRow.Description)" -Failure
+            $installFailure = $true
         }
     }
     else {
         $failureCount = 0
     }
 
-    $state = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_HA_SiteServerDetailedMonitoring -Filter "IsComplete = 2 AND Applicable = 1 AND SiteCode = '$SiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
-
-    if ($state) {
-        Write-DscStatus "Adding passive site server on $passiveFQDN`: $($state.SubStageName)" -RetrySeconds 30
-    }
-
-    if (-not $state) {
-        if (0 -eq $i % 20) {
-            Write-DscStatus "No Progress for adding passive site server reported after $($i * 30) seconds, restarting SMS_Executive"
-            Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 30
-        }
-
+    if (-not $state -and -not $passiveComplete) {
         if ($i -gt 61) {
             Write-DscStatus "No Progress for adding passive site server reported after $($i * 30) seconds, giving up." -Failure
             $installFailure = $true
         }
     }
 
+    # Ground-truth completion fallback (only when CM did not already report ready
+    # or failed). Role-present + SMS_EXECUTIVE Running is necessary but, on its
+    # own, NOT sufficient (CM can still report "Installation failed" while the
+    # service is up), so it is gated on CM NOT being in a failed state.
+    if (-not $passiveComplete -and -not $installFailure -and -not $prereqFailure -and (0 -eq $i % 5)) {
+        $roleNow = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+        if ($roleNow) {
+            $execRunning = $false
+            try {
+                $execSvc = Get-Service -ComputerName $SSVM.vmName -Name 'SMS_EXECUTIVE' -ErrorAction Stop
+                $execRunning = ($execSvc.Status -eq 'Running')
+            }
+            catch { $execRunning = $false }
+            if ($execRunning) {
+                Write-DscStatus "Passive site server ground-truth complete on $($SSVM.vmName): SMS Site Server role present and SMS_EXECUTIVE Running, and ConfigMgr is not reporting a failed state."
+                $passiveComplete = $true
+            }
+        }
+    }
+
+    # Stall watchdog backstop: a wedged in-progress row that CM has neither marked
+    # ready nor failed for a long window -> give up so the phase can't hang forever.
+    if ($state -and -not $passiveComplete -and -not $installFailure) {
+        $stalledMinutes = ((Get-Date) - $lastProgressChange).TotalMinutes
+        if ($stalledMinutes -ge $stallHardMinutes) {
+            Write-DscStatus "Passive install stuck at '$($state.SubStageName)' for $([int]$stalledMinutes) min with no forward progress and ConfigMgr reporting neither ready nor failed on $passiveFQDN; giving up. Check ConfigMgrSetup.log on $passiveFQDN." -Failure
+            $installFailure = $true
+        }
+    }
+
     Start-Sleep -Seconds 60
 
-} until ($state.SubStageId -eq 917515 -or $prereqFailure -or $installFailure)
+} until ($state.SubStageId -eq 917515 -or $passiveComplete -or $prereqFailure -or $installFailure)
 
 # Update actions file (mutex-guarded; safe under parallel execution). In parallel
 # mode the main ScriptWorkflow thread stamps Completed after joining the job

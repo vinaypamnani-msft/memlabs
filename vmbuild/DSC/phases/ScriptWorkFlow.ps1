@@ -695,6 +695,24 @@ if ($containsPassive) {
     $passiveHealthy = {
         $role = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
         if (-not $role) { return $false }
+        # CM-authoritative failure gate. Role present + SMS_EXECUTIVE Running is
+        # NECESSARY but NOT SUFFICIENT: CM can report the passive add "Installation
+        # failed" (SMS_SCI_SysResUse.ServerState low word starts with 'F', e.g.
+        # 0x0001FFFF SiteServerInstallationFailed / 0x0002FFFF PREREQ_ERROR) while
+        # the service is up -- proven live (transient RegAsm DLL-registration
+        # failure on the passive node). Treat a CM-failed ServerState as NOT healthy
+        # so the inline retry below fires instead of stamping Completed on a broken
+        # passive. Best-effort: if ServerState is unavailable (older/remote
+        # provider) fall through to the role+SMS_EXECUTIVE signal so we don't regress.
+        try {
+            $passiveSci = Get-WmiObject -Namespace "root\SMS\site_$($ThisVM.siteCode)" -Class SMS_SCI_SysResUse `
+                -Filter "RoleName = 'SMS Site Server' AND SiteSystemStatus = 0" -ErrorAction Stop | Select-Object -First 1
+            if ($passiveSci -and ($null -ne $passiveSci.ServerState)) {
+                $ss = [int]$passiveSci.ServerState
+                if ($ss -gt 0 -and (('{0:X4}' -f ($ss % 65536)).Substring(0, 1) -eq 'F')) { return $false }
+            }
+        }
+        catch { }
         try {
             $svc = Get-Service -ComputerName $containsPassive.vmName -Name 'SMS_EXECUTIVE' -ErrorAction Stop
             return ($svc.Status -eq 'Running')

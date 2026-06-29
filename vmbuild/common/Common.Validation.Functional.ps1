@@ -5758,7 +5758,22 @@ function Test-PassiveSiteFunctionality {
             $results.Details.Add("FAIL: WMI query for passive site server failed after retries: $($wmiErr.Exception.Message)")
         }
         elseif ($passive) {
-            $results.Details.Add("OK: Passive site server '$passiveName' registered in site '$sc'")
+            # The row existing is necessary but not sufficient -- read ConfigMgr's
+            # authoritative ServerState (the value the console shows). Low word
+            # starting with 'F' (e.g. 0x0001FFFF SiteServerInstallationFailed /
+            # 0x0002FFFF PREREQ_ERROR) = the console's "Installation failed"; a row
+            # can be present with SMS_EXECUTIVE Running yet still be CM-failed.
+            $row = @($passive)[0]
+            $ss = $null
+            if ($null -ne $row.ServerState) { $ss = [int]$row.ServerState }
+            $ssHex = if ($null -ne $ss) { '0x{0:X8}' -f $ss } else { 'n/a' }
+            if ($null -ne $ss -and $ss -gt 0 -and (('{0:X4}' -f ($ss % 65536)).Substring(0, 1) -eq 'F')) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Passive site server '$passiveName' registered but ConfigMgr reports ServerState=$ssHex (Installation failed / prereq error); check ConfigMgrSetup.log on $passiveName")
+            }
+            else {
+                $results.Details.Add("OK: Passive site server '$passiveName' registered in site '$sc' (ServerState=$ssHex)")
+            }
         }
         else {
             $results.Passed = $false
