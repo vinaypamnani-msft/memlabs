@@ -205,8 +205,66 @@
             Status    = "Adding SQL logins and roles"
         }
 
+        # Fast-fail gate: confirm the local SQL instance is actually reachable
+        # BEFORE the SqlLogin/SqlRole/SqlMemory resources run. Those SqlServerDsc
+        # resources connect with a ~600s connect timeout, so against a missing or
+        # down instance EACH one hangs ~10 min (observed: a Hidden Primary whose
+        # SQL was never installed -- the install block above is skipped for
+        # existing/Hidden VMs -- wedged Phase 4 for 30+ min on "Adding SQL logins
+        # and roles"). This Script connects via the same path with a 5s timeout:
+        # on a healthy box Test passes instantly (no-op); when SQL is unreachable
+        # it waits up to 3 min (covers a just-started service) then throws ONE
+        # clear, actionable error instead of three opaque 600s stalls.
+        $cvSqlInstance = $SQLInstanceName
+        if ($SQLInstanceName -eq 'MSSQLSERVER') {
+            $cvSqlSvc = 'MSSQLSERVER'
+            $cvSqlDs  = $node.NodeName
+        }
+        else {
+            $cvSqlSvc = "MSSQL`$$SQLInstanceName"
+            $cvSqlDs  = "$($node.NodeName)\$SQLInstanceName"
+        }
+        $cvHiddenStr = [string][bool]$ThisVM.Hidden
+
+        $sqlReachTest = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+try {
+    `$cs = 'Data Source=$cvSqlDs;Initial Catalog=master;Integrated Security=True;Connect Timeout=5;Encrypt=False;TrustServerCertificate=True'
+    `$c = New-Object System.Data.SqlClient.SqlConnection `$cs
+    `$c.Open(); `$c.Close(); `$c.Dispose()
+    return `$true
+} catch { return `$false }
+"@
+
+        $sqlReachSet = @"
+`$ErrorActionPreference = 'Stop'
+`$cs = 'Data Source=$cvSqlDs;Initial Catalog=master;Integrated Security=True;Connect Timeout=5;Encrypt=False;TrustServerCertificate=True'
+`$deadline = (Get-Date).AddMinutes(3)
+`$err = ''
+do {
+    try { `$c = New-Object System.Data.SqlClient.SqlConnection `$cs; `$c.Open(); `$c.Close(); `$c.Dispose(); return } catch { `$err = `$_.Exception.Message }
+    Start-Sleep -Seconds 10
+} while ((Get-Date) -lt `$deadline)
+`$svc = Get-Service -Name '$cvSqlSvc' -ErrorAction SilentlyContinue
+if (-not `$svc) {
+    throw "SQL instance '$cvSqlInstance' is NOT installed on $($node.NodeName) (no '$cvSqlSvc' service). Phase 4's SQL install step is skipped for existing/Hidden VMs (Hidden=$cvHiddenStr) AND the host does not mount the SQL ISO for Hidden VMs, so the SqlLogin/SqlRole resources have no instance to connect to (each would otherwise hang ~600s). Remedy: rebuild SQL on this VM -- delete + recreate it, or re-deploy it non-Hidden -- then re-run Phase 4. Last connect error: `$err"
+}
+if (`$svc.Status -ne 'Running') {
+    try { Start-Service -Name '$cvSqlSvc' -ErrorAction Stop; Start-Sleep -Seconds 20; `$c = New-Object System.Data.SqlClient.SqlConnection `$cs; `$c.Open(); `$c.Close(); `$c.Dispose(); return } catch { `$err = `$_.Exception.Message }
+}
+throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc.Status)) but is not accepting local connections after 3 min. Check the SQL errorlog, the TCP/IP protocol state, and that it is listening on the expected port. Last connect error: `$err"
+"@
+
+        Script EnsureSqlReachable {
+            DependsOn  = '[WriteStatus]AddSQLPermissions'
+            GetScript  = { @{ Result = '' } }
+            TestScript = $sqlReachTest
+            SetScript  = $sqlReachSet
+        }
+        $nextDepend = '[Script]EnsureSqlReachable'
+
         # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
-        $sqlDependency = @('[WriteStatus]AddSQLPermissions')
+        $sqlDependency = @('[Script]EnsureSqlReachable')
         $i = 0
         foreach ($account in $SQLSysAdminAccounts | Where-Object { $_ -notlike "BUILTIN*" } ) {
             if (-not $account) {
