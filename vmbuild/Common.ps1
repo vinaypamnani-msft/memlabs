@@ -2100,7 +2100,10 @@ function Add-SwitchAndDhcp {
     # below would throw "Could not find a part of the path ...format.ps1xml"
     # before we ever reach Start-DHCP. Repair the temp dir up front so the whole
     # switch/NAT/DHCP creation flow is covered, not just the DhcpServer import.
-    Repair-CimProxyTempPath | Out-Null
+    # If the dir had to be recreated, also reset any stale cached compat proxy.
+    if (Repair-CimProxyTempPath) {
+        Reset-CimProxyModuleState | Out-Null
+    }
 
     # ── NetNat scavenge ─────────────────────────────────────────────────────
     # Too many NetNat entries can cause WinNAT to silently drop traffic.
@@ -2666,6 +2669,60 @@ function Repair-CimProxyTempPath {
     return $recreated
 }
 
+function Reset-CimProxyModuleState {
+    # Companion to Repair-CimProxyTempPath for the case where recreating the temp
+    # dir alone does NOT fix the "...remoteIpMoProxy_...format.ps1xml could not be
+    # found" error (telltale sign: the SAME proxy GUID reappears on every retry).
+    #
+    # Under PowerShell 7 the Windows-only modules we need (ServerManager ->
+    # Install-WindowsFeature, and DhcpServer when it's pulled in alongside it)
+    # cannot load natively, so PS7 imports them through the Windows PowerShell
+    # Compatibility feature: it spins up a loopback "WinPSCompatSession" and
+    # generates an implicit-remoting PROXY module (remoteIpMoProxy_*_<guid>) under
+    # %TEMP%. BOTH the session and that generated proxy module are cached in the
+    # LIVE PS7 process. If the proxy's temp folder is later wiped (cleanup task /
+    # Storage Sense), every subsequent import keeps pointing at the now-deleted
+    # cached path and throws -- recreating the empty temp dir can't restore the
+    # format.ps1xml inside the GUID folder. The cached session + module must be
+    # torn down so the proxy is REGENERATED from scratch on the next import.
+    # Returns $true if it tore anything down.
+    $didReset = $false
+
+    # 1. Unload any in-memory implicit-remoting proxy modules AND the real
+    #    Windows modules, so a fresh import regenerates them cleanly.
+    try {
+        Get-Module |
+            Where-Object { $_.Name -like 'remoteIpMoProxy_*' -or ($_.Path -and $_.Path -like '*remoteIpMoProxy_*') } |
+            ForEach-Object {
+                try { Remove-Module -ModuleInfo $_ -Force -ErrorAction Stop; $didReset = $true } catch { }
+            }
+    }
+    catch { }
+    foreach ($m in @('DhcpServer', 'ServerManager')) {
+        if (Get-Module -Name $m -ErrorAction SilentlyContinue) {
+            try { Remove-Module -Name $m -Force -ErrorAction Stop; $didReset = $true } catch { }
+        }
+    }
+
+    # 2. Tear down the cached WinPS compatibility session(s) so the next import
+    #    builds a brand-new proxy in the (repaired) temp dir instead of reusing
+    #    the stale cached one.
+    try {
+        $compat = @(Get-PSSession -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'WinPSCompatSession*' })
+        if ($compat.Count -gt 0) {
+            $compat | Remove-PSSession -ErrorAction SilentlyContinue
+            $didReset = $true
+        }
+    }
+    catch { }
+
+    if ($didReset) {
+        Write-Log "Reset-CimProxyModuleState: Tore down cached WinPS-compat session/proxy modules so the CIM proxy regenerates on next import." -LogOnly
+    }
+    return $didReset
+}
+
 function Start-DHCP {
     # Install DHCP, if not found
     param (
@@ -2742,7 +2799,11 @@ function Start-DHCP {
     # (and prune any leaked proxy folders) BEFORE importing, so the common
     # "Could not find a part of the path '...remoteIpMoProxy_...format.ps1xml'"
     # failure is avoided outright rather than only handled after it throws.
-    Repair-CimProxyTempPath | Out-Null
+    # If the temp dir actually had to be RECREATED, any WinPS-compat proxy PS7
+    # cached in-process now points at a deleted folder, so reset it too.
+    if (Repair-CimProxyTempPath) {
+        Reset-CimProxyModuleState | Out-Null
+    }
 
     $moduleLoaded = $false
     try {
@@ -2758,15 +2819,20 @@ function Start-DHCP {
         # the -ListAvailable branch below would mis-route it to a pointless
         # winmgmt restart. Recreate the temp dir and retry before anything else.
         if ("$importError" -match 'remoteIpMoProxy|Could not find a part of the path') {
-            Write-Log "Start-DHCP: Failure is a missing CIM-proxy temp path, not a WMI fault. Repairing temp directory and retrying..." -Warning
+            Write-Log "Start-DHCP: Failure is a missing CIM-proxy temp path, not a WMI fault. Repairing temp directory + resetting cached compat proxy, then retrying..." -Warning
+            # Recreate the temp dir AND tear down the cached WinPS-compat session
+            # / proxy module. Recreating the dir alone is insufficient when PS7
+            # has the (now-stale) implicit-remoting proxy cached in-process --
+            # the reset forces the proxy to regenerate into the repaired dir.
             Repair-CimProxyTempPath | Out-Null
+            Reset-CimProxyModuleState | Out-Null
             try {
                 Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
                 $moduleLoaded = $true
-                Write-GreenCheck "DhcpServer module loaded after repairing the CIM-proxy temp directory."
+                Write-GreenCheck "DhcpServer module loaded after repairing the CIM-proxy temp directory and resetting the cached compat proxy."
             }
             catch {
-                Write-Log "Start-DHCP: Module still won't load after temp-path repair: $_" -Warning
+                Write-Log "Start-DHCP: Module still won't load after temp-path repair + compat reset: $_" -Warning
             }
         }
 
