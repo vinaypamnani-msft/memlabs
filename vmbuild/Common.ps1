@@ -5922,6 +5922,52 @@ function Invoke-VmCommand {
                             }
                             catch {}
                             $jobChannelBroken = $jobErrBlob -match 'creating the pipeline|pipeline is not|transport|channel|broken|Cannot connect|not connected|session is in|availability is Busy|No valid sessions|has been closed|socket target process|VMBus|target process has ended'
+                            # The regex above matches the error TEXT, but a PSDirect/VMBus
+                            # transport break does not always carry one of those tokens --
+                            # e.g. "Processing data from remote server <vm> failed ... The I/O
+                            # operation has been aborted because of either a thread exit or an
+                            # application request", or the bare "The background process reported
+                            # an error" (ErrorCode 2100). Those regex MISSES are exactly the
+                            # dangerous disposals: the pipeline was severed by a dying channel,
+                            # so the Stop-Job/Remove-Job branch below DISPOSES the job, and the
+                            # reboot the caller is about to perform (DSC-monitor Restart-VM2Smart,
+                            # Wait-ForVm channel-broken recovery, or the guest's own CM-install
+                            # reboot) then fires a StateChanged callback on the already-disposed
+                            # job on a threadpool thread -> unhandled PSObjectDisposedException
+                            # ('object "PSJob" has already been disposed') that kills the phase
+                            # child process (proven on cstest6 CS6-PS1SITE/-P Phase 8, both
+                            # children crashed ~70s apart right after a heartbeat-recovery
+                            # restart). The AUTHORITATIVE signal is the SESSION's own runspace
+                            # state, not the error text: if the transport is no longer Opened,
+                            # the failure is a channel break regardless of how it was worded, so
+                            # abandon (don't dispose) + leak the session.
+                            if (-not $jobChannelBroken) {
+                                try {
+                                    $rsState = $null
+                                    $rsAvail = $null
+                                    if ($ps -and $ps.Runspace) {
+                                        $rsState = "$($ps.Runspace.RunspaceStateInfo.State)"
+                                        $rsAvail = "$($ps.Runspace.RunspaceAvailability)"
+                                    }
+                                    if ($rsState -and $rsState -ne 'Opened') { $jobChannelBroken = $true }
+                                    elseif ($rsAvail -eq 'None') { $jobChannelBroken = $true }
+                                    if (-not $jobChannelBroken) {
+                                        # Belt-and-braces: a child job's own runspace may report
+                                        # broken even when the parent session momentarily still
+                                        # reads Opened. Guarded -- the Runspace member is not on
+                                        # every job type.
+                                        foreach ($cj in @($job.ChildJobs)) {
+                                            $cjRs = $null
+                                            try { $cjRs = $cj.Runspace } catch {}
+                                            if ($cjRs -and "$($cjRs.RunspaceStateInfo.State)" -in @('Broken', 'Closed', 'Disconnected', 'Closing')) { $jobChannelBroken = $true; break }
+                                        }
+                                    }
+                                    if ($jobChannelBroken -and -not $SuppressLog) {
+                                        Write-Log "$VmName`: Job '$DisplayName' terminal failure reclassified as channel-broken via runspace state (state=$rsState avail=$rsAvail); abandoning the job instead of disposing it to avoid a late disposed-job callback crash." -LogOnly
+                                    }
+                                }
+                                catch {}
+                            }
                         }
                         if ($jobTimedOut) {
                             Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
