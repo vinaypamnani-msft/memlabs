@@ -1,0 +1,383 @@
+{
+  "vmOptions": {
+    "prefix": "PL-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "pushlab.sandwich.lab",
+    "domainNetBiosName": "PUSHLAB",
+    "adminName": "admin",
+    "network": "10.66.10.0",
+    "timeZone": "Central Standard Time",
+    "locale": "en-US"
+  },
+  "domainDefaults": {
+    "DeploymentType": "CAS and Primary",
+    "CMVersion": "2509",
+    "DomainName": "pushlab.sandwich.lab",
+    "Network": "10.66.10.0",
+    "DefaultClientOS": "Windows 11 25H2",
+    "DefaultServerOS": "Server 2025",
+    "DefaultSqlVersion": "SQL Server 2022",
+    "UseDynamicMemory": true,
+    "IncludeClients": true,
+    "IncludeSSMSOnNONSQL": true
+  },
+  "pkiOptions": {
+    "EnablePKI": true,
+    "IssuingCAVM": "HOAGIE",
+    "UseOfflineRoot": true,
+    "OfflineRootCAVM": "PROVOLONE"
+  },
+  "cmOptions": {
+    "version": "2509",
+    "install": true,
+    "pushClientToDomainMembers": true,
+    "EVALVersion": false,
+    "UsePKI": true,
+    "EnableBLM": true,
+    "PrePopulateObjects": true,
+    "OfflineSCP": false,
+    "OfflineSUP": false
+  },
+  "virtualMachines": [
+    {
+      "vmName": "HOAGIE",
+      "role": "DC",
+      "operatingSystem": "Server 2025",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "InstallCA": true,
+      "UseOfflineRoot": true,
+      "ForestTrust": "NONE"
+    },
+    {
+      "vmName": "PROVOLONE",
+      "role": "StandaloneRootCA",
+      "operatingSystem": "Server 2022 November 2024",
+      "memory": "2GB",
+      "virtualProcs": 2
+    },
+    {
+      "vmName": "PANINI",
+      "role": "FileServer",
+      "operatingSystem": "Server 2025",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "600GB",
+        "F": "200GB"
+      },
+      "dynamicMinRam": "3GB"
+    },
+    {
+      "vmName": "REUBEN",
+      "role": "CAS",
+      "operatingSystem": "Server 2025",
+      "memory": "8GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "BUN",
+      "siteName": "Top Bun CAS",
+      "remoteSQLVM": "PASTRAMI",
+      "installSUP": true,
+      "installRP": true,
+      "wsusDataBaseServer": "WID",
+      "wsusContentDir": "E:\\WSUS",
+      "InstallPatchMyPC": true,
+      "PatchMyPCFileServer": "PANINI"
+    },
+    {
+      "vmName": "PASTRAMI",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2025",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "OtherNode": "CORNED",
+      "fileServerVM": "PANINI",
+      "ClusterName": "DELI",
+      "AlwaysOnGroupName": "BUN Availability Group",
+      "AlwaysOnListenerName": "MUSTARD",
+      "SqlServiceAccount": "DeliSvc",
+      "SqlAgentAccount": "DeliAgent",
+      "installRP": false,
+      "InstallSMSProv": false
+    },
+    {
+      "vmName": "CORNED",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2025",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "DeliSvc",
+      "SqlAgentAccount": "DeliAgent"
+    },
+    {
+      "vmName": "REUBEN-P",
+      "role": "PassiveSite",
+      "operatingSystem": "Server 2025",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "siteCode": "BUN",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "remoteContentLibVM": "PANINI"
+    },
+    {
+      "vmName": "MELT",
+      "role": "Primary",
+      "operatingSystem": "Server 2022",
+      "memory": "10GB",
+      "virtualProcs": 8,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "network": "10.66.11.0",
+      "parentSiteCode": "BUN",
+      "siteCode": "PAT",
+      "siteName": "Patty Primary",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "remoteSQLVM": "RYE",
+      "installSUP": true,
+      "installRP": true,
+      "wsusDataBaseServer": "RYE",
+      "wsusContentDir": "E:\\WSUS"
+    },
+    {
+      "vmName": "RYE",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2019",
+      "memory": "8GB",
+      "virtualProcs": 8,
+      "network": "10.66.11.0",
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "RYEINST",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "2433",
+      "additionalDisks": {
+        "E": "200GB"
+      },
+      "InstallRP": false,
+      "InstallSMSProv": false
+    },
+    {
+      "vmName": "MELT-P",
+      "role": "PassiveSite",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "network": "10.66.11.0",
+      "siteCode": "PAT",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "remoteContentLibVM": "PANINI"
+    },
+    {
+      "vmName": "PATTYDP",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022 21H2 February 2024",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "network": "10.66.13.0",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "PAT",
+      "enablePullDP": true,
+      "pullDPSourceDP": "MELT"
+    },
+    {
+      "vmName": "PICKLE",
+      "role": "Secondary",
+      "operatingSystem": "Server 2022 November 2024",
+      "memory": "8GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "network": "10.66.12.0",
+      "parentSiteCode": "PAT",
+      "siteCode": "TOP",
+      "siteName": "Pickle Secondary",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "installSUP": true,
+      "wsusContentDir": "E:\\WSUS",
+      "additionalDisks": {
+        "E": "250GB"
+      }
+    },
+    {
+      "vmName": "OREGANO",
+      "role": "Proxy",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "1GB",
+      "virtualProcs": 1
+    },
+    {
+      "vmName": "SOURDOUGH",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 25H2",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "network": "10.66.11.0",
+      "pushClient": "PAT",
+      "installOffice": "Current",
+      "useProxy": true,
+      "BitLocker": true,
+      "dynamicMinRam": "2GB",
+      "domainUser": "user1"
+    },
+    {
+      "vmName": "CIABATTA",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 1909 (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "network": "10.66.11.0",
+      "pushClient": "PAT",
+      "useFakeWSUSServer": true,
+      "domainUser": "user2"
+    },
+    {
+      "vmName": "FOCACCIA",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 24H2",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "network": "10.66.12.0",
+      "pushClient": "TOP",
+      "BitLocker": true,
+      "domainUser": "user3"
+    },
+    {
+      "vmName": "BAGUETTE",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 Latest (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "network": "10.66.12.0",
+      "pushClient": "TOP",
+      "useProxy": true
+    },
+    {
+      "vmName": "PRETZEL",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 Latest",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "network": "10.66.13.0",
+      "pushClient": "PAT",
+      "installOffice": "Current",
+      "domainUser": "user4"
+    },
+    {
+      "vmName": "KAISER",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 Latest (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "network": "10.66.13.0",
+      "pushClient": "PAT"
+    },
+    {
+      "vmName": "BRIOCHE",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 24H2",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "network": "10.66.14.0",
+      "pushClient": "TOP",
+      "BitLocker": true
+    },
+    {
+      "vmName": "CROUTON",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 Latest (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "network": "10.66.14.0",
+      "pushClient": false,
+      "useFakeWSUSServer": true
+    },
+    {
+      "vmName": "PITA",
+      "role": "LinuxClient",
+      "operatingSystem": "Ubuntu Desktop 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "network": "10.66.14.0"
+    },
+    {
+      "vmName": "CHALLAH",
+      "role": "InternetClient",
+      "operatingSystem": "Windows 11 24H2",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "useFakeWSUSServer": true
+    },
+    {
+      "vmName": "BOOT1",
+      "role": "OSDClient",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2"
+    }
+  ]
+}
