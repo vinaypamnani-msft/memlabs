@@ -669,9 +669,14 @@ function Add-NewVMForRole {
     #   client OS DomainMember        -> PushCMClientToClients
     #   server OS DomainMember (+SQL) -> PushCMClientToServers
     #   site system roles             -> PushCMClientToSiteSystems
+    # Use the normalized role ($actualRoleName) here, NOT the raw $Role: the
+    # role menu passes "DomainMember (Client)" / "DomainMember (Server)" /
+    # "SqlServer", all of which normalize to "DomainMember". Gating on the raw
+    # $Role silently skipped pushClient for every client (the "(Client)" suffix
+    # made '$role -eq DomainMember' false), so the property never appeared.
     $siteSystemRoles = @('Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
-    if ($role -eq 'DomainMember' -or $role -in $siteSystemRoles) {
-        if ($role -in $siteSystemRoles) {
+    if ($actualRoleName -eq 'DomainMember' -or $actualRoleName -in $siteSystemRoles) {
+        if ($actualRoleName -in $siteSystemRoles) {
             $defaultKey = 'PushCMClientToSiteSystems'
         }
         else {
