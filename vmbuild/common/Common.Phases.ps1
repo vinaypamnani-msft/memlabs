@@ -1552,6 +1552,23 @@ function Wait-Phase {
 
     $StartTime = $(get-date)
 
+    # A DC/CAS job failure aborts the ENTIRE phase (Stop-Job on every in-flight
+    # job) ONLY for the foundational deployment phases (2-9), where dependent VMs
+    # genuinely cannot proceed without the DC/CAS. The per-VM fan-out passes --
+    # phase 10 (deploy-time maintenance), the standalone "Maintenance" startup
+    # pass, and phase 11 (validation) -- only apply idempotent per-VM fixes / run
+    # checks, so a single VM's failure (e.g. one fix erroring on the CAS) must NOT
+    # cut off every other VM. In those passes each VM stands on its own and is
+    # marked failed individually.
+    $phaseStr = "$Phase"
+    $phaseStopsOnCritFailure = $false
+    if ($phaseStr -ne "Maintenance" -and $phaseStr -ne "10" -and $phaseStr -ne "11") {
+        $phaseNum = 0
+        if ([int]::TryParse($phaseStr, [ref]$phaseNum) -and $phaseNum -ge 2) {
+            $phaseStopsOnCritFailure = $true
+        }
+    }
+
     try {
 
         Set-PS7ProgressWidth # Refresh progress bar width in case the terminal was resized
@@ -1923,8 +1940,9 @@ function Wait-Phase {
                     # Skip warning/error items already displayed while the job was running
                     if ($outputIndex -le $alreadyShown -and $OutputObject.LogLevel -ge 2) {
                         # DC/CAS failure still needs to stop the phase even if already displayed.
-                        # Exception: Phase 11 is validation -- continue so we collect every problem.
-                        if ($OutputObject.LogLevel -eq 3 -and $phase -ge 2 -and $phase -ne 11 -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) {
+                        # Only for foundational deploy phases (2-9); maintenance (10 /
+                        # "Maintenance") and validation (11) never abort their siblings.
+                        if ($OutputObject.LogLevel -eq 3 -and $phaseStopsOnCritFailure -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) {
                             $critRole = if ($jobName.Contains("[DC]")) { "DC" } else { "CAS" }
                             Write-RedX "$critRole failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try { $jobs | Stop-Job } catch {}
@@ -1936,7 +1954,7 @@ function Wait-Phase {
 
                     if ($OutputObject.LogLevel -eq 3) {
                         Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
-                        if ($phase -ge 2 -and $phase -ne 11 -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) {
+                        if ($phaseStopsOnCritFailure -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) {
                             $critRole = if ($jobName.Contains("[DC]")) { "DC" } else { "CAS" }
                             Write-RedX "$critRole failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try {
