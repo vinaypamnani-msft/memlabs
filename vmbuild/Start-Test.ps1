@@ -85,9 +85,217 @@ param (
             $WordToComplete = $WordToComplete -replace '''',''
             return $newArgument | Where-Object { $_ -match $WordToComplete }
         })]        
-    [string]$serverVersion
+    [string]$serverVersion,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Enable BitLocker Management (BLM) on the site + a BitLocker client", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Enable BitLocker Management (BLM) on the site + a BitLocker client", ParameterSetName = 'TestName')]
+    [switch]$EnableBLM,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Add a Proxy server and route Windows clients through it", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Add a Proxy server and route Windows clients through it", ParameterSetName = 'TestName')]
+    [switch]$EnableProxy,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Two-tier PKI: issuing CA on the DC + offline standalone root CA", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Two-tier PKI: issuing CA on the DC + offline standalone root CA", ParameterSetName = 'TestName')]
+    [switch]$TwoTierPKI,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Deploy Microsoft 365 Apps (Office) to Windows clients", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Deploy Microsoft 365 Apps (Office) to Windows clients", ParameterSetName = 'TestName')]
+    [switch]$Office,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Enable BLM + Proxy + Two-tier PKI + Office together", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Enable BLM + Proxy + Two-tier PKI + Office together", ParameterSetName = 'TestName')]
+    [switch]$TheWorks
 )
 
+
+# ============================================================
+# Feature override helpers (-EnableBLM / -EnableProxy / -TwoTierPKI / -Office / -TheWorks)
+# Each mutates the in-memory config (PSCustomObject from ConvertFrom-Json) BEFORE it is
+# written to c:\temp and handed to New-Lab.ps1, so any selected test can opt into these
+# features without maintaining a separate config file.
+# ============================================================
+function Get-UniqueVmName {
+    param([object]$Config, [string]$Base)
+    $existing = @($Config.virtualMachines | ForEach-Object { $_.vmName })
+    if ($existing -notcontains $Base) { return $Base }
+    for ($i = 2; $i -le 99; $i++) {
+        $candidate = "$Base$i"
+        if ($existing -notcontains $candidate) { return $candidate }
+    }
+    return "$Base$(Get-Random -Minimum 100 -Maximum 999)"
+}
+
+function Get-CmOptionTargets {
+    # cmOptions can live at the root (test configs) and/or on the top-level CAS/Primary
+    # site-server VM (post-migration). Return every cmOptions object so toggles apply to both.
+    param([object]$Config)
+    $targets = @()
+    if ($Config.cmOptions) { $targets += $Config.cmOptions }
+    foreach ($vm in $Config.virtualMachines) {
+        if ($vm.cmOptions -and ($vm.role -eq 'CAS' -or $vm.role -eq 'Primary') -and -not $vm.parentSiteCode) {
+            $targets += $vm.cmOptions
+        }
+    }
+    return @($targets)
+}
+
+function Set-CmOption {
+    param([object]$Config, [string]$Name, $Value)
+    $targets = Get-CmOptionTargets -Config $Config
+    foreach ($t in $targets) { $t | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force }
+    return ($targets.Count -gt 0)
+}
+
+function Resolve-ServerOS {
+    # Reuse a known-valid server OS string already present in the config so validation passes.
+    param([object]$Config)
+    if ($Config.domainDefaults.DefaultServerOS) { return $Config.domainDefaults.DefaultServerOS }
+    $dc = $Config.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+    if ($dc -and $dc.operatingSystem) { return $dc.operatingSystem }
+    return "Server 2022"
+}
+
+function Resolve-Win11OS {
+    param([object]$Config)
+    if ($Config.domainDefaults.DefaultClientOS -and $Config.domainDefaults.DefaultClientOS -like 'Windows 11*') {
+        return $Config.domainDefaults.DefaultClientOS
+    }
+    $existing = $Config.virtualMachines | Where-Object { $_.operatingSystem -like 'Windows 11*' } | Select-Object -First 1
+    if ($existing) { return $existing.operatingSystem }
+    return "Windows 11 Latest"
+}
+
+function Get-WindowsClient {
+    param([object]$Config)
+    return @($Config.virtualMachines | Where-Object { $_.role -eq 'DomainMember' -and ($_.operatingSystem -like 'Windows*') })
+}
+
+function Add-DomainMemberClient {
+    # Append a new Gen2 Windows 11 DomainMember client and return it.
+    param([object]$Config, [string]$BaseName = 'TESTCLI')
+    $name = Get-UniqueVmName -Config $Config -Base $BaseName
+    $os = Resolve-Win11OS -Config $Config
+    $vm = [PSCustomObject][ordered]@{
+        vmName          = $name
+        role            = 'DomainMember'
+        operatingSystem = $os
+        memory          = '4GB'
+        virtualProcs    = 2
+        tpmEnabled      = $true
+        vmGeneration    = '2'
+    }
+    $Config.virtualMachines = @($Config.virtualMachines) + $vm
+    Write-Host "    [+] Added DomainMember client '$name' ($os)" -ForegroundColor DarkCyan
+    return $vm
+}
+
+function Enable-TwoTierPKI {
+    param([object]$Config)
+    $dc = $Config.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+    if (-not $dc) {
+        Write-Host "  [PKI] No DC in config - cannot enable PKI; skipping" -ForegroundColor Yellow
+        return
+    }
+    # Offline Root CA host (StandaloneRootCA, workgroup)
+    $root = $Config.virtualMachines | Where-Object { $_.role -eq 'StandaloneRootCA' } | Select-Object -First 1
+    if (-not $root) {
+        $rootName = Get-UniqueVmName -Config $Config -Base 'ROOTCA'
+        $root = [PSCustomObject][ordered]@{
+            vmName          = $rootName
+            role            = 'StandaloneRootCA'
+            operatingSystem = (Resolve-ServerOS -Config $Config)
+            memory          = '2GB'
+            virtualProcs    = 2
+        }
+        $Config.virtualMachines = @($Config.virtualMachines) + $root
+        Write-Host "    [+] Added StandaloneRootCA VM '$rootName'" -ForegroundColor DarkCyan
+    }
+    $pki = [PSCustomObject][ordered]@{
+        EnablePKI       = $true
+        IssuingCAVM     = $dc.vmName
+        UseOfflineRoot  = $true
+        OfflineRootCAVM = $root.vmName
+    }
+    $Config | Add-Member -NotePropertyName 'pkiOptions' -NotePropertyValue $pki -Force
+    $dc | Add-Member -NotePropertyName 'InstallCA'      -NotePropertyValue $true -Force
+    $dc | Add-Member -NotePropertyName 'UseOfflineRoot' -NotePropertyValue $true -Force
+    [void](Set-CmOption -Config $Config -Name 'UsePKI' -Value $true)
+    Write-Host "  [PKI] Two-tier PKI: IssuingCA=$($dc.vmName), OfflineRoot=$($root.vmName); cmOptions.UsePKI=true" -ForegroundColor Green
+}
+
+function Enable-BLM {
+    param([object]$Config)
+    if (-not (Set-CmOption -Config $Config -Name 'EnableBLM' -Value $true)) {
+        Write-Host "  [BLM] No cmOptions (no ConfigMgr) in this config - skipping BLM" -ForegroundColor Yellow
+        return
+    }
+    # Client BitLocker needs Gen2 + TPM => target Windows 11 clients only.
+    $win11 = @(Get-WindowsClient -Config $Config | Where-Object { $_.operatingSystem -like 'Windows 11*' })
+    if ($win11.Count -eq 0) {
+        $win11 = @(Add-DomainMemberClient -Config $Config -BaseName 'BLMCLI')
+    }
+    foreach ($vm in $win11) {
+        $vm | Add-Member -NotePropertyName 'tpmEnabled'   -NotePropertyValue $true -Force
+        $vm | Add-Member -NotePropertyName 'vmGeneration' -NotePropertyValue '2'   -Force
+        $vm | Add-Member -NotePropertyName 'BitLocker'    -NotePropertyValue $true -Force
+    }
+    Write-Host "  [BLM] cmOptions.EnableBLM=true; BitLocker on: $(@($win11 | ForEach-Object { $_.vmName }) -join ', ')" -ForegroundColor Green
+}
+
+function Enable-Proxy {
+    param([object]$Config)
+    $proxy = $Config.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    if (-not $proxy) {
+        $proxyName = Get-UniqueVmName -Config $Config -Base 'PROXY'
+        $proxy = [PSCustomObject][ordered]@{
+            vmName          = $proxyName
+            role            = 'Proxy'
+            operatingSystem = 'Ubuntu Server 24.04 LTS'
+            osFamily        = 'Linux'
+            memory          = '1GB'
+            virtualProcs    = 1
+        }
+        $Config.virtualMachines = @($Config.virtualMachines) + $proxy
+        Write-Host "    [+] Added Proxy VM '$proxyName' (Ubuntu Server 24.04 LTS)" -ForegroundColor DarkCyan
+    }
+    $clients = @(Get-WindowsClient -Config $Config)
+    if ($clients.Count -eq 0) {
+        $clients = @(Add-DomainMemberClient -Config $Config -BaseName 'PROXYCLI')
+    }
+    foreach ($vm in $clients) { $vm | Add-Member -NotePropertyName 'useProxy' -NotePropertyValue $true -Force }
+    Write-Host "  [Proxy] Proxy=$($proxy.vmName); useProxy=true on: $(@($clients | ForEach-Object { $_.vmName }) -join ', ')" -ForegroundColor Green
+}
+
+function Enable-Office {
+    param([object]$Config)
+    # installOffice validation requires PrePopulateObjects enabled.
+    if (-not (Set-CmOption -Config $Config -Name 'PrePopulateObjects' -Value $true)) {
+        Write-Host "  [Office] No cmOptions (no ConfigMgr) in this config - skipping Office" -ForegroundColor Yellow
+        return
+    }
+    $clients = @(Get-WindowsClient -Config $Config)
+    if ($clients.Count -eq 0) {
+        $clients = @(Add-DomainMemberClient -Config $Config -BaseName 'OFFCLI')
+    }
+    foreach ($vm in $clients) { $vm | Add-Member -NotePropertyName 'installOffice' -NotePropertyValue 'Current' -Force }
+    Write-Host "  [Office] cmOptions.PrePopulateObjects=true; installOffice=Current on: $(@($clients | ForEach-Object { $_.vmName }) -join ', ')" -ForegroundColor Green
+}
+
+function Set-FeatureOverrides {
+    # Apply the -EnableBLM / -EnableProxy / -TwoTierPKI / -Office / -TheWorks switches to a config.
+    param([object]$Config, [string]$ConfigName)
+    $applyPKI    = $TwoTierPKI -or $TheWorks
+    $applyBLM    = $EnableBLM  -or $TheWorks
+    $applyProxy  = $EnableProxy -or $TheWorks
+    $applyOffice = $Office     -or $TheWorks
+    if (-not ($applyPKI -or $applyBLM -or $applyProxy -or $applyOffice)) { return }
+    Write-Host "Applying feature overrides to $ConfigName" -ForegroundColor Cyan
+    if ($applyPKI)    { Enable-TwoTierPKI -Config $Config }
+    if ($applyBLM)    { Enable-BLM -Config $Config }
+    if ($applyProxy)  { Enable-Proxy -Config $Config }
+    if ($applyOffice) { Enable-Office -Config $Config }
+}
 
 function Run-Test {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '',
@@ -126,6 +334,7 @@ function Run-Test {
                 }
             }    
         }
+        Set-FeatureOverrides -Config $config -ConfigName $outputFile
         $domainName = $config.vmOptions.domainName
         $global:removedomains += $domainName
         $global:removedomains = @($global:removedomains | Select-Object -Unique)
