@@ -2161,7 +2161,63 @@ function Test-Configuration {
             Write-Progress2 -Activity "Validating Configuration" -Status "Adding Existing" -PercentComplete 90
             Add-ExistingVMsToDeployConfig -config $deployConfig
 
+            # Guard: don't silently stack NEW VMs onto a domain whose core
+            # infrastructure never finished deploying + validating. The failed
+            # first deploy that leaves a half-built DC / site server (e.g. a
+            # Primary with no SQL installed) is exactly the state that produces
+            # confusing downstream failures when more VMs are added on top of
+            # it. Add-ExistingVMsToDeployConfig has just folded the existing
+            # (hidden) VMs into the config, so their persisted lastPhaseComplete
+            # is available here. Phase 11 (validation) stamps lastPhaseComplete
+            # = 11, so a critical existing VM below 11 means it never completed.
+            # Scoped to DC / site servers (the backbone that reliably reaches 11
+            # -- powered-off / role-special VMs like OSDClient / StandaloneRootCA
+            # are intentionally excluded) and only when there are genuinely NEW
+            # (non-hidden) VMs being added. This is a WARNING (acknowledge-and-
+            # continue), not a hard failure, so a deliberate "I know it's broken,
+            # extend anyway" / resume-and-add still works; flip -Warning to
+            # -Failure to make it blocking.
+            try {
+                $newVMsBeingAdded = @($deployConfig.virtualMachines | Where-Object { -not $_.hidden })
+                if ($newVMsBeingAdded.Count -gt 0) {
+                    $criticalRoles = @('DC', 'CAS', 'Primary', 'Secondary')
+                    $existingCriticalVMs = @($deployConfig.virtualMachines | Where-Object { $_.hidden -and ($_.role -in $criticalRoles) })
+                    $currentBuildVersion = $Common.MemLabsVersion
+                    foreach ($criticalVM in $existingCriticalVMs) {
+                        $criticalNote = Get-VMNote -VMName $criticalVM.vmName
+                        if (-not $criticalNote) { continue }
+                        # Don't flag LEGACY VMs. Phase 11 (validation) didn't exist
+                        # in older MemLabs builds, so a VM deployed by an older build
+                        # could never reach lastPhaseComplete=11 and must not be
+                        # treated as "incomplete". Skip the check when the existing
+                        # VM was last deployed by an OLDER build than the one running
+                        # now. memLabsVersion is the completed-at stamp (set with
+                        # -UpdateVersion); memLabsDeployVersion is written on every
+                        # note touch, so it's the fallback -- which means a CURRENT-
+                        # build VM that failed before the version stamp (the real
+                        # footgun: a half-built Primary) still has the current build
+                        # in memLabsDeployVersion and is therefore still checked.
+                        # String -lt matches the YYMMDD.N comparison Set-VMNote's
+                        # own version-update path already uses.
+                        $criticalVer = if ($criticalNote.memLabsVersion) { $criticalNote.memLabsVersion } else { $criticalNote.memLabsDeployVersion }
+                        if ($currentBuildVersion -and $criticalVer -and ($criticalVer -lt $currentBuildVersion)) {
+                            Write-Log "Add-VM completeness pre-check: skipping legacy $($criticalVM.role) '$($criticalVM.vmName)' (deployed by older build $criticalVer < current $currentBuildVersion; predates Phase 11)." -LogOnly
+                            continue
+                        }
+                        $criticalPhase = if ($criticalNote.lastPhaseComplete) { [int]$criticalNote.lastPhaseComplete } else { 0 }
+                        if ($criticalPhase -lt 11) {
+                            $newNames = ($newVMsBeingAdded | Select-Object -ExpandProperty vmName) -join ', '
+                            Add-ValidationMessage -Message "Existing $($criticalVM.role) '$($criticalVM.vmName)' never finished deployment + validation (lastPhaseComplete=$criticalPhase, expected 11). Adding new VM(s) [$newNames] on top of an incomplete domain is not recommended -- the underlying deployment failed and stacking more VMs onto it will likely fail too. Finish/repair the existing deployment first (re-run it to completion, or remove + redeploy '$($criticalVM.vmName)'), then add the new VMs." -ReturnObject $return -Warning
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-Log "Add-VM completeness pre-check failed (non-fatal): $_" -LogOnly
+            }
+
             # Add thisParams
+
             $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
             $return.DeployConfig = $deployConfigEx
 
