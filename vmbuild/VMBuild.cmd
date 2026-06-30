@@ -46,42 +46,58 @@ REM Explicit gc runs in Invoke-Maintenance.ps1 instead.
 git config --local gc.auto 0 2>NUL
 
 REM ------------------------------------------------------------
-REM Detect if the current branch has been deleted from origin
-REM (e.g. a feature branch that was merged + pruned). If so,
-REM switch back to develop before pulling.
+REM Move the user back to develop when their current branch is either
+REM   (a) deleted from origin (a feature branch that was merged + pruned), or
+REM   (b) RETIRED: still on origin (kept for history/reference) but no longer
+REM       worked on. Add retired branch names to RETIRED_BRANCHES below,
+REM       each wrapped in semicolons, so anyone still sitting on one is
+REM       moved to develop without having to delete the branch from origin.
+REM       e.g. SET "RETIRED_BRANCHES=;feature/foo;feature/bar;"
 REM ------------------------------------------------------------
 git fetch --prune origin 2>NUL
 FOR /F "tokens=*" %%B IN ('git rev-parse --abbrev-ref HEAD 2^>NUL') DO SET CURBRANCH=%%B
-IF NOT "%CURBRANCH%"=="" (
-    IF /I NOT "%CURBRANCH%"=="develop" (
-        IF /I NOT "%CURBRANCH%"=="main" (
-            IF /I NOT "%CURBRANCH%"=="master" (
-                git ls-remote --exit-code --heads origin "%CURBRANCH%" >NUL 2>&1
-                IF ERRORLEVEL 1 (
-                    ECHO.
-                    ECHO ============================================================
-                    ECHO  Branch "%CURBRANCH%" no longer exists on origin.
-                    ECHO  Switching back to develop...
-                    ECHO ============================================================
-                    @ECHO ON
-                    git checkout develop
-                    @ECHO OFF
-                    IF ERRORLEVEL 1 (
-                        ECHO.
-                        ECHO WARNING: Failed to checkout develop. You may have uncommitted
-                        ECHO changes on "%CURBRANCH%". Resolve manually then re-run.
-                        ECHO Press any key to continue with current branch...
-                        PAUSE > NUL
-                    ) ELSE (
-                        @ECHO ON
-                        git pull
-                        @ECHO OFF
-                    )
-                )
-            )
-        )
-    )
+
+SET "RETIRED_BRANCHES=;feature/mouse-menu-support;"
+
+SET "SWITCHREASON="
+IF "%CURBRANCH%"=="" GOTO AfterBranchRedirect
+IF /I "%CURBRANCH%"=="develop" GOTO AfterBranchRedirect
+IF /I "%CURBRANCH%"=="main" GOTO AfterBranchRedirect
+IF /I "%CURBRANCH%"=="master" GOTO AfterBranchRedirect
+
+REM (a) current branch deleted from origin
+git ls-remote --exit-code --heads origin "%CURBRANCH%" >NUL 2>&1
+IF ERRORLEVEL 1 SET "SWITCHREASON=no longer exists on origin"
+
+REM (b) current branch retired but kept on origin
+IF NOT DEFINED SWITCHREASON (
+    ECHO %RETIRED_BRANCHES% | find /I ";%CURBRANCH%;" >NUL 2>&1
+    IF NOT ERRORLEVEL 1 SET "SWITCHREASON=has been merged to develop and retired"
 )
+
+IF NOT DEFINED SWITCHREASON GOTO AfterBranchRedirect
+
+ECHO.
+ECHO ============================================================
+ECHO  Branch "%CURBRANCH%" %SWITCHREASON%.
+ECHO  Switching back to develop...
+ECHO ============================================================
+@ECHO ON
+git checkout develop
+@ECHO OFF
+IF ERRORLEVEL 1 (
+    ECHO.
+    ECHO WARNING: Failed to checkout develop. You may have uncommitted
+    ECHO changes on "%CURBRANCH%". Resolve manually then re-run.
+    ECHO Press any key to continue with current branch...
+    PAUSE > NUL
+) ELSE (
+    @ECHO ON
+    git pull
+    @ECHO OFF
+)
+
+:AfterBranchRedirect
 
 REM ------------------------------------------------------------
 REM Clean up local branches whose remote tracking branch was pruned
