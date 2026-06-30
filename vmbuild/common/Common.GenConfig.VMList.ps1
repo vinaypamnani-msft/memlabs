@@ -306,6 +306,15 @@ function Select-Options {
                 continue MainLoop
             }
             "network" {
+                # Capture the VM's effective subnet (explicit per-VM network, else
+                # the default) and the current default BEFORE the change so we can
+                # recalculate pushClient for everything the move affects.
+                $oldDefault = $global:config.vmOptions.network
+                $oldEffective = $null
+                if ($property.vmName) {
+                    if ($property.network) { $oldEffective = $property.network } else { $oldEffective = $oldDefault }
+                }
+
                 if ($property.vmName) {
                     $network = Get-NetworkForVM -vm $property
                 }
@@ -318,6 +327,11 @@ function Select-Options {
                         $property.PsObject.Members.Remove("network")
                     }
                     #write-host2 -ForegroundColor Khaki "Not changing network as this is the default network."
+                    # Moving a VM back onto the default subnet still changes its
+                    # subnet, so recalc its (and, for a site server, its peers') push site.
+                    if ($property.vmName -and $network -and ($network -ne $oldEffective)) {
+                        Update-PushClientForNetworkChange -ChangedVM $property -OldNetwork $oldEffective -Config $global:config
+                    }
                     continue MainLoop
                 }
                 if ($network) {
@@ -327,6 +341,21 @@ function Select-Options {
                     else {
                         $property.network = $network
                     }
+                }
+                if ($property.vmName) {
+                    # Per-VM subnet change: recalc this VM's push site (keeping its
+                    # current value when it still fits) and -- when this VM is a
+                    # Primary/Secondary site server -- every VM on its old or new
+                    # subnet, since the site that owns those boundaries moved.
+                    if ($network -and ($network -ne $oldEffective)) {
+                        Update-PushClientForNetworkChange -ChangedVM $property -OldNetwork $oldEffective -Config $global:config
+                    }
+                }
+                elseif ($network -and ($network -ne $oldDefault) -and ($property.PSObject.Properties.Name -contains 'basePath')) {
+                    # The DEFAULT network (vmOptions.network) changed: every VM that
+                    # rides the default (no explicit network) just moved subnet, plus
+                    # any VM explicitly on the old/new default -- recalc them all.
+                    Update-PushClientForDefaultNetworkChange -OldDefault $oldDefault -Config $global:config
                 }
                 Get-AdditionalValidations -property $property -name $Name -CurrentValue $network
                 Get-TestResult -SuccessOnError | out-null

@@ -1567,6 +1567,176 @@ function Resolve-PushClientSite {
     return (@($eligible)[0]).SiteCode
 }
 
+function Get-PushClientSubnetLock {
+    <#
+    .SYNOPSIS
+    Returns the site code that OWNS a subnet because a Primary/Secondary site
+    server lives on it (in the config or already deployed), else $null. A site
+    server's own subnet maps to its boundary group unconditionally, so any
+    client there must push from that site. PS5.1-safe.
+    #>
+    param (
+        [Parameter(Mandatory = $false)] [string] $Subnet,
+        [Parameter(Mandatory = $false)] [object] $Config,
+        [Parameter(Mandatory = $false)] [string] $Domain,
+        [Parameter(Mandatory = $false)] [string] $ExcludeVmName,
+        [Parameter(Mandatory = $false)] [string] $DefaultNet
+    )
+    if (-not $Subnet) { return $null }
+    if ($Config -and $Config.virtualMachines) {
+        foreach ($o in $Config.virtualMachines) {
+            if ($ExcludeVmName -and $o.vmName -eq $ExcludeVmName) { continue }
+            if ($o.role -notin @('Primary', 'Secondary')) { continue }
+            if (-not $o.siteCode) { continue }
+            $on = $DefaultNet
+            if ($o.network) { $on = $o.network }
+            if ($on -eq $Subnet) { return $o.siteCode }
+        }
+    }
+    if ($Domain) {
+        try {
+            $svr = @(Get-List -Type VM -DomainName $Domain | Where-Object {
+                    $_.network -eq $Subnet -and $_.role -in @('Primary', 'Secondary') -and $_.siteCode -and
+                    (-not ($ExcludeVmName -and $_.vmName -eq $ExcludeVmName))
+                }) | Select-Object -First 1
+            if ($svr) { return $svr.siteCode }
+        }
+        catch {
+            Write-Log "Get-PushClientSubnetLock: deployed-site lookup failed for '$Subnet': $($_.Exception.Message)" -LogOnly -Warning
+        }
+    }
+    return $null
+}
+
+function Resolve-PushClientWithLock {
+    <#
+    .SYNOPSIS
+    Resolves a VM's pushClient honoring: explicit opt-out ($false) stays off; a
+    Primary/Secondary site server on the subnet LOCKS the value to its site
+    code; otherwise the VM's CURRENT value is kept when it is still a valid
+    eligible site ("prefer the current value if it still makes sense"); else
+    falls back to Resolve-PushClientSite. PS5.1-safe.
+    #>
+    param (
+        [Parameter(Mandatory = $true)] [object] $VM,
+        [Parameter(Mandatory = $false)] [object] $Config,
+        [Parameter(Mandatory = $false)] [string] $Domain,
+        [Parameter(Mandatory = $false)] [object] $EligibleSites,
+        [Parameter(Mandatory = $false)] [string] $DefaultNet
+    )
+    if (($VM.pushClient -is [bool]) -and ($VM.pushClient -eq $false)) { return $false }
+    $eligible = @($EligibleSites)
+    if (-not $eligible -or $eligible.Count -eq 0) { return $VM.pushClient }
+    $codes = @($eligible | ForEach-Object { $_.SiteCode })
+    $subnet = $DefaultNet
+    if ($VM.network) { $subnet = $VM.network }
+    $lock = Get-PushClientSubnetLock -Subnet $subnet -Config $Config -Domain $Domain -ExcludeVmName $VM.vmName -DefaultNet $DefaultNet
+    if ($lock) { return $lock }
+    if (($VM.pushClient -is [string]) -and $VM.pushClient -and ($codes -contains $VM.pushClient)) { return $VM.pushClient }
+    return (Resolve-PushClientSite -VM $VM -Config $Config -Domain $Domain -EligibleSites $eligible)
+}
+
+function Update-PushClientTargets {
+    # Re-resolve pushClient for each VM in $Targets via Resolve-PushClientWithLock
+    # and write back only when the value changes. The changed VM itself is updated
+    # silently; affected peers get a one-line note. PS5.1-safe.
+    param (
+        [Parameter(Mandatory = $false)] [object] $Targets,
+        [Parameter(Mandatory = $false)] [object] $ChangedVM,
+        [Parameter(Mandatory = $false)] [object] $Config,
+        [Parameter(Mandatory = $false)] [string] $Domain,
+        [Parameter(Mandatory = $false)] [object] $Eligible,
+        [Parameter(Mandatory = $false)] [string] $DefaultNet
+    )
+    foreach ($vm in @($Targets)) {
+        if (-not $vm) { continue }
+        if (-not ($vm.PSObject.Properties.Name -contains 'pushClient')) { continue }
+        if (($vm.pushClient -is [bool]) -and ($vm.pushClient -eq $false)) { continue }
+        $new = Resolve-PushClientWithLock -VM $vm -Config $Config -Domain $Domain -EligibleSites $Eligible -DefaultNet $DefaultNet
+        if ($null -ne $new -and $vm.pushClient -ne $new) {
+            $vm.pushClient = $new
+            if (-not $ChangedVM -or ($vm -ne $ChangedVM)) {
+                $sn = $DefaultNet
+                if ($vm.network) { $sn = $vm.network }
+                Write-Host2 -ForegroundColor Khaki "  Recalculated $($vm.vmName) push site -> $new (subnet $sn)."
+            }
+        }
+    }
+}
+
+function Update-PushClientForNetworkChange {
+    <#
+    .SYNOPSIS
+    Recalculate pushClient after a single VM's network changed in genconfig.
+    The moved VM is always re-resolved (its current value is kept when it still
+    makes sense for the new subnet). When the moved VM is a Primary/Secondary
+    SITE SERVER, every VM whose effective subnet is the site server's OLD or NEW
+    network (an explicit per-VM network OR the default vmOptions.network) is
+    re-resolved too, because moving a site server changes which site owns those
+    subnets' boundary groups. PS5.1-safe.
+    #>
+    param (
+        [Parameter(Mandatory = $true)] [object] $ChangedVM,
+        [Parameter(Mandatory = $false)] [string] $OldNetwork,
+        [Parameter(Mandatory = $true)] [object] $Config,
+        [Parameter(Mandatory = $false)] [string] $Domain
+    )
+    if (-not $Config -or -not $Config.virtualMachines) { return }
+    if (-not $ChangedVM) { return }
+    if (-not $Domain -and $Config.vmOptions) { $Domain = $Config.vmOptions.domainName }
+    $eligible = @(Get-EligiblePushSites -Config $Config -Domain $Domain)
+    if (-not $eligible -or $eligible.Count -eq 0) { return }
+    $defaultNet = $null
+    if ($Config.vmOptions) { $defaultNet = $Config.vmOptions.network }
+    $pushRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+
+    $targets = @($ChangedVM)
+    if ($ChangedVM.role -in @('Primary', 'Secondary')) {
+        $newNet = $defaultNet
+        if ($ChangedVM.network) { $newNet = $ChangedVM.network }
+        $affected = @($OldNetwork, $newNet) | Where-Object { $_ } | Select-Object -Unique
+        foreach ($vm in $Config.virtualMachines) {
+            if ($vm -eq $ChangedVM) { continue }
+            if ($vm.role -notin $pushRoles) { continue }
+            $vn = $defaultNet
+            if ($vm.network) { $vn = $vm.network }
+            if ($vn -and ($affected -contains $vn)) { $targets += $vm }
+        }
+    }
+    Update-PushClientTargets -Targets $targets -ChangedVM $ChangedVM -Config $Config -Domain $Domain -Eligible $eligible -DefaultNet $defaultNet
+}
+
+function Update-PushClientForDefaultNetworkChange {
+    <#
+    .SYNOPSIS
+    Recalculate pushClient after the DEFAULT network (vmOptions.network) changed.
+    Every VM that rides the default (no explicit per-VM network) just moved
+    subnet, so re-resolve every push-capable VM whose effective subnet is the
+    OLD or NEW default. PS5.1-safe.
+    #>
+    param (
+        [Parameter(Mandatory = $false)] [string] $OldDefault,
+        [Parameter(Mandatory = $true)] [object] $Config,
+        [Parameter(Mandatory = $false)] [string] $Domain
+    )
+    if (-not $Config -or -not $Config.virtualMachines) { return }
+    if (-not $Domain -and $Config.vmOptions) { $Domain = $Config.vmOptions.domainName }
+    $eligible = @(Get-EligiblePushSites -Config $Config -Domain $Domain)
+    if (-not $eligible -or $eligible.Count -eq 0) { return }
+    $newDefault = $null
+    if ($Config.vmOptions) { $newDefault = $Config.vmOptions.network }
+    $affected = @($OldDefault, $newDefault) | Where-Object { $_ } | Select-Object -Unique
+    $pushRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    $targets = @()
+    foreach ($vm in $Config.virtualMachines) {
+        if ($vm.role -notin $pushRoles) { continue }
+        $vn = $newDefault
+        if ($vm.network) { $vn = $vm.network }
+        if ($vn -and ($affected -contains $vn)) { $targets += $vm }
+    }
+    Update-PushClientTargets -Targets $targets -ChangedVM $null -Config $Config -Domain $Domain -Eligible $eligible -DefaultNet $newDefault
+}
+
 
 function Get-SQLAOConfig {
     [CmdletBinding()]

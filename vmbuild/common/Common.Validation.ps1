@@ -433,11 +433,22 @@ function Test-ValidCmOptions {
             foreach ($net in $bySubnet.Keys) {
                 $vmsOnNet = @($bySubnet[$net])
                 $distinct = @($vmsOnNet | ForEach-Object { $_.pushClient } | Select-Object -Unique)
-                if ($distinct.Count -gt 1) {
-                    # Coerce all VMs on the subnet to the site that hosts that
-                    # subnet's own site server if present, else the first seen.
-                    $ownSite = $eligiblePush | Where-Object { $_.Network -eq $net } | Select-Object -First 1
-                    $target = if ($ownSite) { $ownSite.SiteCode } else { $distinct[0] }
+                # A subnet that hosts its own Primary/Secondary site server is
+                # bound to that site (the site server's BG always covers its
+                # subnet), so EVERY pushed VM there must target it -- even a lone
+                # mis-set client (distinct count 1).
+                $ownSite = $eligiblePush | Where-Object { $_.Network -eq $net } | Select-Object -First 1
+                if ($ownSite) {
+                    $target = $ownSite.SiteCode
+                    $offenders = @($vmsOnNet | Where-Object { $_.pushClient -ne $target })
+                    if ($offenders.Count -gt 0) {
+                        foreach ($vm in $offenders) { $vm.pushClient = $target }
+                        Add-ValidationMessage -Message "Client Push Validation: subnet $net hosts site server $target; $($offenders.vmName -join ', ') were repointed to push from $target (a site server's subnet maps to its own boundary group)." -ReturnObject $ReturnObject -Warning
+                    }
+                }
+                elseif ($distinct.Count -gt 1) {
+                    # No site server on this subnet: coerce all to the first seen.
+                    $target = $distinct[0]
                     foreach ($vm in $vmsOnNet) { $vm.pushClient = $target }
                     Add-ValidationMessage -Message "Client Push Validation: VMs on subnet $net targeted different sites ($($distinct -join ', ')). A subnet maps to one boundary group; all were set to push from $target." -ReturnObject $ReturnObject -Warning
                 }

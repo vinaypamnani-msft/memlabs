@@ -597,12 +597,15 @@ Function Get-PushClientSiteMenu {
     plus "No".
 
     Subnet rules (a subnet maps to exactly one boundary/site):
-      - If the VM's subnet is ALREADY in use by an EXISTING (deployed / hidden)
-        VM, the subnet's boundary is committed -- the choice is LOCKED to that
-        existing site (only that site or "No" for this VM).
+      - If a Primary/Secondary SITE SERVER lives on the VM's subnet (config or
+        deployed), that site owns the subnet's boundary group, so the choice is
+        LOCKED to that site server's site code (only it or "No").
+      - Else if the subnet is ALREADY in use by an EXISTING (deployed / hidden)
+        client, the subnet's boundary is committed -- LOCKED to that site.
       - Otherwise (the subnet only has new/editable VMs) every eligible site is
-        offered, and picking a site CASCADES to all other editable VMs on the
-        same subnet so the whole subnet moves together. "No" stays per-VM.
+        offered, and picking a site CASCADES to the other editable VMs on the
+        SAME subnet (and only that subnet) so the whole subnet moves together.
+        "No" stays per-VM.
 
     Sets $property.pushClient to the site code string or $false.
     #>
@@ -639,8 +642,36 @@ Function Get-PushClientSiteMenu {
     # If so the boundary is committed and the assignment is not changeable.
     $lockedSite = $null
     if ($subnet) {
-        # (a) Hidden peers folded into the config (deploy-assembly context).
+        # (0) A Primary/Secondary SITE SERVER on this subnet owns the subnet's
+        #     boundary group unconditionally (sitesAndNetworks maps each site
+        #     server's own subnet to its site), so a client on this subnet can
+        #     ONLY push from that site -- the site server's BG always exists.
+        #     This catches a brand-new, not-yet-deployed site server, which the
+        #     existing/deployed-peer checks (a)/(b) below would miss.
         if ($config -and $config.virtualMachines) {
+            foreach ($ovm in $config.virtualMachines) {
+                if ($ovm -eq $property) { continue }
+                if ($ovm.role -notin @('Primary', 'Secondary')) { continue }
+                if (-not $ovm.siteCode) { continue }
+                $oNet = if ($ovm.network) { $ovm.network } else { $config.vmOptions.network }
+                if ($oNet -ne $subnet) { continue }
+                $lockedSite = $ovm.siteCode
+                break
+            }
+        }
+        if (-not $lockedSite -and $domain) {
+            try {
+                $svrOnSubnet = @(Get-List -Type VM -DomainName $domain | Where-Object {
+                        $_.network -eq $subnet -and $_.role -in @('Primary', 'Secondary') -and $_.siteCode
+                    }) | Select-Object -First 1
+                if ($svrOnSubnet) { $lockedSite = $svrOnSubnet.siteCode }
+            }
+            catch {
+                Write-Log "Get-PushClientSiteMenu: site-server subnet lookup failed for '$subnet': $($_.Exception.Message)" -LogOnly -Warning
+            }
+        }
+        # (a) Hidden client peers folded into the config (deploy-assembly context).
+        if (-not $lockedSite -and $config -and $config.virtualMachines) {
             foreach ($ovm in $config.virtualMachines) {
                 if ($ovm -eq $property) { continue }
                 if ($thisVmName -and $ovm.vmName -and ($ovm.vmName -eq $thisVmName)) { continue }
@@ -708,13 +739,18 @@ Function Get-PushClientSiteMenu {
         # locked subnet only ever offers its single existing site. Peers set to
         # "No" are left off.
         if (-not $lockedSite -and $subnet -and $config -and $config.virtualMachines) {
+            # Cascade ONLY to VMs on this VM's exact subnet. Compare the
+            # normalized, non-empty subnet string so the cascade can never spill
+            # onto a VM whose subnet differs (or cannot be determined).
+            $thisNet = "$subnet".Trim()
             foreach ($ovm in $config.virtualMachines) {
                 if ($ovm -eq $property) { continue }
                 if ($thisVmName -and $ovm.vmName -and ($ovm.vmName -eq $thisVmName)) { continue }
                 if ($ovm.hidden -eq $true) { continue }
                 if ($ovm.role -notin $pushableRoles) { continue }
                 $oNet = if ($ovm.network) { $ovm.network } else { $config.vmOptions.network }
-                if ($oNet -ne $subnet) { continue }
+                if ([string]::IsNullOrWhiteSpace($oNet)) { continue }
+                if ("$oNet".Trim() -ne $thisNet) { continue }
                 # Don't flip an explicit "No" (boolean $false) back on.
                 if (($ovm.pushClient -is [bool]) -and ($ovm.pushClient -eq $false)) { continue }
                 if ($ovm.pushClient -ne $selection) {
