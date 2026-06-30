@@ -1,4 +1,5 @@
-﻿########################
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+########################
 ### Remove Functions ###
 ########################
 
@@ -22,7 +23,13 @@ function Remove-VirtualMachine {
         # removing the DC). Skip expensive per-client proxy
         # unconfiguration since all VMs are going away anyway.
         [Parameter()]
-        [switch] $RemovingDomain
+        [switch] $RemovingDomain,
+        # When true, skip the entire proxy cleanup block (client
+        # unconfiguration, host shortcuts, guest shortcuts). Used when
+        # removing VMs that never reached Phase 2+ (proxy was never
+        # installed or configured).
+        [Parameter()]
+        [switch] $SkipProxyCleanup
     )
 
     # Helper: retry Remove-Item with configurable attempts and delay
@@ -47,6 +54,86 @@ function Remove-VirtualMachine {
             }
         }
         return $false
+    }
+
+    # Helper: find and kill processes holding open handles inside a folder.
+    # Uses Sysinternals handle.exe (auto-downloaded to C:\tools if missing).
+    function Stop-LockingProcesses {
+        param (
+            [string] $FolderPath
+        )
+
+        $handleExe = "C:\tools\handle.exe"
+
+        # Download handle.exe from Sysinternals if not present
+        if (-not (Test-Path $handleExe)) {
+            Write-Log "Downloading handle.exe from Sysinternals..." -SubActivity
+            if (-not (Test-Path "C:\tools")) {
+                New-Item -Path "C:\tools" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+            try {
+                $ProgressPreference = 'SilentlyContinue'
+                Start-BitsTransfer -Source "https://live.sysinternals.com/handle.exe" -Destination $handleExe -ErrorAction Stop
+            }
+            catch {
+                Write-Log "Could not download handle.exe: $($_.Exception.Message)" -Warning
+                return $false
+            }
+            finally {
+                $ProgressPreference = 'Continue'
+            }
+        }
+
+        # Run handle.exe to find processes with open handles in the folder
+        try {
+            $output = & $handleExe -accepteula -nobanner "$FolderPath" 2>&1 | Out-String
+        }
+        catch {
+            Write-Log "handle.exe failed: $($_.Exception.Message)" -Warning
+            return $false
+        }
+
+        if (-not $output -or $output -match 'No matching handles found') {
+            Write-Log "No locking processes found by handle.exe." -SubActivity
+            return $false
+        }
+
+        # Parse output lines: "processname pid: type (access): handle: path"
+        # Each line with a PID represents a process holding a handle.
+        $killedAny = $false
+        $pidsKilled = @{}
+        foreach ($line in $output -split "`n") {
+            if ($line -match '^(?<name>\S+)\s+pid:\s+(?<pid>\d+)') {
+                $procName = $Matches['name']
+                $procPid  = [int]$Matches['pid']
+
+                # Never kill vmms.exe (VM Management Service) -- that would
+                # break all Hyper-V management until the service restarts.
+                if ($procName -eq 'vmms.exe') {
+                    Write-Log "Skipping vmms.exe (PID $procPid) -- killing it would affect all VMs." -Warning
+                    continue
+                }
+
+                if (-not $pidsKilled.ContainsKey($procPid)) {
+                    $pidsKilled[$procPid] = $true
+                    Write-Log "Killing $procName (PID $procPid) holding handle in '$FolderPath'..." -Warning
+                    try {
+                        Stop-Process -Id $procPid -Force -ErrorAction Stop
+                        $killedAny = $true
+                    }
+                    catch {
+                        Write-Log "Could not kill $procName (PID $procPid): $($_.Exception.Message)" -Warning
+                    }
+                }
+            }
+        }
+
+        if ($killedAny) {
+            # Give the OS a moment to release handles after process termination
+            Start-Sleep -Seconds 2
+        }
+
+        return $killedAny
     }
 
     # Helper: ensure VM is fully stopped with timeout.
@@ -114,16 +201,24 @@ function Remove-VirtualMachine {
 
     # -- DHCP cleanup --
     if ($vmFromList.ClusterIPAddress) {
-        Write-Log "$VmName`: Removing $($vmFromList.ClusterIPAddress) Exclusion..." -HostOnly
-        Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 `
-            -StartRange $vmFromList.ClusterIPAddress -EndRange $vmFromList.ClusterIPAddress `
-            -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+        # Cluster IP is on the domain subnet — remove its DHCP exclusion range.
+        $clusterScopeId = if ($vmFromList.network) { $vmFromList.network } else { $null }
+        if ($clusterScopeId) {
+            Write-Log "$VmName`: Removing $($vmFromList.ClusterIPAddress) Exclusion (scope $clusterScopeId)..." -HostOnly
+            Remove-DhcpServerv4ExclusionRange -ScopeId $clusterScopeId `
+                -StartRange $vmFromList.ClusterIPAddress -EndRange $vmFromList.ClusterIPAddress `
+                -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+        }
     }
     if ($vmFromList.AGIPAddress) {
-        Write-Log "$VmName`: Removing $($vmFromList.AGIPAddress) Exclusion..." -HostOnly
-        Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 `
-            -StartRange $vmFromList.AGIPAddress -EndRange $vmFromList.AGIPAddress `
-            -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+        # AG listener IP is on the domain subnet, not the cluster subnet.
+        $agScopeId = if ($vmFromList.network) { $vmFromList.network } else { $null }
+        if ($agScopeId) {
+            Write-Log "$VmName`: Removing $($vmFromList.AGIPAddress) Exclusion (scope $agScopeId)..." -HostOnly
+            Remove-DhcpServerv4ExclusionRange -ScopeId $agScopeId `
+                -StartRange $vmFromList.AGIPAddress -EndRange $vmFromList.AGIPAddress `
+                -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+        }
     }
 
     # -- Network adapter reservations --
@@ -164,6 +259,10 @@ function Remove-VirtualMachine {
             Remove-Item -Path $cacheFile -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
         }
     }
+    # Also purge the in-memory network cache entry
+    if ($global:Common.NetCache -and $vmTest.vmID) {
+        $global:Common.NetCache.Remove($vmTest.vmID) | Out-Null
+    }
 
     # -- Detach hard drives to prevent checkpoint merge during Remove-VM --
     # When a VM has checkpoints, Remove-VM triggers an AVHDX merge ("Destroying..."
@@ -199,8 +298,17 @@ function Remove-VirtualMachine {
         if (Test-Path $vmTest.Path) {
             Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
             $folderRemoved = Remove-ItemWithRetry -Path $vmTest.Path -MaxAttempts 3 -DelaySeconds 5 -WhatIf:$WhatIf
-            if (-not $folderRemoved) {
-                Write-Log "$VmName`: WARNING - Folder '$($vmTest.Path)' could not be removed. Manual cleanup required." -Warning
+            if (-not $folderRemoved -and -not $WhatIf) {
+                # Initial retries exhausted -- try to kill whichever process
+                # is holding a file lock and retry the removal.
+                Write-Log "$VmName`: Attempting to identify and kill process holding file locks..." -SubActivity
+                $killed = Stop-LockingProcesses -FolderPath $vmTest.Path
+                if ($killed) {
+                    $folderRemoved = Remove-ItemWithRetry -Path $vmTest.Path -MaxAttempts 3 -DelaySeconds 5
+                }
+                if (-not $folderRemoved) {
+                    Write-Log "$VmName`: WARNING - Folder '$($vmTest.Path)' could not be removed. Manual cleanup required." -Warning
+                }
             }
         }
         else {
@@ -231,7 +339,7 @@ function Remove-VirtualMachine {
     # domain: clear in-guest settings, remove Hyper-V port ACLs, and set
     # useProxy=false in VM Notes. Skip when -RemovingDomain since every
     # VM is going away anyway.
-    if (-not $WhatIf -and $vmFromList -and $vmFromList.role -eq 'Proxy' -and $vmFromList.domain) {
+    if (-not $WhatIf -and -not $SkipProxyCleanup -and $vmFromList -and $vmFromList.role -eq 'Proxy' -and $vmFromList.domain) {
         if (-not $RemovingDomain) {
             if (Get-Command -Name Remove-WindowsClientProxyForDomain -ErrorAction SilentlyContinue) {
                 Remove-WindowsClientProxyForDomain -DomainName $vmFromList.domain
@@ -305,6 +413,64 @@ function Remove-DhcpScope {
     if ($dhcpScope) {
         Write-Log "DHCP Scope '$($dhcpScope.Name)' exists. Removing." -SubActivity
         $dhcpScope | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+    }
+}
+
+function Remove-OrphanedNetNats {
+    <#
+    .SYNOPSIS
+        Silently remove memlabs-style NetNat entries that have no matching
+        Hyper-V switch. Called automatically from Remove-Domain / Remove-All
+        finally blocks so orphaned NATs never accumulate.
+    #>
+    [CmdletBinding()]
+    param()
+    try {
+        $switchNames = @((Get-VMSwitch -ErrorAction SilentlyContinue).Name)
+        # Also consider subnets from VMs still registered in Get-List
+        $vmSwitches = @()
+        try { $vmSwitches = @(Get-List -Type UniqueSwitch) } catch {}
+
+        # Protect infrastructure switches only when VMs are connected.
+        # If no VMs use them, they're genuinely orphaned.
+        foreach ($infra in @('Internet', 'Cluster', 'ClusterV2')) {
+            if ($infra -notin $switchNames -and $infra -notin $vmSwitches) { continue }
+            $attached = @(Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
+                Where-Object { $_.SwitchName -eq $infra })
+            if ($attached.Count -gt 0 -and $infra -notin $vmSwitches) {
+                $vmSwitches += $infra
+            }
+        }
+
+        # Map infrastructure switch names to their subnet equivalents so
+        # NATs named by subnet (e.g. '10.250.250.0') are recognized.
+        $inUse = @($switchNames + $vmSwitches) | ForEach-Object {
+            switch ($_) {
+                'Internet'  { '172.31.250.0'; $_ }
+                'Cluster'   { '10.250.250.0'; $_ }
+                'ClusterV2' { '10.250.251.0'; $_ }
+                default     { $_ }
+            }
+        } | Select-Object -Unique
+
+        $natEntries = @(Get-NetNat -ErrorAction SilentlyContinue)
+        foreach ($nat in $natEntries) {
+            # Only touch memlabs-style NATs named with a dotted-quad subnet
+            if ($nat.Name -notmatch '^\d+\.\d+\.\d+\.\d+$') { continue }
+            if ($nat.Name -in $inUse) { continue }
+
+            Write-Log "Removing orphaned NAT '$($nat.Name)' ($($nat.InternalIPInterfaceAddressPrefix))" -Warning
+            Remove-NetNat -Name $nat.Name -Confirm:$false -ErrorAction SilentlyContinue
+
+            # Also clean up the DHCP scope for this orphan
+            $dhcp = Get-DhcpServerv4Scope -ScopeID $nat.Name -ErrorAction SilentlyContinue
+            if ($dhcp) {
+                $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch {
+        Write-Log "Remove-OrphanedNetNats: $($_.Exception.Message)" -Warning
     }
 }
 
@@ -437,6 +603,7 @@ function Remove-ForestTrust {
                 $forestDomain = $TrustedForest.ForestTrust
                 $domainName = $TrustedForest.domain
                 start-vm2 -Name $DC1.vmName
+                Wait-ForHeartbeat -VmName $DC1.vmName | Out-Null
 
                 $scriptBlockTest = {
                     param(
@@ -490,6 +657,7 @@ function Remove-ForestTrust {
                 Write-Log "Removing Trust on $DC2 for '$otherDomain'" -Activity
 
                 start-vm2 -Name $DC2.vmName
+                Wait-ForHeartbeat -VmName $DC2.vmName | Out-Null
                 $scriptBlock1 = {
                     param(
                         [String]$forestDomain,
@@ -528,7 +696,11 @@ function Remove-Domain {
     }
     $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
 
-    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster" } # Internet subnet could be shared between multiple domains
+    # Capture scopes BEFORE deleting VMs — once VMs are gone, Get-List
+    # can't discover which switches belonged to this domain.
+    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster" -and $_ -ne "ClusterV2" } # Internet/Cluster subnets could be shared between multiple domains
+
+    try {
 
     if ($DC) {
         Remove-ForestTrust -DomainName $DomainName
@@ -539,6 +711,10 @@ function Remove-Domain {
     # Remove-VirtualMachine.
     $removingDomain = ($all -or [bool]$DC)
 
+    # Capture parent's $Common so ThreadJob workers can skip the init block.
+    # ThreadJobs share the same process, so $using: gives the live object.
+    $parentCommon = $global:Common
+
     $DeleteVMs = {
     
         try {
@@ -547,12 +723,12 @@ function Remove-Domain {
             #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     
             $rootPath = Split-Path $using:PSScriptRoot -Parent
-            # StartupProfile Fast skips Initialize-Storage (the main remaining
-            # cost in -InJob mode) plus the 4 InJob-already-skipped probes.
-            # Remove-VirtualMachine only needs Get-List / Get-VM2 / DHCP cmdlets
-            # / $Common.CachePath -- none of which depend on storage init,
-            # supported-options, hotfix lookup, or env detection.
-            . $rootPath\Common.ps1 -InJob -StartupProfile Fast -VerboseEnabled:$using:enableVerbose -DevBranch:$using:devBranchValue
+            # Pre-seed $global:Common from the parent so Common.ps1's init
+            # block (if -not $Common.Initialized) is skipped. The dot-source
+            # still loads all function definitions; only the expensive init
+            # (New-Directory x15, git branch, storage, etc.) is avoided.
+            $global:Common = $using:parentCommon
+            . $rootPath\Common.ps1 -InJob -StartupProfile RemoveOnly -VerboseEnabled:$using:enableVerbose -DevBranch:$using:devBranchValue
 
             $currentItem = $using:currentItem
             $Phase = $using:Phase
@@ -578,6 +754,9 @@ function Remove-Domain {
         $result = Wait-Phase -Phase "DomainRemove" -Jobs $start.Jobs -AdditionalData $start.AdditionalData           
         
     }
+    else {
+        Write-Log "No virtual machines found for '$DomainName'." -Warning
+    }
 
 
     if ($DC) {
@@ -587,21 +766,22 @@ function Remove-Domain {
                 Remove-DhcpScope -ScopeId $scope -WhatIf:$WhatIf
             }
 
+            # Remove-VMSwitch2 now also removes the NAT + DHCP scope for
+            # the network, so the explicit NAT loop is no longer needed.
             Write-Log "Removing ALL Hyper-V Switches for '$DomainName'" -Activity
             foreach ($scope in $scopesToDelete) {
                 Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
             }
+        }
+    }
 
-            Write-Log "Removing NAT entries for '$DomainName'" -Activity
-            foreach ($scope in $scopesToDelete) {
-                $nat = Get-NetNat -Name $scope -ErrorAction SilentlyContinue
-                if ($nat) {
-                    Write-Log "Removing NAT entry '$scope'" -SubActivity
-                    if (-not $WhatIf) {
-                        Remove-NetNat -Name $scope -Confirm:$false -ErrorAction SilentlyContinue
-                    }
-                }
-            }
+    } # end try
+    finally {
+        # Sweep for orphaned NATs whose switch is already gone.
+        # This catches leaks from partial deployments, crashes, or
+        # cases where VMs were deleted before Remove-Lab ran.
+        if (-not $WhatIf.IsPresent) {
+            Remove-OrphanedNetNats
         }
     }
 
@@ -614,9 +794,13 @@ function Remove-Domain {
     }
     
     if ($all) {
-        if (Test-Path "E:\virtualMachines\$DomainName") {
-            Write-Log "Removing $DomainName folder" -SubActivity
-            Remove-Item -Path "E:\virtualMachines\$DomainName" -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+        $vmStorageRoot = Get-MemlabsVmStorageRoot -NoPrompt
+        if ($vmStorageRoot) {
+            $domainFolder = Join-Path $vmStorageRoot $DomainName
+            if (Test-Path $domainFolder) {
+                Write-Log "Removing $DomainName folder" -SubActivity
+                Remove-Item -Path $domainFolder -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+            }
         }
     }
 
@@ -631,7 +815,10 @@ function Remove-All {
     )
 
     $vmsToDelete = Get-List -Type VM
-    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName
+    # Get all unique switches across all domains (no DomainName filter)
+    $scopesToDelete = Get-List -Type UniqueSwitch
+
+    try {
 
     if ($vmsToDelete) {
         Write-Log "Removing ALL virtual machines" -Activity
@@ -646,20 +833,19 @@ function Remove-All {
             Remove-DhcpScope -ScopeId $scope -WhatIf:$WhatIf
         }
 
+        # Remove-VMSwitch2 now also removes the NAT + DHCP scope
         Write-Log "Removing ALL Hyper-V Switches" -Activity
         foreach ($scope in $scopesToDelete) {
             Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
         }
+    }
 
-        Write-Log "Removing ALL NAT entries" -Activity
-        foreach ($scope in $scopesToDelete) {
-            $nat = Get-NetNat -Name $scope -ErrorAction SilentlyContinue
-            if ($nat) {
-                Write-Log "Removing NAT entry '$scope'" -SubActivity
-                if (-not $WhatIf) {
-                    Remove-NetNat -Name $scope -Confirm:$false -ErrorAction SilentlyContinue
-                }
-            }
+    } # end try
+    finally {
+        # Sweep for any NATs that survived (switch already gone, partial
+        # deploy, VMs deleted externally, etc.)
+        if (-not $WhatIf.IsPresent) {
+            Remove-OrphanedNetNats
         }
     }
 
@@ -667,11 +853,14 @@ function Remove-All {
     Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
     Remove-Item -Path $Global:Common.MRemoteNGFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
 
-    # Get all the folders in E:\VirtualMachines and delete them
-    $folders = Get-ChildItem -Path "E:\VirtualMachines" -Directory
-    foreach ($folder in $folders) {
-        Write-Log "Removing $($folder.Name) folder" -SubActivity
-        Remove-Item -Path $folder.FullName -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+    # Get all the folders in the host VM-storage root and delete them
+    $vmStorageRoot = Get-MemlabsVmStorageRoot -NoPrompt
+    if ($vmStorageRoot -and (Test-Path $vmStorageRoot)) {
+        $folders = Get-ChildItem -Path $vmStorageRoot -Directory -ErrorAction SilentlyContinue
+        foreach ($folder in $folders) {
+            Write-Log "Removing $($folder.Name) folder" -SubActivity
+            Remove-Item -Path $folder.FullName -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+        }
     }
 
     Write-Host

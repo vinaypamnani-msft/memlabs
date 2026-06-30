@@ -1,3 +1,4 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 <#
 .SYNOPSIS
 Adds an error or warning message to the global GenConfigErrorMessages array.
@@ -194,8 +195,9 @@ function Get-AdditionalValidations {
                 }
             }
             elseif ($value -eq $true) {
-                # Add BitLocker property if BLM is enabled and VM doesn't already have it
-                if ($Global:Config.cmOptions -and $Global:Config.cmOptions.EnableBLM) {
+                # Add BitLocker property if BLM is enabled, VM doesn't already have it,
+                # and VM is domain-joined (non-domain roles never receive BLM policy)
+                if ($Global:Config.cmOptions -and $Global:Config.cmOptions.EnableBLM -and $property.role -notin 'InternetClient', 'WorkgroupMember', 'AADClient') {
                     if ($null -eq $property.BitLocker) {
                         $isClientOS = $property.operatingSystem -and $property.operatingSystem -like "Windows 1*"
                         $property | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
@@ -229,6 +231,10 @@ function Get-AdditionalValidations {
         }
         "vmGeneration" {
             if ($value -notin ("1", "2")) {
+                $property.$name = "2"
+            }
+            if ($value -eq "1" -and $property.role -ne "OSDClient") {
+                Add-ErrorMessage -property $name "Gen 1 is only supported for OSDClient (base images are GPT/UEFI and cannot boot on Gen 1). Changing to Gen 2."
                 $property.$name = "2"
             }
             if ($value -eq "1" -and ($property.tpmEnabled -eq $true)) {
@@ -416,9 +422,9 @@ function Get-AdditionalValidations {
         }
         "EnableBLM" {
             if ($value -eq $true) {
-                # Add BitLocker property to all VMs with TPM enabled
+                # Add BitLocker property to domain-joined VMs with TPM enabled
                 foreach ($vm in $Global:Config.virtualMachines) {
-                    if ($vm.tpmEnabled -and $null -eq $vm.BitLocker) {
+                    if ($vm.tpmEnabled -and $null -eq $vm.BitLocker -and $vm.role -notin 'InternetClient', 'WorkgroupMember', 'AADClient') {
                         $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
                         $vm | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
                     }

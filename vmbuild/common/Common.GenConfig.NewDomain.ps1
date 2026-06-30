@@ -1,3 +1,4 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 # Common.GenConfig.NewDomain.ps1
 # "New Domain" wizard helpers used by genconfig.ps1 to author a new lab
 # configuration: VM/site-code naming, locale/timezone selection, deployment-

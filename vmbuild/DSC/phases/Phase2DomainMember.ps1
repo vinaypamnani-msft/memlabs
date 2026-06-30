@@ -37,6 +37,9 @@
     if ($ThisVM.role -eq "SiteSystem") {
         $firewallRoles += @("Management Point", "Distribution Point", "Software Update Point", "Reporting Services Point")
     }
+    if ($ThisVM.sqlVersion -and ("SQL Server" -notin $firewallRoles)) {
+        $firewallRoles += "SQL Server"
+    }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -90,14 +93,93 @@
                 return ($val -and $val.NoAutoUpdate -eq 1)
             }
             SetScript  = {
-                New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | Out-Null
-                New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name 'NoAutoUpdate' -PropertyType DWord -Value 1 -Force | Out-Null
+                $wuPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+                $auPath = "$wuPath\AU"
+                New-Item -Path $auPath -Force | Out-Null
+                New-ItemProperty -Path $auPath -Name 'NoAutoUpdate' -PropertyType DWord -Value 1 -Force | Out-Null
+                New-ItemProperty -Path $wuPath -Name 'DoNotConnectToWindowsUpdateInternetLocations' -PropertyType DWord -Value 1 -Force | Out-Null
+                New-ItemProperty -Path $wuPath -Name 'DisableWindowsUpdateAccess' -PropertyType DWord -Value 1 -Force | Out-Null
                 Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
             }
         }
 
-        WriteStatus WaitDomain {
+        # ---------------------------------------------------------------------
+        # Domain-independent local OS configuration — run BEFORE the domain
+        # wait/join, not after the post-join reboot.
+        #
+        # None of these resources need AD membership (pure local icacls/takeown,
+        # a local SMB share, local firewall rules, a local registry value). On a
+        # fresh deploy the member otherwise sits idle in WaitForDomainReady while
+        # the DC promotes; doing this local work first overlaps it with that
+        # wait. After the join reboot DSC just re-Tests these (fast no-op), so the
+        # expensive Sets stay off the post-join critical path. All of them persist
+        # across the domain-join reboot.
+        # ---------------------------------------------------------------------
+        AddNtfsPermissions AddNtfsPerms {
+            Ensure    = "Present"
             DependsOn = "[Script]DisableWindowsUpdate"
+        }
+
+        File ShareFolder {
+            DestinationPath = $LogPath
+            Type            = 'Directory'
+            Ensure          = 'Present'
+            DependsOn       = '[AddNtfsPermissions]AddNtfsPerms'
+        }
+
+        FileReadAccessShare DomainSMBShare {
+            Name      = $LogFolder
+            Path      = $LogPath
+            DependsOn = "[File]ShareFolder"
+        }
+
+        OpenFirewallPortForSCCM OpenFirewall {
+            DependsOn = "[FileReadAccessShare]DomainSMBShare"
+            Name      = "DomainMember"
+            Role      = $firewallRoles
+        }
+
+        # Disable UAC remote restrictions so PSDirect sessions from the host
+        # get a full (elevated) admin token. Without this, post-DSC host-to-VM
+        # commands (Set-WindowsClientProxy, etc.) fail with "Requested registry
+        # access is not allowed" on Windows client SKUs (Win10/Win11) because
+        # UAC filters remote admin tokens.
+        Registry DisableUACRemoteRestrictions {
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            Ensure    = "Present"
+            Key       = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+            ValueName = "LocalAccountTokenFilterPolicy"
+            ValueType = "Dword"
+            ValueData = "1"
+        }
+
+        # Confirm the rename actually applied to the ACTIVE computer name before
+        # we join the domain. The stock 'Computer NewName' resource's Test trusts
+        # the PENDING-rename registry value, so if Windows re-ran its specialize
+        # pass on a reboot (observed under heavy host disk I/O, which re-randomizes
+        # the computer name) the ACTIVE name can still be the random DESKTOP-* even
+        # though Computer.Test reported success. Joining the domain under that
+        # transient name permanently breaks the rename ("the specified computer
+        # account could not be found") and strands the config. Gate here: if the
+        # active name isn't the target yet, (re)stage the rename and reboot so the
+        # name lands FIRST. The box is still in a workgroup at this point, so a
+        # plain Rename-Computer needs no domain credential. A genuinely stuck
+        # re-specialize loop now parks on this gate (a clean, detectable failure)
+        # instead of silently joining under the wrong name and bricking the VM.
+        Script ConfirmComputerName {
+            DependsOn  = "[Registry]DisableUACRemoteRestrictions"
+            GetScript  = { return @{ Result = $env:COMPUTERNAME } }
+            TestScript = [string]"return (`$env:COMPUTERNAME -eq '$ThisMachineName')"
+            SetScript  = [string]"
+                if (`$env:COMPUTERNAME -ne '$ThisMachineName') {
+                    try { Rename-Computer -NewName '$ThisMachineName' -Force -ErrorAction Stop } catch { }
+                    `$global:DSCMachineStatus = 1
+                }
+            "
+        }
+
+        WriteStatus WaitDomain {
+            DependsOn = "[Script]ConfirmComputerName"
             Status    = "Waiting for domain $DomainName to be ready (Trying to ping the DC)"
         }
 
@@ -131,28 +213,45 @@
             DependsOn  = "[JoinDomain]JoinDomain"
         }
 
-        AddNtfsPermissions AddNtfsPerms {
-            Ensure    = "Present"
-            DependsOn = "[TestDomainJoin]TestDomainJoin"
-        }
+        # Configure system proxy if this VM is a proxy client. Runs as SYSTEM
+        # so there are no UAC/PSDirect elevation issues. Sets WinHTTP, machine
+        # env vars, HKLM/HKU\.DEFAULT registry, and machine.config <defaultProxy>
+        # with retry logic. By the time Phase 3 DSC starts, all proxy layers are
+        # in place and downloads go through Squid.
+        #
+        # Chains off TestDomainJoin (not DisableUACRemoteRestrictions, which now
+        # runs before the domain wait) so the proxy is configured after the box
+        # is joined and its secure channel validated — keeping the join path free
+        # of any proxy interference.
+        $proxyDepend = '[TestDomainJoin]TestDomainJoin'
+        if ($ThisVM.useProxy -eq $true) {
+            $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+            if ($proxyVm) {
+                $proxyFqdn = "$($proxyVm.vmName).$DomainName"
+                $proxyServer = "${proxyFqdn}:3128"
+                $bypassEntries = @('<local>', "*.$DomainName", $proxyFqdn)
+                # Bypass the proxy for THIS VM's own subnet, not the domain
+                # default network — a member on a secondary network must bypass
+                # for its own subnet, not vmOptions.network.
+                $network = if ($ThisVM.network) { $ThisVM.network } else { $deployConfig.vmOptions.network }
+                if ($network) {
+                    $base = ($network -replace '\.0$', '')
+                    if ($base -match '^\d+\.\d+\.\d+$') { $bypassEntries += "$base.*" }
+                }
+                $proxyBypass = ($bypassEntries | Select-Object -Unique) -join ';'
 
-        File ShareFolder {
-            DestinationPath = $LogPath
-            Type            = 'Directory'
-            Ensure          = 'Present'
-            DependsOn       = '[AddNtfsPermissions]AddNtfsPerms'
-        }
+                WriteStatus ConfigureProxy {
+                    DependsOn = '[TestDomainJoin]TestDomainJoin'
+                    Status    = "Configuring system proxy: $proxyServer"
+                }
 
-        FileReadAccessShare DomainSMBShare {
-            Name      = $LogFolder
-            Path      = $LogPath
-            DependsOn = "[File]ShareFolder"
-        }
-
-        OpenFirewallPortForSCCM OpenFirewall {
-            DependsOn = "[FileReadAccessShare]DomainSMBShare"
-            Name      = "DomainMember"
-            Role      = $firewallRoles
+                SetWindowsProxy ConfigureProxy {
+                    DependsOn   = '[WriteStatus]ConfigureProxy'
+                    ProxyServer = $proxyServer
+                    BypassList  = $proxyBypass
+                }
+                $proxyDepend = '[SetWindowsProxy]ConfigureProxy'
+            }
         }
 
         # Pre-seed TPM protector for BitLocker VMs
@@ -161,14 +260,36 @@
         # Pre-adding a TPM protector works around this by ensuring the volume already has a protector.
         if ($ThisVM.BitLocker -eq $true) {
             WriteStatus SeedTPM {
-                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                DependsOn = $proxyDepend
                 Status    = "Adding TPM protector for BitLocker"
+            }
+
+            # On Server OS, the BitLocker feature (and its PowerShell module) must be installed
+            # before Get-BitLockerVolume and Enable-BitLocker are available. On client OS
+            # (Windows 10/11) the cmdlets are always present.
+            Script InstallBitLockerFeature {
+                DependsOn  = "[WriteStatus]SeedTPM"
+                GetScript  = { @{ Result = "N/A" } }
+                TestScript = {
+                    # ProductType 1 = Workstation (client OS) — BitLocker cmdlets built-in
+                    $productType = (Get-CimInstance Win32_OperatingSystem).ProductType
+                    if ($productType -eq 1) { return $true }
+                    # Server OS — check if the BitLocker feature is installed
+                    $feat = Get-WindowsFeature -Name BitLocker -ErrorAction SilentlyContinue
+                    return ($feat -and $feat.Installed)
+                }
+                SetScript  = {
+                    Install-WindowsFeature -Name BitLocker -IncludeManagementTools -ErrorAction Stop
+                    if ((Get-WindowsFeature -Name BitLocker).InstallState -eq 'InstallPending') {
+                        $global:DSCMachineStatus = 1
+                    }
+                }
             }
 
             # Prevent Windows 11 24H2 automatic device encryption on first login.
             # We want ConfigMgr BLM to manage encryption, not the OS auto-trigger.
             Registry PreventDeviceEncryption {
-                DependsOn = "[WriteStatus]SeedTPM"
+                DependsOn = "[Script]InstallBitLockerFeature"
                 Ensure    = "Present"
                 Key       = "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker"
                 ValueName = "PreventDeviceEncryption"
@@ -261,7 +382,7 @@
         }
         else {
             WriteStatus Complete {
-                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                DependsOn = $proxyDepend
                 Status    = "Complete!"
             }
         }

@@ -1,3 +1,4 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 # Common.GenConfig.DiskMenu.ps1
 #
 # Dedicated per-VM disk management sub-menu for genconfig.
@@ -39,8 +40,8 @@ function Get-VMDiskLetters {
     )
 }
 
-# Returns the next free disk letter (E..Y) for this VM, or $null if all are
-# already used.
+# Returns the next free disk letter (E..Y, excluding the reserved S) for this
+# VM, or $null if all are already used.
 function Get-NextDiskLetter {
     [CmdletBinding()]
     param (
@@ -50,6 +51,9 @@ function Get-NextDiskLetter {
     $used = Get-VMDiskLetters -VirtualMachine $VirtualMachine
     foreach ($code in 69..89) {  # 'E'..'Y'
         $letter = [char]$code
+        # S: is reserved for the SQL ISO mount (SqlSetup SourcePath). Never
+        # offer it as an additional data disk.
+        if ($letter -eq 'S') { continue }
         if ($used -notcontains [string]$letter) {
             return [string]$letter
         }

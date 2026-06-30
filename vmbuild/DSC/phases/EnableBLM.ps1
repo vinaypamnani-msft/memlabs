@@ -1,4 +1,4 @@
-#EnableBLM.ps1
+﻿#EnableBLM.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -124,8 +124,13 @@ if ($blmCollection) {
         $existingRule = Get-CMDeviceCollectionQueryMembershipRule -CollectionId $blmCollection.CollectionID -RuleName $ruleName -ErrorAction SilentlyContinue
         if (-not $existingRule) {
             $query = "SELECT * FROM SMS_R_System WHERE Name = '$vmResourceName'"
-            Add-CMDeviceCollectionQueryMembershipRule -CollectionId $blmCollection.CollectionID -RuleName $ruleName -QueryExpression $query
-            Write-DscStatus "$Tag Added query rule '$ruleName' to $blmCollectionName"
+            try {
+                Add-CMDeviceCollectionQueryMembershipRule -CollectionId $blmCollection.CollectionID -RuleName $ruleName -QueryExpression $query -ErrorAction Stop
+                Write-DscStatus "$Tag Added query rule '$ruleName' to $blmCollectionName"
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: Failed to add query rule '$ruleName': $($_.Exception.Message)"
+            }
         }
         else {
             Write-DscStatus "$Tag Query rule '$ruleName' already exists in $blmCollectionName"
@@ -133,8 +138,14 @@ if ($blmCollection) {
     }
 
     # Force collection membership evaluation and verify members appear
-    Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID
-    Write-DscStatus "$Tag Triggered collection evaluation for $blmCollectionName"
+    # Trigger AD System Discovery first — devices must exist in CM before
+    # query rules can match them. PushClients may have already done this,
+    # but DDR processing can lag.
+    try { Invoke-CMSystemDiscovery } catch {}
+    try { Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID -ErrorAction Stop } catch {
+        Write-DscStatus "$Tag WARNING: Invoke-CMCollectionUpdate failed: $($_.Exception.Message)"
+    }
+    Write-DscStatus "$Tag Triggered AD system discovery + collection evaluation for $blmCollectionName"
 
     # Wait for evaluation to complete - members must be visible for deployment to work
     # Query rules will match once the device is discovered (any ResourceID)
@@ -142,7 +153,18 @@ if ($blmCollection) {
     $evalDelay = 10
     for ($i = 1; $i -le $evalRetries; $i++) {
         Start-Sleep -Seconds $evalDelay
-        $members = @(Get-CMCollectionMember -CollectionId $blmCollection.CollectionID -ErrorAction SilentlyContinue)
+        # Get-CMCollectionMember queries SMS_CM_RES_COLL_<ID> which maps to a SQL
+        # view that ConfigMgr creates asynchronously after New-CMDeviceCollection.
+        # Until the view exists, the SMS Provider throws a terminating WMI error
+        # ("Invalid object name '_RES_COLL_xxx'") that -ErrorAction cannot suppress.
+        # Catch it and treat as 0 members -- the view will appear on a later attempt.
+        try {
+            $members = @(Get-CMCollectionMember -CollectionId $blmCollection.CollectionID -ErrorAction Stop)
+        }
+        catch {
+            Write-DscStatus "$Tag Collection member query failed (attempt $i/$evalRetries, view may not exist yet): $($_.Exception.Message)"
+            $members = @()
+        }
         $expectedNames = @($blmVMs | ForEach-Object { $_.vmName })
         $found = @($members | Where-Object { $_.Name -in $expectedNames })
         if ($found.Count -ge $expectedNames.Count) {
@@ -151,7 +173,9 @@ if ($blmCollection) {
         }
         if ($i -lt $evalRetries) {
             Write-DscStatus "$Tag Waiting for collection evaluation ($i/$evalRetries): $($found.Count)/$($expectedNames.Count) expected BLM clients visible..."
-            Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID
+            try { Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID -ErrorAction Stop } catch {
+                Write-DscStatus "$Tag WARNING: Invoke-CMCollectionUpdate retry failed: $($_.Exception.Message)"
+            }
         }
         else {
             $missing = $expectedNames | Where-Object { $_ -notin $members.Name }
@@ -162,6 +186,39 @@ if ($blmCollection) {
 
 # Build BitLocker policy objects for drive encryption (only when cmOptions.EnableBLM is set)
 if ($blmEnabled) {
+    # Resolve SQL server instance (may be remote SQL or SQLAO listener).
+    # Follows the same pattern as InstallAndUpdateSCCM.ps1 for consistency.
+    $sqlServerName = $env:COMPUTERNAME
+    $sqlInstanceName = $ThisVM.sqlInstanceName
+    $sqlPort = if ($ThisVM.sqlPort) { $ThisVM.sqlPort } else { 1433 }
+
+    if ($ThisVM.remoteSQLVM) {
+        $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisVM.remoteSQLVM }
+        $sqlServerName = $ThisVM.remoteSQLVM
+        $sqlInstanceName = $SQLVM.sqlInstanceName
+        $sqlPort = if ($SQLVM.sqlPort) { $SQLVM.sqlPort } else { 1433 }
+        if ($SQLVM.AlwaysOnListenerName) {
+            $sqlServerName = $SQLVM.AlwaysOnListenerName
+            $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
+        }
+    }
+
+    # Invoke-Sqlcmd -ServerInstance format: "server\instance,port" or "server,port"
+    $sqlConnStr = $sqlServerName
+    if ($sqlInstanceName -and $sqlInstanceName -ne 'MSSQLSERVER') {
+        $sqlConnStr = "$sqlServerName\$sqlInstanceName"
+    }
+    if ($sqlPort -and $sqlPort -ne 1433) {
+        $sqlConnStr = "$sqlConnStr,$sqlPort"
+    }
+    # FQDN version for the Helpdesk installer (-SqlServerName must be FQDN)
+    $sqlServerFqdnBase = "$($sqlServerName.Split('\')[0]).$DomainFullName"
+    $sqlInstanceFqdn = $sqlServerFqdnBase
+    if ($sqlInstanceName -and $sqlInstanceName -ne 'MSSQLSERVER') {
+        $sqlInstanceFqdn = "$sqlServerFqdnBase\$sqlInstanceName"
+    }
+    Write-DscStatus "$Tag SQL resolved: ConnStr=$sqlConnStr FQDN=$sqlInstanceFqdn Port=$sqlPort"
+
     # Ensure SQL encryption certificate exists (required for BLM recovery key escrow)
     # Reference: https://learn.microsoft.com/en-us/mem/configmgr/protect/deploy-use/bitlocker/encrypt-recovery-data
     $cmDbName = "CM_$SiteCode"
@@ -206,8 +263,8 @@ BEGIN
     GRANT CONTROL ON CERTIFICATE ::BitLockerManagement_CERT TO RecoveryAndHardwareWrite;
 END
 "@
-        Invoke-Sqlcmd -Query $sqlCertQuery -ServerInstance "." -TrustServerCertificate -ErrorAction Stop
-        Write-DscStatus "$Tag SQL encryption certificate ensured for $cmDbName"
+        Invoke-Sqlcmd -Query $sqlCertQuery -ServerInstance $sqlConnStr -TrustServerCertificate -ErrorAction Stop
+        Write-DscStatus "$Tag SQL encryption certificate ensured for $cmDbName on $sqlConnStr"
     }
     catch {
         Write-DscStatus "$Tag WARNING: SQL cert creation failed: $($_.Exception.Message)"
@@ -231,13 +288,64 @@ END
     Write-DscStatus "$Tag Checking if BitLocker policy '$blmPolicyName' exists..."
     $blmPolicy = Get-CMBlmSetting -Name $blmPolicyName -ErrorAction SilentlyContinue
     if (-not $blmPolicy) {
-        Write-DscStatus "$Tag Policy not found, creating '$blmPolicyName' with $($blmPolicies.Count) sub-policies..."
-        try {
-            $blmPolicy = New-CMBlmSetting -Name $blmPolicyName -Description "MEMLABS auto created BitLocker management policy" -Policies $blmPolicies -ErrorAction Stop
-            Write-DscStatus "$Tag Created BitLocker policy: $blmPolicyName"
-        }
-        catch {
-            Write-DscStatus "$Tag ERROR: New-CMBlmSetting failed: $($_.Exception.Message)"
+        # New-CMBlmSetting can throw a bare System.Management.ManagementException
+        # immediately after EnableMBAMRecoveryService is set, because the SMS
+        # Provider connection was established before the feature was enabled and
+        # hasn't picked up the BLM policy classes yet. Retry with a short backoff,
+        # logging full exception details and the exact command line on each failure.
+        $blmCmd = "New-CMBlmSetting -Name '$blmPolicyName' -Description 'MEMLABS auto created BitLocker management policy' -Policies <$($blmPolicies.Count) policy objects: XtsAes256, TpmOnly, OsEnforce0d, FdvAutoUnlock, FddEnforce0d, ClientCheck5m> -ErrorAction Stop"
+        $blmMaxRetries = 5
+        $blmRetryDelay = 30
+        for ($blmAttempt = 1; $blmAttempt -le $blmMaxRetries; $blmAttempt++) {
+            Write-DscStatus "$Tag Policy not found, creating '$blmPolicyName' with $($blmPolicies.Count) sub-policies (attempt $blmAttempt/$blmMaxRetries)..."
+            try {
+                $blmPolicy = New-CMBlmSetting -Name $blmPolicyName -Description "MEMLABS auto created BitLocker management policy" -Policies $blmPolicies -ErrorAction Stop
+                Write-DscStatus "$Tag Created BitLocker policy: $blmPolicyName"
+                break
+            }
+            catch {
+                $ex = $_.Exception
+                $exType = $ex.GetType().FullName
+                $exMsg = $ex.Message
+                # Surface inner exception (the ManagementException usually wraps the real provider error here)
+                $innerMsg = ""
+                $inner = $ex.InnerException
+                $innerDepth = 0
+                while ($inner -and $innerDepth -lt 5) {
+                    $innerMsg += " | inner[$($inner.GetType().FullName)]: $($inner.Message)"
+                    $inner = $inner.InnerException
+                    $innerDepth++
+                }
+                # WMI/SMS Provider errors carry an ErrorCode on the ManagementException
+                $wmiCode = ""
+                try { if ($ex.ErrorCode) { $wmiCode = " ErrorCode=$($ex.ErrorCode)" } } catch {}
+                $catInfo = ""
+                try { if ($_.CategoryInfo) { $catInfo = " Category=$($_.CategoryInfo.Category)/$($_.CategoryInfo.Reason)" } } catch {}
+                $fqeid = ""
+                try { if ($_.FullyQualifiedErrorId) { $fqeid = " FQEID=$($_.FullyQualifiedErrorId)" } } catch {}
+                $scriptPos = ""
+                try { if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) { $scriptPos = ($_.InvocationInfo.PositionMessage -replace "\r?\n", " ").Trim() } } catch {}
+
+                Write-DscStatus "$Tag ERROR: New-CMBlmSetting failed (attempt $blmAttempt/$blmMaxRetries)"
+                Write-DscStatus "$Tag   Command : $blmCmd"
+                Write-DscStatus "$Tag   Type    : $exType$wmiCode$catInfo$fqeid"
+                Write-DscStatus "$Tag   Message : $exMsg$innerMsg"
+                if ($scriptPos) { Write-DscStatus "$Tag   At      : $scriptPos" }
+
+                if ($blmAttempt -lt $blmMaxRetries) {
+                    Write-DscStatus "$Tag   Retrying in $blmRetryDelay s (refreshing SMS Provider connection)..."
+                    Start-Sleep -Seconds $blmRetryDelay
+                    # Re-check in case a prior attempt actually created the policy despite throwing
+                    $blmPolicy = Get-CMBlmSetting -Name $blmPolicyName -ErrorAction SilentlyContinue
+                    if ($blmPolicy) {
+                        Write-DscStatus "$Tag Policy '$blmPolicyName' now present after attempt $blmAttempt; continuing."
+                        break
+                    }
+                }
+                else {
+                    Write-DscStatus "$Tag ERROR: New-CMBlmSetting failed after $blmMaxRetries attempts. Policy not created."
+                }
+            }
         }
     }
     else {
@@ -286,7 +394,7 @@ if ($blmEnabled) {
 
     function Test-BlmPortalHealth {
         # Returns hashtable: @{ Installed=$bool; AppOk=$bool; PoolOk=$bool; Reg=$bool; ConnStr=$str; Details=$str }
-        $result = @{ Installed=$false; AppOk=$false; PoolOk=$false; Reg=$false; ConnStr=$null; Details=@() }
+        $result = @{ Installed=$false; AppOk=$false; SspOk=$false; PoolOk=$false; Reg=$false; ConnStr=$null; Details=@() }
         try {
             Import-Module WebAdministration -ErrorAction Stop
         } catch {
@@ -299,7 +407,7 @@ if ($blmEnabled) {
                 $result.AppOk = $true
                 $result.Details += "IIS app /HelpDesk -> $($app.PhysicalPath)"
                 if ($app.PhysicalPath -and -not (Test-Path $app.PhysicalPath)) {
-                    $result.Details += "WARN: physical path missing on disk"
+                    $result.Details += "WARN: HelpDesk physical path missing on disk"
                     $result.AppOk = $false
                 }
                 $poolName = $app.applicationPool
@@ -314,6 +422,13 @@ if ($blmEnabled) {
                 }
             } else {
                 $result.Details += "IIS app /HelpDesk not present"
+            }
+            $ssp = Get-WebApplication -Site 'Default Web Site' -Name 'SelfService' -ErrorAction SilentlyContinue
+            if ($ssp) {
+                $result.SspOk = $true
+                $result.Details += "IIS app /SelfService -> $($ssp.PhysicalPath)"
+            } else {
+                $result.Details += "IIS app /SelfService not present"
             }
         } catch {
             $result.Details += "IIS probe failed: $($_.Exception.Message)"
@@ -330,17 +445,17 @@ if ($blmEnabled) {
         } catch {
             $result.Details += "Registry probe failed: $($_.Exception.Message)"
         }
-        $result.Installed = ($result.AppOk -and $result.Reg)
+        $result.Installed = ($result.AppOk -and $result.SspOk -and $result.Reg)
         return $result
     }
 
     $blmGroup       = 'BLM Helpdesk Users'
     $netbios        = ($DomainFullName -split '\.')[0]
     $qualifiedGroup = "$netbios\$blmGroup"
-    $sqlServerFqdn  = "$env:COMPUTERNAME.$DomainFullName"
+    $localServerFqdn = "$env:COMPUTERNAME.$DomainFullName"
     $cmDbName       = "CM_$SiteCode"
 
-    Write-DscStatus "$Tag === Helpdesk Portal: starting (Server=$sqlServerFqdn Db=$cmDbName Group=$qualifiedGroup Domain=$DomainFullName) ==="
+    Write-DscStatus "$Tag === Helpdesk Portal: starting (Server=$localServerFqdn SqlServer=$sqlInstanceFqdn Db=$cmDbName Group=$qualifiedGroup Domain=$DomainFullName) ==="
 
     # ---- Pre-flight: is it already installed and healthy? -----------------
     try {
@@ -437,21 +552,43 @@ if ($blmEnabled) {
                 Write-DscStatus "$Tag WARNING: AD group setup failed: $($_.Exception.Message)"
             }
 
-            # ---- IIS + ASP.NET 4.5 prereqs (verify-only) ----------------------
-            # Web-Server / Web-Asp-Net45 / Web-Mgmt-Console are installed by
-            # InstallFeatureForSCCM (TemplateHelpDSC) under the "Site Server"
-            # role during Phase 2/3. We only verify here -- any miss indicates
-            # a real upstream prereq failure and should surface loudly.
+            # ---- IIS + ASP.NET 4.5 prereqs (install-if-missing) ---------------
+            # Web-Server / Web-Asp-Net45 / Web-Mgmt-Console are normally
+            # installed by InstallFeatureForSCCM (TemplateHelpDSC) under the
+            # "Site Server" role during Phase 2/3, but that has been observed
+            # to leave Web-Asp-Net45 off on some site servers (logged here as
+            # 'missing IIS prereq features: Web-Asp-Net45'). The MBAM Helpdesk /
+            # Self-Service web apps cannot be created without ASP.NET 4.5, so
+            # rather than only verifying, install any missing feature in-place
+            # before running the installer. Install-WindowsFeature pulls in the
+            # ASP.NET 4.5 dependency chain (Web-Net-Ext45, Web-ISAPI-Ext/Filter,
+            # NET-Framework-45-ASPNET) automatically.
             Write-DscStatus "$Tag Verifying IIS / ASP.NET 4.5 features..."
             try {
-                $needed  = @('Web-Server','Web-Asp-Net45','Web-Mgmt-Console')
+                $needed  = @('Web-Server','Web-Asp-Net45','Web-Windows-Auth','Web-Mgmt-Console')
                 $missing = @()
                 foreach ($f in $needed) {
                     $feat = Get-WindowsFeature -Name $f -ErrorAction SilentlyContinue
                     if (-not $feat -or -not $feat.Installed) { $missing += $f }
                 }
                 if ($missing.Count -gt 0) {
-                    Write-DscStatus "$Tag ERROR: missing IIS prereq features: $($missing -join ', '). Expected to be installed by InstallFeatureForSCCM in Phase 2/3."
+                    Write-DscStatus "$Tag Installing missing IIS prereq features: $($missing -join ', ')..."
+                    $stillMissing = @()
+                    foreach ($f in $missing) {
+                        try {
+                            $r = Install-WindowsFeature -Name $f -IncludeManagementTools -ErrorAction Stop
+                            Write-DscStatus "$Tag   installed '$f' (ExitCode=$($r.ExitCode), RestartNeeded=$($r.RestartNeeded))"
+                        } catch {
+                            Write-DscStatus "$Tag   WARNING: failed to install '$f': $($_.Exception.Message)"
+                        }
+                        $chk = Get-WindowsFeature -Name $f -ErrorAction SilentlyContinue
+                        if (-not $chk -or -not $chk.Installed) { $stillMissing += $f }
+                    }
+                    if ($stillMissing.Count -gt 0) {
+                        Write-DscStatus "$Tag ERROR: IIS prereq features still missing after install attempt: $($stillMissing -join ', '). Portal install will likely fail."
+                    } else {
+                        Write-DscStatus "$Tag   IIS prereqs now satisfied (installed: $($missing -join ', '))"
+                    }
                 } else {
                     $defaultSite = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
                     if (-not $defaultSite) {
@@ -499,6 +636,206 @@ if ($blmEnabled) {
 
             # ---- Run the installer --------------------------------------------
             if ($installerOk) {
+                # Pre-flight: the MBAM installer calls [System.Net.Dns]::GetHostByName($env:computerName)
+                # at line 139 to resolve the local FQDN. If DNS suffix search list is missing or
+                # the VM's A record isn't registered yet, this fails with "No such host is known"
+                # and cascades into "Failure acquiring SQL identity certificate". Fix by ensuring
+                # the primary DNS suffix is set and the hostname resolves.
+                try {
+                    $null = [System.Net.Dns]::GetHostByName($env:COMPUTERNAME)
+                    Write-DscStatus "$Tag Pre-flight: DNS hostname resolution OK ($env:COMPUTERNAME)"
+                }
+                catch {
+                    Write-DscStatus "$Tag Pre-flight: DNS hostname resolution FAILED for '$env:COMPUTERNAME': $($_.Exception.Message)"
+                    # Ensure DNS suffix search list includes our domain
+                    try {
+                        $currentSuffix = (Get-DnsClient | Where-Object { $_.InterfaceAlias -notmatch 'Loopback' } | Select-Object -First 1).ConnectionSpecificSuffix
+                        if (-not $currentSuffix) {
+                            Write-DscStatus "$Tag Pre-flight: No DNS suffix on primary adapter. Setting to '$DomainFullName'..."
+                            Get-DnsClient | Where-Object { $_.InterfaceAlias -notmatch 'Loopback' } | Set-DnsClient -ConnectionSpecificSuffix $DomainFullName -ErrorAction Stop
+                            Register-DnsClient -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds 5
+                        }
+                        # Retry resolution
+                        $resolved = [System.Net.Dns]::GetHostByName($env:COMPUTERNAME)
+                        Write-DscStatus "$Tag Pre-flight: DNS resolved after suffix fix -> $($resolved.HostName)"
+                    }
+                    catch {
+                        Write-DscStatus "$Tag Pre-flight: DNS still failing after suffix fix: $($_.Exception.Message). MBAM installer will likely fail."
+                    }
+                }
+
+                # ---- SQL Server Identification Certificate pre-flight ----------
+                # Verified against ConfigMgr source
+                # (src/SiteServer/mp/MBAM/MBAMWebSiteInstaller.ps1): the
+                # installer's Get-CertificateFromSqlServer does NOT query SQL --
+                # it reads Cert:\LocalMachine\My ON THE SQL BOX for an X509 cert
+                # whose FriendlyName is 'ConfigMgr SQL Server Identification
+                # Certificate' with a currently-valid NotBefore/NotAfter window,
+                # exports its public blob and imports it into
+                # LocalMachine\TrustedPeople so the portal can validate SQL's
+                # 'Encrypt=True;TrustServerCertificate=False' connection. If that
+                # cert is absent / expired / future-dated, Install-MBAMWebSites
+                # writes 'Failure acquring SQL identity certificate' and rolls
+                # the whole install back (the exact failure observed). CM site
+                # setup provisions this cert and serializes it under
+                # HKLM\SOFTWARE\Microsoft\SMS\SQL Server
+                # (EncodedCertificateThumbprint / SerializedEncodedCertificate);
+                # on a fresh deploy it can lag the portal install, so wait for it
+                # (and recover a thumbprint-matched cert that lost its friendly
+                # name) before launching.
+                $certFriendly = 'ConfigMgr SQL Server Identification Certificate'
+                $sqlHostShort = $sqlServerName.Split('\')[0]
+                $isLocalSql   = ($sqlHostShort -eq $env:COMPUTERNAME) -or ($sqlServerFqdnBase -eq $localServerFqdn)
+                $certProbe = {
+                    param($friendly)
+                    $now = Get-Date
+                    $all = @(Get-ChildItem -Path Cert:\LocalMachine\My -ErrorAction SilentlyContinue)
+                    $named = @($all | Where-Object { $_.FriendlyName -eq $friendly })
+                    $valid = @($named | Where-Object { $_.NotBefore -lt $now -and $_.NotAfter -gt $now })
+                    $regThumb = $null
+                    try { $regThumb = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -Name 'EncodedCertificateThumbprint' -ErrorAction Stop).EncodedCertificateThumbprint } catch {}
+                    $recovered = $false
+                    # Recover the common edge case: CM's registry names a cert by
+                    # thumbprint that is present + date-valid in My but lost the
+                    # friendly name the installer filters on. Setting FriendlyName
+                    # on a cert obtained from an opened X509Store persists it.
+                    if ($valid.Count -eq 0 -and $regThumb) {
+                        try {
+                            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My','LocalMachine')
+                            $store.Open('ReadWrite')
+                            $byThumb = $store.Certificates | Where-Object { $_.Thumbprint -eq $regThumb -and $_.NotBefore -lt $now -and $_.NotAfter -gt $now } | Select-Object -First 1
+                            if ($byThumb -and $byThumb.FriendlyName -ne $friendly) {
+                                $byThumb.FriendlyName = $friendly
+                                $recovered = $true
+                            }
+                            $store.Close()
+                        } catch {}
+                        if ($recovered) {
+                            $all   = @(Get-ChildItem -Path Cert:\LocalMachine\My -ErrorAction SilentlyContinue)
+                            $named = @($all | Where-Object { $_.FriendlyName -eq $friendly })
+                            $valid = @($named | Where-Object { $_.NotBefore -lt $now -and $_.NotAfter -gt $now })
+                        }
+                    }
+                    [pscustomobject]@{
+                        ValidCount = $valid.Count
+                        RegThumb   = $regThumb
+                        Recovered  = $recovered
+                        Inventory  = @($named | ForEach-Object { "FN='$($_.FriendlyName)' TP=$($_.Thumbprint) NB=$($_.NotBefore.ToString('s')) NA=$($_.NotAfter.ToString('s'))" })
+                    }
+                }
+
+                # ---- Full SQL-identity-cert diagnostics (one-shot) -------------
+                # We never get the user's environment, so on any failure dump
+                # EVERYTHING needed to root-cause the missing/expired/removed cert
+                # straight into the build log:
+                #   1. Every CANDIDATE cert in LocalMachine\My + \TrustedPeople on
+                #      the SQL box -- VALID *and* EXPIRED/NOT-YET-VALID -- matched
+                #      by friendly name, Server-Auth EKU (1.3.6.1.5.5.7.3.1), or a
+                #      subject containing the SQL host, with full dates/EKU/privkey.
+                #   2. The CM registry serialization on the SITE SERVER
+                #      (HKLM\SOFTWARE\Microsoft\SMS\SQL Server:
+                #      EncodedCertificateThumbprint / SerializedEncodedCertificate).
+                #   3. The CM_RoleIdCertificates DB row(s) (FriendlyName / Subject /
+                #      UsageOID / ExpirationDate / Thumbprint + blob sizes) -- this is
+                #      CM's own record of the cert, so an in-DB thumbprint that is
+                #      absent from the store proves a post-install removal, while no
+                #      row at all proves setup never created it.
+                $serverAuthOid = '1.3.6.1.5.5.7.3.1'
+                $certStoreDiag = {
+                    param($friendly, $sqlHost, $sauthOid)
+                    $now = Get-Date
+                    $out = New-Object System.Collections.Generic.List[string]
+                    foreach ($storeName in 'My','TrustedPeople') {
+                        $certs = @(Get-ChildItem -Path "Cert:\LocalMachine\$storeName" -ErrorAction SilentlyContinue)
+                        $cand  = @($certs | Where-Object {
+                            ($_.FriendlyName -eq $friendly) -or
+                            (@($_.EnhancedKeyUsageList | Where-Object { $_.ObjectId -eq $sauthOid }).Count -gt 0) -or
+                            ($_.Subject -and $sqlHost -and ($_.Subject -like "*$sqlHost*"))
+                        })
+                        $out.Add("STORE LocalMachine\$storeName : $($certs.Count) total cert(s), $($cand.Count) candidate(s)")
+                        foreach ($c in $cand) {
+                            $state = 'VALID'
+                            if ($c.NotBefore -gt $now) { $state = 'NOT-YET-VALID' }
+                            elseif ($c.NotAfter -lt $now) { $state = 'EXPIRED' }
+                            $ekus = @($c.EnhancedKeyUsageList | ForEach-Object { $_.ObjectId }) -join ','
+                            if (-not $ekus) { $ekus = '<none>' }
+                            $out.Add(("  [{0}] TP={1} FN='{2}' Subj='{3}' NB={4} NA={5} PrivKey={6} EKU={7}" -f `
+                                $state, $c.Thumbprint, $c.FriendlyName, $c.Subject, `
+                                $c.NotBefore.ToString('s'), $c.NotAfter.ToString('s'), $c.HasPrivateKey, $ekus))
+                        }
+                    }
+                    return $out
+                }
+                $certDiagEmitted = $false
+                $emitCertDiagnostics = {
+                    Write-DscStatus "$Tag === SQL identity cert diagnostics (one-shot; we have no access to the user's env) ==="
+                    # 1) cert store on the SQL box (valid AND invalid candidates)
+                    try {
+                        if ($isLocalSql) { $lines = & $certStoreDiag $certFriendly $sqlHostShort $serverAuthOid }
+                        else { $lines = Invoke-Command -ComputerName $sqlServerFqdnBase -ScriptBlock $certStoreDiag -ArgumentList $certFriendly, $sqlHostShort, $serverAuthOid -ErrorAction Stop }
+                        foreach ($l in $lines) { Write-DscStatus "$Tag   $l" }
+                    } catch { Write-DscStatus "$Tag   cert store dump failed on ${sqlHostShort}: $($_.Exception.Message)" }
+                    # 2) CM registry serialization on the SITE SERVER (always local)
+                    try {
+                        $rk = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+                        $encThumb  = $rk.EncodedCertificateThumbprint
+                        $serEncLen = 0; if ($rk.SerializedEncodedCertificate) { $serEncLen = ([string]$rk.SerializedEncodedCertificate).Length }
+                        $serSSBLen = 0; if ($rk.SerializedCertificate)        { $serSSBLen = ([string]$rk.SerializedCertificate).Length }
+                        Write-DscStatus "$Tag   REGISTRY HKLM\SOFTWARE\Microsoft\SMS\SQL Server: EncodedCertificateThumbprint=$encThumb SerializedEncodedCertificate(len=$serEncLen) SerializedCertificate/SSB(len=$serSSBLen)"
+                        if ($rk.SerializedEncodedCertificate) {
+                            $pv = ([string]$rk.SerializedEncodedCertificate); if ($pv.Length -gt 80) { $pv = $pv.Substring(0,80) + '...' }
+                            Write-DscStatus "$Tag     SerializedEncodedCertificate preview: $pv"
+                        }
+                    } catch { Write-DscStatus "$Tag   registry read failed: $($_.Exception.Message)" }
+                    # 3) CM_RoleIdCertificates DB row(s) -- CM's own record of the cert
+                    try {
+                        $q = "SELECT RoleTypeID, FriendlyName, SubjectName, UsageOID, ExpirationDate, CONVERT(varchar(max), CONVERT(varbinary(max), Thumbprint)) AS ThumbStr, DATALENGTH(SerializedCertificate) AS SerLen, DATALENGTH(EncodedCertificate) AS EncLen FROM CM_RoleIdCertificates"
+                        $rows = @(Invoke-Sqlcmd -ServerInstance $sqlConnStr -Database $cmDbName -TrustServerCertificate -Query $q -ErrorAction Stop)
+                        Write-DscStatus "$Tag   DB CM_RoleIdCertificates ($cmDbName): $($rows.Count) row(s)"
+                        foreach ($r in $rows) {
+                            $ts = ''; if ($r.ThumbStr) { $ts = ([string]$r.ThumbStr).Trim() }
+                            Write-DscStatus ("{0}     RoleTypeID={1} FN='{2}' Subj='{3}' OID={4} Exp={5} Thumb={6} SerLen={7} EncLen={8}" -f `
+                                $Tag, $r.RoleTypeID, $r.FriendlyName, $r.SubjectName, $r.UsageOID, $r.ExpirationDate, $ts, $r.SerLen, $r.EncLen)
+                        }
+                    } catch { Write-DscStatus "$Tag   DB CM_RoleIdCertificates query failed: $($_.Exception.Message)" }
+                    Write-DscStatus "$Tag === end SQL identity cert diagnostics ==="
+                }
+                Write-DscStatus "$Tag SQL identity cert pre-flight (target=$sqlHostShort local=$isLocalSql)..."
+                $certOk = $false
+                $certWaitMax = 20   # 20 x 15s = up to 5 min
+                for ($ci = 1; $ci -le $certWaitMax; $ci++) {
+                    $probe = $null
+                    try {
+                        if ($isLocalSql) {
+                            $probe = & $certProbe $certFriendly
+                        } else {
+                            $probe = Invoke-Command -ComputerName $sqlServerFqdnBase -ScriptBlock $certProbe -ArgumentList $certFriendly -ErrorAction Stop
+                        }
+                    } catch {
+                        Write-DscStatus "$Tag   cert probe error (attempt $ci/$certWaitMax): $($_.Exception.Message)"
+                    }
+                    if ($probe) {
+                        if ($probe.Recovered) { Write-DscStatus "$Tag   recovered SQL identity cert friendly name on thumbprint $($probe.RegThumb)" }
+                        if ($probe.ValidCount -ge 1) {
+                            Write-DscStatus "$Tag   SQL identity cert present and valid on $sqlHostShort (count=$($probe.ValidCount))"
+                            $certOk = $true
+                            break
+                        }
+                        if ($ci -eq 1 -or $ci -eq $certWaitMax -or ($ci % 4) -eq 0) {
+                            $inv = '<none>'
+                            if ($probe.Inventory.Count -gt 0) { $inv = $probe.Inventory -join ' ; ' }
+                            Write-DscStatus "$Tag   waiting for SQL identity cert (attempt $ci/$certWaitMax): valid=0 regThumb=$($probe.RegThumb) named=[$inv]"
+                        }
+                    }
+                    if ($ci -lt $certWaitMax) { Start-Sleep -Seconds 15 }
+                }
+                if (-not $certOk) {
+                    Write-DscStatus "$Tag WARNING: 'ConfigMgr SQL Server Identification Certificate' not valid in LocalMachine\My on $sqlHostShort after wait. MBAMWebSiteInstaller will fail at 'acquring SQL identity certificate' (CM site setup normally provisions this cert; HKLM\SOFTWARE\Microsoft\SMS\SQL Server\EncodedCertificateThumbprint). Proceeding so full diagnostics are captured."
+                    & $emitCertDiagnostics
+                    $certDiagEmitted = $true
+                }
+
                 $stamp     = Get-Date -Format yyyyMMdd_HHmmss
                 $logDir    = if (Test-Path 'C:\staging\DSC') { 'C:\staging\DSC' } else { $env:TEMP }
                 $logFile   = Join-Path $logDir "MBAMWebSiteInstaller_$stamp.log"
@@ -507,13 +844,35 @@ if ($blmEnabled) {
                 $installerArgs = @(
                     '-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned'
                     '-File',"`"$installer`""
-                    '-SqlServerName',$sqlServerFqdn        # MUST be FQDN -- installer hardcodes
-                    '-SqlDatabaseName',$cmDbName            # Encrypt=True;TrustServerCertificate=False,
-                    '-SiteInstall','HelpDesk'               # so NetBIOS triggers SPN mismatch
+                    '-SqlServerName',$sqlServerFqdnBase     # FQDN of the SQL host only (no instance)
+                    '-SqlDatabaseName',$cmDbName
+                    '-SiteInstall','Both'
                     '-HelpdeskUsersGroupName',"`"$qualifiedGroup`""
                     '-HelpdeskAdminsGroupName',"`"$qualifiedGroup`""
                     '-DomainName',$DomainFullName
                 )
+                # Named instance: pass -SqlInstanceName separately and ensure
+                # SQL Browser is running on the SQL host (required for instance
+                # discovery when the MBAM installer connects without a port number)
+                if ($sqlInstanceName -and $sqlInstanceName -ne 'MSSQLSERVER') {
+                    $installerArgs += '-SqlInstanceName'; $installerArgs += $sqlInstanceName
+                    $sqlHostName = $sqlServerName.Split('\')[0]
+                    try {
+                        $browserStatus = Invoke-Command -ComputerName "$sqlHostName.$DomainFullName" -ScriptBlock {
+                            $svc = Get-Service -Name SQLBrowser -ErrorAction SilentlyContinue
+                            if (-not $svc) { return 'NotFound' }
+                            if ($svc.Status -ne 'Running') {
+                                Set-Service -Name SQLBrowser -StartupType Automatic -ErrorAction SilentlyContinue
+                                Start-Service -Name SQLBrowser -ErrorAction Stop
+                                return 'Started'
+                            }
+                            return 'Running'
+                        } -ErrorAction Stop
+                        Write-DscStatus "$Tag SQL Browser on ${sqlHostName}: $browserStatus"
+                    } catch {
+                        Write-DscStatus "$Tag WARNING: Could not verify SQL Browser on ${sqlHostName}: $($_.Exception.Message)"
+                    }
+                }
                 Write-DscStatus "$Tag Launching installer; log=$logFile"
                 Write-DscStatus "$Tag   args: $($installerArgs -join ' ')"
 
@@ -557,12 +916,12 @@ if ($blmEnabled) {
 
                         # Smoke-test the URL (401/403 are also fine -- means IIS is serving)
                         try {
-                            $req = [System.Net.HttpWebRequest]::Create("https://$sqlServerFqdn/HelpDesk/")
+                            $req = [System.Net.HttpWebRequest]::Create("https://$localServerFqdn/HelpDesk/")
                             $req.Timeout = 15000
                             $req.AllowAutoRedirect = $false
                             $req.UseDefaultCredentials = $true
                             $resp = $req.GetResponse()
-                            Write-DscStatus "$Tag Smoke test: HTTP $([int]$resp.StatusCode) from https://$sqlServerFqdn/HelpDesk/"
+                            Write-DscStatus "$Tag Smoke test: HTTP $([int]$resp.StatusCode) from https://$localServerFqdn/HelpDesk/"
                             $resp.Close()
                         } catch [System.Net.WebException] {
                             $code = $null
@@ -576,10 +935,42 @@ if ($blmEnabled) {
                             Write-DscStatus "$Tag WARNING: Smoke test exception: $($_.Exception.Message)"
                         }
 
-                        Write-DscStatus "$Tag SUCCESS: BLM Helpdesk Portal ready at https://$sqlServerFqdn/HelpDesk (sign in as member of $qualifiedGroup)"
+                        Write-DscStatus "$Tag SUCCESS: BLM portals ready at https://$localServerFqdn/HelpDesk and https://$localServerFqdn/SelfService (sign in as member of $qualifiedGroup)"
                     }
                     else {
-                        Write-DscStatus "$Tag WARNING: Installer ran but post-install health check FAILED. See $logFile and $errFile for details."
+                        # One-shot diagnostics: the installer log lives only on
+                        # this VM and we rarely get a second chance to collect
+                        # it, so pump the FULL installer log/err + the #1 root
+                        # cause (SQL identity cert state) + IIS feature state into
+                        # the build log (which is retrieved) before giving up.
+                        Write-DscStatus "$Tag WARNING: Installer ran but post-install health check FAILED. Capturing full diagnostics (one-shot)."
+                        try {
+                            if (Test-Path $logFile) {
+                                $full = @(Get-Content $logFile -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch 'to Extraction Queue' })
+                                if ($full.Count -gt 250) { $full = $full[-250..-1] }
+                                Write-DscStatus "$Tag   --- MBAMWebSiteInstaller.log (signal lines, Extraction-Queue noise filtered) ---"
+                                foreach ($ln in $full) { if (-not [string]::IsNullOrWhiteSpace($ln)) { Write-DscStatus "$Tag   LOG| $($ln.TrimEnd())" } }
+                            }
+                        } catch { Write-DscStatus "$Tag   (could not read installer log: $($_.Exception.Message))" }
+                        try {
+                            if ((Test-Path $errFile) -and ((Get-Item $errFile).Length -gt 0)) {
+                                $fullErr = @(Get-Content $errFile -ErrorAction SilentlyContinue)
+                                Write-DscStatus "$Tag   --- MBAMWebSiteInstaller.err ($($fullErr.Count) lines) ---"
+                                foreach ($ln in $fullErr) { if (-not [string]::IsNullOrWhiteSpace($ln)) { Write-DscStatus "$Tag   ERR| $($ln.TrimEnd())" } }
+                            }
+                        } catch {}
+                        if (-not $certDiagEmitted) { & $emitCertDiagnostics; $certDiagEmitted = $true }
+                        try {
+                            $feats = @('Web-Server','Web-Asp-Net45','Web-Net-Ext45','Web-Windows-Auth','Web-ISAPI-Ext','Web-ISAPI-Filter','Web-Mgmt-Console') | ForEach-Object {
+                                $f = Get-WindowsFeature -Name $_ -ErrorAction SilentlyContinue
+                                $st = 'missing'; if ($f -and $f.Installed) { $st = 'installed' }
+                                "$_=$st"
+                            }
+                            Write-DscStatus "$Tag   DIAG IIS features: $($feats -join ' ')"
+                            $dws = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
+                            if ($dws) { Write-DscStatus "$Tag   DIAG Default Web Site state=$($dws.State)" } else { Write-DscStatus "$Tag   DIAG Default Web Site: MISSING" }
+                        } catch {}
+                        Write-DscStatus "$Tag   (installer log on VM: $logFile / $errFile)"
                     }
                 }
             }

@@ -1,4 +1,4 @@
-# InstallPSForHierarchy.ps1
+﻿# InstallPSForHierarchy.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -238,19 +238,19 @@ CurrentBranch=1
     $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
     Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
     $propName = "PSReadyToUse" + $ThisVm.VmName
-    $i = 0
+    $waitedSeconds = 0
+    $statusIntervalSeconds = 600
     while ($CSConfiguration.$propName.Status -ne "Completed") {
-        if ($i -eq 0) {
-            Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 600
-            $i++
-        }
-        else {
-            $i++
-            if ($i -gt 20) {
-                $i = 0
-            }
+        # Re-check the CS config file every 30s (below), but only rewrite the
+        # status every $statusIntervalSeconds (600s) so the status/log isn't
+        # flooded. The "-RetrySeconds 30" makes the displayed line read
+        # "checking again in 30 seconds" so it reflects the real poll cadence.
+        if (($waitedSeconds % $statusIntervalSeconds) -eq 0) {
+            $waitedMin = [int]($waitedSeconds / 60)
+            Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use (waited $waitedMin min)" -NoLog -RetrySeconds 30
         }
         Start-Sleep -Seconds 30
+        $waitedSeconds += 30
         $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
     }
 

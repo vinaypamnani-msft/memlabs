@@ -1,6 +1,158 @@
-﻿#Common.StorageToken.ps1
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+#Common.StorageToken.ps1
 # NOTE: This file is dot-sourced during DSC generation which runs under
 # PowerShell 5.1. Do not use PS7+ syntax (e.g. ?? ?. ??= ternary).
+
+# Returns the root used for host-local cached data files (productID.txt, SysCenterId.txt).
+# Stored under %ProgramData%\memlabs (created on demand) instead of the drive root.
+# Honors host override via $env:MEMLABS_DATA_ROOT for unusual setups.
+function Get-MemlabsDataRoot {
+    $root = $env:MEMLABS_DATA_ROOT
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        $programData = $env:ProgramData
+        if ([string]::IsNullOrWhiteSpace($programData)) { $programData = 'C:\ProgramData' }
+        $root = Join-Path $programData 'memlabs'
+    }
+    if (-not (Test-Path -LiteralPath $root)) {
+        New-Item -Path $root -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+    return $root
+}
+
+# ---- Host settings (per-machine, persisted in %ProgramData%\memlabs\host-settings.json) ----
+
+function Get-MemlabsHostSettingsPath {
+    return (Join-Path (Get-MemlabsDataRoot) 'host-settings.json')
+}
+
+function Get-MemlabsHostSettings {
+    $path = Get-MemlabsHostSettingsPath
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        return (Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+    }
+    catch {
+        Write-Log "Get-MemlabsHostSettings: Failed to parse $path - $_" -Warning
+        return $null
+    }
+}
+
+function Set-MemlabsHostSetting {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)]$Value
+    )
+    $path = Get-MemlabsHostSettingsPath
+    $settings = Get-MemlabsHostSettings
+    if (-not $settings) { $settings = [PSCustomObject]@{} }
+    if ($settings.PSObject.Properties[$Name]) {
+        $settings.$Name = $Value
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name $Name -Value $Value -Force
+    }
+    try {
+        $settings | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $path -Force -Encoding utf8 -ErrorAction Stop
+        Write-Log "Set-MemlabsHostSetting: $Name=$Value -> $path" -LogOnly
+    }
+    catch {
+        Write-Log "Set-MemlabsHostSetting: Failed to write $path - $_" -Warning
+    }
+}
+
+# Returns the per-host root path under which memlabs creates per-domain VM folders.
+# Resolution order:
+#   1. $env:MEMLABS_VM_STORAGE_ROOT  (escape hatch for scripted setups)
+#   2. host-settings.json -> vmStorageRoot   (sticky from a previous run)
+#   3. E:\VirtualMachines                    (lab-host convention, when E: exists)
+#   4. interactive picker over fixed drives (largest free space first), saved for next time
+# Validator already rejects basePath drive letters C/D/Z, so those are excluded from the picker.
+# -NoPrompt callers (cleanup, jobs) get $null instead of a prompt if nothing's been chosen.
+function Get-MemlabsVmStorageRoot {
+    [CmdletBinding()]
+    param(
+        [switch]$NoPrompt
+    )
+
+    $envOverride = $env:MEMLABS_VM_STORAGE_ROOT
+    if (-not [string]::IsNullOrWhiteSpace($envOverride)) {
+        return $envOverride
+    }
+
+    $settings = Get-MemlabsHostSettings
+    $saved = $null
+    if ($settings -and $settings.PSObject.Properties['vmStorageRoot']) {
+        $saved = $settings.vmStorageRoot
+    }
+    if (-not [string]::IsNullOrWhiteSpace($saved)) {
+        $savedRoot = [System.IO.Path]::GetPathRoot($saved)
+        if ($savedRoot -and [System.IO.Directory]::Exists($savedRoot)) {
+            return $saved
+        }
+        Write-Log "Get-MemlabsVmStorageRoot: Saved vmStorageRoot '$saved' is on a drive that no longer exists; re-resolving." -Warning
+    }
+
+    if ([System.IO.Directory]::Exists('E:\')) {
+        $default = 'E:\VirtualMachines'
+        Set-MemlabsHostSetting -Name 'vmStorageRoot' -Value $default
+        return $default
+    }
+
+    $eligible = @(Get-MemlabsEligibleStorageDrives)
+    if ($eligible.Count -eq 0) {
+        Write-Log "Get-MemlabsVmStorageRoot: No eligible fixed drives found (need a fixed drive other than C/D/Z)." -Warning
+        return $null
+    }
+
+    if ($NoPrompt -or $Common.InJob -or -not [Environment]::UserInteractive) {
+        $pick = $eligible[0]
+        $path = "$($pick.DriveLetter):\VirtualMachines"
+        Set-MemlabsHostSetting -Name 'vmStorageRoot' -Value $path
+        return $path
+    }
+
+    Write-Host ''
+    Write-Host 'No E: drive found. Select a drive for VM storage (sorted by free space):' -ForegroundColor Cyan
+    for ($i = 0; $i -lt $eligible.Count; $i++) {
+        $d = $eligible[$i]
+        $freeGB = [math]::Round($d.FreeSpace / 1GB, 1)
+        $sizeGB = [math]::Round($d.Size / 1GB, 1)
+        $tag = if ($i -eq 0) { ' (largest free)' } else { '' }
+        Write-Host ("  [{0}] {1}:\  {2} GB free of {3} GB{4}" -f ($i + 1), $d.DriveLetter, $freeGB, $sizeGB, $tag)
+    }
+    $picked = $null
+    while ($null -eq $picked) {
+        $resp = Read-Host "Enter selection 1-$($eligible.Count) [1]"
+        if ([string]::IsNullOrWhiteSpace($resp)) { $resp = '1' }
+        $n = 0
+        if ([int]::TryParse($resp, [ref]$n) -and $n -ge 1 -and $n -le $eligible.Count) {
+            $picked = $eligible[$n - 1]
+        }
+        else {
+            Write-Host "Invalid selection." -ForegroundColor Yellow
+        }
+    }
+    $path = "$($picked.DriveLetter):\VirtualMachines"
+    Set-MemlabsHostSetting -Name 'vmStorageRoot' -Value $path
+    Write-Host "Saved $path as the default VM storage root for this host." -ForegroundColor Green
+    return $path
+}
+
+function Get-MemlabsEligibleStorageDrives {
+    # Fixed disks (DriveType=3) only. C/D/Z are reserved (system/recovery/storage) per validator.
+    $excluded = @('C', 'D', 'Z')
+    Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $letter = $_.DeviceID.TrimEnd(':')
+            if ($letter -and ($excluded -notcontains $letter.ToUpper())) {
+                [PSCustomObject]@{
+                    DriveLetter = $letter
+                    FreeSpace   = [int64]$_.FreeSpace
+                    Size        = [int64]$_.Size
+                }
+            }
+        } | Sort-Object -Property FreeSpace -Descending
+}
 
 # Placeholder for future alternative auth methods (e.g. Managed Identity, certificate-based).
 # Currently only SAS token auth is supported.
@@ -66,8 +218,6 @@ function Get-StorageConfig {
     Write-Log "Get-StorageConfig: Found $($configFiles.Count) config file(s): $($configFiles.Name -join ', ')" -LogOnly
 
     # ---- Try each config file in descending order (newest first) ----
-    $config = $null
-    $configPath = $null
     $authSet = $false
 
     foreach ($file in ($configFiles | Sort-Object @{
@@ -131,8 +281,6 @@ function Get-StorageConfig {
         $testUrl = Get-StorageUrl -BaseUrl $candidateStorageLocation -FileName $script:fileListName
         $testResponse = Invoke-StorageRequest -Url $testUrl
         if ($null -ne $testResponse) {
-            $config = $candidate
-            $configPath = $file.FullName
             $authSet = $true
             Write-Log "Get-StorageConfig: Storage auth mode: SAS Token via $($file.Name)" -LogOnly
             break
@@ -216,6 +364,19 @@ function Initialize-Storage {
     $VerbosePreference = 'SilentlyContinue'
 
     try {
+        # Skip all network operations if running inside a job.
+        # Jobs don't need to verify SAS tokens over the network - they
+        # only need the local file list and admin credential.
+        if ($InJob.IsPresent) {
+            Write-Log "Skipped storage network operations, running inside a job." -Verbose
+            $Common.OfflineMode = $true
+            $script:fileListName = if ($Common.DevBranch) { "_fileList_develop.json" } else { "_fileList.json" }
+            $script:fileListPath = Join-Path $Common.AzureFilesPath $script:fileListName
+            if (-not (Update-FileList)) { return $false }
+            if (-not (Get-LocalAdminCredential)) { return $false }
+            return $true
+        }
+
         # Load local config and determine auth mode
         $storageConfigLoaded = Get-StorageConfig
         if (-not $storageConfigLoaded) {
@@ -231,14 +392,6 @@ function Initialize-Storage {
             $script:fileListPath = Join-Path $Common.AzureFilesPath $script:fileListName
             $script:downloadConfigName = $Common.NewestStorageConfigFileName
             $script:downloadConfigPath = Join-Path $Common.ConfigPath $script:downloadConfigName
-        }
-
-        # Skip all network operations if running inside a job
-        if ($InJob.IsPresent) {
-            Write-Log "Skipped updating from azure storage, running inside a job." -Verbose
-            if (-not (Update-FileList)) { return $false }
-            if (-not (Get-LocalAdminCredential)) { return $false }
-            return $true
         }
 
         # Skip Update-StorageConfigFile entirely if storage config failed
@@ -385,7 +538,7 @@ function Update-FileList {
 function Get-ProductID {
 
     $productIDName = "productID.txt"
-    $productIdPath = "E:\$productIDName"
+    $productIdPath = Join-Path (Get-MemlabsDataRoot) $productIDName
 
     if (Test-Path $productIdPath) {
         Write-Log "ProductID already exists at $productIdPath, skipping." -LogOnly

@@ -64,9 +64,110 @@ if ($server) {
     Update-Log "Disable Windows Ink Workspace button"
     New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsInkWorkspace' -Force | New-ItemProperty -Name AllowWindowsInkWorkspace -Value 0 -Force | Out-Null
 
-    #Update-Log "Disable Windows Update"
-    #New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | New-ItemProperty -Name NoAutoUpdate -Value 1 -Force | Out-Null
+    Update-Log "Disable Windows Update"
+    New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | New-ItemProperty -Name NoAutoUpdate -Value 1 -Force | Out-Null
 }
+
+# Disable Microsoft Edge Update — auto-updates leave PendingFileRenameOperations
+# that trigger unnecessary reboots during lab builds.
+Update-Log "Disable Microsoft Edge Update services and scheduled tasks"
+foreach ($svc in @('edgeupdate', 'edgeupdatem', 'MicrosoftEdgeElevationService')) {
+    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($s) {
+        Stop-Service $svc -Force -ErrorAction SilentlyContinue
+        Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
+    }
+}
+Get-ScheduledTask -TaskPath '\' -ErrorAction SilentlyContinue |
+    Where-Object { $_.TaskName -match 'MicrosoftEdgeUpdate' } |
+    Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+
+# Disable telemetry, diagnostics, and consumer experience
+# These generate network traffic, disk I/O, and occasional PendingFileRename
+# entries that interfere with deterministic lab builds.
+Update-Log "Disable telemetry and diagnostics services"
+foreach ($svc in @('DiagTrack', 'dmwappushservice')) {
+    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($s) {
+        Stop-Service $svc -Force -ErrorAction SilentlyContinue
+        Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
+    }
+}
+
+Update-Log "Disable telemetry via registry"
+$dtPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'
+New-Item -Path $dtPath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $dtPath -Name 'AllowTelemetry' -PropertyType DWord -Value 0 -Force | Out-Null
+New-ItemProperty -Path $dtPath -Name 'AllowDeviceNameInTelemetry' -PropertyType DWord -Value 0 -Force | Out-Null
+New-ItemProperty -Path $dtPath -Name 'DoNotShowFeedbackNotifications' -PropertyType DWord -Value 1 -Force | Out-Null
+
+Update-Log "Disable Advertising ID, activity history, and tailored experiences"
+# Advertising ID
+$advIdPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo'
+New-Item -Path $advIdPath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $advIdPath -Name 'DisabledByGroupPolicy' -PropertyType DWord -Value 1 -Force | Out-Null
+# Activity History (timeline)
+$actPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
+New-Item -Path $actPath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $actPath -Name 'PublishUserActivities' -PropertyType DWord -Value 0 -Force | Out-Null
+New-ItemProperty -Path $actPath -Name 'UploadUserActivities' -PropertyType DWord -Value 0 -Force | Out-Null
+New-ItemProperty -Path $actPath -Name 'EnableActivityFeed' -PropertyType DWord -Value 0 -Force | Out-Null
+# Tailored experiences
+$tailoredPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy'
+New-Item -Path $tailoredPath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $tailoredPath -Name 'TailoredExperiencesWithDiagnosticDataEnabled' -PropertyType DWord -Value 0 -Force | Out-Null
+# Feedback frequency — never
+$siufPath = 'HKCU:\Software\Microsoft\Siuf\Rules'
+New-Item -Path $siufPath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $siufPath -Name 'NumberOfSIUFInPeriod' -PropertyType DWord -Value 0 -Force | Out-Null
+# Online speech recognition
+$speechPath = 'HKLM:\SOFTWARE\Policies\Microsoft\InputPersonalization'
+New-Item -Path $speechPath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $speechPath -Name 'AllowInputPersonalization' -PropertyType DWord -Value 0 -Force | Out-Null
+# Inking & typing personalization
+New-ItemProperty -Path $speechPath -Name 'RestrictImplicitInkCollection' -PropertyType DWord -Value 1 -Force | Out-Null
+New-ItemProperty -Path $speechPath -Name 'RestrictImplicitTextCollection' -PropertyType DWord -Value 1 -Force | Out-Null
+# App launch tracking
+Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Start_TrackProgs' -Value 0 -Force -ErrorAction SilentlyContinue
+# Location tracking
+$locPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'
+New-Item -Path $locPath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $locPath -Name 'DisableLocation' -PropertyType DWord -Value 1 -Force | Out-Null
+# WiFi Sense (auto hotspot sharing) — Win10 only but harmless on Server
+$wfPath = 'HKLM:\SOFTWARE\Microsoft\WcmSvc\wifinetworkmanager\config'
+New-Item -Path $wfPath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $wfPath -Name 'AutoConnectAllowedOEM' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+
+Update-Log "Disable consumer experience and spotlight"
+$cePath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'
+New-Item -Path $cePath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $cePath -Name 'DisableWindowsConsumerFeatures' -PropertyType DWord -Value 1 -Force | Out-Null
+New-ItemProperty -Path $cePath -Name 'DisableSoftLanding' -PropertyType DWord -Value 1 -Force | Out-Null
+New-ItemProperty -Path $cePath -Name 'DisableCloudOptimizedContent' -PropertyType DWord -Value 1 -Force | Out-Null
+
+Update-Log "Disable scheduled tasks: defrag, NGEN, CEIP, telemetry, Server Manager"
+$disableTasks = @(
+    '\Microsoft\Windows\Defrag\ScheduledDefrag'
+    '\Microsoft\Windows\Server Manager\ServerManager'
+    '\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser'
+    '\Microsoft\Windows\Application Experience\ProgramDataUpdater'
+    '\Microsoft\Windows\Autochk\Proxy'
+    '\Microsoft\Windows\Customer Experience Improvement Program\Consolidator'
+    '\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip'
+    '\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector'
+)
+foreach ($taskFullName in $disableTasks) {
+    $taskName = Split-Path $taskFullName -Leaf
+    $taskPath = (Split-Path $taskFullName -Parent) + '\'
+    $t = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue
+    if ($t -and $t.State -ne 'Disabled') {
+        Disable-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue | Out-Null
+    }
+}
+# NGEN tasks use version-specific paths — match by wildcard
+Get-ScheduledTask -TaskPath '\Microsoft\Windows\.NET Framework\' -ErrorAction SilentlyContinue |
+    Where-Object { $_.TaskName -match 'NGEN' } |
+    Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
 
 # Common Windows Settings
 # ========================
@@ -106,6 +207,95 @@ Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 
 
 Update-Log "Disable network location wizard"
 New-Item 'HKLM:\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff' -Force -ErrorAction SilentlyContinue | Out-Null
+
+# Visual performance optimizations
+# =================================
+# Set "Adjust for best performance" (disables all animations, transparency,
+# smooth scrolling, thumbnail caching, etc.) — dramatically reduces first-login
+# time and memory footprint on Windows 11 VMs.
+Update-Log "Set visual effects to 'Adjust for best performance'"
+# UserPreferencesMask controls all visual effects. 90 12 03 80 10 00 00 00 = "Best performance"
+$vfxPath = 'HKCU:\Control Panel\Desktop'
+Set-ItemProperty -Path $vfxPath -Name 'UserPreferencesMask' -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00)) -Type Binary -Force
+Set-ItemProperty -Path $vfxPath -Name 'MenuShowDelay' -Value '0' -Force  # No menu animation delay
+$vfxWinPath = 'HKCU:\Control Panel\Desktop\WindowMetrics'
+Set-ItemProperty -Path $vfxWinPath -Name 'MinAnimate' -Value '0' -Force  # No minimize/maximize animation
+$vfxAdvPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+Set-ItemProperty -Path $vfxAdvPath -Name 'TaskbarAnimations' -Value 0 -Force
+Set-ItemProperty -Path $vfxAdvPath -Name 'ListviewAlphaSelect' -Value 0 -Force  # No translucent selection rectangle
+Set-ItemProperty -Path $vfxAdvPath -Name 'ListviewShadow' -Value 0 -Force      # No drop shadows on icon labels
+# VisualFX key tells System Properties to show "Custom" or "Best Performance"
+$vfxSysPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects'
+New-Item -Path $vfxSysPath -Force -ErrorAction SilentlyContinue | Out-Null
+Set-ItemProperty -Path $vfxSysPath -Name 'VisualFXSetting' -Value 2 -Force  # 2 = Best Performance
+
+# Disable transparency effects (Win10/11 compositing overhead)
+Update-Log "Disable transparency and animation effects"
+$themePath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+New-Item -Path $themePath -Force -ErrorAction SilentlyContinue | Out-Null
+Set-ItemProperty -Path $themePath -Name 'EnableTransparency' -Value 0 -Force
+# SystemParametersInfo-equivalent: disable UI animations globally
+$dwmPath = 'HKCU:\Software\Microsoft\Windows\DWM'
+New-Item -Path $dwmPath -Force -ErrorAction SilentlyContinue | Out-Null
+Set-ItemProperty -Path $dwmPath -Name 'EnableAeroPeek' -Value 0 -Force
+Set-ItemProperty -Path $dwmPath -Name 'AlwaysHibernateThumbnails' -Value 0 -Force
+
+# Windows 11 specific: disable Widgets, Copilot, Chat, Snap layouts, and
+# first-login "welcome" experience that installs suggested apps.
+if (-not $server) {
+    Update-Log "Disable Windows 11 Widgets, Copilot, Chat, and first-run bloat"
+    # Widgets
+    New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Force -ErrorAction SilentlyContinue | Out-Null
+    New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Name 'AllowNewsAndInterests' -PropertyType DWord -Value 0 -Force | Out-Null
+    Set-ItemProperty -Path $vfxAdvPath -Name 'TaskbarDa' -Value 0 -Force -ErrorAction SilentlyContinue  # Hide Widgets button
+    # Copilot
+    New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' -Force -ErrorAction SilentlyContinue | Out-Null
+    New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' -Name 'TurnOffWindowsCopilot' -PropertyType DWord -Value 1 -Force | Out-Null
+    # Chat (Teams consumer)
+    Set-ItemProperty -Path $vfxAdvPath -Name 'TaskbarMn' -Value 0 -Force -ErrorAction SilentlyContinue
+    # Snap assist overlay — distracting in RDP sessions
+    Set-ItemProperty -Path $vfxAdvPath -Name 'EnableSnapAssistFlyout' -Value 0 -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $vfxAdvPath -Name 'SnapAssist' -Value 0 -Force -ErrorAction SilentlyContinue
+}
+
+# Disable "Welcome Experience" and "Get tips/suggestions" that trigger
+# on first login and install promoted apps in the background.
+Update-Log "Disable Welcome Experience, tips, and suggested content"
+$cdmPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
+New-Item -Path $cdmPath -Force -ErrorAction SilentlyContinue | Out-Null
+# Disable all content delivery (suggested apps, Start menu suggestions, tips)
+foreach ($cdmVal in @(
+    'SubscribedContent-310093Enabled'    # Welcome Experience
+    'SubscribedContent-338389Enabled'    # Tips/tricks
+    'SubscribedContent-338393Enabled'    # Suggested content in Settings
+    'SubscribedContent-353694Enabled'    # Suggested content in Settings
+    'SubscribedContent-353696Enabled'    # Suggested content in Settings
+    'SystemPaneSuggestionsEnabled'       # Start menu suggested apps
+    'SilentInstalledAppsEnabled'         # Auto-install suggested apps
+    'SoftLandingEnabled'                 # Tips about Windows
+    'RotatingLockScreenEnabled'          # Lock screen spotlight
+    'RotatingLockScreenOverlayEnabled'   # Lock screen fun facts
+)) {
+    New-ItemProperty -Path $cdmPath -Name $cdmVal -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+}
+
+# Disable first-logon animation ("Hi, we're getting things ready for you")
+Update-Log "Disable first-logon animation"
+New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Force -ErrorAction SilentlyContinue | Out-Null
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'EnableFirstLogonAnimation' -Value 0 -Force
+
+# Disable Search highlights (Bing images in search bar)
+Update-Log "Disable search highlights"
+New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'EnableDynamicContentInWSB' -PropertyType DWord -Value 0 -Force | Out-Null
+
+# Reduce Superfetch/SysMain memory pressure on VMs with limited RAM
+Update-Log "Disable SysMain (Superfetch) — counterproductive on dynamic-memory VMs"
+$s = Get-Service -Name 'SysMain' -ErrorAction SilentlyContinue
+if ($s) {
+    Stop-Service 'SysMain' -Force -ErrorAction SilentlyContinue
+    Set-Service  'SysMain' -StartupType Disabled -ErrorAction SilentlyContinue
+}
 
 Update-Log "Add tools paths to PATH variable"
 $toolsPath = "C:\tools"

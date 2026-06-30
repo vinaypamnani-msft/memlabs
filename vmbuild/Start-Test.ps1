@@ -40,9 +40,22 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'TestName')]
     [ArgumentCompleter({
             param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
-            . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false -InJob:$true
-            $argument = @(Get-CMVersions)
-            return $argument | Where-Object { $_ -match $WordToComplete }
+            # Fast path: read CM versions from cache file instead of loading Common.ps1
+            $versions = @()
+            if ($global:Common.Supported.CMVersions) {
+                $versions = @($global:Common.Supported.CMVersions)
+            }
+            else {
+                $cacheFile = Join-Path $PSScriptRoot "cache\supported-options.json"
+                if (Test-Path $cacheFile) {
+                    try {
+                        $cached = Get-Content $cacheFile -ErrorAction SilentlyContinue | ConvertFrom-Json
+                        if ($cached.Supported.CMVersions) { $versions = @($cached.Supported.CMVersions) }
+                    } catch {}
+                }
+            }
+            $versions = $versions | Sort-Object -Descending
+            return $versions | Where-Object { $_ -like "$WordToComplete*" }
         })]        
     [string]$cmVersion,
 
@@ -77,6 +90,8 @@ param (
 
 
 function Run-Test {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '',
+        Justification = 'Local test-runner helper; not an exported cmdlet.')]
     param(
         [string]$Test
     )
@@ -144,6 +159,15 @@ function Run-Test {
     
     [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./Remove-lab.ps1 -DomainName $domainName")
     return $true
+}
+
+# Validate Common.ps1 has UTF-8 BOM before dot-sourcing (PS5.1 needs BOM for non-ASCII chars)
+$commonPath = Join-Path $PSScriptRoot 'Common.ps1'
+$bomBytes = [System.IO.File]::ReadAllBytes($commonPath)[0..2]
+if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq 0xBF)) {
+    Write-Host "ERROR: Common.ps1 is missing UTF-8 BOM. PS5.1 will fail to parse non-ASCII characters." -ForegroundColor Red
+    Write-Host "Run: git checkout -- vmbuild/Common.ps1" -ForegroundColor Yellow
+    exit 1
 }
 
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose

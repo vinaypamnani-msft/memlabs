@@ -1,3 +1,4 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 function Rename-VirtualMachine {
     [CmdletBinding()]
     param (
@@ -532,6 +533,7 @@ function Add-NewVMForRole {
                         break
                     }
                 }
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installOffice' -Value $false -force
             }
         }
         "DomainMember (Server)" {}
@@ -571,6 +573,7 @@ function Add-NewVMForRole {
             if ($virtualMachine.operatingSystem.Contains("Windows 11") ) {
                 $virtualMachine.Memory = "4GB"
             }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installOffice' -Value $false -force
         }
         "OSDClient" {
             $virtualMachine.memory = "2GB"
@@ -654,8 +657,9 @@ function Add-NewVMForRole {
         $ConfigToModify | Add-Member -MemberType NoteProperty -Name "VirtualMachines" -Value @() -Force
     }
 
-    # Add BitLocker property if BLM is enabled and VM has TPM + client OS
-    if ($virtualMachine.tpmEnabled -and $ConfigToModify.cmOptions -and $ConfigToModify.cmOptions.EnableBLM) {
+    # Add BitLocker property if BLM is enabled and VM has TPM + client OS.
+    # Non-domain roles (InternetClient, WorkgroupMember, AADClient) never receive BLM policy.
+    if ($virtualMachine.tpmEnabled -and $ConfigToModify.cmOptions -and $ConfigToModify.cmOptions.EnableBLM -and $role -notin 'InternetClient', 'WorkgroupMember', 'AADClient') {
         $isClientOS = $virtualMachine.operatingSystem -and $virtualMachine.operatingSystem -like "Windows 1*"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
     }
@@ -755,6 +759,7 @@ function Add-NewVMForRole {
                     OfflineSUP                = $false
                     UsePKI                    = $false
                     EnableBLM                 = $false
+                    WsusImportBaseline        = $true
                 }
             }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions -force

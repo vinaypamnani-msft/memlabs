@@ -1,4 +1,4 @@
-#InstallBoundaryGroups.ps1
+﻿#InstallBoundaryGroups.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -111,31 +111,77 @@ if ($allBGsExist) {
 
 Write-DscStatus "Create $bgsCount Boundary Groups for site $SiteCode"
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
-    $siteStatus = Get-CMSite -SiteCode $bgsitecode
-    if ($siteStatus.Status -eq 1) {
-        $sitesystems = @()
-        $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
-        try {
-            $exists = Get-CMBoundaryGroup -Name $bgsitecode
-            if ($exists) {
+    # A child SECONDARY site is installed in PARALLEL with this script (the
+    # secondary/passive install runs as a background job and takes ~10+ min),
+    # and this Primary is the ONLY place InstallBoundaryGroups runs for the
+    # hierarchy: the secondary itself never runs it and the CAS doesn't call it.
+    # So gating child boundary-group creation on the child being fully 'Active'
+    # (Status -eq 1) ALWAYS skipped it (the secondary never finishes before this
+    # loop), and the child BG was never created at all -- the root cause of the
+    # Phase 11 'Expected boundary group <child> not found' warning, which never
+    # cleared on re-runs either.
+    #
+    # Fix: wait briefly for the child's SMS_Site ROW to register, then create the
+    # BG as soon as the row exists. A boundary group is global metadata and does
+    # not require the site to be fully installed to exist; site systems (the
+    # secondary's DP) are added best-effort and fill in on a later pass / re-run
+    # once the secondary is up.
+    $siteStatus = Get-CMSite -SiteCode $bgsitecode -ErrorAction SilentlyContinue
+    if (-not $siteStatus -and $bgsitecode -ne $SiteCode) {
+        Write-DscStatus "Site '$bgsitecode' not yet registered; waiting up to 3 min for its row before creating its Boundary Group..."
+        $rowWaitMax = 36   # 36 x 5s = ~3 min
+        for ($rw = 1; $rw -le $rowWaitMax -and -not $siteStatus; $rw++) {
+            Start-Sleep -Seconds 5
+            $siteStatus = Get-CMSite -SiteCode $bgsitecode -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $siteStatus) {
+        Write-DscStatus "Skip creating Boundary Group '$bgsitecode' - site row never registered after waiting."
+        Start-Sleep -Seconds 5
+        continue
+    }
+
+    # Resolve currently-registered site systems (best-effort; a still-installing
+    # secondary's DP/MP/SUP may not be present yet -- that's fine).
+    $sitesystems = @()
+    $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+    $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+    $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+    $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
+
+    # Site assignment (DefaultSiteCode): a secondary's clients are assigned to the
+    # PARENT primary ($SiteCode) and get content from the secondary's DP, so the
+    # child BG's default site is the running primary. For the primary's own BG
+    # this is identical ($SiteCode -eq $bgsitecode).
+    $bgDefaultSite = $SiteCode
+
+    try {
+        $exists = Get-CMBoundaryGroup -Name $bgsitecode -ErrorAction SilentlyContinue
+        if ($exists) {
+            if ($sitesystems) {
                 Write-DscStatus "Updating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
                 Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $sitesystems
             }
             else {
-                Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
-                #New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $sitesystems
-                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgsitecode -AddSiteSystemServerName $sitesystems
+                Write-DscStatus "Boundary Group '$bgsitecode' already exists; no site systems registered yet to add (site '$bgsitecode' still installing)"
             }
         }
-        catch {
-            Write-DscStatus "Failed to create Boundary Group '$bgsitecode' in sitecode $siteCode. Error: $_"
+        else {
+            if ($sitesystems) {
+                Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
+                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgDefaultSite -AddSiteSystemServerName $sitesystems
+            }
+            else {
+                # Site row exists but no site systems registered yet (secondary
+                # still installing). Create the group now so it EXISTS + replicates;
+                # the DP is added when it comes online (later pass / re-run).
+                Write-DscStatus "Creating Boundary Group '$bgsitecode' (site '$bgsitecode' still installing - no site systems yet; DP added on a later pass) in sitecode $SiteCode"
+                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgDefaultSite
+            }
         }
     }
-    else {
-        Write-DscStatus "Skip creating Boundary groups for site $bgsitecode because Site Status for sitecode $siteCode is not 'Active'."
+    catch {
+        Write-DscStatus "Failed to create Boundary Group '$bgsitecode' in sitecode $SiteCode. Error: $_"
     }
     Start-Sleep -Seconds 5
 }
@@ -143,39 +189,56 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
 # Create Boundaries for each subnet and add to BG
 Write-DscStatus "Create Boundaries for each subnet and add to BG"
 foreach ($bg in $bgs) {
-    $exists = Get-CMBoundary -BoundaryName $bg.Subnet
+    # Compute usable host range (.1 to .254), matching the convention CM uses
+    # when auto-creating boundaries from AD subnets via Forest Discovery.
+    # Using .0-.255 (network/broadcast) would create a duplicate boundary
+    # alongside the Forest Discovery auto-created .1-.254 range.
+    $IP = $bg.Subnet
+    $mask = '255.255.255.0'
+    $IPBits = [int[]]$IP.Split('.')
+    $MaskBits = [int[]]$Mask.Split('.')
+    $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
+    $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+    $NetworkID = $NetworkIDBits -join '.'
+    $NetworkIDBits[3] = 1          # first usable host
+    $BroadcastBits[3] = 254        # last usable host
+    $FirstHost = $NetworkIDBits -join '.'
+    $LastHost = $BroadcastBits -join '.'
+    $rangeValue = "$FirstHost-$LastHost"
+    # Match AD Forest Discovery naming: domain/SiteCode/NetworkID/prefix
+    $boundaryName = "$DomainFullName/$($bg.SiteCode)/$NetworkID/24"
+
+    # Check by name first, then by value to catch Forest Discovery auto-created boundaries
+    $exists = Get-CMBoundary -BoundaryName $boundaryName -ErrorAction SilentlyContinue
+    if (-not $exists) {
+        # Also check the old naming convention (just the subnet IP)
+        $exists = Get-CMBoundary -BoundaryName $bg.Subnet -ErrorAction SilentlyContinue
+    }
+    if (-not $exists) {
+        $exists = Get-CMBoundary | Where-Object { $_.BoundaryType -eq 3 -and $_.Value -eq $rangeValue }
+    }
     if ($exists) {
         try {
-            Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
-            Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
+            Write-DscStatus "Adding Boundary '$($exists.DisplayName)' ($rangeValue) to Boundary Group $($bg.SiteCode)"
+            Add-CMBoundaryToGroup -BoundaryName $exists.DisplayName -BoundaryGroupName $bg.SiteCode
         }
         catch {
-            Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+            Write-DscStatus "Failed to add boundary '$($exists.DisplayName)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
         }
     }
     else {
         try {
-            Write-DscStatus "Creating Boundary $($bg.SiteCode) with subnet $($bg.Subnet)"
-            #New-CMBoundary -Type IPSubnet -Name $bg.Subnet -Value "$($bg.Subnet)/24"
-            $IP = $bg.Subnet
-            $mask = '255.255.255.0'
-            $IPBits = [int[]]$IP.Split('.')
-            $MaskBits = [int[]]$Mask.Split('.')
-            $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
-            $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
-            $NetworkID = $NetworkIDBits -join '.'
-            $Broadcast = $BroadcastBits -join '.'
-            New-CMBoundary -Type IPRange -Name $bg.Subnet -Value "$($NetworkID)-$($Broadcast)"
+            Write-DscStatus "Creating Boundary '$boundaryName' with range $rangeValue"
+            New-CMBoundary -Type IPRange -Name $boundaryName -Value $rangeValue
             try {
-                Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
-                Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
+                Add-CMBoundaryToGroup -BoundaryName $boundaryName -BoundaryGroupName $bg.SiteCode
             }
             catch {
-                Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+                Write-DscStatus "Failed to add boundary '$boundaryName' to Boundary Group '$($bg.SiteCode)'. Error: $_"
             }
         }
         catch {
-            Write-DscStatus "Failed to create boundary '$($bg.Subnet)'. Error: $_"
+            Write-DscStatus "Failed to create boundary '$boundaryName'. Error: $_"
         }
     }
 
@@ -223,9 +286,7 @@ Invoke-CMSystemDiscovery
 Start-Sleep -Seconds 5
 
 if ($ThisVm.thisParams.PassiveNode) {
-    Write-DscStatus "Skip Client Push since we're adding Passive site server"
-    $pushClients = $false
-    #return
+    Write-DscStatus "Passive site server detected — client push will proceed for other VMs"
 }
 
 # Push Clients

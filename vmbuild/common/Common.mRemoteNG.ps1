@@ -1,6 +1,181 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 ##############################
 ### mRemoteNG Functions    ###
 ##############################
+
+# ============================================================================
+# mRemoteNG password-audit diagnostics (ALWAYS-ON)
+# ----------------------------------------------------------------------------
+# These exist to root-cause the recurring "password corrupted (decrypt failed:
+# Decryption failed)" loop where EVERY password is re-flagged and "Repaired" on
+# every build but the file never converges. Hypothesis: the audit decrypts with
+# the provider's default KeyDerivationIterations while mRemoteNG.exe rewrites the
+# file's KdfIterations to a different value on its side, so the derived key never
+# matches across the script <-> GUI handoff.
+#
+# They run UNCONDITIONALLY for now so the very next build captures the failure
+# window (the prior log didn't reach the mRemoteNG step). All output is -LogOnly
+# so there is zero added console noise, and no password plaintext is ever logged
+# (only blob lengths/prefixes, SHA256 file hashes, and iteration counts).
+#
+# TODO(mrng-diag): once the root cause is confirmed and the KDF-iteration fix is
+# in, RE-GATE all of this behind a switch (e.g. $global:MRNGDiag mirroring
+# $global:ProgressDiag, or env var MEMLABS_MRNG_DIAG=1) and make Write-MRNGDiag a
+# no-op when the gate is off.
+# ============================================================================
+
+function Write-MRNGDiag {
+    param([string]$Message)
+    # TODO(mrng-diag): add early-return gate here once root cause is resolved.
+    try {
+        Write-Log "[MRNGDiag] $Message" -LogOnly
+    }
+    catch {}
+}
+
+# Read a member value (public or non-public property/field) via reflection.
+# Used to inspect the AeadCryptographyProvider's iteration/cipher settings,
+# which are not guaranteed to be public.
+function Get-MRNGMemberValue {
+    param($Object, [string]$Name)
+    if (-not $Object) { return $null }
+    $flags = [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Instance
+    $t = $Object.GetType()
+    try {
+        $prop = $t.GetProperty($Name, $flags)
+        if ($prop) { return $prop.GetValue($Object, $null) }
+    }
+    catch {}
+    try {
+        $field = $t.GetField($Name, $flags)
+        if ($field) { return $field.GetValue($Object) }
+    }
+    catch {}
+    return $null
+}
+
+# Set a member value (public or non-public property/field) via reflection.
+# Returns $true on success. Used by the non-destructive decrypt probe to point a
+# throwaway provider at the file's declared KdfIterations.
+function Set-MRNGMemberValue {
+    param($Object, [string]$Name, $Value)
+    if (-not $Object) { return $false }
+    $flags = [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Instance
+    $t = $Object.GetType()
+    try {
+        $prop = $t.GetProperty($Name, $flags)
+        if ($prop -and $prop.CanWrite) { $prop.SetValue($Object, $Value, $null); return $true }
+    }
+    catch {}
+    try {
+        $field = $t.GetField($Name, $flags)
+        if ($field) { $field.SetValue($Object, $Value); return $true }
+    }
+    catch {}
+    return $false
+}
+
+# Snapshot the crypto provider's effective key-derivation settings so we can
+# compare them against the file's declared KdfIterations.
+function Get-MRNGProviderSnapshot {
+    param($Provider)
+    $snap = @{ KeyDerivationIterations = "n/a"; BlockCipherMode = "n/a"; EncryptionEngine = "n/a" }
+    if (-not $Provider) { return $snap }
+    foreach ($propName in @("KeyDerivationIterations", "BlockCipherMode", "EncryptionEngine")) {
+        $val = Get-MRNGMemberValue -Object $Provider -Name $propName
+        if ($null -ne $val) { $snap[$propName] = "$val" }
+    }
+    return $snap
+}
+
+# Fingerprint the connection file on disk: SHA256, byte length, last-write time,
+# the root encryption attributes (KdfIterations etc.), and how many nodes carry a
+# password. Never reads or logs any password plaintext. Returns a hashtable, or
+# $null when the file is absent.
+function Get-MRNGFileFingerprint {
+    param([string]$Path)
+    if ([string]::IsNullOrEmpty($Path) -or -not (Test-Path $Path)) { return $null }
+    $fp = @{
+        Path          = $Path
+        Sha256        = $null
+        Length        = $null
+        LastWriteUtc  = $null
+        RootAttrs     = @{}
+        PasswordNodes = 0
+    }
+    try {
+        $item = Get-Item -Path $Path -ErrorAction Stop
+        $fp.Length = $item.Length
+        $fp.LastWriteUtc = $item.LastWriteTimeUtc.ToString("o")
+    }
+    catch {}
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $hashBytes = $sha.ComputeHash($bytes)
+        $fp.Sha256 = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
+        $sha.Dispose()
+    }
+    catch {}
+    try {
+        [xml]$x = Get-Content -Path $Path -ErrorAction Stop
+        $rootEl = $x.DocumentElement
+        foreach ($attrName in @("EncryptionEngine", "BlockCipherMode", "KdfIterations", "FullFileEncryption", "Protected")) {
+            $val = $rootEl.GetAttribute($attrName)
+            if ($attrName -eq "Protected" -and $val -and $val.Length -gt 12) {
+                $val = $val.Substring(0, 12) + "..."
+            }
+            $fp.RootAttrs[$attrName] = $val
+        }
+        $fp.PasswordNodes = @($x.SelectNodes("//Node") | Where-Object { -not [string]::IsNullOrEmpty($_.GetAttribute("Password")) }).Count
+    }
+    catch {}
+    return $fp
+}
+
+# Render a fingerprint (from Get-MRNGFileFingerprint) to a single log line.
+function Format-MRNGFingerprint {
+    param($Fingerprint)
+    if (-not $Fingerprint) { return "<no file>" }
+    $ra = $Fingerprint.RootAttrs
+    return ("sha256={0} len={1} lastWriteUtc={2} KdfIterations={3} EncryptionEngine={4} BlockCipherMode={5} FullFileEncryption={6} Protected={7} pwdNodes={8}" -f `
+            $Fingerprint.Sha256, $Fingerprint.Length, $Fingerprint.LastWriteUtc, $ra["KdfIterations"], $ra["EncryptionEngine"], $ra["BlockCipherMode"], $ra["FullFileEncryption"], $ra["Protected"], $Fingerprint.PasswordNodes)
+}
+
+# Non-destructive probe: try to decrypt a password blob using the FILE's declared
+# KdfIterations on a throwaway provider. If it succeeds where the default-iteration
+# audit failed, that is the smoking gun confirming the iteration mismatch is the
+# root cause. Does not modify the document or the real audit provider.
+function Test-MRNGDecryptWithFileIterations {
+    param(
+        [string]$EncryptedPassword,
+        $Key,
+        [string]$FileKdfIterations,
+        [string]$ExpectedPlaintext
+    )
+    if ([string]::IsNullOrEmpty($FileKdfIterations)) { return "skipped (no file KdfIterations)" }
+    $iters = 0
+    if (-not [int]::TryParse($FileKdfIterations, [ref]$iters)) { return "skipped (unparseable KdfIterations '$FileKdfIterations')" }
+    $probeProvider = $null
+    try {
+        $probeProvider = New-Object mRemoteNG.Security.SymmetricEncryption.AeadCryptographyProvider
+    }
+    catch {
+        return "error (cannot create probe provider: $($_.Exception.Message))"
+    }
+    $set = Set-MRNGMemberValue -Object $probeProvider -Name "KeyDerivationIterations" -Value $iters
+    if (-not $set) { return "skipped (could not set KeyDerivationIterations=$iters on probe provider)" }
+    try {
+        $decrypted = $probeProvider.Decrypt($EncryptedPassword, $Key)
+        if ($decrypted -ceq $ExpectedPlaintext) {
+            return "SUCCESS with $iters iterations -- confirms iteration mismatch is the root cause"
+        }
+        return "decrypted but value mismatch (len=$($decrypted.Length)) with $iters iterations"
+    }
+    catch {
+        return "still FAILED with $iters iterations: $($_.Exception.Message)"
+    }
+}
 
 function Install-MRemoteNG {
     # Check standard install paths
@@ -70,6 +245,9 @@ function Install-MRemoteNG {
         }
     }
 
+    # Enable description tooltips in the connection tree so hovering shows VM info.
+    Set-MRemoteNGSettings -InstallDir (Split-Path $mRemoteNGExe)
+
     # Workaround: mRemoteNG 1.78.2 /cons: CLI argument is broken — GetStartupConnectionFileName()
     # reads OptionsConnectionsPage.Default.ConnectionFilePath but /cons: writes to the old
     # OptionsBackupPage.Default.BackupLocation (dead code path). Symlink the default confCons.xml
@@ -101,6 +279,218 @@ function Install-MRemoteNG {
                 Write-Log "Could not create symlink at $defaultFile`: $_" -Warning -LogOnly
             }
         }
+    }
+}
+
+function Format-MRemoteNGTooltip {
+    # Build a human-readable multi-line description for mRemoteNG connection tooltips.
+    # Replaces the raw JSON blob so hovering a connection shows useful VM info at a glance.
+    param(
+        [PSCustomObject]$Vm,
+        [string]$CmVersion = "",
+        [PSCustomObject[]]$VmListFull = @(),
+        [string]$ResolvedIp = ""
+    )
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $vmIsLinux = Test-VmIsLinux -Vm $Vm
+
+    # --- Line 1: Role description ---
+    $roleLabel = switch ($Vm.Role) {
+        'DC'               { 'Domain Controller' }
+        'BDC'              { 'Backup Domain Controller' }
+        'CAS'              { 'CAS Site Server' }
+        'Primary'          { 'Primary Site Server' }
+        'Secondary'        { 'Secondary Site Server' }
+        'PassiveSite'      { 'Passive Site Server' }
+        'SiteSystem'       { 'Site System' }
+        'DomainMember'     { if ($Vm.deployedOS -match 'Server') { 'Domain Member (Server)' } else { 'Domain Member (Client)' } }
+        'WorkgroupMember'  { 'Workgroup Member' }
+        'InternetClient'   { 'Internet Client' }
+        'AADClient'        { 'Entra ID Client' }
+        'OSDClient'        { 'OSD Client' }
+        'WSUS'             { 'WSUS Server' }
+        'FileServer'       { 'File Server' }
+        'SQLAO'            { 'SQL Always On' }
+        'StandaloneRootCA' { 'Standalone Root CA' }
+        'Proxy'            { 'Proxy' }
+        'LinuxServer'      { 'Linux Server' }
+        'LinuxClient'      { 'Linux Client' }
+        default            { $Vm.Role }
+    }
+    $os = if ($Vm.deployedOS) { $Vm.deployedOS } elseif ($Vm.operatingSystem) { $Vm.operatingSystem } else { '' }
+    if ($os) { $lines.Add("$roleLabel  `u{2022}  $os") } else { $lines.Add($roleLabel) }
+
+    # --- Line 2: IP / Memory / vCPUs ---
+    $infoParts = @()
+    $ip = if (-not [string]::IsNullOrWhiteSpace($ResolvedIp)) { $ResolvedIp } elseif ($Vm.LastKnownIP) { $Vm.LastKnownIP } else { $null }
+    if ($ip) { $infoParts += "IP: $ip" }
+    if ($Vm.memory) { $infoParts += "$($Vm.memory) RAM" }
+    if ($Vm.virtualProcs) {
+        $cpuLabel = if ([int]$Vm.virtualProcs -eq 1) { 'vCPU' } else { 'vCPUs' }
+        $infoParts += "$($Vm.virtualProcs) $cpuLabel"
+    }
+    if ($infoParts.Count -gt 0) { $lines.Add($infoParts -join '  `u{2022}  ') }
+
+    # --- Domain ---
+    if ($Vm.Domain) { $lines.Add("Domain: $($Vm.Domain)") }
+
+    # --- Site info (CM roles) ---
+    if ($Vm.SiteCode) {
+        $siteLine = "Site: $($Vm.SiteCode)"
+        if ($Vm.ParentSiteCode) { $siteLine += " -> $($Vm.ParentSiteCode)" }
+        if ($Vm.siteName) { $siteLine += " ($($Vm.siteName))" }
+        $lines.Add($siteLine)
+    }
+    if ($CmVersion -and $Vm.Role -in 'CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite') {
+        $lines.Add("ConfigMgr: $CmVersion")
+    }
+
+    # --- SQL ---
+    if ($Vm.SqlVersion) {
+        $sqlLine = "SQL: $($Vm.SqlVersion)"
+        if ($Vm.sqlInstanceName -and $Vm.sqlInstanceName -ne 'MSSQLSERVER') { $sqlLine += " ($($Vm.sqlInstanceName))" }
+        if ($Vm.RemoteSQLVM) { $sqlLine += " (remote: $($Vm.RemoteSQLVM))" }
+        $lines.Add($sqlLine)
+    } elseif ($Vm.Role -in 'CAS', 'Primary' -and $VmListFull.Count -gt 0) {
+        # Show remote SQL if this site server uses one
+        $remoteSql = $Vm.RemoteSQLVM
+        if ($remoteSql) {
+            $sqlVm = $VmListFull | Where-Object { $_.vmName -eq $remoteSql } | Select-Object -First 1
+            $sqlLine = "SQL: $remoteSql"
+            if ($sqlVm.SqlVersion) { $sqlLine += " ($($sqlVm.SqlVersion))" }
+            $lines.Add($sqlLine)
+        }
+    }
+
+    # --- SQLAO details ---
+    if ($Vm.Role -eq 'SQLAO') {
+        if ($Vm.OtherNode) { $lines.Add("AG Partner: $($Vm.OtherNode)") }
+        if ($Vm.AlwaysOnListenerName) { $lines.Add("Listener: $($Vm.AlwaysOnListenerName)") }
+        if ($Vm.ClusterName) { $lines.Add("Cluster: $($Vm.ClusterName)") }
+    }
+
+    # --- Site System roles ---
+    if ($Vm.Role -eq 'SiteSystem') {
+        $sr = @()
+        if ($Vm.installMP)     { $sr += 'MP' }
+        if ($Vm.installDP)     { $sr += 'DP' }
+        if ($Vm.installSUP -or $Vm.InstallSUP) { $sr += 'SUP' }
+        if ($Vm.InstallRP)     { $sr += 'RP' }
+        if ($Vm.InstallSMSProv) { $sr += 'SMS Provider' }
+        if ($sr.Count -gt 0)   { $lines.Add("Roles: $($sr -join ', ')") }
+    } else {
+        # Non-SiteSystem with SUP (e.g. Primary w/ co-located SUP)
+        if ($Vm.installSUP -or $Vm.InstallSUP) { $lines.Add('WSUS / SUP co-located') }
+    }
+
+    # --- Features ---
+    $features = @()
+    if ($Vm.InstallCA) {
+        $caLabel = 'Issuing CA'
+        if ($Vm.SubordinateCA -or $Vm.UseOfflineRoot) { $caLabel += ' (Subordinate)' }
+        $features += $caLabel
+    }
+    if ($Vm.tpmEnabled)  { $features += 'TPM' }
+    if ($Vm.BitLocker)   { $features += 'BitLocker' }
+    if ($Vm.useProxy)    { $features += 'Proxy' }
+    if ($Vm.enablePullDP) { $features += 'Pull DP' }
+    if ($Vm.InstallRP -and $Vm.Role -ne 'SiteSystem') { $features += 'Reporting Point' }
+    if ($features.Count -gt 0) { $lines.Add($features -join '  `u{2022}  ') }
+
+    # --- User ---
+    if ($Vm.domainUser) { $lines.Add("User: $($Vm.domainUser)") }
+
+    # --- Linux extras ---
+    if ($vmIsLinux) {
+        if ($Vm.Role -eq 'Proxy') {
+            $lines.Add("Squid logs: /var/log/squid")
+            if ($ip) { $lines.Add("Proxy Admin: http://${ip}:8443") }
+        }
+        $rdpOn = ($Vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$Vm.enableRDP
+        if ($rdpOn) { $lines.Add('xRDP enabled') }
+        $joinOn = ($Vm.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$Vm.joinDomain
+        if ($joinOn) { $lines.Add('AD domain joined') }
+    }
+
+    # --- Network ---
+    if ($Vm.network) { $lines.Add("Network: $($Vm.network)") }
+
+    return ($lines -join "`n")
+}
+
+function Set-MRemoteNGSettings {
+    # Enable ShowDescriptionTooltipsInTree in mRemoteNG settings.
+    # Handles both portable (mRemoteNG.settings next to exe) and
+    # non-portable (user.config in %LocalAppData%) editions.
+    param([string]$InstallDir)
+
+    if (-not $InstallDir) { return }
+
+    $settingName = 'ShowDescriptionTooltipsInTree'
+
+    # --- Portable edition: mRemoteNG.settings ---
+    $portableFile = Join-Path $InstallDir 'mRemoteNG.settings'
+    try {
+        if (Test-Path $portableFile) {
+            [xml]$sx = Get-Content -Path $portableFile -Raw
+        }
+        else {
+            [xml]$sx = '<?xml version="1.0" encoding="utf-8"?><settings><localSettings></localSettings><globalSettings></globalSettings></settings>'
+        }
+        $local = $sx.SelectSingleNode('//localSettings')
+        if (-not $local) {
+            $local = $sx.CreateElement('localSettings')
+            [void]$sx.DocumentElement.AppendChild($local)
+        }
+        $node = $local.SelectSingleNode("setting[@name='$settingName']")
+        if (-not $node) {
+            $node = $sx.CreateElement('setting')
+            $node.SetAttribute('name', $settingName)
+            $node.InnerText = 'True'
+            [void]$local.AppendChild($node)
+            $sx.Save($portableFile)
+            Write-Log "mRemoteNG: enabled $settingName in portable settings" -LogOnly -Verbose
+        }
+        elseif ($node.InnerText -ne 'True') {
+            $node.InnerText = 'True'
+            $sx.Save($portableFile)
+            Write-Log "mRemoteNG: enabled $settingName in portable settings" -LogOnly -Verbose
+        }
+    }
+    catch {
+        Write-Log "mRemoteNG: could not update portable settings: $_" -Warning -LogOnly
+    }
+
+    # --- Non-portable edition: user.config in %LocalAppData% ---
+    try {
+        $userConfigs = @(Get-ChildItem -Path "$env:LOCALAPPDATA\mRemoteNG" -Filter 'user.config' -Recurse -ErrorAction SilentlyContinue)
+        foreach ($uc in $userConfigs) {
+            [xml]$ucx = Get-Content -Path $uc.FullName -Raw
+            $sectionPath = '//userSettings/mRemoteNG.Properties.OptionsAppearancePage'
+            $section = $ucx.SelectSingleNode($sectionPath)
+            if (-not $section) { continue }
+            $existing = $section.SelectSingleNode("setting[@name='$settingName']")
+            if (-not $existing) {
+                $el = $ucx.CreateElement('setting')
+                $el.SetAttribute('name', $settingName)
+                $el.SetAttribute('serializeAs', 'String')
+                $val = $ucx.CreateElement('value')
+                $val.InnerText = 'True'
+                [void]$el.AppendChild($val)
+                [void]$section.AppendChild($el)
+                $ucx.Save($uc.FullName)
+                Write-Log "mRemoteNG: enabled $settingName in $($uc.FullName)" -LogOnly -Verbose
+            }
+            elseif ($existing.value -ne 'True') {
+                $existing.value = 'True'
+                $ucx.Save($uc.FullName)
+                Write-Log "mRemoteNG: enabled $settingName in $($uc.FullName)" -LogOnly -Verbose
+            }
+        }
+    }
+    catch {
+        Write-Log "mRemoteNG: could not update user.config: $_" -Warning -LogOnly
     }
 }
 
@@ -188,6 +578,108 @@ Add-Type -Path '$bouncyCastleDll' -ErrorAction Stop
     }
 }
 
+function Repair-MRemoteNGPasswords {
+    # Audit all Password attributes in the mRemoteNG XML document.
+    # Every non-empty Password should decrypt to $Common.LocalAdmin's plaintext.
+    # If decryption fails (corrupted) or returns wrong value, replace with a
+    # freshly encrypted password. Returns $true if any were repaired.
+    param(
+        [xml]$Doc,
+        [string]$FreshEncryptedPassword
+    )
+
+    if ([string]::IsNullOrEmpty($FreshEncryptedPassword)) {
+        return $false
+    }
+
+    # Try to create the crypto provider for decryption validation.
+    # Assemblies should already be loaded from Get-MRemoteNGPassword earlier.
+    $cp = $null
+    $key = $null
+    $expectedPlaintext = $null
+    try {
+        $cp = New-Object mRemoteNG.Security.SymmetricEncryption.AeadCryptographyProvider
+        $key = ConvertTo-SecureString 'mR3m' -AsPlainText -Force
+        $expectedPlaintext = $Common.LocalAdmin.GetNetworkCredential().Password
+    }
+    catch {
+        Write-Log "mRemoteNG password audit: cannot load crypto provider; skipping. $_" -Warning -LogOnly
+        return $false
+    }
+
+    # ALWAYS-ON diagnostics: capture the provider's effective iteration count and
+    # the file's declared KdfIterations up front. A mismatch here is the prime
+    # suspect for the recurring "Decryption failed" loop.
+    # TODO(mrng-diag): re-gate behind a switch once root cause is resolved.
+    $providerSnapshot = Get-MRNGProviderSnapshot -Provider $cp
+    $providerIterations = $providerSnapshot["KeyDerivationIterations"]
+    $fileKdfIterations = $null
+    try { $fileKdfIterations = $Doc.DocumentElement.GetAttribute("KdfIterations") } catch {}
+    $iterationMismatch = ("$providerIterations" -ne "$fileKdfIterations")
+    Write-MRNGDiag ("audit start: provider KeyDerivationIterations=$providerIterations BlockCipherMode=$($providerSnapshot['BlockCipherMode']) EncryptionEngine=$($providerSnapshot['EncryptionEngine'])")
+    Write-MRNGDiag ("audit iteration check: file=$fileKdfIterations provider=$providerIterations mismatch=$iterationMismatch")
+
+    $repaired = $false
+    $checkedCount = 0
+    $nodes = $Doc.SelectNodes("//Node")
+    foreach ($node in $nodes) {
+        $pwd = $node.GetAttribute("Password")
+        if ([string]::IsNullOrEmpty($pwd)) { continue }
+
+        # Container nodes are folders and carry no real credential (children use
+        # their own). A non-empty container Password is a stale blob from an older
+        # mRemoteNG/version that we cannot re-decrypt, and was the source of the
+        # never-converging "decrypt failed" loop. Blank it (one-time cleanup) and
+        # skip the decrypt audit instead of flagging it corrupted every run.
+        if ($node.GetAttribute("Type") -eq "Container") {
+            $node.SetAttribute("Password", "")
+            $repaired = $true
+            Write-MRNGDiag ("node '$($node.GetAttribute('Name'))' is Container: blanked stale password, skipping decrypt audit")
+            continue
+        }
+
+        $checkedCount++
+        $nodeName = $node.GetAttribute("Name")
+        $pwdLen = $pwd.Length
+        $pwdPrefix = if ($pwdLen -ge 8) { $pwd.Substring(0, 8) } else { $pwd }
+        Write-MRNGDiag ("node '$nodeName': blobLen=$pwdLen blobPrefix=$pwdPrefix")
+        try {
+            $decrypted = $cp.Decrypt($pwd, $key)
+            if ($decrypted -cne $expectedPlaintext) {
+                Write-Log "mRemoteNG password audit: '$nodeName' decrypts to wrong value. Repairing." -Warning
+                Write-MRNGDiag ("node '$nodeName' decrypt WRONG-VALUE: decryptedLen=$($decrypted.Length) expectedLen=$($expectedPlaintext.Length) file=$fileKdfIterations provider=$providerIterations mismatch=$iterationMismatch")
+                $node.SetAttribute("Password", $FreshEncryptedPassword)
+                $repaired = $true
+            }
+            else {
+                Write-MRNGDiag ("node '$nodeName' decrypt OK")
+            }
+        }
+        catch {
+            Write-Log "mRemoteNG password audit: '$nodeName' password corrupted (decrypt failed: $_). Repairing." -Warning
+            # ALWAYS-ON diag: full exception detail + non-destructive decrypt probe
+            # using the file's own KdfIterations. TODO(mrng-diag): re-gate once fixed.
+            $exType = $_.Exception.GetType().FullName
+            $exMsg = $_.Exception.Message
+            $innerMsg = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { "<none>" }
+            Write-MRNGDiag ("node '$nodeName' decrypt FAILED: file=$fileKdfIterations provider=$providerIterations mismatch=$iterationMismatch exType=$exType exMsg=$exMsg innerMsg=$innerMsg")
+            $probeResult = Test-MRNGDecryptWithFileIterations -EncryptedPassword $pwd -Key $key -FileKdfIterations $fileKdfIterations -ExpectedPlaintext $expectedPlaintext
+            Write-MRNGDiag ("node '$nodeName' decrypt-with-file-iterations probe: $probeResult")
+            $node.SetAttribute("Password", $FreshEncryptedPassword)
+            $repaired = $true
+        }
+    }
+
+    if ($repaired) {
+        Write-Log "mRemoteNG password audit: repaired corrupted passwords (checked $checkedCount nodes)." -Warning
+    }
+    else {
+        Write-Log "mRemoteNG password audit: all $checkedCount passwords verified OK." -LogOnly -Verbose
+    }
+
+    return $repaired
+}
+
 function Get-MRemoteNGDeterministicGuid {
     param([string]$Seed)
     # Generate a deterministic GUID from a seed string so IDs remain stable across regenerations.
@@ -217,6 +709,61 @@ function New-MRemoteNGXmlDocument {
     return $doc
 }
 
+function Get-MRemoteNGGroupForVM {
+    <#
+    .SYNOPSIS
+        Returns the role-based group name for a VM (Clients, DomainServers, MECMServers, Servers).
+    #>
+    param($Vm, $VmListFull)
+
+    switch ($Vm.Role) {
+        "DC"               { return "DomainServers" }
+        "BDC"              { return "DomainServers" }
+        "FileServer"       { return "DomainServers" }
+        "StandaloneRootCA" { return "DomainServers" }
+        "CAS"              { return "MECMServers" }
+        "Primary"          { return "MECMServers" }
+        "Secondary"        { return "MECMServers" }
+        "SiteSystem"       { return "MECMServers" }
+        "PassiveSite"      { return "MECMServers" }
+        "OSDClient"        { return "Clients" }
+        "AADClient"        { return "Clients" }
+        "InternetClient"   { return "Clients" }
+        "SQLAO" {
+            # SQLAO hosting a site DB → MECMServers, otherwise Servers
+            $primaryNode = $Vm
+            if (-not $Vm.OtherNode) {
+                $primaryNode = $VmListFull | Where-Object { $_.OtherNode -eq $Vm.vmName } | Select-Object -First 1
+                if (-not $primaryNode) { $primaryNode = $Vm }
+            }
+            $siteServer = $VmListFull | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName -and $_.Role -in "Primary", "CAS" }
+            if ($siteServer) { return "MECMServers" }
+            return "Servers"
+        }
+        "WSUS" {
+            if ($Vm.installSUP -or $Vm.InstallSUP) { return "MECMServers" }
+            return "Servers"
+        }
+        "DomainMember" {
+            if ($Vm.InstallCA) { return "DomainServers" }
+            # SQL hosting a site DB → MECMServers
+            if ($Vm.SqlVersion) {
+                $siteServer = $VmListFull | Where-Object { $_.RemoteSQLVM -eq $Vm.vmName -and $_.Role -in "Primary", "CAS" }
+                if ($siteServer) { return "MECMServers" }
+            }
+            $isServer = $Vm.deployedOS -match "Server"
+            if ($isServer) { return "Servers" }
+            return "Clients"
+        }
+        "WorkgroupMember" {
+            $isServer = $Vm.deployedOS -match "Server"
+            if ($isServer) { return "Servers" }
+            return "Clients"
+        }
+        default { return "Servers" }
+    }
+}
+
 function New-MRemoteNGContainerNode {
     param(
         [xml]$Doc,
@@ -241,7 +788,12 @@ function New-MRemoteNGContainerNode {
     $node.SetAttribute("Id", (Get-MRemoteNGDeterministicGuid -Seed "container:$Name"))
     $node.SetAttribute("Username", $Username)
     $node.SetAttribute("Domain", $Domain)
-    $node.SetAttribute("Password", $Password)
+    # Containers are folders only. With no Inheritance element present, mRemoteNG
+    # default behavior is that each child Connection uses its OWN credentials, not
+    # the parent's. A container Password is dead weight that we cannot reliably
+    # re-decrypt across mRemoteNG/version changes, which produced the recurring
+    # "password corrupted (decrypt failed)" audit loop. Always leave it empty.
+    $node.SetAttribute("Password", "")
     $node.SetAttribute("Hostname", "")
     $node.SetAttribute("Protocol", $Protocol)
     $node.SetAttribute("RdpVersion", "rdc10")
@@ -564,6 +1116,98 @@ function Remove-MissingDomainsFromMRemoteNG {
     return $return
 }
 
+function Get-MECMSiteHierarchy {
+    <#
+    .SYNOPSIS
+        Analyzes the VM list and returns MECM site hierarchy info for grouping.
+    .DESCRIPTION
+        Returns site entries ordered by rank (CAS, PRI, SEC) and a mapping
+        of each MECM-related VM to its owning site code.
+    #>
+    param([array]$VmListFull)
+
+    $siteServers = @($VmListFull | Where-Object { $_.Role -in "CAS", "Primary", "Secondary" })
+    if ($siteServers.Count -eq 0) { return $null }
+
+    $rankMap = @{ "CAS" = 0; "Primary" = 1; "Secondary" = 2 }
+    $sites = @($siteServers | Sort-Object { $rankMap[$_.Role] }, SiteCode | ForEach-Object {
+        [PSCustomObject]@{
+            SiteCode       = $_.SiteCode
+            Role           = $_.Role
+            ParentSiteCode = $_.ParentSiteCode
+            RoleLabel      = switch ($_.Role) { "CAS" { "CAS" } "Primary" { "PRI" } "Secondary" { "SEC" } }
+        }
+    })
+
+    # Map each MECM VM to its owning site code
+    $vmSiteMap = @{}
+    foreach ($vm in $VmListFull) {
+        # VMs with a direct SiteCode and an MECM role
+        if ($vm.SiteCode -and $vm.Role -in "CAS", "Primary", "Secondary", "SiteSystem", "PassiveSite") {
+            $vmSiteMap[$vm.vmName] = $vm.SiteCode
+            continue
+        }
+
+        # WSUS with SUP belongs to its site
+        if ($vm.Role -eq "WSUS" -and ($vm.installSUP -or $vm.InstallSUP) -and $vm.SiteCode) {
+            $vmSiteMap[$vm.vmName] = $vm.SiteCode
+            continue
+        }
+
+        # SQLAO or DomainMember with SqlVersion hosting a site DB
+        if ($vm.SqlVersion -or $vm.Role -eq "SQLAO") {
+            $primaryNode = $vm
+            if ($vm.Role -eq "SQLAO" -and -not $vm.OtherNode) {
+                $primaryNode = $VmListFull | Where-Object { $_.OtherNode -eq $vm.vmName } | Select-Object -First 1
+                if (-not $primaryNode) { $primaryNode = $vm }
+            }
+            $siteRef = $VmListFull | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName -and $_.Role -in "Primary", "CAS" } | Select-Object -First 1
+            if ($siteRef) {
+                $vmSiteMap[$vm.vmName] = $siteRef.SiteCode
+                if ($vm.OtherNode) { $vmSiteMap[$vm.OtherNode] = $siteRef.SiteCode }
+                continue
+            }
+        }
+
+        # DomainMember with installSUP
+        if ($vm.Role -eq "DomainMember" -and ($vm.installSUP -or $vm.InstallSUP) -and $vm.SiteCode) {
+            $vmSiteMap[$vm.vmName] = $vm.SiteCode
+            continue
+        }
+    }
+
+    $label = "{" + (($sites | ForEach-Object { $_.SiteCode }) -join ", ") + "}"
+
+    return [PSCustomObject]@{
+        Sites     = $sites
+        VmSiteMap = $vmSiteMap
+        Label     = $label
+    }
+}
+
+function Get-MECMSiteRolePriority {
+    <#
+    .SYNOPSIS
+        Returns a numeric sort priority for a VM within its MECM site group.
+        Lower values sort first (site server → passive → SQL → site systems).
+    #>
+    param($Vm)
+    switch ($Vm.Role) {
+        "CAS"          { return 0 }
+        "Primary"      { return 1 }
+        "Secondary"    { return 2 }
+        "PassiveSite"  { return 3 }
+        "SQLAO"        { return 4 }
+        "SiteSystem"   { return 6 }
+        "WSUS"         { return 7 }
+        "DomainMember" {
+            if ($Vm.SqlVersion) { return 5 }
+            return 8
+        }
+        default        { return 9 }
+    }
+}
+
 function New-MRemoteNGFileFromHyperV {
     [CmdletBinding()]
     param(
@@ -581,6 +1225,46 @@ function New-MRemoteNGFileFromHyperV {
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating mRemoteNG connection file" -Activity:$Activity
 
+    # ALWAYS-ON diagnostics: fingerprint the file exactly as we found it (i.e. after
+    # the previous run AND after any mRemoteNG.exe edits on its last close), then
+    # compare it to the fingerprint we persisted at the end of our last run. A
+    # 'changed-since-last-exit: yes' with a different KdfIterations is the smoking gun
+    # that mRemoteNG.exe rewrote the file (and bumped iterations) between builds,
+    # which is what makes the next audit fail to decrypt every password.
+    # TODO(mrng-diag): re-gate behind a switch (e.g. $global:MRNGDiag / MEMLABS_MRNG_DIAG)
+    # once the root cause is confirmed and the iteration fix is in.
+    $mrngDiagEntryFp = Get-MRNGFileFingerprint -Path $MRemoteNGFile
+    Write-MRNGDiag ("entry fingerprint: " + (Format-MRNGFingerprint -Fingerprint $mrngDiagEntryFp))
+    $mrngDiagLastExitPath = $null
+    try {
+        $mrngLogDir = Split-Path $Common.LogPath -Parent
+        $mrngDiagLastExitPath = Join-Path $mrngLogDir "mrng-diag-last.json"
+    }
+    catch {}
+    if ($mrngDiagLastExitPath -and (Test-Path $mrngDiagLastExitPath)) {
+        try {
+            $lastExit = Get-Content -Path $mrngDiagLastExitPath -Raw | ConvertFrom-Json
+            $changed = $true
+            if ($mrngDiagEntryFp -and $lastExit.Sha256 -and ($lastExit.Sha256 -eq $mrngDiagEntryFp.Sha256)) { $changed = $false }
+            $lastKdf = $null
+            if ($lastExit.RootAttrs) { $lastKdf = $lastExit.RootAttrs.KdfIterations }
+            $entryKdf = $null
+            if ($mrngDiagEntryFp) { $entryKdf = $mrngDiagEntryFp.RootAttrs["KdfIterations"] }
+            $changedText = if ($changed) { "yes" } else { "no" }
+            Write-MRNGDiag ("changed-since-last-exit: $changedText; lastExitSha256=$($lastExit.Sha256) lastExitKdfIterations=$lastKdf entryKdfIterations=$entryKdf")
+        }
+        catch {
+            Write-MRNGDiag "could not read last-exit fingerprint: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-MRNGDiag "no prior last-exit fingerprint found (first instrumented run)"
+    }
+
+    # Bulk-fetch all VM network adapters in one WMI call so per-VM cache
+    # lookups during Get-VMFromHyperV are instant instead of ~3s each.
+    Invoke-VMNetworkBulkWarmup
+
     # Ensure target directory exists
     $targetDir = Split-Path $MRemoteNGFile
     if (-not (Test-Path $targetDir)) {
@@ -591,6 +1275,18 @@ function New-MRemoteNGFileFromHyperV {
     $oldDesktopCopy = Join-Path ([Environment]::GetFolderPath("Desktop")) "memlabs-mremoteng.xml"
     if ((Test-Path $oldDesktopCopy) -and $oldDesktopCopy -ne $MRemoteNGFile) {
         Remove-Item $oldDesktopCopy -Force -ErrorAction SilentlyContinue
+    }
+
+    # Stop mRemoteNG before touching the file. If it's running it can hold a
+    # file lock or save its own state mid-edit, corrupting our read or causing
+    # our write to silently lose its changes.
+    $killed = $false
+    $mRNGProc = Get-Process -Name mRemoteNG -ErrorAction Ignore | Select-Object -First 1
+    if ($mRNGProc) {
+        $killed = $true
+        Get-Process -Name mRemoteNG -ErrorAction Ignore | Stop-Process -Force
+        Start-Sleep -Seconds 1
+        Write-Log "Stopped mRemoteNG before modifying connection file." -LogOnly -Verbose
     }
 
     if ($OverWrite -and (Test-Path $MRemoteNGFile)) {
@@ -615,6 +1311,31 @@ function New-MRemoteNGFileFromHyperV {
     else {
         $doc = New-MRemoteNGXmlDocument
         $shouldSave = $true
+    }
+
+    # Ensure root encryption attributes match our AeadCryptographyProvider defaults.
+    # mRemoteNG may update KdfIterations/BlockCipherMode/etc when it saves the file.
+    # We always encrypt with the provider's built-in defaults (AES-GCM, 1000 iterations),
+    # so if the XML declares different parameters mRemoteNG will derive a different key
+    # and every password will fail to decrypt on next load ("Decryption failed").
+    # Full regen avoids this because New-MRemoteNGXmlDocument sets these attributes fresh.
+    $root = $doc.DocumentElement
+    $expectedRootAttrs = @{
+        EncryptionEngine   = "AES"
+        BlockCipherMode    = "GCM"
+        KdfIterations      = "1000"
+        FullFileEncryption = "false"
+        Protected          = "zd4H/+kOmTb3uDN3ehFiYDE5SiS79p+qWRZkMBpQjzaiU4A5rA66CcSULCGAPhxpZRrcfKy7A7NMMG4jgBSD0SPG"
+    }
+    foreach ($kvp in $expectedRootAttrs.GetEnumerator()) {
+        if ($root.GetAttribute($kvp.Key) -ne $kvp.Value) {
+            Write-Log "mRemoteNG: resetting root attribute $($kvp.Key) from '$($root.GetAttribute($kvp.Key))' to '$($kvp.Value)'" -LogOnly -Verbose
+            # ALWAYS-ON diag: surface every root-attribute reset (esp. KdfIterations
+            # being forced back to 1000). TODO(mrng-diag): re-gate once fixed.
+            Write-MRNGDiag ("root-attr reset: $($kvp.Key) from '$($root.GetAttribute($kvp.Key))' to '$($kvp.Value)'")
+            $root.SetAttribute($kvp.Key, $kvp.Value)
+            $shouldSave = $true
+        }
     }
 
     Install-MRemoteNG
@@ -643,8 +1364,10 @@ function New-MRemoteNGFileFromHyperV {
             $container.SetAttribute("Username", $username)
             $shouldSave = $true
         }
-        if ($encryptedPass -and $container.GetAttribute("Password") -ne $encryptedPass) {
-            $container.SetAttribute("Password", $encryptedPass)
+        # Containers never hold a password (children use their own credentials).
+        # Blank any leftover blob so it can't be re-flagged as corrupted next run.
+        if (-not [string]::IsNullOrEmpty($container.GetAttribute("Password"))) {
+            $container.SetAttribute("Password", "")
             $shouldSave = $true
         }
 
@@ -662,44 +1385,160 @@ function New-MRemoteNGFileFromHyperV {
             $cmVersion = "CM" + $dcVM.domainDefaults.CMVersion
         }
 
-        # Find or create Linux (SSH) sub-container
+        # --- Role-based group containers ---
+        # Compute which groups are needed, create/find sub-containers.
+        # Order defines display order in the tree.
+        $groupOrder = @("MECMServers", "DomainServers", "Clients", "Servers", "Linux")
+        $neededGroups = @{}
+        foreach ($vm in $vmListFull) {
+            if (Test-VmIsLinux -Vm $vm) {
+                $neededGroups["Linux"] = $true
+            }
+            else {
+                $grp = Get-MRemoteNGGroupForVM -Vm $vm -VmListFull $vmListFull
+                $neededGroups[$grp] = $true
+            }
+        }
+
+        $groupContainers = @{}
+        foreach ($grpName in $groupOrder) {
+            if (-not $neededGroups[$grpName]) { continue }
+            # MECMServers container may have been renamed to include site codes (e.g. "MECMServers {YUM, NOM}")
+            if ($grpName -eq "MECMServers") {
+                $existingGrp = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -match '^MECMServers' } | Select-Object -First 1
+            }
+            else {
+                $existingGrp = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq $grpName } | Select-Object -First 1
+            }
+            if ($existingGrp) {
+                $groupContainers[$grpName] = $existingGrp
+            }
+            else {
+                $expanded = $grpName -in @("MECMServers", "DomainServers")
+                $grpNode = New-MRemoteNGContainerNode -Doc $doc -Name $grpName `
+                    -Username $username -Domain $domain -Password $encryptedPass -Expanded $expanded
+                [void]$container.AppendChild($grpNode)
+                $groupContainers[$grpName] = $grpNode
+                $shouldSave = $true
+            }
+        }
+
+        # --- MECM site hierarchy sub-containers ---
+        $siteHierarchy = $null
+        $siteContainers = @{}
+        if ($neededGroups["MECMServers"]) {
+            $siteHierarchy = Get-MECMSiteHierarchy -VmListFull $vmListFull
+
+            # Build client→siteCode map: for each client VM, determine which
+            # Primary site would push the ConfigMgr client to it (network affinity).
+            $clientPushSiteMap = @{}
+            if ($siteHierarchy -and $siteHierarchy.Sites.Count -gt 0) {
+                $primaries = $vmListFull | Where-Object { $_.Role -eq "Primary" }
+                foreach ($pri in $primaries) {
+                    $priNetwork = $pri.network
+                    $priSiteCode = $pri.SiteCode
+                    foreach ($v in $vmListFull) {
+                        if ($v.network -eq $priNetwork -and -not $clientPushSiteMap.ContainsKey($v.vmName)) {
+                            $clientPushSiteMap[$v.vmName] = $priSiteCode
+                        }
+                    }
+                    $secondaries = $vmListFull | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $priSiteCode }
+                    foreach ($sec in $secondaries) {
+                        foreach ($v in $vmListFull) {
+                            if ($v.network -eq $sec.network -and -not $clientPushSiteMap.ContainsKey($v.vmName)) {
+                                $clientPushSiteMap[$v.vmName] = $priSiteCode
+                            }
+                        }
+                    }
+                }
+            }
+            if ($siteHierarchy) {
+                $mecmContainer = $groupContainers["MECMServers"]
+
+                # Update container name to show site codes
+                $mecmLabel = "MECMServers $($siteHierarchy.Label)"
+                if ($mecmContainer.GetAttribute("Name") -ne $mecmLabel) {
+                    $mecmContainer.SetAttribute("Name", $mecmLabel)
+                    $shouldSave = $true
+                }
+
+                # Migrate: remove direct connections from MECMServers container
+                # (they belong in site sub-containers and will be re-added below)
+                $directConns = @($mecmContainer.SelectNodes("Node[@Type='Connection']"))
+                if ($directConns.Count -gt 0) {
+                    foreach ($conn in $directConns) {
+                        [void]$mecmContainer.RemoveChild($conn)
+                    }
+                    $shouldSave = $true
+                }
+
+                # Create/find site sub-containers ordered by rank (CAS, PRI, SEC)
+                foreach ($site in $siteHierarchy.Sites) {
+                    $siteName = "$($site.RoleLabel) ($($site.SiteCode))"
+                    $existingSite = $mecmContainer.SelectNodes("Node[@Type='Container']") |
+                        Where-Object { $_.Name -eq $siteName -or $_.Name -match "^$([regex]::Escape($site.RoleLabel))\s*\($([regex]::Escape($site.SiteCode))\)" } |
+                        Select-Object -First 1
+                    if ($existingSite) {
+                        if ($existingSite.GetAttribute("Name") -ne $siteName) {
+                            $existingSite.SetAttribute("Name", $siteName)
+                            $shouldSave = $true
+                        }
+                        $siteContainers[$site.SiteCode] = $existingSite
+                    }
+                    else {
+                        $siteNode = New-MRemoteNGContainerNode -Doc $doc -Name $siteName `
+                            -Username $username -Domain $domain -Password $encryptedPass -Expanded $true
+                        [void]$mecmContainer.AppendChild($siteNode)
+                        $siteContainers[$site.SiteCode] = $siteNode
+                        $shouldSave = $true
+                    }
+
+                    # Clear existing connections for fresh rebuild (ensures correct site placement)
+                    $sc = $siteContainers[$site.SiteCode]
+                    $existingConns = @($sc.SelectNodes("Node[@Type='Connection']"))
+                    if ($existingConns.Count -gt 0) {
+                        foreach ($econn in $existingConns) {
+                            [void]$sc.RemoveChild($econn)
+                        }
+                        $shouldSave = $true
+                    }
+                }
+            }
+        }
+
+        # Find or create Linux (SSH) sub-container inside the Linux group
         $linuxContainer = $null
+        $linuxGroup = $groupContainers["Linux"]
 
         foreach ($vm in $vmListFull) {
             # --- Linux VMs: SSH entry for all, optional RDP entry ---
             if (Test-VmIsLinux -Vm $vm) {
                 # Always create SSH entry (no enableRDP gate)
-                if (-not $linuxContainer) {
-                    $linuxContainer = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "Linux (SSH)" } | Select-Object -First 1
+                if (-not $linuxContainer -and $linuxGroup) {
+                    $linuxContainer = $linuxGroup.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "SSH" } | Select-Object -First 1
                     if (-not $linuxContainer) {
-                        $linuxContainer = New-MRemoteNGContainerNode -Doc $doc -Name "Linux (SSH)" `
-                            -Username "vmbuildadmin" -Domain "" -Password $encryptedPass -Protocol "SSH2" -Port "22"
-                        [void]$container.AppendChild($linuxContainer)
+                        $linuxContainer = New-MRemoteNGContainerNode -Doc $doc -Name "SSH" `
+                            -Username "vmbuildadmin" -Domain "" -Password $encryptedPass -Protocol "SSH2" -Port "22" -Expanded $false
+                        [void]$linuxGroup.AppendChild($linuxContainer)
                     }
                 }
 
-                # Resolve IP (same LLMNR fallback as RDCMan)
-                $linuxIp = $vm.LastKnownIP
-                if ([string]::IsNullOrWhiteSpace($linuxIp)) {
-                    try {
-                        $linuxIp = (Get-VMNetworkAdapter -VMName $vm.VmName -ErrorAction Stop).IPAddresses |
-                            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
-                    }
-                    catch { }
+                # Resolve IP (same LLMNR fallback as RDCMan).
+                # Prefer live IP from Hyper-V over cached LastKnownIP — DHCP
+                # leases can change and LastKnownIP goes stale.
+                $linuxIp = $null
+                try {
+                    $linuxIp = (Get-VMNetworkAdapter -VMName $vm.VmName -ErrorAction Stop).IPAddresses |
+                        Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
                 }
+                catch { }
+                if ([string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp = $vm.LastKnownIP }
                 $sshHost = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
 
                 $sshDisplayName = "$($vm.VmName) [Linux SSH]"
                 if ($vm.SiteCode) { $sshDisplayName += " ($($vm.SiteCode))" }
 
-                $cSSH = [PSCustomObject]@{}
-                foreach ($item in $vm | Get-Member -MemberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" }) {
-                    $cSSH | Add-Member -MemberType NoteProperty -Name $item.Name -Value $vm."$($item.Name)" -Force
-                }
-                $commentValue = "Linux"
-                if ($vm.Role -eq 'Proxy') { $commentValue = "Linux - Squid logs: /var/log/squid | Proxy Admin: http://${sshHost}:8443" }
-                $cSSH | Add-Member -MemberType NoteProperty -Name "Comment" -Value $commentValue -Force
-                $sshComment = ($cSSH | ConvertTo-Json -Depth 4 -Compress)
+                $sshComment = Format-MRemoteNGTooltip -Vm $vm -ResolvedIp $sshHost
 
                 if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $linuxContainer `
                         -Name $vm.VmName -DisplayName $sshDisplayName -Hostname $sshHost `
@@ -720,14 +1559,15 @@ function New-MRemoteNGFileFromHyperV {
                     }
                 }
 
-                # If enableRDP, also add an RDP entry in the main container
+                # If enableRDP, also add an RDP entry in the Linux group container
                 $rdpOn = ($vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$vm.enableRDP
                 $isLinuxClient = $vm.Role -eq 'LinuxClient'
                 if ($rdpOn -or $isLinuxClient) {
                     $rdpDisplayName = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
                     if ($vm.SiteCode) { $rdpDisplayName += " ($($vm.SiteCode))" }
 
-                    if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $container `
+                    $linuxRdpTarget = if ($linuxGroup) { $linuxGroup } else { $container }
+                    if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $linuxRdpTarget `
                             -Name $vm.VmName -DisplayName $rdpDisplayName -Hostname $sshHost `
                             -Protocol "RDP" -Port "3389" -Description $sshComment `
                             -Username "vmbuildadmin" -Domain "" -Password $encryptedPass `
@@ -742,52 +1582,20 @@ function New-MRemoteNGFileFromHyperV {
             # --- Windows VMs ---
             Write-Verbose "mRemoteNG: Adding VM $($vm.VmName)"
 
-            $c = [PSCustomObject]@{}
-            foreach ($item in $vm | Get-Member -MemberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" }) {
-                $c | Add-Member -MemberType NoteProperty -Name $item.Name -Value $vm."$($item.Name)" -Force
-            }
+            # Determine role-based group container
+            $vmGroup = Get-MRemoteNGGroupForVM -Vm $vm -VmListFull $vmListFull
+            $targetContainer = $groupContainers[$vmGroup]
+            if (-not $targetContainer) { $targetContainer = $container }
 
-            # Set Comment property for description (mirrors RDCMan logic)
-            if ($vm.Role -eq "DomainMember" -or $vm.Role -eq "WorkgroupMember") {
-                $deployedOS = $vm.deployedOS
-                $isServer = $deployedOS -match "Server"
-                if ($null -eq $vm.SqlVersion -and $isServer) {
-                    if ($vm.InstallCA) {
-                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "IssuingCA" -Force
-                    }
-                    else {
-                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -Force
-                    }
-                }
-                elseif (-not $isServer) {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient" -Force
-                }
-            }
-            if ($vm.Role -eq "WSUS") {
-                if ($vm.installSUP) {
-                    $c | Add-Member -MemberType NoteProperty -Name "SUPForSiteServer" -Value "$($vm.SiteCode)" -Force
-                }
-                else {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -Force
-                }
-            }
-            if ($vm.SqlVersion) {
-                $PrimaryNode = $vm
-                if ($vm.role -eq "SQLAO") {
-                    if (-not $vm.OtherNode) {
-                        $primaryNode = $vmListFull | Where-Object { $_.OtherNode -eq $vm.vmName }
-                    }
-                }
-                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName -and $_.Role -in "Primary", "CAS" }
-                if ($SiteServer) {
-                    $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)" -Force
-                }
-                elseif ($vm.Role -eq "DomainMember") {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -Force
+            # Route MECM VMs to site sub-containers
+            if ($vmGroup -eq "MECMServers" -and $siteHierarchy -and $siteContainers.Count -gt 0) {
+                $vmSite = $siteHierarchy.VmSiteMap[$vm.vmName]
+                if ($vmSite -and $siteContainers[$vmSite]) {
+                    $targetContainer = $siteContainers[$vmSite]
                 }
             }
 
-            $comment = $c | ConvertTo-Json -Depth 4 -Compress
+            $comment = Format-MRemoteNGTooltip -Vm $vm -CmVersion $cmVersion -VmListFull $vmListFull
             $name = $vm.VmName
             $ForceOverwrite = $true
             $vmID = $null
@@ -829,6 +1637,9 @@ function New-MRemoteNGFileFromHyperV {
             $supTag = $null
             if (($vm.installSUP -or $vm.InstallSUP) -and $vm.Role -ne "SiteSystem") { $supTag = "WSUS" }
 
+            $rpTag = $null
+            if ($vm.InstallRP -and $vm.Role -ne "SiteSystem") { $rpTag = "RP" }
+
             $proxyTag = $null
             if ($vm.useProxy) { $proxyTag = "Proxy" }
 
@@ -837,6 +1648,7 @@ function New-MRemoteNGFileFromHyperV {
             $tagParts = @()
             if ($roleTag) { $tagParts += $roleTag }
             if ($caTag) { $tagParts += $caTag }
+            if ($rpTag) { $tagParts += $rpTag }
             if ($supTag) { $tagParts += $supTag }
             if ($proxyTag) { $tagParts += $proxyTag }
 
@@ -854,6 +1666,9 @@ function New-MRemoteNGFileFromHyperV {
                 $displayName += " ($($vm.SiteCode)"
                 if ($vm.ParentSiteCode) { $displayName += "->$($vm.ParentSiteCode)" }
                 $displayName += ")"
+            }
+            elseif ($clientPushSiteMap -and $clientPushSiteMap.ContainsKey($vm.vmName)) {
+                $displayName += " ($($clientPushSiteMap[$vm.vmName]))"
             }
 
             # IP-based hostname for AAD/Internet clients
@@ -891,15 +1706,43 @@ function New-MRemoteNGFileFromHyperV {
                 $connPassword = $encryptedPass
             }
 
-            if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $container `
+            if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $targetContainer `
                     -Name $name -DisplayName $displayName -Hostname $name `
-                    -Protocol "RDP" -Port "3389" -Description $comment.ToString() `
+                    -Protocol "RDP" -Port "3389" -Description $comment `
                     -Username $connUsername -Domain $connDomain -Password $connPassword `
                     -GuidSeed "rdp:${domain}:$($vm.VmName)" `
                     -VmId $(if ($vmID) { $vmID } else { "" }) `
                     -UseEnhancedMode $(if ($vmID) { $true } else { $false }) `
                     -ForceOverwrite $ForceOverwrite) {
                 $shouldSave = $true
+            }
+        }
+
+        # --- Sort MECM site sub-containers by role priority ---
+        if ($siteHierarchy -and $siteContainers.Count -gt 0) {
+            foreach ($siteCode in $siteContainers.Keys) {
+                $siteContainer = $siteContainers[$siteCode]
+                $connections = @($siteContainer.SelectNodes("Node[@Type='Connection']"))
+                if ($connections.Count -le 1) { continue }
+
+                $sorted = @($connections | Sort-Object {
+                    $hostname = $_.GetAttribute("Hostname")
+                    $vm = $vmListFull | Where-Object { $_.vmName -eq $hostname } | Select-Object -First 1
+                    if ($vm) { Get-MECMSiteRolePriority -Vm $vm } else { 99 }
+                })
+
+                $needsReorder = $false
+                for ($i = 0; $i -lt $sorted.Count; $i++) {
+                    if ($connections[$i].GetAttribute("Name") -ne $sorted[$i].GetAttribute("Name")) {
+                        $needsReorder = $true
+                        break
+                    }
+                }
+                if ($needsReorder) {
+                    foreach ($conn in $sorted) { [void]$siteContainer.RemoveChild($conn) }
+                    foreach ($conn in $sorted) { [void]$siteContainer.AppendChild($conn) }
+                    $shouldSave = $true
+                }
             }
         }
 
@@ -910,7 +1753,7 @@ function New-MRemoteNGFileFromHyperV {
         $hvContainer = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "Hyper-V Console" } | Select-Object -First 1
         if (-not $hvContainer) {
             $hvContainer = New-MRemoteNGContainerNode -Doc $doc -Name "Hyper-V Console" `
-                -Username $env:USERNAME -Domain "" -Password "" -Protocol "RDP" -Port "2179"
+                -Username $env:USERNAME -Domain "" -Password "" -Protocol "RDP" -Port "2179" -Expanded $false
             [void]$container.AppendChild($hvContainer)
             $shouldSave = $true
         }
@@ -954,11 +1797,7 @@ function New-MRemoteNGFileFromHyperV {
         Write-Verbose "mRemoteNG: Adding Unknown VMs"
         $unknownContainer = Get-MRemoteNGContainerForDomain -Doc $doc -Domain "UnknownVMs" -Username "" -Password ""
         foreach ($vm in $unknownVMs) {
-            $c = [PSCustomObject]@{}
-            foreach ($item in $vm | Get-Member -MemberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" }) {
-                $c | Add-Member -MemberType NoteProperty -Name $item.Name -Value $vm."$($item.Name)" -Force
-            }
-            $comment = $c | ConvertTo-Json -Depth 4 -Compress
+            $comment = Format-MRemoteNGTooltip -Vm $vm
             $displayName = $vm.VmName
 
             $protocol = "RDP"
@@ -982,7 +1821,7 @@ function New-MRemoteNGFileFromHyperV {
 
             if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $unknownContainer `
                     -Name $vm.VmName -DisplayName $displayName -Hostname $hostname `
-                    -Protocol $protocol -Port $port -Description $comment.ToString() `
+                    -Protocol $protocol -Port $port -Description $comment `
                     -GuidSeed "${protocol}:unknown:$($vm.VmName)" `
                     -ForceOverwrite $false) {
                 $shouldSave = $true
@@ -990,18 +1829,15 @@ function New-MRemoteNGFileFromHyperV {
         }
     }
 
+    # Audit all passwords before saving — decrypt each one and verify it matches
+    # the expected plaintext. Replace any corrupted passwords with a fresh value.
+    if (Repair-MRemoteNGPasswords -Doc $doc -FreshEncryptedPassword $encryptedPass) {
+        $shouldSave = $true
+    }
+
     # Save
-    $killed = $false
     if ($shouldSave) {
         try {
-            # mRemoteNG does not auto-reload its XML; stop it before writing
-            # so it doesn't hold a file lock and doesn't show stale data.
-            $proc = Get-Process -Name mRemoteNG -ErrorAction Ignore | Select-Object -First 1
-            if ($proc) {
-                $killed = $true
-                Get-Process -Name mRemoteNG -ErrorAction Ignore | Stop-Process -Force
-                Start-Sleep -Seconds 1
-            }
 
             # Use UTF-8 without BOM — mRemoteNG expects UTF-8, but [xml].Save() writes UTF-16
             $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
@@ -1017,6 +1853,22 @@ function New-MRemoteNGFileFromHyperV {
         Write-Log "No Changes. Not updating $MRemoteNGFile" -Success -Verbose
     }
 
+    # ALWAYS-ON diag: fingerprint what WE just wrote (or the unchanged file) and
+    # persist it to logs\mrng-diag-last.json so the NEXT run's entry fingerprint can
+    # detect whether mRemoteNG.exe rewrote the file (esp. KdfIterations) in between.
+    # This persisted record is the decisive run-to-run comparison.
+    # TODO(mrng-diag): re-gate once root cause is resolved.
+    $mrngDiagExitFp = Get-MRNGFileFingerprint -Path $MRemoteNGFile
+    Write-MRNGDiag ("script-written fingerprint (shouldSave=$shouldSave): " + (Format-MRNGFingerprint -Fingerprint $mrngDiagExitFp))
+    if ($mrngDiagLastExitPath -and $mrngDiagExitFp) {
+        try {
+            $mrngDiagExitFp | ConvertTo-Json -Depth 5 | Out-File -FilePath $mrngDiagLastExitPath -Encoding utf8 -Force
+        }
+        catch {
+            Write-MRNGDiag "could not persist exit fingerprint: $($_.Exception.Message)"
+        }
+    }
+
     # Restart mRemoteNG if we stopped it (or start it fresh after saving)
     if ($killed -or $shouldSave) {
         $mRNGExe = $null
@@ -1027,6 +1879,39 @@ function New-MRemoteNGFileFromHyperV {
             $mRNGProc = Start-Process $mRNGExe -ArgumentList "/cons:`"$MRemoteNGFile`"" -PassThru -WindowStyle Minimized -ErrorAction SilentlyContinue
             if ($mRNGProc) {
                 Write-GreenCheck "Updated $MRemoteNGFile. Restarted mRemoteNG (PID $($mRNGProc.Id))" -ForegroundColor ForestGreen
+                # mRemoteNG ignores -WindowStyle Minimized and restores to its saved window state.
+                # Poll for its main window handle, then force-minimize repeatedly to win the race
+                # against mRemoteNG's late window activation during load.
+                try {
+                    $swApi = Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' -Name "SwApi" -Namespace Win32mRNG -PassThru -ErrorAction SilentlyContinue
+                    $mRNGProc.WaitForInputIdle(8000) | Out-Null
+
+                    # Poll for MainWindowHandle (may not exist until UI fully renders)
+                    $hWnd = [IntPtr]::Zero
+                    for ($i = 0; $i -lt 20; $i++) {
+                        Start-Sleep -Milliseconds 250
+                        $mRNGProc.Refresh()
+                        $hWnd = $mRNGProc.MainWindowHandle
+                        if ($hWnd -and $hWnd -ne [IntPtr]::Zero) {
+                            $swApi::ShowWindow($hWnd, 6) | Out-Null  # SW_MINIMIZE
+                            break
+                        }
+                    }
+
+                    # Re-minimize after a delay: mRemoteNG often re-activates while loading connections
+                    if ($hWnd -and $hWnd -ne [IntPtr]::Zero) {
+                        for ($i = 0; $i -lt 4; $i++) {
+                            Start-Sleep -Milliseconds 500
+                            $mRNGProc.Refresh()
+                            $hWnd = $mRNGProc.MainWindowHandle
+                            if ($hWnd -and $hWnd -ne [IntPtr]::Zero) {
+                                $swApi::ShowWindow($hWnd, 6) | Out-Null  # SW_MINIMIZE
+                            }
+                        }
+                    }
+                }
+                catch {}
+                Restore-TerminalFocus
             }
             else {
                 Write-GreenCheck "Updated $MRemoteNGFile. mRemoteNG was stopped but failed to restart" -ForegroundColor ForestGreen
@@ -1037,6 +1922,22 @@ function New-MRemoteNGFileFromHyperV {
         }
         else {
             Write-GreenCheck "Updated $MRemoteNGFile" -ForegroundColor ForestGreen
+        }
+    }
+
+    # ALWAYS-ON diag: re-read the file shortly after relaunching mRemoteNG.exe and
+    # compare to the fingerprint we just wrote. mRemoteNG usually only rewrites on
+    # close (so this often matches), but if it rewrites on load this catches it
+    # immediately. The decisive signal remains next-run entry vs this run's persisted
+    # script-written fingerprint. TODO(mrng-diag): re-gate once root cause is resolved.
+    if ($killed -or $shouldSave) {
+        Start-Sleep -Milliseconds 500
+        $mrngDiagPostGuiFp = Get-MRNGFileFingerprint -Path $MRemoteNGFile
+        Write-MRNGDiag ("post-GUI fingerprint: " + (Format-MRNGFingerprint -Fingerprint $mrngDiagPostGuiFp))
+        if ($mrngDiagExitFp -and $mrngDiagPostGuiFp) {
+            $postChanged = ($mrngDiagExitFp.Sha256 -ne $mrngDiagPostGuiFp.Sha256)
+            $postChangedText = if ($postChanged) { "yes" } else { "no" }
+            Write-MRNGDiag ("post-GUI changed-vs-script-written: $postChangedText; scriptKdf=$($mrngDiagExitFp.RootAttrs['KdfIterations']) postGuiKdf=$($mrngDiagPostGuiFp.RootAttrs['KdfIterations'])")
         }
     }
 

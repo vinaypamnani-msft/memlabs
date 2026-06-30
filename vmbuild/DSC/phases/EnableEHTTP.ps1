@@ -1,4 +1,4 @@
-#enableEHTTP.ps1
+﻿#enableEHTTP.ps1
 param(
     [string]$configFilePath,
     [string]$logPath,

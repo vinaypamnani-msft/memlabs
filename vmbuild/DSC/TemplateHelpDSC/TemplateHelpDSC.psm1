@@ -18,11 +18,75 @@ function Get-InstalledProducts {
 }
 
 
+function Copy-MemlabsCachedFile {
+    # Cache-first delivery: if the MemLabs download-cache DVD (volume label
+    # MEMLABSCACHE) is mounted and contains the file for $Url, verify it against
+    # the on-disc manifest (size + SHA1) and copy it to $Dest. Returns $true on a
+    # verified hit; $false (never throws) on any miss so the caller downloads
+    # normally. The manifest is keyed by URL -- the same URL the DSC resource
+    # already passes in -- so no per-resource filename knowledge is required.
+    param([string] $Url, [string] $Dest)
+    if ([string]::IsNullOrWhiteSpace($Url) -or [string]::IsNullOrWhiteSpace($Dest)) { return $false }
+    try {
+        $drive = $null
+        foreach ($cd in (Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=5" -ErrorAction SilentlyContinue)) {
+            if ($cd.VolumeName -eq 'MEMLABSCACHE' -and $cd.DeviceID) { $drive = $cd.DeviceID; break }
+        }
+        if (-not $drive) { return $false }
+
+        $manifestPath = Join-Path "$drive\" 'manifest.json'
+        if (-not (Test-Path $manifestPath)) { return $false }
+        $manifest = Get-Content -Path $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        if (-not $manifest -or -not $manifest.files) { return $false }
+
+        $entry = $null
+        $urlTrim = $Url.Trim()
+        foreach ($prop in $manifest.files.psobject.properties) {
+            if ($prop.Name -eq $Url -or [string]::Equals($prop.Name.Trim(), $urlTrim, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $entry = $prop.Value
+                break
+            }
+        }
+        if (-not $entry -or -not $entry.file) { return $false }
+
+        $src = Join-Path "$drive\" $entry.file
+        if (-not (Test-Path $src)) { return $false }
+
+        $srcItem = Get-Item $src -ErrorAction Stop
+        if ($entry.size -and ([int64]$srcItem.Length -ne [int64]$entry.size)) { return $false }
+        if ($entry.sha1) {
+            $h = (Get-FileHash -Algorithm SHA1 -Path $src -ErrorAction Stop).Hash.ToLowerInvariant()
+            if ($h -ne ([string]$entry.sha1).ToLowerInvariant()) { return $false }
+        }
+
+        $destDir = Split-Path $Dest -Parent
+        if ($destDir -and -not (Test-Path $destDir)) { New-Item -ItemType Directory -Force -Path $destDir | Out-Null }
+        if (Test-Path $Dest) { Remove-Item $Dest -Force -ErrorAction SilentlyContinue | Out-Null }
+        Copy-Item -Path $src -Destination $Dest -Force -ErrorAction Stop
+        if (-not (Test-Path $Dest)) { return $false }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+
 function Invoke-DownloadFile {
     param(
         [string] $url,
         [string] $dest
     )
+
+    # Cache-first: serve from the mounted MemLabs cache DVD when available. On any
+    # miss this is a no-op and we fall through to the normal download chain.
+    try {
+        if (Copy-MemlabsCachedFile -Url $url -Dest $dest) {
+            Write-Status "Using cached $([System.IO.Path]::GetFileName($dest)) from MemLabs cache DVD"
+            return
+        }
+    }
+    catch { Write-Verbose "Cache-first lookup failed: $($_.Exception.Message)" }
 
     if ((Test-Path $dest)) {
         Remove-Item $dest -Force -ErrorAction SilentlyContinue | Out-Null
@@ -33,8 +97,93 @@ function Invoke-DownloadFile {
         $dirname = Split-Path $dest -Parent
         New-Item -ItemType Directory -Force -Path $dirname
         try {
+            # Best-effort expected size (for a percentage display); aka.ms redirects are followed.
+            $expectedBytes = 0
+            try {
+                $head = [System.Net.HttpWebRequest]::Create($url)
+                $head.Method = "HEAD"
+                $head.AllowAutoRedirect = $true
+                $head.UserAgent = "memlabs-dsc"
+                $headResp = $head.GetResponse()
+                $expectedBytes = [int64]$headResp.ContentLength
+                $headResp.Close()
+            }
+            catch { $expectedBytes = 0 }
+
+            # Async download so we can report progress while it runs (the synchronous
+            # DownloadFile blocks with no feedback, which makes long downloads look hung).
             $wc = New-Object System.Net.WebClient
-            $wc.DownloadFile($url, $dest)
+            $dlState = [hashtable]::Synchronized(@{ Done = $false; Error = $null })
+            $completedSub = Register-ObjectEvent -InputObject $wc -EventName DownloadFileCompleted -MessageData $dlState -Action {
+                $s = $Event.MessageData
+                if ($EventArgs.Error) { $s.Error = $EventArgs.Error.Message }
+                elseif ($EventArgs.Cancelled) { $s.Error = "Cancelled" }
+                $s.Done = $true
+            }
+            # Stall / overall-budget guards: a wedged TCP transfer keeps IsBusy true
+            # forever (WebClient has no overall timeout), so abort and fall through to
+            # the BITS / Invoke-WebRequest fallback instead of hanging the LCM.
+            $stallTimeoutSec = 120   # no byte growth for this long => stalled
+            $maxDownloadSec = 1800   # 30 min hard cap for the whole transfer
+            $stallReason = $null
+            try {
+                $wc.DownloadFileAsync([uri]$url, $dest)
+                $startTime = Get-Date
+                $lastStatusTime = [DateTime]::MinValue
+                $lastSize = -1
+                $lastGrowthTime = Get-Date
+                while ($wc.IsBusy -and -not $dlState.Done) {
+                    Start-Sleep -Milliseconds 500
+                    $now = Get-Date
+                    $sizeNow = 0
+                    try { if (Test-Path $dest) { $sizeNow = (Get-Item $dest -ErrorAction SilentlyContinue).Length } } catch { $sizeNow = 0 }
+                    if ($sizeNow -gt $lastSize) {
+                        $lastSize = $sizeNow
+                        $lastGrowthTime = $now
+                    }
+                    elseif (($now - $lastGrowthTime).TotalSeconds -ge $stallTimeoutSec) {
+                        $stallReason = "no data received for $stallTimeoutSec s (stalled at $([math]::Round($sizeNow / 1MB, 1)) MB)"
+                        break
+                    }
+                    if (($now - $startTime).TotalSeconds -ge $maxDownloadSec) {
+                        $stallReason = "exceeded $maxDownloadSec s overall budget (at $([math]::Round($sizeNow / 1MB, 1)) MB)"
+                        break
+                    }
+                    if (($now - $lastStatusTime).TotalSeconds -ge 5) {
+                        $lastStatusTime = $now
+                        $mbNow = [math]::Round($sizeNow / 1MB, 1)
+                        $elapsed = [int]($now - $startTime).TotalSeconds
+                        if ($expectedBytes -gt 0) {
+                            $pct = [math]::Min(100, [math]::Round(($sizeNow / $expectedBytes) * 100, 0))
+                            $mbTotal = [math]::Round($expectedBytes / 1MB, 1)
+                            Write-Status "Downloading $dest : $mbNow / $mbTotal MB ($pct%) [$elapsed s]"
+                        }
+                        else {
+                            Write-Status "Downloading $dest : $mbNow MB downloaded [$elapsed s]"
+                        }
+                    }
+                }
+                if ($stallReason) {
+                    Write-Status "Download stalled: $stallReason. Cancelling and switching to fallback."
+                    try { $wc.CancelAsync() } catch {}
+                    Start-Sleep -Milliseconds 500
+                }
+            }
+            finally {
+                if ($completedSub) {
+                    Unregister-Event -SourceIdentifier $completedSub.Name -ErrorAction SilentlyContinue
+                    Remove-Job -Name $completedSub.Name -Force -ErrorAction SilentlyContinue
+                }
+                $wc.Dispose()
+            }
+            if ($stallReason) {
+                # Remove the partial file so the fallback path starts clean.
+                if (Test-Path $dest) { Remove-Item $dest -Force -ErrorAction SilentlyContinue | Out-Null }
+                throw "WebClient async download stalled: $stallReason"
+            }
+            if ($dlState.Error) {
+                throw "WebClient async download failed: $($dlState.Error)"
+            }
             #Start-BitsTransfer -Source $url -Destination $dest -Priority Foreground -ErrorAction Stop
         }
         catch {
@@ -55,7 +204,7 @@ function Invoke-DownloadFile {
                     Write-Verbose $_
                     $ErrorMessage = $_.Exception.Message
                     # Force reboot
-                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    #[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                     #$global:DSCMachineStatus = 1
                     write-status "Failed to Download $url with error: $ErrorMessage"
                     throw "Failed to Download $url with error: $ErrorMessage"
@@ -272,7 +421,9 @@ class InstallADK {
             $proc = Start-Process -FilePath $exe -ArgumentList $full -Wait -PassThru -NoNewWindow
             $code = $proc.ExitCode
             Write-Status ("ADK {0}: adksetup exit code: {1} (0x{2:x})" -f $label, $code, $code)
-            if ($code -ne 0) {
+            # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED -- install succeeded, reboot needed.
+            # Don't enter the diagnostics/dead-link-probe path for 3010.
+            if ($code -ne 0 -and $code -ne 3010) {
                 $errLines = @()
                 if (Test-Path $logFile) {
                     try {
@@ -512,8 +663,8 @@ class InstallADK {
                     Write-Status "Failed to launch ADK $label setup: $ErrorMessage"
                     throw "Failed to launch ADK $label setup: $ErrorMessage"
                 }
-                if ($lastExit -eq 0) {
-                    if (& $verifyInstall) { return 0 }
+                if ($lastExit -eq 0 -or $lastExit -eq 3010) {
+                    if (& $verifyInstall) { return $lastExit }
                     # 0-exit but install didn't happen -- almost always means
                     # Burn's dependency-provider registry has a stale entry
                     # ("WixBundleInstalled = 1" in the log) from a prior run
@@ -541,7 +692,7 @@ class InstallADK {
                 }
                 $layoutArgs = @('/quiet','/layout',$layoutDir)
                 $layoutExit = & $invokeAdk $exe $layoutArgs ("$label-layout")
-                if ($layoutExit -ne 0) {
+                if ($layoutExit -ne 0 -and $layoutExit -ne 3010) {
                     Write-Status "ADK $label : /layout fallback failed with exit $layoutExit. Giving up."
                     return $layoutExit
                 }
@@ -555,7 +706,7 @@ class InstallADK {
                 }
                 $offlineArgs = @('/quiet','/features') + $features
                 $offlineExit = & $invokeAdk $localExe $offlineArgs ("$label-offline")
-                if ($offlineExit -eq 0 -and -not (& $verifyInstall)) {
+                if (($offlineExit -eq 0 -or $offlineExit -eq 3010) -and -not (& $verifyInstall)) {
                     Write-Status "ADK $label : offline install reported success but expected paths still missing. Giving up."
                     return -2
                 }
@@ -595,7 +746,7 @@ class InstallADK {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking ADK installation status"
         $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
         $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\Windows Kits\Installed Roots")
         if ($subKey) {
@@ -634,71 +785,171 @@ class InstallSSMS {
 
     [void] Set() {
         # Download SSMS
-
         $ssmsSetup = "C:\temp\SSMS-Setup-ENU.exe"
 
         Invoke-DownloadFile $this.DownloadUrl $ssmsSetup
-                
-        # Install SSMS
-        $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE"
-        $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE"
-        $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE"
 
-        if ((Test-Path $smssinstallpath) -or (Test-Path $smssinstallpath2) -or (Test-Path $smssinstallpath3)) {
-            Write-Status "SSMS Installed Successfully! (Tested Out)"
+        # Version-agnostic detection paths. v18/19/20 install 32-bit under
+        # "...(x86)\Microsoft SQL Server Management Studio NN\Common7\IDE"; v21/22+ install 64-bit under
+        # "...\Microsoft SQL Server Management Studio NN\Release\Common7\IDE". Match any of them so a future
+        # version bump never re-triggers a needless reinstall + reboot on every pass.
+        $ssmsExePaths = @(
+            "C:\Program Files\Microsoft SQL Server Management Studio *\Release\Common7\IDE\Ssms.exe",
+            "C:\Program Files\Microsoft SQL Server Management Studio *\Common7\IDE\Ssms.exe",
+            "C:\Program Files (x86)\Microsoft SQL Server Management Studio *\Common7\IDE\ssms.exe"
+        )
+
+        $ssmsExe = Get-ChildItem -Path $ssmsExePaths -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+        if ($ssmsExe) {
+            Write-Status "SSMS Installed Successfully! (Tested Out) - $($ssmsExe.FullName)"
             return
         }
+
+        # Pick the correct SILENT arguments for whichever installer the URL actually served, so the install
+        # is bullet-proof no matter which SSMS the link resolves to now or later:
+        #   - WiX Burn standalone (SSMS <= 20, SSMS-Setup-ENU.exe):       /install /quiet /norestart
+        #   - Visual Studio bootstrapper (SSMS 21/22+, vs_SSMS.exe):      --quiet --norestart --wait
+        # The file was saved under a fixed name, so classify by CONTENT: the VS stub is tiny (~5 MB) and its
+        # version info references Visual Studio; the Burn package is hundreds of MB.
+        $burnArgs = @('/install', '/quiet', '/norestart')
+        $vsArgs = @('--quiet', '--norestart', '--wait')
+
+        $looksVs = $false
+        try {
+            $fi = Get-Item -LiteralPath $ssmsSetup -ErrorAction Stop
+            $sizeMB = [math]::Round($fi.Length / 1MB, 1)
+            $vi = $fi.VersionInfo
+            $viText = ("{0}|{1}|{2}" -f $vi.FileDescription, $vi.ProductName, $vi.OriginalFilename)
+            if ($sizeMB -lt 60) { $looksVs = $true }
+            if ($viText -match 'Visual Studio|vs_setup|bootstrap') { $looksVs = $true }
+            if ($looksVs) { $kindText = 'VS bootstrapper' } else { $kindText = 'Burn standalone' }
+            Write-Status ("SSMS installer classified as {0} ({1} MB; '{2}')" -f $kindText, $sizeMB, $viText)
+        }
+        catch {
+            Write-Status "Could not read SSMS installer metadata ($($_.Exception.Message)); defaulting to Burn-style args."
+        }
+
+        # Try the most-likely arg style first; fall back to the other only if the first EXITED without
+        # installing (a misclassification). Each attempt runs under a hard timeout + kill so a wedged
+        # installer or a UI dialog in session 0 can never hang the phase for hours.
+        if ($looksVs) {
+            $attempts = @(
+                @{ Name = 'VS bootstrapper'; Args = $vsArgs },
+                @{ Name = 'Burn standalone'; Args = $burnArgs }
+            )
+        }
         else {
+            $attempts = @(
+                @{ Name = 'Burn standalone'; Args = $burnArgs },
+                @{ Name = 'VS bootstrapper'; Args = $vsArgs }
+            )
+        }
 
-            $cmd = $ssmsSetup
-            $arg1 = "/install"
-            $arg2 = "/quiet"
-            $arg3 = "/norestart"
+        $timeoutSeconds = 2700   # 45-min hard cap per attempt; never hang the phase for hours.
+        $installed = $false
+        $timedOut = $false
+        $lastDetail = 'no attempt ran'
 
+        foreach ($attempt in $attempts) {
+            Write-Status ("Installing SSMS [{0}]: `"{1}`" {2}" -f $attempt.Name, $ssmsSetup, ($attempt.Args -join ' '))
+            $proc = $null
             try {
-                Write-Status "Installing SSMS..."
-                & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Status "SSMS Installed Successfully!"
-
-                # Reboot
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-                $global:DSCMachineStatus = 1
+                $proc = Start-Process -FilePath $ssmsSetup -ArgumentList $attempt.Args -PassThru -WindowStyle Hidden -ErrorAction Stop
             }
             catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to install SSMS with below error: $ErrorMessage"
-                throw "Failed to install SSMS with below error: $ErrorMessage"
+                $lastDetail = "Start-Process failed: $($_.Exception.Message)"
+                Write-Status "SSMS install [$($attempt.Name)] could not start: $($_.Exception.Message)"
+                continue
             }
+
+            if ($proc.WaitForExit($timeoutSeconds * 1000)) {
+                $lastDetail = "exit code $($proc.ExitCode)"
+                Write-Status ("SSMS install [{0}] exited with code {1}" -f $attempt.Name, $proc.ExitCode)
+            }
+            else {
+                $timedOut = $true
+                $lastDetail = "timed out after ${timeoutSeconds}s"
+                Write-Status ("SSMS install [{0}] did not finish within {1}s -- killing it and any child installers" -f $attempt.Name, $timeoutSeconds)
+                try { $proc.Kill() } catch { }
+                foreach ($pn in @('vs_installer', 'vs_installershell', 'vs_bootstrapper', 'vs_setup_bootstrapper', 'setup', 'SSMS-Setup-ENU')) {
+                    Get-Process -Name $pn -ErrorAction SilentlyContinue | ForEach-Object { try { $_.Kill() } catch { } }
+                }
+            }
+
+            # Verify by ground truth (the file on disk), NOT the exit code: installers use different codes and
+            # 3010/1641 mean success-with-reboot. So just re-scan for ssms.exe.
+            Start-Sleep -Seconds 5
+            $ssmsExe = Get-ChildItem -Path $ssmsExePaths -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+            if ($ssmsExe) {
+                Write-Status "SSMS Installed Successfully! - $($ssmsExe.FullName)"
+                $installed = $true
+                break
+            }
+
+            if ($timedOut) {
+                # A hang on this binary will almost certainly hang again with the other arg style on the SAME
+                # file, so stop here and fail rather than burn another 45 minutes.
+                Write-Status "SSMS installer hung; not retrying the alternate argument style on the same hung binary."
+                break
+            }
+
+            Write-Status ("SSMS not present after the [{0}] attempt; retrying with the alternate installer arguments." -f $attempt.Name)
+        }
+
+        if (-not $installed) {
+            $msg = "Failed to install SSMS (tried Burn '/install /quiet /norestart' and VS '--quiet --norestart --wait'). Last detail: $lastDetail"
+            Write-Status $msg
+            throw $msg
+        }
+
+        # Reboot ONLY if one is genuinely pending. SSMS is an application install and does
+        # not require a reboot to function. The old code rebooted unconditionally, but on
+        # the boxes SSMS lands on (installSSMS => CAS/Primary site servers) the IIS-group
+        # RebootNow later in this same Phase 3 pass already provides a reboot, making this
+        # one redundant -- and an extra reboot here just lengthens Phase 3 and (when files
+        # were in use) can re-trigger the whole post-reboot MOF re-apply. So probe the
+        # standard pending-reboot signals and only set DSCMachineStatus when the install
+        # actually staged in-use files; otherwise let the downstream reboot (or Phase 4
+        # SQL, on a SQL-only SSMS box) finalize.
+        $rebootPending = $false
+        try {
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $rebootPending = $true }
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $rebootPending = $true }
+            $sm = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
+            if ($sm -and $sm.PendingFileRenameOperations) { $rebootPending = $true }
+        }
+        catch { }
+
+        if ($rebootPending) {
+            Write-Status "SSMS install left a pending reboot; rebooting to finalize."
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+        }
+        else {
+            Write-Status "SSMS installed; no reboot pending (a later step will reboot if needed)."
         }
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
-        $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
-        $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
-        $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE\ssms.exe"
+        Write-Status "Checking SSMS installation status"
 
-        if (Test-Path $smssinstallpath) {
-            If ((Get-Item $smssinstallpath).length -gt 0kb) {
-                Write-Verbose "Test - Installing SSMS... $smssinstallpath exists"
-                return $true
-            }
+        # Version-agnostic detection. Match any installed SSMS across every layout:
+        #   - v18/19/20: 32-bit, "C:\Program Files (x86)\Microsoft SQL Server Management Studio NN\Common7\IDE\ssms.exe"
+        #   - v21/22+  : 64-bit (VS-based), "C:\Program Files\Microsoft SQL Server Management Studio NN\Release\Common7\IDE\Ssms.exe"
+        # Assigning Get-ChildItem to a variable consumes its pipeline output so nothing leaks onto the
+        # success stream (a DSC class Test() must return ONLY a boolean, or the LCM hard-fails).
+        $ssmsExe = Get-ChildItem -Path @(
+            "C:\Program Files\Microsoft SQL Server Management Studio *\Release\Common7\IDE\Ssms.exe",
+            "C:\Program Files\Microsoft SQL Server Management Studio *\Common7\IDE\Ssms.exe",
+            "C:\Program Files (x86)\Microsoft SQL Server Management Studio *\Common7\IDE\ssms.exe"
+        ) -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Sort-Object FullName -Descending | Select-Object -First 1
+
+        if ($ssmsExe) {
+            Write-Verbose "Test - Installing SSMS... $($ssmsExe.FullName) exists"
+            return $true
         }
 
-        if (Test-Path $smssinstallpath2) {
-            If ((Get-Item $smssinstallpath2).length -gt 0kb) {
-                Write-Verbose "Test - Installing SSMS... $smssinstallpath2 exists"
-                return $true
-            }
-        }
-        if (Test-Path $smssinstallpath3) {
-            If ((Get-Item $smssinstallpath3).length -gt 0kb) {
-                Write-Verbose "Test - Installing SSMS... $smssinstallpath3 exists"
-                return $true
-            }
-        }
-
-        Write-Verbose "Test - Installing SSMS... $smssinstallpath3 does not exist"
+        Write-Verbose "Test - Installing SSMS... no ssms.exe found under any 'Microsoft SQL Server Management Studio *' path"
         return $false
     }
 
@@ -727,29 +978,74 @@ class InstallDotNet4 {
         $setup = "C:\temp\$($this.FileName)"
         
         Invoke-DownloadFile $this.DownloadUrl $setup
-        
-        # Install
-        $cmd = $setup
-        $arg1 = "/q"
-        $arg2 = "/norestart"
+
+        $processName = ($this.FileName -split ".exe")[0]
+
+        # Bounded install. The .NET bootstrapper (ndp48...exe /q /norestart) extracts and runs a child
+        # installer named after the file; the OLD code polled for that child in a `while ($true)` loop with
+        # NO upper bound, so a wedged installer span forever. Cap every wait and verify by registry.
+        $launchTimeoutSeconds = 1800   # 30-min cap for the launcher stub to exit
+        $childTimeoutSeconds = 1800    # 30-min cap waiting for the extracted child installer to finish
 
         try {
             Write-Status "Installing .NET $($this.FileName)..."
-            & $cmd $arg1 $arg2 | out-null
 
-            $processName = ($this.FileName -split ".exe")[0]
+            $exitCode = $null
+            $proc = Start-Process -FilePath $setup -ArgumentList @('/q', '/norestart') -PassThru -WindowStyle Hidden -ErrorAction Stop
+            if (-not $proc.WaitForExit($launchTimeoutSeconds * 1000)) {
+                Write-Status ".NET installer launcher did not exit within ${launchTimeoutSeconds}s -- killing it"
+                try { $proc.Kill() } catch { }
+            }
+            else {
+                try { $exitCode = $proc.ExitCode } catch { }
+            }
+
+            # Bounded wait for the extracted child installer to clear (replaces the unbounded while ($true) loop).
+            $waited = 0
             while ($true) {
-                Start-Sleep -Seconds 10
-                $process = Get-Process $processName -ErrorAction SilentlyContinue
-                if ($null -eq $process) {
+                $child = Get-Process $processName -ErrorAction SilentlyContinue
+                if ($null -eq $child) { break }
+                if ($waited -ge $childTimeoutSeconds) {
+                    Write-Status ".NET child installer '$processName' still running after ${childTimeoutSeconds}s -- killing it"
+                    foreach ($c in $child) { try { $c.Kill() } catch { } }
                     break
                 }
+                Start-Sleep -Seconds 10
+                $waited += 10
             }
             Start-Sleep -Seconds 10 ## Buffer Wait
-            Write-Status ".NET $($this.FileName) Installed Successfully!"
 
-            # Reboot
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            # Read ground truth (the same NDP\v4\Full Release the Test() method checks).
+            $installed = $false
+            try {
+                $netVal = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Name "Release" -ErrorAction Stop
+                if ($netVal.Release -ge $this.NetVersion) { $installed = $true }
+            }
+            catch { }
+
+            # The .NET 4.8 offline installer (ndp48-x86-x64-allos-enu.exe) almost always returns 3010
+            # (ERROR_SUCCESS_REBOOT_REQUIRED) -- or 1641 -- on Server 2016/2019/2022 because in-use .NET
+            # assemblies force PendingFileRenameOperations, and the NDP\v4\Full Release value is NOT raised
+            # to the new build until AFTER that reboot. So a pre-reboot registry read legitimately still
+            # shows the OLD (< NetVersion) value on a perfectly successful install. Treat 0/3010/1641 as
+            # success-needs-reboot: set DSCMachineStatus and let Test() verify the Release value AFTER the
+            # reboot (this is the original, tried-and-true behavior). Only HARD-FAIL on a genuinely bad
+            # installer exit code, so a wedged/failed installer still surfaces cleanly instead of looping.
+            $okExitCodes = @(0, 3010, 1641)
+            if (-not $installed -and $null -ne $exitCode -and ($okExitCodes -notcontains $exitCode)) {
+                throw ".NET $($this.FileName) failed to install (installer exit code $exitCode; NDP\v4\Full Release still < $($this.NetVersion))."
+            }
+
+            if ($installed) {
+                Write-Status ".NET $($this.FileName) Installed Successfully!"
+            }
+            else {
+                Write-Status ".NET $($this.FileName) staged (installer exit code $(if ($null -eq $exitCode) { 'unknown' } else { $exitCode })); rebooting to finalize registration."
+            }
+
+            # Reboot. Registration of the new Release value completes on this reboot when files were in use;
+            # Test() re-verifies NDP\v4\Full Release >= NetVersion after the machine comes back up.
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
         }
         catch {
@@ -760,7 +1056,7 @@ class InstallDotNet4 {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking .NET Framework installation status"
         $NETval = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Name "Release"
 
         If ($NETval.Release -ge $this.NetVersion) {
@@ -805,7 +1101,7 @@ class InstallReportBuilder {
 
     [bool] Test() {
 
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking Report Builder installation status"
         $_path = $this.Path
 
         if (-not (Test-Path -Path $_path)) {
@@ -862,7 +1158,7 @@ class InstallODBCDriver {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking ODBC Driver 18 installation status"
 
         try {
             $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
@@ -931,7 +1227,7 @@ class InstallOleDbDriver {
 
     [bool] Test() {
         $packageName = "Microsoft OLEDB Driver 19"
-        Write-Status "DSC Test- Checking deployment status for $packageName"
+        Write-Status "Checking $packageName installation status"
         try {
             $InstallRegistryPath = "HKLM:\SOFTWARE\Microsoft\MSOLEDBSQL19"
 
@@ -986,6 +1282,17 @@ class InstallSqlClient {
         $_URL = $this.URL
         Invoke-DownloadFile $_URL $_path
 
+        # Skip install if already registered (Set may be called just to
+        # restore the MSI file for Windows Installer source resolution).
+        $regPath = "HKLM:\SOFTWARE\Microsoft\SQLNCLI11"
+        if (Test-Path $regPath) {
+            $ver = (Get-ItemProperty $regPath -ErrorAction SilentlyContinue).InstalledVersion
+            if ($ver -and [System.Version]$ver -ge [System.Version]"11.4.7001.0") {
+                Write-Status "SQL Native Client $ver already installed, MSI restored to $_path"
+                return
+            }
+        }
+
         Install-MSIPackage `
             -MsiPath $_path `
             -DisplayName "SQL Server Native Client 11" `
@@ -996,7 +1303,7 @@ class InstallSqlClient {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking SQL Native Client 11 installation status"
         try {
             $RegistryPath = "HKLM:\SOFTWARE\Microsoft\SQLNCLI11"
 
@@ -1017,6 +1324,12 @@ class InstallSqlClient {
             }
 
             If ([System.Version]$($Version.InstalledVersion) -ge [System.Version]"11.4.7001.0") {
+                # Installed, but ensure the MSI file still exists at the download
+                # path so Windows Installer can find it when a CU patches it.
+                if (-not (Test-Path $this.Path)) {
+                    Write-Status "SQL Native Client is installed but MSI missing at $($this.Path) - re-downloading"
+                    return $false
+                }
                 Write-Host "Sql Client 11.4.7001.0 or greater $($Version.InstalledVersion) is installed"
                 return $true
             }
@@ -1109,7 +1422,6 @@ class InstallVCRedist {
             # bundle writes) to contain a "Shutting down, exit code"
             # line. Poll up to 120s; that covers slow disks and AV
             # scanning the cached MSIs.
-            $bundleKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
             $childLogPattern = if ($_path -like "*x64*") {
                 "c:\temp\vc_redistx64_*_vcRuntime*_x64.log"
             } else {
@@ -1178,7 +1490,7 @@ class InstallVCRedist {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking VC++ Redistributable installation status"
         try {
             # OLE DB Driver 19's VCRedistCheck CA reads Bld DWORD; require
             # at least 14.34 (Bld 33135). Major.Minor alone isn't enough --
@@ -1271,7 +1583,7 @@ class InstallPMPC {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking Patch My PC installation status"
         if ((Test-Path -Path "C:\Program Files\Patch My PC\Patch My PC Publishing Service\Settings.xml")) {
             return $true
         }        
@@ -1309,12 +1621,12 @@ class InstallConsole {
         Write-Status "Installing SCCM Console..."
         & C:\staging\DSC\phases\Install-Console.ps1 -SiteServer $_SiteServer -CMInstallDir $_CMInstallDir
         Write-Status "Finished installing SCCM Console... Rebooting"  
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1      
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking ConfigMgr Console installation status"
         try {
             $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
         }
@@ -1584,36 +1896,212 @@ class WaitForExtendSchemaFile {
 
         Write-Status "Extending the Active Directory schema..."
 
-        # Force AD Replication
-        $domainControllers = Get-ADDomainController -Filter *
+        # Force AD Replication (job-based with timeout; repadmin can hang if a
+        # DC's NTDS is still initializing, e.g. BDC just promoted).
+        # Omit the DN argument so /AdeP walks ALL partitions (Domain,
+        # Configuration, AND Schema) -- schema extension targets
+        # CN=Schema,CN=Configuration,... which is a separate NC from
+        # the domain DN.
+        $domainControllers = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
         if ($domainControllers.Count -gt 1) {
             Write-Status "Forcing AD Replication on $($domainControllers.Name -join ',')"
-            $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
+            $dcNames = @($domainControllers.Name)
+            $replJob = Start-Job -ScriptBlock {
+                param($dcNames)
+                $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
+            } -ArgumentList (,$dcNames)
+            $null = Wait-Job $replJob -Timeout 60
+            if ($replJob.State -eq 'Running') {
+                Stop-Job $replJob -ErrorAction SilentlyContinue
+            }
+            Remove-Job $replJob -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
         }
 
-        if (Test-Path $extadschpath) {
-            Write-Status "Running $extadschpath"
-            & $extadschpath | out-null
-        }
-        if (Test-Path $extadschpath2) {
-            Write-Status "Running $extadschpath2"
-            & $extadschpath2 | out-null
-        }
+        # Find the first valid extadsch.exe path
+        $extExe = @($extadschpath, $extadschpath2, $extadschpath3, $extadschpath4) |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
 
-        if (Test-Path $extadschpath3) {
-            Write-Status "Running $extadschpath3"
-            & $extadschpath3 | out-null
+        if (-not $extExe) {
+            Write-Status "WARNING: extadsch.exe not found in any expected path"
         }
+        else {
+            # --- Pre-flight checks ---
+            $schemaNC = $null
+            $schemaOk = $false
+            try {
+                Import-Module ActiveDirectory -ErrorAction Stop
+                $schemaNC = (Get-ADRootDSE).schemaNamingContext
+            }
+            catch {
+                Write-Status "WARNING: Could not query AD schema naming context: $($_.Exception.Message)"
+            }
 
-        if (Test-Path $extadschpath4) {
-            Write-Status "Running $extadschpath4"
-            & $extadschpath4 | out-null
+            # Verify Schema Admin membership (extadsch.exe requires it)
+            try {
+                $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+                $schemaAdminsSID = (Get-ADGroup "Schema Admins" -ErrorAction Stop).SID
+                if ($currentUser.Groups -notcontains $schemaAdminsSID) {
+                    Write-Status "WARNING: Current identity '$($currentUser.Name)' is not in Schema Admins -- extadsch.exe will likely fail. Ensure PsDscRunAsCredential is set to a domain admin account."
+                }
+                else {
+                    Write-Status "Schema Admin membership confirmed for '$($currentUser.Name)'"
+                }
+            }
+            catch {
+                Write-Status "WARNING: Could not verify Schema Admins membership: $($_.Exception.Message)"
+            }
+
+            # Verify Schema Master FSMO is reachable
+            try {
+                $schemaMaster = (Get-ADForest -ErrorAction Stop).SchemaMaster
+                $localFQDN = [System.Net.Dns]::GetHostEntry("").HostName
+                Write-Status "Schema Master: $schemaMaster (local: $localFQDN)"
+                if ($localFQDN -ine $schemaMaster) {
+                    if (-not (Test-Connection -ComputerName $schemaMaster -Count 1 -Quiet -ErrorAction SilentlyContinue)) {
+                        Write-Status "WARNING: Schema Master $schemaMaster is not reachable"
+                    }
+                }
+            }
+            catch {
+                Write-Status "WARNING: Could not identify Schema Master: $($_.Exception.Message)"
+            }
+
+            # Check if schema is already fully extended (skip extadsch if so)
+            if ($schemaNC) {
+                try {
+                    $existingObjs = @(Get-ADObject -SearchBase $schemaNC `
+                        -Filter "name -like 'MS-SMS-*' -or name -like 'mS-SMS-*'" -ErrorAction SilentlyContinue)
+                    if ($existingObjs.Count -ge 18) {
+                        Write-Status "CM schema already extended ($($existingObjs.Count) SMS objects found) - skipping extadsch.exe"
+                        $schemaOk = $true
+                    }
+                    elseif ($existingObjs.Count -gt 0) {
+                        Write-Status "Partial CM schema detected ($($existingObjs.Count)/18 objects) - will attempt to complete"
+                    }
+                }
+                catch {}
+            }
+
+            # Wait for replication convergence before schema extension (multi-DC only)
+            if (-not $schemaOk) {
+                $dcList = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue)
+                if ($dcList.Count -gt 1) {
+                    Write-Status "Waiting for replication convergence across $($dcList.Count) DCs..."
+                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                    while ($sw.Elapsed.TotalSeconds -lt 60) {
+                        Start-Sleep -Seconds 10
+                        $chk = & repadmin /replsummary 2>&1
+                        # Look for error/fail indicators -- more reliable than
+                        # parsing error codes, since replsummary format varies by OS.
+                        # Exclude header lines ("Source DSA ... largest delta  fails/total %  error"
+                        # and the matching Destination DSA header) which contain the
+                        # words "fails" and "error" as column labels, not real errors.
+                        $errors = $chk | Where-Object { $_ -match 'error|fail|\*' -and $_ -notmatch '^(Source|Destination) DSA' -and $_ -notmatch 'largest delta' }
+                        if (-not $errors) { break }
+                        Write-Status "Replication settling ($([int]$sw.Elapsed.TotalSeconds)s)..."
+                    }
+                    $sw.Stop()
+                }
+            }
+
+            $logFile = "C:\ExtADSch.log"
+            $maxAttempts = 3
+
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                if ($schemaOk) { break }
+                # Rename previous log so we can detect whether extadsch.exe
+                # actually wrote a new one (vs failing silently due to
+                # permissions or path issues).
+                $logExisted = Test-Path $logFile
+                if ($logExisted) {
+                    $bak = "$logFile.attempt$($attempt - 1)"
+                    Rename-Item $logFile $bak -Force -ErrorAction SilentlyContinue
+                }
+
+                Write-Status "Running extadsch.exe (attempt $attempt/$maxAttempts): $extExe"
+                $extOutput = & $extExe 2>&1
+                Start-Sleep -Seconds 2
+
+                # Parse ExtADSch.log for success/failure
+                if (Test-Path $logFile) {
+                    $logContent = Get-Content $logFile -Raw
+                    if ($logContent -match 'Successfully extended the Active Directory schema') {
+                        Write-Status "Schema extension succeeded (attempt $attempt)"
+                        $schemaOk = $true
+                        break
+                    }
+                    $failLines = ($logContent -split "`r?`n") | Where-Object { $_ -match 'Failed|Error code' } | Select-Object -First 5
+                    Write-Status "Schema extension failed (attempt $attempt): $($failLines -join ' | ')"
+                }
+                else {
+                    # extadsch.exe ran but didn't produce a log -- likely a
+                    # permissions or working-directory issue, not a schema
+                    # problem.  Note: extadsch.exe writes diagnostics to
+                    # C:\ExtADSch.log, not stdout, so console capture is
+                    # usually empty.  A missing log typically means a
+                    # filesystem ACL or working-directory problem on C:\.
+                    $consoleOut = if ($extOutput) { ($extOutput | Select-Object -First 5) -join ' | ' } else { '(no output)' }
+                    Write-Status "Schema extension (attempt $attempt): extadsch.exe produced no log at $logFile -- check C:\ filesystem permissions. Console: $consoleOut"
+                }
+
+                if ($attempt -lt $maxAttempts) {
+                    $delay = 30 * $attempt
+                    Write-Status "Retrying schema extension in ${delay}s..."
+                    Start-Sleep -Seconds $delay
+
+                    # Force replication before retry -- omit DN so all partitions
+                    # (including Schema NC) are synced
+                    $dcList = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
+                    if ($dcList.Count -gt 1) {
+                        repadmin /syncall $env:COMPUTERNAME /AdeP 2>&1 | Out-Null
+                    }
+                }
+            }
+
+            # Verify all required SMS schema attributes and classes exist.
+            # Catches both fresh extensions and re-runs where extadsch.exe
+            # reports "Failed" but the objects were created by a prior deployment.
+            if (-not $schemaOk -and $schemaNC) {
+                try {
+                    $reqAttrs = @('MS-SMS-Site-Code','mS-SMS-Assignment-Site-Code','MS-SMS-Site-Boundaries',
+                        'MS-SMS-Roaming-Boundaries','MS-SMS-Default-MP','mS-SMS-Device-Management-Point',
+                        'MS-SMS-MP-Name','MS-SMS-MP-Address','mS-SMS-Health-State','mS-SMS-Source-Forest',
+                        'MS-SMS-Ranged-IP-Low','MS-SMS-Ranged-IP-High','mS-SMS-Version','mS-SMS-Capabilities')
+                    $reqClasses = @('MS-SMS-Management-Point','MS-SMS-Server-Locator-Point',
+                        'MS-SMS-Site','MS-SMS-Roaming-Boundary-Range')
+
+                    $found = @(Get-ADObject -SearchBase $schemaNC `
+                        -Filter "name -like 'MS-SMS-*' -or name -like 'mS-SMS-*'" -ErrorAction SilentlyContinue |
+                        Select-Object -ExpandProperty Name)
+
+                    $missingA = @($reqAttrs | Where-Object { $found -notcontains $_ })
+                    $missingC = @($reqClasses | Where-Object { $found -notcontains $_ })
+
+                    if ($missingA.Count -eq 0 -and $missingC.Count -eq 0) {
+                        Write-Status "All $($reqAttrs.Count) attributes and $($reqClasses.Count) classes present in schema"
+                        $schemaOk = $true
+                    }
+                    else {
+                        if ($missingA.Count -gt 0) { Write-Status "Missing schema attributes ($($missingA.Count)): $($missingA -join ', ')" }
+                        if ($missingC.Count -gt 0) { Write-Status "Missing schema classes ($($missingC.Count)): $($missingC -join ', ')" }
+                    }
+                }
+                catch {
+                    Write-Status "WARNING: Could not verify schema objects: $($_.Exception.Message)"
+                }
+            }
+
+            if (-not $schemaOk) {
+                Write-Status "WARNING: Schema extension incomplete. AD publishing for ConfigMgr will not work. Check C:\ExtADSch.log on the DC."
+            }
         }
         Write-Status "Done Extending Schema"
     }
 
     [bool] Test() {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        Write-Status "WaitForExtendSchemaFile: running as '$($identity.Name)' (AuthType=$($identity.AuthenticationType), IsSystem=$($identity.IsSystem))"
         return $false
     }
 
@@ -1701,7 +2189,14 @@ class DelegateControl {
             Write-Status "Creating new AD Object: CN=System Management,CN=System,$root"
             $ou = New-ADObject -Type Container -name "System Management" -Path "CN=System,$root" -Passthru
         }
-        $DomainName = $this.DomainFullName.split('.')[0]
+        # Use actual NetBIOS name for SID resolution, not the first DNS
+        # label. In disjoint namespaces (e.g. DNS "wacky.sandwich.lab" with
+        # NetBIOS "TACO"), .split('.')[0] gives "wacky" which dsacls can't
+        # resolve to a SID. Get-ADDomain.NetBIOSName is authoritative.
+        $DomainName = (Get-ADDomain -ErrorAction SilentlyContinue).NetBIOSName
+        if (-not $DomainName) {
+            $DomainName = $this.DomainFullName.split('.')[0]
+        }
         #Delegate Control
         $cmd = "dsacls.exe"
         $arg1 = "CN=System Management,CN=System,$root"
@@ -1718,6 +2213,7 @@ class DelegateControl {
 
         $retries = 0
         $maxretries = 15
+        $forcedReplication = $false
         while ($retries -le $maxretries) {
 
             Clear-DnsClientCache -ErrorAction SilentlyContinue
@@ -1729,7 +2225,7 @@ class DelegateControl {
                     Write-Status "dsacls.exe failed to add permissions 5 time.. Attempting reboot."
                     Write-Verbose "Rebooting"
                     New-Item $_FileName
-                    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                     $global:DSCMachineStatus = 1
                     return
                 }
@@ -1743,6 +2239,63 @@ class DelegateControl {
 
             Write-Verbose "Result $result"
             Write-Verbose "dsacls.exe exit code: $dsaclsExitCode"
+
+            # Error 1332 = "No Sid Found" -- the computer account hasn't
+            # replicated to this DC yet. Force AD replication once, then
+            # try targeting the PDC emulator directly.
+            if ($dsaclsExitCode -eq 1332 -and -not $forcedReplication) {
+                $forcedReplication = $true
+                try {
+                    $domainControllers = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue)
+                    if ($domainControllers.Count -gt 1) {
+                        $dn = (Get-ADDomain -ErrorAction SilentlyContinue).DistinguishedName
+                        Write-Status "SID not found locally. Forcing AD replication across $($domainControllers.Count) DCs..."
+                        $dcNames = @($domainControllers.Name)
+                        $replJob = Start-Job -ScriptBlock {
+                            param($dcNames, $dn)
+                            $dcNames | ForEach-Object { repadmin /syncall $_ $dn /AdeP 2>&1 | Out-Null }
+                        } -ArgumentList $dcNames, $dn
+                        $null = Wait-Job $replJob -Timeout 60
+                        if ($replJob.State -eq 'Running') {
+                            Stop-Job $replJob -ErrorAction SilentlyContinue
+                        }
+                        Remove-Job $replJob -Force -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 5
+                        Write-Status "Replication sync completed. Retrying dsacls..."
+                    }
+                }
+                catch {
+                    Write-Verbose "Forced replication failed: $_"
+                }
+            }
+
+            # If dsacls failed with 1332 (SID not found on this DC), try
+            # targeting each DC directly. The PDC or the DC where the
+            # computer account was created may already have the SID.
+            $successDcArg1 = $null
+            if ($dsaclsExitCode -eq 1332) {
+                try {
+                    $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue)
+                    foreach ($dc in $allDCs) {
+                        if ($dc.HostName -eq (hostname)) { continue }
+                        $serverArg1 = "\\$($dc.HostName)\$arg1"
+                        Write-Status "Trying dsacls via $($dc.Name)... (Try $retries/$maxretries)"
+                        Write-Verbose "Running $cmd $serverArg1 $arg2 $arg3 $arg4"
+                        $null = & $cmd $serverArg1 $arg2 $arg3 $arg4 *>&1
+                        $dcExitCode = $LASTEXITCODE
+                        Write-Verbose "dsacls via $($dc.Name) exit code: $dcExitCode"
+                        if ($dcExitCode -eq 0) {
+                            Write-Status "dsacls succeeded via $($dc.Name)"
+                            $dsaclsExitCode = 0
+                            $successDcArg1 = $serverArg1
+                            break
+                        }
+                    }
+                }
+                catch {
+                    Write-Verbose "Multi-DC dsacls attempt failed: $_"
+                }
+            }
 
             # If dsacls.exe reported success (exit code 0), trust it and
             # do a quick verify. The old 60s-per-retry logic turned a
@@ -1759,6 +2312,16 @@ class DelegateControl {
             if ($this.CheckPermissions($permissioninfo, $_machinename, $DomainName)) {
                 Write-Verbose "Permissions verified successfully"
                 break
+            }
+
+            # If dsacls succeeded on a remote DC, verify against that DC
+            # (the ACL may not have replicated locally yet).
+            if ($successDcArg1) {
+                $remotePerm = & $tcmd $successDcArg1
+                if ($this.CheckPermissions($remotePerm, $_machinename, $DomainName)) {
+                    Write-Status "Permissions verified on remote DC"
+                    break
+                }
             }
 
             # If dsacls.exe said it succeeded but our pattern match failed,
@@ -1791,9 +2354,12 @@ class DelegateControl {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking AD System Management container delegation"
         $_machinename = $this.Machine
-        $DomainName = $this.DomainFullName.split('.')[0]
+        $DomainName = (Get-ADDomain -ErrorAction SilentlyContinue).NetBIOSName
+        if (-not $DomainName) {
+            $DomainName = $this.DomainFullName.split('.')[0]
+        }
         $root = (Get-ADRootDSE).defaultNamingContext
         try {
             Get-ADObject "CN=System Management,CN=System,$root"
@@ -1852,7 +2418,7 @@ class AddNtfsPermissions {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking NTFS permissions on C:\tools"
         $testPath = "C:\staging\DSC\AddNtfsPermissions.txt"
         if (Test-Path $testPath) {
             return $true
@@ -1965,16 +2531,67 @@ class DownloadFile {
     }
 
     [bool] Test() {
-        #if (!(Test-Path $this.FilePath)) {
-        #    return $false
-        #}
+        if (!(Test-Path $this.FilePath)) {
+            return $false
+        }
 
-        #If (!(Get-Item $this.FilePath).length -gt 0kb) {
-        #    return $false
-        #}
+        if (!((Get-Item $this.FilePath).Length -gt 0)) {
+            return $false
+        }
 
-        #Let logic in Invoke-DownloadFile handle this
-        return $false
+        # Verify SHA1 hash for files with an embedded hash in the filename
+        # (e.g. sqlserver2016-kb5014351-x64_{sha1hash}.exe)
+        if ($this.DownloadUrl -match '-x64_([\da-fA-F]{40})\.exe$') {
+            $expectedHash = $Matches[1].ToLowerInvariant()
+            $fileItem = Get-Item $this.FilePath
+            $hashCachePath = "$($this.FilePath).SHA1"
+
+            # Check for a cached hash sidecar file with size and last-modified metadata
+            $actualHash = $null
+            $useCachedHash = $false
+            if (Test-Path $hashCachePath) {
+                try {
+                    $cacheLines = Get-Content $hashCachePath
+                    if ($cacheLines.Count -ge 3) {
+                        $cachedHash = $cacheLines[0].Trim().ToLowerInvariant()
+                        $cachedSize = [long]$cacheLines[1].Trim()
+                        $cachedLastWrite = [datetime]$cacheLines[2].Trim()
+                        if ($fileItem.Length -eq $cachedSize -and $fileItem.LastWriteTimeUtc -eq $cachedLastWrite) {
+                            $useCachedHash = $true
+                            $actualHash = $cachedHash
+                        }
+                    }
+                }
+                catch {
+                    # Sidecar corrupt or unreadable; fall through to full hash
+                }
+            }
+
+            if (-not $useCachedHash) {
+                $actualHash = (Get-FileHash $this.FilePath -Algorithm SHA1).Hash.ToLowerInvariant()
+            }
+
+            if ($actualHash -ne $expectedHash) {
+                Write-Status "Hash mismatch for $(Split-Path $this.FilePath -Leaf): expected $expectedHash, got $actualHash. Deleting corrupt download."
+                $parentDir = Split-Path $this.FilePath -Parent
+                Remove-Item $parentDir -Recurse -Force -ErrorAction SilentlyContinue
+                return $false
+            }
+
+            # Write/update the sidecar cache so subsequent runs skip hashing
+            if (-not $useCachedHash) {
+                try {
+                    @($actualHash, $fileItem.Length.ToString(), $fileItem.LastWriteTimeUtc.ToString('o')) | Out-File -FilePath $hashCachePath -Force
+                }
+                catch {
+                    Write-Verbose "Could not write hash cache file: $_"
+                }
+            }
+
+            Write-Verbose "SHA1 hash verified for $(Split-Path $this.FilePath -Leaf)"
+        }
+
+        return $true
     }
 
     [DownloadFile] Get() {
@@ -2208,6 +2825,45 @@ function Write-Status {
 
 }
 
+function Invoke-WithTimeoutJob {
+    # Run a scriptblock under Start-ThreadJob (or Start-Job fallback) with a
+    # hard per-attempt timeout + retry, then KILL it if it overruns. Used to
+    # bound CDXML/CIM cmdlets such as Get/Remove-DnsServerResourceRecord
+    # -ComputerName <DC>, which have no native timeout and can block for
+    # minutes when the DC's WinRM/CIM is briefly wedged -- stalling the DSC
+    # apply (and the whole phase) with it. Returns the scriptblock output on
+    # success, or $null on timeout/error (caller treats that as 'skip').
+    param(
+        [Parameter(Mandatory)] [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList = @(),
+        [int] $TimeoutSec = 30,
+        [int] $MaxAttempts = 2
+    )
+    $useThreadJob = $null -ne (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $job = $null
+        try {
+            $job = if ($useThreadJob) {
+                Start-ThreadJob -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
+            }
+            else {
+                Start-Job -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
+            }
+            if (Wait-Job -Job $job -Timeout $TimeoutSec) {
+                $out = Receive-Job -Job $job -ErrorAction SilentlyContinue
+                try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                return $out
+            }
+            try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+            try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        catch {
+            if ($job) { try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {} }
+        }
+    }
+    return $null
+}
+
 [DscResource()]
 class WriteStatus {
     [DscProperty(key)]
@@ -2220,19 +2876,10 @@ class WriteStatus {
     }
 
     [bool] Test() {
-        $_Status = $this.Status
-        $StatusLog = "C:\staging\DSC\DSC_Log.log"
-
-        if (Test-Path $StatusLog) {
-            Write-Verbose "Testing if $StatusLog contains: $_Status"
-            $contains = Get-Content -Path $StatusLog -Force | Select-String -Pattern $_Status -SimpleMatch
-            if ($contains) {
-                Write-Verbose "StatusLog contains status."
-                return $true
-            }
-        }
-
-        Write-Verbose "StatusLog does NOT contain status."
+        # Always return false so Set() writes the current status.
+        # Previously checked DSC_Log.log for the text, but that caused
+        # skips on re-runs when the message was already in the log from
+        # a prior attempt, leaving DSC_Status.txt stale.
         return $false
     }
 
@@ -2434,6 +3081,15 @@ class ChangeSqlInstancePort {
         #    return $true
         #}
 
+        # Always ensure the firewall rule exists, even when the port is already correct.
+        # Without this, a default MSSQLSERVER on 1433 passes the port check, Set() is
+        # skipped, and the firewall rule inside Set() never runs.
+        $fwRule = Get-NetFirewallRule -DisplayName 'SQL over TCP Inbound (Named Instance)' -ErrorAction SilentlyContinue
+        if (-not $fwRule) {
+            Write-Verbose "[ChangeSqlInstancePort]: Firewall rule missing for port $_SQLInstancePort"
+            return $false
+        }
+
         try {
             # Load the assemblies
             Write-Verbose "[ChangeSqlInstancePort]: Testing port for $_SQLInstanceName"
@@ -2484,58 +3140,58 @@ class RegisterTaskScheduler {
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
+    # Internal: LastRunTime captured just before we start the task, so a fresh start
+    # can be detected even when the launched script completes quickly.
+    hidden [datetime] $StartBaseline = [datetime]::MinValue
+
     [void] Set() {
         $_TaskName = $this.TaskName
         $_ScriptName = $this.ScriptName
         $_ScriptPath = $this.ScriptPath
         $_ScriptArgument = $this.ScriptArgument
-        $_AdminCreds = $this.AdminCreds
 
 
 
-        $RegisterTime = [datetime]::Now
         $waitTime = 30
 
         $success = $this.RegisterTask()
-        $lastRunTime = $this.GetLastRunTime()
-        $failCount = 0
+        if (-not $success) {
+            throw "Failed to register task $_TaskName after multiple attempts. Check domain trust and AD replication."
+        }
         Write-Status "Starting task $_Taskname from $_ScriptPath $_ScriptName $_ScriptArgument"
-        Write-Verbose "lastRunTime: $lastRunTime   RegisterTime: $RegisterTime"
-        while ($lastRunTime -lt $RegisterTime) {
-            Write-Verbose "Checking to see if task has started Attempt $failCount"
-            Write-Verbose "lastRunTime: $lastRunTime   RegisterTime: $RegisterTime"
 
-            if ($failCount -gt 2) {
-                Write-Verbose "Manually starting the task"
-                Start-ScheduledTask -TaskName $_TaskName
-                start-sleep $waitTime
-                $lastRunTime = $this.GetLastRunTime()
-            }
-
-            if ($failCount -eq 5) {
-                Write-Status "$_TaskName has not ran yet after 5 Cycles. Re-Registering Task"
-                #Unregister existing task
-                $success = $this.RegisterTask()
-
-            }
-
-            if ($failCount -eq 8) {
-                Write-Status "$_TaskName failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
-                throw "Task failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
-            }
-
-            if ($lastRunTime -gt $RegisterTime) {
-                Write-Status "$_Taskname was successfully started at $lastRunTime"
+        # RegisterTask() already started the task and confirmed it entered the Running
+        # state. Re-verify here using live task state (Get-ScheduledTask /
+        # Get-ScheduledTaskInfo) -- which updates immediately, unlike the laggy
+        # TaskScheduler/Operational event log -- and, if it somehow isn't running,
+        # re-register / re-start it (bounded) before giving up.
+        $failCount = 0
+        $maxRetries = 8
+        while ($true) {
+            if ($this.IsTaskRunning()) {
+                Write-Status "$_TaskName confirmed running."
                 break
             }
-            else {
-                Write-Status "$_Taskname has not started. Last run time was: $lastRunTime"
-                $failCount++
+            if ($failCount -ge $maxRetries) {
+                Write-Status "$_TaskName failed to run after $maxRetries retries. Exiting. Please check Task Scheduler for Task: $_TaskName"
+                throw "Task failed to run after $maxRetries retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
             }
-            start-sleep -Seconds $waitTime
-            $lastRunTime = $this.GetLastRunTime()
+
+            $taskExists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
+            if (-not $taskExists) {
+                Write-Status "$_TaskName disappeared. Re-registering..."
+                if (-not $this.RegisterTask()) {
+                    throw "Failed to re-register task $_TaskName."
+                }
+            }
+            else {
+                Write-Status "$_TaskName not running yet (attempt $failCount). Starting it."
+                Start-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
+            }
+            $failCount++
+            Start-Sleep -Seconds $waitTime
         }
-        Write-Status "$_TaskName was successfully started at $lastRunTime"
+        Write-Status "$_TaskName was successfully started."
 
 
 
@@ -2613,10 +3269,6 @@ class RegisterTaskScheduler {
         $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
         Write-Verbose "New-ScheduledTaskAction : $TaskCommand $TaskArg"
 
-        # Seconds to wait to start task
-        $waitTime = 15
-        $TaskStartTime = [datetime]::Now.AddSeconds($waitTime)
-        $RegisterTime = [datetime]::Now
         #$Trigger = New-ScheduledTaskTrigger -Once -At $TaskStartTime
         #Write-Verbose "Time is now: $RegisterTime Task Scheduled to run at $TaskStartTime"
 
@@ -2627,40 +3279,91 @@ class RegisterTaskScheduler {
 
         $Task = New-ScheduledTask -Action $Action -Description $TaskDescription -Principal $Principal
 
-        $Task | Register-ScheduledTask -TaskName $($this.TaskName) -User $($this.AdminCreds.UserName) -Password $Password -Force | out-Null
+        # Register with retry -- domain trust failures are transient (AD replication lag
+        # can cause "trust relationship failed" for 10-20 min in large deployments)
+        $registered = $false
+        $maxRegAttempts = 40  # 40 × 30s = 20 min max wait
+        for ($regAttempt = 1; $regAttempt -le $maxRegAttempts; $regAttempt++) {
+            try {
+                $Task | Register-ScheduledTask -TaskName $($this.TaskName) -User $($this.AdminCreds.UserName) -Password $Password -Force -ErrorAction Stop | Out-Null
+            } catch {
+                Write-Status "Register-ScheduledTask attempt $regAttempt/$maxRegAttempts failed: $($_.Exception.Message)"
+            }
+            # Verify the task actually exists
+            $verify = Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
+            if ($verify) {
+                $registered = $true
+                Write-Status "Task $($this.TaskName) registered successfully (attempt $regAttempt)"
+                break
+            }
+            Write-Status "Task $($this.TaskName) not found after attempt $regAttempt/$maxRegAttempts. Retrying in 30s..."
+            Start-Sleep -Seconds 30
+        }
 
-        start-sleep -Seconds $waitTime
+        if (-not $registered) {
+            Write-Status "ERROR: Task $($this.TaskName) could not be registered after 5 attempts."
+            return $false
+        }
+
+        # Make sure the task isn't already Running before we start it (a leftover run
+        # from a prior pass would make "is it running?" ambiguous). Capture the
+        # current LastRunTime as a baseline so a fresh start can be detected even if
+        # the launched script completes quickly.
+        $this.StartBaseline = [datetime]::MinValue
+        try {
+            $preInfo = Get-ScheduledTaskInfo -TaskName $($this.TaskName) -ErrorAction Stop
+            if ($preInfo.LastRunTime) { $this.StartBaseline = $preInfo.LastRunTime }
+            $preState = (Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction Stop).State
+            if ($preState -eq 'Running') {
+                Write-Status "$($this.TaskName) is already Running before start; stopping it for a clean start."
+                Stop-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+            }
+        }
+        catch {
+            Write-Status "Could not read pre-start state for $($this.TaskName): $($_.Exception.Message)"
+        }
 
         Write-Status "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) is starting"
         Start-ScheduledTask -TaskName $($this.TaskName)
-        Write-Status "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) has Started."
+
+        # Confirm the task actually entered the Running state (or already ran to
+        # completion for a fast no-op script) instead of sleeping a fixed interval and
+        # hoping. State / LastRunTime update almost immediately.
+        $startConfirmed = $false
+        for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Seconds 2
+            if ($this.IsTaskRunning()) {
+                $startConfirmed = $true
+                break
+            }
+        }
+        if ($startConfirmed) {
+            Write-Status "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) has Started."
+        }
+        else {
+            Write-Status "WARNING: $($this.TaskName) did not confirm Running within 30s after start; caller will retry."
+        }
 
         return $true
 
     }
 
-    [datetime] GetLastRunTime() {
-
-        $filterXML = @'
-        <QueryList>
-         <Query Id="0" Path="Microsoft-Windows-TaskScheduler/Operational">
-          <Select Path="Microsoft-Windows-TaskScheduler/Operational">
-           *[EventData/Data[@Name='TaskName']='\TEMPLATE']
-          </Select>
-         </Query>
-        </QueryList>
-'@
-
-        $filterXML = $filterXML -replace ("TEMPLATE", $this.TaskName)
-        $Lastevent = (Get-WinEvent  -FilterXml $filterXML -ErrorAction Stop) | Where-Object { $_.ID -eq 100 } | Select-Object -First 1
-
-        if ($Lastevent) {
-            Write-Verbose "Last Run Time is $($Lastevent.TimeCreated)"
-            return $Lastevent.TimeCreated
+    [bool] IsTaskRunning() {
+        # True when the scheduled task is actively Running, or (for a fast no-op script
+        # that already finished) when it has run since we captured StartBaseline.
+        try {
+            $state = (Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction Stop).State
+            if ($state -eq 'Running') { return $true }
+            $info = Get-ScheduledTaskInfo -TaskName $($this.TaskName) -ErrorAction Stop
+            # 267009 = SCHED_S_TASK_RUNNING
+            if ($info.LastTaskResult -eq 267009) { return $true }
+            if ($info.LastRunTime -and $info.LastRunTime -gt $this.StartBaseline) { return $true }
         }
-        Write-Verbose "No Last Run Time found returning $([datetime]::MinValue)"
-        return [datetime]::MinValue
-
+        catch {
+            Write-Verbose "IsTaskRunning check failed for $($this.TaskName): $($_.Exception.Message)"
+        }
+        return $false
     }
 }
 
@@ -2752,7 +3455,7 @@ class AddUserToLocalAdminGroup {
             Write-Status "AddUserToLocalAdminGroup: Failed to add $_DomainName\$_Name to administrators group $_"
             if ($(Test-ComputerSecureChannel) -eq $False) { 
                 Write-Status "AddUserToLocalAdminGroup: Secure Channel is broken. Attempting to reboot to fix it."
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
             }
         }
@@ -2795,21 +3498,34 @@ class JoinDomain {
         $_credential = $this.Credential
         $_DomainName = $this.DomainName
         $_retryCount = 80
+
+        # Pre-flight: detect network problems that make domain join impossible.
+        # Catching these early avoids a 20-minute blind retry loop.
+        $this.DiagnoseNetwork($_DomainName)
+
         try {
             Write-Status "Joining computer to Domain $_DomainName"
             Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Stop
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
         }
         catch {
             $CurrentDomain = (Get-WmiObject -Class Win32_ComputerSystem).Domain
             $count = 0
             Write-Status "Failed to join into the domain $_DomainName, retry $count/$_retryCount"
+            $lastDiag = [datetime]::MinValue
             $flag = $false
             while ($CurrentDomain -ne $_DomainName) {
                 if ($count -lt $_retryCount) {
                     $count++
                     Write-Status "Current Domain of $CurrentDomain does not match $_DomainName. Retry count: $count/$_retryCount"
+
+                    # Re-run diagnostics every 5 minutes during retry loop
+                    if (([datetime]::Now - $lastDiag).TotalMinutes -ge 5) {
+                        $this.DiagnoseNetwork($_DomainName)
+                        $lastDiag = [datetime]::Now
+                    }
+
                     Start-Sleep -Seconds 15
                     Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Ignore
 
@@ -2821,6 +3537,8 @@ class JoinDomain {
                 }
             }
             if ($flag) {
+                # Final diagnostic before last-ditch attempt
+                $this.DiagnoseNetwork($_DomainName)
                 Write-Status "Failed too many times.  Rebooting, then Rejoining domain."
                 Add-Computer -DomainName $_DomainName -Credential $_credential
             }
@@ -2829,8 +3547,64 @@ class JoinDomain {
             }
             $global:DSCMachineStatus = 1
         }
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
+    }
+
+    [void] DiagnoseNetwork([string] $domainName) {
+        # Check for APIPA or duplicate IP — the two most common causes of
+        # domain join failure that waste 20 minutes in a blind retry loop.
+        try {
+            $adapters = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.InterfaceAlias -notmatch 'Loopback' }
+            foreach ($a in $adapters) {
+                $ip = $a.IPAddress
+                $iface = $a.InterfaceAlias
+                if ($ip.StartsWith('169.254')) {
+                    Write-Status "WARNING: $iface has APIPA address $ip - no DHCP lease. Domain join will fail until this is resolved."
+                }
+                # Check for DAD (Duplicate Address Detection) state
+                if ($a.AddressState -eq 'Duplicate') {
+                    Write-Status "ERROR: $iface has DUPLICATE IP $ip - another device owns this address. This is likely a cluster/AG virtual IP assigned as a DHCP reservation by mistake. Domain join is impossible until the reservation is fixed on the DHCP server."
+                }
+            }
+            # Check DNS resolution
+            try {
+                $dcAddrs = [System.Net.Dns]::GetHostAddresses($domainName) |
+                    Where-Object { $_.AddressFamily -eq 'InterNetwork' }
+                if ($dcAddrs) {
+                    Write-Status "DNS: $domainName resolves to $($dcAddrs.IPAddressToString -join ', ')"
+                }
+                else {
+                    Write-Status "WARNING: DNS resolution for $domainName returned no IPv4 addresses."
+                }
+            }
+            catch {
+                Write-Status "WARNING: DNS resolution for $domainName failed: $($_.Exception.Message)"
+            }
+            # Check LDAP port on the first resolved DC
+            try {
+                $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ServerAddresses.Count -gt 0 } | Select-Object -First 1).ServerAddresses[0]
+                if ($dnsServer) {
+                    $tcp = New-Object System.Net.Sockets.TcpClient
+                    try {
+                        $tcp.Connect($dnsServer, 389)
+                        if ($tcp.Connected) {
+                            Write-Status "LDAP: DC at $dnsServer`:389 is reachable."
+                        }
+                    }
+                    catch {
+                        Write-Status "WARNING: LDAP port 389 on DC $dnsServer is not reachable: $($_.Exception.Message)"
+                    }
+                    finally { $tcp.Dispose() }
+                }
+            }
+            catch {}
+        }
+        catch {
+            Write-Status "Network diagnostic failed: $($_.Exception.Message)"
+        }
     }
 
     [bool] Test() {
@@ -2862,8 +3636,14 @@ class TestDomainJoin {
     # to AD with a broken secure channel.
     #
     # Self-heal strategy:
-    #   1. Reset-ComputerMachinePassword against the named DC (no reboot needed).
-    #   2. If still broken, full Remove-Computer + Add-Computer + reboot.
+    #   0. Verify DNS + DC connectivity first. If the DC is unreachable, the
+    #      secure channel test is meaningless — fix DNS and retry before
+    #      anything destructive.
+    #   1. Test-ComputerSecureChannel -Repair (resets password, no reboot).
+    #   2. Reset-ComputerMachinePassword against the named DC.
+    #   3. Only as absolute last resort: Remove-Computer + reboot.
+    #      This is destructive (breaks SPNs, Kerberos, cluster membership)
+    #      and should almost never be needed.
     [DscProperty(Key)]
     [string] $DomainName
 
@@ -2903,8 +3683,81 @@ class TestDomainJoin {
         $_DCName = $this.DCName
         $_credential = $this.Credential
 
-        # Step 1: try Reset-ComputerMachinePassword. Cheap, no reboot.
-        Write-Status "Secure channel to $_DomainName is broken. Resetting machine password against $_DCName."
+        # Step 0: Verify we can actually reach the DC before attempting any
+        # repair. A broken secure channel test when DNS is wrong or the DC
+        # is unreachable is a false positive — the machine account is fine,
+        # it's just a connectivity issue. Doing Remove-Computer in that
+        # state would be catastrophically wrong.
+        $dcReachable = $false
+        Write-Status "Verifying DC connectivity before secure channel repair."
+        for ($attempt = 1; $attempt -le 6; $attempt++) {
+            # Try DNS flush + re-register on each attempt
+            try {
+                ipconfig /flushdns 2>&1 | Out-Null
+                ipconfig /registerdns 2>&1 | Out-Null
+            } catch {}
+
+            # Check if DC resolves and is reachable on LDAP (389)
+            try {
+                $dcIP = [System.Net.Dns]::GetHostAddresses($_DCName) |
+                    Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+                    Select-Object -First 1
+                if ($dcIP) {
+                    $tcp = New-Object System.Net.Sockets.TcpClient
+                    try {
+                        $tcp.Connect($dcIP.IPAddressToString, 389)
+                        if ($tcp.Connected) {
+                            $dcReachable = $true
+                            Write-Status "DC '$_DCName' reachable at $($dcIP.IPAddressToString):389 (attempt $attempt)."
+                        }
+                    }
+                    catch {
+                        Write-Status "DC '$_DCName' resolved to $($dcIP.IPAddressToString) but LDAP port 389 unreachable (attempt $attempt)."
+                    }
+                    finally { $tcp.Dispose() }
+                }
+                else {
+                    Write-Status "DC '$_DCName' DNS resolution returned no IPv4 addresses (attempt $attempt)."
+                }
+            }
+            catch {
+                Write-Status "DC '$_DCName' DNS resolution failed (attempt $attempt): $($_.Exception.Message)"
+            }
+
+            if ($dcReachable) { break }
+            if ($attempt -lt 6) {
+                $delay = $attempt * 10
+                Write-Status "Waiting ${delay}s before retry..."
+                Start-Sleep -Seconds $delay
+            }
+        }
+
+        if (-not $dcReachable) {
+            Write-Status "DC '$_DCName' is not reachable after 6 attempts. Secure channel cannot be verified or repaired. Requesting reboot to reset network stack."
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+            return
+        }
+
+        # Step 1: Test-ComputerSecureChannel -Repair. This does a password
+        # reset in one call and is the simplest fix.
+        Write-Status "Secure channel to $_DomainName is broken. Attempting -Repair."
+        for ($i = 1; $i -le 2; $i++) {
+            try {
+                if (Test-ComputerSecureChannel -Repair -Credential $_credential -ErrorAction Stop) {
+                    Write-Status "Test-ComputerSecureChannel -Repair succeeded (attempt $i)."
+                    return
+                }
+            }
+            catch {
+                $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
+                Write-Status "Test-ComputerSecureChannel -Repair attempt $i failed: $msg"
+            }
+            if ($i -lt 2) { Start-Sleep -Seconds 10 }
+        }
+
+        # Step 2: Reset-ComputerMachinePassword against the named DC.
+        Write-Status "Repair failed. Trying Reset-ComputerMachinePassword against $_DCName."
         for ($i = 1; $i -le 3; $i++) {
             try {
                 Reset-ComputerMachinePassword -Server $_DCName -Credential $_credential -ErrorAction Stop
@@ -2921,26 +3774,20 @@ class TestDomainJoin {
             if ($i -lt 3) { Start-Sleep -Seconds 15 }
         }
 
-        # Step 2: full unjoin + rejoin. Requires reboot, but avoids leaving the
-        # node wedged with a broken secret that every later phase will trip on.
-        Write-Status "Reset failed. Performing full Remove-Computer + Add-Computer cycle."
+        # Step 3: Last resort — Remove-Computer + reboot. This is destructive
+        # (breaks SPNs, Kerberos tickets, cluster membership, SQL AG) and
+        # should almost never fire if Steps 0-2 are working correctly.
+        Write-Status "WARNING: All non-destructive repairs failed. Performing Remove-Computer + reboot (rejoin on next DSC pass). This will break SPNs and cluster membership."
         try {
             Remove-Computer -UnjoinDomainCredential $_credential -PassThru -Force -ErrorAction Stop | Out-Null
+            Write-Status "Remove-Computer succeeded. Requesting reboot so JoinDomain can re-add."
         }
         catch {
             $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
-            Write-Status "Remove-Computer failed (continuing to Add-Computer anyway): $msg"
-        }
-        try {
-            Add-Computer -DomainName $_DomainName -Credential $_credential -Force -ErrorAction Stop
-            Write-Status "Add-Computer succeeded. Rebooting to complete rejoin."
-        }
-        catch {
-            $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
-            Write-Status "Add-Computer failed during self-heal: $msg"
+            Write-Status "Remove-Computer failed: $msg"
             throw
         }
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
     }
 
@@ -2960,10 +3807,19 @@ class OpenFirewallPortForSCCM {
     [void] Set() {
         $_Role = $this.Role
 
+        # Hardening: opening firewall ports is BEST-EFFORT. A single bad / unsupported / duplicate
+        # rule must NEVER abort the DSC apply and strand the whole configuration. (Observed: an
+        # invalid -LocalPort value made New-NetFirewallRule throw a non-terminating error, which the
+        # LCM recorded as a Set failure -> pending.mof retained -> node parked in PendingConfiguration
+        # for the rest of Phase 2.) Suppress per-call errors for the whole method, then surface a
+        # single summary at the end so a genuine problem is still visible without failing the deploy.
+        $ErrorActionPreference = 'SilentlyContinue'
+        $Error.Clear()
+
         Write-Status "Opening firewall ports for Role:$_Role"
 
-        New-NetFirewallRule -DisplayName "Cluster Network Outbound" -Profile Any -Direction Outbound -Action Allow -RemoteAddress "10.250.250.0/24"
-        New-NetFirewallRule -DisplayName "Cluster Network Inbound" -Profile Any -Direction Inbound -Action Allow -RemoteAddress "10.250.250.0/24"
+        New-NetFirewallRule -DisplayName "Cluster Network Outbound" -Profile Any -Direction Outbound -Action Allow -RemoteAddress @("10.250.250.0/24", "10.250.251.0/24")
+        New-NetFirewallRule -DisplayName "Cluster Network Inbound" -Profile Any -Direction Inbound -Action Allow -RemoteAddress @("10.250.250.0/24", "10.250.251.0/24")
 
         New-NetFirewallRule -DisplayName 'WinRM Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
         New-NetFirewallRule -DisplayName 'WinRM Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
@@ -3067,7 +3923,7 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 2433' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'SQL over TCP  Outbound 1500' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SCCM PXE SP"
 
-            New-NetFirewallRule -DisplayName 'DHCP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(67.68) -Group "For SCCM PXE SP"
+            New-NetFirewallRule -DisplayName 'DHCP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(67, 68) -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'TFTP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 69  -Group "For SCCM PXE SP"
             New-NetFirewallRule -DisplayName 'BINL Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 4011 -Group "For SCCM PXE SP"
         }
@@ -3156,7 +4012,9 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1433' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SQL Server"
             New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 2433' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SQL Server"
             New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1500' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SQL Server"
-            New-NetFirewallRule -DisplayName 'WMI' -Program "%systemroot%\system32\svchost.exe" -Service "winmgmt" -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort Domain -Group "For SQL Server WMI"
+            New-NetFirewallRule -DisplayName 'SQL HADR Endpoint Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5022 -Group "For SQL Server"
+            New-NetFirewallRule -DisplayName 'SQL Browser Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol UDP -LocalPort 1434 -Group "For SQL Server"
+            New-NetFirewallRule -DisplayName 'WMI' -Program "%systemroot%\system32\svchost.exe" -Service "winmgmt" -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort RPC -Group "For SQL Server WMI"
             New-NetFirewallRule -DisplayName 'DCOM' -Program "%systemroot%\system32\svchost.exe" -Service "rpcss" -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SQL Server DCOM"
             New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SQL Server"
         }
@@ -3223,21 +4081,31 @@ class OpenFirewallPortForSCCM {
                 New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For WorkgroupMember"
 
                 # Force reboot, RDP doesn't seem to work until reboot
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
             }
         }
-        $StatusPath = "$env:windir\temp\OpenFirewallStatus.txt"
-        "Finished" >> $StatusPath
+
+        # Best-effort visibility: every entry in $Error here is a suppressed firewall-rule failure
+        # ($Error was cleared at the top of Set and only firewall cmdlets run in between). Report a
+        # summary so a real misconfiguration still shows up in the DSC log even though it no longer
+        # strands the node. $Error[0] is the most recent failure.
+        if ($Error.Count -gt 0) {
+            Write-Status "WARNING: $($Error.Count) firewall rule(s) reported errors and were skipped (continuing). First: $(($Error[0].Exception.Message).Trim())"
+        }
+
+        # Durable marker under C:\staging (survives reboots + %windir%\temp cleanup, which was
+        # purging the old marker between runs -- re-running every firewall rule, and a
+        # WorkgroupMember reboot, on every Phase 3).
+        $StatusPath = "C:\staging\OpenFirewallStatus.txt"
+        if (-not (Test-Path 'C:\staging')) { New-Item -ItemType Directory -Path 'C:\staging' -Force | Out-Null }
+        "Finished" | Out-File -FilePath $StatusPath -Append -Encoding ascii
     }
 
     [bool] Test() {
-        $StatusPath = "$env:windir\temp\OpenFirewallStatus.txt"
-        if (Test-Path $StatusPath) {
-            return $true
-        }
-
-        return $false
+        # Durable marker, falling back to the legacy %windir%\temp marker so a device already
+        # provisioned under the old scheme (old marker not yet cleaned) isn't re-run/rebooted.
+        return ([bool]((Test-Path "C:\staging\OpenFirewallStatus.txt") -or (Test-Path "$env:windir\temp\OpenFirewallStatus.txt")))
     }
 
     [OpenFirewallPortForSCCM] Get() {
@@ -3255,7 +4123,7 @@ class InstallFeatureForSCCM {
     [string[]] $Role
 
     [DscProperty(NotConfigurable)]
-    [string] $Version = "7"
+    [string] $Version = "8"
 
     [void] Set() {
         $_Role = $this.Role
@@ -3269,154 +4137,167 @@ class InstallFeatureForSCCM {
         }
         catch {}
 
-        # Server OS?
-        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
-        if ($os) {
-            $IsServerOS = $true
-            if ($os.ProductType -eq 1) {
-                $IsServerOS = $false
-            }
-        }
-        else {
-            $IsServerOS = $false
-        }
-
-        if ($IsServerOS) {
-
-            #
-            #
-            #
-            #   If you add roles here, please update the Version number so existing Machines will get the new roles
-            #
-            #
-            #
-
-            # Collect all features into a single list, then install once for speed.
-            $features = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
-            # All servers
-            [void]$features.Add("Web-Windows-Auth")
-            [void]$features.Add("Web-ISAPI-Ext")
-            [void]$features.Add("RSAT-AD-PowerShell")
-            [void]$features.Add("AD-Domain-Services")
-
-            if ($_Role -notcontains "DC" -and $_Role -notcontains "BDC") {
-                # Non-DC servers get BITS and IIS metabase
-                [void]$features.Add("BITS")
-                [void]$features.Add("BITS-IIS-Ext")
-                [void]$features.Add("Web-WMI")
-                [void]$features.Add("Web-Metabase")
-
-                if ($_Role -notcontains "DomainMember") {
-                    [void]$features.Add("Rdc")
-                }
-            }
-
-            if ($_Role -contains "SQLAO") {
-                foreach ($f in @("Failover-Clustering", "RSAT-Clustering-PowerShell", "RSAT-Clustering-CmdInterface", "RSAT-Clustering-Mgmt")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Site Server") {
-                foreach ($f in @("Net-Framework-Core", "NET-Framework-45-Core",
-                    "Web-Basic-Auth", "Web-IP-Security", "Web-Url-Auth", "Web-ASP", "Web-Asp-Net",
-                    "Web-Mgmt-Console", "Web-Lgcy-Scripting", "Web-Mgmt-Service", "Web-Mgmt-Tools", "Web-Scripting-Tools",
-                    "Web-WMI", "Web-Metabase", "Rdc", "UpdateServices-UI", "BITS", "BITS-IIS-Ext")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Application Catalog website point") {
-                foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Application Catalog web service point") {
-                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Certificate registration point") {
-                foreach ($f in @("Web-Asp-Net", "Web-Asp-Net45", "Web-Metabase", "Web-WMI")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Distribution point") {
-                foreach ($f in @("Web-WMI", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Enrollment point") {
-                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Enrollment proxy point") {
-                foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "Fallback status point") {
-                [void]$features.Add("Web-Metabase")
-            }
-
-            if ($_Role -contains "Management point") {
-                foreach ($f in @("BITS", "BITS-IIS-Ext", "Web-WMI", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            if ($_Role -contains "State migration point") {
-                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
-                    [void]$features.Add($f)
-                }
-            }
-
-            # Install all collected features in a single call
-            $featureList = @($features)
+        # Required server features for this role (empty on client OS). The list is
+        # computed once in GetRequiredFeatures() and shared with Test() so the two can
+        # never drift.
+        $featureList = @($this.GetRequiredFeatures())
+        if ($featureList.Count -gt 0) {
             Write-Status "Installing $($featureList.Count) Windows Features: $($featureList -join ', ')"
             $result = Install-WindowsFeature -Name $featureList -IncludeManagementTools
             if ($result.RestartNeeded -eq "Yes") {
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
             }
         }
 
-        $StatusPath = "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt"
-        "Finished" >> $StatusPath
+        # Durable completion breadcrumb (diagnostics + client-OS fast-path). Lives under
+        # C:\staging so it survives reboots and %windir%\temp cleanup -- the old
+        # %windir%\temp marker was being purged between runs (Phase 10 maintenance / the
+        # reboots during Phase 8 CM install), which made the full feature install +
+        # reboot re-run on every Phase 3 for the SiteSystem boxes. Server-OS idempotency
+        # is now keyed on the ACTUAL installed feature set in Test(), not on this file.
+        $markerPath = $this.MarkerPath()
+        try {
+            $markerDir = Split-Path -Parent $markerPath
+            if (-not (Test-Path $markerDir)) { New-Item -ItemType Directory -Path $markerDir -Force | Out-Null }
+            "Finished" | Out-File -FilePath $markerPath -Append -Encoding ascii
+        }
+        catch {}
     }
 
     [bool] Test() {
-        $StatusPath = "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt"
-        if (Test-Path $StatusPath) {
-            $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
-            if ($os) {
-                $IsServerOS = $true
-                if ($os.ProductType -eq 1) {
-                    $IsServerOS = $false
-                }
-            }
-            else {
-                $IsServerOS = $false
-            }
-
-            if ($IsServerOS) {
-                if ((Get-WindowsFeature -name AD-Domain-Services).InstallState -ne "Installed") {
-                    return $false
-                }
-            }
-
-            return $true
+        # Idempotency is keyed on the ACTUAL installed feature set, not a stamp file, so
+        # a fully-provisioned server never re-runs the install + reboot just because the
+        # marker was cleaned up. Adding a feature in GetRequiredFeatures() is also
+        # auto-detected here (no Version bump needed): a newly-required-but-missing
+        # feature makes Test() return $false and Set() installs only what's missing.
+        $featureList = @($this.GetRequiredFeatures())
+        if ($featureList.Count -eq 0) {
+            # Client OS -- no server features to verify; gate on the durable marker so
+            # the one-time TelnetClient enable in Set() isn't re-run forever. Fall back to
+            # the legacy %windir%\temp marker so devices provisioned under the old scheme
+            # (whose old marker hasn't been cleaned yet) aren't re-run on the first pass.
+            return ([bool]((Test-Path $this.MarkerPath()) -or (Test-Path "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt")))
         }
-        return $false
-       
+        # Assigned + wrapped in @() so Get-WindowsFeature objects never leak onto the
+        # success stream (a non-boolean leak hard-fails a PS5.1 DSC Test method).
+        $missing = @(Get-WindowsFeature -Name $featureList -ErrorAction SilentlyContinue | Where-Object { $_.InstallState -ne "Installed" })
+        return ($missing.Count -eq 0)
+    }
+
+    [string] MarkerPath() {
+        # Join the role array deterministically so the filename is stable across runs
+        # regardless of how the role[] is ordered/stringified.
+        $roleTag = ($this.Role -join '-')
+        return "C:\staging\InstallFeatureStatus$roleTag$($this.Version).txt"
+    }
+
+    [string[]] GetRequiredFeatures() {
+        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $IsServerOS = $true
+        if (-not $os -or $os.ProductType -eq 1) {
+            $IsServerOS = $false
+        }
+        if (-not $IsServerOS) {
+            return @()
+        }
+
+        $_Role = $this.Role
+
+        # Collect all features into a single set, deduped case-insensitively.
+        # NOTE: adding a feature here is picked up automatically on the next run --
+        # Test() checks actual install state, so no Version bump is needed.
+        $features = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+        # All servers
+        [void]$features.Add("RSAT-AD-PowerShell")
+        [void]$features.Add("AD-Domain-Services")
+
+        if ($_Role -notcontains "DC" -and $_Role -notcontains "BDC") {
+            # Non-DC servers get the IIS auth/ISAPI bits, BITS and IIS metabase.
+            # DCs/BDCs don't host IIS for our roles — the CA web-enrollment path
+            # (Common.PKI.ps1) installs its own Web-Server on demand — so these
+            # IIS features are skipped on DC/BDC to shorten the feature install.
+            [void]$features.Add("Web-Windows-Auth")
+            [void]$features.Add("Web-ISAPI-Ext")
+            [void]$features.Add("BITS")
+            [void]$features.Add("BITS-IIS-Ext")
+            [void]$features.Add("Web-WMI")
+            [void]$features.Add("Web-Metabase")
+
+            if ($_Role -notcontains "DomainMember") {
+                [void]$features.Add("Rdc")
+            }
+        }
+
+        if ($_Role -contains "SQLAO") {
+            foreach ($f in @("Failover-Clustering", "RSAT-Clustering-PowerShell", "RSAT-Clustering-CmdInterface", "RSAT-Clustering-Mgmt", "RSAT-DNS-Server")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Site Server") {
+            foreach ($f in @("Net-Framework-Core", "NET-Framework-45-Core",
+                "Web-Basic-Auth", "Web-IP-Security", "Web-Url-Auth", "Web-ASP", "Web-Asp-Net",
+                "Web-Mgmt-Console", "Web-Lgcy-Scripting", "Web-Mgmt-Service", "Web-Mgmt-Tools", "Web-Scripting-Tools",
+                "Web-WMI", "Web-Metabase", "Rdc", "UpdateServices-UI", "BITS", "BITS-IIS-Ext")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Application Catalog website point") {
+            foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Application Catalog web service point") {
+            foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Certificate registration point") {
+            foreach ($f in @("Web-Asp-Net", "Web-Asp-Net45", "Web-Metabase", "Web-WMI")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Distribution point") {
+            foreach ($f in @("Web-WMI", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Enrollment point") {
+            foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Enrollment proxy point") {
+            foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "Fallback status point") {
+            [void]$features.Add("Web-Metabase")
+        }
+
+        if ($_Role -contains "Management point") {
+            foreach ($f in @("BITS", "BITS-IIS-Ext", "Web-WMI", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        if ($_Role -contains "State migration point") {
+            foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                [void]$features.Add($f)
+            }
+        }
+
+        return @($features)
     }
 
     [InstallFeatureForSCCM] Get() {
@@ -3434,6 +4315,15 @@ class SetCustomPagingFile {
 
     [DscProperty(Mandatory)]
     [string] $MaximumSize
+
+    # When $true, configure the page file but do NOT force a reboot here.
+    # The page-file size change still requires a reboot to take effect, but the
+    # caller is responsible for ensuring a subsequent reboot happens (e.g. the
+    # DC config places this BEFORE the ADDomain promotion, whose reboot applies
+    # the change for free — saving one dedicated reboot per DC). Default $false
+    # preserves the original always-reboot behavior for every other caller.
+    [DscProperty()]
+    [bool] $SuppressReboot = $false
 
     [void] Set() {
         $_Drive = $this.Drive
@@ -3453,9 +4343,14 @@ class SetCustomPagingFile {
         else {
             Set-CimInstance $currentpagingfile -Property @{InitialSize = $_InitialSize ; MaximumSize = $_MaximumSize }
         }
-        Write-Status "Page file configured. $_Drive\pagefile.sys Size: $_MaximumSize MB. Rebooting."
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-        $global:DSCMachineStatus = 1
+        if ($this.SuppressReboot) {
+            Write-Status "Page file configured. $_Drive\pagefile.sys Size: $_MaximumSize MB. Reboot deferred to a subsequent step."
+        }
+        else {
+            Write-Status "Page file configured. $_Drive\pagefile.sys Size: $_MaximumSize MB. Rebooting."
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+        }
     }
 
     [bool] Test() {
@@ -3526,8 +4421,11 @@ class UpdateCAPrefs {
         try {
             certutil -setreg Policy\EditFlags +EDITF_ENABLELDAPREFERRALS
             Restart-Service -Name certsvc
-            $StatusPath = "$env:windir\temp\UpdateCAStatus.txt"
-            "Finished" >> $StatusPath
+            # Durable marker under C:\staging (survives %windir%\temp cleanup; the old temp marker
+            # was lost between runs, needlessly re-running certutil + restarting certsvc each pass).
+            $StatusPath = "C:\staging\UpdateCAStatus.txt"
+            if (-not (Test-Path 'C:\staging')) { New-Item -ItemType Directory -Path 'C:\staging' -Force | Out-Null }
+            "Finished" | Out-File -FilePath $StatusPath -Append -Encoding ascii
 
             Write-Status "Finished installing CA."
         }
@@ -3537,12 +4435,9 @@ class UpdateCAPrefs {
     }
 
     [bool] Test() {
-        $StatusPath = "$env:windir\temp\UpdateCAStatus.txt"
-        if (Test-Path $StatusPath) {
-            return $true
-        }
-
-        return $false
+        # Durable marker, falling back to the legacy %windir%\temp marker so an existing CA
+        # provisioned under the old scheme isn't needlessly re-run (certutil + certsvc restart).
+        return ([bool]((Test-Path "C:\staging\UpdateCAStatus.txt") -or (Test-Path "$env:windir\temp\UpdateCAStatus.txt")))
     }
 
     [UpdateCAPrefs] Get() {
@@ -3605,13 +4500,784 @@ class ClusterSetOwnerNodes {
 }
 
 [DscResource()]
+class WaitForClusterAccess {
+    [DscProperty(Key)]
+    [string] $ClusterName
+
+    [DscProperty()]
+    [string] $ClusterIPAddress = ''
+
+    [DscProperty()]
+    [int] $RetryIntervalSec = 15
+
+    [DscProperty()]
+    [int] $RetryCount = 40
+
+    hidden [string] $LastError = ''
+    hidden [string] $DnsSummary = ''
+    hidden [string] $NetSummary = ''
+    hidden [string] $FwSummary = ''
+
+    hidden [string] TestFirewallRules() {
+        $results = [System.Collections.Generic.List[string]]::new()
+
+        # Check Failover Cluster firewall rules (auto-created by the Windows Feature)
+        $clusterRules = Get-NetFirewallRule -DisplayGroup "Failover Clusters" -ErrorAction SilentlyContinue
+        if ($clusterRules) {
+            $enabled = @($clusterRules | Where-Object { $_.Enabled -eq 'True' }).Count
+            $total = @($clusterRules).Count
+            $results.Add("ClusterRules:$enabled/$total enabled")
+        }
+        else {
+            $results.Add("ClusterRules:MISSING")
+        }
+
+        # Check cluster network blanket rules
+        $clusterNetIn = Get-NetFirewallRule -DisplayName "Cluster Network Inbound" -ErrorAction SilentlyContinue
+        $clusterNetOut = Get-NetFirewallRule -DisplayName "Cluster Network Outbound" -ErrorAction SilentlyContinue
+        $inOk = $clusterNetIn -and $clusterNetIn.Enabled -eq 'True'
+        $outOk = $clusterNetOut -and $clusterNetOut.Enabled -eq 'True'
+        $results.Add("ClusterNet:In=$(if ($inOk) {'OK'} else {'MISS'}),Out=$(if ($outOk) {'OK'} else {'MISS'})")
+
+        # Check RPC 135 inbound
+        $rpc135 = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -match 'RPC Endpoint Mapper|DCOM' } |
+            Select-Object -First 1
+        $results.Add("RPC135in:$(if ($rpc135) {'OK'} else {'MISS'})")
+
+        # Check firewall profiles
+        $profiles = Get-NetFirewallProfile -ErrorAction SilentlyContinue
+        $activeProfiles = @($profiles | Where-Object { $_.Enabled -eq 'True' } | ForEach-Object { "$($_.Name):$($_.DefaultInboundAction)" })
+        if ($activeProfiles.Count -gt 0) {
+            $results.Add("Profiles:$($activeProfiles -join ',')")
+        }
+
+        $summary = $results -join ', '
+        Write-Status "Firewall: $summary"
+        $this.FwSummary = $summary
+        return $summary
+    }
+
+    hidden [string] TestNetworkConnectivity([string] $ip) {
+        if (-not $ip) { return "No IP to test" }
+
+        $results = [System.Collections.Generic.List[string]]::new()
+
+        # ICMP ping
+        try {
+            $ping = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction Stop
+            $results.Add("Ping:$(if ($ping) { 'OK' } else { 'FAIL' })")
+        }
+        catch {
+            $results.Add("Ping:ERR($($_.Exception.Message))")
+        }
+
+        # TCP 135 (RPC endpoint mapper -- used by Get-Cluster)
+        try {
+            $tcp135 = Test-NetConnection -ComputerName $ip -Port 135 -WarningAction SilentlyContinue -ErrorAction Stop
+            $results.Add("TCP135:$(if ($tcp135.TcpTestSucceeded) { 'OK' } else { 'CLOSED' })")
+        }
+        catch {
+            $results.Add("TCP135:ERR")
+        }
+
+        # TCP 445 (SMB -- used for cluster admin shares)
+        try {
+            $tcp445 = Test-NetConnection -ComputerName $ip -Port 445 -WarningAction SilentlyContinue -ErrorAction Stop
+            $results.Add("TCP445:$(if ($tcp445.TcpTestSucceeded) { 'OK' } else { 'CLOSED' })")
+        }
+        catch {
+            $results.Add("TCP445:ERR")
+        }
+
+        $summary = $results -join ', '
+        Write-Status "Network $ip : $summary"
+        $this.NetSummary = $summary
+        return $summary
+    }
+
+    hidden [bool] TryClusterAccess([string] $name) {
+        Clear-DnsClientCache
+
+        # First check if DNS resolves at all
+        $domain = (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
+        $clusterFqdn = if ($name -like "*.*") { $name } else { "$name.$domain" }
+        try {
+            $dnsResult = Resolve-DnsName -Name $clusterFqdn -Type A -ErrorAction Stop |
+                Where-Object { $_.Type -eq 'A' }
+            if (-not $dnsResult) {
+                $this.LastError = "DNS resolves but returned no A records"
+                return $false
+            }
+            $resolvedIP = $dnsResult[0].IPAddress
+            Write-Verbose "DNS resolved $clusterFqdn -> $resolvedIP"
+        }
+        catch {
+            $this.LastError = "DNS: $($_.Exception.Message)"
+            return $false
+        }
+
+        # DNS works, now try the actual cluster connection by name
+        try {
+            $null = Get-Cluster -Name $name -ErrorAction Stop
+            return $true
+        }
+        catch {
+            $nameErr = $_.Exception.Message
+            # Try via IP -- if this works, it's a name-based access issue
+            # (Cluster Name resource offline or CNO not accessible by name)
+            $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
+            if ($_ClusterIP) {
+                try {
+                    $null = Get-Cluster -Name $_ClusterIP -ErrorAction Stop
+
+                    # Cluster is running and reachable by IP. Check if the
+                    # Cluster Name resource is actually Online. If it is,
+                    # the name-based failure is a client-side resolution issue
+                    # (e.g. local ClusSvc not running on this pre-join node)
+                    # and the cluster itself is fully functional.
+                    $nameResOnline = $false
+                    try {
+                        $nameRes = Get-ClusterResource -Cluster $_ClusterIP -ErrorAction Stop |
+                            Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'Network Name' }
+                        if ($nameRes -and $nameRes.State -eq 'Online') {
+                            $nameResOnline = $true
+                        }
+                    }
+                    catch {
+                        Write-Verbose "Could not query Cluster Name resource state: $_"
+                    }
+
+                    if ($nameResOnline) {
+                        # Cluster Name resource is Online but Get-Cluster by name
+                        # still failed -- force DNS re-registration and retry once
+                        # by name. xCluster and other resources connect by name,
+                        # so we can't accept IP-only access.
+                        Write-Status "Get-Cluster by name failed but by IP $_ClusterIP succeeded; Cluster Name resource is Online -- forcing DNS update and retrying by name"
+                        try {
+                            $nameRes2 = Get-ClusterResource -Cluster $_ClusterIP -ErrorAction Stop |
+                                Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'Network Name' }
+                            if ($nameRes2) {
+                                $nameRes2 | Update-ClusterNetworkNameResource -ErrorAction Stop
+                                Write-Verbose "Update-ClusterNetworkNameResource succeeded"
+                            }
+                        } catch {
+                            Write-Verbose "Update-ClusterNetworkNameResource failed: $_"
+                        }
+                        Clear-DnsClientCache
+                        Start-Sleep -Seconds 5
+
+                        try {
+                            $null = Get-Cluster -Name $name -ErrorAction Stop
+                            Write-Status "Get-Cluster by name succeeded after DNS update"
+                            $this.LastError = $null
+                            return $true
+                        } catch {
+                            $this.LastError = "Get-Cluster by name still fails after DNS update ($($_.Exception.Message)); IP $_ClusterIP works, Cluster Name Online -- will retry"
+                            return $false
+                        }
+                    }
+
+                    $this.LastError = "Get-Cluster by name FAILED ($nameErr) but by IP $_ClusterIP SUCCEEDED -- Cluster Name resource not Online"
+                    return $false
+                }
+                catch {
+                    $this.LastError = "Get-Cluster by name FAILED ($nameErr), by IP $_ClusterIP also FAILED ($($_.Exception.Message))"
+                    return $false
+                }
+            }
+            $this.LastError = "Get-Cluster: $nameErr"
+            return $false
+        }
+    }
+
+    hidden [string] RepairClusterDns([string] $name) {
+        $actions = [System.Collections.Generic.List[string]]::new()
+
+        # If we're on a cluster node, check cluster health and force DNS re-registration.
+        # Get-Cluster (no -Name) connects to the local cluster service, bypassing DNS.
+        try {
+            $localCluster = Get-Cluster -ErrorAction Stop
+            if ($localCluster.Name -eq $name) {
+                $actions.Add("Local cluster found")
+
+                # Check all resources in the Cluster Group -- the "Cluster Name" and
+                # "Cluster IP Address" resources must be Online for remote access.
+                $clusterGroup = Get-ClusterGroup -Name "Cluster Group" -ErrorAction Stop
+                $groupState = $clusterGroup.State
+                $actions.Add("ClusterGroup:$groupState")
+
+                $clusterResources = Get-ClusterResource -ErrorAction Stop |
+                    Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+                foreach ($res in $clusterResources) {
+                    $actions.Add("$($res.Name):$($res.State)")
+                    Write-Status "Cluster resource '$($res.Name)' state: $($res.State)"
+                }
+
+                # If Cluster Name or its IP is not Online, try to bring the group online
+                $nameRes = $clusterResources | Where-Object { $_.ResourceType -eq 'Network Name' }
+                $ipRes = $clusterResources | Where-Object { $_.ResourceType -eq 'IP Address' }
+
+                # If the Cluster IP resource is missing entirely (deleted by a
+                # previous buggy ClusterRemoveUnwantedIPs run), recreate it.
+                $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
+                if (-not $ipRes -and $_ClusterIP) {
+                    Write-Status "Cluster IP resource is MISSING. Recreating for $_ClusterIP..."
+                    try {
+                        $ipBytes = $_ClusterIP.Split('.')
+                        $subnetPrefix = "$($ipBytes[0]).$($ipBytes[1]).$($ipBytes[2])."
+                        $clusterNetwork = Get-ClusterNetwork -ErrorAction Stop |
+                            Where-Object { $_.Address -and "$($_.Address)".StartsWith($subnetPrefix) } |
+                            Select-Object -First 1
+
+                        $resName = "Cluster IP Address"
+                        $newIP = Add-ClusterResource -Name $resName -Group "Cluster Group" -ResourceType "IP Address" -ErrorAction Stop
+                        $setParams = @{ Address = $_ClusterIP; SubnetMask = "255.255.255.0" }
+                        if ($clusterNetwork) { $setParams['Network'] = $clusterNetwork.Name }
+                        $newIP | Set-ClusterParameter -Multiple $setParams -ErrorAction Stop
+
+                        if ($nameRes) {
+                            Add-ClusterResourceDependency -Resource "Cluster Name" -Provider $resName -ErrorAction SilentlyContinue
+                        }
+
+                        Start-ClusterResource -Name $resName -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 5
+                        $ipRes = Get-ClusterResource -Name $resName -ErrorAction SilentlyContinue
+                        $actions.Add("IPRecreated:$($ipRes.State)")
+                        Write-Status "Cluster IP resource recreated: $($ipRes.State)"
+                    }
+                    catch {
+                        $actions.Add("IPRecreate failed: $_")
+                        Write-Status "Failed to recreate Cluster IP: $_"
+                    }
+                }
+
+                if ($nameRes -and $nameRes.State -ne 'Online') {
+                    Write-Status "Cluster Name resource is $($nameRes.State). Attempting to bring online..."
+                    # IP must be online before name can come online
+                    if ($ipRes -and $ipRes.State -ne 'Online') {
+                        foreach ($ip in $ipRes) {
+                            if ($ip.State -ne 'Online') {
+                                Write-Status "Starting Cluster IP resource '$($ip.Name)'..."
+                                $ip | Start-ClusterResource -ErrorAction SilentlyContinue
+                                Start-Sleep -Seconds 3
+                            }
+                        }
+                    }
+                    $nameRes | Start-ClusterResource -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 5
+                    # Re-check state
+                    $nameRes = Get-ClusterResource -Name $nameRes.Name -ErrorAction Stop
+                    $actions.Add("NameAfterStart:$($nameRes.State)")
+                    Write-Status "Cluster Name resource now: $($nameRes.State)"
+                }
+
+                if ($nameRes -and $nameRes.State -eq 'Online') {
+                    Write-Status "Forcing DNS re-registration via Update-ClusterNetworkNameResource."
+                    try {
+                        $null = $nameRes | Update-ClusterNetworkNameResource -ErrorAction Stop
+                        $actions.Add("DNS re-registered")
+                    }
+                    catch {
+                        $actions.Add("UpdateDNS failed: $_")
+                    }
+                    Start-Sleep -Seconds 5
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Not on a cluster node or local cluster not named '$name': $_"
+            $actions.Add("LocalCheck: $_")
+
+            # Not on a cluster node -- try connecting remotely via IP to fix Cluster Name resource.
+            # This is the typical path for ClusterNode2 which hasn't joined the cluster yet.
+            $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
+            if ($_ClusterIP) {
+                try {
+                    $remoteCluster = Get-Cluster -Name $_ClusterIP -ErrorAction Stop
+                    if ($remoteCluster.Name -eq $name) {
+                        $actions.Add("RemoteCluster via $($_ClusterIP) OK")
+
+                        $clusterResources = Get-ClusterResource -Cluster $_ClusterIP -ErrorAction Stop |
+                            Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+                        foreach ($res in $clusterResources) {
+                            $actions.Add("$($res.Name):$($res.State)")
+                            Write-Status "Cluster resource '$($res.Name)' state: $($res.State)"
+                        }
+
+                        $nameRes = $clusterResources | Where-Object { $_.ResourceType -eq 'Network Name' }
+                        $ipRes = $clusterResources | Where-Object { $_.ResourceType -eq 'IP Address' }
+
+                        if ($nameRes -and $nameRes.State -ne 'Online') {
+                            Write-Status "Cluster Name resource is $($nameRes.State). Attempting remote fix via IP..."
+                            if ($ipRes -and $ipRes.State -ne 'Online') {
+                                foreach ($ip in $ipRes) {
+                                    if ($ip.State -ne 'Online') {
+                                        Write-Status "Starting Cluster IP resource '$($ip.Name)'..."
+                                        $ip | Start-ClusterResource -ErrorAction SilentlyContinue
+                                        Start-Sleep -Seconds 3
+                                    }
+                                }
+                            }
+                            $nameRes | Start-ClusterResource -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds 5
+                            $nameRes = Get-ClusterResource -Name $nameRes.Name -Cluster $_ClusterIP -ErrorAction Stop
+                            $actions.Add("NameAfterStart:$($nameRes.State)")
+                            Write-Status "Cluster Name resource now: $($nameRes.State)"
+                        }
+
+                        if ($nameRes -and $nameRes.State -eq 'Online') {
+                            Write-Status "Forcing DNS re-registration via Update-ClusterNetworkNameResource."
+                            try {
+                                $null = $nameRes | Update-ClusterNetworkNameResource -ErrorAction Stop
+                                $actions.Add("DNS re-registered")
+                            }
+                            catch {
+                                $actions.Add("UpdateDNS failed: $_")
+                            }
+                            Start-Sleep -Seconds 5
+                        }
+                    }
+                }
+                catch {
+                    Write-Verbose "Remote cluster via IP $_ClusterIP also failed: $_"
+                    $actions.Add("RemoteCheck: $_")
+                }
+            }
+        }
+
+        # Discover domain and all DCs
+        $domain = (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
+        $allDCs = @()
+        try {
+            Import-Module ActiveDirectory -ErrorAction Stop -Verbose:$false
+            $allDCs = @(Get-ADDomainController -Filter * -ErrorAction Stop | Select-Object -ExpandProperty HostName)
+        }
+        catch {
+            $actions.Add("AD module failed: $_")
+            Write-Verbose "Could not enumerate DCs via AD module: $_"
+        }
+        if ($allDCs.Count -eq 0) {
+            try {
+                $ns = Resolve-DnsName -Name $domain -Type NS -ErrorAction Stop | Where-Object { $_.Type -eq 'NS' }
+                $allDCs = @($ns | ForEach-Object { $_.NameHost })
+            }
+            catch {
+                $actions.Add("NS lookup failed")
+                Write-Verbose "Could not enumerate DCs via NS records: $_"
+            }
+        }
+
+        if ($allDCs.Count -eq 0) {
+            $summary = "No DCs found"
+            $this.DnsSummary = $summary
+            return $summary
+        }
+
+        $clusterFqdn = if ($name -like "*.*") { $name } else { "$name.$domain" }
+        Write-Status "Checking DNS for '$clusterFqdn' across $($allDCs.Count) DC(s): $($allDCs -join ', ')"
+
+        # Check which DCs have the A record and which don't
+        $dcsWithRecord = @()
+        $dcsMissing = @()
+        $dcErrors = @{}
+        $knownIP = $null
+        foreach ($dc in $allDCs) {
+            try {
+                $rec = Resolve-DnsName -Name $clusterFqdn -Type A -Server $dc -DnsOnly -ErrorAction Stop |
+                    Where-Object { $_.Type -eq 'A' }
+                if ($rec) {
+                    $dcsWithRecord += $dc
+                    if (-not $knownIP) { $knownIP = $rec[0].IPAddress }
+                    Write-Status "DC $dc : A record $($rec[0].IPAddress)"
+                }
+                else {
+                    $dcsMissing += $dc
+                    $dcErrors[$dc] = "empty response"
+                    Write-Status "DC $dc : no A record for $clusterFqdn"
+                }
+            }
+            catch {
+                $dcsMissing += $dc
+                $dcErrors[$dc] = $_.Exception.Message
+                Write-Status "DC $dc : FAILED - $($_.Exception.Message)"
+            }
+        }
+
+        if ($dcsWithRecord.Count -eq $allDCs.Count) {
+            $summary = "DNS OK on all $($allDCs.Count) DC(s) -> $knownIP"
+        }
+        elseif ($dcsWithRecord.Count -gt 0) {
+            $haveShort = ($dcsWithRecord | ForEach-Object { ($_ -split '\.')[0] }) -join ','
+            $missShort = ($dcsMissing | ForEach-Object { ($_ -split '\.')[0] }) -join ','
+            $summary = "DNS: $knownIP on [$haveShort], missing on [$missShort]"
+
+            # Force replication from a DC that has it
+            $sourceDC = $dcsWithRecord[0]
+            Write-Status "Forcing AD replication from $sourceDC to $($dcsMissing.Count) DC(s)"
+            try {
+                $domainDN = ($domain.Split('.') | ForEach-Object { "DC=$_" }) -join ','
+                foreach ($targetDC in $dcsMissing) {
+                    foreach ($nc in @($domainDN, "DC=DomainDnsZones,$domainDN")) {
+                        $repOut = repadmin /replicate $targetDC $sourceDC $nc /force 2>&1
+                        Write-Verbose "repadmin $targetDC <- $sourceDC ($nc): $repOut"
+                    }
+                }
+                $actions.Add("Replicated to $missShort")
+            }
+            catch {
+                $actions.Add("Replication failed: $_")
+                Write-Verbose "Replication attempt failed: $_"
+            }
+        }
+        else {
+            $errMsgs = ($dcErrors.GetEnumerator() | ForEach-Object { "$(($_.Key -split '\.')[0]):$($_.Value)" }) -join '; '
+            $summary = "DNS missing on ALL $($allDCs.Count) DC(s) [$errMsgs]"
+        }
+
+        if ($actions.Count -gt 0) { $summary += " | $($actions -join '; ')" }
+
+        # Flush local DNS cache after any repair
+        Clear-DnsClientCache
+        $null = ipconfig /registerdns 2>&1
+
+        Write-Status "DNS repair done: $summary"
+        $this.DnsSummary = $summary
+        return $summary
+    }
+
+    hidden [string] StripCidr([string] $ip) {
+        if ($ip -match '^([^/]+)/') { return $Matches[1] }
+        return $ip
+    }
+
+    [void] Set() {
+        # Pre-import modules silently to avoid verbose "Exporting function" spam
+        Import-Module FailoverClusters -Verbose:$false -ErrorAction SilentlyContinue
+        Import-Module DnsClient -Verbose:$false -ErrorAction SilentlyContinue
+
+        $_ClusterName = $this.ClusterName
+        $_RetryInterval = $this.RetryIntervalSec
+        $_RetryCount = $this.RetryCount
+        $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
+
+        for ($i = 1; $i -le $_RetryCount; $i++) {
+            # On first attempt and every 4th attempt, run full diagnostics
+            if ($i -eq 1 -or ($i % 4) -eq 0) {
+                try { $this.RepairClusterDns($_ClusterName) } catch { Write-Status "RepairClusterDns error: $_" }
+                # Network connectivity test against cluster IP and DNS-resolved IP
+                $ipsToTest = [System.Collections.Generic.List[string]]::new()
+                if ($_ClusterIP) { $ipsToTest.Add($_ClusterIP) }
+                $domain = (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
+                $fqdn = if ($_ClusterName -like "*.*") { $_ClusterName } else { "$_ClusterName.$domain" }
+                try {
+                    $r = Resolve-DnsName -Name $fqdn -Type A -ErrorAction Stop | Where-Object { $_.Type -eq 'A' }
+                    if ($r) {
+                        $dnsIP = $r[0].IPAddress
+                        if ($dnsIP -and $dnsIP -ne $_ClusterIP -and -not $ipsToTest.Contains($dnsIP)) {
+                            $ipsToTest.Add($dnsIP)
+                        }
+                    }
+                }
+                catch {}
+                foreach ($testIP in $ipsToTest) {
+                    try { $this.TestNetworkConnectivity($testIP) } catch { Write-Status "Network test error for ${testIP}: $_" }
+                }
+                # Firewall diagnostics on first attempt only
+                if ($i -eq 1) {
+                    try { $this.TestFirewallRules() } catch { Write-Status "Firewall check error: $_" }
+                }
+            }
+            else {
+                Clear-DnsClientCache
+            }
+
+            if ($this.TryClusterAccess($_ClusterName)) {
+                Write-Status "Cluster '$_ClusterName' is now accessible by name."
+                return
+            }
+
+            $detail = $this.LastError
+            if ($this.DnsSummary) { $detail = "$detail | $($this.DnsSummary)" }
+            if ($this.NetSummary) { $detail = "$detail | Net:$($this.NetSummary)" }
+            if ($this.FwSummary -and $i -le 2) { $detail = "$detail | FW:$($this.FwSummary)" }
+            Write-Status "Cluster '$_ClusterName' attempt $i/$_RetryCount FAILED: $detail"
+            Start-Sleep -Seconds $_RetryInterval
+        }
+        throw "Cluster '$_ClusterName' did not become accessible after $_RetryCount attempts ($(($_RetryCount * $_RetryInterval) / 60) min). Last: $($this.LastError) | DNS: $($this.DnsSummary) | Net: $($this.NetSummary) | FW: $($this.FwSummary)"
+    }
+
+    [bool] Test() {
+        # Pre-import modules silently to avoid verbose "Exporting function" spam
+        Import-Module FailoverClusters -Verbose:$false -ErrorAction SilentlyContinue
+        Import-Module DnsClient -Verbose:$false -ErrorAction SilentlyContinue
+
+        $_ClusterName = $this.ClusterName
+        if ($this.TryClusterAccess($_ClusterName)) {
+            Write-Verbose "Cluster '$_ClusterName' is accessible by name."
+            return $true
+        }
+        Write-Verbose "Cluster '$_ClusterName' is not accessible by name ($($this.LastError)) -- will attempt DNS repair."
+        return $false
+    }
+
+    [WaitForClusterAccess] Get() {
+        return $this
+    }
+}
+
+# JoinClusterByIP works around a Windows Failover Cluster API limitation:
+# OpenCluster("ClusterName") fails on non-member nodes where ClusSvc is not
+# running, even when DNS, SPNs, and the Cluster Name resource are all healthy.
+# The xCluster DSC resource uses name-based cluster access in Test-TargetResource,
+# which triggers a non-terminating error that causes the LCM to abort. This
+# resource uses IP-based access (Get-Cluster -Name $IP / Add-ClusterNode -Cluster $IP)
+# which bypasses the broken name resolution layer entirely.
+
+# Impersonation helpers (matching FailoverClusterDsc pattern).
+# LogonUser with LOGON32_LOGON_NEW_CREDENTIALS (type 9) creates a token that
+# uses the supplied credentials for network access while keeping the local
+# identity -- this solves the Kerberos double-hop without needing WinRM loopback.
+function Get-ImpersonateLib {
+    if ($script:ImpersonateLib) {
+        return $script:ImpersonateLib
+    }
+
+    $sig = @'
+[DllImport("advapi32.dll", SetLastError = true)]
+public static extern bool LogonUser(string lpszUsername, string lpszDomain, string lpszPassword, int dwLogonType, int dwLogonProvider, ref IntPtr phToken);
+
+[DllImport("kernel32.dll")]
+public static extern Boolean CloseHandle(IntPtr hObject);
+'@
+
+    $script:ImpersonateLib = Add-Type -PassThru -Namespace 'Lib.Impersonation' -Name ImpersonationLib -MemberDefinition $sig
+    return $script:ImpersonateLib
+}
+
+function Set-ImpersonateAs {
+    param (
+        [Parameter(Mandatory)]
+        [PSCredential] $Credential
+    )
+
+    [IntPtr] $userToken = [Security.Principal.WindowsIdentity]::GetCurrent().Token
+    $ImpersonateLib = Get-ImpersonateLib
+
+    $bLogin = $ImpersonateLib::LogonUser(
+        $Credential.GetNetworkCredential().UserName,
+        $Credential.GetNetworkCredential().Domain,
+        $Credential.GetNetworkCredential().Password,
+        9,  # LOGON32_LOGON_NEW_CREDENTIALS
+        0,  # LOGON32_PROVIDER_DEFAULT
+        [ref]$userToken
+    )
+
+    if ($bLogin) {
+        $Identity = New-Object Security.Principal.WindowsIdentity $userToken
+        $context = $Identity.Impersonate()
+    }
+    else {
+        throw "Unable to impersonate user '$($Credential.GetNetworkCredential().UserName)'"
+    }
+
+    return $context, $userToken
+}
+
+function Close-UserToken {
+    param (
+        [Parameter(Mandatory)]
+        [IntPtr] $Token
+    )
+
+    $ImpersonateLib = Get-ImpersonateLib
+    $ImpersonateLib::CloseHandle($Token) | Out-Null
+}
+
+[DscResource()]
+class JoinClusterByIP {
+    [DscProperty(Key)]
+    [string] $ClusterName
+
+    [DscProperty(Mandatory)]
+    [string] $ClusterIPAddress
+
+    [DscProperty()]
+    [string] $Role = 'Join'  # 'Create' for Node1, 'Join' for Node2
+
+    [DscProperty()]
+    [PSCredential] $DomainAdministratorCredential
+
+    hidden [string] StripCidr([string] $ip) {
+        if ($ip -match '^([^/]+)/') { return $Matches[1] }
+        return $ip
+    }
+
+    [void] Set() {
+        $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
+        $_NodeName = $env:COMPUTERNAME
+        $_ClusterName = $this.ClusterName
+        $_Credential = $this.DomainAdministratorCredential
+        $_Role = $this.Role
+
+        $impersonationContext = $null
+        $newToken = [IntPtr]::Zero
+
+        try {
+            if ($_Credential) {
+                Write-Status "Impersonating '$($_Credential.GetNetworkCredential().UserName)' for cluster access"
+                ($impersonationContext, $newToken) = Set-ImpersonateAs -Credential $_Credential
+            }
+
+            if ($_Role -eq 'Create') {
+                # Preflight: the static cluster IP must sit on a local NIC that owns
+                # that subnet. WSFC only assigns the ClusterAndClient role to a
+                # gateway-bearing network, so a cluster IP that matches no local NIC
+                # (e.g. allocated from the wrong subnet on a multi-network lab) fails
+                # New-Cluster with the opaque "no appropriate ClusterAndClient network
+                # was found to host it" and then retries for 30+ min before the
+                # orchestrator force-restarts the VM. Fail FAST here with an actionable
+                # message naming the bad IP, the node's actual NICs, and the expected
+                # subnet -- but only when the cluster doesn't already exist (rerun).
+                $_localCluster = Get-Cluster -ErrorAction SilentlyContinue -Verbose:$false
+                if (-not ($_localCluster -and $_localCluster.Name -eq $_ClusterName)) {
+                    $_clusterPrefix = ($_ClusterIP.Split('.')[0..2] -join '.') + '.'
+                    $_localV4 = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                        Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' })
+                    $_hostingNic = $_localV4 | Where-Object { $_.IPAddress -like "$_clusterPrefix*" } | Select-Object -First 1
+                    if (-not $_hostingNic) {
+                        $_have = (($_localV4 | ForEach-Object { $_.IPAddress }) | Sort-Object -Unique) -join ', '
+                        throw "JoinClusterByIP preflight FAILED: cluster IP '$_ClusterIP' is not on any local subnet of '$_NodeName' (node IPv4: [$_have]). The cluster/AG IP must live on this node's own domain subnet ($_clusterPrefix*). This is a config/IP-allocation error -- New-Cluster would fail with 'no appropriate ClusterAndClient network was found to host it'. Remove + re-add this SQLAO node (or correct its ClusterIPAddress/AGIPAddress) so the IP is allocated from the node's network."
+                    }
+                    $_gw = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $_hostingNic.InterfaceIndex -ErrorAction SilentlyContinue
+                    if (-not $_gw) {
+                        Write-Status "WARNING: NIC hosting $_clusterPrefix* (ifIndex $($_hostingNic.InterfaceIndex), IP $($_hostingNic.IPAddress)) has no default gateway; WSFC may classify it Cluster-only and reject the cluster IP. Proceeding -- New-Cluster will report the authoritative result."
+                    }
+                }
+                Write-Status "Creating cluster '$_ClusterName' on '$_NodeName' with IP $_ClusterIP"
+                try {
+                    New-Cluster -Name $_ClusterName -Node $_NodeName -StaticAddress $_ClusterIP -NoStorage -Force -ErrorAction Stop -WarningAction SilentlyContinue -Verbose:$false
+                }
+                catch {
+                    # If the node is already in the target cluster (re-run), treat as success
+                    $localCluster = Get-Cluster -ErrorAction SilentlyContinue -Verbose:$false
+                    if ($localCluster -and $localCluster.Name -eq $_ClusterName) {
+                        Write-Status "Node '$_NodeName' is already in cluster '$_ClusterName'"
+                    }
+                    else {
+                        throw
+                    }
+                }
+                Write-Status "Successfully created cluster '$_ClusterName'"
+            }
+            else {
+                # Check for existing node in Down state -- must remove before re-adding
+                try {
+                    $existingNode = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue -Verbose:$false
+                    if ($existingNode -and $existingNode.State -eq 'Down') {
+                        Write-Status "Node '$_NodeName' is in Down state in cluster '$_ClusterName' -- removing before re-add"
+                        Remove-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -Force -ErrorAction Stop -Verbose:$false
+                        Write-Status "Removed downed node '$_NodeName' from cluster '$_ClusterName'"
+                    }
+                }
+                catch {
+                    Write-Status "Error checking/removing downed node: $_"
+                }
+
+                Write-Status "Joining node '$_NodeName' to cluster '$_ClusterName' via IP $_ClusterIP"
+                Add-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -NoStorage -ErrorAction Stop -Verbose:$false
+                Write-Status "Successfully joined '$_NodeName' to cluster '$_ClusterName'"
+            }
+        }
+        catch {
+            $action = if ($_Role -eq 'Create') { 'New-Cluster' } else { 'Add-ClusterNode' }
+            Write-Status "$action failed: $_"
+            throw
+        }
+        finally {
+            if ($impersonationContext) {
+                $impersonationContext.Undo()
+                $impersonationContext.Dispose()
+                Close-UserToken -Token $newToken
+            }
+        }
+    }
+
+    [bool] Test() {
+        $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
+        $_NodeName = $env:COMPUTERNAME
+        $_ClusterName = $this.ClusterName
+        $_Credential = $this.DomainAdministratorCredential
+
+        $impersonationContext = $null
+        $newToken = [IntPtr]::Zero
+
+        try {
+            if ($_Credential) {
+                ($impersonationContext, $newToken) = Set-ImpersonateAs -Credential $_Credential
+            }
+
+            $node = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue -Verbose:$false
+            if ($node) {
+                if ($node.State -eq 'Up' -or $node.State -eq 'Paused') {
+                    Write-Verbose "Node '$_NodeName' is a member of cluster '$_ClusterName' (State: $($node.State))"
+                    return $true
+                }
+                # Down state -- return $false so Set can remove and re-add
+                Write-Verbose "Node '$_NodeName' is a member of cluster '$_ClusterName' but state is '$($node.State)' -- will remove and re-add"
+                return $false
+            }
+        }
+        catch {
+            Write-Verbose "Could not query cluster membership via IP $_ClusterIP`: $_"
+        }
+        finally {
+            if ($impersonationContext) {
+                $impersonationContext.Undo()
+                $impersonationContext.Dispose()
+                Close-UserToken -Token $newToken
+            }
+        }
+
+        # Fallback: if IP-based query failed or timed out, check local cluster membership
+        try {
+            $localCluster = Get-Cluster -ErrorAction SilentlyContinue -Verbose:$false
+            if ($localCluster -and $localCluster.Name -eq $_ClusterName) {
+                $localNode = Get-ClusterNode -Name $_NodeName -ErrorAction SilentlyContinue -Verbose:$false
+                if ($localNode -and ($localNode.State -eq 'Up' -or $localNode.State -eq 'Paused')) {
+                    Write-Verbose "Node '$_NodeName' confirmed in cluster '$_ClusterName' via local query (IP-based query failed)"
+                    return $true
+                }
+            }
+        }
+        catch { }
+
+        Write-Verbose "Node '$_NodeName' is not a member of cluster '$_ClusterName'"
+        return $false
+    }
+
+    [JoinClusterByIP] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
 class ClusterRemoveUnwantedIPs {
     [DscProperty(Key)]
     [string] $ClusterName
 
+    [DscProperty()]
+    [string] $ClusterIPAddress
+
+    hidden [string] StripCidr([string] $ip) {
+        if ($ip -match '^([^/]+)/') { return $Matches[1] }
+        return $ip
+    }
+
     [void] Set() {
         try {
             $_ClusterName = $this.ClusterName
+            $_KeepIP = if ($this.ClusterIPAddress) { $this.StripCidr($this.ClusterIPAddress) } else { $null }
             $valid = $false
             [int]$failCount = 0
             Write-Status "Getting Cluster $_ClusterName"
@@ -3637,15 +5303,93 @@ class ClusterRemoveUnwantedIPs {
                     start-sleep 60
                 }
             }
-            $ResourcesToRemove = ($Cluster | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            # Only clean IPs from the "Cluster Group" (the cluster's own identity).
+            # Do NOT touch IP resources in AG listener groups -- those belong to
+            # the availability group and use domain-subnet IPs by design.
+            $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+            $ipParams = $clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value
+            if ($_KeepIP) {
+                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -ne $_KeepIP }).ClusterObject
+            }
+            else {
+                # Legacy fallback: keep heartbeat-subnet IPs (both old and new subnets)
+                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -notlike "10.250.250.*" -and $_.Value -notlike "10.250.251.*" }).ClusterObject
+            }
             if ($ResourcesToRemove) {
                 foreach ($Resource in $ResourcesToRemove) {
                     Write-Status "Cluster Removing $($resource.Name)"
                     Remove-ClusterResource -Name $resource.Name -Force
                 }
+                # Let the cluster settle after IP removal before re-registering DNS
+                Start-Sleep -Seconds 10
+            }
+
+            # Verify the intended IP resource still exists.  A previous version
+            # of this code removed ALL domain-subnet IPs, including the one the
+            # cluster needs.  Recreate it if missing.
+            if ($_KeepIP) {
+                $currentClusterRes = Get-ClusterResource -Cluster $_ClusterName -ErrorAction SilentlyContinue |
+                    Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'IP Address' }
+                $remainingIPs = $currentClusterRes |
+                    Get-ClusterParameter -Name 'Address' -ErrorAction SilentlyContinue
+                $hasIntendedIP = $remainingIPs | Where-Object { $_.Value -eq $_KeepIP }
+                if (-not $hasIntendedIP) {
+                    Write-Status "Cluster IP resource for $_KeepIP is missing. Recreating..."
+                    try {
+                        # Find the cluster network for this IP's subnet
+                        $ipBytes = $_KeepIP.Split('.')
+                        $subnetPrefix = "$($ipBytes[0]).$($ipBytes[1]).$($ipBytes[2])."
+                        $clusterNetwork = Get-ClusterNetwork -ErrorAction Stop |
+                            Where-Object { $_.Address -and "$($_.Address)".StartsWith($subnetPrefix) } |
+                            Select-Object -First 1
+
+                        $resName = "Cluster IP Address"
+                        # Avoid name collision with existing resources
+                        $existing = Get-ClusterResource -Name $resName -ErrorAction SilentlyContinue
+                        if ($existing) { $resName = "Cluster IP Address ($_KeepIP)" }
+
+                        $newIP = Add-ClusterResource -Name $resName -Group "Cluster Group" -ResourceType "IP Address" -ErrorAction Stop
+                        $setParams = @{ Address = $_KeepIP; SubnetMask = "255.255.255.0" }
+                        if ($clusterNetwork) {
+                            $setParams['Network'] = $clusterNetwork.Name
+                        }
+                        $newIP | Set-ClusterParameter -Multiple $setParams -ErrorAction Stop
+
+                        # Cluster Name must depend on this IP
+                        $nameRes = Get-ClusterResource -Name "Cluster Name" -ErrorAction SilentlyContinue
+                        if ($nameRes) {
+                            Add-ClusterResourceDependency -Resource "Cluster Name" -Provider $resName -ErrorAction SilentlyContinue
+                        }
+
+                        Start-ClusterResource -Name $resName -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 5
+                        # Try to bring the Cluster Name online now that it has an IP
+                        if ($nameRes -and $nameRes.State -ne 'Online') {
+                            Start-ClusterResource -Name "Cluster Name" -ErrorAction SilentlyContinue
+                        }
+                        Write-Status "Cluster IP resource $_KeepIP recreated"
+                    }
+                    catch {
+                        Write-Status "Failed to recreate Cluster IP resource: $_"
+                    }
+                }
             }
             Write-Status "Cluster Registering new DNS records"
-            Get-ClusterResource -Name "Cluster Name" | Update-ClusterNetworkNameResource
+            $dnsRegistered = $false
+            for ($dnsAttempt = 1; $dnsAttempt -le 3; $dnsAttempt++) {
+                try {
+                    Get-ClusterResource -Name "Cluster Name" | Update-ClusterNetworkNameResource -ErrorAction Stop
+                    $dnsRegistered = $true
+                    break
+                }
+                catch {
+                    Write-Verbose "DNS registration attempt $dnsAttempt/3 failed: $_"
+                    if ($dnsAttempt -lt 3) { Start-Sleep -Seconds 15 }
+                }
+            }
+            if (-not $dnsRegistered) {
+                Write-Verbose "DNS registration failed after 3 attempts. Cluster may re-register on next consistency check."
+            }
             Write-Status "Finished Removing Unwanted Cluster IPs"
         }
         catch {
@@ -3658,6 +5402,7 @@ class ClusterRemoveUnwantedIPs {
 
         try {
             $_ClusterName = $this.ClusterName
+            $_KeepIP = if ($this.ClusterIPAddress) { $this.StripCidr($this.ClusterIPAddress) } else { $null }
             $valid = $false
             [int]$failCount = 0
             $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
@@ -3682,7 +5427,14 @@ class ClusterRemoveUnwantedIPs {
                     start-sleep 60
                 }
             }
-            $ResourcesToRemove = ($Cluster | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+            $ipParams = $clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value
+            if ($_KeepIP) {
+                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -ne $_KeepIP }).ClusterObject
+            }
+            else {
+                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -notlike "10.250.250.*" -and $_.Value -notlike "10.250.251.*" }).ClusterObject
+            }
 
             if ($ResourcesToRemove) {
                 return $false
@@ -3730,11 +5482,24 @@ class ModuleAdd {
         # causing Install-Module to hang or time out for up to 30 minutes.
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+        # Pre-import package modules quietly to prevent DSC verbose log
+        # flooding with hundreds of "Importing cmdlet ..." lines.
+        $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+        try { Import-Module PackageManagement, PowerShellGet -ErrorAction SilentlyContinue }
+        finally { $global:VerbosePreference = $savedVP }
+
         $Nuget = $null
         try {
             $NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
         }
         catch { }
+
+        # Suppress verbose for all Install-Module / Install-PackageProvider
+        # calls. These internally import PackageManagement and PowerShellGet
+        # which floods the DSC log with hundreds of "Exporting function ..."
+        # and "Importing cmdlet ..." lines.
+        $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+        try {
         
         IF ($null -eq $NuGet) {
             #Install-PackageProvider Nuget -force -Confirm:$false
@@ -3749,7 +5514,9 @@ class ModuleAdd {
                 Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
             }
             catch {
+                $global:VerbosePreference = $savedVP
                 Write-Verbose "$_"
+                $global:VerbosePreference = 'SilentlyContinue'
                 write-Status "Retry. Installing powershell module PowerShellGet for scope $_userScope"
                 Clear-DnsClientCache -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 20
@@ -3768,11 +5535,13 @@ class ModuleAdd {
         if ($null -eq $module) {
             if ($this.Clobber -eq 'Yes') {
                 try {
-                    write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope."
+                    write-Status "Installing powershell module $_moduleName for scope $_userScope."
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -ErrorAction Stop
                 }
                 catch {
+                    $global:VerbosePreference = $savedVP
                     Write-Verbose "$_"
+                    $global:VerbosePreference = 'SilentlyContinue'
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope.."
                     Clear-DnsClientCache -ErrorAction SilentlyContinue
                     Start-Sleep -Seconds 20
@@ -3781,11 +5550,13 @@ class ModuleAdd {
             }
             else {
                 try {
-                    write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope..."
+                    write-Status "Installing powershell module $_moduleName for scope $_userScope..."
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
                 }
                 catch {
+                    $global:VerbosePreference = $savedVP
                     Write-Verbose "$_"
+                    $global:VerbosePreference = 'SilentlyContinue'
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope...."
                     Clear-DnsClientCache -ErrorAction SilentlyContinue
                     Start-Sleep -Seconds 20
@@ -3793,13 +5564,18 @@ class ModuleAdd {
                 }
             }
         }
+
+        } finally { $global:VerbosePreference = $savedVP }
     }
 
     [bool] Test() {
 
         $_ModuleName = $this.CheckModuleName
         write-verbose ('Searching for module:' + $_ModuleName)
-        $GetModuleStatus = Get-InstalledModule -Name $_ModuleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        $GetModuleStatus = $null
+        $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+        try { $GetModuleStatus = Get-InstalledModule -Name $_ModuleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue }
+        finally { $global:VerbosePreference = $savedVP }
 
         if ($GetModuleStatus) {
             write-verbose ('Found module:' + $_ModuleName + 'ModuleStatus:' + $GetModuleStatus.Version)
@@ -3834,7 +5610,9 @@ class ConfigureWSUS {
     hidden [void] CleanupWSUS() {
         Write-Status "Cleaning up WSUS IIS configuration..."
         
-        Import-Module WebAdministration -ErrorAction SilentlyContinue
+        $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+        try { Import-Module WebAdministration -ErrorAction SilentlyContinue }
+        finally { $global:VerbosePreference = $savedVP }
         
         # Stop WSUS Service
         $ServiceName = 'WSUSService'
@@ -4017,6 +5795,11 @@ class ConfigureWSUS {
                     Write-Status "Re-running WSUS postinstall after fix..."
                     $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
                 }
+
+                # WID only: grant the lab admin sysadmin so SSMS can connect to
+                # WID without elevation (WID trusts only BUILTIN\Administrators,
+                # which UAC token filtering strips from a normal logon).
+                $this.GrantWidSysadmin()
             }
             Write-Verbose "WSUS postinstall output: $postinstallOutput"
         }
@@ -4026,7 +5809,7 @@ class ConfigureWSUS {
         }
         
         try {
-            $wsus = get-WsusServer
+            $null = get-WsusServer
         }
         catch {
             Write-Status "Failed to Configure WSUS. Could not locate WSUS Server after postinstall"
@@ -4074,6 +5857,118 @@ class ConfigureWSUS {
             & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' configuressl $_HTTPSurl
 
         }
+
+        # Harden the WsusPool IIS app pool so it survives the first full
+        # Microsoft Update sync. Runs regardless of HTTP/HTTPS.
+        $this.HardenWsusPool()
+    }
+
+    # WID grants sysadmin only to BUILTIN\Administrators, which UAC token
+    # filtering strips from a normal (non-elevated) logon -- so connecting to
+    # WID in SSMS otherwise needs "Run as administrator". Add the lab domain
+    # admin as an explicit sysadmin login here (this runs as SYSTEM, which is
+    # sysadmin on WID) so a normal SSMS session connects directly. WID's named
+    # pipe is local-only, so this only matters on the WID host itself.
+    # Idempotent -- safe to re-run.
+    [void] GrantWidSysadmin() {
+        try {
+            $deployPath = 'C:\staging\DSC\deployConfig.json'
+            if (-not (Test-Path $deployPath)) {
+                Write-Verbose "GrantWidSysadmin: $deployPath not found, skipping"
+                return
+            }
+            $dc = Get-Content $deployPath -Raw | ConvertFrom-Json
+            $netbios = $dc.vmOptions.domainNetBiosName
+            $admin = $dc.vmOptions.adminName
+            if (-not $netbios -or -not $admin) {
+                Write-Verbose "GrantWidSysadmin: admin/domain missing in deployConfig, skipping"
+                return
+            }
+            $login = "$netbios\$admin"
+            $tsql = "IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'$login') CREATE LOGIN [$login] FROM WINDOWS; IF IS_SRVROLEMEMBER('sysadmin', N'$login') <> 1 ALTER SERVER ROLE sysadmin ADD MEMBER [$login];"
+
+            $conn = New-Object System.Data.SqlClient.SqlConnection
+            $conn.ConnectionString = "Data Source=np:\\.\pipe\MICROSOFT##WID\tsql\query;Initial Catalog=master;Integrated Security=True;Connect Timeout=30"
+            $opened = $false
+            for ($i = 1; $i -le 5 -and -not $opened; $i++) {
+                try { $conn.Open(); $opened = $true }
+                catch { Start-Sleep -Seconds 5 }
+            }
+            if (-not $opened) {
+                Write-Status "GrantWidSysadmin: could not connect to WID pipe after retries (non-fatal)"
+                return
+            }
+            try {
+                Write-Status "Granting WID sysadmin to $login"
+                $cmd = $conn.CreateCommand()
+                $cmd.CommandText = $tsql
+                [void]$cmd.ExecuteNonQuery()
+                Write-Status "WID sysadmin grant for $login completed"
+            }
+            finally {
+                $conn.Close()
+            }
+        }
+        catch {
+            Write-Status "GrantWidSysadmin failed (non-fatal): $_"
+            Write-Verbose "$_"
+        }
+    }
+
+    # The first full Microsoft Update sync pulls the entire modern category
+    # taxonomy in a single ServerSync call. With the default WsusPool recycle
+    # cap (~1.8 GB private memory) and queueLength (1000), IIS recycles the pool
+    # mid-sync; the in-flight ServerSync/GetSubscriptionState dies with HTTP 503,
+    # the sync never reaches state 6702, and the catalog stays empty
+    # (GetStatus().UpdateCount = 0). Sync 1 then re-runs forever. Uncapping
+    # memory + raising the queue + disabling periodic/request recycles lets the
+    # pool survive the first big sync. Idempotent — safe to re-run.
+    [void] HardenWsusPool() {
+        Write-Status "Hardening WsusPool app pool to survive first full WSUS sync"
+        $savedVP = $global:VerbosePreference
+        $global:VerbosePreference = 'SilentlyContinue'
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+        }
+        catch {
+            Write-Status "WsusPool hardening skipped — WebAdministration unavailable: $_"
+            $global:VerbosePreference = $savedVP
+            return
+        }
+        $global:VerbosePreference = $savedVP
+
+        $poolPath = 'IIS:\AppPools\WsusPool'
+        if (-not (Test-Path $poolPath)) {
+            Write-Status "WsusPool not found at $poolPath — skipping hardening"
+            return
+        }
+
+        $settings = @(
+            @{ Name = 'recycling.periodicRestart.privateMemory'; Value = 0 }
+            @{ Name = 'recycling.periodicRestart.requests'; Value = 0 }
+            @{ Name = 'recycling.periodicRestart.time'; Value = [TimeSpan]::Zero }
+            @{ Name = 'queueLength'; Value = 25000 }
+            @{ Name = 'processModel.idleTimeout'; Value = [TimeSpan]::Zero }
+            @{ Name = 'startMode'; Value = 'AlwaysRunning' }
+            @{ Name = 'failure.rapidFailProtection'; Value = $false }
+        )
+        foreach ($s in $settings) {
+            try {
+                Set-ItemProperty -Path $poolPath -Name $s.Name -Value $s.Value -ErrorAction Stop
+                Write-Verbose "WsusPool $($s.Name) = $($s.Value)"
+            }
+            catch {
+                Write-Status "WsusPool: failed to set $($s.Name): $_"
+            }
+        }
+
+        try {
+            Restart-WebAppPool -Name 'WsusPool' -ErrorAction Stop
+            Write-Status "WsusPool hardened and restarted (privateMemory uncapped, queueLength=25000)"
+        }
+        catch {
+            Write-Status "WsusPool: restart after hardening failed: $_"
+        }
     }
 
     [bool] Test() {
@@ -4104,42 +5999,127 @@ class WSUSSync {
     [string] $ServerName
 
     [void] Set() {
-       
-        Write-Status "Starting initial WSUSSync for $($this.ServerName) using Product: SQL Server 2005 Category: Tools"
+        # Pre-Phase-7 cab import has been moved out of this DSC resource
+        # into InstallRoles.ps1 (Start-WsusBaselineImportBackground /
+        # Wait-WsusBaselineImport in ScriptFunctions.ps1). DSC's "background
+        # process + reboot between phases" model could not reliably tell a
+        # completed `wsusutil import` from one killed mid-flight by a
+        # post-phase reboot, leaving SUSDB with a partial taxonomy that the
+        # next CM sync would trip over ("invalid update identity in XML").
+        # InstallRoles owns launch + verify (exit code, log tail, post-count)
+        # in a single script context so partial imports get retried instead
+        # of silently shipped. See ScriptFunctions.ps1.
+        #
+        # If the cab is present we skip the MU fire-and-forget sync below --
+        # InstallRoles will populate the taxonomy via cab import. If the cab
+        # is absent (cab disabled, copy failed, no cab in the build) we
+        # still kick off the MU sync here so categories are downloading in
+        # the background through Phases 7-10 instead of stalling perfloading
+        # for hours waiting on the first MU categories sync.
+        $cabPath = 'C:\staging\wsus\WsusCategoriesBaseline.cab'
+        if (Test-Path $cabPath) {
+            Write-Status "WSUS categories baseline cab present at $cabPath. Skipping Phase 7 MU sync; InstallRoles will run wsusutil import."
+            return
+        }
+
+        # No cab -- fall back to the early fire-and-forget MU sync to
+        # pre-download the WSUS category catalog. This runs in Phase 7
+        # (after any PBIRS install on the same VM has completed and
+        # rebooted), ~3-4 hours before perfloading needs WSUS ready. By
+        # syncing now (even with minimal products), the full category
+        # taxonomy downloads in background. When perfloading runs its
+        # product sync later, categories are already present and only
+        # update metadata is needed.
+        Write-Status "Starting early WSUS catalog sync for $($this.ServerName) (fire-and-forget, no cab available)"
         try {
-            $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530 #-UseSsl
- 
-            Get-WsusProduct | Set-WsusProduct -disable
+            $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530
+            if (-not $WSUS) {
+                Write-Status "WSUS server not found at $($this.ServerName):8530. Skipping early sync."
+                return
+            }
+
+            # Verify WsusPool is hardened (ConfigureWSUS should have done this, but verify)
+            $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+            try { Import-Module WebAdministration -ErrorAction SilentlyContinue } finally { $global:VerbosePreference = $savedVP }
+            $pool = Get-ItemProperty -Path 'IIS:\AppPools\WsusPool' -Name recycling.periodicRestart.privateMemory -ErrorAction SilentlyContinue
+            if ($pool -and $pool.Value -gt 0) {
+                Write-Status "WsusPool privateMemory cap is $($pool.Value) - hardening before sync"
+                Set-ItemProperty -Path 'IIS:\AppPools\WsusPool' -Name recycling.periodicRestart.privateMemory -Value 0 -ErrorAction SilentlyContinue
+                Restart-WebAppPool -Name WsusPool -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 5
+            }
+
+            # Select minimal products/classifications to get the category catalog
+            # without downloading massive update metadata. SQL Server 2005 + Tools
+            # is small but forces the full category tree download.
+            Write-Status "Configuring minimal sync scope (SQL Server 2005 + Tools)"
+            Get-WsusProduct | Set-WsusProduct -Disable
             Get-WsusProduct | Where-Object { $_.Product.Title -eq "SQL Server 2005" } | Set-WsusProduct
-         
-            Get-WsusClassification | Set-WsusClassification -disable
+            Get-WsusClassification | Set-WsusClassification -Disable
             Get-WsusClassification | Where-Object { $_.Classification.Title -eq "Tools" } | Set-WsusClassification
-         
+
+            # Start sync - fire and forget, don't wait
             $sub = $WSUS.GetSubscription()
             $sub.StartSynchronization()
+            Write-Status "WSUS sync started. Will run in background during Phases 7-8 (~4 hours)."
+
+            # Block until the sync has actually transitioned to Running before
+            # returning. StartSynchronization() is async -- the WSUS service
+            # picks up the request on a worker thread and flips the status
+            # NotStarted -> Running within a few seconds. The orchestrator's
+            # post-phase reboot check (Phase < 8) runs Test_PendingReboot,
+            # which only sets DeferredFor when GetSynchronizationStatus()
+            # returns 'Running'. If we return from Set() before the transition
+            # is observable, the post-phase check can race in, see NotStarted,
+            # find any pending reboot from PBIRS install aftermath, and
+            # reboot the VM -- killing the sync we just kicked off.
+            $deadline = (Get-Date).AddSeconds(30)
+            $observedRunning = $false
+            $lastStatus = $null
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $lastStatus = $sub.GetSynchronizationStatus().ToString()
+                    if ($lastStatus -eq 'Running') {
+                        $observedRunning = $true
+                        break
+                    }
+                } catch {}
+                Start-Sleep -Seconds 1
+            }
+            if ($observedRunning) {
+                Write-Status "WSUS sync confirmed Running. Safe to end Phase 7 DSC pass."
+            } else {
+                Write-Status "WSUS sync did not transition to Running within 30s (last status: $lastStatus). Post-phase reboot check may not defer; perfloading will retry sync later."
+            }
         }
         catch {
-            Write-Status "Initial WSUSSync failed.  Skipping."
+            Write-Status "Early WSUS sync failed: $($_.Exception.Message). Perfloading will handle sync later."
         }
-       
     }
 
     [bool] Test() {
-
+        # Test if a sync is in progress or has completed (category catalog present)
         try {
-            $wsus = get-WsusServer
-            $sub = $WSUS.GetSubscription()
-            if ($wsus) {
-                if (($sub.GetUpdateCategories() | where-object { $_.Title -eq "SQL Server 2005" }).Count -ge 1) {
-                    return $true
-                }
+            $wsus = Get-WsusServer -ErrorAction Stop
+            $sub = $wsus.GetSubscription()
+            
+            # Check if sync is currently running (compare as string to avoid parse-time type load)
+            $syncStatus = $sub.GetSynchronizationStatus()
+            if ($syncStatus.ToString() -eq 'Running') {
+                Write-Status "WSUS sync already in progress - skipping"
+                return $true
             }
-
+            
+            # If we have categories, a sync has completed at some point
+            $cats = $sub.GetUpdateCategories()
+            if ($cats -and $cats.Count -gt 0) {
+                Write-Status "WSUS catalog already has $($cats.Count) categories - skipping early sync"
+                return $true
+            }
             return $false
         }
         catch {
-            Write-Status "Failed to Find WSUS Server"
-            Write-Verbose "$_"
+            Write-Status "WSUS not ready for sync test: $($_.Exception.Message)"
             return $false
         }
     }
@@ -4184,6 +6164,19 @@ class InstallPBIRS {
             $_Creds = $this.DBcredentials
             write-Status ("Configuring PBIRS for $($this.SqlServer) in $($this.InstallPath) downloading from $($this.DownloadUrl)")
 
+            # Verify install by checking for RSReportServer.config, not just
+            # the instance folder. The config file is the last artifact the
+            # installer creates; its presence proves a complete install.
+            $verifyPbirs = Join-Path $this.InstallPath "$($this.RSInstance)\ReportServer\RSReportServer.config"
+            $pbirsAttempt = 0
+            $pbirsMaxAttempts = 3
+            $pbirsExit = -1
+            $needsReboot = $false
+
+            # Skip download + install entirely if already installed
+            if (Test-Path -LiteralPath $verifyPbirs) {
+                Write-Status "PBIRS already installed ($verifyPbirs exists). Skipping install."
+            } else {
 
             $pbirsSetup = "C:\temp\PowerBIReportServer.exe"
             Invoke-DownloadFile $this.DownloadUrl $pbirsSetup
@@ -4198,30 +6191,40 @@ class InstallPBIRS {
 
             write-Status ("Starting $pbirsSetup")
             $PBIRSargs = "/quiet /InstallFolder=$($this.InstallPath) /IAcceptLicenseTerms /Edition=Dev /Log C:\staging\PBI.log"
+
             # PowerBIReportServer.exe is a WiX/Burn bootstrapper bundle, so it
             # has the same silent-success failure mode as adksetup: a stale
             # dependency-provider registration ("WixBundleInstalled = 1") from
             # a prior failed install makes the bundle exit 0 in a few seconds
-            # without doing real work. Verify the install actually happened by
-            # checking for the SSRS subfolder (the bundle always creates that;
-            # the parent InstallPath was already created by us via New-Item).
-            # If missing, force /uninstall to clear the provider key and retry
-            # once before giving up.
-            $verifyPbirs = Join-Path $this.InstallPath 'SSRS'
-            $pbirsAttempt = 0
-            $pbirsMaxAttempts = 2
-            $pbirsExit = -1
+            # without doing real work. If config file is missing after install,
+            # force /uninstall to clear the provider key and retry.
             while ($pbirsAttempt -lt $pbirsMaxAttempts) {
                 $pbirsAttempt++
                 Write-Status ("PBIRS install attempt $pbirsAttempt/$pbirsMaxAttempts (Start-Process -Wait, may take several minutes)...")
                 $pbirsProc = Start-Process -FilePath $pbirsSetup -ArgumentList $PBIRSargs -Wait -PassThru
                 $pbirsExit = $pbirsProc.ExitCode
                 Write-Status ("PBIRS bootstrapper exit code: $pbirsExit (0x{0:x})" -f $pbirsExit)
-                if ($pbirsExit -eq 0 -and (Test-Path -LiteralPath $verifyPbirs)) {
-                    Write-Status "PBIRS installed successfully (SSRS subfolder present)."
+                # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED -- install succeeded, reboot needed.
+                # Treat it the same as exit 0 for the path-verification check.
+                $pbirsOk = ($pbirsExit -eq 0 -or $pbirsExit -eq 3010)
+                if ($pbirsOk -and (Test-Path -LiteralPath $verifyPbirs)) {
+                    if ($pbirsExit -eq 3010) {
+                        Write-Status "PBIRS installed successfully (SSRS subfolder present, exit 3010 = reboot required)."
+                        $needsReboot = $true
+                    } else {
+                        Write-Status "PBIRS installed successfully (SSRS subfolder present)."
+                    }
                     break
                 }
-                if ($pbirsExit -eq 0) {
+                if ($pbirsOk) {
+                    # 3010 without SSRS folder: bootstrapper saw a pending reboot (likely from
+                    # a prior uninstall or VC++ redist) and returned immediately without
+                    # installing anything. Retrying won't help -- need to reboot first.
+                    if ($pbirsExit -eq 3010) {
+                        Write-Status "PBIRS returned 3010 but SSRS folder missing -- pending reboot blocking install. Requesting reboot."
+                        $needsReboot = $true
+                        break
+                    }
                     Write-Status "PBIRS bootstrapper reported success but expected install path missing: $verifyPbirs"
                     if (Test-Path -LiteralPath 'C:\staging\PBI.log') {
                         try {
@@ -4231,11 +6234,27 @@ class InstallPBIRS {
                     }
                 }
                 if ($pbirsAttempt -lt $pbirsMaxAttempts) {
+                    # Exit 87 (ERROR_INVALID_PARAMETER) is often transient -- file lock,
+                    # bootstrapper collision, etc. Sleep and retry before resorting to
+                    # uninstall which can leave a pending 3010 that poisons the next attempt.
+                    if ($pbirsExit -eq 87) {
+                        Write-Status "Exit 87 is often transient. Sleeping 15s before retry (no uninstall)."
+                        Start-Sleep -Seconds 15
+                        continue
+                    }
                     Write-Status "Running PBIRS /uninstall /quiet to clear stale Burn registration before retry."
                     try {
                         $unArgs = "/uninstall /quiet /Log C:\staging\PBI-uninstall.log"
                         $unProc = Start-Process -FilePath $pbirsSetup -ArgumentList $unArgs -Wait -PassThru
-                        Write-Status ("PBIRS /uninstall returned $($unProc.ExitCode).")
+                        $unExit = $unProc.ExitCode
+                        Write-Status ("PBIRS /uninstall returned $unExit.")
+                        # If the uninstall itself needs a reboot, retrying the install is
+                        # futile -- the bootstrapper will return 3010 without doing real work.
+                        if ($unExit -eq 3010) {
+                            Write-Status "Uninstall requires reboot (3010). Requesting reboot; install will resume after."
+                            $needsReboot = $true
+                            break
+                        }
                     } catch {
                         Write-Status ("PBIRS /uninstall threw: $($_.Exception.Message) (continuing to retry install)")
                     }
@@ -4243,11 +6262,25 @@ class InstallPBIRS {
                 }
             }
             if (-not (Test-Path -LiteralPath $verifyPbirs)) {
-                throw "PBIRS install failed after $pbirsMaxAttempts attempts (last exit $pbirsExit). Expected path missing: $verifyPbirs. See C:\staging\PBI.log."
+                if ($needsReboot) {
+                    # Don't throw -- let Set() exit normally so DSC processes the reboot
+                    # signal. After reboot, Test() will return false (config file still
+                    # missing) and LCM will call Set() again for a clean install.
+                    Write-Status "PBIRS not yet installed; reboot pending. LCM will re-run Set() after reboot."
+                    $global:DSCMachineStatus = 1
+                    return
+                } else {
+                    throw "PBIRS install failed after $pbirsMaxAttempts attempts (last exit $pbirsExit). Expected path missing: $verifyPbirs. See C:\staging\PBI.log."
+                }
             }
+
+            } # end else (skip install when already present)
 
             try {
                 write-Status ("Installing Module ReportingServicesTools")
+                $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+                try { Import-Module PackageManagement -ErrorAction SilentlyContinue }
+                finally { $global:VerbosePreference = $savedVP }
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Install-Module -Name ReportingServicesTools -Force -AllowClobber -Confirm:$false
             }
@@ -4255,6 +6288,37 @@ class InstallPBIRS {
                 Write-Verbose ("InstallPBIRS $_")
             }
 
+
+            # Pre-flight: if the ReportServer database already exists but is
+            # corrupt (e.g. missing dbo.Subscriptions), Set-RsDatabase's upgrade
+            # scripts will fail. Drop the corrupt DB so Set-RsDatabase creates a
+            # clean one instead of trying to upgrade.
+            try {
+                $checkConn = New-Object System.Data.SqlClient.SqlConnection
+                $checkConn.ConnectionString = "Server=$($this.SqlServer);Database=master;Integrated Security=True;TrustServerCertificate=True"
+                $checkConn.Open()
+                $checkCmd = $checkConn.CreateCommand()
+                $checkCmd.CommandText = "SELECT DB_ID('ReportServer')"
+                $dbExists = $checkCmd.ExecuteScalar()
+                if ($null -ne $dbExists -and $dbExists -ne [DBNull]::Value) {
+                    $checkCmd.CommandText = "SELECT OBJECT_ID('ReportServer.dbo.Subscriptions')"
+                    $tblExists = $checkCmd.ExecuteScalar()
+                    if ($null -eq $tblExists -or $tblExists -eq [DBNull]::Value) {
+                        Write-Status "ReportServer database exists but is corrupt (dbo.Subscriptions missing). Dropping and re-creating."
+                        Stop-Service -Name 'PowerBIReportServer' -Force -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 3
+                        foreach ($dbName in 'ReportServerTempDB', 'ReportServer') {
+                            $checkCmd.CommandText = "IF DB_ID('$dbName') IS NOT NULL BEGIN ALTER DATABASE [$dbName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$dbName]; END"
+                            $checkCmd.ExecuteNonQuery() | Out-Null
+                            Write-Status "Dropped corrupt database $dbName"
+                        }
+                    }
+                }
+                $checkConn.Close()
+            }
+            catch {
+                Write-Status "Warning: could not check ReportServer database health: $($_.Exception.Message)"
+            }
 
             try {
                 Write-Status "Calling Set-RsDatabase"
@@ -4291,6 +6355,14 @@ class InstallPBIRS {
                 }
             }
 
+
+            # Restart the service so it picks up the (possibly new) database
+            # before we configure URLs. Without this, Set-PbiRsUrlReservation
+            # can fail with SetVirtualDirectory error -2147220930 when the DB
+            # was just recreated.
+            Write-Status "Restarting PowerBIReportServer before URL reservation"
+            Restart-Service -Name "PowerBIReportServer" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
 
             Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
             Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer
@@ -4345,36 +6417,147 @@ class InstallPBIRS {
                 Get-Service | Where-Object { $_.Name -eq "SQLSERVERAGENT" -or $_.Name -like "SqlAgent*" } | Start-Service
             }
             catch {}
+
+            # Post-install SOAP health probe: since LCM will not call Test()
+            # again after Set(), verify the portal is actually functional now.
+            # If the database is still corrupt the probe will fail and we throw
+            # so DSC marks this resource as failed rather than silently passing.
+            if (-not $needsReboot) {
+                Start-Sleep -Seconds 10
+                $scheme = if ($this.TemplateName) { 'https' } else { 'http' }
+                $probeFqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+                $soapUri = "$scheme`://$probeFqdn/ReportServer/ReportService2005.asmx"
+                $origCb = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                try {
+                    $ssrsProxy = New-WebServiceProxy -Uri $soapUri -UseDefaultCredential -ErrorAction Stop
+                    $itemType = $ssrsProxy.GetItemType("/")
+                    if ($itemType -eq 'Folder') {
+                        Write-Status "PBIRS SOAP health check passed after install."
+                    }
+                    else {
+                        throw "PBIRS SOAP health check: unexpected root type '$itemType'"
+                    }
+                }
+                catch {
+                    Write-Status "PBIRS SOAP health check FAILED after install: $($_.Exception.Message)"
+                    throw "PBIRS installed but portal is not functional. SOAP probe at $soapUri failed: $($_.Exception.Message)"
+                }
+                finally {
+                    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $origCb
+                }
+            }
+
+            if ($needsReboot) {
+                Write-Status "Requesting reboot for pending PBIRS prerequisite updates (exit 3010)."
+                $global:DSCMachineStatus = 1
+            }
         }
         catch {
             Write-Status "Failed to Configure PBIRS"
-            Write
             Write-Verbose "$_"
         }
     }
 
     [bool] Test() {
-
         try {
-            $service = $null
-            if ($($this.RSInstance) -eq "PBIRS") {
+            # Service must be installed and running
+            if ($this.RSInstance -eq "PBIRS") {
+                $service = Get-Service PowerBIReportServer -ErrorAction SilentlyContinue
+                if (-not $service -or $service.Status -ne "Running") {
+                    Write-Verbose "InstallPBIRS Test: PowerBIReportServer service not running."
+                    return $false
+                }
+            }
+
+            # Instance subfolder must exist (proves install completed)
+            $ssrsPath = Join-Path $this.InstallPath $this.RSInstance
+
+            # RSReportServer.config must exist (proves install completed fully)
+            $configPath = Join-Path $ssrsPath 'ReportServer\RSReportServer.config'
+            if (-not (Test-Path -LiteralPath $configPath)) {
+                Write-Verbose "InstallPBIRS Test: RSReportServer.config not found at $configPath"
+                return $false
+            }
+
+            # Check database configuration via WMI (the definitive source).
+            # RSReportServer.config's <DSN> element is often empty/encrypted;
+            # WMI always has the real DatabaseName after Set-RsDatabase.
+            $wmiNs = $null
+            try {
+                $wmiRS = Get-WmiObject -Namespace root\Microsoft\SqlServer\ReportServer -Class __Namespace -ErrorAction Stop
+                $rsName = $wmiRS.Name
+                $wmiVer = Get-WmiObject -Namespace "root\Microsoft\SqlServer\ReportServer\$rsName" -Class __Namespace -ErrorAction Stop
+                $verName = $wmiVer.Name
+                $wmiNs = "root\Microsoft\SqlServer\ReportServer\$rsName\$verName\Admin"
+            } catch {
+                Write-Verbose "InstallPBIRS Test: cannot enumerate PBIRS WMI namespace: $_"
+                return $false
+            }
+
+            $rsConfig = Get-WmiObject -Namespace $wmiNs -Class MSReportServer_ConfigurationSetting -ErrorAction SilentlyContinue
+            if (-not $rsConfig) {
+                Write-Verbose "InstallPBIRS Test: MSReportServer_ConfigurationSetting not found in $wmiNs"
+                return $false
+            }
+
+            # DatabaseName must be populated (proves Set-RsDatabase ran)
+            if ([string]::IsNullOrWhiteSpace($rsConfig.DatabaseName)) {
+                Write-Verbose "InstallPBIRS Test: database not configured (empty DatabaseName in WMI)"
+                return $false
+            }
+
+            # At least one URL must be reserved
+            $urls = $rsConfig.ListReservedUrls()
+            if (-not $urls -or -not $urls.UrlString -or $urls.UrlString.Count -eq 0) {
+                Write-Verbose "InstallPBIRS Test: no URL reservations in WMI"
+                return $false
+            }
+
+            # When HTTPS is expected, verify HTTPS URL reservations exist
+            if ($this.TemplateName) {
+                $httpsUrls = $urls.UrlString | Where-Object { $_ -like 'https:*' }
+                if (-not $httpsUrls -or $httpsUrls.Count -eq 0) {
+                    Write-Verbose "InstallPBIRS Test: TemplateName set but no HTTPS URL reservations found"
+                    return $false
+                }
+            }
+
+            # SOAP API health probe: verify the ReportService2005 endpoint
+            # is functional. This is the same check ConfigMgr uses to validate
+            # reporting services. If the database connection is broken or the
+            # service is in a bad state, GetItemType("/") will fail and we
+            # return $false so LCM re-runs Set() to repair.
+            try {
+                $scheme = if ($this.TemplateName) { 'https' } else { 'http' }
+                $probeFqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+                $soapUri = "$scheme`://$probeFqdn/ReportServer/ReportService2005.asmx"
+                $origCb = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
                 try {
-                    $service = Get-Service PowerBIReportServer -ErrorAction SilentlyContinue
+                    $ssrsProxy = New-WebServiceProxy -Uri $soapUri -UseDefaultCredential -ErrorAction Stop
+                    $itemType = $ssrsProxy.GetItemType("/")
+                    if ($itemType -eq 'Folder') {
+                        Write-Verbose "InstallPBIRS Test: SOAP API healthy at '$soapUri' (root = Folder)"
+                    }
+                    else {
+                        Write-Verbose "InstallPBIRS Test: SOAP API returned unexpected root type '$itemType'"
+                        return $false
+                    }
                 }
-                catch {}
+                finally {
+                    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $origCb
+                }
+            }
+            catch {
+                Write-Verbose "InstallPBIRS Test: SOAP API probe failed: $($_.Exception.Message)"
+                return $false
             }
 
-            if ($service) {
-                if ($service.status -eq "Running") {
-                    return $true
-                }
-            }
-
-            return $false
+            return $true
         }
         catch {
-            Write-Verbose "Failed to Find PBIRS Server"
-            Write-Verbose "$_"
+            Write-Verbose "InstallPBIRS Test: $_"
             return $false
         }
     }
@@ -4398,7 +6581,7 @@ class RebootNow {
             Write-Status "Rebooting machine."
             Start-sleep -seconds 4
             New-Item $_FileName
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
             return
         }
@@ -4441,6 +6624,99 @@ class InstallRootCertificate {
     [DscProperty(Key)]
     [string]$CAName
 
+    # Remote forest DC FQDN (e.g. CST-DC1.cstest8.com) used to AUTHORITATIVELY
+    # discover the issuing CA from AD instead of guessing its -config string.
+    [DscProperty()]
+    [string]$RemoteForestDC
+
+    # Optional issuing-CA host hint (short or FQDN) to disambiguate when the
+    # remote forest publishes more than one Enterprise issuing CA.
+    [DscProperty()]
+    [string]$IssuingCAHint
+
+    # Resolve the issuing CA's certutil -config string ("<dNSHostName>\<cn>")
+    # by enumerating the remote forest's Enrollment Services container -- the
+    # exact object set ADCS itself publishes for every Enterprise issuing CA.
+    # This is naming-, IP-, and tier-agnostic: an offline standalone root never
+    # publishes a pKIEnrollmentService object, so only true issuing CAs appear,
+    # and a CA on a non-DC member server with a custom CN is found correctly.
+    # Falls back to the passed-in CAName guess if discovery yields nothing.
+    [string] ResolveCAConfig() {
+        $fallback = $this.CAName
+        if ([string]::IsNullOrWhiteSpace($this.RemoteForestDC)) {
+            return $fallback
+        }
+        try {
+            $rootDSE = [ADSI]"LDAP://$($this.RemoteForestDC)/RootDSE"
+            $configNC = [string]$rootDSE.configurationNamingContext.Value
+            if ([string]::IsNullOrWhiteSpace($configNC)) {
+                Write-Status "CA discovery: could not read configurationNamingContext from $($this.RemoteForestDC); using fallback '$fallback'"
+                return $fallback
+            }
+            $enrollPath = "LDAP://$($this.RemoteForestDC)/CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC"
+            $enroll = [ADSI]$enrollPath
+            $cas = @()
+            foreach ($child in $enroll.Children) {
+                $cn = [string]$child.Properties['cn'].Value
+                $dns = [string]$child.Properties['dNSHostName'].Value
+                if (-not [string]::IsNullOrWhiteSpace($cn) -and -not [string]::IsNullOrWhiteSpace($dns)) {
+                    $cas += [pscustomobject]@{ CN = $cn; DnsHostName = $dns; Config = "$dns\$cn" }
+                }
+            }
+            if ($cas.Count -eq 0) {
+                Write-Status "CA discovery: no Enterprise issuing CA published in the $($this.RemoteForestDC) forest; using fallback '$fallback'"
+                return $fallback
+            }
+            $chosen = $null
+            if (-not [string]::IsNullOrWhiteSpace($this.IssuingCAHint)) {
+                foreach ($ca in $cas) {
+                    $hostShort = ($ca.DnsHostName -split '\.')[0]
+                    if ($hostShort -eq $this.IssuingCAHint -or $ca.DnsHostName -eq $this.IssuingCAHint) {
+                        $chosen = $ca
+                        break
+                    }
+                }
+            }
+            if (-not $chosen) {
+                $chosen = $cas | Select-Object -First 1
+            }
+            if ($cas.Count -gt 1) {
+                $allConfigs = ($cas | ForEach-Object { $_.Config }) -join ', '
+                Write-Status "CA discovery: $($cas.Count) issuing CAs found [$allConfigs]; selected '$($chosen.Config)'"
+            }
+            else {
+                Write-Status "CA discovery: resolved issuing CA '$($chosen.Config)'"
+            }
+            return $chosen.Config
+        }
+        catch {
+            Write-Status "WARNING: CA discovery against $($this.RemoteForestDC) failed: $_. Using fallback '$fallback'"
+            return $fallback
+        }
+    }
+
+    # AD's cACertificate attribute is multi-valued: it can come back as a single
+    # byte[] (one cert) or an object[]/Array of byte[] (cross-cert history). Pull
+    # the first usable DER cert blob out of whatever shape we get.
+    [byte[]] FirstCertBytes([object]$val) {
+        if ($null -eq $val) { return $null }
+        if ($val -is [byte[]]) { return $val }
+        if ($val -is [System.Array]) {
+            foreach ($item in $val) {
+                if ($item -is [byte[]]) { return $item }
+            }
+        }
+        return $null
+    }
+
+    [bool] BytesEqual([byte[]]$a, [byte[]]$b) {
+        if ($null -eq $a -or $null -eq $b) { return $false }
+        if ($a.Length -ne $b.Length) { return $false }
+        for ($i = 0; $i -lt $a.Length; $i++) {
+            if ($a[$i] -ne $b[$i]) { return $false }
+        }
+        return $true
+    }
 
     [void] Set() {
 
@@ -4450,24 +6726,80 @@ class InstallRootCertificate {
         if (-not (Test-Path $_FileName)) {
             Write-Status "Install Root Cert"
 
-            # Get the full certificate chain from the CA (works for both single-tier and two-tier PKI)
-            $chainFile = "C:\Temp\ca_chain.p7b"
-            certutil.exe -config $this.CAName -ca.chain $chainFile
+            $rootBytes = $null
+            $issuingBytes = $null
 
-            # Import the PKCS#7 chain and find root (self-signed) vs subordinate certs
-            $chainCerts = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
-            $chainCerts.Import($chainFile)
+            # PRIMARY retrieval: read the CA certificates straight from the remote
+            # forest's AD (Configuration NC), where ADCS publishes them and which
+            # is replicated to every DC. This replaces 'certutil -config X
+            # -ca.chain <file>', which mis-parses on Server 2022 ("Too many
+            # arguments" -> no file produced) and so never worked for the
+            # cross-forest case. The CA is reachable (certutil -ping/ICertRequest2
+            # succeeds); the retrieval verb was the bug. AD read is naming-, IP-,
+            # tier-, and DCOM-agnostic and works for single- and multi-tier PKI.
+            if (-not [string]::IsNullOrWhiteSpace($this.RemoteForestDC)) {
+                try {
+                    $configNC = [string]([ADSI]"LDAP://$($this.RemoteForestDC)/RootDSE").configurationNamingContext.Value
 
-            $rootCert = $chainCerts | Where-Object { $_.Subject -eq $_.Issuer } | Select-Object -First 1
-            $subCACert = $chainCerts | Where-Object { $_.Subject -ne $_.Issuer } | Select-Object -First 1
+                    # Root (self-signed) CA cert(s): CN=Certification Authorities
+                    $caContainer = [ADSI]"LDAP://$($this.RemoteForestDC)/CN=Certification Authorities,CN=Public Key Services,CN=Services,$configNC"
+                    foreach ($ca in $caContainer.Children) {
+                        $b = $this.FirstCertBytes($ca.Properties['cACertificate'].Value)
+                        if ($b) {
+                            $rootBytes = $b
+                            Write-Status "Read root CA '$([string]$ca.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
+                            break
+                        }
+                    }
 
-            if (-not $rootCert) {
-                Write-Status "WARNING: Could not find root CA in chain, falling back to -ca.cert"
-                certutil.exe -config $this.CAName -ca.cert $_FileName
+                    # Issuing CA cert: the pKIEnrollmentService object (prefer the
+                    # host hint when more than one issuing CA is published).
+                    $enroll = [ADSI]"LDAP://$($this.RemoteForestDC)/CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC"
+                    $picked = $null
+                    foreach ($svc in $enroll.Children) {
+                        if (-not [string]::IsNullOrWhiteSpace($this.IssuingCAHint)) {
+                            $dns = [string]$svc.Properties['dNSHostName'].Value
+                            $short = ($dns -split '\.')[0]
+                            if ($short -eq $this.IssuingCAHint -or $dns -eq $this.IssuingCAHint) {
+                                $picked = $svc
+                                break
+                            }
+                        }
+                        if (-not $picked) { $picked = $svc }
+                    }
+                    if ($picked) {
+                        $b = $this.FirstCertBytes($picked.Properties['cACertificate'].Value)
+                        if ($b) {
+                            $issuingBytes = $b
+                            Write-Status "Read issuing CA '$([string]$picked.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
+                        }
+                    }
+                }
+                catch {
+                    Write-Status "WARNING: Reading CA certs from AD ($($this.RemoteForestDC)) failed: $_"
+                }
+            }
+
+            if ($rootBytes -or $issuingBytes) {
+                # Prefer the self-signed root for the RootCA file; if only the
+                # issuing CA was found, use it.
+                if (-not $rootBytes) { $rootBytes = $issuingBytes }
+                [System.IO.File]::WriteAllBytes($_FileName, $rootBytes)
+                Write-Status "Wrote root CA certificate to $_FileName from AD"
             }
             else {
-                [System.IO.File]::WriteAllBytes($_FileName, $rootCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
-                Write-Status "Exported root CA '$($rootCert.Subject)' to $_FileName"
+                # FALLBACK: legacy certutil retrieval (only if the AD read yielded
+                # nothing -- e.g. RemoteForestDC absent or the container empty).
+                $caConfig = $this.ResolveCAConfig()
+                Write-Status "AD CA read unavailable; falling back to certutil -ca.cert against '$caConfig'"
+                certutil.exe -config $caConfig -ca.cert $_FileName
+            }
+
+            # If we still have no root cert file, fail with a clear, actionable
+            # error so the LCM retries on a real (recoverable) condition instead
+            # of the downstream dspublish calls running against a missing file.
+            if (-not (Test-Path $_FileName)) {
+                throw "InstallRootCertificate: unable to obtain root CA certificate for forest '$($this.RemoteForestDC)' / CA '$($this.CAName)' (AD read produced no cert and certutil -ca.cert fallback produced no file). DSC will retry."
             }
 
             # Publish root CA cert as RootCA and NtauthCA
@@ -4476,12 +6808,15 @@ class InstallRootCertificate {
             Write-Status "Running certutil.exe -dspublish -f $_FileName NtauthCA"
             certutil.exe -dspublish -f $_FileName NtauthCA
 
-            # If two-tier PKI, publish the subordinate CA cert as SubCA
-            if ($subCACert) {
+            # If two-tier PKI (issuing CA differs from the root), publish the
+            # issuing/subordinate CA as SubCA and NtauthCA (it is the CA that
+            # actually signs the end-entity certs we cross-forest authenticate).
+            if ($issuingBytes -and $rootBytes -and -not $this.BytesEqual($issuingBytes, $rootBytes)) {
                 $subCACertFile = "C:\Temp\subCA.cer"
-                [System.IO.File]::WriteAllBytes($subCACertFile, $subCACert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
-                Write-Status "Two-tier PKI: publishing subordinate CA '$($subCACert.Subject)' as SubCA"
+                [System.IO.File]::WriteAllBytes($subCACertFile, $issuingBytes)
+                Write-Status "Two-tier PKI: publishing subordinate/issuing CA as SubCA + NtauthCA"
                 certutil.exe -dspublish -f $subCACertFile SubCA
+                certutil.exe -dspublish -f $subCACertFile NtauthCA
             }
             else {
                 # Single-tier: the CA is the root, publish as SubCA too
@@ -4561,6 +6896,9 @@ class AddCertificateTemplate {
 
             IF ($null -eq $module) {
                 Write-Status "Installing PSPKI Module"  
+                $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+                try { Import-Module PackageManagement -ErrorAction SilentlyContinue }
+                finally { $global:VerbosePreference = $savedVP }
                 Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
@@ -4624,7 +6962,7 @@ class AddCertificateTemplate {
                         if (-not (Test-Path "C:\temp\certreboot2.txt")) {
                             Write-Status "Rebooting $_"
                             New-Item "C:\temp\certreboot2.txt"
-                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                             $global:DSCMachineStatus = 1
                             return
                         }
@@ -4668,7 +7006,7 @@ class AddCertificateTemplate {
                         if (-not (Test-Path "C:\temp\certreboot.txt")) {
                             Write-Status "Rebooting $_"
                             New-Item "C:\temp\certreboot.txt"
-                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                             $global:DSCMachineStatus = 1
                             return
                         }
@@ -4983,3 +7321,786 @@ class GpUpdate {
     }
 
 }
+
+[DscResource()]
+class SetDNSAddress {
+    [DscProperty(Key)]
+    [string] $Name
+
+    [DscProperty(Mandatory)]
+    [string[]] $Address
+
+    [void] Set() {
+        $alias = (Get-NetAdapter | Select-Object -First 1).Name
+        Write-Status "Setting DNS to $($this.Address -join ', ') on $alias"
+        Set-DnsClientServerAddress -InterfaceAlias $alias -ServerAddresses $this.Address
+    }
+
+    [bool] Test() {
+        $alias = (Get-NetAdapter | Select-Object -First 1).Name
+        $current = (Get-DnsClientServerAddress -InterfaceAlias $alias -AddressFamily IPv4).ServerAddresses
+        $desired = $this.Address
+        return ($null -ne $current -and ($current -join ',') -eq ($desired -join ','))
+    }
+
+    [SetDNSAddress] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
+class DisableClusterNicDnsRegistration {
+    [DscProperty(Key)]
+    [string] $ClusterSubnet = '10.250.251.'
+
+    [DscProperty(Key)]
+    [string] $Stage = 'Full'
+
+    [DscProperty(Mandatory)]
+    [string] $DomainName
+
+    [DscProperty(Mandatory)]
+    [string] $DCName
+
+    [DscProperty()]
+    [string] $ClusterName
+
+    [DscProperty()]
+    [string] $ClusterIPAddress
+
+    [DscProperty()]
+    [string] $ListenerName
+
+    [DscProperty()]
+    [string] $ListenerIPAddress
+
+    [void] Set() {
+        $_subnet = $this.ClusterSubnet
+        $_domain = $this.DomainName
+        $_dc     = $this.DCName
+
+        # Per-block elapsed instrumentation. Test() always returns $false so this
+        # Set() runs on EVERY pass (and twice per Phase 5 deploy: a 'Pre' stage and
+        # a 'Post' stage). One stage has been observed taking ~3.5 min even on a
+        # re-run where nothing needs changing; this records how long each major
+        # block takes and emits a single summary line so the dominant cost is
+        # visible in the build log / [DscTiming] resource detail. Cheap (Get-Date
+        # deltas only); no behavior change.
+        $blockTimes = [ordered]@{}
+        $lapStart = [datetime]::UtcNow
+
+        # Pre-import modules quietly so DSC verbose logging doesn't flood
+        # with hundreds of "Exporting function ..." lines. Import-Module
+        # -Verbose:$false is insufficient because DSC sets $VerbosePreference
+        # = 'Continue' session-wide, and module manifest processing respects
+        # the preference variable, not the cmdlet switch. Temporarily override
+        # the preference variable during imports.
+        $savedVerbose = $global:VerbosePreference
+        $global:VerbosePreference = 'SilentlyContinue'
+        try {
+            Import-Module NetAdapter, NetTCPIP, DnsClient, DnsServer, FailoverClusters, NetSecurity -ErrorAction SilentlyContinue
+        }
+        finally {
+            $global:VerbosePreference = $savedVerbose
+        }
+        $blockTimes['ModuleImport'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1); $lapStart = [datetime]::UtcNow
+
+        # 1. Disable DNS registration on cluster/heartbeat adapters and rename NICs.
+        $allAdapters = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })
+        $clusterAdapters = @()
+        $domainAdapters = @()
+
+        foreach ($a in $allAdapters) {
+            $ips = Get-NetIPAddress -InterfaceIndex $a.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            if ($ips | Where-Object { $_.IPAddress -like "${_subnet}*" }) {
+                $clusterAdapters += $a
+            }
+            else {
+                $domainAdapters += $a
+            }
+        }
+
+        foreach ($adapter in $clusterAdapters) {
+            # Each mutation below is guarded with a cheap "is it already correct?"
+            # read so a re-run (Test() returns $false by design) is a fast no-op
+            # and -- importantly -- does NOT needlessly re-bind / reset a live
+            # heartbeat NIC every time. Set() is still fully self-correcting.
+            $changed = $false
+
+            # Three-layer DNS-registration prevention:
+            #  1. RegisterThisConnectionsAddress = $false  (preference flag)
+            #  2. No DNS servers  (nowhere to send the update)
+            #  3. No DNS suffix   (no zone to register in)
+            $dnsCli = Get-DnsClient -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue
+            if ((-not $dnsCli) -or $dnsCli.RegisterThisConnectionsAddress -or ($dnsCli.ConnectionSpecificSuffix -ne '')) {
+                Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction Stop
+                $changed = $true
+            }
+            $curServers = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+            if ($curServers.Count -gt 0) {
+                Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses @() -ErrorAction SilentlyContinue
+                $changed = $true
+            }
+
+            # Higher metric so the domain NIC is always preferred for outbound traffic.
+            $curMetric = (Get-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).InterfaceMetric
+            if ($curMetric -ne 20) {
+                Set-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -InterfaceMetric 20 -ErrorAction SilentlyContinue
+                $changed = $true
+            }
+
+            # Disable NetBIOS over TCP/IP on the cluster NIC (2 = Disable).
+            $wmiNic = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex = $($adapter.InterfaceIndex)" -ErrorAction SilentlyContinue
+            if ($wmiNic -and $wmiNic.TcpipNetbiosOptions -ne 2) {
+                $wmiNic.SetTcpipNetbios(2) | Out-Null
+                $changed = $true
+            }
+
+            # Disable IPv6 (AAAA registration), LLTD mapper (ms_lltdio) + responder
+            # (ms_rspndr) on the cluster NIC. Disable-NetAdapterBinding re-binds the
+            # adapter (slow + briefly disruptive), so only touch a binding that is
+            # actually still enabled.
+            foreach ($comp in @('ms_tcpip6', 'ms_lltdio', 'ms_rspndr')) {
+                $binding = Get-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID $comp -ErrorAction SilentlyContinue
+                if ($binding -and $binding.Enabled) {
+                    Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID $comp -ErrorAction SilentlyContinue
+                    $changed = $true
+                }
+            }
+
+            # Remove default gateway from cluster NIC -- heartbeat NICs should never
+            # route externally. DHCP may have handed one out before the scope was fixed.
+            $gateway = Get-NetRoute -InterfaceIndex $adapter.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue
+            if ($gateway) {
+                Remove-NetRoute -InterfaceIndex $adapter.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue
+                Write-Status "Removed default gateway from cluster adapter '$($adapter.Name)'"
+                $changed = $true
+            }
+
+            # Rename to something descriptive if still using a generic Windows name.
+            if ($adapter.Name -match '^Ethernet(\s\d+)?$') {
+                try {
+                    Rename-NetAdapter -InputObject $adapter -NewName 'Cluster' -ErrorAction Stop
+                    Write-Status "Renamed adapter '$($adapter.Name)' -> 'Cluster'"
+                    $changed = $true
+                }
+                catch {
+                    Write-Verbose "Could not rename adapter '$($adapter.Name)': $_"
+                }
+            }
+
+            if ($changed) {
+                Write-Status "Stripped DNS capability from heartbeat adapter '$($adapter.Name)' ($_subnet*)"
+            }
+            else {
+                Write-Status "Heartbeat adapter '$($adapter.Name)' already configured ($_subnet*)"
+            }
+        }
+
+        $blockTimes['ClusterNicLoop'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1); $lapStart = [datetime]::UtcNow
+
+        # Also rename the domain adapter for consistency and ensure low metric.
+        foreach ($adapter in $domainAdapters) {
+            $curMetric = (Get-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).InterfaceMetric
+            if ($curMetric -ne 10) {
+                Set-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -InterfaceMetric 10 -ErrorAction SilentlyContinue
+            }
+
+            if ($adapter.Name -match '^Ethernet(\s\d+)?$') {
+                try {
+                    Rename-NetAdapter -InputObject $adapter -NewName 'Domain' -ErrorAction Stop
+                    Write-Status "Renamed adapter '$($adapter.Name)' -> 'Domain'"
+                }
+                catch {
+                    Write-Verbose "Could not rename adapter '$($adapter.Name)': $_"
+                }
+            }
+        }
+
+        $blockTimes['DomainNicLoop'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1); $lapStart = [datetime]::UtcNow
+
+        # Disable DNS registration on cluster virtual adapters that don't appear
+        # in Get-NetAdapter (e.g. Microsoft Failover Cluster Virtual Adapter,
+        # isatap tunnel adapters).  These are recreated with default settings
+        # (RegisterThisConnectionsAddress = $true) every time the cluster service
+        # starts, so they silently re-register the heartbeat IP in DNS.
+        foreach ($iface in (Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
+            # Skip adapters already handled above via Get-NetAdapter
+            $already = $clusterAdapters + $domainAdapters | Where-Object { $_.InterfaceIndex -eq $iface.ifIndex }
+            if ($already) { continue }
+
+            $ifaceIPs = (Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
+            $isClusterSubnet = $ifaceIPs | Where-Object { $_ -like "${_subnet}*" }
+            $isClusterName = $iface.InterfaceAlias -like '*Cluster*' -or $iface.InterfaceAlias -like '*isatap*'
+
+            if ($isClusterSubnet -or $isClusterName) {
+                $vChanged = $false
+                $vDns = Get-DnsClient -InterfaceIndex $iface.ifIndex -ErrorAction SilentlyContinue
+                if ((-not $vDns) -or $vDns.RegisterThisConnectionsAddress -or ($vDns.ConnectionSpecificSuffix -ne '')) {
+                    Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction SilentlyContinue
+                    $vChanged = $true
+                }
+                $vServers = @((Get-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+                if ($vServers.Count -gt 0) {
+                    Set-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -ServerAddresses @() -ErrorAction SilentlyContinue
+                    $vChanged = $true
+                }
+                foreach ($comp in @('ms_lltdio', 'ms_rspndr')) {
+                    $vb = Get-NetAdapterBinding -InterfaceAlias $iface.InterfaceAlias -ComponentID $comp -ErrorAction SilentlyContinue
+                    if ($vb -and $vb.Enabled) {
+                        Disable-NetAdapterBinding -InterfaceAlias $iface.InterfaceAlias -ComponentID $comp -ErrorAction SilentlyContinue
+                        $vChanged = $true
+                    }
+                }
+                if ($vChanged) {
+                    Write-Status "Stripped DNS capability from virtual adapter '$($iface.InterfaceAlias)' (ifIndex $($iface.ifIndex))"
+                }
+            }
+        }
+
+        $blockTimes['VirtualNicLoop'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1); $lapStart = [datetime]::UtcNow
+
+        # Re-register only the domain adapter so the correct A record stays.
+        Register-DnsClient -ErrorAction SilentlyContinue
+
+        # 2. Remove stale hostname A records that point to the cluster subnet.
+        $hostname = $env:COMPUTERNAME
+        try {
+            # Get/Remove-DnsServerResourceRecord -ComputerName <DC> are CDXML/CIM
+            # cmdlets with NO native timeout; an intermittently-wedged DC can block
+            # them for minutes and stall this DSC apply (and the phase). Run each
+            # under a kill+retry watchdog so a hang degrades to a skipped cleanup
+            # instead of a hung phase. The stale-subnet filter runs inside the job
+            # so only plain strings cross the job boundary.
+            $staleIps = Invoke-WithTimeoutJob -TimeoutSec 30 -MaxAttempts 2 -ArgumentList @($_domain, $hostname, $_dc, $_subnet) -ScriptBlock {
+                param($zone, $name, $dc, $subnet)
+                @(Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dc -ErrorAction Stop |
+                    ForEach-Object { $_.RecordData.IPv4Address.ToString() } |
+                    Where-Object { $_ -like "${subnet}*" })
+            }
+            foreach ($ip in @($staleIps)) {
+                Write-Status "Removing stale DNS A record $hostname -> $ip from $_dc"
+                $null = Invoke-WithTimeoutJob -TimeoutSec 30 -MaxAttempts 2 -ArgumentList @($_domain, $hostname, $_dc, $ip) -ScriptBlock {
+                    param($zone, $name, $dc, $rip)
+                    Remove-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -RecordData $rip -ComputerName $dc -Force -ErrorAction Stop
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Could not clean stale hostname DNS records: $_"
+        }
+
+        # 3. Flush DNS cache so stale records don't interfere.
+        #    Do NOT pre-create cluster or listener DNS A records here.
+        #    The Cluster Name resource and AG listener manage their own DNS
+        #    registration on whichever network has DNS registration enabled
+        #    (the domain adapter). Pre-creating records on the cluster-subnet
+        #    IP caused OpenCluster() failures because the Cluster Name resource
+        #    serves on the domain-network IP, not the cluster-subnet IP.
+        Clear-DnsClientCache -ErrorAction SilentlyContinue
+        $blockTimes['DnsCleanupAndDcQuery'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1); $lapStart = [datetime]::UtcNow
+
+        # 4. Scope cluster heartbeat firewall rule to cluster subnet only.
+        #    Derive CIDR from the subnet property (e.g. '10.250.250.' -> '10.250.250.0/24')
+        #    by counting the octets provided. 3 octets = /24, 2 = /16, 1 = /8.
+        $octets = ($_subnet.TrimEnd('.') -split '\.').Count
+        $cidrBits = $octets * 8
+        $networkAddr = $_subnet.TrimEnd('.') + ('.0' * (4 - $octets))
+        $cidr = "$networkAddr/$cidrBits"
+        $ruleName = 'WSFC Heartbeat (Cluster Subnet)'
+        if (-not (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue)) {
+            New-NetFirewallRule -DisplayName $ruleName `
+                -Direction Inbound -Protocol UDP -LocalPort 3343 `
+                -RemoteAddress $cidr -Action Allow -ErrorAction SilentlyContinue | Out-Null
+            Write-Status "Created firewall rule '$ruleName' ($cidr)"
+        }
+
+        # 5. Set RegisterAllProvidersIP=0 on the Cluster Name resource so only the
+        #    active node's IP is registered in DNS (not all node IPs). Prevents
+        #    clients from resolving the cluster name to a node that isn't hosting.
+        $_clusterName = $this.ClusterName
+        if ($_clusterName) {
+            try {
+                $clusNameRes = Get-ClusterResource -Cluster $_clusterName -Name 'Cluster Name' -ErrorAction Stop
+                $regAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction SilentlyContinue).Value
+                if ($regAll -ne 0) {
+                    $clusNameRes | Set-ClusterParameter -Name RegisterAllProvidersIP -Value 0 -ErrorAction Stop
+                    # Bounce the resource so the parameter takes effect immediately
+                    # instead of waiting for the next failover.
+                    $clusNameRes | Stop-ClusterResource -ErrorAction SilentlyContinue
+                    $clusNameRes | Start-ClusterResource -ErrorAction SilentlyContinue
+                    Write-Status "Set RegisterAllProvidersIP=0 on Cluster Name resource (restarted)"
+                }
+            }
+            catch {
+                Write-Verbose "Could not set RegisterAllProvidersIP: $_"
+            }
+        }
+        $blockTimes['ClusterOps'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1)
+        $__bt = ($blockTimes.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)s" }) -join ' '
+        Write-Status "DisableClusterNicDnsRegistration [$($this.Stage)] block timing: $__bt"
+    }
+
+    [bool] Test() {
+        # ALWAYS return $false -- never add real Test logic here, and never remove
+        # this comment. The cluster / NetAdapter / DNS cmdlets this resource relies
+        # on (e.g. Get-NetAdapter, Get-NetAdapterBinding, Resolve-DnsName,
+        # Get-ClusterResource) leak records onto the success output stream (stream 1)
+        # from inside a PS 5.1 class method -- a Verbose/Information/object record
+        # gets collected ALONGSIDE the boolean return value. DSC then sees more than
+        # one value coming back from Test-TargetResource and throws:
+        #   "Test-TargetResource must be the boolean value True or False"
+        # which hard-fails the whole configuration. There is no reliable way to
+        # suppress every such leak inside a class method, so Test() must stay a
+        # plain, unconditional 'return $false'. Idempotency is handled in Set()
+        # instead: it reads current state and skips any mutation already correct,
+        # so re-running it (which happens every pass because Test is always false)
+        # is a cheap no-op.
+        return $false
+    }
+
+    [DisableClusterNicDnsRegistration] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
+class SetWindowsProxy {
+    [DscProperty(Key)]
+    [string] $ProxyServer      # e.g. "ZZ-SQUID.wacky.sandwich.lab:3128"
+
+    [DscProperty(Mandatory)]
+    [string] $BypassList       # e.g. "<local>;*.wacky.sandwich.lab;172.19.77.*"
+
+    [void] Set() {
+        $_proxy  = $this.ProxyServer
+        $_bypass = $this.BypassList
+        $maxRetries = 3
+
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            try {
+                Write-Status "SetWindowsProxy: configuring proxy $_proxy (attempt $attempt/$maxRetries)"
+
+                # 1. WinHTTP (used by BITS, Windows Update, .NET fallback)
+                $result = & netsh winhttp set proxy proxy-server="$_proxy" bypass-list="$_bypass" 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "netsh winhttp set proxy failed (exit $LASTEXITCODE): $result" }
+
+                # 2. Machine-level environment variables
+                [Environment]::SetEnvironmentVariable('HTTP_PROXY',  "http://$_proxy", 'Machine')
+                [Environment]::SetEnvironmentVariable('HTTPS_PROXY', "http://$_proxy", 'Machine')
+                [Environment]::SetEnvironmentVariable('NO_PROXY',    $_bypass,         'Machine')
+
+                # 3. HKLM Internet Settings (WinINet machine-wide default)
+                $ieKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+                New-ItemProperty -Path $ieKey -Name 'ProxyEnable'   -PropertyType DWord  -Value 1       -Force | Out-Null
+                New-ItemProperty -Path $ieKey -Name 'ProxyServer'   -PropertyType String -Value $_proxy  -Force | Out-Null
+                New-ItemProperty -Path $ieKey -Name 'ProxyOverride' -PropertyType String -Value $_bypass -Force | Out-Null
+
+                # 4. HKU\.DEFAULT (SYSTEM-context .NET / WinINet reads)
+                $defaultUserKey = 'Registry::HKEY_USERS\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+                if (-not (Test-Path $defaultUserKey)) { New-Item -Path $defaultUserKey -Force | Out-Null }
+                New-ItemProperty -Path $defaultUserKey -Name 'ProxyEnable'   -PropertyType DWord  -Value 1       -Force | Out-Null
+                New-ItemProperty -Path $defaultUserKey -Name 'ProxyServer'   -PropertyType String -Value $_proxy  -Force | Out-Null
+                New-ItemProperty -Path $defaultUserKey -Name 'ProxyOverride' -PropertyType String -Value $_bypass -Force | Out-Null
+
+                # 5. .NET Framework machine.config <defaultProxy>
+                $bypassRegexes = @()
+                foreach ($e in ($_bypass -split ';')) {
+                    $e = $e.Trim()
+                    if (-not $e -or $e -eq '<local>') { continue }
+                    $rx = '^' + ([Regex]::Escape($e) -replace '\\\*', '.*') + '$'
+                    $bypassRegexes += $rx
+                }
+                $machineConfigPaths = @(
+                    "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\Config\machine.config",
+                    "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\Config\machine.config"
+                )
+                foreach ($mcPath in $machineConfigPaths) {
+                    if (-not (Test-Path $mcPath)) { continue }
+                    $xml = [xml](Get-Content -LiteralPath $mcPath -Raw)
+                    $configNode = $xml.DocumentElement
+                    $sysNet = $configNode.SelectSingleNode('system.net')
+                    if (-not $sysNet) {
+                        $sysNet = $xml.CreateElement('system.net')
+                        [void]$configNode.AppendChild($sysNet)
+                    }
+                    $existing = $sysNet.SelectSingleNode('defaultProxy')
+                    if ($existing) { [void]$sysNet.RemoveChild($existing) }
+                    $defProxy = $xml.CreateElement('defaultProxy')
+                    $defProxy.SetAttribute('enabled', 'true')
+                    $defProxy.SetAttribute('useDefaultCredentials', 'true')
+                    $proxyEl = $xml.CreateElement('proxy')
+                    $proxyEl.SetAttribute('proxyaddress', "http://$_proxy")
+                    $proxyEl.SetAttribute('bypassonlocal', 'true')
+                    $proxyEl.SetAttribute('autoDetect', 'false')
+                    $proxyEl.SetAttribute('usesystemdefault', 'false')
+                    [void]$defProxy.AppendChild($proxyEl)
+                    if ($bypassRegexes.Count -gt 0) {
+                        $bypassEl = $xml.CreateElement('bypasslist')
+                        foreach ($rx in $bypassRegexes) {
+                            $addEl = $xml.CreateElement('add')
+                            $addEl.SetAttribute('address', $rx)
+                            [void]$bypassEl.AppendChild($addEl)
+                        }
+                        [void]$defProxy.AppendChild($bypassEl)
+                    }
+                    [void]$sysNet.AppendChild($defProxy)
+                    $xml.Save($mcPath)
+
+                    # Verify the write persisted
+                    $verifyXml = [xml](Get-Content -LiteralPath $mcPath -Raw)
+                    $verifyProxy = $verifyXml.DocumentElement.SelectSingleNode('system.net/defaultProxy/proxy')
+                    if (-not $verifyProxy) {
+                        throw "machine.config verification failed: <defaultProxy/proxy> not found in $mcPath"
+                    }
+                    if ($verifyProxy.GetAttribute('proxyaddress') -ne "http://$_proxy") {
+                        throw "machine.config proxyaddress mismatch in $mcPath (got '$($verifyProxy.GetAttribute('proxyaddress'))')"
+                    }
+                }
+
+                Write-Status "SetWindowsProxy: proxy $_proxy configured successfully"
+                return   # success
+            }
+            catch {
+                Write-Status "SetWindowsProxy: attempt $attempt failed: $_"
+                if ($attempt -ge $maxRetries) { throw }
+                Start-Sleep -Seconds 5
+            }
+        }
+    }
+
+    [bool] Test() {
+        $_proxy = $this.ProxyServer
+
+        # Check WinHTTP
+        try {
+            $output = & netsh winhttp show proxy 2>$null
+            if ($output -notmatch 'Proxy Server\(s\)\s*:\s*(\S+)') {
+                Write-Verbose "SetWindowsProxy Test: WinHTTP proxy not set"
+                return $false
+            }
+            if ($Matches[1].Trim() -ne $_proxy) {
+                Write-Verbose "SetWindowsProxy Test: WinHTTP proxy is '$($Matches[1].Trim())', expected '$_proxy'"
+                return $false
+            }
+        }
+        catch {
+            Write-Verbose "SetWindowsProxy Test: WinHTTP check failed: $_"
+            return $false
+        }
+
+        # Check machine.config
+        $mcPath = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\Config\machine.config"
+        if (Test-Path $mcPath) {
+            try {
+                $xml = [xml](Get-Content -LiteralPath $mcPath -Raw)
+                $p = $xml.DocumentElement.SelectSingleNode('system.net/defaultProxy/proxy')
+                if (-not $p -or $p.GetAttribute('proxyaddress') -ne "http://$_proxy") {
+                    Write-Verbose "SetWindowsProxy Test: machine.config <defaultProxy> not set for $_proxy"
+                    return $false
+                }
+            }
+            catch {
+                Write-Verbose "SetWindowsProxy Test: machine.config check failed: $_"
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    [SetWindowsProxy] Get() {
+        return $this
+    }
+}
+
+# ---------------------------------------------------------------------------
+# PromoteDomainController
+#
+# Wraps Install-ADDSDomainController with robust error handling.  The built-in
+# ADDomainController resource from ActiveDirectoryDsc lets the non-terminating
+# "Verification of user credential permissions failed" error propagate into
+# the DSC error stream.  The LCM then marks the resource as failed even though
+# -Force causes Install-ADDSDomainController to proceed.  This resource
+# suppresses that error and scrubs it from $global:Error so the LCM sees a
+# clean Set() and honours the reboot request.
+# ---------------------------------------------------------------------------
+[DscResource()]
+class PromoteDomainController {
+    [DscProperty(Key)]
+    [string] $DomainName
+
+    [DscProperty(Mandatory)]
+    [System.Management.Automation.PSCredential] $Credential
+
+    [DscProperty(Mandatory)]
+    [System.Management.Automation.PSCredential] $SafeModeAdministratorPassword
+
+    [DscProperty()]
+    [string] $DatabasePath = 'C:\Windows\NTDS'
+
+    [DscProperty()]
+    [string] $LogPath = 'C:\Windows\Logs'
+
+    [DscProperty()]
+    [string] $SysvolPath = 'C:\Windows\SYSVOL'
+
+    [DscProperty()]
+    [bool] $IsGlobalCatalog = $true
+
+    [DscProperty()]
+    [bool] $InstallDns = $true
+
+    [void] Set() {
+        $credUser = $this.Credential.UserName
+        Write-Verbose "PromoteDomainController: Running as process identity '$env:USERDOMAIN\$env:USERNAME'"
+        Write-Verbose "PromoteDomainController: Credential supplied for promotion: '$credUser'"
+        Write-Verbose "PromoteDomainController: Target domain: '$($this.DomainName)'"
+        Write-Verbose "PromoteDomainController: Computer name: '$env:COMPUTERNAME'"
+
+        # Check if a previous promotion succeeded by looking for the Netlogon
+        # SysVol registry key (same check the ADDomain resource uses).  This
+        # key is only written after a fully successful promotion -- not by
+        # Install-WindowsFeature and not by a partial/failed promotion.
+        $previousPromotion = $false
+        try {
+            $nlSysvol = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -Name 'SysVol' -ErrorAction Stop
+            $domainSysVol = Join-Path $nlSysvol $this.DomainName
+            if (Test-Path $domainSysVol) {
+                $previousPromotion = $true
+            }
+        }
+        catch {}
+
+        $existingSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
+        $svcStatus = if ($existingSvc) { $existingSvc.Status } else { 'N/A' }
+        Write-Verbose "PromoteDomainController: NTDS service status: $svcStatus, previous promotion: $previousPromotion"
+
+        if ($existingSvc -and $existingSvc.Status -eq 'Running') {
+            Write-Verbose "PromoteDomainController: NTDS is already running - nothing to do"
+            return
+        }
+
+        if ($previousPromotion) {
+            # Promotion succeeded previously but NTDS isn't running.  Try to start it.
+            Write-Verbose "PromoteDomainController: Previous promotion detected. Attempting to start NTDS."
+            try {
+                Start-Service -Name 'NTDS' -ErrorAction Stop
+                $existingSvc.WaitForStatus('Running', [TimeSpan]::FromSeconds(120))
+                Write-Verbose "PromoteDomainController: NTDS started successfully"
+                return
+            }
+            catch {
+                Write-Verbose "PromoteDomainController: Could not start NTDS: $_ - requesting reboot"
+                $global:DSCMachineStatus = 1
+                return
+            }
+        }
+
+        # No previous successful promotion.  Check for stale ntds.dit from a
+        # partial/failed attempt and clean it up before re-promoting.
+        $ditPath = Join-Path $this.DatabasePath 'ntds.dit'
+        if (Test-Path $ditPath) {
+            Write-Verbose "PromoteDomainController: Stale ntds.dit found without SysVol - force-removing failed promotion"
+            $errorsBefore = $global:Error.Count
+            try {
+                $dsrmPass = $this.SafeModeAdministratorPassword.Password
+                Uninstall-ADDSDomainController -ForceRemoval -Force `
+                    -LocalAdministratorPassword $dsrmPass `
+                    -DemoteOperationMasterRole:$true `
+                    -ErrorAction SilentlyContinue 2>&1 | ForEach-Object {
+                    Write-Verbose "PromoteDomainController: (force-remove) $_"
+                }
+            }
+            catch {
+                Write-Verbose "PromoteDomainController: Force-removal exception: $_"
+            }
+            $errorsAdded = $global:Error.Count - $errorsBefore
+            if ($errorsAdded -gt 0) {
+                for ($i = 0; $i -lt $errorsAdded; $i++) {
+                    $global:Error.RemoveAt(0)
+                }
+            }
+
+            if (Test-Path $ditPath) {
+                Write-Verbose "PromoteDomainController: ntds.dit still present after force-removal - requesting reboot"
+                $global:DSCMachineStatus = 1
+                return
+            }
+            Write-Verbose "PromoteDomainController: Force-removal complete - proceeding to fresh promotion"
+        }
+        else {
+            Write-Verbose "PromoteDomainController: No previous promotion detected - fresh promotion"
+        }
+
+        # Verify the credential can authenticate against the domain via LDAP
+        # before attempting promotion.  Log group memberships for diagnostics.
+        try {
+            $domainDN = ($this.DomainName.Split('.') | ForEach-Object { "DC=$_" }) -join ','
+            $networkPass = $this.Credential.GetNetworkCredential().Password
+            $de = New-Object System.DirectoryServices.DirectoryEntry(
+                "LDAP://$domainDN", $credUser, $networkPass)
+            $searcher = New-Object System.DirectoryServices.DirectorySearcher($de)
+            $searcher.Filter = "(&(objectClass=user)(sAMAccountName=$($this.Credential.GetNetworkCredential().UserName)))"
+            $searcher.PropertiesToLoad.Add('memberOf') | Out-Null
+            $searcher.PropertiesToLoad.Add('distinguishedName') | Out-Null
+            $userResult = $searcher.FindOne()
+            if ($userResult) {
+                Write-Verbose "PromoteDomainController: LDAP bind succeeded for '$credUser'"
+                $dn = $userResult.Properties['distinguishedname'][0]
+                Write-Verbose "PromoteDomainController: User DN: $dn"
+                $groups = @($userResult.Properties['memberof'])
+                if ($groups.Count -gt 0) {
+                    foreach ($g in $groups) {
+                        Write-Verbose "PromoteDomainController: Member of: $g"
+                    }
+                    $isDomainAdmin = $groups | Where-Object { $_ -like 'CN=Domain Admins,*' }
+                    $isEnterpriseAdmin = $groups | Where-Object { $_ -like 'CN=Enterprise Admins,*' }
+                    if (-not $isDomainAdmin) {
+                        Write-Verbose "PromoteDomainController: WARNING - '$credUser' is NOT in Domain Admins"
+                    }
+                    if (-not $isEnterpriseAdmin) {
+                        Write-Verbose "PromoteDomainController: WARNING - '$credUser' is NOT in Enterprise Admins"
+                    }
+                }
+                else {
+                    Write-Verbose "PromoteDomainController: WARNING - No group memberships returned for '$credUser'"
+                }
+            }
+            else {
+                Write-Verbose "PromoteDomainController: WARNING - LDAP search found no user matching '$credUser'"
+            }
+        }
+        catch {
+            Write-Verbose "PromoteDomainController: LDAP pre-check failed: $_"
+        }
+
+        Write-Verbose "PromoteDomainController: Purging Kerberos ticket cache"
+        & klist purge 2>&1 | Out-Null
+
+        $params = @{
+            DomainName                    = $this.DomainName
+            SafeModeAdministratorPassword = $this.SafeModeAdministratorPassword.Password
+            Credential                    = $this.Credential
+            NoRebootOnCompletion          = $true
+            Force                         = $true
+            DatabasePath                  = $this.DatabasePath
+            LogPath                       = $this.LogPath
+            SysvolPath                    = $this.SysvolPath
+            InstallDns                    = $this.InstallDns
+        }
+
+        if (-not $this.IsGlobalCatalog) {
+            $params['NoGlobalCatalog'] = $true
+        }
+
+        Write-Verbose "PromoteDomainController: Calling Install-ADDSDomainController for domain '$($this.DomainName)'"
+
+        # Snapshot error count so we can scrub errors added by the cmdlet.
+        $errorsBefore = $global:Error.Count
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+        # Use -ErrorAction SilentlyContinue and 2>&1 to prevent the
+        # non-terminating credential-check warning from reaching the LCM's
+        # error stream.  The -Force on Install-ADDSDomainController already
+        # auto-answers the confirmation; we just need to keep the error
+        # record out of DSC's view.
+        try {
+            Install-ADDSDomainController @params -ErrorAction SilentlyContinue 2>&1 | ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                    Write-Verbose "PromoteDomainController: (suppressed error) $($_.Exception.Message)"
+                }
+                else {
+                    Write-Verbose "PromoteDomainController: $($_)"
+                }
+            }
+        }
+        catch {
+            Write-Verbose "PromoteDomainController: Install-ADDSDomainController exception: $_"
+        }
+        $sw.Stop()
+        Write-Verbose "PromoteDomainController: Install-ADDSDomainController completed in $($sw.Elapsed.ToString())"
+
+        # If the call finished in under 60 seconds the promotion almost
+        # certainly did not succeed (a real promotion takes 10-20 min).
+        if ($sw.Elapsed.TotalSeconds -lt 60) {
+            Write-Verbose "PromoteDomainController: WARNING - Completed too quickly; promotion likely failed"
+        }
+
+        # Scrub any error records added during the call so the LCM doesn't
+        # report "threw one or more non-terminating errors".
+        $errorsAdded = $global:Error.Count - $errorsBefore
+        if ($errorsAdded -gt 0) {
+            Write-Verbose "PromoteDomainController: Scrubbing $errorsAdded error record(s) from `$global:Error"
+            for ($i = 0; $i -lt $errorsAdded; $i++) {
+                $global:Error.RemoveAt(0)
+            }
+        }
+        # Verify the promotion succeeded by checking the Netlogon SysVol key.
+        $promotionVerified = $false
+        try {
+            $nlSysvol = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -Name 'SysVol' -ErrorAction Stop
+            $domainSysVol = Join-Path $nlSysvol $this.DomainName
+            if (Test-Path $domainSysVol) {
+                $promotionVerified = $true
+            }
+        }
+        catch {}
+        $ditPath = Join-Path $this.DatabasePath 'ntds.dit'
+        $postSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
+        Write-Verbose "PromoteDomainController: Post-install - SysVol verified: $promotionVerified, ntds.dit exists: $(Test-Path $ditPath), NTDS: $(if ($postSvc) { $postSvc.Status } else { 'not found' })"
+        if (-not $promotionVerified) {
+            Write-Verbose "PromoteDomainController: WARNING - Netlogon SysVol key not present after Install-ADDSDomainController; promotion may have failed"
+        }
+
+        Write-Verbose "PromoteDomainController: Requesting reboot to complete promotion"
+        $global:DSCMachineStatus = 1
+    }
+
+    [bool] Test() {
+        Write-Verbose "PromoteDomainController: Testing DC status for '$env:COMPUTERNAME' in domain '$($this.DomainName)'"
+
+        # Use the same check as the ADDomain resource from ActiveDirectoryDsc:
+        # the Netlogon SysVol registry key is only written after a fully
+        # successful DC promotion.  Install-WindowsFeature AD-Domain-Services
+        # does NOT create it, so this reliably distinguishes 'role installed'
+        # from 'actually promoted'.
+        $promotionComplete = $false
+        try {
+            $nlSysvol = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -Name 'SysVol' -ErrorAction Stop
+            $domainSysVol = Join-Path $nlSysvol $this.DomainName
+            if (Test-Path $domainSysVol) {
+                $promotionComplete = $true
+                Write-Verbose "PromoteDomainController: Netlogon SysVol path '$domainSysVol' exists"
+            }
+            else {
+                Write-Verbose "PromoteDomainController: Netlogon SysVol registry set but domain path '$domainSysVol' missing"
+            }
+        }
+        catch {
+            Write-Verbose "PromoteDomainController: Netlogon SysVol registry key not present - not promoted"
+        }
+
+        if (-not $promotionComplete) {
+            Write-Verbose "PromoteDomainController: Promotion not complete - Set() required"
+            return $false
+        }
+
+        # Promotion completed.  Return true only if NTDS is Running so that
+        # downstream resources (DNS forwarders etc.) have a working AD.
+        $svc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') {
+            Write-Verbose "PromoteDomainController: NTDS is Running - fully promoted and operational"
+            return $true
+        }
+
+        Write-Verbose "PromoteDomainController: Promotion complete but NTDS is $(if ($svc) { $svc.Status } else { 'not found' }) - needs start or reboot"
+        return $false
+    }
+
+    [PromoteDomainController] Get() {
+        return $this
+    }
+}
+
+

@@ -1,4 +1,4 @@
-configuration Phase6
+﻿configuration Phase6
 {
     param
     (
@@ -11,6 +11,8 @@ configuration Phase6
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc', 'UpdateServicesDsc'
+    # Note: WSUSSync (early catalog sync) is fired in Phase 7, AFTER any PBIRS
+    # install on the same VM, so a PBIRS-triggered reboot can't interrupt it.
 
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -171,13 +173,11 @@ configuration Phase6
             }
         }
 
-        if ($standalone) {            
-            WSUSSync WSUSSync {
-                DependsOn  = $nextDepend
-                ServerName = $thisVM.vmName + "." + $DomainName
-            }
-            $nextDepend = "[WSUSSync]WSUSSync"
-        }
+        # NOTE: WSUSSync (early catalog sync) moved to Phase 7. On a dual-role
+        # VM (installSUP + installRP), Phase 7 PBIRS install could trigger a
+        # DSC-level reboot that interrupted the sync. Firing the sync at the
+        # end of Phase 7 (after PBIRS install completes) puts all install
+        # reboots before the sync starts.
 
         WriteStatus Complete {
             Status    = "Complete!"

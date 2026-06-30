@@ -1,0 +1,72 @@
+# Test-PS51Patterns.ps1
+# Pre-commit check for PS 5.1 runtime anti-patterns in staged files.
+# Called from .git/hooks/pre-commit for files that run inside VMs.
+
+$Files = git diff --cached --name-only --diff-filter=ACM |
+    Where-Object { $_ -match '(vmbuild/DSC/|vmbuild/common/|Common\.ScriptBlocks\.ps1|TemplateHelpDSC)' } |
+    Where-Object { $_ -notmatch 'Test-PS51Patterns\.ps1' }
+
+if (-not $Files) { exit 0 }
+
+$issues = @()
+
+foreach ($f in $Files) {
+    # Get added/modified lines from staged diff
+    $diffLines = git diff --cached -U0 -- $f |
+        Where-Object { $_ -match '^\+' -and $_ -notmatch '^\+\+\+' }
+
+    if (-not $diffLines) { continue }
+
+    foreach ($line in $diffLines) {
+        # Pattern 1: ::new($var) without @() wrapper
+        # Matches: ::new($items) but not ::new() or ::new($a, $b) or ::new([string[]]@($items))
+        if ($line -match '::new\(\$[^,)]+\)' -and $line -notmatch '@\(') {
+            $issues += "  $f  ::new(`$var) without @() -- PS 5.1 cannot match collection constructor overloads."
+            $issues += "    $($line.TrimStart('+').Trim())"
+            $issues += "    Fix: [string[]]@(`$var) or [type[]]@(`$var)"
+            $issues += ""
+        }
+
+        # Pattern 2: .Values or .Keys passed to cmdlet parameter without @()
+        if ($line -match '\.(Values|Keys)\b' -and $line -notmatch '@\(' -and $line -match '-[A-Za-z]') {
+            $issues += "  $f  `$hash.Values/Keys without @() -- PS 5.1 cannot bind ValueCollection/KeyCollection."
+            $issues += "    $($line.TrimStart('+').Trim())"
+            $issues += "    Fix: @(`$hash.Values)"
+            $issues += ""
+        }
+
+        # Pattern 3: ?? null-coalescing operator (PS 7+ only)
+        if ($line -match '\?\?' -and $line -notmatch '^\s*#') {
+            $issues += "  $f  '??' null-coalescing operator -- not supported in PS 5.1."
+            $issues += "    $($line.TrimStart('+').Trim())"
+            $issues += "    Fix: if (`$var) { `$var } else { 'default' }"
+            $issues += ""
+        }
+
+        # Pattern 4: $variable: with invalid scope qualifier
+        # "$attempt:" is parsed as a scope-qualified variable (like "$script:")
+        # which throws 'Variable reference is not valid' at runtime.
+        # Valid scopes: global, local, script, private, using, workflow, env,
+        # variable, function, alias, plus drive letters (C:, HKLM:, etc.)
+        $validScopes = 'global|local|script|private|using|workflow|env|variable|function|alias|[A-Z]'
+        if ($line -match '\$([A-Za-z_]\w*):\s' -and $Matches[1] -notmatch "^($validScopes)$") {
+            $issues += "  $f  Invalid variable scope '`$$($Matches[1]):' -- colon is treated as a scope qualifier."
+            $issues += "    $($line.TrimStart('+').Trim())"
+            $issues += "    Fix: use `${$($Matches[1])} to delimit the variable name before the colon."
+            $issues += ""
+        }
+    }
+}
+
+if ($issues.Count -gt 0) {
+    Write-Host ""
+    Write-Host "ERROR: PS 5.1 runtime anti-patterns found in files that execute inside VMs." -ForegroundColor Red
+    Write-Host "These patterns pass parsing but fail at runtime under PowerShell 5.1." -ForegroundColor Red
+    Write-Host ""
+    $issues | ForEach-Object { Write-Host $_ }
+    Write-Host "Test with: powershell.exe -NoProfile -Command { <pattern> }"
+    Write-Host "To bypass (if false positive): git commit --no-verify"
+    exit 1
+}
+
+exit 0

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param ()
 
 $ErrorActionPreference = 'Continue'
@@ -95,6 +95,48 @@ function Invoke-System32CurlMaintenance {
     }
 
     Write-LogMessage 'System32 curl maintenance completed.'
+}
+
+function Invoke-GitMaintenance {
+    Write-LogMessage 'Starting git maintenance...'
+
+    # gc.auto is set to 0 in VMBuild.cmd to prevent pack-file contention
+    # during fetch/pull on Windows (inline gc tries to rewrite packs while
+    # fetch still holds handles -> "Unlink of file ... failed" hang).
+    # Run gc explicitly here where nothing else is using the repo.
+    $repoRoot = Split-Path $scriptPath -Parent
+    try {
+        $gcOutput = & git -C $repoRoot gc 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-LogMessage 'git gc completed successfully.'
+        }
+        else {
+            Write-LogMessage "git gc returned exit code $LASTEXITCODE : $gcOutput" -Level 'WARNING'
+        }
+    }
+    catch {
+        Write-LogMessage "git gc threw: $_" -Level 'WARNING'
+    }
+
+    # Exclude .git from Windows Defender real-time scanning.
+    # Defender holds file handles during scan, contributing to pack-file
+    # locking when git rewrites packs.
+    $repoGitDir = Join-Path $repoRoot '.git'
+    if (Test-Path $repoGitDir) {
+        try {
+            $prefs = Get-MpPreference -ErrorAction Stop
+            if ($prefs.ExclusionPath -notcontains $repoGitDir) {
+                Add-MpPreference -ExclusionPath $repoGitDir -ErrorAction Stop
+                Write-LogMessage "Added Defender exclusion for $repoGitDir"
+            }
+        }
+        catch {
+            # Non-fatal: Defender may not be present or we may lack permissions
+            Write-LogMessage "Could not configure Defender exclusion: $_" -Level 'WARNING'
+        }
+    }
+
+    Write-LogMessage 'Git maintenance completed.'
 }
 
 function Invoke-DotNet6Maintenance {
@@ -631,6 +673,7 @@ Write-LogMessage "Script path: $scriptPath"
 Write-LogMessage "Log file: $logFile"
 Write-LogMessage '========================================' 
 
+try { Invoke-GitMaintenance } catch { Write-LogMessage "Git maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-System32CurlMaintenance } catch { Write-LogMessage "System32 curl maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }

@@ -1,4 +1,5 @@
-﻿# Common.ps1
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+# Common.ps1
 [CmdletBinding()]
 param (
     [Parameter()]
@@ -10,7 +11,7 @@ param (
     [Parameter()]
     [switch]$GetLatestHotfixVersion,
     [Parameter()]
-    [ValidateSet("Default", "Fast", "Full")]
+    [ValidateSet("Default", "Fast", "Full", "RemoveOnly")]
     [string]$StartupProfile = "Default",
     [Parameter()]
     [switch]$FastInit,
@@ -29,8 +30,12 @@ param (
     [Parameter()]
     [switch]$DisableInitContextCache,
     [Parameter()]
-    [ValidateRange(1, 1440)]
-    [int]$InitContextCacheMinutes = 30,
+    # IsAzureVM / CorpNet detection effectively never changes for a given host,
+    # so cache it for 30 days (43200 min). A short TTL caused Phase 10 child
+    # jobs (InJob path) to read an expired cache, default IsAzureVM to $false,
+    # and silently drop Azure-gated fixes like Fix_ActivateWindows.
+    [ValidateRange(1, 525600)]
+    [int]$InitContextCacheMinutes = 43200,
     [Parameter()]
     [switch]$DisableHotfixCache,
     [Parameter()]
@@ -77,12 +82,38 @@ Function Write-ProgressElapsed {
         if ($FailCount) {
             $msg = $msg + " Failed $FailCount / $FailCountMax"
         }
-        Write-Progress2 $msg -Status $text -PercentComplete $percent
+        Write-Progress2 $msg -Status $text -PercentComplete $percent -force
     }
     catch {
         Write-Exception $_
-        Write-Progress2 "Exception" -Status $_
+        Write-Progress2 "Exception" -Status $_ -force
     }
+}
+
+# Lightweight diagnostic logger for the progress-bar investigation. Gated by
+# $global:ProgressDiag so it is a no-op in normal runs. Writes to a dedicated
+# progressdiag.log (next to the build log) so it never pollutes VMBuild.log.
+# Safe to call from parent and child-job processes; concurrent-write failures
+# are swallowed since this is diagnostic-only.
+Function Write-ProgressDiagLog {
+    param([string]$Message)
+    if (-not $global:ProgressDiag) { return }
+    try {
+        $diagPath = $global:ProgressDiagPath
+        if (-not $diagPath) {
+            if ($Common -and $Common.LogPath) {
+                $base = Split-Path $Common.LogPath -Parent
+            }
+            else {
+                $base = $env:TEMP
+            }
+            $diagPath = Join-Path $base "progressdiag.log"
+            $global:ProgressDiagPath = $diagPath
+        }
+        $line = "{0} [pid:{1}] {2}`r`n" -f (Get-Date -Format "HH:mm:ss.fff"), $PID, $Message
+        [System.IO.File]::AppendAllText($diagPath, $line)
+    }
+    catch {}
 }
 
 #Main wrapper for Write-Progress.  This allows all params, and catches any errors
@@ -189,8 +220,32 @@ Function Write-Progress2Impl {
             if ($force -or $PSBoundParameters.TryGetValue('force', [ref]$forcevalue)) {
                 $PSBoundParameters.remove("force")
                 $force = $true
-                $OriginalProgressPreference = $Global:ProgressPreference
-                $Global:ProgressPreference = 'Continue'
+
+                # Diagnostic: count how often the -force path runs (i.e. how often
+                # progress is rendered with ProgressPreference set to 'Continue').
+                if ($global:ProgressDiag) {
+                    if (-not $global:ProgressForceFlips) { $global:ProgressForceFlips = 0 }
+                    $global:ProgressForceFlips++
+                    Write-ProgressDiagLog ("[ForceFlip] tid={0} useLocalPref={1} Activity={2}" -f [System.Threading.Thread]::CurrentThread.ManagedThreadId, ($global:ProgressForceUseLocalPref -ne $false), $Activity)
+                }
+
+                # Root-cause fix for Phase 2 orphan progress bars: PS7 auto-renders a
+                # background job's RAW progress records whenever the PARENT session's
+                # $Global:ProgressPreference is 'Continue'. The old code flipped $Global
+                # to 'Continue' to render our managed bar, which opened a race where any
+                # child-job DataAdded callback surfaced an orphan bar (no VM-name prefix)
+                # at the bottom of the screen. Setting a FUNCTION-LOCAL $ProgressPreference
+                # instead lets the steppable Write-Progress (invoked in this scope) render
+                # our bar while $Global stays 'SilentlyContinue', so the auto-render path
+                # never fires. Set $global:ProgressForceUseLocalPref = $false to restore
+                # the old global-flip behavior (used for A/B repro of the orphan bug).
+                if ($global:ProgressForceUseLocalPref -ne $false) {
+                    $ProgressPreference = 'Continue'
+                }
+                else {
+                    $OriginalProgressPreference = $Global:ProgressPreference
+                    $Global:ProgressPreference = 'Continue'
+                }
             }
 
             $logvalue = $null
@@ -204,20 +259,24 @@ Function Write-Progress2Impl {
             if ($PSBoundParameters.TryGetValue('Activity', [ref]$Activityvalue)) {
                 $Activityvalue = $Activity.Trim()
                 $Activityvalue = "  " + $Activityvalue
-                # if ($Activityvalue.Contains("`n")) {
-                #     Write-Log "$Activity contains new-line"
-                # }
                 $PSBoundParameters['Activity'] = $Activityvalue
             }
 
             $StatusValue = $null
             if ($PSBoundParameters.TryGetValue('Status', [ref]$StatusValue)) {
-                $StatusValue = $StatusValue.TrimEnd()
-
-                #if ($StatusValue.Contains("`n")) {
-                #    Write-Log "$StatusValue contains new-line"
-                #}
-                $PSBoundParameters['Status'] = $StatusValue
+                if ([string]::IsNullOrWhiteSpace($StatusValue)) {
+                    # A whitespace-only Status (e.g. PS remoting's built-in
+                    # "Preparing modules for first use." record forwarded by
+                    # Invoke-VmCommand) trims to an empty string, which the wrapped
+                    # Write-Progress rejects via ValidateNotNullOrEmpty and throws on
+                    # every record. Status is optional, so drop it instead of failing.
+                    $PSBoundParameters.Remove('Status') | Out-Null
+                    $Status = $null
+                }
+                else {
+                    $StatusValue = $StatusValue.TrimEnd()
+                    $PSBoundParameters['Status'] = $StatusValue
+                }
             }
 
             if ($writeLog) {
@@ -228,34 +287,21 @@ Function Write-Progress2Impl {
                     Write-Log "Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
                     $Global:LastStatus = $Status + $Percent
                 }
-                else {
-                    #Write-Log "Ignored Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
-                }
             }
 
             $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
             $scriptCmd = { & $wrappedCmd @PSBoundParameters }
-
             $steppablePipeline = $scriptCmd.GetSteppablePipeline($myInvocation.CommandOrigin)
             $steppablePipeline.Begin($PSCmdlet)
         }
         catch {
             throw
         }
-        finally {
-            if ($force) {
-                $Global:ProgressPreference = $OriginalProgressPreference
-            }
-        }
 
     }
     process {
 
         try {
-            if ($force) {
-                $OriginalProgressPreference = $Global:ProgressPreference
-                $Global:ProgressPreference = 'Continue'
-            }
             if ($Activity) {
                 $Activity = $Activity.TrimEnd()
                 if ($Activity.Contains("`n")) {
@@ -276,15 +322,20 @@ Function Write-Progress2Impl {
                 $PercentComplete = 99
             }
 
-            $steppablePipeline.Process($_)
+            if ($force) {
+                $steppablePipeline.Process($_)
+                # Only the global-flip path needs restoring; the function-local
+                # $ProgressPreference path is discarded automatically at function exit.
+                if ($global:ProgressForceUseLocalPref -eq $false) {
+                    $Global:ProgressPreference = $OriginalProgressPreference
+                }
+            }
+            else {
+                $steppablePipeline.Process($_)
+            }
         }
         catch {
             throw
-        }
-        finally {
-            if ($force) {
-                $Global:ProgressPreference = $OriginalProgressPreference
-            }
         }
 
     }
@@ -336,6 +387,10 @@ function Get-LogBufferEntry {
 
 function Invoke-LogRotateIfNeeded {
     param([string]$Path)
+    # Only rotate the base VMBuild.log (menu log). Domain-specific deploy
+    # logs (VMBuild.<domain>.log) get a fresh file per deployment via the
+    # timestamp-rename in New-Lab.ps1 and should never be split mid-build.
+    if ($Path -notmatch '[/\\]VMBuild\.log$') { return }
     try {
         $entry = $global:LogBuffers[$Path]
         if ($entry) {
@@ -366,6 +421,8 @@ function Invoke-LogRotateIfNeeded {
 
 function Flush-LogBuffer {
     [CmdletBinding(DefaultParameterSetName = 'Path')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '',
+        Justification = 'Established internal helper name; renaming would touch many call sites across the codebase.')]
     param(
         [Parameter(ParameterSetName = 'Path')]
         [string]$Path,
@@ -401,6 +458,11 @@ function Register-LogBufferExitFlush {
     try {
         Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action {
             try {
+                # Stop the verbose tail window
+                if ($global:Common.VerboseTailProcess -and -not $global:Common.VerboseTailProcess.HasExited) {
+                    try { $global:Common.VerboseTailProcess.Kill() } catch { }
+                    $global:Common.VerboseTailProcess = $null
+                }
                 # Stop the background flush timer before final flush
                 if ($global:LogFlushTimer) {
                     $global:LogFlushTimer.Dispose()
@@ -480,6 +542,72 @@ namespace MemLabs {
             2000,                # initial delay (ms)
             2000                 # period (ms) — flush every 2 seconds
         )
+    }
+}
+
+function Start-VerboseTailWindow {
+    <#
+    .SYNOPSIS
+    Spawns a secondary PowerShell window that tails the log file for verbose entries.
+    #>
+    if (-not $Common.LogPath -or -not (Test-Path $Common.LogPath)) {
+        Write-Log "Cannot start verbose tail window: log file not found." -Warning
+        return
+    }
+    if ($Common.VerboseTailProcess -and -not $Common.VerboseTailProcess.HasExited) {
+        Write-Log "Verbose tail window is already running (PID $($Common.VerboseTailProcess.Id))." -Verbose
+        return
+    }
+
+    $logPath = $Common.LogPath
+    # Build a self-contained script that tails the log and extracts verbose
+    # entries from the CMTrace XML format (type="0").
+    $tailScript = @"
+`$host.UI.RawUI.WindowTitle = 'MemLabs Verbose Output'
+Write-Host 'Tailing verbose entries from:' -ForegroundColor Cyan
+Write-Host '  $logPath' -ForegroundColor Cyan
+Write-Host ('  Started: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) -ForegroundColor Cyan
+Write-Host ''
+Get-Content -LiteralPath '$logPath' -Wait -Tail 0 | ForEach-Object {
+    if (`$_ -match 'type="0"' -and `$_ -match '<!\[LOG\[(.+?)\]LOG\]') {
+        `$msg = `$Matches[1]
+        `$ts = if (`$_ -match 'time="([^"]+)"') { `$Matches[1].Substring(0,12) } else { '' }
+        `$comp = if (`$_ -match 'component="([^"]+)"') { `$Matches[1] } else { '' }
+        Write-Host "`$ts [`$comp] `$msg" -ForegroundColor DarkGray
+    }
+}
+"@
+    $tempScript = Join-Path $env:TEMP "memlabs-verbose-tail.ps1"
+    Set-Content -LiteralPath $tempScript -Value $tailScript -Encoding UTF8 -Force
+
+    $psExe = if ($Common.PS7) { "pwsh.exe" } else { "powershell.exe" }
+    $Common.VerboseTailProcess = Start-Process $psExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tempScript`"" `
+        -PassThru -ErrorAction SilentlyContinue
+
+    if ($Common.VerboseTailProcess) {
+        Write-Log "Started verbose tail window (PID $($Common.VerboseTailProcess.Id))." -LogOnly
+    }
+    else {
+        Write-Log "Failed to start verbose tail window." -Warning
+    }
+}
+
+function Stop-VerboseTailWindow {
+    <#
+    .SYNOPSIS
+    Stops the secondary verbose tail window if it is still running.
+    #>
+    if ($Common.VerboseTailProcess -and -not $Common.VerboseTailProcess.HasExited) {
+        try {
+            $Common.VerboseTailProcess.Kill()
+            $Common.VerboseTailProcess = $null
+        }
+        catch { }
+    }
+    # Clean up temp script
+    $tempScript = Join-Path $env:TEMP "memlabs-verbose-tail.ps1"
+    if (Test-Path $tempScript) {
+        Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -658,8 +786,8 @@ function Write-Log {
         $writeHost = $true
     }
 
-    # Always log verbose to host, if VerboseEnabled
-    if ($IsVerbose -and $Common.VerboseEnabled) {
+    # Always log verbose to host, if VerboseEnabled and not suppressed for menus
+    if ($IsVerbose -and $Common.VerboseEnabled -and -not $Common.VerboseToLogOnly) {
         $writeHost = $true
     }
 
@@ -1013,49 +1141,131 @@ function Get-File {
                 }
             }
 
-            $copyAttempts = if ($isVhdxCopy) { 2 } else { 1 }
-            for ($copyAttempt = 1; $copyAttempt -le $copyAttempts; $copyAttempt++) {
+            # --- Resilient copy loop for local files (especially VHDX) ---
+            # Strategy: alternate BITS and robocopy with increasing backoff.
+            # Only give up on non-recoverable errors (source missing, disk
+            # full, access denied). Transient I/O errors under heavy load
+            # are retried indefinitely.
+            if (-not $isVhdxCopy) {
+                # Non-VHDX: single BITS attempt, no retry loop
                 Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
-
-                if (Test-Path $Destination) {
-                    return $true
-                }
-
-                # File missing after BITS reported success — gather diagnostics
-                $diagParts = @()
-                if (-not (Test-Path $destinationDirectory)) {
-                    $diagParts += "destination directory MISSING"
-                }
-                else {
-                    $dirFiles = @(Get-ChildItem -LiteralPath $destinationDirectory -ErrorAction SilentlyContinue)
-                    $diagParts += "directory exists ($($dirFiles.Count) files)"
-                }
-                try {
-                    $drive = Get-PSDrive -Name (Split-Path $Destination -Qualifier).TrimEnd(':') -ErrorAction Stop
-                    $diagParts += "drive free: $([Math]::Round($drive.Free / 1GB, 2))GB"
-                }
-                catch { $diagParts += "drive free: unknown" }
-                $diagMsg = $diagParts -join "; "
-                Write-Log "Get-File: BITS returned success but file missing. Diagnostics: $diagMsg" -Warning
-
-                if ($isVhdxCopy -and $copyAttempt -lt $copyAttempts) {
-                    Write-Log "Get-File: Transfer reported success but '$Destination' is missing. Waiting 30 seconds before retry ($copyAttempt/$copyAttempts)." -Warning
-                    Start-Sleep -Seconds 30
-
-                    if (Test-Path $Destination) {
-                        return $true
-                    }
-
-                    Write-Log "Get-File: '$Destination' still missing after 30 seconds. Retrying copy." -Warning
-                    continue
-                }
-
+                if (Test-Path $Destination) { return $true }
                 Write-Log "Get-File: Transfer appeared to succeed but '$Destination' does not exist." -Failure
                 return $false
             }
 
-            # All retry attempts exhausted without returning — should not reach here
-            Write-Log "Get-File: Copy of '$sourceDisplay' failed after $copyAttempts attempt(s)." -Failure
+            # VHDX copy — keep trying until it works or we hit a fatal error
+            $maxRounds = 10          # 10 rounds × (BITS + robocopy) = 20 total attempts
+            $lastError = $null
+            for ($round = 1; $round -le $maxRounds; $round++) {
+
+                # Check for non-recoverable conditions before each round
+                if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+                    Write-Log "Get-File: Source '$sourceDisplay' no longer exists. Cannot retry." -Failure
+                    return $false
+                }
+                try {
+                    $drvName = (Split-Path $Destination -Qualifier).TrimEnd(':')
+                    $drv = Get-PSDrive -Name $drvName -ErrorAction Stop
+                    $srcSize = (Get-Item -LiteralPath $Source -ErrorAction Stop).Length
+                    if ([int64]$drv.Free -lt ($srcSize + 1GB)) {
+                        $freeGb = [Math]::Round($drv.Free / 1GB, 2)
+                        $needGb = [Math]::Round(($srcSize + 1GB) / 1GB, 2)
+                        Write-Log "Get-File: Destination drive '$drvName':\ has only ${freeGb}GB free (need ${needGb}GB). Cannot retry." -Failure
+                        return $false
+                    }
+                }
+                catch {
+                    Write-Log "Get-File: Could not check free space: $($_.ToString().Trim())" -Warning
+                }
+
+                # --- Try BITS ---
+                $bitsError = $null
+                try {
+                    Write-Log "Get-File: BITS copy attempt (round $round/$maxRounds) for '$sourceDisplay'" -LogOnly
+                    Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    $bitsError = $_
+                    if (Test-Path $Destination) {
+                        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+                    }
+                }
+
+                if (-not $bitsError -and (Test-Path $Destination)) {
+                    return $true
+                }
+
+                if ($bitsError) {
+                    $lastError = $bitsError
+                    # Check for access-denied / permission errors — non-recoverable
+                    $errMsg = $bitsError.ToString()
+                    if ($errMsg -match 'Access is denied|0x80070005') {
+                        Write-Log "Get-File: BITS access denied for '$sourceDisplay'. Cannot retry." -Failure
+                        throw $bitsError
+                    }
+                    Write-Log "Get-File: BITS failed (round $round): $($errMsg.Trim()). Trying robocopy..." -Warning
+                }
+                else {
+                    Write-Log "Get-File: BITS reported success but '$Destination' missing (round $round). Trying robocopy..." -Warning
+                }
+
+                # --- Try robocopy ---
+                if (Test-Path -LiteralPath $Source -PathType Leaf) {
+                    $roboSrc = Split-Path $Source -Parent
+                    $roboDst = Split-Path $Destination -Parent
+                    $roboFile = Split-Path $Source -Leaf
+                    $destFile = Split-Path $Destination -Leaf
+                    $needsRename = $roboFile -ne $destFile
+
+                    # Clean up any partial file
+                    if (Test-Path $Destination) {
+                        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+                    }
+                    if ($needsRename) {
+                        $tempCopy = Join-Path $roboDst $roboFile
+                        if (Test-Path $tempCopy) {
+                            Remove-Item -LiteralPath $tempCopy -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+
+                    # /J = unbuffered I/O (avoids cache pressure on large files)
+                    # /R:2 /W:10 = 2 retries, 10s wait (robocopy's own retries)
+                    # /NP = no progress percentage
+                    $roboArgs = @($roboSrc, $roboDst, $roboFile, '/J', '/R:2', '/W:10', '/NP')
+                    Write-Log "Get-File: robocopy (round $round) $($roboArgs -join ' ')" -LogOnly
+                    $roboResult = & robocopy @roboArgs 2>&1
+                    $roboExit = $LASTEXITCODE
+
+                    if ($roboExit -lt 8) {
+                        if ($needsRename) {
+                            $copiedPath = Join-Path $roboDst $roboFile
+                            if (Test-Path $copiedPath) {
+                                Rename-Item -LiteralPath $copiedPath -NewName $destFile -Force -ErrorAction Stop
+                            }
+                        }
+                        if (Test-Path $Destination) {
+                            Write-Log "Get-File: robocopy succeeded (round $round, exit $roboExit)."
+                            return $true
+                        }
+                    }
+
+                    $roboTail = ($roboResult | Select-Object -Last 3) -join " | "
+                    $lastError = "robocopy exit $roboExit : $roboTail"
+                    Write-Log "Get-File: robocopy failed (round $round, exit $roboExit): $roboTail" -Warning
+                }
+
+                # Backoff before next round — cap at 60s
+                if ($round -lt $maxRounds) {
+                    $delay = [Math]::Min(60, 15 * $round)
+                    Write-Log "Get-File: Copy of '$sourceDisplay' failed (round $round/$maxRounds). Retrying in ${delay}s..." -Warning
+                    Start-Sleep -Seconds $delay
+                }
+            }
+
+            # All rounds exhausted
+            Write-Log "Get-File: Copy of '$sourceDisplay' failed after $maxRounds rounds of BITS + robocopy. Last error: $lastError" -Failure
+            if ($lastError -is [System.Management.Automation.ErrorRecord]) { throw $lastError }
             return $false
         }
 
@@ -1097,9 +1307,7 @@ function Copy-ItemSafe {
         [Parameter(Mandatory = $false)]
         [switch] $WhatIf,
         [Parameter(Mandatory = $false)]
-        [switch]$Force,
-        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
-        [int]$TimeoutSeconds = 360
+        [switch]$Force
     )
     #$PSScriptRoot = $using:PSScriptRoot
     $location = $PSScriptRoot
@@ -1122,6 +1330,18 @@ function Copy-ItemSafe {
             #Write-Host "Loading common: . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose"
             . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
+            # Dot-sourcing Common.ps1 -InJob resets $Common.LogPath to the base
+            # VMBuild.log. Re-point it to the domain-specific log (same pattern as
+            # the phase workers in Common.ScriptBlocks.ps1) so this nested job's
+            # entries land in VMBuild.<domain>.log, not VMBuild.log.
+            $domainNameForLogging = $using:VMDomainName
+            if (-not $domainNameForLogging -or $domainNameForLogging -eq "WORKGROUP") {
+                try { $domainNameForLogging = (Get-VMNote -VMName $using:VMName).domain } catch { }
+            }
+            if ($domainNameForLogging) {
+                $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+            }
+
             $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName
 
             if ($ps) {
@@ -1142,35 +1362,168 @@ function Copy-ItemSafe {
 
     write-log "[Copy-ItemSafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force" -LogOnly
 
+    # Scale timeouts based on concurrent VM load. More VMs = more PSDirect
+    # contention = slower copies. Avoid adding heartbeat probe load too often.
+    $runningVmCount = @(Get-VM -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' }).Count
+    $extraVms = [Math]::Max(0, $runningVmCount - 8)
+
+    $pollIntervalSeconds = 30
+    $stallTimeoutSeconds = 30 + ($extraVms * 5)    # 30s base + 5s per VM over 8
+    $maxTotalSeconds = 1800                         # Hard cap: 30 minutes per attempt
+    $guestHeartbeatIntervalSeconds = 120 + ($extraVms * 5)  # 120s base + 5s per VM over 8
+
+    Write-Log "[Copy-ItemSafe] [$VMName] $runningVmCount running VMs: stallTimeout=${stallTimeoutSeconds}s, heartbeatInterval=${guestHeartbeatIntervalSeconds}s" -LogOnly
+
+    # Derive the guest-side check path for heartbeat size monitoring
+    $guestCheckPath = $Destination
+    if ($Recurse) {
+        # Recursive copy: source folder lands as a subfolder of Destination
+        $guestCheckPath = Join-Path $Destination (Split-Path $Path -Leaf)
+    }
+
     $retries = 3
     while ($retries -gt 0) {
-        $job = start-job -ScriptBlock $CopyItemScript
-        $wait = Wait-Job -Timeout $TimeoutSeconds -Job $job
-        $job
-        if ($wait.State -eq "Running") {
-            Stop-Job $job | out-null
-            remove-job -job $job | out-null
-            $retries--
-        }
-        else {
-            if ($wait.State -eq "Completed") {
-                $result = Receive-Job $job
-                write-log "[Copy-ItemSafe] returned: $result" -LogOnly
-                remove-job $job | out-null
-                if ($result -eq $false) {
-                    Write-Log "[Copy-ItemSafe] Job completed but scriptblock returned failure. Retries left: $($retries - 1)" -Warning
-                    $retries--
-                    continue
-                }
-                return $true
-            }
-            else {
-                write-log "[Copy-ItemSafe] State = $($wait.State)" -logonly
-                Stop-Job $job | out-null
-                remove-job $job | out-null
-                $retries--
+        $job = Start-Job -ScriptBlock $CopyItemScript
+        $attemptStart = Get-Date
+        $lastProgressFingerprint = ''
+        $lastProgressTime = $attemptStart
+        $timedOut = $false
+        $lastGuestHeartbeatTime = [datetime]::MinValue
+        $lastGuestSize = -1
+
+        # On the last retry, skip stall detection and allow the full hard cap.
+        # Earlier retries use stall detection to fail fast and retry sooner.
+        $isLastRetry = $retries -eq 1
+
+        # Poll loop: check every $pollIntervalSeconds whether the copy is making progress
+        while ($job.State -eq "Running") {
+            $null = Wait-Job -Timeout $pollIntervalSeconds -Job $job
+            if ($job.State -ne "Running") { break }
+
+            $elapsedSeconds = [int]((Get-Date) - $attemptStart).TotalSeconds
+
+            # Hard cap safety net
+            if ($elapsedSeconds -ge $maxTotalSeconds) {
+                Write-Log "[Copy-ItemSafe] [$VMName] Copy hit hard cap of ${maxTotalSeconds}s copying $Path. Retries left: $($retries - 1)" -Warning
+                $timedOut = $true
+                break
             }
 
+            # Check progress via the job's Progress stream.
+            # Copy-Item emits ProgressRecords: Count increases per new file,
+            # and PercentComplete/StatusDescription update per chunk within a file.
+            # Track a fingerprint of (Count + latest record state) so both
+            # new-file progress AND byte-level progress on large files (ISOs) are detected.
+            $progressStream = if ($job.ChildJobs.Count -gt 0) { $job.ChildJobs[0].Progress } else { $job.Progress }
+            $currentCount = $progressStream.Count
+            $fingerprint = "$currentCount"
+            $progressDetail = ''
+            if ($currentCount -gt 0) {
+                $latestRecord = $progressStream[$currentCount - 1]
+                $fingerprint = "$currentCount|$($latestRecord.PercentComplete)|$($latestRecord.StatusDescription)"
+                $progressDetail = "$currentCount items, $($latestRecord.PercentComplete)%"
+                if ($latestRecord.CurrentOperation) {
+                    # Trim long paths to just the filename for log readability
+                    $progressDetail += " ($([System.IO.Path]::GetFileName($latestRecord.CurrentOperation)))"
+                }
+            }
+
+            if ($fingerprint -ne $lastProgressFingerprint) {
+                # Copy is making progress (new file started, or bytes advancing on current file)
+                if ($progressDetail) {
+                    Write-Log "[Copy-ItemSafe] [$VMName] Progress: $progressDetail (${elapsedSeconds}s elapsed)" -LogOnly
+                }
+                $lastProgressFingerprint = $fingerprint
+                $lastProgressTime = Get-Date
+            }
+            else {
+                # No progress from the Progress stream. Check if we should do a guest heartbeat.
+                $latestPercent = if ($currentCount -gt 0) { $progressStream[$currentCount - 1].PercentComplete } else { 0 }
+                $isIndeterminate = $currentCount -gt 0 -and $latestPercent -eq -1
+                $stallSeconds = [int]((Get-Date) - $lastProgressTime).TotalSeconds
+
+                # Guest heartbeat: check actual file size on the VM to detect real progress
+                # that the Progress stream doesn't report.
+                $heartbeatAlive = $false
+                $secsSinceHeartbeat = ((Get-Date) - $lastGuestHeartbeatTime).TotalSeconds
+                if ($stallSeconds -ge $stallTimeoutSeconds -and $secsSinceHeartbeat -ge $guestHeartbeatIntervalSeconds) {
+                    $lastGuestHeartbeatTime = Get-Date
+                    try {
+                        $checkSession = Get-VmSession -VmName $VMName -VmDomainName $VMDomainName -MaxRetries 1 -Quiet
+                        if ($checkSession) {
+                            $currentGuestSize = Invoke-Command -Session $checkSession -ScriptBlock {
+                                param($p)
+                                if (Test-Path $p) {
+                                    $item = Get-Item $p -EA SilentlyContinue
+                                    if ($item.PSIsContainer) {
+                                        (Get-ChildItem $p -Recurse -File -EA SilentlyContinue | Measure-Object Length -Sum -EA SilentlyContinue).Sum
+                                    }
+                                    else { $item.Length }
+                                }
+                                else { 0 }
+                            } -ArgumentList $guestCheckPath -ErrorAction SilentlyContinue
+                            if ($null -eq $currentGuestSize) { $currentGuestSize = 0 }
+
+                            if ($currentGuestSize -gt $lastGuestSize -and $lastGuestSize -ge 0) {
+                                $deltaMB = [Math]::Round(($currentGuestSize - $lastGuestSize) / 1MB, 1)
+                                $totalMB = [Math]::Round($currentGuestSize / 1MB, 1)
+                                Write-Log "[Copy-ItemSafe] [$VMName] Guest heartbeat: +${deltaMB} MB (${totalMB} MB total at $guestCheckPath, ${elapsedSeconds}s elapsed)" -LogOnly
+                                $lastProgressTime = Get-Date  # copy IS alive, reset stall timer
+                                $heartbeatAlive = $true
+                            }
+                            else {
+                                $totalMB = [Math]::Round([Math]::Max($currentGuestSize, 0) / 1MB, 1)
+                                Write-Log "[Copy-ItemSafe] [$VMName] Guest heartbeat: no growth (${totalMB} MB at $guestCheckPath, ${elapsedSeconds}s elapsed)" -LogOnly
+                            }
+                            $lastGuestSize = $currentGuestSize
+                        }
+                    }
+                    catch {
+                        Write-Log "[Copy-ItemSafe] [$VMName] Guest heartbeat failed: $_" -LogOnly
+                    }
+                }
+
+                if (-not $heartbeatAlive -and -not $isLastRetry) {
+                    if (-not $isIndeterminate -and $stallSeconds -ge $stallTimeoutSeconds) {
+                        $stallDetail = if ($progressDetail) { " (last: $progressDetail)" } else { '' }
+                        Write-Log "[Copy-ItemSafe] [$VMName] Copy stalled for ${stallSeconds}s with no progress${stallDetail} copying $Path. Retries left: $($retries - 1)" -Warning
+                        $timedOut = $true
+                        break
+                    }
+                    else {
+                        $indeterminateTag = if ($isIndeterminate) { " [indeterminate]" } else { "" }
+                        Write-Log "[Copy-ItemSafe] [$VMName] No new progress for ${stallSeconds}s (${elapsedSeconds}s total)${indeterminateTag}" -LogOnly
+                    }
+                }
+                elseif (-not $heartbeatAlive -and $isLastRetry) {
+                    Write-Log "[Copy-ItemSafe] [$VMName] Last retry: no new progress for ${stallSeconds}s, waiting up to ${maxTotalSeconds}s (${elapsedSeconds}s elapsed)" -LogOnly
+                }
+            }
+        }
+
+        if ($timedOut) {
+            Stop-Job $job | Out-Null
+            Remove-Job -Job $job | Out-Null
+            $retries--
+            continue
+        }
+
+        if ($job.State -eq "Completed") {
+            $result = Receive-Job $job
+            Write-Log "[Copy-ItemSafe] returned: $result" -LogOnly
+            Remove-Job $job | Out-Null
+            if ($result -eq $false) {
+                Write-Log "[Copy-ItemSafe] [$VMName] Job completed but scriptblock returned failure. Retries left: $($retries - 1)" -Warning
+                $retries--
+                continue
+            }
+            return $true
+        }
+        else {
+            Write-Log "[Copy-ItemSafe] [$VMName] Job ended with state '$($job.State)' copying $Path. Retries left: $($retries - 1)" -Warning
+            Stop-Job $job | Out-Null
+            Remove-Job -Job $job | Out-Null
+            $retries--
         }
     }
     return $false
@@ -1269,7 +1622,7 @@ function Start-CurlTransfer {
     $retryCount = 0
     $success = $false
 
-    Write-Host
+    if (-not $Silent) { Write-Host }
 
     do {
         $retryCount++
@@ -1286,21 +1639,28 @@ function Start-CurlTransfer {
             0 {
                 # Success
                 $success = $true
-                Write-Host
+                if (-not $Silent) { Write-Host }
                 break
             }
             33 {
                 # Range request not satisfied — partial file is likely corrupt or already complete
                 # Delete and restart from scratch
-                Write-Host
+                if (-not $Silent) { Write-Host }
                 Write-Log "Start-CurlTransfer: Resume failed (exit 33) for '$Source'. Removing partial file and restarting." -Warning
                 Remove-Item -Path $Destination -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 2
             }
             default {
-                Write-Host
-                Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $($result.ExitCode). Will retry $(($maxRetries - $retryCount)) more time(s)."
-                Write-Host
+                # When -Silent (e.g. the optional download cache, which falls through
+                # to a direct download on any miss), a transient failure that's about to
+                # be retried logs NOTHING -- only a genuine give-up (all retries
+                # exhausted, below) is worth recording. The interactive path keeps its
+                # on-console retry message and spacing.
+                if (-not $Silent) {
+                    Write-Host
+                    Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $($result.ExitCode). Will retry $(($maxRetries - $retryCount)) more time(s)."
+                    Write-Host
+                }
                 Start-Sleep -Seconds 5
             }
         }
@@ -1642,6 +2002,74 @@ function Restore-TerminalFocus {
     }
 }
 
+# Test-NetworkFastPath
+#
+# In-memory check against pre-fetched network state.  Returns $true when
+# the switch, host-side IP, NAT rule, and DHCP scope for a network all
+# exist already — skipping the dozens of per-network WMI calls that the
+# full Add-SwitchAndDhcp / Test-NetworkSwitch / Test-DHCPScope path makes.
+#
+# Callers populate $Cache once with bulk queries (Get-VMSwitch, Get-NetNat,
+# Get-NetAdapter, Get-NetIPAddress, Get-DhcpServerv4Scope) and pass it in.
+# When $Cache is $null or any check fails, returns $false so the caller
+# falls through to Add-SwitchAndDhcp which has full retry/recovery logic.
+function Test-NetworkFastPath {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$NetworkName,
+        [Parameter(Mandatory = $true)]
+        [string]$NetworkSubnet,
+        [Parameter(Mandatory = $false)]
+        [hashtable]$Cache
+    )
+
+    if (-not $Cache) { return $false }
+
+    # 1. VM switch exists?  (replicates Get-VMSwitch2 -like match)
+    $sw = $Cache.Switches | Where-Object { $_.Name -like "*$NetworkName*" } | Select-Object -First 1
+    if (-not $sw) {
+        Write-Log "  Fast-path miss: switch '$NetworkName' not in cache." -LogOnly
+        return $false
+    }
+
+    # 2. Host adapter has the correct .200 IP?
+    $adapter = $Cache.Adapters | Where-Object { $_.Name -like "*$NetworkName*" } | Select-Object -First 1
+    if (-not $adapter) {
+        Write-Log "  Fast-path miss: adapter for '$NetworkName' not in cache." -LogOnly
+        return $false
+    }
+    $desiredIp = $NetworkSubnet.Substring(0, $NetworkSubnet.LastIndexOf(".")) + ".200"
+    $hasIp = $Cache.IPs | Where-Object { $_.InterfaceAlias -eq $adapter.InterfaceAlias -and $_.IPAddress -eq $desiredIp }
+    if (-not $hasIp) {
+        Write-Log "  Fast-path miss: adapter '$($adapter.InterfaceAlias)' missing IP $desiredIp." -LogOnly
+        return $false
+    }
+
+    # 3. NAT rule exists?
+    $hasNat = $Cache.Nats | Where-Object { $_.Name -eq $NetworkSubnet }
+    if (-not $hasNat) {
+        Write-Log "  Fast-path miss: NAT '$NetworkSubnet' not in cache." -LogOnly
+        return $false
+    }
+
+    # 4. DHCP scope exists? (skip for switches that intentionally have no DHCP)
+    if ($NetworkName -ne 'ClusterV2') {
+        $hasScope = $Cache.Scopes | Where-Object { $_.ScopeId.IPAddressToString -eq $NetworkSubnet }
+        if (-not $hasScope) {
+            Write-Log "  Fast-path miss: DHCP scope '$NetworkSubnet' not in cache." -LogOnly
+            return $false
+        }
+    }
+
+    # All checks passed — emit the same log lines the full path would.
+    Write-Log "HyperV Network switch for '$NetworkName' already exists."
+    if ($NetworkName -ne 'ClusterV2') {
+        Write-GreenCheck "'$NetworkSubnet ($NetworkName)' scope is already present in DHCP."
+    }
+    return $true
+}
+
 function Add-SwitchAndDhcp {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Network Name.")]
@@ -1662,14 +2090,73 @@ function Add-SwitchAndDhcp {
         return $true
     }
 
-
-    get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' } | start-service
-    $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
-    if ($service) {
-        Write-Log "DHCPServer Service could not be started." -Failure
-        return $false
-    }
     Write-Log "Creating/verifying Hyper-V switch and DHCP Scopes for '$NetworkName' network." -Activity
+
+    # This is the host-side networking chokepoint (runs once per network at the
+    # start of a deploy) and the first thing it does is call CDXML cmdlets that
+    # auto-load their module: Get-NetNat (NetNat), the vSwitch cmdlets, and
+    # Get/Remove-DhcpServerv4Scope. Each generates a remoteIpMoProxy_* proxy in
+    # %TEMP%, so if that dir was wiped mid-session the very first Get-NetNat
+    # below would throw "Could not find a part of the path ...format.ps1xml"
+    # before we ever reach Start-DHCP. Repair the temp dir up front so the whole
+    # switch/NAT/DHCP creation flow is covered, not just the DhcpServer import.
+    # Reset any stale cached compat proxy if the dir was recreated OR an
+    # already-loaded proxy points at a now-deleted folder (Test-CimProxyStale).
+    $needReset = Repair-CimProxyTempPath
+    if ($needReset -or (Test-CimProxyStale)) {
+        Reset-CimProxyModuleState | Out-Null
+    }
+
+    # ── NetNat scavenge ─────────────────────────────────────────────────────
+    # Too many NetNat entries can cause WinNAT to silently drop traffic.
+    # If the count exceeds the threshold, remove orphans automatically
+    # before creating new networking.
+    $natCount = @(Get-NetNat -ErrorAction SilentlyContinue).Count
+    if ($natCount -ge 20) {
+        Write-Log "NetNat count is $natCount (threshold 20). Scavenging orphans..." -Warning
+        Remove-OrphanedNetNats
+        $newCount = @(Get-NetNat -ErrorAction SilentlyContinue).Count
+        if ($newCount -lt $natCount) {
+            Write-Log "Scavenged $($natCount - $newCount) orphaned NAT(s). Remaining: $newCount." -Warning
+        }
+    }
+
+    # ── Stale-networking safeguard ──────────────────────────────────────────
+    # If the vSwitch exists but NO Hyper-V VMs are connected to it, the
+    # switch/NAT/DHCP are left over from a failed removal of a previous
+    # deployment.  Remove them so they get cleanly recreated below.
+    # Skip shared switches (Internet, Cluster, External) — they are not
+    # domain-specific and may legitimately have zero VMs temporarily.
+    $isSharedSwitch = $NetworkName -in @('Internet', 'Cluster', 'ClusterV2', 'External')
+    if (-not $isSharedSwitch) {
+        $existingSwitch = Get-VMSwitch2 -NetworkName $NetworkName
+        if ($existingSwitch) {
+            $attachedVMs = @(Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
+                Where-Object { $_.SwitchName -eq $existingSwitch.Name })
+            if ($attachedVMs.Count -eq 0) {
+                Write-Log "Switch '$NetworkName' exists but no VMs are connected. Cleaning up stale networking." -Warning
+
+                # Remove DHCP scope
+                $dhcpScope = Get-DhcpServerv4Scope -ScopeID $NetworkSubnet -ErrorAction SilentlyContinue
+                if ($dhcpScope) {
+                    Write-Log "  Removing stale DHCP scope '$($dhcpScope.Name)' [$NetworkSubnet]" -Warning
+                    $dhcpScope | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
+                }
+
+                # Remove NAT entry
+                $nat = Get-NetNat -Name $NetworkSubnet -ErrorAction SilentlyContinue
+                if ($nat) {
+                    Write-Log "  Removing stale NAT '$NetworkSubnet'" -Warning
+                    Remove-NetNat -Name $NetworkSubnet -Confirm:$false -ErrorAction SilentlyContinue
+                }
+
+                # Remove the switch itself
+                Write-Log "  Removing stale switch '$($existingSwitch.Name)'" -Warning
+                $existingSwitch | Remove-VMSwitch -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
+            }
+        }
+    }
 
     $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet -DomainName $DomainName
     if (-not $switch) {
@@ -1677,10 +2164,50 @@ function Add-SwitchAndDhcp {
         return $false
     }
 
-    # Test if DHCP scope exists, if not create it
+    # Test if DHCP scope exists, if not create it.
+    # Test-DHCPScope handles starting the DHCP service internally via
+    # Start-DHCP, so no preemptive service check is needed here.
+    # If it fails (e.g. DHCP crashed), restart the service and retry once.
     $worked = Test-DHCPScope -ScopeID $NetworkSubnet -ScopeName $NetworkName -DomainName $DomainName -DNSServer $DNSServer
     if (-not $worked) {
+        Write-Log "DHCP scope check failed for '$NetworkName'. Restarting DHCPServer and retrying..." -Warning
+        Stop-Service "DHCPServer" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        $dhcpOk = Start-DHCP
+        if ($dhcpOk) {
+            $worked = Test-DHCPScope -ScopeID $NetworkSubnet -ScopeName $NetworkName -DomainName $DomainName -DNSServer $DNSServer
+        }
+    }
+    if (-not $worked) {
         Write-Log "Failed to verify/create DHCP Scope for the '$NetworkName' network. ($NetworkSubnet) Exiting." -Failure
+        return $false
+    }
+    return $true
+}
+
+function Add-SwitchNoDhcp {
+    # Creates a Hyper-V Internal switch with a host adapter IP but no DHCP
+    # scope and no NAT. Used for the ClusterV2 heartbeat network where VMs
+    # get static IPs and only need to reach each other on the same host.
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$NetworkName,
+        [Parameter(Mandatory = $true)]
+        [string]$NetworkSubnet,
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    if ($WhatIf.IsPresent) {
+        Write-Log "[What-If] Will create/verify Hyper-V switch '$NetworkName' (no DHCP/NAT)."
+        return $true
+    }
+
+    Write-Log "Creating/verifying Hyper-V switch '$NetworkName' (no DHCP, no NAT)." -Activity
+
+    $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet
+    if (-not $switch) {
+        Write-Log "Failed to verify/create Hyper-V switch for $NetworkName network ($NetworkSubnet). Exiting." -Failure
         return $false
     }
     return $true
@@ -1711,6 +2238,10 @@ function Test-NetworkSwitch {
             $notes = "Cluster network shared by all domains"
             $doNotRecreate = $true
         }
+        if ($NetworkName -eq "ClusterV2") {
+            $notes = "Cluster heartbeat network shared by all domains (no DHCP)"
+            $doNotRecreate = $true
+        }
         if ($NetworkName -eq "Internet") {
             $notes = "Internet network shared by all domains"
             $doNotRecreate = $true
@@ -1737,15 +2268,43 @@ function Test-NetworkSwitch {
             $exists = Get-VMSwitch2 -NetworkName $NetworkName
             if ($exists) {
                 if ([String]::IsNullOrWhiteSpace($exists.Notes)) {
-                    Write-Log "HyperV Network switch for '$NetworkName' already exists but has no notes. Please verify this network is not in use by another domain." -LogOnly
-                    Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  -LogOnly
-                    $doNotRecreate = $true
+                    if ($doNotRecreate -and $notes -ne "Unknown network") {
+                        try {
+                            Set-VMSwitch -VMSwitch $exists -Notes $notes -ErrorAction Stop | Out-Null
+                            $exists = Get-VMSwitch2 -NetworkName $NetworkName
+                            Write-Log "Updated notes on shared HyperV switch '$NetworkName' to '$notes'." -LogOnly
+                        }
+                        catch {
+                            Write-Log "Failed to update notes on shared HyperV switch '$NetworkName'." -LogOnly
+                            Write-Log "$($_.Exception.Message)" -LogOnly
+                        }
+                    }
+
+                    if ([String]::IsNullOrWhiteSpace($exists.Notes)) {
+                        Write-Log "HyperV Network switch for '$NetworkName' already exists but has no notes. Please verify this network is not in use by another domain." -LogOnly
+                        Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  -LogOnly
+                        $doNotRecreate = $true
+                    }
                 }
 
                 if ($exists.Notes -eq "Unknown network") {
-                    Write-Log "HyperV Network switch for '$NetworkName' already exists but is Unknown. Please verify this network is not in use by another domain." -LogOnly
-                    Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  -LogOnly
-                    $doNotRecreate = $true
+                    if ($doNotRecreate -and $notes -ne "Unknown network") {
+                        try {
+                            Set-VMSwitch -VMSwitch $exists -Notes $notes -ErrorAction Stop | Out-Null
+                            $exists = Get-VMSwitch2 -NetworkName $NetworkName
+                            Write-Log "Updated notes on shared HyperV switch '$NetworkName' from 'Unknown network' to '$notes'." -LogOnly
+                        }
+                        catch {
+                            Write-Log "Failed to update notes on shared HyperV switch '$NetworkName'." -LogOnly
+                            Write-Log "$($_.Exception.Message)" -LogOnly
+                        }
+                    }
+
+                    if ($exists.Notes -eq "Unknown network") {
+                        Write-Log "HyperV Network switch for '$NetworkName' already exists but is Unknown. Please verify this network is not in use by another domain." -LogOnly
+                        Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  -LogOnly
+                        $doNotRecreate = $true
+                    }
                 }
 
                 if ($exists.Notes -eq $notes -or $doNotRecreate) {
@@ -1814,6 +2373,55 @@ function Test-NetworkSwitch {
         if (-not $hasDesired) {
             Write-Log "Unable to set IP for '$interfaceAlias' network adapter to $desiredIp."
             return $false
+        }
+
+        # Set vEthernet adapter to Private so the host firewall is less
+        # restrictive for lab traffic. NLA classifies internal-switch adapters
+        # as Public by default.
+        $currentProfile = Get-NetConnectionProfile -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue
+        if ($currentProfile -and $currentProfile.NetworkCategory -ne 'Private') {
+            Write-Log "Setting '$interfaceAlias' network profile from '$($currentProfile.NetworkCategory)' to 'Private'."
+            Set-NetConnectionProfile -InterfaceIndex $adapter.InterfaceIndex -NetworkCategory Private -ErrorAction SilentlyContinue
+        }
+
+        # Ensure a single host-wide rule allows inbound ICMPv4 Echo Request
+        # from any RFC 1918 address. Windows Server disables the built-in
+        # ICMP rule even on Private profile, so VMs cannot ping the host
+        # .200 gateway without this. One rule covers all lab subnets.
+        $icmpRuleName = 'MemLabs-ICMPv4-Echo-Private'
+        $icmpRule = Get-NetFirewallRule -Name $icmpRuleName -ErrorAction SilentlyContinue
+        if (-not $icmpRule) {
+            Write-Log "Adding host firewall rule '$icmpRuleName' to allow inbound ICMPv4 Echo Request from private subnets."
+            New-NetFirewallRule -Name $icmpRuleName -DisplayName 'MemLabs - Allow ICMPv4 Echo (Private Subnets)' `
+                -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 `
+                -RemoteAddress @('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16') `
+                -Profile Any -Enabled True -ErrorAction SilentlyContinue | Out-Null
+        }
+        elseif ($icmpRule.Enabled -ne 'True') {
+            Enable-NetFirewallRule -Name $icmpRuleName -ErrorAction SilentlyContinue
+        }
+
+        # Enable per-interface IPv4 forwarding so the host routes between lab
+        # subnets (required for multi-subnet domains, e.g. a DC on one subnet
+        # and clients on another). A vEthernet switch created AFTER the last
+        # boot comes up with Forwarding=Disabled and is NOT retroactively
+        # enabled by the global IpEnableRouter=1 flag until the next reboot,
+        # so a host that created this switch mid-session (without rebooting)
+        # would silently drop cross-subnet traffic at the .200 gateway. Set it
+        # explicitly here so routing works on every host, every time, without a
+        # reboot. ClusterV2 is intentionally excluded (heartbeat-only segment
+        # that must never route); it short-circuits before this point.
+        if ($NetworkName -ne 'ClusterV2') {
+            $fwd = Get-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            if ($fwd -and $fwd.Forwarding -ne 'Enabled') {
+                Write-Log "Enabling IPv4 forwarding on '$interfaceAlias' (was '$($fwd.Forwarding)')."
+                Set-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -Forwarding Enabled -ErrorAction SilentlyContinue
+            }
+        }
+
+        # ClusterV2 is a pure internal switch — no NAT needed (heartbeat only)
+        if ($NetworkName -eq 'ClusterV2') {
+            return $true
         }
 
         $valid = Test-NetworkNat -NetworkSubnet $NetworkSubnet
@@ -1919,6 +2527,27 @@ function Test-NoRRAS {
 
 function Test-Networks {
 
+    # Self-heal IPv4 forwarding on every lab vEthernet switch (except ClusterV2,
+    # a heartbeat-only segment that must never route). A switch created after the
+    # last boot comes up Forwarding=Disabled and is NOT retroactively enabled by
+    # the global IpEnableRouter=1 flag until the next reboot, which silently breaks
+    # cross-subnet routing for multi-subnet domains. Add-SwitchAndDhcp enables it
+    # per-switch at create/verify time; this sweep additionally fixes switches from
+    # OTHER domains not in the current deploy, so an already-affected host recovers
+    # on the next launch without a reboot. Runs every Test-Networks pass and is a
+    # no-op once all switches are already Enabled.
+    try {
+        $fwdToFix = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.InterfaceAlias -like 'vEthernet (*' -and $_.InterfaceAlias -ne 'vEthernet (ClusterV2)' -and $_.Forwarding -ne 'Enabled' })
+        foreach ($iface in $fwdToFix) {
+            Write-Log "Enabling IPv4 forwarding on '$($iface.InterfaceAlias)' (was '$($iface.Forwarding)')."
+            Set-NetIPInterface -InterfaceIndex $iface.InterfaceIndex -AddressFamily IPv4 -Forwarding Enabled -ErrorAction SilentlyContinue
+        }
+    }
+    catch {
+        Write-Log "IPv4 forwarding self-heal sweep failed: $_" -LogOnly
+    }
+
     $invalidNetworks = @()
     $networkList = Get-List -Type UniqueNetwork
     foreach ($network in $networkList) {
@@ -1934,10 +2563,14 @@ function Test-Networks {
         $invalidNetworks += $internetSubnet
     }
 
+    # ClusterV2 is a pure internal switch (heartbeat only) — no NAT needed.
+    # Remove any stale NAT left over from previous runs that incorrectly
+    # created one; do not recreate it.
     $clusterNetwork = "10.250.250.0"
-    $valid = Test-NetworkNat -NetworkSubnet $clusterNetwork
-    if (-not $valid) {
-        $invalidNetworks += $clusterNetwork
+    $staleClusterNat = Get-NetNat -Name $clusterNetwork -ErrorAction SilentlyContinue
+    if ($staleClusterNat) {
+        Write-Log "Removing stale NAT '$clusterNetwork' (cluster network does not use NAT)." -Warning
+        Remove-NetNat -Name $clusterNetwork -Confirm:$false -ErrorAction SilentlyContinue
     }
 
     if ($invalidNetworks.Count -gt 0) {
@@ -1957,10 +2590,37 @@ function Test-NetworkNat {
 
     )
 
+    $expectedPrefix = "$($NetworkSubnet)/24"
     $exists = Get-NetNat -Name $NetworkSubnet -ErrorAction SilentlyContinue
     if ($exists) {
-        Write-Log "'$NetworkSubnet' is already present in NAT." -Verbose
-        return $true
+        # Validate the existing NAT is healthy: correct prefix and the
+        # internal interface still exists.  A partial removal of a
+        # previous deployment can leave a stale NAT that has the right
+        # name but references a deleted adapter, breaking all outbound
+        # traffic for VMs on that subnet.
+        $healthy = $true
+        if ($exists.InternalIPInterfaceAddressPrefix -ne $expectedPrefix) {
+            Write-Log "NAT '$NetworkSubnet' has wrong prefix '$($exists.InternalIPInterfaceAddressPrefix)' (expected '$expectedPrefix'). Recreating." -Warning
+            $healthy = $false
+        }
+        if ($healthy) {
+            # Check that the NAT's internal interface is reachable:
+            # there should be a host adapter with an IP on this subnet.
+            $subnetBase = $NetworkSubnet.Substring(0, $NetworkSubnet.LastIndexOf("."))
+            $hostIp = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPAddress -like "$subnetBase.*" }
+            if (-not $hostIp) {
+                Write-Log "NAT '$NetworkSubnet' exists but no host adapter has an IP on $subnetBase.x. Recreating." -Warning
+                $healthy = $false
+            }
+        }
+        if ($healthy) {
+            Write-Log "'$NetworkSubnet' is already present in NAT." -Verbose
+            return $true
+        }
+        # Stale NAT — remove before recreating
+        Write-Log "Removing stale NAT '$NetworkSubnet'..." -Warning
+        Remove-NetNat -Name $NetworkSubnet -Confirm:$false -ErrorAction SilentlyContinue
     }
 
     try {
@@ -1971,16 +2631,167 @@ function Test-NetworkNat {
             Restart-Service RemoteAccess -ErrorAction Stop -WarningAction SilentlyContinue
         }
 
-        New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
+        New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix $expectedPrefix -ErrorAction Stop
         return $true
     }
     catch {
-        Write-Log "New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix `"$($NetworkSubnet)/24`" failed with error: $_" -Failure
+        Write-Log "New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix `"$expectedPrefix`" failed with error: $_" -Failure
         return $false
     }
 
 }
 
+
+function Repair-CimProxyTempPath {
+    # CDXML/CIM-based modules (DhcpServer, ServerManager/Install-WindowsFeature,
+    # NetTCPIP, etc.) generate temporary proxy module files
+    # (remoteIpMoProxy_*.format.ps1xml) under the process TEMP directory at
+    # import time. If that directory has been deleted mid-session -- e.g. a
+    # cleanup task clearing %TEMP%, Storage Sense, or another process wiping
+    # the user's temp folder -- Import-Module fails hard with:
+    #   "Could not find a part of the path '...remoteIpMoProxy_...format.ps1xml'".
+    # The module files themselves are still on disk, so -ListAvailable lies and
+    # says everything's fine. Ensure every temp path the proxy generator might
+    # use actually exists, recreating any that vanished. Returns $true if it had
+    # to recreate at least one directory (i.e. a retry is worthwhile).
+    #
+    # NOTE: a FULL temp dir is NOT this failure (that surfaces as an
+    # IOException / "not enough space on the disk"). But every CIM/CDXML import
+    # LEAKS a remoteIpMoProxy_* folder here, and on a long-lived lab host these
+    # accumulate into the thousands -- bloating enumeration and raising the odds
+    # of a name collision during proxy generation. So we also opportunistically
+    # prune stale leaked proxy folders (age-gated so an in-flight import is
+    # never touched).
+    $recreated = $false
+    $tempPaths = @(
+        ([System.IO.Path]::GetTempPath()),
+        $env:TEMP,
+        $env:TMP
+    ) | Where-Object { $_ } | Select-Object -Unique
+
+    foreach ($tp in $tempPaths) {
+        try {
+            if (-not (Test-Path -LiteralPath $tp)) {
+                New-Item -ItemType Directory -Path $tp -Force -ErrorAction Stop | Out-Null
+                Write-Log "Repair-CimProxyTempPath: Recreated missing temp directory '$tp' (CIM proxy module generation needs it)." -Warning
+                $recreated = $true
+                continue   # freshly created -- nothing to prune
+            }
+
+            # Hygiene: prune leaked CIM proxy folders older than 1 hour. The
+            # 1-hour age gate guarantees we never delete the proxy folder of a
+            # currently-running import (those are minutes old at most), so this
+            # is safe to run unconditionally before every import. Only acts when
+            # the leak has actually built up (>200 folders) to keep it cheap.
+            $leaked = @(Get-ChildItem -LiteralPath $tp -Directory -Filter 'remoteIpMoProxy_*' -ErrorAction SilentlyContinue)
+            if ($leaked.Count -gt 200) {
+                $cutoff = (Get-Date).AddHours(-1)
+                $stale = @($leaked | Where-Object { $_.LastWriteTime -lt $cutoff })
+                $pruned = 0
+                foreach ($dir in $stale) {
+                    try {
+                        Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+                        $pruned++
+                    }
+                    catch {
+                        # In-use / locked folder -- skip it, it'll age out later.
+                    }
+                }
+                if ($pruned -gt 0) {
+                    Write-Log "Repair-CimProxyTempPath: Pruned $pruned stale leaked CIM proxy folder(s) from '$tp' ($($leaked.Count) total)." -LogOnly
+                }
+            }
+        }
+        catch {
+            Write-Log "Repair-CimProxyTempPath: Failed to ensure/clean temp directory '$tp': $_" -Warning
+        }
+    }
+
+    return $recreated
+}
+
+function Reset-CimProxyModuleState {
+    # Companion to Repair-CimProxyTempPath for the case where recreating the temp
+    # dir alone does NOT fix the "...remoteIpMoProxy_...format.ps1xml could not be
+    # found" error (telltale sign: the SAME proxy GUID reappears on every retry).
+    #
+    # Under PowerShell 7 the Windows-only modules we need (ServerManager ->
+    # Install-WindowsFeature, and DhcpServer when it's pulled in alongside it)
+    # cannot load natively, so PS7 imports them through the Windows PowerShell
+    # Compatibility feature: it spins up a loopback "WinPSCompatSession" and
+    # generates an implicit-remoting PROXY module (remoteIpMoProxy_*_<guid>) under
+    # %TEMP%. BOTH the session and that generated proxy module are cached in the
+    # LIVE PS7 process. If the proxy's temp folder is later wiped (cleanup task /
+    # Storage Sense), every subsequent import keeps pointing at the now-deleted
+    # cached path and throws -- recreating the empty temp dir can't restore the
+    # format.ps1xml inside the GUID folder. The cached session + module must be
+    # torn down so the proxy is REGENERATED from scratch on the next import.
+    # Returns $true if it tore anything down.
+    $didReset = $false
+
+    # 1. Unload any in-memory implicit-remoting proxy modules AND the real
+    #    Windows modules, so a fresh import regenerates them cleanly.
+    try {
+        Get-Module |
+            Where-Object { $_.Name -like 'remoteIpMoProxy_*' -or ($_.Path -and $_.Path -like '*remoteIpMoProxy_*') } |
+            ForEach-Object {
+                try { Remove-Module -ModuleInfo $_ -Force -ErrorAction Stop; $didReset = $true } catch { }
+            }
+    }
+    catch { }
+    foreach ($m in @('DhcpServer', 'ServerManager')) {
+        if (Get-Module -Name $m -ErrorAction SilentlyContinue) {
+            try { Remove-Module -Name $m -Force -ErrorAction Stop; $didReset = $true } catch { }
+        }
+    }
+
+    # 2. Tear down the cached WinPS compatibility session(s) so the next import
+    #    builds a brand-new proxy in the (repaired) temp dir instead of reusing
+    #    the stale cached one.
+    try {
+        $compat = @(Get-PSSession -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'WinPSCompatSession*' })
+        if ($compat.Count -gt 0) {
+            $compat | Remove-PSSession -ErrorAction SilentlyContinue
+            $didReset = $true
+        }
+    }
+    catch { }
+
+    if ($didReset) {
+        Write-Log "Reset-CimProxyModuleState: Tore down cached WinPS-compat session/proxy modules so the CIM proxy regenerates on next import." -LogOnly
+    }
+    return $didReset
+}
+
+function Test-CimProxyStale {
+    # Returns $true when PS7 has a WinPS-compat proxy cached in-process whose
+    # backing %TEMP% folder has been DELETED -- the exact precondition for the
+    # "remoteIpMoProxy_...format.ps1xml could not be found" failure. Letting the
+    # proactive guard detect this lets it reset the stale session BEFORE the
+    # first import is attempted, so the (recoverable but alarming) warning never
+    # prints. Cheap and side-effect-free: it only inspects already-loaded
+    # modules -- no Import-Module, no session creation, no temp writes -- so it's
+    # safe to call on every Start-DHCP / Add-SwitchAndDhcp pass. A healthy
+    # session (proxy folder still present) returns $false, so nothing is torn
+    # down needlessly.
+    try {
+        $proxies = @(Get-Module | Where-Object {
+                $_.Name -like 'remoteIpMoProxy_*' -or
+                (($_.Name -in @('DhcpServer', 'ServerManager')) -and $_.Path -and $_.Path -like '*remoteIpMoProxy_*')
+            })
+        foreach ($m in $proxies) {
+            if ($m.Path) {
+                $dir = Split-Path -Parent $m.Path
+                if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+                    return $true
+                }
+            }
+        }
+    }
+    catch { }
+    return $false
+}
 
 function Start-DHCP {
     # Install DHCP, if not found
@@ -2049,6 +2860,106 @@ function Start-DHCP {
         }
     }
 
+    # Verify the DhcpServer PowerShell module actually loads. Don't just
+    # check -ListAvailable (files on disk) — the module is CDXML-based and
+    # depends on the WMI/CIM service. If winmgmt is wedged the files exist
+    # but Import-Module fails with "module could not be loaded".
+    #
+    # Proactively ensure the temp dir the CIM proxy generator writes to exists
+    # (and prune any leaked proxy folders) BEFORE importing, so the common
+    # "Could not find a part of the path '...remoteIpMoProxy_...format.ps1xml'"
+    # failure is avoided outright rather than only handled after it throws.
+    # Reset the cached WinPS-compat proxy if EITHER the temp dir had to be
+    # recreated OR a proxy already loaded in-process points at a now-deleted
+    # folder (Test-CimProxyStale) -- the latter is the common case where the
+    # parent temp dir still exists but the GUID proxy subfolder was wiped, so a
+    # dir-recreate alone wouldn't fire. Resetting here pre-empts the first-import
+    # failure (and its alarming-but-recoverable warning) entirely.
+    $needReset = Repair-CimProxyTempPath
+    if ($needReset -or (Test-CimProxyStale)) {
+        Reset-CimProxyModuleState | Out-Null
+    }
+
+    $moduleLoaded = $false
+    try {
+        Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+        $moduleLoaded = $true
+    }
+    catch {
+        $importError = $_
+        Write-Log "Start-DHCP: DhcpServer module failed to load: $importError" -Warning
+
+        # First, classify the "missing temp path" failure explicitly. This is
+        # the remoteIpMoProxy_*.format.ps1xml case: the module IS on disk, so
+        # the -ListAvailable branch below would mis-route it to a pointless
+        # winmgmt restart. Recreate the temp dir and retry before anything else.
+        if ("$importError" -match 'remoteIpMoProxy|Could not find a part of the path') {
+            Write-Log "Start-DHCP: Failure is a missing CIM-proxy temp path, not a WMI fault. Repairing temp directory + resetting cached compat proxy, then retrying..." -Warning
+            # Recreate the temp dir AND tear down the cached WinPS-compat session
+            # / proxy module. Recreating the dir alone is insufficient when PS7
+            # has the (now-stale) implicit-remoting proxy cached in-process --
+            # the reset forces the proxy to regenerate into the repaired dir.
+            Repair-CimProxyTempPath | Out-Null
+            Reset-CimProxyModuleState | Out-Null
+            try {
+                Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+                $moduleLoaded = $true
+                Write-GreenCheck "DhcpServer module loaded after repairing the CIM-proxy temp directory and resetting the cached compat proxy."
+            }
+            catch {
+                Write-Log "Start-DHCP: Module still won't load after temp-path repair + compat reset: $_" -Warning
+            }
+        }
+
+        # Diagnose: are the module files even on disk?
+        $moduleOnDisk = [bool](Get-Module DhcpServer -ListAvailable -ErrorAction SilentlyContinue)
+
+        if (-not $moduleLoaded -and $moduleOnDisk) {
+            # Files present but module won't load — likely WMI/CIM service
+            # is in a bad state (CDXML modules use CIM under the hood).
+            Write-Log "Start-DHCP: Module files exist on disk but won't load. Restarting WMI service (winmgmt)..." -Warning
+            Restart-Service winmgmt -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+            # DHCP service depends on WMI; restarting winmgmt may stop it.
+            Start-Service DHCPServer -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            try {
+                Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+                $moduleLoaded = $true
+                Write-GreenCheck "DhcpServer module loaded after WMI service restart."
+            }
+            catch {
+                Write-Log "Start-DHCP: Module still won't load after WMI restart: $_" -Failure
+                Write-Log "Start-DHCP: A host reboot may be required. Original error: $importError" -Failure
+            }
+        }
+        elseif (-not $moduleLoaded) {
+            # Module files missing — RSAT tools were stripped (e.g. by a Windows Update).
+            Write-OrangePoint "DhcpServer module is not installed. Reinstalling DHCP management tools..."
+            if (Get-Command -Name "Install-WindowsFeature" -ErrorAction SilentlyContinue) {
+                $installed = Install-WindowsFeature 'RSAT-DHCP' -Confirm:$false -ErrorAction SilentlyContinue
+                if (-not $installed -or -not $installed.Success) {
+                    $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
+                }
+                if ($installed -and $installed.Success) {
+                    Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction SilentlyContinue
+                    $moduleLoaded = $true
+                    Write-GreenCheck "DHCP management tools reinstalled."
+                }
+                else {
+                    Write-Log "Start-DHCP: Failed to reinstall DHCP management tools. Run 'Install-WindowsFeature RSAT-DHCP' manually." -Failure
+                }
+            }
+            else {
+                Write-Log "Start-DHCP: DhcpServer module is missing and Install-WindowsFeature is unavailable. Install RSAT-DHCP manually." -Failure
+            }
+        }
+    }
+
+    if (-not $moduleLoaded) {
+        return $false
+    }
+
     return $true
 }
 
@@ -2102,39 +3013,28 @@ function Test-DHCPScope {
 
 
         # Check if scope exists
-        $createScope = $true
+        $createScope = $false
+        $updateOptions = $false
         $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
         if ($scope) {
             if ($DHCPDNSAddress) {
                 $scopeOptions = get-DhcpServerv4OptionValue -scopeID $scopeID -ErrorAction SilentlyContinue
                 $currentDNS = ($scopeOptions | Where-Object OptionID -eq 6).Value
                 if ($currentDNS -ne $DHCPDNSAddress) {
-                    Write-OrangePoint "'$ScopeID ($ScopeName)' scope does not match preferred DNS server"
-                    $createScope = $true
+                    Write-OrangePoint "'$ScopeID ($ScopeName)' scope DNS ($currentDNS) does not match preferred ($DHCPDNSAddress) — updating options in-place"
+                    $updateOptions = $true
                 }
                 else {
                     Write-GreenCheck "'$ScopeID ($ScopeName)' scope is already present in DHCP."
-                    $createScope = $false
                 }
             }
             else {
                 Write-GreenCheck "'$ScopeID ($ScopeName)' scope is already present in DHCP."
-                $createScope = $false
             }
         }
         else {
             Write-OrangePoint "'$ScopeID ($ScopeName)' scope is not present in DHCP. Creating new scope"
             $createScope = $true
-        }
-
-        $dhcp = Start-DHCP
-        if (-not $dhcp) {
-            Write-Log "DHCP Could not be started" -Failure
-            return $false
-        }
-
-        if ($scope -and $createScope) {
-            Remove-DhcpServerv4Scope -scopeID $scopeID -force
         }
 
         $dhcp = Start-DHCP
@@ -2191,15 +3091,56 @@ function Test-DHCPScope {
                     }
                 }
             }
+        }
 
+        # After creating a new scope, rebuild DHCP reservations from existing
+        # VM notes and MAC addresses. This restores reservations for Linux VMs
+        # (which rely on stable IPs for SSH/mRemoteNG) and any other VMs that
+        # had reservations before the scope was lost.
+        if ($createScope -and $DomainScope) {
+            try {
+                $existingVms = Get-List -Type VM -DomainName $DomainName -ErrorAction SilentlyContinue
+                if ($existingVms) {
+                    $rebuilt = 0
+                    foreach ($evm in $existingVms) {
+                        $vmNote = Get-VMNote -VMName $evm.vmName -ErrorAction SilentlyContinue
+                        if (-not $vmNote -or -not $vmNote.LastKnownIP) { continue }
+                        $ip = $vmNote.LastKnownIP
+                        # Only rebuild if the IP falls within this scope's range
+                        if ($ip -notlike "$network.*") { continue }
+                        $vmnet = Get-VM2 -Name $evm.vmName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter -ErrorAction SilentlyContinue
+                        if (-not $vmnet -or -not $vmnet.MacAddress) { continue }
+                        try {
+                            Add-DhcpServerv4Reservation -ScopeId $scopeID -IPAddress $ip -ClientId $vmnet.MacAddress `
+                                -Description "Reservation for $($evm.vmName) (rebuilt)" -ErrorAction Stop | Out-Null
+                            $rebuilt++
+                            Write-Log "Rebuilt DHCP reservation: $($evm.vmName) $ip -> $($vmnet.MacAddress)" -Verbose
+                        }
+                        catch {
+                            Write-Log "Could not rebuild DHCP reservation for $($evm.vmName) ($ip): $_" -Warning
+                        }
+                    }
+                    if ($rebuilt -gt 0) {
+                        Write-Log "Rebuilt $rebuilt DHCP reservation(s) for scope '$scopeID' from VM notes" -Verbose
+                    }
+                }
+            }
+            catch {
+                Write-Log "Failed to rebuild DHCP reservations for scope '$scopeID': $_" -Warning
+            }
+        }
 
+        # Set or update scope options (for new scopes AND existing scopes
+        # whose DNS option needs updating). Updating in-place preserves
+        # all existing leases and reservations.
+        if ($createScope -or $updateOptions) {
             try {
                 if (-not $DomainScope) {
                     if ($ScopeName -eq "cluster") {
-                        $HashArguments = @{
-                            ScopeId = $ScopeID
-                            Router  = $DHCPDefaultGateway
-                        }
+                        # Cluster/heartbeat NICs must not have a default gateway,
+                        # DNS, or any other DHCP options. Just the scope is enough.
+                        Write-GreenCheck "Cluster scope '$ScopeID' created (no DHCP options needed)."
+                        return $true
                     }
                     else {
                         $HashArguments = @{
@@ -2278,16 +3219,18 @@ function New-VmNote {
             memLabsDeployVersion = $Common.MemLabsVersion
         }
 
-        # Track the last phase that completed successfully on this VM
+        # Track the highest phase that has ever completed successfully on this VM.
+        # Monotonic: a -StartPhase N re-run must not drop the value from (say) 11
+        # down to N, because the Phase 8 auto-snapshot guard reads this as
+        # "has this CAS/Primary ever finished Phase 8?" (lastPhaseComplete >= 8).
+        $existingNote = Get-VMNote -VMName $VmName
+        $existingMax = if ($existingNote -and $existingNote.lastPhaseComplete) { [int]$existingNote.lastPhaseComplete } else { 0 }
         if ($Successful -and $Phase -gt 0) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $Phase -Force
+            $newMax = [Math]::Max($existingMax, [int]$Phase)
+            $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $newMax -Force
         }
-        else {
-            # Preserve existing lastPhaseComplete from previous successful phase
-            $existingNote = Get-VMNote -VMName $VmName
-            if ($existingNote -and $existingNote.lastPhaseComplete) {
-                $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $existingNote.lastPhaseComplete -Force
-            }
+        elseif ($existingMax -gt 0) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $existingMax -Force
         }
 
         if ($UpdateVersion.IsPresent) {
@@ -2301,7 +3244,7 @@ function New-VmNote {
             $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
         }
 
-        Write-Log "Checking if we can write out domainDefaults"
+        Write-Log "Checking if we can write out domainDefaults" -Verbose
         if ($null -ne $DeployConfig.domainDefaults -and $ThisVm.role -eq "DC") {
             Write-Log "Writing out domainDefaults Value: $($DeployConfig.domainDefaults.DeploymentType)"
             $vmNote | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $($DeployConfig.domainDefaults) -Force
@@ -2342,7 +3285,10 @@ function Get-VMNote {
     $vm = Get-VM2 -Name $VMName -Fallback
 
     if (-not $vm) {
-        Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
+        # VM not found is a normal condition (e.g. Phase 1 pre-allocation queries
+        # notes for VMs that don't exist yet). Log quietly without a bogus
+        # "Error:" suffix -- there's no exception in scope here, so $_ is blank.
+        Write-Log "$VMName`: VM not found in Hyper-V; no VM Note to read." -Verbose -LogOnly
         return $null
     }
 
@@ -2380,6 +3326,7 @@ function Set-VMNote {
     param (
         [Parameter(Mandatory = $true, ParameterSetName = "VMNote")]
         [Parameter(Mandatory = $true, ParameterSetName = "VMVersion")]
+        [Parameter(Mandatory = $true, ParameterSetName = "FixOnly")]
         [string]$vmName,
         [Parameter(Mandatory = $true, ParameterSetName = "VMNote")]
         [Parameter(Mandatory = $false, ParameterSetName = "VMVersion")]
@@ -2390,7 +3337,13 @@ function Set-VMNote {
         [Parameter(Mandatory = $false)]
         [switch]$forceVersionUpdate,
         [Parameter(Mandatory = $false)]
-        [bool]$force
+        [bool]$force,
+        [Parameter(Mandatory = $true, ParameterSetName = "FixOnly")]
+        [Parameter(Mandatory = $false, ParameterSetName = "VMNote")]
+        [Parameter(Mandatory = $false, ParameterSetName = "VMVersion")]
+        [string]$FixApplied,
+        [Parameter(Mandatory = $false)]
+        [string]$FixAppliedVersion
     )
 
     if (-not $vmNote) {
@@ -2412,6 +3365,18 @@ function Set-VMNote {
     if ($vmVersion -and ($vmNote.memLabsVersion -lt $vmVersion -or $forceVersionUpdate.IsPresent)) {
         $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
         $vmVersionUpdated = $true
+    }
+
+    # Per-fix tracking: record individual fix application in appliedFixes dictionary
+    if ($FixApplied) {
+        $appliedFixes = @{}
+        if ($vmNote.PSObject.Properties.Name -contains 'appliedFixes' -and $vmNote.appliedFixes) {
+            foreach ($prop in $vmNote.appliedFixes.PSObject.Properties) {
+                $appliedFixes[$prop.Name] = $prop.Value
+            }
+        }
+        $appliedFixes[$FixApplied] = $FixAppliedVersion
+        $vmNote | Add-Member -MemberType NoteProperty -Name "appliedFixes" -Value ([PSCustomObject]$appliedFixes) -Force
     }
 
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
@@ -2547,6 +3512,352 @@ function Get-DhcpScopeDescription {
     }
 }
 
+function Invoke-IsolatedCim {
+    <#
+    .SYNOPSIS
+    Runs a scriptblock containing CIM-based cmdlets (DhcpServer, Hyper-V) in a
+    reused, throwaway in-process runspace, isolated from the caller's runspace.
+
+    .DESCRIPTION
+    PowerShell 7 begins auto-forwarding (and draining) a Start-Job child's
+    Progress stream the instant a CIM cmdlet that emits progress (e.g. the
+    DhcpServer CDXML cmdlets) runs in that child's runspace. Once that happens
+    the child's .Progress collection stops accumulating the managed per-VM
+    progress records that Write-JobProgress renders in Wait-Phase, so the
+    per-VM progress bars collapse into a single forwarded bar. The damage is
+    permanent for the lifetime of the runspace -- even synthetic Write-Progress
+    records stop accumulating after a single CIM call.
+
+    Running the CIM cmdlet in a SEPARATE in-process runspace attaches that
+    auto-forward/drain to the throwaway runspace instead, leaving the caller's
+    (child job's) own .Progress stream clean so the managed bars keep rendering.
+
+    The isolated runspace is created fresh for each call and disposed before
+    returning. It must NOT be cached/reused for the lifetime of the child job:
+    a persistent isolated runspace keeps a Hyper-V / DhcpServer CIM connection
+    open in-process, which interferes with the PowerShell Direct sessions
+    Phase 1 uses for disk init (the in-guest Storage cmdlets hang). The CIM
+    cmdlets here run only a handful of times per VM, so the per-call module
+    import cost is negligible. The scriptblock runs in a fresh session state:
+    it sees only native cmdlets/modules and whatever is passed via
+    -ArgumentList (declare a matching param() block). It does NOT see the
+    caller's functions (Write-Log, Get-VM2, etc.) or variables.
+
+    .PARAMETER ScriptBlock
+    The scriptblock to execute in isolation. Use only native cmdlets inside it.
+
+    .PARAMETER ArgumentList
+    Positional arguments passed to the scriptblock's param() block.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList
+    )
+
+    # Create a FRESH throwaway runspace for this call and dispose it in the
+    # finally below. Do NOT cache/reuse a global runspace: a lingering isolated
+    # runspace holds a Hyper-V / DhcpServer CIM connection open in-process for
+    # the whole life of the child job, and that interferes with the PowerShell
+    # Direct sessions Phase 1 uses for disk init (in-guest Storage cmdlets hang).
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    try {
+        $null = $ps.AddScript($ScriptBlock.ToString())
+        if ($ArgumentList) {
+            foreach ($arg in $ArgumentList) { $null = $ps.AddArgument($arg) }
+        }
+
+        # Invoke() throws for terminating errors (e.g. -ErrorAction Stop inside
+        # the scriptblock), which preserves the caller's existing try/catch
+        # semantics. The results are materialized before the finally disposes
+        # the runspace, so returning them is safe.
+        return $ps.Invoke()
+    }
+    finally {
+        try { $ps.Runspace.Close() } catch {}
+        try { $ps.Dispose() } catch {}
+    }
+}
+
+# Return the (primary) NIC MAC for a VM, looked up in an isolated runspace so
+# the Hyper-V CIM query never poisons the caller's progress stream. When
+# -ExcludeCluster is set, SQLAO Cluster heartbeat NICs are filtered out.
+function Get-VMMacIsolated {
+    param(
+        [Parameter(Mandatory = $true)][string] $VmName,
+        [switch] $ExcludeCluster
+    )
+    return Invoke-IsolatedCim -ArgumentList $VmName, $ExcludeCluster.IsPresent -ScriptBlock {
+        param($vmName, $excludeCluster)
+        $nic = Get-VM -Name $vmName -ErrorAction Stop | Get-VMNetworkAdapter
+        if ($excludeCluster) {
+            $nic = $nic | Where-Object { -not $_.SwitchName -or $_.SwitchName -notmatch 'Cluster' }
+        }
+        $nic = $nic | Select-Object -First 1
+        if ($nic) { [string]$nic.MacAddress } else { $null }
+    }
+}
+
+# Return the IP of an existing DHCP reservation matching $Mac in $ScopeId, or
+# $null. Runs the DhcpServer CIM query in an isolated runspace.
+function Get-DHCPReservationIPForMac {
+    param(
+        [Parameter(Mandatory = $true)][string] $ScopeId,
+        [Parameter(Mandatory = $true)][string] $Mac
+    )
+    return Invoke-IsolatedCim -ArgumentList $ScopeId, $Mac -ScriptBlock {
+        param($scopeId, $mac)
+        $r = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
+            Where-Object { ($_.ClientId -replace '-', '') -eq $mac }
+        # Do NOT use $r.IPAddress.IPAddressToString here. In the fresh
+        # [PowerShell]::Create() runspace the DhcpServer CDXML cmdlet is
+        # visible but its types.ps1xml adapter (which turns .IPAddress into a
+        # [System.Net.IPAddress]) is not applied, so .IPAddress is the raw CIM
+        # string "x.x.x.x" and .IPAddressToString is $null -> empty string.
+        # That made the Phase 11 audit see an empty IP and flag EVERY VM as
+        # "no DHCP reservation". [string]$r.IPAddress is correct whether
+        # .IPAddress is an [ipaddress] (ToString gives the dotted quad) or a
+        # plain string.
+        if ($r) { [string]$r.IPAddress } else { $null }
+    }
+}
+
+# Return a hashtable of vmName -> domain-NIC MAC for EVERY VM on the host, all
+# in ONE isolated runspace (single Hyper-V module import). This is the batched
+# counterpart to Get-VMMacIsolated: callers that need MACs for many VMs (e.g.
+# the Phase 11 DHCP audit) should use this instead of calling Get-VMMacIsolated
+# in a loop, which spawns a fresh runspace -- and re-imports the Hyper-V module
+# (~seconds) -- per VM. When -ExcludeCluster is set, SQLAO Cluster heartbeat
+# NICs are filtered out, matching Get-VMMacIsolated. MACs are projected to plain
+# strings inside the isolated runspace so no type adapter is needed by the
+# caller.
+function Get-AllVMMacsIsolated {
+    param(
+        [switch] $ExcludeCluster
+    )
+    $results = Invoke-IsolatedCim -ArgumentList $ExcludeCluster.IsPresent -ScriptBlock {
+        param($excludeCluster)
+        $out = @()
+        foreach ($vm in (Get-VM -ErrorAction SilentlyContinue)) {
+            $nic = $vm | Get-VMNetworkAdapter
+            if ($excludeCluster) {
+                $nic = $nic | Where-Object { -not $_.SwitchName -or $_.SwitchName -notmatch 'Cluster' }
+            }
+            $nic = $nic | Select-Object -First 1
+            if ($nic) { $mac = [string]$nic.MacAddress } else { $mac = $null }
+            $out += [pscustomobject]@{ VmName = [string]$vm.Name; Mac = $mac }
+        }
+        $out
+    }
+    $map = @{}
+    foreach ($r in $results) { $map[$r.VmName] = $r.Mac }
+    return $map
+}
+
+# Return every DHCP reservation across every scope as an array of objects with
+# ScopeId / Mac (dashes stripped) / Ip, all in ONE isolated runspace (single
+# DhcpServer module import). This is the batched counterpart to
+# Get-DHCPReservationIPForMac: callers verifying many VMs (e.g. the Phase 11
+# audit) should build a lookup from this once instead of calling
+# Get-DHCPReservationIPForMac per VM, which re-imports the DhcpServer module in
+# a fresh runspace each time. Ip is projected to a plain string inside the
+# isolated runspace (the CDXML .IPAddress type adapter is NOT applied there --
+# see Get-DHCPReservationIPForMac for the full rationale).
+function Get-AllDHCPReservationsIsolated {
+    return Invoke-IsolatedCim -ScriptBlock {
+        $out = @()
+        foreach ($scope in (Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)) {
+            $sid = [string]$scope.ScopeId
+            foreach ($r in (Get-DhcpServerv4Reservation -ScopeId $sid -ErrorAction SilentlyContinue)) {
+                $out += [pscustomobject]@{
+                    ScopeId = $sid
+                    Mac     = ($r.ClientId -replace '-', '')
+                    Ip      = [string]$r.IPAddress
+                }
+            }
+        }
+        $out
+    }
+}
+
+# Host-wide named mutex serializing every DHCP server write/read-for-write op.
+# The DhcpServer CDXML cmdlets call into the DHCP RPC interface and parallel
+# Phase 1 VM-create jobs hitting Add-DhcpServerv4Reservation /
+# Get-DhcpServerv4FreeIPAddress + Add-DhcpServerv4ExclusionRange against the
+# same scope produced intermittent "Failed to reserve IP address ... in scope
+# ... on DHCP server ..." errors that swallowed all root-cause detail. The
+# Global\ prefix makes the mutex visible across PowerShell processes / jobs
+# on the host (matches the pattern used by Global\MemlabsImapi2fsLock in
+# Common.Linux.ps1). Failures to acquire fall through after the timeout so a
+# single stuck holder can't deadlock a whole deploy -- the operation runs
+# anyway and any race-induced error gets caught/retried by the caller.
+function Invoke-WithDhcpMutex {
+    param(
+        [Parameter(Mandatory = $true)] [scriptblock] $ScriptBlock,
+        [int] $TimeoutSeconds = 120
+    )
+    $mtx = $null
+    $acquired = $false
+    try {
+        try {
+            $mtx = [System.Threading.Mutex]::new($false, 'Global\MemLabs_DHCP')
+            $acquired = $mtx.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            # Prior holder died without releasing; ownership is now ours.
+            $acquired = $true
+        }
+        catch {
+            # Mutex creation itself failed (rare: ACL / WaitHandleCannotBeOpenedException
+            # under unusual session conditions). Run unguarded rather than fail the deploy.
+            Write-Log "Invoke-WithDhcpMutex: mutex unavailable, running unguarded ($($_.Exception.GetType().FullName)): $($_.Exception.Message)" -LogOnly
+        }
+        if (-not $acquired -and $mtx) {
+            Write-Log "Invoke-WithDhcpMutex: timed out after $TimeoutSeconds s; proceeding without serialization" -LogOnly
+        }
+        & $ScriptBlock
+    }
+    finally {
+        if ($mtx) {
+            if ($acquired) { try { $mtx.ReleaseMutex() } catch {} }
+            try { $mtx.Dispose() } catch {}
+        }
+    }
+}
+
+# Create a DHCP reservation, running the DhcpServer CIM cmdlet in an isolated
+# runspace. Serialized across the host via Global\MemLabs_DHCP and retried on
+# failure with exponential backoff so transient RPC contention from parallel
+# Phase 1 VM-create jobs doesn't surface as a permanent reservation failure.
+# Pre-cleans an orphaned reservation on the same IP under a different MAC --
+# left over from a partial prior deploy this is the most common cause of the
+# bare cmdlet failing. Throws with full exception chain detail (type, message,
+# every InnerException) on final failure so the caller's log line carries the
+# actual root cause instead of a stringified ErrorRecord.
+function Add-DHCPReservationIsolated {
+    param(
+        [Parameter(Mandatory = $true)][string] $ScopeId,
+        [Parameter(Mandatory = $true)][string] $IPAddress,
+        [Parameter(Mandatory = $true)][string] $Mac,
+        [string] $Description,
+        [int] $MaxAttempts = 4,
+        [string] $LogContext
+    )
+
+    $tag = if ($LogContext) { "$LogContext`: " } else { '' }
+    $attempt = 0
+    $lastError = $null
+    while ($attempt -lt $MaxAttempts) {
+        $attempt++
+        try {
+            Invoke-WithDhcpMutex -ScriptBlock {
+                Invoke-IsolatedCim -ArgumentList $ScopeId, $IPAddress, $Mac, $Description -ScriptBlock {
+                    param($scopeId, $ip, $mac, $desc)
+
+                    # Pre-clean: a reservation OR active lease already sitting on
+                    # this IP under a DIFFERENT client is the most common cause of
+                    # Add-DhcpServerv4Reservation throwing "Failed to reserve IP
+                    # address ... in scope ...". Such an occupant is either:
+                    #   (a) an ORPHAN  -- left by a deleted VM, or held by a VM that
+                    #       now lives on a different vSwitch (e.g. a capture box) --
+                    #       in which case we safely reclaim the IP; or
+                    #   (b) a LIVE VM currently attached to THIS scope's switch --
+                    #       a genuine in-lab IP collision -- in which case stealing
+                    #       it would break a working VM, so we refuse and surface it.
+                    # The scope id equals the vSwitch name (the switch is created as
+                    # New-VMSwitch -Name <network>), so "legitimately owns this IP"
+                    # == "MAC is attached to the switch named $scopeId". Membership
+                    # is resolved lazily (only when a conflict must be adjudicated)
+                    # so the common no-conflict path does no Get-VM enumeration.
+                    $ourMac = ($mac -replace '[-:]', '').ToLower()
+                    $switchMacs = $null
+                    $resolveSwitchMacs = {
+                        $m = @{}
+                        try {
+                            Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
+                                Where-Object { $_.SwitchName -eq $scopeId -and $_.MacAddress -and $_.MacAddress -ne '000000000000' } |
+                                ForEach-Object { $m[($_.MacAddress -replace '[-:]', '').ToLower()] = $_.VMName }
+                        }
+                        catch { }
+                        $m
+                    }
+
+                    $existing = $null
+                    try { $existing = Get-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
+                    if ($existing) {
+                        $existingMac = ($existing.ClientId -replace '[-:]', '').ToLower()
+                        if ($existingMac -eq $ourMac) {
+                            # Reservation already exists with our MAC -- idempotent success.
+                            return
+                        }
+                        if ($null -eq $switchMacs) { $switchMacs = & $resolveSwitchMacs }
+                        if ($switchMacs.ContainsKey($existingMac)) {
+                            throw "DHCP in-lab IP collision: $ip on scope $scopeId is already reserved to live switch member '$($switchMacs[$existingMac])' (MAC $existingMac); refusing to reassign it to MAC $mac. Fix the IP assignment for one of these VMs."
+                        }
+                        # Orphan reservation -- reclaim the IP (drop any matching lease too).
+                        Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null
+                        try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null } catch { }
+                    }
+                    else {
+                        # No reservation, but a stale ACTIVE LEASE held by a
+                        # different, non-member client can still make the Add fail
+                        # with "Failed to reserve IP address". Clear that orphan
+                        # lease -- never one belonging to a live switch member.
+                        # (Get-DhcpServerv4Lease rejects -ScopeId + -IPAddress
+                        # together, so query by -IPAddress alone.)
+                        $lease = $null
+                        try { $lease = Get-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
+                        if ($lease) {
+                            $leaseMac = ($lease.ClientId -replace '[-:]', '').ToLower()
+                            if ($leaseMac -ne $ourMac) {
+                                if ($null -eq $switchMacs) { $switchMacs = & $resolveSwitchMacs }
+                                if (-not $switchMacs.ContainsKey($leaseMac)) {
+                                    try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null } catch { }
+                                }
+                            }
+                        }
+                    }
+
+                    Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ClientId $mac -Description $desc -ErrorAction Stop | Out-Null
+                } | Out-Null
+            }
+            if ($attempt -gt 1) {
+                Write-Log "${tag}Add-DHCPReservationIsolated: succeeded for $IPAddress on attempt $attempt/$MaxAttempts (Scope=$ScopeId, MAC=$Mac)" -LogOnly
+            }
+            return
+        }
+        catch {
+            $lastError = $_
+            $exType = $_.Exception.GetType().FullName
+            $exMsg = $_.Exception.Message
+            $inner = $_.Exception.InnerException
+            $innerStr = ''
+            while ($inner) {
+                $innerStr += " >> [$($inner.GetType().FullName)] $($inner.Message)"
+                $inner = $inner.InnerException
+            }
+            Write-Log "${tag}Add-DHCPReservationIsolated: attempt $attempt/$MaxAttempts failed for $IPAddress (Scope=$ScopeId, MAC=$Mac): [$exType] $exMsg$innerStr" -LogOnly
+            if ($attempt -lt $MaxAttempts) {
+                # 500ms, 1s, 2s
+                Start-Sleep -Milliseconds ([int](500 * [math]::Pow(2, $attempt - 1)))
+            }
+        }
+    }
+
+    # All attempts failed -- rethrow with full diagnostic context so the
+    # caller's catch logs the real root cause instead of a stringified $_.
+    $exType = $lastError.Exception.GetType().FullName
+    $exMsg = $lastError.Exception.Message
+    $inner = $lastError.Exception.InnerException
+    $innerStr = ''
+    while ($inner) {
+        $innerStr += " >> [$($inner.GetType().FullName)] $($inner.Message)"
+        $inner = $inner.InnerException
+    }
+    throw "Add-DHCPReservationIsolated: all $MaxAttempts attempts failed for $IPAddress (Scope=$ScopeId, MAC=$Mac). Final error: [$exType] $exMsg$innerStr"
+}
+
 function Remove-DHCPReservation {
     param(
         [string] $ip,
@@ -2554,70 +3865,63 @@ function Remove-DHCPReservation {
         [string] $vmName
     )
 
-    $job = $null
-    $scopes = (Get-DhcpServerv4Scope).ScopeID
+    # The DhcpServer CDXML cmdlets emit CIM progress that permanently poisons
+    # the calling runspace's Progress stream (collapsing the managed per-VM
+    # progress bars when this runs inside a Phase job). Run the entire
+    # lookup/removal in an isolated in-process runspace so the poison lands on
+    # the throwaway runspace instead. Removal is synchronous here (the prior
+    # -AsJob was itself a progress-isolation workaround that's now unnecessary).
+    # Wrapped in Invoke-WithDhcpMutex so parallel Phase 1 jobs don't fight the
+    # add path -- a remove on scope X racing an add on scope X has produced
+    # spurious "Failed to reserve" errors in the past.
+    $logLines = Invoke-WithDhcpMutex -ScriptBlock {
+        Invoke-IsolatedCim -ArgumentList $ip, $mac, $vmName -ScriptBlock {
+            param($ip, $mac, $vmName)
+            $out = @()
+            $scopes = (Get-DhcpServerv4Scope).ScopeID
 
-    if ($ip) {
-        Write-Log -Verbose ($VmName + " Checking for Reservation for $ip")
-        if (Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue) {
-            Write-Log -Verbose ($VmName + " Removing Reservation for $ip")
-            $job = Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue -AsJob
-        }
-    }
-
-    if ($mac) {
-        Write-Log -Verbose ($VmName + " Checking for Reservation for $mac")
-        foreach ($scope in  $scopes) {
-            #write-Host $scope.ScopeId
-            #Get-DhcpServerv4Reservation -scope $scope.ScopeID
-            $reservation = Get-DhcpServerv4Reservation -scope $scope -ClientId $mac -ErrorAction SilentlyContinue
-
-            if ($reservation) {
-                Write-Log -Verbose ($VmName + " Removing Reservation for $mac")
-                $job = Remove-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -AsJob
-                break;
-            }
-        }
-    }
-
-    if (-not $ip -and -not $mac) {
-        Write-Log -Verbose ($VmName + " Checking for Reservation for $vmName")
-        foreach ($scope in $scopes) {
-            #write-Host $scope.ScopeId
-            #Get-DhcpServerv4Reservation -scope $scope.ScopeID
-            $reservation = Get-DhcpServerv4Reservation -scope $scope -ClientId $mac -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
-
-            if ($reservation) {
-                Write-Log -Verbose ($VmName + " Removing Reservation for $vmName")
-                $job = Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IpAddress -AsJob
-                break;
-            }
-        }
-    }
-
-    if ($job) {
-        try {
-            $wait = Wait-Job -Timeout 60 -Job $job
-            if ($wait.State -eq "Running") {
-                Stop-Job $job | out-null
-                remove-job -job $job | out-null
-            }
-            else {
-                if ($wait.State -eq "Completed") {
-                    $result = Receive-Job $job
-                    write-log -logonly "[DHCP] returned: $result"
-                    remove-job $job | out-null
+            if ($ip) {
+                $out += "$vmName Checking for Reservation for $ip"
+                if (Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue) {
+                    $out += "$vmName Removing Reservation for $ip"
+                    Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue
                 }
-                else {
-                    write-log -logonly "[DHCP] State = $($wait.State)" -logonly
-                    Stop-Job $job | out-null
-                    remove-job $job | out-null
+                # Also drop any active lease so the IP is fully released, not just
+                # the reservation (an orphan lease can still block a later Add).
+                try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
+            }
+
+            if ($mac) {
+                $out += "$vmName Checking for Reservation for $mac"
+                foreach ($scope in $scopes) {
+                    $reservation = Get-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -ErrorAction SilentlyContinue
+                    if ($reservation) {
+                        $out += "$vmName Removing Reservation for $mac"
+                        Remove-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -ErrorAction SilentlyContinue
+                        try { Remove-DhcpServerv4Lease -IPAddress $reservation.IPAddress -ErrorAction SilentlyContinue } catch { }
+                        break
+                    }
                 }
             }
+
+            if (-not $ip -and -not $mac) {
+                $out += "$vmName Checking for Reservation for $vmName"
+                foreach ($scope in $scopes) {
+                    $reservation = Get-DhcpServerv4Reservation -ScopeId $scope -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
+                    if ($reservation) {
+                        $out += "$vmName Removing Reservation for $vmName"
+                        Remove-DhcpServerv4Reservation -IPAddress $reservation.IPAddress -ErrorAction SilentlyContinue
+                        try { Remove-DhcpServerv4Lease -IPAddress $reservation.IPAddress -ErrorAction SilentlyContinue } catch { }
+                        break
+                    }
+                }
+            }
+            return $out
         }
-        catch {
-            Write-Log -LogOnly "Failed to remove job $_"
-        }
+    }
+
+    foreach ($line in $logLines) {
+        Write-Log -Verbose $line
     }
 }
 
@@ -2652,9 +3956,6 @@ The name of the virtual switch to connect the virtual machine to.
 .PARAMETER DiskControllerType
 The type of disk controller to use for the virtual machine. Default value is "SCSI".
 
-.PARAMETER SwitchName2
-The name of an additional virtual switch to connect the virtual machine to.
-
 .PARAMETER AdditionalDisks
 Additional disks to attach to the virtual machine.
 
@@ -2682,6 +3983,562 @@ New-VirtualMachine -VmName "MyVM" -VmPath "C:\VMs" -Memory "4GB" -Processors 2 -
 This example creates a new virtual machine named "MyVM" with 4GB of memory, 2 processors, generation 2, and connects it to the "VirtualSwitch" virtual switch.
 
 #>
+
+function Set-SQLAOHeartbeatIPs {
+    <#
+    .SYNOPSIS
+        Allocate the SQLAO cluster heartbeat IP (10.250.251.x) for every SQLAO node
+        ONCE, single-threaded, right before the parallel Phase 5 jobs fan out.
+    .DESCRIPTION
+        Only Phase 5 needs these IPs, so they are allocated here -- on the main
+        thread, before any Phase 5 job starts -- in a single pass: gather every IP
+        already in use, work out how many nodes still need one, grab that many free
+        addresses, and dole them out. Because it is serial there is no race and NO
+        mutex (and the per-node Add-VMNetworkAdapter in the Phase 5 job acts on
+        distinct VMs, so it doesn't need one either).
+
+        The heartbeat subnet (10.250.251.0/24) has no DHCP scope, so collision
+        avoidance is purely this in-memory dedup over .20-.199. A node's existing IP
+        (deployConfig or VM Note) is reused when unique; a node with no IP -- or whose
+        stored IP collides with another node (a bad config from an older build) -- is
+        handed the next free address. The result is stamped on the deployConfig (so
+        the per-job copies inherit it) AND written to every SQLAO VM Note at once (so
+        reruns / -StartPhase 5 reuse it).
+
+        ClusterV2 (10.250.251.0/24) is a SINGLE host-internal switch SHARED by every
+        domain on the host, so two SQLAO clusters in DIFFERENT domains share the same
+        L2 segment. The in-use scan below therefore enumerates EVERY VM on the host
+        (no -DomainName filter) -- a heartbeat IP held by a node in another domain is
+        just as much a collision as one in this domain.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [object]$DeployConfig
+    )
+
+    $sqlaoVMs = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and -not $_.hidden })
+    if ($sqlaoVMs.Count -eq 0) { return }
+
+    $subnet = '10.250.251'
+    $rangeStart = 20
+    $rangeEnd = 199
+
+    # 1. Collect every heartbeat IP already in use ACROSS ALL DOMAINS on the host --
+    #    ClusterV2 is one shared L2 segment, so an SQLAO node in any domain holding a
+    #    10.250.251.x is a real collision. Exclude this config's own VMs (matched by
+    #    vmName, which is prefix-unique host-wide) so a node never counts its own IP
+    #    as someone else's on a -StartPhase 5 rerun.
+    $cfgNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($v in $sqlaoVMs) { if ($v.vmName) { $null = $cfgNames.Add($v.vmName) } }
+    $used = [System.Collections.Generic.HashSet[string]]::new()
+    try {
+        foreach ($evm in (Get-List -Type VM -SmartUpdate | Where-Object { $_.ClusterHeartbeatIP -and (-not $cfgNames.Contains($_.vmName)) })) {
+            $null = $used.Add($evm.ClusterHeartbeatIP)
+        }
+    }
+    catch {}
+
+    # 2. Reuse each node's existing IP when it's unique; everything else (missing or a
+    #    duplicate) goes in $needIP to be (re)allocated below.
+    $needIP = [System.Collections.Generic.List[object]]::new()
+    foreach ($v in $sqlaoVMs) {
+        $cur = $v.ClusterHeartbeatIP
+        if (-not $cur) {
+            $note = $null
+            try { $note = Get-VMNote -VMName $v.vmName -ErrorAction SilentlyContinue } catch {}
+            if ($note -and $note.ClusterHeartbeatIP) { $cur = $note.ClusterHeartbeatIP }
+        }
+        if ($cur -and -not $used.Contains($cur)) {
+            $null = $used.Add($cur)
+            $v | Add-Member -MemberType NoteProperty -Name ClusterHeartbeatIP -Value $cur -Force
+        }
+        else {
+            if ($cur) { Write-Log "$($v.vmName): SQLAO: heartbeat IP $cur is a duplicate -- reallocating" -Warning }
+            $needIP.Add($v)
+        }
+    }
+
+    # 3. Grab one free IP per node that needs one and dole them out.
+    foreach ($v in $needIP) {
+        $ip = $null
+        for ($o = $rangeStart; $o -le $rangeEnd; $o++) {
+            $cand = "$subnet.$o"
+            if (-not $used.Contains($cand)) { $ip = $cand; break }
+        }
+        if (-not $ip) {
+            Write-Log "$($v.vmName): SQLAO: no free heartbeat IP in $subnet.$rangeStart-$rangeEnd (range exhausted)" -Failure
+            continue
+        }
+        $null = $used.Add($ip)
+        $v | Add-Member -MemberType NoteProperty -Name ClusterHeartbeatIP -Value $ip -Force
+        Write-Log "$($v.vmName): SQLAO: assigned heartbeat IP $ip" -LogOnly
+    }
+
+    # 4. Persist to every SQLAO VM Note at once so reruns reuse the same IPs.
+    foreach ($v in $sqlaoVMs) {
+        if ($v.ClusterHeartbeatIP) {
+            New-VmNote -VmName $v.vmName -DeployConfig $DeployConfig -InProgress $true
+        }
+    }
+}
+
+function Set-DeployConfigIPAddresses {
+    <#
+    .SYNOPSIS
+        Pre-allocate DHCP IPs for every VM before Phase 1 starts.
+    .DESCRIPTION
+        Iterates all non-hidden VMs in the deploy config, determines
+        the correct DHCP scope, and assigns a stable IP:
+        - CAS -> .5, Primary -> .10, Secondary -> .15 (fixed well-known)
+        - Proxy (Linux) -> .2 (static cloud-init)
+        - DC -> .1 (set by DSC, but reserve it here)
+        - All others -> Get-DhcpServerv4FreeIPAddress from the scope
+
+        Stamps $vm.AssignedIP on each VM's config object. New-VirtualMachine
+        and New-LinuxVirtualMachine use this to create the DHCP reservation
+        immediately after VM creation (before boot), so every VM boots
+        with a deterministic, reserved IP.
+
+        This runs serially on the main thread before parallel Phase 1
+        jobs start, so no mutex is needed for IP allocation.
+    #>
+    param (
+        [Parameter(Mandatory)]
+        [object]$DeployConfig
+    )
+
+    $defaultNetwork = $DeployConfig.vmOptions.network
+    if (-not $defaultNetwork) {
+        Write-Log "Set-DeployConfigIPAddresses: No default network in vmOptions. Cannot allocate IPs." -Failure
+        return
+    }
+
+    # Verify DHCP service is running before we try to allocate
+    $dhcpService = Get-Service DHCPServer -ErrorAction SilentlyContinue
+    if (-not $dhcpService -or $dhcpService.Status -ne 'Running') {
+        Write-Log "Set-DeployConfigIPAddresses: DHCP service is not running. Starting..." -Warning
+        $dhcp = Start-DHCP
+        if (-not $dhcp) {
+            Write-Log "Set-DeployConfigIPAddresses: Could not start DHCP service. IP pre-allocation will be skipped." -Failure
+            return
+        }
+    }
+
+    # Track IPs we've allocated to prevent duplicates within this run
+    $allocatedIps = [System.Collections.Generic.HashSet[string]]::new()
+    $vmCount = 0
+    $skipCount = 0
+    $reuseCount = 0
+    $fixedCount = 0
+    $dynamicCount = 0
+    $failCount = 0
+
+    # Collect all scopes we'll use and verify they exist
+    $scopesNeeded = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($vm in $DeployConfig.virtualMachines) {
+        if ($vm.hidden -or $vm.role -eq 'OSDClient') { continue }
+        $sid = if ($vm.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($vm.network) { $vm.network } else { $defaultNetwork } }
+        $null = $scopesNeeded.Add($sid)
+    }
+    foreach ($sid in $scopesNeeded) {
+        $scope = Get-DhcpServerv4Scope -ScopeId $sid -ErrorAction SilentlyContinue
+        if (-not $scope) {
+            Write-Log "Set-DeployConfigIPAddresses: DHCP scope $sid does not exist! VMs on this scope will not get pre-assigned IPs." -Warning
+        }
+        else {
+            $stats = Get-DhcpServerv4ScopeStatistics -ScopeId $sid -ErrorAction SilentlyContinue
+            if ($stats) {
+                Write-Log "Set-DeployConfigIPAddresses: Scope $sid ($($scope.Name)): $($stats.Free) free, $($stats.InUse) in use, $($stats.Reserved) reserved" -LogOnly
+            }
+        }
+    }
+
+    # Sweep orphaned DHCP reservations for THIS domain before allocating anything.
+    #
+    # A reservation goes orphaned when its VM is deleted (failed Phase 1 VM that was
+    # removed, or a prior teardown whose DHCP cleanup didn't run) or recreated with a
+    # new MAC. Get-DhcpServerv4FreeIPAddress treats a reservation with no active lease
+    # as FREE, so it can hand a stale-reservation IP to a new VM, whose own reservation
+    # Add then fails (the IP is already reserved) -- the same collision class that broke
+    # Phase 5 SQLAO. Clearing orphans up front frees those IPs for clean reuse.
+    #
+    # Ownership is scoped strictly to this domain so we never touch another domain's or
+    # a manually-created reservation: a reservation is removable only when its MAC is
+    # NOT held by any live VM AND it is positively attributable to this domain (FQDN
+    # ending in .<domain>, a hostname/Description naming one of this domain's VMs, or --
+    # for the domain's own exclusive subnet -- a MemLabs 'Reservation for X' signature).
+    $domainName = $DeployConfig.vmOptions.domainName
+    if ($domainName) {
+        $validMacs = [System.Collections.Generic.HashSet[string]]::new()
+        $domainVmNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+        $existingDomainVMs = @()
+        try { $existingDomainVMs = @(Get-List -Type VM -DomainName $domainName -SmartUpdate) } catch {}
+        foreach ($evm in $existingDomainVMs) {
+            if ($evm.vmName) { $null = $domainVmNames.Add($evm.vmName) }
+        }
+        foreach ($cvm in $DeployConfig.virtualMachines) {
+            if ($cvm.vmName) { $null = $domainVmNames.Add($cvm.vmName) }
+        }
+
+        # Live NIC MACs for VMs that still exist (the only legitimate reservation owners).
+        foreach ($evm in $existingDomainVMs) {
+            try {
+                $liveVm = Get-VM2 -Name $evm.vmName -ErrorAction SilentlyContinue
+                if (-not $liveVm) { continue }
+                foreach ($nic in ($liveVm | Get-VMNetworkAdapter -ErrorAction SilentlyContinue)) {
+                    if ($nic.MacAddress -and $nic.MacAddress -ne '000000000000') {
+                        $null = $validMacs.Add(($nic.MacAddress -replace '-', '').ToUpper())
+                    }
+                }
+            }
+            catch {}
+        }
+
+        $orphansRemoved = 0
+        foreach ($sid in $scopesNeeded) {
+            $isSharedScope = ($sid -eq '172.31.250.0')
+            $resv = @()
+            try { $resv = @(Get-DhcpServerv4Reservation -ScopeId $sid -ErrorAction SilentlyContinue) } catch {}
+            foreach ($r in $resv) {
+                $rMac = ($r.ClientId -replace '-', '').ToUpper()
+                if (-not $rMac) { continue }
+                if ($validMacs.Contains($rMac)) { continue }   # held by a live VM -- keep
+
+                $rName = [string]$r.Name
+                $rDesc = [string]$r.Description
+                $rHost = if ($rName) { ($rName -split '\.')[0] } else { '' }
+
+                $ownedByDomain = $false
+                if ($rName -and $rName -like "*.$domainName") {
+                    # FQDN registered into this domain -- strongest signal, safe even on
+                    # the shared internet scope.
+                    $ownedByDomain = $true
+                }
+                elseif (-not $isSharedScope) {
+                    # The domain's own /24 is exclusive to this domain, so a MemLabs
+                    # reservation here that no live VM owns is ours to clear.
+                    if ($rHost -and $domainVmNames.Contains($rHost)) {
+                        $ownedByDomain = $true
+                    }
+                    elseif ($rDesc -match '^Reservation for (.+)$') {
+                        # Linux VM reservations carry a " (Linux)" suffix in the Description
+                        # (Common.Linux.ps1: "Reservation for <vm> (Linux)"). Strip it before
+                        # matching the bare VM name, otherwise the proxy's fixed-role reservation
+                        # (e.g. .2) -- which also has no FQDN Name yet (its DNS A-record is
+                        # deferred to Phase 2) -- can NEVER be attributed to the domain and is
+                        # never swept. A surviving stale .2 reservation then gets inherited by a
+                        # later VM that Hyper-V hands the proxy's recycled MAC, booting it onto
+                        # .2 and colliding with the proxy.
+                        $resvVmName = $Matches[1].Trim() -replace '\s*\(Linux\)$', ''
+                        if ($domainVmNames.Contains($resvVmName)) {
+                            $ownedByDomain = $true
+                        }
+                    }
+                }
+                if (-not $ownedByDomain) { continue }   # unknown / other domain -- never touch
+
+                $rIp = $r.IPAddress.IPAddressToString
+                Write-Log "Set-DeployConfigIPAddresses: Removing orphaned DHCP reservation $rIp (Name='$rName', MAC=$rMac, scope $sid) -- no live VM owns this MAC" -LogOnly
+                # Remove-DhcpServerv4Reservation's -IPAddress and -ScopeId belong to
+                # different parameter sets (IPAddress uniquely identifies the
+                # reservation; ScopeId pairs with ClientId). Passing both can't
+                # resolve a set, and that binding error is terminating -- it bypasses
+                # -ErrorAction SilentlyContinue. Identify the reservation by IP only.
+                Remove-DhcpServerv4Reservation -IPAddress $rIp -ErrorAction SilentlyContinue
+                $orphansRemoved++
+            }
+        }
+        if ($orphansRemoved -gt 0) {
+            Write-Log "Set-DeployConfigIPAddresses: Cleaned up $orphansRemoved orphaned DHCP reservation(s) for domain $domainName"
+        }
+    }
+
+    # Pre-allocate SQLAO virtual IPs (cluster VIP + AG listener) up front, alongside
+    # every other VM, so they are reserved BEFORE the per-VM free-IP picks below.
+    #
+    # These were previously allocated lazily in New-VirtualMachine's 2nd-NIC code
+    # during Phase 1. That allocator runs in a parallel child job and only consults
+    # live DHCP (active leases + exclusions). A regular VM's pre-assigned IP is held
+    # only by a temporary exclusion that THIS function removes at the end -- its
+    # durable DHCP reservation isn't created until the VM is started, seconds later.
+    # In that window a SQLAO node's cluster allocator could pick a regular VM's
+    # in-flight IP (and vice-versa), producing a Phase 5 'IP Address is already used'
+    # collision (seen on wacky.sandwich.lab: ZZ-FRIES ClusterIP 172.19.77.83 collided
+    # with ZZ-TURNIP's AssignedIP .83).
+    #
+    # Allocating here -- single-threaded, before any Phase 1 job starts, and seeding
+    # the shared dedup set used for every VM -- closes that race. Cluster/AG IPs are
+    # drawn from .201-.254, ABOVE the DHCP pool, so the pool allocator can never
+    # collide with them. On rerun, existing values in deployConfig or the VM Note are
+    # restored and kept instead of being reallocated.
+
+    # Allocate a SQLAO cluster/AG virtual IP from the TOP of the subnet (.201-.254),
+    # ABOVE the DHCP dynamic pool (.20-.199) and the .200 gateway. Keeping cluster
+    # virtual IPs out of the pool means Get-DhcpServerv4FreeIPAddress (which only
+    # ever returns pool addresses) can NEVER hand a regular VM an address that is
+    # also a cluster VIP -- structurally eliminating the Phase 5 'IP Address is
+    # already used' collision class. The chosen IP is seeded into the dedup set so
+    # neither the next cluster's pick nor the per-VM pool loop can return it again.
+    function Get-SqlaoFreeIP {
+        param([string]$ScopeId, [string]$VmName, [string]$Label)
+        $base = (($ScopeId.Split('.') | Select-Object -First 3) -join '.')
+
+        # Walk the cluster range .201-.254 (ABOVE the .20-.199 pool) and return the
+        # first address not already taken. $allocatedIps holds every IP claimed this
+        # run -- pool picks plus every cluster/AG IP seeded from existing clusters in
+        # step 2 -- so this naturally skips IPs owned by other clusters in the domain.
+        # No DHCP exclusion is added: these IPs are outside the scope's lease range,
+        # so the pool allocator can never return them and an exclusion can't even be
+        # created there.
+        for ($octet = 201; $octet -le 254; $octet++) {
+            $candidate = "$base.$octet"
+            if ($allocatedIps.Contains($candidate)) { continue }
+            # Defensive: a reservation should never exist above the .199 pool, but
+            # skip the address if one somehow does.
+            $existingResv = $null
+            try { $existingResv = Get-DhcpServerv4Reservation -ScopeId $ScopeId -IPAddress $candidate -ErrorAction SilentlyContinue } catch {}
+            if ($existingResv) { continue }
+
+            $null = $allocatedIps.Add($candidate)
+            $null = $sqlaoIps.Add($candidate)
+            return $candidate
+        }
+
+        Write-Log "$VmName`: SQLAO: No free $Label IP in $base.201-.254 (cluster IP range exhausted)" -Warning
+        return $null
+    }
+
+    $sqlaoIps = [System.Collections.Generic.HashSet[string]]::new()
+
+    # 1. Collect every cluster/AG IP already known (deployConfig + VM Notes, all nodes).
+    #    For owner nodes, restore note values back onto the config object so a rerun
+    #    keeps the original IPs instead of picking new ones in step 3.
+    foreach ($sqlaoVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+        $note = $null
+        try { $note = Get-VMNote -VMName $sqlaoVm.vmName -ErrorAction SilentlyContinue } catch {}
+        foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
+            if ($sqlaoVm.OtherNode -and -not $sqlaoVm.$prop -and $note -and $note.$prop) {
+                $sqlaoVm | Add-Member -MemberType NoteProperty -Name $prop -Value ($note.$prop) -Force
+            }
+            foreach ($src in @($sqlaoVm.$prop, $note.$prop)) {
+                if ($src) { $null = $sqlaoIps.Add(($src -replace '/.+$', '')) }
+            }
+        }
+    }
+
+    # 1b. Pull in cluster/AG IPs from every OTHER cluster already in the domain
+    #     (existing SQLAO VMs not part of this deployConfig). A new cluster must not
+    #     reuse an IP a pre-existing cluster already owns.
+    if ($DeployConfig.vmOptions.domainName) {
+        $existingSqlaoVMs = @()
+        try { $existingSqlaoVMs = @(Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName -SmartUpdate | Where-Object { $_.role -eq 'SQLAO' }) } catch {}
+        foreach ($evm in $existingSqlaoVMs) {
+            foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
+                if ($evm.$prop) { $null = $sqlaoIps.Add(($evm.$prop -replace '/.+$', '')) }
+            }
+        }
+    }
+
+    # 2. Seed every known cluster/AG IP into the shared dedup set so neither another
+    #    cluster's allocation nor the per-VM pool loop can hand it out again. These
+    #    live ABOVE the DHCP pool (.201-.254), so no exclusion is needed -- and one
+    #    can't be created (an exclusion must fall inside the scope's lease range).
+    #    The lone exception: a legacy cluster IP from before this scheme that still
+    #    sits inside the .20-.199 pool DOES need an exclusion so a regular VM's
+    #    free-IP pick can't grab it.
+    foreach ($sqlaoIp in $sqlaoIps) {
+        $parsed = $null
+        if (-not [System.Net.IPAddress]::TryParse($sqlaoIp, [ref]$parsed)) { continue }
+        $null = $allocatedIps.Add($sqlaoIp)
+        $lastOctet = [int]($sqlaoIp.Split('.')[-1])
+        if ($lastOctet -ge 20 -and $lastOctet -le 199) {
+            $sqlaoScope = (($sqlaoIp.Split('.') | Select-Object -First 3) -join '.') + '.0'
+            if ($scopesNeeded.Contains($sqlaoScope)) {
+                Add-DhcpServerv4ExclusionRange -ScopeId $sqlaoScope -StartRange $sqlaoIp -EndRange $sqlaoIp -ErrorAction SilentlyContinue | Out-Null
+                Write-Log "Set-DeployConfigIPAddresses: Excluded legacy in-pool SQLAO IP $sqlaoIp on scope $sqlaoScope" -LogOnly
+            }
+        }
+        else {
+            Write-Log "Set-DeployConfigIPAddresses: Reserved SQLAO virtual IP $sqlaoIp (above pool, no exclusion needed)" -LogOnly
+        }
+    }
+
+    # 3. For each cluster-owner node still missing a cluster/AG IP, allocate one now
+    #    from the domain scope. Both IPs must live on the domain subnet so they are
+    #    reachable by clients (the heartbeat network is cluster-only / Role 1).
+    foreach ($ownerVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden })) {
+        # Allocate from the node's OWN network, not the domain default. A SQLAO
+        # node placed on a secondary network (e.g. a child Primary's site network)
+        # has its domain NIC -- and therefore its only gateway-bearing
+        # ClusterAndClient network -- on that subnet. Allocating the cluster/AG
+        # virtual IPs from $defaultNetwork instead lands them on a subnet the node
+        # can't host, so New-Cluster -StaticAddress fails with "no appropriate
+        # ClusterAndClient network was found to host it". Mirror the per-VM main-NIC
+        # rule ($vm.network ?? $defaultNetwork).
+        $domainScopeId = if ($ownerVm.network) { $ownerVm.network } else { $defaultNetwork }
+        if (-not $scopesNeeded.Contains($domainScopeId)) {
+            Write-Log "$($ownerVm.vmName): SQLAO: domain scope $domainScopeId not available; cluster/AG IPs will be allocated in Phase 1." -Warning
+            continue
+        }
+        $ownerSubnet = (($domainScopeId.Split('.') | Select-Object -First 3) -join '.') + '.'
+        foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
+            $existing = $ownerVm.$prop
+            if ($existing) {
+                $clean = $existing -replace '/.+$', ''
+                # Self-heal: a value restored from a note/config that was allocated
+                # against the WRONG subnet (e.g. an earlier build that drew cluster
+                # IPs from the domain default network instead of this node's own
+                # network) would make New-Cluster fail forever. Discard it so it gets
+                # reallocated from $domainScopeId below.
+                if ($clean -notlike "$ownerSubnet*") {
+                    Write-Log "$($ownerVm.vmName): SQLAO: discarding $prop $clean -- not on node subnet $ownerSubnet* (reallocating from scope $domainScopeId)" -Warning
+                    $null = $sqlaoIps.Remove($clean)
+                    $ownerVm.$prop = $null
+                    $existing = $null
+                }
+                else {
+                    # Already set and on the correct subnet -- keep it, strip any /suffix.
+                    if ($clean -ne $existing) { $ownerVm | Add-Member -MemberType NoteProperty -Name $prop -Value $clean -Force }
+                    continue
+                }
+            }
+            $label = if ($prop -eq 'ClusterIPAddress') { 'Cluster' } else { 'AG listener' }
+            $newIp = Get-SqlaoFreeIP -ScopeId $domainScopeId -VmName $ownerVm.vmName -Label $label
+            if (-not $newIp) { continue }
+            $null = $sqlaoIps.Add($newIp)
+            $ownerVm | Add-Member -MemberType NoteProperty -Name $prop -Value $newIp -Force
+            Write-Log "$($ownerVm.vmName): SQLAO: Pre-assigned $label IP $newIp (domain scope $domainScopeId)" -LogOnly
+        }
+        if ($ownerVm.ClusterIPAddress -and $ownerVm.AGIPAddress -and $ownerVm.ClusterIPAddress -eq $ownerVm.AGIPAddress) {
+            Write-Log "$($ownerVm.vmName): SQLAO: Cluster and AG IP are identical ($($ownerVm.ClusterIPAddress)). Domain scope $domainScopeId may be exhausted." -Failure
+        }
+    }
+
+    foreach ($vm in $DeployConfig.virtualMachines) {
+        if ($vm.hidden) { $skipCount++; continue }
+        if ($vm.role -eq 'OSDClient') { $skipCount++; continue }
+        $vmCount++
+
+        # Determine the DHCP scope for this VM
+        if ($vm.role -in 'InternetClient', 'AADClient') {
+            $scopeId = '172.31.250.0'
+        }
+        else {
+            $scopeId = if ($vm.network) { $vm.network } else { $defaultNetwork }
+        }
+        $base = ($scopeId.Split('.') | Select-Object -First 3) -join '.'
+        $ip = $null
+        $ipSource = 'none'
+
+        # Check if a DHCP reservation already exists for this VM's MAC
+        # (from a previous deploy). If so, reuse it instead of allocating
+        # a new IP — avoids clobbering a working reservation on rerun.
+        try {
+            $existingVm = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
+            if ($existingVm) {
+                $vmnet = $existingVm | Get-VMNetworkAdapter |
+                    Where-Object { $_.SwitchName -and $_.SwitchName -notmatch 'Cluster' } |
+                    Select-Object -First 1
+                if ($vmnet -and $vmnet.MacAddress) {
+                    $reservation = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
+                        Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
+                    if ($reservation) {
+                        $ip = $reservation.IPAddress.IPAddressToString
+                        $ipSource = 'existing-reservation'
+                        $reuseCount++
+                    }
+                    else {
+                        Write-Log "$($vm.vmName): VM exists (MAC=$($vmnet.MacAddress)) but no DHCP reservation found in scope $scopeId" -LogOnly
+                    }
+                }
+                else {
+                    Write-Log "$($vm.vmName): VM exists but has no domain NIC or MAC" -LogOnly
+                }
+            }
+        }
+        catch {
+            Write-Log "$($vm.vmName): Error checking existing VM/reservation: $($_.Exception.Message)" -LogOnly
+        }
+
+        # Fixed well-known IPs (outside the DHCP pool .20-.199)
+        if (-not $ip) {
+            switch ($vm.role) {
+                'DC'        { $ip = "$base.1"; $ipSource = 'fixed-role' }
+                'BDC'       { $ip = "$base.3"; $ipSource = 'fixed-role' }
+                'CAS'       { $ip = "$base.5"; $ipSource = 'fixed-role' }
+                'Primary'   { $ip = "$base.10"; $ipSource = 'fixed-role' }
+                'Secondary' { $ip = "$base.15"; $ipSource = 'fixed-role' }
+                'Proxy'     { $ip = "$base.2"; $ipSource = 'fixed-role' }
+            }
+            if ($ipSource -eq 'fixed-role') { $fixedCount++ }
+        }
+
+        # Dynamic allocation from the DHCP pool
+        if (-not $ip) {
+            try {
+                # Get-DhcpServerv4FreeIPAddress + Add-DhcpServerv4ExclusionRange
+                # is a read-then-write race when multiple Phase 1 jobs allocate
+                # against the same scope. Serialize host-wide via the DHCP mutex
+                # so two parallel allocations can't both pick the same address
+                # before either one excludes it.
+                $allocResult = Invoke-WithDhcpMutex -ScriptBlock {
+                    $freeIP = Get-DhcpServerv4FreeIPAddress -ScopeId $scopeId -ErrorAction Stop
+                    if ($freeIP) {
+                        # Exclude it immediately so the next call can't return the same address
+                        Add-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $freeIP -EndRange $freeIP -ErrorAction SilentlyContinue | Out-Null
+                    }
+                    $freeIP
+                }
+                if ($allocResult) {
+                    $ip = $allocResult.ToString()
+                    $ipSource = 'dhcp-pool'
+                    $dynamicCount++
+                }
+                else {
+                    Write-Log "$($vm.vmName): DHCP scope $scopeId returned no free IPs (scope may be exhausted)" -Warning
+                    $failCount++
+                    continue
+                }
+            }
+            catch {
+                Write-Log "$($vm.vmName): Failed to get free IP from scope ${scopeId}: $($_.Exception.Message)" -Warning
+                $failCount++
+                continue
+            }
+        }
+
+        # Validate the IP is well-formed
+        $parsedIP = $null
+        if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$parsedIP)) {
+            Write-Log "$($vm.vmName): IP '$ip' is not a valid IPv4 address (source=$ipSource). Skipping." -Warning
+            $failCount++
+            continue
+        }
+
+        if (-not $allocatedIps.Add($ip)) {
+            Write-Log "$($vm.vmName): DUPLICATE — IP $ip already allocated to another VM in this deploy! (source=$ipSource)" -Warning
+        }
+
+        $vm | Add-Member -MemberType NoteProperty -Name 'AssignedIP' -Value $ip -Force
+        Write-Log "$($vm.vmName): Pre-assigned IP $ip (scope $scopeId, role $($vm.role), source $ipSource)" -LogOnly
+    }
+
+    # Clean up exclusion ranges we added — the DHCP reservations (created
+    # in New-VirtualMachine after New-VM) will prevent reuse. Exclusions
+    # block the entire IP even from reservations on some DHCP versions.
+    $cleanedExclusions = 0
+    foreach ($vm in $DeployConfig.virtualMachines) {
+        if ($vm.hidden -or -not $vm.AssignedIP) { continue }
+        if ($vm.role -in 'DC', 'BDC', 'CAS', 'Primary', 'Secondary', 'Proxy', 'OSDClient') { continue }
+        $scopeId = if ($vm.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($vm.network) { $vm.network } else { $defaultNetwork } }
+        $removed = Remove-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $vm.AssignedIP -EndRange $vm.AssignedIP -ErrorAction SilentlyContinue -PassThru
+        if ($removed) { $cleanedExclusions++ }
+    }
+
+    Write-Log "Pre-allocated IPs for $vmCount VM(s): $dynamicCount dynamic, $fixedCount fixed-role, $reuseCount reused, $failCount failed, $skipCount skipped. Cleaned $cleanedExclusions temp exclusions."
+}
+
 function New-VirtualMachine {
     param (
         [Parameter(Mandatory = $true)]
@@ -2704,8 +4561,6 @@ function New-VirtualMachine {
         [string]$SwitchName,
         [Parameter(Mandatory = $false)]
         [string]$DiskControllerType = "SCSI",
-        [Parameter(Mandatory = $false)]
-        [string]$SwitchName2,
         [Parameter(Mandatory = $false)]
         [object]$AdditionalDisks,
         [Parameter(Mandatory = $false)]
@@ -2834,6 +4689,54 @@ function New-VirtualMachine {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
         }
 
+        # Create DHCP reservation now that the MAC is available.
+        # AssignedIP was stamped on the VM config by Set-DeployConfigIPAddresses
+        # before Phase 1 started, so every VM boots with a deterministic IP.
+        # Skip if a reservation already exists for this MAC (rerun scenario).
+        if ($DeployConfig -and -not $OSDClient.IsPresent) {
+            $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+            if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
+                # DHCP CIM cmdlets run in an isolated runspace (Invoke-IsolatedCim
+                # via the Get-VMMacIsolated / *DHCPReservation* helpers) so their
+                # CIM progress never poisons this job's managed progress bars.
+                try {
+                    $vmMac = Get-VMMacIsolated -VmName $VmName
+                    if ($vmMac -and $vmMac -ne '000000000000') {
+                        $assignedIP = $thisVmConfig.AssignedIP
+                        $scopeId = if ($thisVmConfig.role -in 'InternetClient', 'AADClient') {
+                            '172.31.250.0'
+                        } else {
+                            # Scope must be the /24 that contains AssignedIP -- a VM on a
+                            # secondary subnet must reserve in its own scope, not vmOptions.network.
+                            $ipOctets = ([string]$assignedIP).Split('.')
+                            if ($ipOctets.Count -eq 4) { "$($ipOctets[0]).$($ipOctets[1]).$($ipOctets[2]).0" }
+                            elseif ($thisVmConfig.network) { $thisVmConfig.network } else { $DeployConfig.vmOptions.network }
+                        }
+                        # Check if a reservation already exists for this MAC.
+                        # Only KEEP it when it points at this VM's AssignedIP; a reservation
+                        # for this MAC at a DIFFERENT IP is stale (e.g. left over pointing at
+                        # another VM's fixed-role IP) and MUST be corrected, or the VM boots
+                        # onto the wrong address and collides with the IP's rightful owner.
+                        $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
+                        if ($existing -and $existing -eq $assignedIP) {
+                            Write-Log "$VmName`: DHCP reservation already exists: $existing (MAC=$vmMac); keeping" -LogOnly
+                        }
+                        else {
+                            if ($existing) {
+                                Write-Log "$VmName`: DHCP reservation for MAC=$vmMac points to $existing but AssignedIP is $assignedIP; correcting to avoid an address collision" -LogOnly
+                            }
+                            Remove-DHCPReservation -mac $vmMac -vmName $VmName
+                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName"
+                            Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
+                        }
+                    }
+                }
+                catch {
+                    Write-Log "$VmName`: Could not create DHCP reservation for $($thisVmConfig.AssignedIP). $_" -Warning
+                }
+            }
+        }
+
         # Copy sysprepped image to VM location
         $osDiskName = "$($VmName)_OS.vhdx"
         $osDiskPath = Join-Path $vm.Path $osDiskName
@@ -2917,8 +4820,10 @@ function New-VirtualMachine {
         Set-VM -Name $vmName -ProcessorCount $Processors | out-null
 
         Write-Progress2 $Activity -Status "Adding OS Disk to VM" -percentcomplete 65 -force
-        Write-Log "$VmName`: Adding virtual disk $osDiskPath"
-        Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType $DiskControllerType -ControllerNumber 0 | out-null
+        # Gen 1 VMs can only boot from IDE; force the OS disk onto IDE 0 regardless of $DiskControllerType.
+        $osDiskController = if ($Generation -eq 1) { "IDE" } else { $DiskControllerType }
+        Write-Log "$VmName`: Adding virtual disk $osDiskPath (controller: $osDiskController)"
+        Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType $osDiskController -ControllerNumber 0 | out-null
 
         Write-Progress2 $Activity -Status "Adding DVD disk to VM" -percentcomplete 70 -force
         Write-Log "$VmName`: Adding a DVD drive"
@@ -2926,7 +4831,10 @@ function New-VirtualMachine {
 
         Write-Progress2 $Activity -Status "Changing Boot Order" -percentcomplete 75 -force
         Write-Log "$VmName`: Changing boot order"
-        $f = Get-VM2 -Fallback -Name $VmName | Get-VMFirmware
+        # Get-VMFirmware / Set-VMFirmware are Gen 2 only. Gen 1 uses BIOS boot
+        # order (CD, IDE, LegacyNetworkAdapter, Floppy) which is correct by default
+        # once the OS disk is on IDE.
+        $f = if ($Generation -eq 2) { Get-VM2 -Fallback -Name $VmName | Get-VMFirmware } else { $null }
         $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
         $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
         $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
@@ -2954,21 +4862,24 @@ function New-VirtualMachine {
         }
 
         Write-Progress2 $Activity -Status "Setting Firmware" -percentcomplete 85 -force
-        # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
-        if ($null -ne $f_file) {
-            if (-not $OSDClient.IsPresent) {
-                Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net | out-null
+        # Set-VMFirmware is Gen 2 only. Gen 1 BIOS boot order is fine by default.
+        if ($Generation -eq 2) {
+            # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
+            if ($null -ne $f_file) {
+                if (-not $OSDClient.IsPresent) {
+                    Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net | out-null
+                }
+                else {
+                    Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd | out-null
+                }
             }
             else {
-                Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd | out-null
-            }
-        }
-        else {
-            if (-not $OSDClient.IsPresent) {
-                Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net | out-null
-            }
-            else {
-                Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
+                if (-not $OSDClient.IsPresent) {
+                    Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net | out-null
+                }
+                else {
+                    Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
+                }
             }
         }
 
@@ -2980,145 +4891,61 @@ function New-VirtualMachine {
             return $false
         }
 
-        if ($SwitchName2) {
-            Write-Progress2 $Activity -Status "SQLAO: Waiting to add 2nd NIC" -percentcomplete 90 -force
-            $mtx = New-Object System.Threading.Mutex($false, "GetIP")
-            write-log "Attempting to acquire 'GetIP' Mutex" -LogOnly
-            [void]$mtx.WaitOne()
-            write-log "acquired 'GetIP' Mutex" -LogOnly
-            try {
-                Write-Progress2 $Activity -Status "SQLAO: Adding 2nd NIC" -percentcomplete 95 -force
-                write-log "$VmName`: Adding 2nd NIC attached to $SwitchName2" -LogOnly
-                $Global:ProgressPreference = 'SilentlyContinue'
-                $vmnet = Add-VMNetworkAdapter -VMName $VmName -SwitchName $SwitchName2 -Passthru
-                write-log "$VmName`: NIC added MAC: $($vmnet.MacAddress)" -LogOnly
-
-                if (-not $($vmnet.MacAddress)) {
-                    start-sleep -Seconds 60
-                    if (-not $($vmnet.MacAddress)) {
-                        #Investigate deleting and re-adding
-                        write-log "$VmName`: 2nd NIC does not have a MAC address: $($vmnet)" -Failure
-                        return $false
-                    }
-                }
-
-                $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
-                if (-not ($dc.network)) {
-                    $dns = $DeployConfig.vmOptions.network.Substring(0, $DeployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
-                }
-                else {
-                    $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
-                }
-
-
-                if (-not $dns) {
-                    write-Log -Failure "$VmName`:Could not determine DNS for cluster network"
-                    return $false
-                }
-
-                $ip = $null
+        # Create DHCP reservation now that the VM is started and has a real MAC.
+        # Before Start-VM2, Hyper-V reports MAC as 000000000000 (dynamic MAC
+        # not yet assigned). After start, the real MAC is available.
+        if ($DeployConfig -and -not $OSDClient.IsPresent) {
+            $thisVmConfig2 = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+            if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated) {
+                # DHCP/Hyper-V CIM cmdlets run isolated (see Get-VMMacIsolated /
+                # *DHCPReservation* helpers) so they don't poison the managed bars.
                 try {
-                    $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
-                    if (! $ip) {
-                        $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
-                    }
-                    if (! $ip) {
-                        Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
-                        return $false
-                    }
-                    else {
-                        Remove-DHCPReservation -ip $ip -vmName $VmName
-                    }
-
-                    Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                    Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $VmName
-                    Remove-DHCPReservation -vmName $VmName
-
-
-                    Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                }
-                catch {
-                    #retry
-                    Start-DHCP -Restart | out-null
-                    $ip = $null
-                    try {
-                        $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
-                        if (! $ip) {
-                            $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
+                    $vmMac2 = Get-VMMacIsolated -VmName $VmName -ExcludeCluster
+                    if ($vmMac2 -and $vmMac2 -ne '000000000000') {
+                        $scopeId2 = if ($thisVmConfig2.role -in 'InternetClient', 'AADClient') {
+                            '172.31.250.0'
+                        } else {
+                            # Scope must be the /24 that contains AssignedIP -- a VM on a
+                            # secondary subnet must reserve in its own scope, not vmOptions.network.
+                            $ipOctets2 = ([string]$thisVmConfig2.AssignedIP).Split('.')
+                            if ($ipOctets2.Count -eq 4) { "$($ipOctets2[0]).$($ipOctets2[1]).$($ipOctets2[2]).0" }
+                            elseif ($thisVmConfig2.network) { $thisVmConfig2.network } else { $DeployConfig.vmOptions.network }
                         }
-                        if (! $ip) {
-                            Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
-                            return $false
+                        # Only KEEP an existing reservation for this MAC when it points at the
+                        # VM's AssignedIP; a reservation at a different IP is stale and would put
+                        # the VM on the wrong address (and collide with that IP's rightful owner).
+                        $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2
+                        if ($existing2 -and $existing2 -eq $thisVmConfig2.AssignedIP) {
+                            Write-Log "$VmName`: DHCP reservation already exists: $existing2 (MAC=$vmMac2); keeping" -LogOnly
                         }
                         else {
-                            Remove-DHCPReservation -ip $ip -vmName $currentItem.vmName
+                            if ($existing2) {
+                                Write-Log "$VmName`: DHCP reservation for MAC=$vmMac2 points to $existing2 but AssignedIP is $($thisVmConfig2.AssignedIP); correcting to avoid an address collision" -LogOnly
+                            }
+                            Remove-DHCPReservation -mac $vmMac2 -vmName $VmName
+                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName" -LogContext $VmName
+                            Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
                         }
-                        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                        Remove-DHCPReservation -vmName $currentItem.vmName
-
-
-                        Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
-                        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                        Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                        Set-DhcpServerv4OptionValue -optionID 15 -value $DeployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                    }
-                    catch {
-                        write-log -failure "$VmName`:Failed to reserve IP address $ip for DNS: $dns and Mac:$($vmnet.MacAddress)"
-                        Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
-                        return $false
+                        $thisVmConfig2 | Add-Member -MemberType NoteProperty -Name 'ReservationCreated' -Value $true -Force
                     }
                 }
-
-                $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
-                #$currentItem | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value $ip -Force
-                #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
-                if ($currentItem.OtherNode) {
-                    $IPs = (Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 75 -WarningAction SilentlyContinue) | Select-Object -Last 2
-                    Write-Log "$VmName`: SQLAO: Setting New ClusterIPAddress and AG IPAddress" -LogOnly
-                    $clusterIP = $IPs[0]
-                    $AGIP = $IPs[1]
-
-                    write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
-
-                    if ($clusterIP) {
-                        Remove-DHCPReservation -ip $clusterIP -vmName $VmName
-                    }
-                    if ($AGIP) {
-                        Remove-DHCPReservation -ip $AGIP -vmName $VmName
-                    }
-
-
-                    if (-not $clusterIP -or -not $AGIP) {
-                        write-log -failure "$VmName`:Failed to acquire Cluster or AGIP for SQLAO"
-                        return $false
-                    }
-
-                    $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
-                    $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
-
-                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | out-null
-                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue | out-null
+                catch {
+                    # Add-DHCPReservationIsolated already logs each attempt and rethrows
+                    # with the full exception chain on final failure; surface a concise
+                    # WARN here plus the script stack for diagnostic completeness.
+                    $exType = $_.Exception.GetType().FullName
+                    $exMsg  = $_.Exception.Message
+                    Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP) [$exType]: $exMsg" -Warning
+                    if ($_.ScriptStackTrace) { Write-Log "$VmName`: DHCP reservation failure stack: $($_.ScriptStackTrace)" -LogOnly }
                 }
             }
-            catch {
-                Write-Progress2 $Activity -Status "SQLAO: $_" -percentcomplete 99 -force
-                Start-Sleep -seconds 5
-                Write-Exception $_
-                Write-Log "$vmName`: Failed adding 2nd NIC $_"
-                return $false
-            }
-            finally {
-                [void]$mtx.ReleaseMutex()
-                [void]$mtx.Dispose()
-            }
-
-            New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
-            Write-Progress2 $Activity -Status "SQLAO: 2nd NIC Added" -percentcomplete 100 -force
         }
+
+        # The SQLAO cluster heartbeat (2nd) NIC and its heartbeat/cluster/AG IPs are no
+        # longer added here. They are provisioned at the start of Phase 5 (see the
+        # "$Phase -eq 5 -and role -eq SQLAO" block in Common.ScriptBlocks.ps1), which is
+        # both faster (host has settled past the Phase 1 parallel-OOBE storm) and
+        # convergent (safe to re-run).
 
         Write-Progress2 $Activity -Status "VM Created in Hyper-V successfully" -percentcomplete 100 -force -Completed
         return $true
@@ -3136,9 +4963,27 @@ function New-VirtualMachine {
 }
 
 function Get-AvailableMemoryGB {
-    $availableMemory = Get-CimInstance win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
-    $availableMemory = ($availableMemory - ("8GB" / 1kB)) * 1KB / 1GB
-    $availableMemory = [Math]::Round($availableMemory, 2)
+    param(
+        [Parameter(Mandatory = $false)]
+        [string[]]$ExcludeVMs
+    )
+
+    # Use total physical RAM instead of free memory for a stable, deterministic
+    # calculation that isn't affected by OS cache fluctuations.
+    $totalPhysical = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+    $usableBytes = $totalPhysical - 8GB
+
+    # Subtract memory assigned to running Hyper-V VMs, optionally excluding
+    # VMs that belong to the caller's deployment (so their memory stays in the
+    # "available" pool for that deployment's total calculation).
+    $runningVMs = Get-VM | Where-Object { $_.State -eq "Running" }
+    if ($ExcludeVMs) {
+        $runningVMs = $runningVMs | Where-Object { $_.Name -notin $ExcludeVMs }
+    }
+    $runningVMMemory = ($runningVMs | Measure-Object -Property MemoryAssigned -Sum).Sum
+    if (-not $runningVMMemory) { $runningVMMemory = 0 }
+
+    $availableMemory = [Math]::Round(($usableBytes - $runningVMMemory) / 1GB, 2)
     if ($availableMemory -lt 0) {
         $availableMemory = 0
     }
@@ -3189,7 +5034,7 @@ function Wait-ForVm {
             try {
                 $vmTest = Get-VM2 -Name $VmName -Fallback
                 if (-not $vmTest) {
-                    Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
+                    Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed -force
                     Write-Log -Failure "Could not find VM $VMName"
                     return
                 }
@@ -3223,20 +5068,31 @@ function Wait-ForVm {
         $wwahostrunning = $false
         $readySmb = $false
 
+        # Sysprep-settle tracking for the OOBE gate (see readiness check below).
+        $lastOobeName = $null
+        $oobeCompleteFirstSeen = $null
+        [int]$oobeSettleCapSeconds = 180
+
         [int]$failures = 0
-        [int]$maxFailures = ([int]$TimeoutMinutes * 4)
+        [int]$maxFailures = 40  # ~10 min at ~15s per failure increment (power-cycle threshold, independent of total timeout)
+        [int]$powerCycles = 0
+        [int]$maxPowerCycles = 3
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
+            $oobeStatusText = "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State\ImageState = IMAGE_STATE_COMPLETE"
+            if ($powerCycles -gt 0) {
+                $oobeStatusText += " (power-cycled $powerCycles/$maxPowerCycles)"
+            }
 
             try {
-                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State\ImageState = IMAGE_STATE_COMPLETE"
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $oobeStatusText
             }
             catch {}
 
             $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
             $stopwatch2.Start()
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
             Write-Log "$VmName`: $out" -Verbose
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
@@ -3259,8 +5115,101 @@ function Wait-ForVm {
                     [int]$failures++
                 }
                 if ($failures -ge $maxFailures) {
+                    # Before power-cycling, check if the VM is running but has no heartbeat.
+                    # NoContact after 2+ min means no OS loaded (boot failure).
+                    # OkApplicationsUnknown/OkApplicationsHealthy = OS is booting normally.
+                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    if ($vmCheck -and $vmCheck.State -eq "Running" -and $vmCheck.Uptime.TotalMinutes -ge 2 -and $vmCheck.Heartbeat -eq "NoContact") {
+                        Write-Log "$VmName`: VM is Running (uptime $([int]$vmCheck.Uptime.TotalMinutes)min) with heartbeat NoContact — possible boot failure. Check VM console: vmconnect localhost $VmName" -Warning
+                    }
+                    $powerCycles++
+                    if ($powerCycles -gt $maxPowerCycles) {
+                        Write-Log "$VmName`: OOBE not responding after $maxPowerCycles power-cycles ($([int]$stopWatch.Elapsed.TotalMinutes) min elapsed). Giving up." -Warning
+                        break
+                    }
+                    Write-Log "$VmName`: OOBE not responding after $failures poll failures. Power-cycling VM (attempt $powerCycles/$maxPowerCycles)." -Warning
+                    $vmState = if ($vmCheck) { $vmCheck.State } else { "Unknown" }
+                    Write-Log "$VmName`: VM state before power-cycle: $vmState" -Warning
                     stop-vm2 -name $VmName -TurnOff
                     start-sleep -seconds 8
+
+                    # After the first power-cycle, if heartbeat was NoContact (OS never
+                    # loaded into a usable state), attempt an offline registry fix for
+                    # the "The computer restarted unexpectedly" Windows Setup error.
+                    # This happens when the specialize pass reboots at the wrong moment
+                    # (common under heavy disk I/O with many parallel VM creations).
+                    # The fix sets setup.exe ChildCompletion from 1 (in-progress) to 3
+                    # (success) so Setup skips the failed specialize step on next boot.
+                    if ($powerCycles -ge 2 -and $vmCheck -and $vmCheck.Heartbeat -eq "NoContact") {
+                        try {
+                            $osDisk = (Get-VMHardDiskDrive -VMName $VmName -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*_OS.vhdx" } | Select-Object -First 1).Path
+                            if ($osDisk -and (Test-Path $osDisk)) {
+                                Write-Log "$VmName`: Heartbeat NoContact after power-cycle — attempting offline registry repair for 'unexpected restart' Setup loop" -Warning
+                                $mountResult = Mount-VHD -Path $osDisk -Passthru -ErrorAction Stop
+                                $driveLetter = ($mountResult | Get-Disk | Get-Partition | Where-Object { $_.Type -eq 'Basic' -and $_.Size -gt 1GB } | Get-Volume | Sort-Object SizeRemaining -Descending | Select-Object -First 1).DriveLetter
+                                if ($driveLetter) {
+                                    # Capture Setup/Sysprep logs while the disk is mounted.
+                                    # These are overwritten once OOBE succeeds, so this is
+                                    # the only chance to see what went wrong.
+                                    $pantherLogs = @(
+                                        "${driveLetter}:\Windows\Panther\setuperr.log",
+                                        "${driveLetter}:\Windows\Panther\UnattendGC\setuperr.log",
+                                        "${driveLetter}:\Windows\System32\Sysprep\Panther\setuperr.log"
+                                    )
+                                    foreach ($pLog in $pantherLogs) {
+                                        if (Test-Path $pLog) {
+                                            $logLabel = $pLog.Replace("${driveLetter}:", '')
+                                            $tail = Get-Content $pLog -Tail 15 -ErrorAction SilentlyContinue
+                                            if ($tail) {
+                                                Write-Log "$VmName`: $logLabel (last 15 lines):" -Warning
+                                                foreach ($pLine in $tail) { Write-Log "  $pLine" -LogOnly }
+                                            }
+                                        }
+                                    }
+                                    # Also grab the last 5 lines of setupact.log for context
+                                    $setupActPath = "${driveLetter}:\Windows\Panther\setupact.log"
+                                    if (Test-Path $setupActPath) {
+                                        $actTail = Get-Content $setupActPath -Tail 5 -ErrorAction SilentlyContinue
+                                        if ($actTail) {
+                                            Write-Log "$VmName`: \Windows\Panther\setupact.log (last 5 lines):" -LogOnly
+                                            foreach ($aLine in $actTail) { Write-Log "  $aLine" -LogOnly }
+                                        }
+                                    }
+
+                                    $hivePath = "${driveLetter}:\Windows\System32\config\SYSTEM"
+                                    if (Test-Path $hivePath) {
+                                        $regKey = "HKLM\VMBUILD_OFFLINE_SYSTEM"
+                                        & reg load $regKey $hivePath 2>&1 | Out-Null
+                                        try {
+                                            $childCompPath = "$regKey\Setup\Status\ChildCompletion"
+                                            $currentVal = & reg query $childCompPath /v "setup.exe" 2>&1
+                                            Write-Log "$VmName`: ChildCompletion\setup.exe current value: $($currentVal -join ' ')" -LogOnly
+                                            & reg add $childCompPath /v "setup.exe" /t REG_DWORD /d 3 /f 2>&1 | Out-Null
+                                            Write-Log "$VmName`: Set ChildCompletion\setup.exe = 3 (specialize complete)" -Warning
+                                        }
+                                        finally {
+                                            Start-Sleep -Milliseconds 500
+                                            [gc]::Collect()
+                                            & reg unload $regKey 2>&1 | Out-Null
+                                        }
+                                    }
+                                    else {
+                                        Write-Log "$VmName`: Could not find SYSTEM hive at $hivePath" -Warning
+                                    }
+                                }
+                                else {
+                                    Write-Log "$VmName`: Could not determine drive letter after mounting VHDX" -Warning
+                                }
+                                Dismount-VHD -Path $osDisk -ErrorAction SilentlyContinue
+                                Start-Sleep -Seconds 2
+                            }
+                        }
+                        catch {
+                            Write-Log "$VmName`: Offline registry repair failed: $_" -Warning
+                            try { Dismount-VHD -Path $osDisk -ErrorAction SilentlyContinue } catch {}
+                        }
+                    }
+
                     Start-vm2 -name $VmName
                     Start-Sleep -Seconds 8
                     [int]$failures = 0
@@ -3277,7 +5226,54 @@ function Wait-ForVm {
                 Write-Log "$VmName`: OOBE State is $($out.ScriptBlockOutput)"
                 $status = $originalStatus
                 $status += "Current State: $($out.ScriptBlockOutput)"
-                $readyOobe = "IMAGE_STATE_COMPLETE" -eq $out.ScriptBlockOutput
+                if ("IMAGE_STATE_COMPLETE" -ne $out.ScriptBlockOutput) {
+                    $readyOobe = $false
+                }
+                else {
+                    # IMAGE_STATE_COMPLETE flips BEFORE Setup finalizes the specialize
+                    # pass. Under heavy host disk I/O (many parallel VM creates) specialize
+                    # can be interrupted and re-armed, re-randomizing the computer name on a
+                    # later boot -- which then collides with DSC's rename/pagefile reboots and
+                    # kicks off a rename loop (the FAB-W10CLIENT2 failure). Before declaring
+                    # the VM ready, confirm sysprep has actually settled: SetupType=0 +
+                    # OOBEInProgress=0, and the computer name hasn't changed since the prior
+                    # COMPLETE read. This is bounded and best-effort by design so it can NEVER
+                    # fail or meaningfully delay a healthy VM: a settled box passes immediately,
+                    # a not-yet-settled box is accepted anyway after $oobeSettleCapSeconds, and
+                    # if the probe can't run we fall back to trusting IMAGE_STATE_COMPLETE.
+                    $settle = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock {
+                        $s = Get-ItemProperty "HKLM:\SYSTEM\Setup" -Name SetupType, OOBEInProgress -ErrorAction SilentlyContinue
+                        [pscustomobject]@{ SetupType = [int]$s.SetupType; OOBE = [int]$s.OOBEInProgress; Name = $env:COMPUTERNAME }
+                    }
+                    if ($null -eq $oobeCompleteFirstSeen) { $oobeCompleteFirstSeen = [DateTime]::UtcNow }
+                    if ($settle.ScriptBlockOutput -and $settle.ScriptBlockOutput.Name) {
+                        $so = $settle.ScriptBlockOutput
+                        if ($lastOobeName -and ($so.Name -ne $lastOobeName)) {
+                            # Name changed since the last COMPLETE read -> specialize is
+                            # re-running (re-randomizing). Restart the settle clock.
+                            Write-Log "$VmName`: computer name changed ($lastOobeName -> $($so.Name)) after IMAGE_STATE_COMPLETE -- sysprep specialize is re-running; waiting for it to finalize before DSC." -Warning
+                            $oobeCompleteFirstSeen = [DateTime]::UtcNow
+                        }
+                        $lastOobeName = $so.Name
+                        $oobeSettled = ($so.SetupType -eq 0) -and ($so.OOBE -eq 0)
+                        $waitedSettleSecs = ([DateTime]::UtcNow - $oobeCompleteFirstSeen).TotalSeconds
+                        if ($oobeSettled) {
+                            $readyOobe = $true
+                        }
+                        elseif ($waitedSettleSecs -ge $oobeSettleCapSeconds) {
+                            Write-Log "$VmName`: ImageState COMPLETE but sysprep still not settled (SetupType=$($so.SetupType) OOBEInProgress=$($so.OOBE)) after $([int]$waitedSettleSecs)s -- accepting anyway." -Warning
+                            $readyOobe = $true
+                        }
+                        else {
+                            $readyOobe = $false
+                            Write-Log "$VmName`: ImageState COMPLETE but sysprep not settled yet (SetupType=$($so.SetupType) OOBEInProgress=$($so.OOBE) Name=$($so.Name)); waiting for specialize to finalize before DSC."
+                        }
+                    }
+                    else {
+                        # Settle probe unavailable -> preserve prior behavior.
+                        $readyOobe = $true
+                    }
+                }
                 try {
                     Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
                 }
@@ -3292,7 +5288,7 @@ function Wait-ForVm {
 
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE complete. Checking SMB access"
                 Start-Sleep -Seconds 3
-                $out = Invoke-VmCommand -VmName $VmName -AsJob -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
+                $out = Invoke-VmCommand -VmName $VmName -AsJob -VmDomainName $VmDomainName -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "$VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
                 $readySmb = $true -eq $out.ScriptBlockOutput
                 if ($readySmb) { Start-Sleep -Seconds 10 } # Extra wait to ensure wwahost has had a chance to start
@@ -3300,7 +5296,7 @@ function Wait-ForVm {
 
             # Wait until wwahost.exe is not found, or not longer running
             if ($readySmb) {
-                $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+                $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
 
                 if ($wwahost.ScriptBlockOutput) {
                     $wwahostrunning = $true
@@ -3325,7 +5321,29 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState } -ShowVMSessionError | Out-Null
+            $lastAttempt = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState } -ShowVMSessionError
+
+            # Log a detailed failure summary so the root cause is visible without scrolling
+            $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
+            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
+            $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
+            $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
+            $lastOobeState = if ($lastAttempt.ScriptBlockOutput) { $lastAttempt.ScriptBlockOutput } else { "PSDirect failed" }
+            $lastError = if ($lastAttempt.ScriptBlockFailed -and $lastAttempt.ErrorDetails) { ($lastAttempt.ErrorDetails -join '; ') } else { $null }
+
+            $reason = if (-not $readyOobe) {
+                "OOBE never completed (ImageState='$lastOobeState')"
+            } elseif (-not $readySmb) {
+                "OOBE done but SMB (\\localhost\c$) never became accessible"
+            } else {
+                "OOBE+SMB done but WWAHost never stopped"
+            }
+
+            Write-Log "$VmName`: OOBE FAILURE SUMMARY: $reason | Elapsed=${elapsedMin}min | PowerCycles=$powerCycles/$maxPowerCycles | VM=$vmState | Heartbeat=$vmHb | Uptime=$vmUptime" -Warning
+            if ($lastError) {
+                Write-Log "$VmName`: Last PSDirect error: $lastError" -Warning
+            }
         }
     }
 
@@ -3334,24 +5352,83 @@ function Wait-ForVm {
         Write-Log "$VmName`: $status"
         Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
 
+        [int]$powerCycles = 0
+        [int]$maxPowerCycles = 1
+        [bool]$powerCycleEligible = $false
+
         do {
-            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-Process wwahost, oobelauncher, UserOOBEBroker -ErrorAction SilentlyContinue }
 
             if ($wwahost.ScriptBlockOutput) {
                 $ready = $true
-                Write-Log "$VmName`: OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
-                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running"
+                $oobeProcName = ($wwahost.ScriptBlockOutput | Select-Object -First 1).ProcessName
+                Write-Log "$VmName`: OOBE Started. $oobeProcName (PID $($wwahost.ScriptBlockOutput[0].Id)) is running." -Verbose
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE Started. $oobeProcName is running"
+            }
+            elseif ($wwahost.ScriptBlockFailed) {
+                # PSDirect session failed — after sysprep /generalize, the local
+                # admin account is wiped so PSDirect can't authenticate. If the VM
+                # heartbeat is OK, this means OOBE is active (the only time the
+                # VM is running but has no usable local accounts).
+                $hbCheck = (Get-VM2 -Name $VmName -ErrorAction SilentlyContinue).Heartbeat
+                if ($hbCheck -and $hbCheck -match 'Ok') {
+                    $ready = $true
+                    Write-Log "$VmName`: OOBE detected via auth failure (post-sysprep, heartbeat=$hbCheck). Local accounts wiped — VM is at OOBE." -Verbose
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE detected (auth failure + heartbeat OK)"
+                }
+                else {
+                    Write-Log "$VmName`: OOBE hasn't started yet. Session failed, heartbeat=$hbCheck."
+                    $ready = $false
+                    Start-Sleep -Seconds $WaitSeconds
+                }
             }
             else {
-                Write-Log "$VmName`: OOBE hasn't started yet. WWAHost not running."
+                Write-Log "$VmName`: OOBE hasn't started yet. No OOBE process running."
                 $ready = $false
                 Start-Sleep -Seconds $WaitSeconds
+
+                # After half the timeout has elapsed with NoContact heartbeat,
+                # try one power-cycle as a last resort.
+                if (-not $powerCycleEligible -and $stopWatch.Elapsed.TotalMinutes -ge ($TimeoutMinutes / 2)) {
+                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    if ($vmCheck -and $vmCheck.State -eq "Running" -and $vmCheck.Heartbeat -eq "NoContact") {
+                        $powerCycleEligible = $true
+                    }
+                    elseif ($vmCheck -and $vmCheck.State -eq "Running") {
+                        Write-Log "$VmName`: VM is Running (uptime $([int]$vmCheck.Uptime.TotalMinutes)min) with heartbeat $($vmCheck.Heartbeat) — OS is still booting, continuing to wait." -Warning
+                    }
+                }
+
+                if ($powerCycleEligible -and $powerCycles -lt $maxPowerCycles) {
+                    $powerCycles++
+                    $powerCycleEligible = $false
+                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmState = if ($vmCheck) { $vmCheck.State } else { "Unknown" }
+                    Write-Log "$VmName`: OOBE not starting after $([int]$stopWatch.Elapsed.TotalMinutes) min with heartbeat NoContact. Power-cycling VM (attempt $powerCycles/$maxPowerCycles). VM state: $vmState" -Warning
+                    stop-vm2 -name $VmName -TurnOff | Out-Null
+                    start-sleep -seconds 8
+                    Start-vm2 -name $VmName | Out-Null
+                    Start-Sleep -Seconds 30
+                }
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null
+            $lastAttempt = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue } -ShowVMSessionError
+
+            # Log a detailed failure summary
+            $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
+            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
+            $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
+            $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
+            $lastError = if ($lastAttempt.ScriptBlockFailed -and $lastAttempt.ErrorDetails) { ($lastAttempt.ErrorDetails -join '; ') } else { $null }
+
+            Write-Log "$VmName`: OOBE-START FAILURE SUMMARY: WWAHost never appeared | Elapsed=${elapsedMin}min | PowerCycles=$powerCycles/$maxPowerCycles | VM=$vmState | Heartbeat=$vmHb | Uptime=$vmUptime" -Warning
+            if ($lastError) {
+                Write-Log "$VmName`: Last PSDirect error: $lastError" -Warning
+            }
         }
     }
 
@@ -3379,13 +5456,16 @@ function Wait-ForVm {
             start-sleep -seconds 15
         }
         if (-not $vmTest) {
-            Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
+            Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed -force
             Write-Log -Failure "Could not find VM $VMName"
             return
         }
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
         $count = 0
-        $restarted = $false
+        [int]$restartCount = 0
+        [int]$maxRestarts = 2
+        [int]$channelBrokenCount = 0
+        [bool]$psdirectRebootDone = $false
         do {
             $count++
             if ($count -gt 1) {
@@ -3399,37 +5479,91 @@ function Wait-ForVm {
             if ($count -eq 1 -or $count % 3 -eq 0) {
                 $vmTest = Get-VM2 -Fallback -Name $VmName
                 if ($vmTest.State -ne "Running") {
-                    stop-vm2 -name $vmName
-                    start-sleep -seconds 15
-                    start-vm2 -name $vmName
-                    start-sleep -seconds 20
+                    stop-vm2 -name $vmName -TurnOff | Out-Null
+                    start-sleep -seconds 10
+                    start-vm2 -name $vmName | Out-Null
+                    Wait-ForHeartbeat -VmName $VmName -Stopwatch $stopWatch -Timespan $timeSpan | Out-Null
                 }
             }
 
-            # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
-            $ready = $true -eq $out.ScriptBlockOutput
+            # Single round-trip: probe the readiness marker AND C:\ (liveness)
+            # together so the "channel alive but path not present yet" branch
+            # below no longer needs a SECOND PSDirect call per poll -- this loop
+            # runs on every VM boot wait, so halving the round-trips while the
+            # path is still appearing adds up. SuppressLog since we're in a loop.
+            # -SessionMaxRetries 1: the outer do/until loop already retries, and
+            # 3 retries x 3 credentials x 30s timeout = 4.5 min per call freezes the
+            # progress display and starves the timeout check.
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SessionMaxRetries 1 -ScriptBlock {
+                [PSCustomObject]@{ Path = (Test-Path $using:PathToVerify); Root = (Test-Path "C:\") }
+            } -SuppressLog
+            $ready = $true -eq $out.ScriptBlockOutput.Path
             if ($ready) {
+                $channelBrokenCount = 0
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
             }
             elseif ($count -gt 1) {
-                $outtest = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path "C:\" } -SuppressLog
-                $readytest = $true -eq $outtest.ScriptBlockOutput
+                # C:\ liveness already came back in the same round-trip above.
+                $readytest = $true -eq $out.ScriptBlockOutput.Root
 
                 if ($readytest) {
+                    $channelBrokenCount = 0
                     Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding. Waiting for $PathToVerify to exist."
                 }
                 else {
-                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding"
-                    if ($count -eq 3 -or $stopWatch.Elapsed.TotalMinutes -ge 5) {
-                        if (-not $restarted) {
-                            Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Restarting VM"
-                            stop-vm2 -name $vmName
-                            start-sleep -seconds 15
-                            start-vm2 -name $vmName
-                            start-sleep -seconds 20
-                            $restarted = $true
+                    # VM is not responding to PSDirect at all.
+                    # Check heartbeat to decide whether to hard-restart.
+                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $hb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
+
+                    # Detect channel-broken from the actual session diagnostics.
+                    # The call timing out or returning a VMBus error is evidence
+                    # the PSDirect channel is hung — distinct from auth failures.
+                    # (Single coalesced probe now, so one ChannelBroken flag.)
+                    $channelBrokenNow = $out.ChannelBroken
+                    $hbText = "heartbeat: $hb"
+                    if ($channelBrokenNow) { $hbText += ", channel broken" }
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding ($hbText)"
+
+                    # Only hard-reset when heartbeat is NoContact (IC not responding
+                    # at all — VM is likely stuck at boot or crashed).
+                    # OkApplicationsUnknown / OkApplicationsHealthy mean the OS is
+                    # still booting normally; resetting would just delay things.
+                    $heartbeatStuck = ($hb -eq "NoContact" -or $hb -eq "N/A")
+                    if ($restartCount -lt $maxRestarts -and $heartbeatStuck -and ($count -ge 10 -or $stopWatch.Elapsed.TotalMinutes -ge 3)) {
+                        $restartCount++
+                        Write-Log "$VmName`: Not responding after $count polls (heartbeat: $hb). Hard-resetting VM (attempt $restartCount/$maxRestarts)." -Warning
+                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Hard-resetting VM (attempt $restartCount/$maxRestarts)"
+                        stop-vm2 -name $vmName -TurnOff | Out-Null
+                        start-sleep -seconds 10
+                        start-vm2 -name $vmName | Out-Null
+                        Wait-ForHeartbeat -VmName $VmName -Stopwatch $stopWatch -Timespan $timeSpan | Out-Null
+                        $count = 0
+                        $channelBrokenCount = 0
+                    }
+                    elseif (-not $heartbeatStuck -and $channelBrokenNow -and -not $psdirectRebootDone) {
+                        # Heartbeat is healthy but PSDirect channel is broken
+                        # (sessions timed out or returned VMBus errors like
+                        # "socket target process has ended").  This is distinct
+                        # from auth failures where the channel works fine.
+                        # Require 3 consecutive channel-broken results + 3 min
+                        # elapsed to avoid false positives from transient timeouts.
+                        $channelBrokenCount++
+                        if ($channelBrokenCount -ge 3 -and $stopWatch.Elapsed.TotalMinutes -ge 3) {
+                            $psdirectRebootDone = $true
+                            Write-Log "$VmName`: PSDirect channel broken after $channelBrokenCount consecutive failures despite healthy heartbeat ($hb). Rebooting VM to recover VMBus." -Warning
+                            Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Rebooting VM — PSDirect channel broken with healthy heartbeat"
+                            stop-vm2 -name $vmName -TurnOff | Out-Null
+                            start-sleep -seconds 10
+                            start-vm2 -name $vmName | Out-Null
+                            Wait-ForHeartbeat -VmName $VmName -Stopwatch $stopWatch -Timespan $timeSpan | Out-Null
+                            $count = 0
                         }
+                    }
+                    elseif (-not $heartbeatStuck -and -not $channelBrokenNow) {
+                        # Session failed with a normal error (auth, etc.) — not a
+                        # channel problem.  Reset the channel-broken counter.
+                        $channelBrokenCount = 0
                     }
                 }
             }
@@ -3439,22 +5573,65 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path $using:PathToVerify } -ShowVMSessionError | Out-Null
+            $lastAttempt = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path $using:PathToVerify } -ShowVMSessionError
+
+            # Log a detailed failure summary
+            $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
+            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
+            $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
+            $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
+            $lastError = if ($lastAttempt.ScriptBlockFailed -and $lastAttempt.ErrorDetails) { ($lastAttempt.ErrorDetails -join '; ') } else { $null }
+
+            $reason = if ($lastAttempt.ScriptBlockOutput -eq $false) {
+                "PSDirect works but '$PathToVerify' does not exist"
+            } elseif ($lastAttempt.ScriptBlockFailed) {
+                "PSDirect connection failed"
+            } else {
+                "Unknown (last output: $($lastAttempt.ScriptBlockOutput))"
+            }
+
+            Write-Log "$VmName`: WAIT FAILURE SUMMARY: $reason | Elapsed=${elapsedMin}min | Restarts=$restartCount/$maxRestarts | VM=$vmState | Heartbeat=$vmHb | Uptime=$vmUptime" -Warning
+            if ($lastError) {
+                Write-Log "$VmName`: Last PSDirect error: $lastError" -Warning
+            }
         }
     }
 
 
 
     if ($ready) {
-        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Wait complete." -Completed
+        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Wait complete." -Completed -force
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: VM is now available." -Success }
     }
     else {
-        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Timer expired while waiting for VM" -Completed
+        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Timer expired while waiting for VM" -Completed -force
         Write-Log "$VmName`: Timer expired while waiting for VM" -Warning
     }
 
     return $ready
+}
+
+function Get-VmHostSideDiag {
+    # Best-effort host-side (Hyper-V) snapshot of a VM, used to annotate PSDirect
+    # readiness/channel failures ("An error occurred while creating the pipeline",
+    # broken transport, etc.) in the build log. All fields come straight from the
+    # hypervisor -- no PSDirect round-trip -- so they're available even when the
+    # guest's session can't be created. Reviewing these alongside the failure tells
+    # us whether the failure correlates with a freshly-(re)started/booting guest
+    # (low Uptime / non-Ok Heartbeat) and therefore whether the readiness gate
+    # thresholds (e.g. the 60s pending-reboot skip) need tuning. Never throws.
+    param([string]$VmName)
+    try {
+        $vm = Get-VM2 -Name $VmName
+        if (-not $vm) { return "[host-diag: VM '$VmName' not found in Hyper-V]" }
+        $up = if ($vm.Uptime) { "$([int]$vm.Uptime.TotalSeconds)s" } else { "n/a" }
+        $hb = if ($vm.Heartbeat) { "$($vm.Heartbeat)" } else { "n/a" }
+        return "[host-diag: State=$($vm.State) Uptime=$up Heartbeat=$hb Status='$($vm.Status)']"
+    }
+    catch {
+        return "[host-diag: unavailable ($($_.Exception.Message))]"
+    }
 }
 
 function Invoke-VmCommand {
@@ -3468,7 +5645,7 @@ function Invoke-VmCommand {
         [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
         [string]$VmDomainAccount,
         [Parameter(Mandatory = $false, HelpMessage = "Argument List to supply to ScriptBlock")]
-        [string[]]$ArgumentList,
+        [object[]]$ArgumentList,
         [Parameter(Mandatory = $false, HelpMessage = "Display Name of the script for log/console")]
         [string]$DisplayName,
         [Parameter(Mandatory = $false, HelpMessage = "Suppress log entries. Useful when waiting for VM to be ready to run commands.")]
@@ -3479,15 +5656,24 @@ function Invoke-VmCommand {
         [switch]$ShowVMSessionError,
         [Parameter(Mandatory = $false, HelpMessage = "Run command as a job")]
         [switch]$AsJob,
-        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
+        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length. With -PollProgress this is a STALL timeout (max time with no progress heartbeat from the guest), not an absolute deadline.")]
         [int]$TimeoutSeconds = 180,
+        [Parameter(Mandatory = $false, HelpMessage = "When running as a job, poll the inner job's Progress stream and re-emit the latest record so long-running remote scriptblocks surface live status (instead of appearing frozen). The remote scriptblock must call Write-Progress for there to be anything to forward. Also switches -TimeoutSeconds to heartbeat/stall semantics: each new progress record resets the timer (bounded by an absolute ceiling).")]
+        [switch]$PollProgress,
+        [Parameter(Mandatory = $false, HelpMessage = "Skip domain credential fallback via VMNote. Use during OOBE polling when VM is not yet domain-joined.")]
+        [switch]$SkipDomainFallback,
+        [Parameter(Mandatory = $false, HelpMessage = "Max retries for Get-VmSession (default 3). Reduce for tight polling loops.")]
+        [int]$SessionMaxRetries = 3,
+        [Parameter(Mandatory = $false, HelpMessage = "On an -AsJob timeout, after evicting the wedged session run a 30s liveness probe (hostname); if the guest still does not answer, reboot the VM to recover. Default OFF -- only set where the VM is expected to be responsive (e.g. post-build Phase 11 checks), NEVER in readiness/OOBE polling loops where a timeout is normal and the VM may be intentionally mid-reboot.")]
+        [switch]$RebootIfUnresponsive,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
     try {
         # Set display name for logging
         if (-not $DisplayName) {
-            $DisplayName = $ScriptBlock
+            $DisplayName = ($ScriptBlock.ToString() -replace '\s+', ' ').Trim()
+            if ($DisplayName.Length -gt 80) { $DisplayName = $DisplayName.Substring(0, 77) + '...' }
         }
 
         # WhatIf
@@ -3512,6 +5698,10 @@ function Invoke-VmCommand {
             CommandResult     = $false
             ScriptBlockFailed = $false
             ScriptBlockOutput	= $null
+            ErrorDetails      = $null
+            ChannelBroken     = $false
+            TimedOut          = $false
+            Rebooted          = $false
         }
 
         # Prepare args
@@ -3525,38 +5715,181 @@ function Invoke-VmCommand {
 
         # Get VM Session
         $ps = $null
+        $sessionDiag = @{ ChannelBroken = $false }
+        $localOnlySession = $SkipDomainFallback.IsPresent
+        # When -SuppressLog is set the caller is polling for VM readiness (OOBE /
+        # SMB / path checks in tight do/until loops), so a session that can't be
+        # created yet is expected, not a failure. Route Get-VmSession's per-attempt
+        # warning and final-failure message to -LogOnly -Verbose (recorded for
+        # diagnostics, never on screen) instead of letting it emit type=3 errors
+        # that make the phase look broken. -ShowVMSessionError still overrides this.
+        $quietSession = $SuppressLog.IsPresent -and -not $ShowVMSessionError.IsPresent
         if ($VmDomainAccount) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
         if (-not $ps) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
-        if (-not $ps -and $VmDomainName -eq "WORKGROUP") {
+        if (-not $ps -and $VmDomainName -eq "WORKGROUP" -and -not $SkipDomainFallback) {
             $note = Get-VMNote -VMName $VmName
             $domain2 = $note.domain
             $adminName = $note.adminName
             if (-not $adminName) {
                 $adminName = "admin"
             }
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
         $failed = ($null -eq $ps)
+        if ($failed) {
+            $return.ChannelBroken = [bool]$sessionDiag.ChannelBroken
+        }
 
         # Run script block inside VM
+        $inflightToken = $null
         if (-not $failed) {
+            # Mark this scriptblock as in-flight on $ps so a concurrent pipeline on
+            # the SAME cached session (the suspected cause of "An error occurred while
+            # creating the pipeline") is visible to the failure-site diagnostic below.
+            $inflightToken = Enter-VmSessionInflight -Session $ps -DisplayName $DisplayName
             try {
                 if ($AsJob) {
                     $job = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue -AsJob
-                    $job | Wait-Job -Timeout $TimeoutSeconds
+                    if ($PollProgress) {
+                        # Poll the inner job's Progress stream while it runs and re-emit the
+                        # latest record. Under -AsJob the remote scriptblock's Write-Progress
+                        # records are confined to the nested job (they don't propagate to this
+                        # caller the way a synchronous Invoke-Command -Session would), so a
+                        # long remote operation looks frozen. Forwarding the latest record via
+                        # Write-Progress2 -force surfaces live status in the caller's progress
+                        # stream (e.g. the Phase 11 job's display via Wait-Phase/Write-JobProgress).
+                        #
+                        # HEARTBEAT (STALL) TIMEOUT: with -PollProgress, $TimeoutSeconds is the
+                        # max time we'll wait WITHOUT a new progress record from the guest -- it
+                        # is NOT an absolute deadline. Every Write-Progress the remote scriptblock
+                        # emits is a heartbeat that resets the timer, so a validation that
+                        # legitimately spends several minutes across many short steps (e.g. the
+                        # DomainMember CCM-client / ccmsetup wait loops, which heartbeat every
+                        # ~10s) never gets reaped as a false "timed out" failure. Only a genuinely
+                        # hung scriptblock -- no progress at all for $TimeoutSeconds -- is killed.
+                        # An absolute ceiling bounds a scriptblock that heartbeats forever.
+                        $stallSeconds = $TimeoutSeconds
+                        $absoluteCeiling = (Get-Date).AddSeconds([Math]::Max($TimeoutSeconds * 6, 1800))
+                        $stallDeadline = (Get-Date).AddSeconds($stallSeconds)
+                        $lastForwarded = $null
+                        $lastProgressCount = 0
+                        while ($job.State -eq "Running" -and (Get-Date) -lt $stallDeadline -and (Get-Date) -lt $absoluteCeiling) {
+                            Start-Sleep -Milliseconds 750
+                            try {
+                                # PSRemotingJob exposes per-session streams on its child job.
+                                $progressSource = if ($job.ChildJobs -and $job.ChildJobs.Count -gt 0) { $job.ChildJobs[0] } else { $job }
+                                if ($progressSource -and $progressSource.Progress -and $progressSource.Progress.Count -gt 0) {
+                                    # Any growth in the progress stream is a heartbeat -> reset the
+                                    # stall timer. The guest emits a distinct status (with an
+                                    # elapsed-seconds counter) on each loop iteration so the record
+                                    # count always advances even when the activity is unchanged.
+                                    if ($progressSource.Progress.Count -ne $lastProgressCount) {
+                                        $lastProgressCount = $progressSource.Progress.Count
+                                        $stallDeadline = (Get-Date).AddSeconds($stallSeconds)
+                                    }
+                                    $lastRec = $progressSource.Progress[$progressSource.Progress.Count - 1]
+                                    if ($lastRec -and -not [string]::IsNullOrWhiteSpace($lastRec.Activity) -and -not [string]::IsNullOrWhiteSpace($lastRec.StatusDescription)) {
+                                        $line = "$($lastRec.Activity)|$($lastRec.StatusDescription)"
+                                        if ($line -ne $lastForwarded) {
+                                            $lastForwarded = $line
+                                            Write-Progress2 -Activity $lastRec.Activity -Status $lastRec.StatusDescription -PercentComplete 0 -force
+                                        }
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                        if ($job.State -eq "Running") {
+                            if ((Get-Date) -ge $absoluteCeiling) {
+                                Write-Log "$VmName`: Job '$DisplayName' hit absolute ceiling ($([int]([Math]::Max($TimeoutSeconds * 6, 1800)))s); stopping." -LogOnly
+                            }
+                            else {
+                                Write-Log "$VmName`: Job '$DisplayName' stalled (no progress heartbeat for ${stallSeconds}s); stopping." -LogOnly
+                            }
+                        }
+                    }
+                    else {
+                        $job | Wait-Job -Timeout $TimeoutSeconds
+                    }
                     if ($job.State -eq "Completed") {
                         $return.ScriptBlockOutput = (Receive-Job $job)
                         if (-not $SuppressLog) {
                             Write-Log "$VmName`: Job '$DisplayName' Succeeded" -LogOnly
                         }
                         $failed = $false
+                        # Remove the completed job NOW. Leaving it leaks a PSRemotingJob still
+                        # bound to the cached session's runspace. Wait-ForVm polls via this path
+                        # every few seconds, so a long wait accumulates dozens of leaked completed
+                        # jobs against one VM's session. When that session is later evicted/disposed
+                        # (Remove-VmSessionFromCache on timeout) or the VM is turned off (stop-vm2
+                        # -TurnOff in the channel-broken recovery), every leaked job's transport
+                        # breaks at once and a late state-change/transport callback fires on a
+                        # threadpool thread against an already-disposed job -> unhandled
+                        # PSObjectDisposedException ('object "PSJob" has already been disposed')
+                        # that kills the whole phase child process. Receive-Job already drained the
+                        # output, so removing it here is safe and closes that race.
+                        Remove-Job $job -Force -ErrorAction SilentlyContinue
+
+                        # The PSRemotingJob above ran ON the cached session's runspace
+                        # (Invoke-Command -Session $ps -AsJob). Wait-Job + Remove-Job return as
+                        # soon as the job object is reaped, but the SERVER-SIDE (in-guest)
+                        # PSDirect/VMBus pipeline from that job keeps tearing down for a brief
+                        # window AFTER local Remove-Job. If the very next caller issues a
+                        # SYNCHRONOUS Invoke-Command on this same cached session during that window
+                        # (e.g. Stop-DSC -AsJob immediately followed by the synchronous "Check
+                        # pending reboot" probe in Common.ScriptBlocks.ps1), the new pipeline-create
+                        # races that server-side teardown and surfaces the non-terminating engine
+                        # error "An error occurred while creating the pipeline."
+                        #
+                        # PROVEN (CSTest full pass 2026-06-29/30, 884baf8f diag, 841/841 samples):
+                        # at the failure site runspaceAvail=Available, concurrentOnSameSession=<none>.
+                        # So the LOCAL RunspaceAvailability flag is a FALSE-READY signal -- it flips
+                        # to Available the instant the job is reaped, well before the transport's
+                        # server-side pipeline is actually gone. Gating on RunspaceAvailability
+                        # (the prior fix) is therefore inert: it returns immediately and provides no
+                        # protection, which is exactly why the flood persisted (838 errors, 0
+                        # "did not return to Available" give-ups).
+                        #
+                        # Real fix: probe ACTUAL pipeline-creatability. Issue a trivial round-trip
+                        # on the same cached session; if it throws the pipeline/transport-teardown
+                        # error, the server side isn't ready yet -- back off and retry. Once a
+                        # round-trip succeeds, the transport is clear and the next synchronous reuse
+                        # is safe. Bounded (~5s) so a genuinely wedged session can't hang the caller.
+                        try {
+                            if ($ps -and $ps.Runspace) {
+                                $teardownSig = 'creating the pipeline|pipeline is not|session is in|availability is Busy|not available to run commands|has been closed|No valid sessions|transport|broken'
+                                $probeDeadline = (Get-Date).AddSeconds(5)
+                                $probeReady = $false
+                                while (-not $probeReady -and (Get-Date) -lt $probeDeadline) {
+                                    try {
+                                        $null = Invoke-Command -Session $ps -ScriptBlock { 1 } -ErrorAction Stop
+                                        $probeReady = $true
+                                    }
+                                    catch {
+                                        if ("$($_.Exception.Message)" -match $teardownSig) {
+                                            # server-side pipeline still tearing down -- back off
+                                            Start-Sleep -Milliseconds 100
+                                        }
+                                        else {
+                                            # Unexpected error (not the teardown race): stop probing
+                                            # and let the real call surface/handle it.
+                                            $probeReady = $true
+                                        }
+                                    }
+                                }
+                                if (-not $probeReady -and -not $SuppressLog) {
+                                    Write-Log "$VmName`: Session transport did not become pipeline-ready within 5s after job '$DisplayName'; proceeding (next call may rebuild the session)." -LogOnly
+                                }
+                            }
+                        }
+                        catch { }
                     }
                     else {
                         Write-Log "$VmName`: Job '$DisplayName' Failed State: $($job.State)" -LogOnly
@@ -3571,19 +5904,124 @@ function Invoke-VmCommand {
                         if (-not $SuppressLog) {
                             Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $OutErr." -Failure
                         }
-                        if ($job.State -eq "Running") {
-                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
+                        $jobTimedOut = ($job.State -eq "Running")
+                        # Was this terminal failure caused by a broken PSDirect/VMBus channel
+                        # (vs an ordinary scriptblock error)? Inspect the job's failure reason
+                        # + error streams NOW, while the job is still alive (Remove-Job below
+                        # would dispose it). Used to decide whether the job must be abandoned
+                        # rather than disposed -- see the terminal-state branch below.
+                        $jobChannelBroken = $false
+                        if (-not $jobTimedOut) {
+                            $jobErrBlob = "$OutErr"
+                            try {
+                                foreach ($cj in @($job.ChildJobs)) {
+                                    if ($cj.JobStateInfo -and $cj.JobStateInfo.Reason) { $jobErrBlob += " " + $cj.JobStateInfo.Reason.ToString() }
+                                    if ($cj.Error -and $cj.Error.Count -gt 0) { $jobErrBlob += " " + (@($cj.Error | ForEach-Object { $_.ToString() }) -join ' ') }
+                                }
+                                if ($job.JobStateInfo -and $job.JobStateInfo.Reason) { $jobErrBlob += " " + $job.JobStateInfo.Reason.ToString() }
+                            }
+                            catch {}
+                            $jobChannelBroken = $jobErrBlob -match 'creating the pipeline|pipeline is not|transport|channel|broken|Cannot connect|not connected|session is in|availability is Busy|No valid sessions|has been closed|socket target process|VMBus|target process has ended'
                         }
-                        Stop-Job $job | Out-Null
-                        Remove-Job $job
+                        if ($jobTimedOut) {
+                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
+                            # A timed-out PSDirect/PSRemoting job is wedged on a dead or hung
+                            # VMBus channel. Stop-Job / Remove-Job BLOCK on it (often for
+                            # minutes) because the remote pipeline can't acknowledge
+                            # cancellation until the VM is rebooted -- synchronously stopping
+                            # it here would just make the caller MORE stuck. Signal
+                            # cancellation asynchronously and ABANDON the job object instead;
+                            # it is reaped when the reboot below breaks its transport, or when
+                            # this process exits. (We do NOT Receive/Remove it -- it never
+                            # produced output and a forced remove would block on the same dead
+                            # transport.)
+                            try { $job.StopJobAsync() } catch {}
+                        }
+                        else {
+                            # Job is in a terminal state (Failed / Stopped). Inspect WHY before
+                            # disposing it. A plain scriptblock error is safe to Stop+Remove
+                            # (its pipeline is done and no transport break is imminent). But a
+                            # failure caused by a BROKEN PSDIRECT CHANNEL is different: the
+                            # caller (e.g. Wait-ForVm's channel-broken recovery) is about to
+                            # stop-vm2 -TurnOff / reboot the VM to recover VMBus, which breaks
+                            # this session's transport. Disposing the job now (Remove-Job) lets
+                            # that later transport break fire a StateChanged callback on a
+                            # threadpool thread against the already-disposed job ->
+                            # PSObjectDisposedException ('object "PSJob" has already been
+                            # disposed') that crashes the whole phase child process (observed on
+                            # ZZ-CREPE in Phase 2). So for a channel-broken terminal failure,
+                            # treat it like the timeout path: ABANDON the job (do NOT dispose --
+                            # a later callback then finds a live object) and leak its session.
+                            if ($jobChannelBroken) {
+                                try { $job.StopJobAsync() } catch {}
+                            }
+                            else {
+                                Stop-Job $job -ErrorAction SilentlyContinue | Out-Null
+                                Remove-Job $job -Force -ErrorAction SilentlyContinue
+                            }
+                        }
+                        if ($jobTimedOut) {
+                            # The job never finished within the timeout: the guest
+                            # didn't answer, so this PSDirect session is suspect.
+                            # Evict the cached session for this VM so the NEXT call
+                            # builds a FRESH session instead of reusing a wedged
+                            # channel -- reusing a hung session is what cascades into
+                            # a full phase hang.
+                            $return.TimedOut = $true
+                            # -LeakSession (do NOT dispose): the timed-out job above
+                            # was only StopJobAsync'd (abandoned, NOT removed -- a
+                            # synchronous Remove-Job blocks on the dead VMBus). If we
+                            # DISPOSE its session now, the job's later transport-break
+                            # StateChanged callback -- fired when the VM is rebooted to
+                            # recover the channel (Wait-ForVm's heartbeat reboot, or
+                            # Invoke-VmLivenessRecovery) -- runs on a threadpool thread
+                            # against an already-disposed object -> unhandled
+                            # PSObjectDisposedException ('object "PSJob" has already
+                            # been disposed') that crashes the whole phase child
+                            # process. Evict the cache ENTRY but LEAK the session object
+                            # (reaped at process exit); the wedged channel is no longer
+                            # reachable via the cache anyway.
+                            Remove-VmSessionFromCache -VmName $VmName -LeakSession
+                            if ($RebootIfUnresponsive) {
+                                $recovery = Invoke-VmLivenessRecovery -VmName $VmName -VmDomainName $VmDomainName -Quiet:$SuppressLog
+                                $return.Rebooted = [bool]$recovery.Rebooted
+                            }
+                        }
+                        elseif ($jobChannelBroken) {
+                            # Channel-broken terminal failure: the abandoned job above was NOT
+                            # disposed. Surface it to the caller and evict the cache ENTRY while
+                            # LEAKING the session object (do NOT dispose -- same disposed-object
+                            # callback hazard) so the next call builds a fresh channel and the
+                            # imminent VM reboot/TurnOff can't crash the process via this
+                            # session's transport break.
+                            $return.ChannelBroken = $true
+                            Remove-VmSessionFromCache -VmName $VmName -LeakSession
+                        }
                     }
                 }
                 else {
-                    $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+                    # Suppress Invoke-Command's auto-generated progress record whose Activity
+                    # is the raw scriptblock text.  Explicit Write-Progress2 calls in the
+                    # calling code provide the meaningful progress instead.
+                    $savedProgressPref = $ProgressPreference
+                    $ProgressPreference = 'SilentlyContinue'
+                    try {
+                        $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+                    }
+                    finally {
+                        $ProgressPreference = $savedProgressPref
+                    }
+                    # Overwrite any leaked Invoke-Command progress with the clean DisplayName.
+                    # $ProgressPreference suppression doesn't reliably prevent PS Direct
+                    # sessions from adding raw-scriptblock progress records to the job stream.
+                    if (-not $SuppressLog) {
+                        Write-Progress2 "$VmName`: $DisplayName" -Status "Done" -force
+                    }
                 }
             }
             catch {
                 $failed = $true
+                $caughtException = $_
                 if (-not $SuppressLog) {
                     Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $_" -Failure
                     Write-Log "$($_.ScriptStackTrace)" -LogOnly
@@ -3637,6 +6075,52 @@ function Invoke-VmCommand {
             # return $return
         }
 
+        # Capture error details on the return object for callers to inspect
+        if ($failed) {
+            # Snapshot whether the scriptblock produced NO output BEFORE the block
+            # below back-fills ScriptBlockOutput with error text -- a genuine
+            # no-output failure (output null) distinguishes a real pipeline-create
+            # collision from a scriptblock that ran and returned but errored.
+            $sbOutputWasNull = ($null -eq $return.ScriptBlockOutput)
+            if ($Err2 -and $Err2.Count -gt 0) {
+                $return.ErrorDetails = @($Err2 | ForEach-Object { $_.ToString().Trim() })
+            }
+            elseif ($caughtException) {
+                $return.ErrorDetails = @("$caughtException".Trim())
+            }
+            # Populate ScriptBlockOutput with error text when command failed but output is null
+            if ($null -eq $return.ScriptBlockOutput) {
+                if ($return.ErrorDetails) {
+                    $return.ScriptBlockOutput = $return.ErrorDetails[0]
+                }
+            }
+            # When the failure is a PSDirect readiness/channel issue (the recurring
+            # "An error occurred while creating the pipeline", a broken transport, a
+            # session that won't connect, etc.) emit a companion host-side diagnostic
+            # line so post-run log review can correlate these failures with the VM's
+            # actual Hyper-V uptime/heartbeat. Over many runs this tells us whether the
+            # failures cluster on freshly-booting guests (=> a readiness gate/threshold
+            # needs tuning) or hit settled VMs (=> something else). Gated on the error
+            # signature (and ChannelBroken) so ordinary scriptblock failures don't
+            # trigger a host query or add log noise. -LogOnly: file only, not console.
+            if (-not $SuppressLog) {
+                $errBlob = "$($return.ErrorDetails -join ' ')"
+                if ($return.ChannelBroken -or $errBlob -match 'creating the pipeline|pipeline is not|transport|channel|broken|Cannot connect|not connected|session is in|availability is Busy|No valid sessions') {
+                    Write-Log "$VmName`: '$DisplayName' PSDirect readiness diag -- $(Get-VmHostSideDiag -VmName $VmName)" -LogOnly
+                    # Mechanism diagnostic: was a SECOND pipeline running on this same
+                    # cached session from another thread when the error fired (the
+                    # concurrency hypothesis), and was the runspace Busy / output null?
+                    # This is what tells us whether the fix needs per-session
+                    # serialization (concurrency) vs the AsJob settle-wait already in
+                    # place (transitional) vs something else (Available + idle).
+                    Write-Log "$VmName`: '$DisplayName' pipeline-race diag -- $(Get-VmSessionConcurrencyDiag -Session $ps -SelfToken $inflightToken -OutputWasNull $sbOutputWasNull)" -LogOnly
+                }
+            }
+        }
+
+        # Release the in-flight marker AFTER the diagnostic above has read it.
+        Exit-VmSessionInflight -Token $inflightToken
+
         # Set Command Result state in return object
         if (-not $failed) {
             $return.CommandResult = $true
@@ -3647,12 +6131,351 @@ function Invoke-VmCommand {
     }
     catch {
         Write-Log "$VmName`: Invoke-VMCommand Exception $_"
+        # Ensure the in-flight marker is released even on an unexpected throw, so a
+        # leaked entry can't produce a false-positive concurrency reading later.
+        Exit-VmSessionInflight -Token $inflightToken
     }
     return $return
 
 }
 
 $global:ps_cache = @{}
+# Remembers which credential style last worked for each VM so the next
+# cold connect can try it first, avoiding 30s timeout on wrong creds.
+# Values: 'primary' | 'local' | 'domain-lookup' | 'administrator'.
+$global:ps_lastGoodCred = @{}
+
+# In-flight tracker for the "An error occurred while creating the pipeline"
+# investigation. Keyed by PSSession.InstanceId; value is a synchronized list of
+# @{ ThreadId; Display; At } for every Invoke-VmCommand currently executing a
+# scriptblock on that session. Lets the failure-site diagnostic state, with
+# proof, whether a second pipeline was running on the SAME cached session from
+# another thread at the moment the pipeline-create error fired (the concurrency
+# mechanism) vs the session being idle (something else). Cheap: two locked list
+# mutations per call, only ever read on a failure.
+$global:ps_inflight = [System.Collections.Hashtable]::Synchronized(@{})
+
+function Enter-VmSessionInflight {
+    # Mark a scriptblock as executing on $Session. Returns an opaque token to pass
+    # to Exit-VmSessionInflight. Never throws.
+    param($Session, [string]$DisplayName)
+    try {
+        if (-not $Session) { return $null }
+        $key = "$($Session.InstanceId)"
+        $entry = @{ ThreadId = [System.Threading.Thread]::CurrentThread.ManagedThreadId; Display = $DisplayName; At = (Get-Date) }
+        [System.Threading.Monitor]::Enter($global:ps_inflight.SyncRoot)
+        try {
+            if (-not $global:ps_inflight.ContainsKey($key)) { $global:ps_inflight[$key] = (New-Object System.Collections.ArrayList) }
+            [void]$global:ps_inflight[$key].Add($entry)
+        }
+        finally { [System.Threading.Monitor]::Exit($global:ps_inflight.SyncRoot) }
+        return @{ Key = $key; Entry = $entry }
+    }
+    catch { return $null }
+}
+
+function Exit-VmSessionInflight {
+    param($Token)
+    try {
+        if (-not $Token) { return }
+        [System.Threading.Monitor]::Enter($global:ps_inflight.SyncRoot)
+        try {
+            if ($global:ps_inflight.ContainsKey($Token.Key)) {
+                $global:ps_inflight[$Token.Key].Remove($Token.Entry)
+                if ($global:ps_inflight[$Token.Key].Count -eq 0) { [void]$global:ps_inflight.Remove($Token.Key) }
+            }
+        }
+        finally { [System.Threading.Monitor]::Exit($global:ps_inflight.SyncRoot) }
+    }
+    catch { }
+}
+
+function Get-VmSessionConcurrencyDiag {
+    # Build a one-line diagnostic describing the session's runspace availability and
+    # any OTHER in-flight scriptblock on the same session right now (i.e. genuine
+    # concurrent use). $SelfToken is excluded so the calling op doesn't list itself.
+    # Never throws.
+    param($Session, $SelfToken, [bool]$OutputWasNull)
+    try {
+        $avail = '<no-session>'
+        if ($Session) { try { $avail = [string]$Session.Runspace.RunspaceAvailability } catch { $avail = '<unknown>' } }
+        $concurrent = @()
+        if ($Session) {
+            $key = "$($Session.InstanceId)"
+            [System.Threading.Monitor]::Enter($global:ps_inflight.SyncRoot)
+            try {
+                if ($global:ps_inflight.ContainsKey($key)) {
+                    foreach ($e in @($global:ps_inflight[$key])) {
+                        if ($SelfToken -and [object]::ReferenceEquals($e, $SelfToken.Entry)) { continue }
+                        $concurrent += "tid=$($e.ThreadId) op='$($e.Display)' for=$([int]((Get-Date) - $e.At).TotalMilliseconds)ms"
+                    }
+                }
+            }
+            finally { [System.Threading.Monitor]::Exit($global:ps_inflight.SyncRoot) }
+        }
+        $concStr = if ($concurrent.Count) { ($concurrent -join ' | ') } else { '<none>' }
+        $rsId = try { [string][System.Management.Automation.Runspaces.Runspace]::DefaultRunspace.Id } catch { '?' }
+        return "runspaceAvail=$avail outputWasNull=$OutputWasNull thisThread=$([System.Threading.Thread]::CurrentThread.ManagedThreadId) defaultRunspace=$rsId concurrentOnSameSession=[$concStr]"
+    }
+    catch { return "concurrency-diag-unavailable ($($_.Exception.Message))" }
+}
+
+# New-PSSessionWithTimeout
+# Wraps New-PSSession -VMId in a separate runspace so the call can be
+# capped at $TimeoutSec seconds.  PSDirect's VMId parameter set does
+# not accept -SessionOption (which carries OpenTimeout), so there is
+# no native way to prevent an indefinite hang when PSDirect is broken
+# inside the guest (e.g. during BDC promotion).
+# Returns @{ Session; TimedOut; ErrorMessage } so callers can
+# distinguish channel-broken (timeout / VMBus error) from auth errors.
+function New-PSSessionWithTimeout {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '',
+        Justification = 'The nested job scriptblock parameter $cred receives an existing [pscredential]; it is never a plaintext password.')]
+    param(
+        [string]$Name,
+        [guid]$VMId,
+        [pscredential]$Credential,
+        [int]$TimeoutSec = 30
+    )
+
+    # Return a diagnostic hashtable so callers can distinguish
+    # timeout (channel hung) from auth/connection errors.
+    $result = @{ Session = $null; TimedOut = $false; ErrorMessage = $null }
+
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $rs.Open()
+
+    $psi = [System.Management.Automation.PowerShell]::Create()
+    $psi.Runspace = $rs
+
+    $null = $psi.AddScript({
+        param($name, $vmId, $cred)
+        New-PSSession -Name $name -VMId $vmId -Credential $cred -ErrorAction Stop
+    }).AddArgument($Name).AddArgument($VMId).AddArgument($Credential)
+
+    $async = $psi.BeginInvoke()
+
+    if (-not $async.AsyncWaitHandle.WaitOne($TimeoutSec * 1000)) {
+        # Timed out — use BeginStop (non-blocking) instead of Stop() which
+        # blocks until the underlying VMBus call completes.  When PSDirect
+        # is wedged, Stop() hangs indefinitely, defeating the timeout.
+        # BeginStop queues the cancellation and returns immediately; the
+        # runspace and PowerShell instance are leaked until the async stop
+        # completes or the process exits — acceptable vs. hanging forever.
+        try { $psi.BeginStop($null, $null) } catch {}
+        $result.TimedOut = $true
+        return $result
+    }
+
+    try {
+        $result.Session = $psi.EndInvoke($async) | Select-Object -First 1
+    }
+    catch {
+        $result.ErrorMessage = "$_"
+    }
+
+    $psi.Dispose()
+
+    if ($result.Session) {
+        # Keep the runspace alive — closing it can destroy the PSSession
+        # whose transport was established through it.  Attach it to the
+        # session so it can be cleaned up when the session is evicted.
+        $result.Session | Add-Member -NotePropertyName '_OwnerRunspace' -NotePropertyValue $rs -Force
+    }
+    else {
+        $rs.Close()
+        $rs.Dispose()
+    }
+    return $result
+}
+
+# Dispose a PSSession and its owner runspace (if created by
+# New-PSSessionWithTimeout).  Use this instead of Remove-PSSession
+# directly when evicting sessions from ps_cache.
+function Remove-VmSession {
+    param([object]$Session)
+    if (-not $Session) { return }
+    try {
+        if ($Session._OwnerRunspace) {
+            $Session._OwnerRunspace.Close()
+            $Session._OwnerRunspace.Dispose()
+        }
+    } catch {}
+    try { Remove-PSSession $Session -ErrorAction SilentlyContinue } catch {}
+}
+
+# Evict + dispose EVERY cached PSDirect session for a VM and forget its
+# last-known-good credential. Call this whenever a command against the VM
+# times out / the channel is suspect: a session whose command hung must not
+# be reused (it stays in ps_cache reporting Availability='Available' and the
+# next caller rides the same wedged channel -> cascading hangs). The next
+# Get-VmSession then builds a fresh, validated session.
+function Remove-VmSessionFromCache {
+    param(
+        [string]$VmName,
+        # When set, the cache ENTRY is removed (so the next Get-VmSession builds a
+        # fresh session) but the underlying PSSession/runspace is NOT disposed.
+        # Use this when an abandoned, still-running timed-out PSRemoting job is
+        # bound to the session: disposing it now would let the job's late
+        # state-change/transport callback (which fires when a subsequent reboot
+        # breaks the VMBus) hit an already-disposed object on a threadpool thread
+        # -> unhandled PSObjectDisposedException that kills the phase child
+        # process. Leaking the session object (reaped at process exit) is the safe
+        # trade -- the channel is dead and is no longer reachable via the cache.
+        [switch]$LeakSession
+    )
+    if (-not $VmName) { return }
+    $VmName = $VmName.Split('.')[0]
+    foreach ($key in @($global:ps_cache.Keys)) {
+        if ($key -like "$VmName-*") {
+            $sess = $global:ps_cache[$key]
+            $global:ps_cache.Remove($key)
+            if (-not $LeakSession) { Remove-VmSession $sess }
+            $dispNote = if ($LeakSession) { 'leaked (abandoned job may still ride it)' } else { 'disposed' }
+            Write-Log "$VmName`: Evicted cached PSDirect session '$key' ($dispNote; timed out / unresponsive)" -Verbose
+        }
+    }
+    if ($global:ps_lastGoodCred.ContainsKey($VmName)) { $global:ps_lastGoodCred.Remove($VmName) }
+}
+
+# Liveness probe + reboot escalation for a VM whose PSDirect command timed
+# out. The caller has already evicted the wedged session, so this runs a
+# fresh, short 'hostname' probe over a NEW session:
+#   - guest answers  -> it is alive; the original command was merely slow /
+#                       stuck. Do NOT reboot.
+#   - probe also times out -> the channel is genuinely wedged. Reboot the VM
+#                       to recover (bounded, single attempt).
+# Returns @{ Alive; Rebooted }. The probe deliberately does NOT pass
+# -RebootIfUnresponsive, so there is no recursion.
+function Invoke-VmLivenessRecovery {
+    param(
+        [string]$VmName,
+        [string]$VmDomainName,
+        [switch]$Quiet
+    )
+    $outcome = @{ Alive = $false; Rebooted = $false }
+    if (-not $Quiet) {
+        Write-Log "$VmName`: PSDirect command timed out; running 30s liveness probe (hostname) before escalating." -Warning
+    }
+    $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog `
+        -DisplayName "Liveness probe (hostname)" -AsJob -TimeoutSeconds 30 -SessionMaxRetries 1 `
+        -ScriptBlock { $env:COMPUTERNAME }
+    if ($probe -and -not $probe.ScriptBlockFailed -and $probe.ScriptBlockOutput) {
+        $outcome.Alive = $true
+        if (-not $Quiet) {
+            Write-Log "$VmName`: Liveness probe OK (guest responded '$($probe.ScriptBlockOutput)'); NOT rebooting -- the original command was slow, not the channel." -Warning
+        }
+        return $outcome
+    }
+    # Probe failed too -> channel wedged. Reboot to recover.
+    Write-Log "$VmName`: Liveness probe FAILED after session eviction; PSDirect channel is wedged. Rebooting VM to recover." -Warning
+    $rebooted = Restart-UnresponsiveVm -VmName $VmName -MaxRetries 1 -WaitTimeSeconds 120
+    $outcome.Rebooted = [bool]$rebooted
+    # Drop any session that may have been re-created during the probe so the
+    # post-reboot guest gets a fresh channel. -LeakSession: a probe that timed
+    # out left an abandoned job bound to that session; disposing it here (right
+    # after a reboot that just broke its transport) risks the same disposed-job
+    # callback crash, so evict the cache entry but don't dispose the object.
+    Remove-VmSessionFromCache -VmName $VmName -LeakSession
+    if ($rebooted) {
+        Write-Log "$VmName`: VM rebooted and is responsive again." -Warning
+    }
+    else {
+        Write-Log "$VmName`: VM did NOT become responsive after reboot." -Failure
+    }
+    return $outcome
+}
+
+# Pre-flight channel remediation for the Phase 10 (maintenance) and Phase 11
+# (validation) per-VM jobs. A VM can be fully Running with a healthy heartbeat
+# yet have a WEDGED PowerShell Direct / VMBus channel -- New-PSSession -VMId
+# times out, so the per-VM job can never open a session and fails with an opaque
+# "Start-VMMaintenance returned no data" (Phase 10) or "ScriptBlock failed (no
+# error detail returned)" (Phase 11). This probes the channel and, ONLY when it
+# is genuinely wedged (guest Running + heartbeat alive + ChannelBroken), reboots
+# the VM once to recover VMBus and re-probes to confirm.
+#
+# A healthy VM passes the first probe instantly (one cheap PSDirect round-trip,
+# zero recovery cost), so the helper is safe to call unconditionally at the top
+# of every per-VM job: only genuinely-broken machines pay the reboot, and each
+# runs in its own parallel job. Linux guests and roles that aren't PSDirect-
+# managed here (OSDClient / AADClient / StandaloneRootCA) are skipped via the
+# VM note so they are never probed or rebooted.
+function Repair-VmPSDirectChannel {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $false)]
+        [string]$VmDomainName = "WORKGROUP",
+        [Parameter(Mandatory = $false)]
+        [string]$Phase = ""
+    )
+
+    $tag = if ($Phase) { "[Phase $Phase]: " } else { "" }
+
+    $vm = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+    if (-not $vm) { return $true }                  # caller's normal path will report a missing VM
+    if ($vm.State -ne 'Running') { return $true }   # never wake an intentionally-off VM here
+
+    # Skip roles / OS that don't use the Windows PSDirect maintenance pipeline.
+    # Mirrors the Linux + excluded-role checks in Start-VMMaintenance so a Linux
+    # guest (no PSDirect) or an OSD/AAD client / offline root CA is never probed
+    # or rebooted by this helper.
+    $note = Get-VMNote -VMName $VmName
+    if ($note) {
+        if ($note.role -in @('OSDClient', 'AADClient', 'StandaloneRootCA')) { return $true }
+        $noteIsLinux = $false
+        if ($note.role -eq 'Proxy') { $noteIsLinux = $true }
+        elseif ($note.PSObject.Properties.Name -contains 'osFamily' -and $note.osFamily -eq 'Linux') { $noteIsLinux = $true }
+        elseif ($note.operatingSystem -and ($note.operatingSystem -like 'Ubuntu*' -or $note.operatingSystem -like 'Debian*' -or $note.operatingSystem -like 'Linux*')) { $noteIsLinux = $true }
+        elseif ($note.deployedOS -and ($note.deployedOS -like 'Ubuntu*' -or $note.deployedOS -like 'Debian*' -or $note.deployedOS -like 'Linux*')) { $noteIsLinux = $true }
+        if ($noteIsLinux) { return $true }
+    }
+
+    # Quick health probe. A healthy VM returns instantly -> no recovery cost.
+    $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog `
+        -DisplayName "PSDirect channel probe" -CommandReturnsBool -SessionMaxRetries 2 `
+        -ScriptBlock { $true }
+    if ($probe -and -not $probe.ScriptBlockFailed -and $probe.ScriptBlockOutput -eq $true) {
+        return $true
+    }
+
+    # Probe failed. Only a wedged VMBus/PSDirect channel (guest Running, heartbeat
+    # alive, ChannelBroken) is recoverable by a reboot. Auth / other failures are
+    # left to the caller's normal path to report.
+    $vm = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+    $hb = if ($vm) { "$($vm.Heartbeat)" } else { "N/A" }
+    $channelBroken = ($probe -and $probe.ChannelBroken)
+    $heartbeatAlive = ($hb -ne 'NoContact' -and $hb -ne 'N/A')
+    if (-not ($channelBroken -and $heartbeatAlive)) {
+        return $true
+    }
+
+    Write-Log "$tag$VmName`: PowerShell Direct channel is wedged (VM Running, heartbeat $hb). Rebooting once to recover VMBus before continuing." -Warning
+
+    # Drop the dead cached session so the post-reboot guest gets a fresh channel.
+    Remove-VmSessionFromCache -VmName $VmName -LeakSession
+
+    $rebooted = Restart-UnresponsiveVm -VmName $VmName -MaxRetries 1 -WaitTimeSeconds 240
+    if (-not $rebooted) {
+        Write-Log "$tag$VmName`: VM did not come back responsive after recovery reboot; continuing -- the caller's normal path will report any remaining failure." -Warning
+        return $false
+    }
+
+    # Restart-UnresponsiveVm only confirms RDP; confirm PSDirect specifically.
+    $probe2 = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog `
+        -DisplayName "PSDirect channel re-probe" -CommandReturnsBool -SessionMaxRetries 3 `
+        -ScriptBlock { $true }
+    if ($probe2 -and -not $probe2.ScriptBlockFailed -and $probe2.ScriptBlockOutput -eq $true) {
+        Write-Log "$tag$VmName`: PowerShell Direct channel recovered after reboot." -Success
+        return $true
+    }
+
+    Write-Log "$tag$VmName`: PowerShell Direct channel still not responding after recovery reboot." -Warning
+    return $false
+}
+
 function Get-VmSession {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
@@ -3662,7 +6485,15 @@ function Get-VmSession {
         [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
         [string]$VmDomainAccount,
         [Parameter(Mandatory = $false, HelpMessage = "Show VM Session errors, very noisy")]
-        [switch]$ShowVMSessionError
+        [switch]$ShowVMSessionError,
+        [Parameter(Mandatory = $false, HelpMessage = "Max retry attempts (default 3). Reduce for tight polling loops.")]
+        [int]$MaxRetries = 3,
+        [Parameter(Mandatory = $false, HelpMessage = "Only try local/primary credentials. Skip domain-lookup fallback.")]
+        [switch]$LocalOnly,
+        [Parameter(Mandatory = $false, HelpMessage = "Suppress the final 'Could not create session' type=3 failure log. Use for best-effort liveness probes (e.g. Copy-ItemSafe heartbeat) where a miss during OOBE is expected and not an error.")]
+        [switch]$Quiet,
+        [Parameter(Mandatory = $false, HelpMessage = "Hashtable populated with channel diagnostics: ChannelBroken = true when PSDirect timed out or returned a VMBus error.")]
+        [hashtable]$Diagnostics
     )
 
 
@@ -3689,7 +6520,8 @@ function Get-VmSession {
     }
 
     Write-Log "$VmName`: Get-VmSession started with cachekey $cacheKey" -Verbose
-    # Retrieve session from cache
+
+    # ── Fast path: exact cache key match ──────────────────────────────────
     if ($global:ps_cache.ContainsKey($cacheKey)) {
         $ps = $global:ps_cache[$cacheKey]
         if ($ps.Availability -eq "Available") {
@@ -3698,7 +6530,27 @@ function Get-VmSession {
         }
         else {
             $global:ps_cache.Remove($cacheKey)
-            try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+            $global:ps_lastGoodCred.Remove($VmName)
+            Remove-VmSession $ps
+        }
+    }
+
+    # ── Fast path: ANY available session for this VM ──────────────────────
+    # Between phases the caller often changes VmDomainName (WORKGROUP →
+    # domain or vice-versa), causing a cache miss even though a perfectly
+    # good session already exists under a different key.
+    foreach ($existingKey in @($global:ps_cache.Keys)) {
+        if ($existingKey -like "$VmName-*") {
+            $existingPs = $global:ps_cache[$existingKey]
+            if ($existingPs.Availability -eq "Available") {
+                Write-Log "$VmName`: Reusing existing session from key '$existingKey' (caller asked for '$cacheKey')." -Verbose
+                return $existingPs
+            }
+            else {
+                $global:ps_cache.Remove($existingKey)
+                $global:ps_lastGoodCred.Remove($VmName)
+                Remove-VmSession $existingPs
+            }
         }
     }
 
@@ -3707,7 +6559,67 @@ function Get-VmSession {
         Write-Log "[Get-VMSession] $VmName`: Failed to find VM named $VmName" -Failure
         return $null
     }
+
+    # ── Build ordered credential list ─────────────────────────────────────
+    # Each entry: @{ Tag; Username; CacheKey }.  The 'primary' credential
+    # (what the caller asked for) is always present.  Additional fallbacks
+    # are appended when they differ from primary.  If a previous call for
+    # this VM already succeeded with a known credential tag, that entry is
+    # moved to the front so we try it first (avoids 30s timeout on wrong
+    # creds).
+    $credEntries = [System.Collections.Generic.List[hashtable]]::new()
+
+    # Primary: what the caller asked for
+    $credEntries.Add(@{ Tag = 'primary'; Username = $username; CacheKey = $cacheKey })
+
+    # Local fallback: VMNAME\localadmin (only if different from primary)
+    $localUser = "$VmName\$($Common.LocalAdmin.UserName)"
+    $localCacheKey = "$VmName-WORKGROUP-$($Common.LocalAdmin.UserName)"
+    if ($localUser -ne $username) {
+        $credEntries.Add(@{ Tag = 'local'; Username = $localUser; CacheKey = $localCacheKey })
+    }
+
+    # Domain-lookup fallback: use the domain from Get-List VM record.
+    # Skip in job context — jobs know the domain from deployConfig, and
+    # Get-List's cold path (Get-VM + bulk warmup) is extremely expensive
+    # when 20+ job workers all hit it simultaneously.
+    if (-not $LocalOnly -and -not $Common.InJob) {
+        $vmRecord = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
+        if ($vmRecord -and $vmRecord.Domain) {
+            $domainLookupUser = "$($vmRecord.Domain)\$($Common.LocalAdmin.UserName)"
+            $domainLookupCacheKey = "$VmName-$($vmRecord.Domain)-$($Common.LocalAdmin.UserName)"
+            if ($domainLookupUser -ne $username -and $domainLookupUser -ne $localUser) {
+                $credEntries.Add(@{ Tag = 'domain-lookup'; Username = $domainLookupUser; CacheKey = $domainLookupCacheKey })
+            }
+        }
+    }
+
+    # Administrator fallback: DOMAIN\Administrator (after DC promotion)
+    if (-not $LocalOnly -and $VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
+        $adminUser = "$VmDomainName\Administrator"
+        $adminCacheKey = "$VmName-$VmDomainName-Administrator"
+        if ($adminUser -ne $username) {
+            $credEntries.Add(@{ Tag = 'administrator'; Username = $adminUser; CacheKey = $adminCacheKey })
+        }
+    }
+
+    # If we remember which credential last worked, move it to the front
+    $lastGood = $global:ps_lastGoodCred[$VmName]
+    if ($lastGood) {
+        $idx = -1
+        for ($i = 0; $i -lt $credEntries.Count; $i++) {
+            if ($credEntries[$i].Tag -eq $lastGood) { $idx = $i; break }
+        }
+        if ($idx -gt 0) {
+            $entry = $credEntries[$idx]
+            $credEntries.RemoveAt($idx)
+            $credEntries.Insert(0, $entry)
+            Write-Log "$VmName`: Trying last-known-good credential '$lastGood' ($($entry.Username)) first." -Verbose
+        }
+    }
+
     $failCount = 0
+    [bool]$sawChannelBroken = $false
     while ($true) {
         $ps = $null
         $failCount++
@@ -3715,74 +6627,89 @@ function Get-VmSession {
             start-sleep -seconds 5
         }
 
-        if ($failCount -gt 3) {
+        if ($failCount -gt $MaxRetries) {
             break
         }
 
-        $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
-        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
-        if ($Err0.Count -ne 0) {
-            try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-            if ($VmDomainName -ne $VmName) {
-                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
-                $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
-                $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
-                $cacheKey = $VmName + "-WORKGROUP-" + $Common.LocalAdmin.UserName
-                Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
-                $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
-                if ($Err1.Count -ne 0) {
-                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-                    $VM = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
-                    if ($VM) {
+        # Skip New-PSSession entirely if the VM is not running.
+        # Avoids 30s+ timeout per credential attempt on a dead/rebooting VM.
+        $vmState = (Get-VM2 -Name $VmName -ErrorAction SilentlyContinue).State
+        if ($vmState -ne 'Running') {
+            Write-Log "$VmName`: VM state is '$vmState'; skipping session attempt $failCount/$MaxRetries" -Verbose
+            continue
+        }
 
-                        $username3 = "$($VM.Domain)\$($Common.LocalAdmin.UserName)"
-                        $creds = New-Object System.Management.Automation.PSCredential ($username3, $Common.LocalAdmin.Password)
-                        $cacheKey = $VmName + "-$($VM.Domain)-" + $Common.LocalAdmin.UserName
-                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
-                    }
-                    # Fallback: try DOMAIN\Administrator (works after DC promotion where local admin becomes domain Administrator)
-                    if (-not $ps -and $VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
-                        $username4 = "$VmDomainName\Administrator"
-                        $creds = New-Object System.Management.Automation.PSCredential ($username4, $Common.LocalAdmin.Password)
-                        $cacheKey = $VmName + "-$VmDomainName-Administrator"
-                        Write-Log "$VmName`: Falling back to $username4." -Verbose
-                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
-                    }
-                    if (-not $ps) {
-                        if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
-                            Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning
-                        }
-                        else {
-                            Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning -Verbose
-                        }
-                        continue
-                    }
-                }
+        # Try each credential in order; stop on first success
+        $triedNames = @()
+        foreach ($entry in $credEntries) {
+            $triedNames += $entry.Username
+            $creds = New-Object System.Management.Automation.PSCredential ($entry.Username, $Common.LocalAdmin.Password)
+            Write-Log "$VmName`: Trying credential '$($entry.Username)' (tag=$($entry.Tag))." -Verbose
+            $connectResult = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
+            $ps = $connectResult.Session
+            if ($ps -and $ps.Availability -eq "Available") {
+                $cacheKey = $entry.CacheKey
+                $global:ps_lastGoodCred[$VmName] = $entry.Tag
+                Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
+                $global:ps_cache[$cacheKey] = $ps
+                return $ps
             }
-            else {
-                if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
-                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-                    Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
-                }
-                else {
-                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-                    Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
-                }
-                continue
+            # Detect channel-broken indicators: timeout means VMBus is hung;
+            # "socket target process has ended" / "background process reported
+            # an error" mean the guest-side PSDirect host crashed.
+            # Auth errors (access denied, logon failure) are NOT channel-broken.
+            $channelBroken = $false
+            if ($connectResult.TimedOut) {
+                $sawChannelBroken = $true
+                $channelBroken = $true
+            }
+            elseif ($connectResult.ErrorMessage -match 'socket target process has ended|background process reported an error') {
+                $sawChannelBroken = $true
+                $channelBroken = $true
+            }
+            Remove-VmSession $ps
+
+            # When the transport itself is dead -- the connect timed out (guest
+            # never answered the hvsocket) or the guest-side PSDirect host
+            # crashed -- cycling through the remaining credentials is pointless:
+            # they all ride the SAME broken channel and would each burn the full
+            # connect timeout for nothing. Credential cycling only helps for AUTH
+            # failures (access denied / logon failure), which return fast and are
+            # NOT channel-broken. Stop this pass immediately and let the outer
+            # retry loop (with backoff) decide whether to try again.
+            if ($channelBroken) {
+                Write-Log "$VmName`: connect did not respond on '$($entry.Username)' (channel broken, not an auth error); skipping remaining credentials this pass." -Verbose
+                break
             }
         }
 
-        if ($ps.Availability -eq "Available") {
-            # Cache & return session
-            Write-Log "$VmName`: Created session with VM using $username. CacheKey [$cacheKey]" -Success -Verbose
-            $global:ps_cache[$cacheKey] = $ps
-            return $ps
+        $triedList = $triedNames -join ', '
+        if (-not $Quiet -and ($ShowVMSessionError.IsPresent -or ($failCount -eq $MaxRetries))) {
+            Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning
         }
-        try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-        Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Warning
+        elseif ($Quiet) {
+            # Quiet probe: keep it in the log for diagnostics but never on screen.
+            Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning -Verbose -LogOnly
+        }
+        else {
+            Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning -Verbose
+        }
     }
-    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-    Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure
+    # Populate diagnostics for the caller so it knows WHY we failed
+    if ($Diagnostics -and $sawChannelBroken) {
+        $Diagnostics.ChannelBroken = $true
+    }
+    # Best-effort probes (e.g. Copy-ItemSafe heartbeat, MaxRetries=1) routinely
+    # miss while the guest is still in OOBE; that is expected, not a failure.
+    # -Quiet downgrades this from a type=3 error (which makes Phase 1 look
+    # broken) to a log-only verbose entry: it's recorded in the log for
+    # diagnostics but never spews the console.
+    if ($Quiet) {
+        Write-Log "$VmName`: Could not create session after $MaxRetries retries (quiet probe)." -LogOnly -Verbose
+    }
+    else {
+        Write-Log "$VmName`: Could not create session after $MaxRetries retries." -Failure
+    }
 }
 
 
@@ -3883,15 +6810,49 @@ function Get-Tools {
             $extractIfZip = $tool.ExtractFolderIfZip
             if (Test-Path $downloadPath) {
                 if ($downloadPath.ToLowerInvariant().EndsWith(".zip") -and $extractIfZip -eq $true) {
-                    Write-Log -LogOnly "Extracting $fileName to $fileDestination."
-                    Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+                    # Use a marker file to track which zip MD5 was last extracted.
+                    # Timestamp comparison is unreliable because Get-FileWithHash
+                    # can touch the download file during verification, and
+                    # Expand-Archive -Force rewrites all extracted file timestamps.
+                    $markerPath = Join-Path $fileDestination ".extracted-md5"
+                    $currentMd5 = if ($tool.md5) { $tool.md5 } else { (Get-FileHash $downloadPath -Algorithm MD5).Hash }
+                    $skipExtract = $false
+                    if ((Test-Path $fileDestination) -and (Test-Path $markerPath)) {
+                        $lastMd5 = Get-Content $markerPath -Raw -ErrorAction SilentlyContinue
+                        if ($lastMd5 -and $lastMd5.Trim() -eq $currentMd5) {
+                            $skipExtract = $true
+                        }
+                    }
+                    if ($skipExtract) {
+                        Write-Log -LogOnly "Staging for $fileName already up-to-date, skipping extract."
+                    }
+                    else {
+                        Write-Log -LogOnly "Extracting $fileName to $fileDestination."
+                        Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+                        $currentMd5 | Set-Content $markerPath -Force -ErrorAction SilentlyContinue
+                    }
                 }
                 else {
-                    Write-Log -LogOnly "Copying $fileName to $fileDestination."
-                    try {
-                        Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                    # Skip copy if the staged file has the same size and the
+                    # download hash hasn't changed
+                    $skipCopy = $false
+                    if (Test-Path $fileDestination) {
+                        $srcItem = Get-Item $downloadPath
+                        $dstItem = Get-Item $fileDestination -ErrorAction SilentlyContinue
+                        if ($dstItem -and -not $dstItem.PSIsContainer -and $dstItem.Length -eq $srcItem.Length) {
+                            $skipCopy = $true
+                        }
                     }
-                    catch {}
+                    if ($skipCopy) {
+                        Write-Log -LogOnly "Staging for $fileName already up-to-date, skipping copy."
+                    }
+                    else {
+                        Write-Log -LogOnly "Copying $fileName to $fileDestination."
+                        try {
+                            Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                        }
+                        catch {}
+                    }
                 }
             }
         }
@@ -3990,18 +6951,10 @@ function Install-Tools {
             Write-Log "$vmName`: Failed to get a session with the VM." -Failure
             return $false
         }
-        if (-not $Force) {
-            $out = Invoke-VmCommand -VmName $vm.vmName -AsJob -VmDomainName $vm.domain -SuppressLog -ScriptBlock { Test-Path -Path "C:\Tools\Fix-PostInstall.ps1" -ErrorAction SilentlyContinue }
-        }
-        if (-not ($Force -or $out.ScriptBlockOutput -ne $true)) {
-            # Tools already present and -Force not specified: nothing to do, this is success.
-            Write-Log "$vmName`: Tools already present (Fix-PostInstall.ps1 exists). Skipping inject." -Verbose
-            return $true
-        }
-        if ($Force -or $out.ScriptBlockOutput -ne $true) {
-            $i = 0
-            $ToolList = @()
-            foreach ($tool in $Common.AzureFileList.Tools) {
+
+        $i = 0
+        $ToolList = @()
+        foreach ($tool in $Common.AzureFileList.Tools) {
 
                 $i++
                 if ($TotalCount -gt 0) {
@@ -4062,7 +7015,7 @@ function Install-Tools {
             if ($vm.operatingSystem -like "*2016*") {
                 $fast = $false
             }
-            $worked = Copy-ToolToVM -Tool $ToolList -VMName $vm.vmName -WhatIf:$WhatIf -Fast:$fast
+            $worked = Copy-ToolToVM -Tool $ToolList -VMName $vm.vmName -WhatIf:$WhatIf -Fast:$fast -Force:$Force
             if (-not $worked) {
                 $success = $false
                 Write-Progress2 "Injecting tools" -Status "Failed to Inject at least one tool to $VmName" -Log
@@ -4084,7 +7037,6 @@ function Install-Tools {
                 Write-Progress2 "Injecting tools" -Status "All Tools copied to $VmName, but at least 1 has failed." -Log -Completed
                 return $false
             }
-        }
 
     }
     Write-Log -Verbose "Injecting Tools $($ToolName -join ",") to Virtual Machines $($allVMs.vmName -join ",")"
@@ -4116,7 +7068,273 @@ function Install-Tools {
         }
     }
 
+    # Stale tool zip cleanup is handled by the caller (Start-Phase post-P2
+    # block) after all parallel jobs complete. Do NOT clean here — parallel
+    # jobs would delete zips that other in-flight jobs still need.
+
     return $success
+}
+
+function Clean-StaleToolZips {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '',
+        Justification = 'Established internal helper name; renaming would touch its call sites across the codebase.')]
+    param()
+    # Scan all per-VM toolhash cache files to find which tool zips are
+    # actively referenced, then delete any tools-*.zip that isn't needed.
+    # This prevents 200+ MB zips from accumulating across reruns when
+    # fingerprints change (e.g. a tool is added/removed).
+    try {
+        $tempPath = $Common.TempPath
+        if (-not $tempPath -or -not (Test-Path $tempPath)) { return }
+
+        $cacheFiles = Get-ChildItem -Path $tempPath -Filter "toolhash-*.json" -File -ErrorAction SilentlyContinue
+        if (-not $cacheFiles) { return }
+
+        $activeZips = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($cf in $cacheFiles) {
+            try {
+                $cached = Get-Content $cf.FullName -Raw | ConvertFrom-Json
+                if ($cached.ZipFiles) {
+                    foreach ($zf in $cached.ZipFiles) {
+                        $null = $activeZips.Add($zf)
+                    }
+                }
+            }
+            catch {}
+        }
+
+        if ($activeZips.Count -eq 0) { return }
+
+        $allZips = Get-ChildItem -Path $tempPath -Filter "tools-*.zip" -File -ErrorAction SilentlyContinue
+        foreach ($zip in $allZips) {
+            if (-not $activeZips.Contains($zip.Name)) {
+                $sizeMB = [Math]::Round($zip.Length / 1MB, 1)
+                Write-Log "Cleaning stale tool zip: $($zip.Name) (${sizeMB} MB)" -LogOnly
+                Remove-Item $zip.FullName -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch {
+        Write-Log "Clean-StaleToolZips: $_" -LogOnly
+    }
+}
+
+function Build-ToolZipsForPhase2 {
+    <#
+    .SYNOPSIS
+        Pre-builds the fingerprint-keyed tools zips on the host so Phase 2
+        jobs find them already built and skip the Compress-Archive step.
+        Runs serially on the host before Start-PhaseJobs dispatches workers.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$deployConfig
+    )
+
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-Log "Build-ToolZipsForPhase2: Pre-building tool zips..." -LogOnly
+
+    # --- Collect all tool entries the same way Copy-ToolToVM does ---
+    $commonEntries = @()
+    $allExtraSets = @{}  # fingerprint -> entries
+
+    foreach ($tool in $Common.AzureFileList.Tools) {
+        if ($tool.NoUpdate) { continue }
+
+        $toolFileName = Split-Path $tool.url -Leaf
+        if ($toolFileName.Contains("?")) { $toolFileName = $toolFileName.Split("?")[0] }
+        $fileTargetRelative = Join-Path $tool.Target $toolFileName
+
+        if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
+            $fileTargetRelative = $tool.Target
+        }
+
+        $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
+
+        if ($tool.Name -eq "WMI Explorer") {
+            $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe"
+            $fileTargetRelative = Join-Path $fileTargetRelative "WmiExplorer.exe"
+        }
+
+        if (-not (Test-Path $toolPathHost)) { continue }
+
+        $entry = [PSCustomObject]@{
+            Name           = $tool.Name
+            SourcePath     = $toolPathHost
+            TargetRelative = $fileTargetRelative
+        }
+
+        if ($tool.Optional -and $tool.Roles) {
+            # Track per-role extra entries; they get their own fingerprint
+            foreach ($role in $tool.Roles) {
+                if (-not $allExtraSets.ContainsKey($role)) {
+                    $allExtraSets[$role] = @()
+                }
+                $allExtraSets[$role] += $entry
+            }
+        }
+        elseif ($tool.Optional -and -not $tool.Roles) {
+            # Pure optional with no roles — skipped in normal Install-Tools
+            continue
+        }
+        else {
+            $commonEntries += $entry
+        }
+    }
+
+    # Add maintenance fix files to common bundle
+    try {
+        $maintPaths = Get-MaintenanceInjectPaths
+        foreach ($file in $maintPaths.Files) {
+            $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+            if (Test-Path $sourcePath) {
+                $commonEntries += [PSCustomObject]@{
+                    Name           = "MaintFix:$file"
+                    SourcePath     = $sourcePath
+                    TargetRelative = "staging\$file"
+                }
+            }
+        }
+        foreach ($toolFolder in $maintPaths.Tools) {
+            $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
+            if (Test-Path $sourcePath) {
+                $commonEntries += [PSCustomObject]@{
+                    Name           = "MaintFix:$toolFolder"
+                    SourcePath     = $sourcePath
+                    TargetRelative = "tools\$toolFolder"
+                }
+            }
+        }
+    }
+    catch {
+        Write-Log "Build-ToolZipsForPhase2: Could not add maintenance fix files: $_" -LogOnly
+    }
+
+    # --- Fingerprint helper (same logic as Copy-ToolToVM) ---
+    $computeFingerprint = {
+        param([object[]]$entries)
+        $parts = foreach ($entry in $entries | Sort-Object { $_.TargetRelative }) {
+            $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
+            if ($item -is [System.IO.DirectoryInfo]) {
+                $children = Get-ChildItem $item.FullName -Recurse -File | Sort-Object FullName
+                foreach ($child in $children) {
+                    "$($entry.TargetRelative)|$($child.FullName.Substring($item.FullName.Length))|$($child.Length)"
+                }
+            }
+            else {
+                "$($entry.TargetRelative)|$($item.Length)"
+            }
+        }
+        $str = $parts -join "`n"
+        $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($str))
+        $hash = (Get-FileHash -InputStream $stream -Algorithm MD5).Hash
+        $stream.Dispose()
+        return $hash
+    }
+
+    # --- Build zip helper (same logic as Copy-ToolToVM.$buildZip) ---
+    $buildZipLocal = {
+        param([object[]]$entries, [string]$fingerprint, [string]$label)
+        if ($entries.Count -eq 0) { return $null }
+
+        $zipPath = Join-Path $Common.TempPath "tools-$fingerprint.zip"
+        if (Test-Path $zipPath) {
+            Write-Log "Build-ToolZipsForPhase2: $label zip already exists ($fingerprint)." -LogOnly
+            return $zipPath
+        }
+
+        $stagingDir = Join-Path $Common.TempPath "toolzip-$fingerprint"
+        if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
+        New-Item -Path $stagingDir -ItemType Directory -Force | Out-Null
+
+        foreach ($entry in $entries) {
+            $dest = Join-Path $stagingDir $entry.TargetRelative
+            $destDir = Split-Path $dest -Parent
+            if (-not (Test-Path $destDir)) {
+                New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+            }
+            if ((Get-Item $entry.SourcePath) -is [System.IO.DirectoryInfo]) {
+                Copy-Item -Path $entry.SourcePath -Destination $dest -Recurse -Force
+            }
+            else {
+                Copy-Item -Path $entry.SourcePath -Destination $dest -Force
+            }
+        }
+
+        Write-Log "Build-ToolZipsForPhase2: Creating $label zip ($($entries.Count) items)..." -LogOnly
+        $prevPref = $Global:ProgressPreference
+        $Global:ProgressPreference = "SilentlyContinue"
+        try {
+            Compress-Archive -Path "$stagingDir\*" -DestinationPath $zipPath -Force
+        }
+        finally {
+            $Global:ProgressPreference = $prevPref
+        }
+        Remove-Item $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        $sizeMB = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+        Write-Log "Build-ToolZipsForPhase2: $label zip created (${sizeMB} MB)." -LogOnly
+        return $zipPath
+    }
+
+    # --- Helper: find the most recently modified source file across entries ---
+    $getNewestSource = {
+        param([object[]]$entries)
+        $newest = $null
+        foreach ($entry in $entries) {
+            $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
+            if ($item -is [System.IO.DirectoryInfo]) {
+                $child = Get-ChildItem $item.FullName -Recurse -File -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+                if ($child -and (-not $newest -or $child.LastWriteTimeUtc -gt $newest.LastWriteTimeUtc)) { $newest = $child }
+            }
+            else {
+                if ($item -and (-not $newest -or $item.LastWriteTimeUtc -gt $newest.LastWriteTimeUtc)) { $newest = $item }
+            }
+        }
+        return $newest
+    }
+
+    # --- Build common zip ---
+    $builtCount = 0
+    $allZipNames = @()
+    if ($commonEntries.Count -gt 0) {
+        $commonFP = & $computeFingerprint $commonEntries
+        $zipPath = Join-Path $Common.TempPath "tools-$commonFP.zip"
+        $zipExists = Test-Path $zipPath
+        $newestFile = & $getNewestSource $commonEntries
+        $newestInfo = if ($newestFile) { "$($newestFile.Name) ($($newestFile.Length) bytes, $($newestFile.LastWriteTimeUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC)" } else { "(none)" }
+        Write-Log "Build-ToolZipsForPhase2: common fingerprint=$commonFP, zipExists=$zipExists, tempPath=$($Common.TempPath), newest=$newestInfo" -LogOnly
+        $null = & $buildZipLocal $commonEntries $commonFP "common tools"
+        $allZipNames += "tools-$commonFP.zip"
+        $builtCount++
+    }
+
+    # --- Build unique extra zips (one per distinct role-tool set) ---
+    $builtExtraFPs = @{}
+    foreach ($role in $allExtraSets.Keys) {
+        $extraEntries = $allExtraSets[$role]
+        $extraFP = & $computeFingerprint $extraEntries
+        if (-not $builtExtraFPs.ContainsKey($extraFP)) {
+            $zipPath = Join-Path $Common.TempPath "tools-$extraFP.zip"
+            $zipExists = Test-Path $zipPath
+            $newestFile = & $getNewestSource $extraEntries
+            $newestInfo = if ($newestFile) { "$($newestFile.Name) ($($newestFile.Length) bytes, $($newestFile.LastWriteTimeUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC)" } else { "(none)" }
+            Write-Log "Build-ToolZipsForPhase2: extra ($role) fingerprint=$extraFP, zipExists=$zipExists, newest=$newestInfo" -LogOnly
+            $null = & $buildZipLocal $extraEntries $extraFP "extra tools ($role)"
+            $allZipNames += "tools-$extraFP.zip"
+            $builtExtraFPs[$extraFP] = $true
+            $builtCount++
+        }
+    }
+
+    # --- Write a manifest so Clean-StaleToolZips knows these zips are active ---
+    if ($allZipNames.Count -gt 0) {
+        $manifestPath = Join-Path $Common.TempPath "toolhash-_prebuild.json"
+        @{ ZipFiles = $allZipNames } | ConvertTo-Json | Set-Content $manifestPath -Force -ErrorAction SilentlyContinue
+    }
+
+    $timer.Stop()
+    Write-Log "Build-ToolZipsForPhase2: Pre-built $builtCount zip(s) in $($timer.Elapsed.ToString('hh\:mm\:ss'))."
 }
 
 function Copy-ToolToVM {
@@ -4128,7 +7346,9 @@ function Copy-ToolToVM {
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf,
         [Parameter(Mandatory = $false, HelpMessage = "Fast.. Might hang.")]
-        [switch]$Fast
+        [switch]$Fast,
+        [Parameter(Mandatory = $false, HelpMessage = "Force copy even if hash matches.")]
+        [switch]$Force
     )
 
     $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VMName }
@@ -4144,7 +7364,8 @@ function Copy-ToolToVM {
     }
 
     # --- Build list of source paths to bundle ---
-    $zipEntries = @()
+    $commonEntries = @()
+    $extraEntries = @()
     foreach ($ToolItem in $Tool) {
         if ($ToolItem.NoUpdate -eq $true) {
             Write-Log "$vmName`: Skipped injecting '$($ToolItem.Name) since it's marked NoUpdate." -Verbose
@@ -4173,80 +7394,309 @@ function Copy-ToolToVM {
             continue
         }
 
-        $zipEntries += [PSCustomObject]@{
+        $entry = [PSCustomObject]@{
             Name             = $ToolItem.Name
             SourcePath       = $toolPathHost
             TargetRelative   = $fileTargetRelative
         }
+
+        # Tools with Optional+Roles are VM-specific; everything else is common
+        if ($ToolItem.Optional -and $ToolItem.Roles) {
+            $extraEntries += $entry
+        }
+        else {
+            $commonEntries += $entry
+        }
     }
 
-    if ($zipEntries.Count -eq 0) {
+    # --- Add maintenance fix InjectFiles/InjectTools to the common bundle
+    #     so they ride with the tools. Phase 10 skips the redundant PSDirect
+    #     copy when the files already exist on the VM. ---
+    try {
+        $maintPaths = Get-MaintenanceInjectPaths
+        foreach ($file in $maintPaths.Files) {
+            $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+            if (Test-Path $sourcePath) {
+                $commonEntries += [PSCustomObject]@{
+                    Name           = "MaintFix:$file"
+                    SourcePath     = $sourcePath
+                    TargetRelative = "staging\$file"
+                }
+            }
+        }
+        foreach ($toolFolder in $maintPaths.Tools) {
+            $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
+            if (Test-Path $sourcePath) {
+                $commonEntries += [PSCustomObject]@{
+                    Name           = "MaintFix:$toolFolder"
+                    SourcePath     = $sourcePath
+                    TargetRelative = "tools\$toolFolder"
+                }
+            }
+        }
+    }
+    catch {
+        Write-Log "$vmName`: Could not add maintenance fix files to tools bundle: $_" -LogOnly
+    }
+
+    if ($commonEntries.Count -eq 0 -and $extraEntries.Count -eq 0) {
         Write-Log "$vmName`: No tools to inject." -Verbose
         return $true
     }
 
-    # --- Create a single zip bundle on the host ---
-    $zipStagingDir = Join-Path $Common.TempPath "toolzip-$VMName"
-    if (Test-Path $zipStagingDir) { Remove-Item $zipStagingDir -Recurse -Force }
-    New-Item -Path $zipStagingDir -ItemType Directory -Force | Out-Null
-
-    foreach ($entry in $zipEntries) {
-        $dest = Join-Path $zipStagingDir $entry.TargetRelative
-        $destDir = Split-Path $dest -Parent
-        if (-not (Test-Path $destDir)) {
-            New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+    # --- Helper: compute a fingerprint for a set of zip entries ---
+    $computeFingerprint = {
+        param([object[]]$entries)
+        # Use path + size only (no timestamps). Get-Tools re-extracts tool
+        # zips on every run, which updates LastWriteTimeUtc even though the
+        # content is identical. Including timestamps would invalidate the
+        # fingerprint cache on every rerun.
+        $parts = foreach ($entry in $entries | Sort-Object { $_.TargetRelative }) {
+            $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
+            if ($item -is [System.IO.DirectoryInfo]) {
+                $children = Get-ChildItem $item.FullName -Recurse -File | Sort-Object FullName
+                foreach ($child in $children) {
+                    "$($entry.TargetRelative)|$($child.FullName.Substring($item.FullName.Length))|$($child.Length)"
+                }
+            }
+            else {
+                "$($entry.TargetRelative)|$($item.Length)"
+            }
         }
-        if ((Get-Item $entry.SourcePath) -is [System.IO.DirectoryInfo]) {
-            Copy-Item -Path $entry.SourcePath -Destination $dest -Recurse -Force
+        $str = $parts -join "`n"
+        $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($str))
+        $hash = (Get-FileHash -InputStream $stream -Algorithm MD5).Hash
+        $stream.Dispose()
+        return $hash
+    }
+
+    # --- Compute fingerprints ---
+    $commonFingerprint = $null
+    $extraFingerprint = $null
+    $vmHashPath = "C:\Tools\Tools.MD5"
+    $hostCachePath = Join-Path $Common.TempPath "toolhash-$VMName.json"
+
+    try {
+        if ($commonEntries.Count -gt 0) {
+            $commonFingerprint = & $computeFingerprint $commonEntries
+        }
+        if ($extraEntries.Count -gt 0) {
+            $extraFingerprint = & $computeFingerprint $extraEntries
+        }
+    }
+    catch {
+        Write-Log "$vmName`: Source fingerprint computation failed, will do full rebuild: $_" -LogOnly
+    }
+
+    # Combined fingerprint for the VM-level skip check (common + extras)
+    $combinedFingerprint = if ($commonFingerprint -and $extraFingerprint) {
+        $s = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes("$commonFingerprint|$extraFingerprint"))
+        $h = (Get-FileHash -InputStream $s -Algorithm MD5).Hash; $s.Dispose(); $h
+    }
+    elseif ($commonFingerprint) { $commonFingerprint }
+    elseif ($extraFingerprint) { $extraFingerprint }
+    else { $null }
+
+    # --- Fast skip: if combined fingerprint + VM hash match, skip everything ---
+    if ($combinedFingerprint -and -not $WhatIf -and -not $Force) {
+        try {
+            if (Test-Path $hostCachePath) {
+                $cached = Get-Content $hostCachePath -Raw | ConvertFrom-Json
+                if ($cached.SourceFingerprint -eq $combinedFingerprint) {
+                    $cachedBundleHash = $cached.BundleMD5
+                    $hashCheck = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
+                        if (Test-Path $using:vmHashPath) {
+                            return (Get-Content $using:vmHashPath -ErrorAction SilentlyContinue | Select-Object -First 1)
+                        }
+                        return $null
+                    }
+                    if (-not $hashCheck.ScriptBlockFailed -and $hashCheck.ScriptBlockOutput -eq $cachedBundleHash) {
+                        Write-Log "$vmName`: Tools unchanged (source fingerprint + VM hash match). Skipping." -Success
+                        return $true
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Log "$vmName`: Cache check failed, falling through to full rebuild: $_" -LogOnly
+        }
+    }
+
+    # --- Helper: build a zip with mutex guarding. Returns the zip path. ---
+    #     If another job already built the zip (fingerprint match), reuses it.
+    $buildZip = {
+        param([object[]]$entries, [string]$fingerprint, [string]$label)
+
+        if ($entries.Count -eq 0) { return $null }
+
+        $zipPath = Join-Path $Common.TempPath "tools-$fingerprint.zip"
+        $mutexName = "Global\MemLabs-ToolZip-$fingerprint"
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+
+        try {
+            # Wait up to 10 minutes for the mutex
+            if (-not $mutex.WaitOne(600000)) {
+                Write-Log "$vmName`: Timed out waiting for $label zip mutex. Building anyway." -Warning
+            }
+
+            # After acquiring the mutex, check if the zip already exists
+            if (Test-Path $zipPath) {
+                Write-Log "$vmName`: Reusing existing $label bundle (built by another VM)." -LogOnly
+                return $zipPath
+            }
+
+            # Build the zip
+            $stagingDir = Join-Path $Common.TempPath "toolzip-$fingerprint"
+            if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
+            New-Item -Path $stagingDir -ItemType Directory -Force | Out-Null
+
+            foreach ($entry in $entries) {
+                $dest = Join-Path $stagingDir $entry.TargetRelative
+                $destDir = Split-Path $dest -Parent
+                if (-not (Test-Path $destDir)) {
+                    New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                }
+                if ((Get-Item $entry.SourcePath) -is [System.IO.DirectoryInfo]) {
+                    Copy-Item -Path $entry.SourcePath -Destination $dest -Recurse -Force
+                }
+                else {
+                    Copy-Item -Path $entry.SourcePath -Destination $dest -Force
+                }
+            }
+
+            Write-Log "$vmName`: Creating $label bundle ($($entries.Count) items)..." -LogOnly
+            $prevPref = $Global:ProgressPreference
+            $Global:ProgressPreference = "SilentlyContinue"
+            try {
+                Compress-Archive -Path "$stagingDir\*" -DestinationPath $zipPath -Force
+            }
+            finally {
+                $Global:ProgressPreference = $prevPref
+            }
+            Remove-Item $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+
+            return $zipPath
+        }
+        finally {
+            try { $mutex.ReleaseMutex() } catch {}
+            $mutex.Dispose()
+        }
+    }
+
+    # --- Build the common zip (shared across all VMs, mutex-guarded) ---
+    $commonZipPath = $null
+    $extraZipPath = $null
+
+    if ($commonEntries.Count -gt 0) {
+        if ($commonFingerprint) {
+            $commonZipPath = & $buildZip $commonEntries $commonFingerprint "common tools"
         }
         else {
-            Copy-Item -Path $entry.SourcePath -Destination $dest -Force
+            # No fingerprint available — fall back to VM-specific zip without mutex
+            $commonZipPath = & $buildZip $commonEntries $VMName "common tools"
         }
     }
 
-    $zipPath = Join-Path $Common.TempPath "tools-$VMName.zip"
-    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-
-    Write-Log "$vmName`: Creating tools bundle ($($zipEntries.Count) tools)..." -LogOnly
-    $progressPref = $ProgressPreference
-    $ProgressPreference = "SilentlyContinue"
-    try {
-        Compress-Archive -Path "$zipStagingDir\*" -DestinationPath $zipPath -Force
-    }
-    finally {
-        $ProgressPreference = $progressPref
+    # --- Build the extras zip (role-specific tools, also mutex-guarded by its fingerprint) ---
+    if ($extraEntries.Count -gt 0) {
+        if ($extraFingerprint) {
+            $extraZipPath = & $buildZip $extraEntries $extraFingerprint "extra tools"
+        }
+        else {
+            $extraZipPath = & $buildZip $extraEntries "$VMName-extra" "extra tools"
+        }
     }
 
-    $zipSizeMB = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1)
-    Write-Log "$vmName`: Copying tools bundle (${zipSizeMB} MB, $($zipEntries.Count) tools) to VM..."
-    Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${zipSizeMB} MB) to $VMName" -Log
+    # --- Compute a combined MD5 from the zip file(s) for the VM hash check ---
+    $zipPaths = @()
+    if ($commonZipPath) { $zipPaths += $commonZipPath }
+    if ($extraZipPath) { $zipPaths += $extraZipPath }
 
-    # --- Copy the single zip to the VM and expand ---
+    $hashParts = foreach ($zp in $zipPaths) {
+        (Get-FileHash -Path $zp -Algorithm MD5).Hash
+    }
+    $combinedHashString = $hashParts -join "|"
+    $bundleStream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($combinedHashString))
+    $bundleHash = (Get-FileHash -InputStream $bundleStream -Algorithm MD5).Hash
+    $bundleStream.Dispose()
+
+    $totalSizeMB = [Math]::Round(($zipPaths | ForEach-Object { (Get-Item $_).Length } | Measure-Object -Sum).Sum / 1MB, 1)
+    $totalItems = $commonEntries.Count + $extraEntries.Count
+
+    # --- Check if the VM already has this exact bundle ---
+    $skipCopy = $false
+    if (-not $WhatIf -and -not $Force) {
+        $hashCheck = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
+            if (Test-Path $using:vmHashPath) {
+                return (Get-Content $using:vmHashPath -ErrorAction SilentlyContinue | Select-Object -First 1)
+            }
+            return $null
+        }
+        if (-not $hashCheck.ScriptBlockFailed -and $hashCheck.ScriptBlockOutput -eq $bundleHash) {
+            Write-Log "$vmName`: Tools bundle hash matches ($bundleHash). Skipping copy." -Success
+            $skipCopy = $true
+        }
+    }
+
+    # Collect zip filenames for the cleanup manifest
+    $activeZipNames = @($zipPaths | ForEach-Object { Split-Path $_ -Leaf })
+
+    if ($skipCopy) {
+        if ($combinedFingerprint) {
+            @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash; ZipFiles = $activeZipNames } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
+        }
+        return $true
+    }
+
+    Write-Log "$vmName`: Copying tools bundle (${totalSizeMB} MB, $totalItems items) to VM..."
+    Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${totalSizeMB} MB) to $VMName" -Log -force
+
+    # --- Copy each zip to the VM and expand ---
     $success = $true
-    $vmZipPath = "C:\Windows\Temp\tools-bundle.zip"
+    $progressPref = $ProgressPreference
     try {
         $ProgressPreference = "SilentlyContinue"
-        if ($Fast) {
-            Copy-Item -ToSession $ps -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
-        }
-        else {
-            Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
+        foreach ($zp in $zipPaths) {
+            $vmZipPath = "C:\Windows\Temp\tools-bundle.zip"
+
+            if ($Fast) {
+                Copy-Item -ToSession $ps -Path $zp -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
+            }
+            else {
+                $copyResult = Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $zp -Destination $vmZipPath -Force -WhatIf:$WhatIf
+                if ($copyResult -eq $false) {
+                    throw "Copy-ItemSafe exhausted retries copying tools bundle to VM"
+                }
+            }
+
+            if (-not $WhatIf) {
+                $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock {
+                    Expand-Archive -Path $using:vmZipPath -DestinationPath "C:\" -Force
+                    Remove-Item -Path $using:vmZipPath -Force -ErrorAction SilentlyContinue
+                }
+                if ($expandResult.ScriptBlockFailed) {
+                    Write-Log "$vmName`: Failed to expand tools bundle inside VM. $($expandResult.ScriptBlockOutput)" -Failure
+                    $success = $false
+                    break
+                }
+            }
         }
 
-        # Expand inside the VM
-        if (-not $WhatIf) {
-            $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock {
-                Expand-Archive -Path $using:vmZipPath -DestinationPath "C:\" -Force
-                Remove-Item -Path $using:vmZipPath -Force -ErrorAction SilentlyContinue
+        # Write the combined bundle hash to the VM
+        if ($success -and -not $WhatIf) {
+            $writeHash = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
+                $using:bundleHash | Set-Content -Path $using:vmHashPath -Force -ErrorAction SilentlyContinue
             }
-            if ($expandResult.ScriptBlockFailed) {
-                Write-Log "$vmName`: Failed to expand tools bundle inside VM. $($expandResult.ScriptBlockOutput)" -Failure
-                $success = $false
+            if ($writeHash.ScriptBlockFailed) {
+                Write-Log "$vmName`: Could not write Tools.MD5 hash file. Next run will re-copy." -LogOnly
             }
         }
 
         if ($success) {
-            Write-Log "$vmName`: Successfully injected $($zipEntries.Count) tools via bundle." -Success
+            Write-Log "$vmName`: Successfully injected $totalItems tools via bundle. Hash: $bundleHash" -Success
+            if ($combinedFingerprint) {
+                @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash; ZipFiles = $activeZipNames } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
+            }
         }
     }
     catch {
@@ -4255,9 +7705,6 @@ function Copy-ToolToVM {
     }
     finally {
         $ProgressPreference = $progressPref
-        # Cleanup host temp files
-        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-        Remove-Item $zipStagingDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     return $success
 }
@@ -4776,7 +8223,7 @@ function Set-SupportedOptions {
         "LinuxClient"
     )
 
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy")
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy", "installOffice")
     $propsToUpdate = $updatablePropList
     $propsToUpdate += "wsusContentDir"
 
@@ -4939,7 +8386,19 @@ Function Set-PS7ProgressWidth {
     if ($PSVersionTable.PSVersion.Major -eq 7) {
         $maxWidth = 500
         try {
-            $currentWidth = [Console]::WindowWidth
+            $currentWidth = 0
+            # Get-LiveWindowSize uses a fresh CONOUT$ handle via P/Invoke, which
+            # returns the real terminal width even in ConPTY hosts (Windows Terminal,
+            # VS Code) where [Console]::WindowWidth can return a stale cached value.
+            if (Get-Command Get-LiveWindowSize -ErrorAction SilentlyContinue) {
+                $size = Get-LiveWindowSize
+                if ($size -and $size.Width -gt 0) {
+                    $currentWidth = $size.Width
+                }
+            }
+            if ($currentWidth -le 0) {
+                $currentWidth = [Console]::WindowWidth
+            }
             if ($currentWidth -gt 0) {
                 $maxWidth = [Math]::Round(($currentWidth * 0.95), 0)
             }
@@ -5048,6 +8507,36 @@ Function Set-TitleBar {
 ### DOT SOURCING ###
 ####################
 
+# RemoveOnly profile: load only the files needed for Remove-VirtualMachine.
+# Saves ~2-3s per ThreadJob worker during domain removal (skips ~20 files).
+$removeOnlyProfile = ($StartupProfile -eq 'RemoveOnly')
+if ($removeOnlyProfile) {
+    . $PSScriptRoot\common\Common.StorageToken.ps1
+    . $PSScriptRoot\common\Common.Colors.ps1
+    . $PSScriptRoot\common\Common.Config.ps1
+    . $PSScriptRoot\common\Common.HyperV.ps1
+    . $PSScriptRoot\common\Common.Phases.ps1
+    . $PSScriptRoot\common\Common.Remove.ps1
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        . $PSScriptRoot\common\Common.Linux.ps1
+    }
+    else {
+        function Test-VmIsLinux {
+            param ([Parameter(Mandatory = $false, ValueFromPipeline = $true)] [object]$Vm)
+            if (-not $Vm) { return $false }
+            if ($Vm.PSObject.Properties.Name -contains 'osFamily' -and $Vm.osFamily -eq 'Linux') { return $true }
+            foreach ($prop in @('operatingSystem', 'deployedOS')) {
+                if ($Vm.PSObject.Properties.Name -contains $prop) {
+                    $val = $Vm.$prop
+                    if ($val -and ($val -like 'Ubuntu*' -or $val -like 'Debian*' -or $val -like 'Linux*')) { return $true }
+                }
+            }
+            return $false
+        }
+    }
+}
+else {
+
 . $PSScriptRoot\common\Common.StorageToken.ps1
 
 . $PSScriptRoot\common\Common.Colors.ps1
@@ -5060,6 +8549,7 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.mRemoteNG.ps1
 . $PSScriptRoot\common\Common.Remove.ps1
 . $PSScriptRoot\common\Common.Maintenance.ps1
+. $PSScriptRoot\common\Common.DownloadCache.ps1
 . $PSScriptRoot\common\Common.ScriptBlocks.ps1
 . $PSScriptRoot\common\Common.GenConfig.ps1
 . $PSScriptRoot\common\Common.GenConfig.NewDomain.ps1
@@ -5077,7 +8567,25 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.Health.ps1
 . $PSScriptRoot\common\Common.Layout.ps1
 . $PSScriptRoot\common\Common.HyperV.ps1
-. $PSScriptRoot\common\Common.Linux.ps1
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    . $PSScriptRoot\common\Common.Linux.ps1
+}
+else {
+    # Stub so callers (e.g. Common.Validation.ps1) can reference Test-VmIsLinux under PS5.1
+    # without loading the full Common.Linux.ps1 which uses PS7-only syntax.
+    function Test-VmIsLinux {
+        param ([Parameter(Mandatory = $false, ValueFromPipeline = $true)] [object]$Vm)
+        if (-not $Vm) { return $false }
+        if ($Vm.PSObject.Properties.Name -contains 'osFamily' -and $Vm.osFamily -eq 'Linux') { return $true }
+        foreach ($prop in @('operatingSystem', 'deployedOS')) {
+            if ($Vm.PSObject.Properties.Name -contains $prop) {
+                $val = $Vm.$prop
+                if ($val -and ($val -like 'Ubuntu*' -or $val -like 'Debian*' -or $val -like 'Linux*')) { return $true }
+            }
+        }
+        return $false
+    }
+}
 . $PSScriptRoot\common\Common.snapshots.ps1
 . $PSScriptRoot\common\Common.PKI.ps1
 . $PSScriptRoot\common\Common.menu.ps1
@@ -5092,6 +8600,8 @@ if ($PSVersionTable.PSVersion -ge [Version]'7.4') {
     . $PSScriptRoot\common\Common.PS7.ps1
 }
 
+} # end else (non-RemoveOnly profile)
+
 ############################
 ### Common Object        ###
 ############################
@@ -5104,21 +8614,18 @@ if (-not $Common.Initialized) {
 
     $profileSkipStorageInit = $false
     $profileSkipMaintenanceRefresh = $false
-    $profileSkipVmCacheRefresh = $false
     $profileSkipEnvironmentDetection = $false
     $profileSkipHostPreparation = $false
 
-    if ($StartupProfile -eq "Fast") {
+    if ($StartupProfile -eq "Fast" -or $removeOnlyProfile) {
         $profileSkipStorageInit = $true
         $profileSkipMaintenanceRefresh = $true
-        $profileSkipVmCacheRefresh = $true
         $profileSkipEnvironmentDetection = $true
         $profileSkipHostPreparation = $true
     }
 
     $effectiveSkipStorageInit = $profileSkipStorageInit -or $SkipStorageInit.IsPresent
     $effectiveSkipMaintenanceRefresh = $profileSkipMaintenanceRefresh -or $SkipMaintenanceRefresh.IsPresent
-    $effectiveSkipVmCacheRefresh = $profileSkipVmCacheRefresh -or $SkipVmCacheRefresh.IsPresent
     $effectiveSkipEnvironmentDetection = $profileSkipEnvironmentDetection -or $SkipEnvironmentDetection.IsPresent
     $effectiveSkipHostPreparation = $profileSkipHostPreparation -or $SkipHostPreparation.IsPresent
 
@@ -5130,7 +8637,6 @@ if (-not $Common.Initialized) {
             $effectiveSkipMaintenanceRefresh = $true
         }
         $effectiveSkipHostPreparation = $true
-        $effectiveSkipVmCacheRefresh = $true
     }
 
     try {
@@ -5401,9 +8907,17 @@ if (-not $Common.Initialized) {
                     }
 
                     if (-not $effectiveSkipEnvironmentDetection) {
+                        # The 10.1.0.4 NIC check is specific to one Azure
+                        # environment's address plan; other environments use a
+                        # different gateway/subnet, so it can't be the sole
+                        # signal. IMDS is the authoritative, environment-agnostic
+                        # probe -- always fall back to it when the NIC check
+                        # doesn't match. ($meta must be cleared first so a stale
+                        # value from a failed call can't be misread as success.)
                         if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
                         if (-not $isAzureVM) {
-                            try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
+                            $meta = $null
+                            try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -TimeoutSec 2 -ErrorAction Stop }
                             catch {}
                             if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) {
                                 $isAzureVM = $true
@@ -5439,6 +8953,27 @@ if (-not $Common.Initialized) {
                 }
             }
         }
+        elseif (-not $loadedInitContextCache) {
+            # InJob path: child jobs (e.g. Phase 10 maintenance) get IsAzureVM
+            # only from the on-disk cache above -- the inline probe lives in the
+            # -not $InJob branch and never runs here. If the cache is missing or
+            # stale, fall back to a cheap inline probe so Azure-gated work (e.g.
+            # Fix_ActivateWindows) still registers instead of silently defaulting
+            # IsAzureVM to $false and dropping the fix.
+            if (-not $effectiveSkipEnvironmentDetection) {
+                try {
+                    if (Get-NetIPAddress -AddressFamily IPV4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
+                }
+                catch {}
+                if (-not $isAzureVM) {
+                    try {
+                        $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -TimeoutSec 2 -ErrorAction Stop
+                        if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) { $isAzureVM = $true }
+                    }
+                    catch {}
+                }
+            }
+        }
 
         if (-not $header1) {
             $header1 = "==="
@@ -5450,9 +8985,23 @@ if (-not $Common.Initialized) {
         if (-not $breakPrefix) {
             $breakPrefix = "-----"
         }
+
+        # Load sticky mouse preference from cache (default: enabled)
+        $mouseEnabled = $true
+        $mousePrefFile = Join-Path $startupCachePath "mouse-preference.json"
+        if (Test-Path $mousePrefFile) {
+            try {
+                $mousePref = Get-Content $mousePrefFile -ErrorAction SilentlyContinue | ConvertFrom-Json
+                if ($null -ne $mousePref.MouseEnabled) {
+                    $mouseEnabled = [bool]$mousePref.MouseEnabled
+                }
+            }
+            catch {}
+        }
+
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion              = "260522.0"
-            LatestHotfixVersion         = "260522.0"
+            MemLabsVersion              = "260627.1"
+            LatestHotfixVersion         = "260627.1"
             PS7                         = $PS7
             Initialized                 = $true
             InJob                       = $InJob
@@ -5477,6 +9026,8 @@ if (-not $Common.Initialized) {
             RdcManFilePath              = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
             MRemoteNGFilePath           = Join-Path $env:ProgramData "memlabs\memlabs-mremoteng.xml"                # mRemoteNG File
             VerboseEnabled              = $VerboseEnabled.IsPresent                                                 # Verbose Logging
+            VerboseToLogOnly            = $false                                                                    # When true, verbose goes to log only (suppressed from console)
+            VerboseTailProcess          = $null                                                                     # Process object for secondary verbose tail window
             DevBranch                   = $devBranch                                                                # Git dev branch
             Supported                   = $null                                                                     # Supported Configs
             AzureFileList               = $null
@@ -5489,6 +9040,7 @@ if (-not $Common.Initialized) {
             IsAzureVM                   = $isAzureVM
             CorpNetInterfaceIndex       = $corpNetInterfaceIndex
             OfflineMode                 = $false
+            MouseEnabled                = $mouseEnabled
             NewestStorageConfigFileName = "_storageConfig2026.1.json"
             StorageConfigLocation       = $null
         }
@@ -5507,7 +9059,9 @@ if (-not $Common.Initialized) {
 
         if (-not $InJob) {
             Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
-            Set-TitleBar "Init Phase"
+            if (-not $removeOnlyProfile) {
+                Set-TitleBar "Init Phase"
+            }
             Write-Log "Loading required modules." -Verbose
         }
 
@@ -5530,7 +9084,7 @@ if (-not $Common.Initialized) {
                 $getresults = $false
                 Write-Log "Skipping storage initialization due to startup switches. Using Offline Mode." -LogOnly
             }
-            if (-not $getresults ) {
+            if (-not $getresults -and -not $effectiveSkipStorageInit) {
                 $common.OfflineMode = $true
                 Write-Log "failed to get the storage JSON file. Using Offline Mode" -Warning
             }

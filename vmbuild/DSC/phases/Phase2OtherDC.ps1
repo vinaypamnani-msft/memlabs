@@ -42,6 +42,25 @@
         if ($_cmo.UsePKI) { $usePKI = $true }
     }
 
+    # Cross-forest PKI: this OtherDC is the remote CA for a trusted domain whose
+    # clients must autoenroll their ConfigMgr client-auth cert cross-forest (the
+    # trusted domain's DC has ForestTrust set AND a remote RootCA). The per-domain
+    # heuristic above can't detect this -- the remote managing site (e.g. the
+    # cstest8 Primary) is a HIDDEN stub in this deploy with no cmOptions, and the
+    # trusted domain itself runs no CM site -- so $usePKI stays false and the
+    # AddCertificateTemplate grants below get skipped. That leaves the trusted
+    # domain's "Domain Computers" without Enroll/AutoEnroll on
+    # ConfigMgrClientCertificate, so its clients never get a client cert and
+    # ccmsetup fails with CCM_E_NO_CLIENT_PKI_CERT (80092004). main published these
+    # templates unconditionally; restore that behavior for the cross-forest case.
+    if (-not $usePKI) {
+        $crossForestPkiDC = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'DC' -and $_.ForestTrust -and $_.ForestTrust -ne 'NONE' -and
+                $_.thisParams -and $_.thisParams.RootCA
+            })
+        if ($crossForestPkiDC.Count -gt 0) { $usePKI = $true }
+    }
+
     $RealDC = $deployConfig.virtualMachines | Where-Object { $_.role -in ("DC") }
 
     $DCIPAddr = $RealDC.thisParams.DCIPAddress

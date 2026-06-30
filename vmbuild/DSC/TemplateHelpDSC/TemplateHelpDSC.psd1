@@ -50,7 +50,13 @@ DscResourcesToExport = @(
     'UpdateCAPrefs',
     'InstallRootCertificate',
     'RunPkiSync',
-    'GpUpdate'
+    'GpUpdate',
+    'SetDNSAddress',
+    'DisableClusterNicDnsRegistration',
+    'WaitForClusterAccess',
+    'JoinClusterByIP',
+    'SetWindowsProxy',
+    'PromoteDomainController'
 
 
 )

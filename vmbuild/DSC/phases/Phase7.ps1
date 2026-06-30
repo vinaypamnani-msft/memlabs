@@ -1,4 +1,4 @@
-configuration Phase7
+﻿configuration Phase7
 {
     param
     (
@@ -111,9 +111,108 @@ configuration Phase7
             DependsOn = "[ModuleAdd]SQLServerModule"
         }
 
+        $nextDepend = "[InstallPBIRS]InstallPBIRS"
+
+        # Dual-role VM (installSUP + installRP): fire the early WSUS catalog
+        # sync AFTER PBIRS install completes so a PBIRS-triggered reboot can't
+        # interrupt the in-flight sync. Only the top-of-hierarchy SUP syncs
+        # from MU (CAS, or standalone Primary). Child Primaries / Secondaries
+        # sync from upstream and don't need an early kick.
+        $hasCAS = ($deployConfig.VirtualMachines | Where-Object { $_.role -eq 'CAS' }).Count -gt 0
+        $syncsFromMU = ($thisVM.installSUP -eq $true) -and (
+            ($thisVM.role -eq 'CAS') -or
+            ($thisVM.role -eq 'Primary' -and -not $hasCAS)
+        )
+        if ($syncsFromMU) {
+            # Drain any pending reboot left over from PBIRS install before
+            # firing the WSUS sync. If any reboot is pending, PendingReboot
+            # sets $global:DSCMachineStatus = 1 and LCM reboots; on resume,
+            # LCM moves on to WSUSSync (the next resource in the chain),
+            # which then fires the sync on a clean OS. This guarantees:
+            #   - WSUSSync starts with no pending reboot in flight
+            #   - Phase 7 ends with no pending reboot
+            #   - Phase 8 CM setup's "Pending System Restart" prereq passes
+            # SkipPendingFileRename: ComputerManagementDsc.PendingReboot flags
+            # ANY PendingFileRenameOperations entry, including delete-only temp
+            # cleanup (DEL*.tmp, CCM*.tmp, Edge updater leftovers) that some
+            # services rewrite immediately after every boot -- causing an
+            # infinite reboot loop. Our own $Test_PendingReboot (used by pre/
+            # post phase checks AND Phase 8 prereq logic) already filters
+            # delete-only entries as harmless, so skipping the file-rename
+            # signal here is consistent. CBS/WindowsUpdate/computer-rename
+            # signals (which is what PBIRS install actually leaves behind)
+            # still trigger the reboot.
+            PendingReboot DrainBeforeWSUSSync {
+                Name                  = 'BeforeWSUSSync'
+                SkipCcmClientSDK      = $true
+                SkipPendingFileRename = $true
+                DependsOn             = $nextDepend
+            }
+            WSUSSync WSUSSync {
+                DependsOn  = "[PendingReboot]DrainBeforeWSUSSync"
+                ServerName = $thisVM.vmName + "." + $DomainName
+            }
+            $nextDepend = "[WSUSSync]WSUSSync"
+        }
+
         WriteStatus Complete {
             Status    = "Complete!"
-            DependsOn = "[InstallPBIRS]InstallPBIRS"
+            DependsOn = $nextDepend
+        }
+    }
+
+    Node $AllNodes.Where{ $_.Role -eq 'WSUS' }.NodeName
+    {
+        # WSUS-only nodes in Phase 7: VMs with installSUP=true (or role=WSUS)
+        # that do NOT have installRP. Phase 6 already installed/configured WSUS;
+        # here we just kick the early catalog sync, mirroring the original
+        # Phase 6 behavior but timed to happen after any PBIRS-induced reboots
+        # elsewhere in the hierarchy have settled.
+
+        $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }
+
+        # Only the top-of-hierarchy SUP (or a standalone WSUS) syncs from MU.
+        $hasCAS = ($deployConfig.VirtualMachines | Where-Object { $_.role -eq 'CAS' }).Count -gt 0
+        $standalone = ($thisVM.role -eq 'WSUS')
+        $syncsFromMU = $standalone -or (
+            ($thisVM.installSUP -eq $true) -and (
+                ($thisVM.role -eq 'CAS') -or
+                ($thisVM.role -eq 'Primary' -and -not $hasCAS)
+            )
+        )
+
+        if ($syncsFromMU) {
+            WriteStatus StartWSUSSync {
+                Status = "Starting early WSUS catalog sync (background)"
+            }
+            # Drain any pending reboot before firing the sync. Pre-Phase-7
+            # check already cleared incoming pending reboots, but defend
+            # against anything that slipped through (e.g. late CBS state)
+            # so the sync runs on a clean OS and Phase 7 ends clean.
+            # SkipPendingFileRename: ComputerManagementDsc.PendingReboot flags
+            # delete-only temp cleanup entries (which our own $Test_PendingReboot
+            # treats as harmless) and re-asserts them every boot, causing an
+            # infinite reboot loop. Skip them here too.
+            PendingReboot DrainBeforeWSUSSync {
+                Name                  = 'BeforeWSUSSync'
+                SkipCcmClientSDK      = $true
+                SkipPendingFileRename = $true
+                DependsOn             = "[WriteStatus]StartWSUSSync"
+            }
+            WSUSSync WSUSSync {
+                DependsOn  = "[PendingReboot]DrainBeforeWSUSSync"
+                ServerName = $thisVM.vmName + "." + $DomainName
+            }
+            WriteStatus Complete {
+                Status    = "Complete!"
+                DependsOn = "[WSUSSync]WSUSSync"
+            }
+        }
+        else {
+            # Downstream WSUS — syncs from upstream when upstream is ready.
+            WriteStatus Complete {
+                Status = "Complete!"
+            }
         }
     }
 }

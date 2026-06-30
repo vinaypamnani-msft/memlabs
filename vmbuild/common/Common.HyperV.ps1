@@ -1,4 +1,5 @@
-﻿function Install-HyperV {
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+function Install-HyperV {
     # Cache the Hyper-V feature state — Get-WindowsFeature is a CIM call via
     # ServerManager that shows "Collecting data..." and can stall for minutes.
     # Once Hyper-V is installed it stays installed; only re-check once per 24 hours.
@@ -17,6 +18,29 @@
         }
         catch {}
     }
+
+    # Fast pre-check: the vmms service is registered when the Hyper-V role is
+    # installed and the Hyper-V PowerShell module ships with Hyper-V-PowerShell.
+    # Both checks are local-registry lookups (sub-millisecond) — far faster
+    # than Get-WindowsFeature, which goes through ServerManager/CIM and can
+    # stall for minutes when WMI is busy or the system is under load.
+    # Skip the slow CIM call entirely when both signals say "installed".
+    if (-not $hvInstalled) {
+        $vmmsRegistered = [bool](Get-Service -Name vmms -ErrorAction SilentlyContinue)
+        $hvModuleAvailable = [bool](Get-Command -Name Get-VM -Module Hyper-V -ErrorAction SilentlyContinue)
+        if ($vmmsRegistered -and $hvModuleAvailable) {
+            $hvInstalled = $true
+            Write-Log "Install-HyperV: Hyper-V detected via vmms service + Hyper-V module (skipped Get-WindowsFeature)." -LogOnly
+            try {
+                [PSCustomObject]@{
+                    CheckedUtc = (Get-Date).ToUniversalTime().ToString("o")
+                    Installed  = $true
+                } | ConvertTo-Json | Set-Content -Path $hvCacheFile -Encoding UTF8
+            }
+            catch {}
+        }
+    }
+
     if (-not $hvInstalled) {
         Write-Log "Install-HyperV: Calling Get-WindowsFeature Hyper-V (CIM — may be slow)..." -LogOnly
         if ((Get-WindowsFeature -Name Hyper-V).InstallState -ne 'Installed') {
@@ -61,25 +85,42 @@ function Get-VM2 {
         [switch]$Fallback
     )
 
+    # In job workers (Start-Job = separate process), skip Get-List entirely.
+    # Get-List's cold path does Get-VM + Get-VMNetworkAdapter -All to build
+    # the full VM cache — with 20+ workers all doing this simultaneously,
+    # the WMI calls serialize on vmms.exe and create a 10+ minute logjam.
+    # A direct Get-VM -Name is a single targeted WMI call.
+    if ($Common.InJob) {
+        return (Get-VM -Name $Name -ErrorAction SilentlyContinue)
+    }
+
+    # NOTE: Get-VM -Id is queried with -ErrorAction SilentlyContinue throughout.
+    # Get-List can return a STALE cache entry whose vmId no longer exists in
+    # Hyper-V (e.g. the VM was deleted out-of-band, or Remove-Lab is cleaning up
+    # after a partial teardown). A bare Get-VM -Id THROWS "Hyper-V was unable to
+    # find a virtual machine with id ..." on such an entry, which aborted callers
+    # like Remove-Lab. Returning $null on a stale id and falling through to a
+    # cache refresh lets the caller treat the VM as gone (which it is).
     $vmFromList = Get-List -Type VM | Where-Object { $_.vmName -eq $Name }
 
     if ($vmFromList) {
-        return (Get-VM -Id $vmFromList.vmId)
+        $vm = Get-VM -Id $vmFromList.vmId -ErrorAction SilentlyContinue
+        if ($vm) { return $vm }
+        # Stale cache entry: id no longer in Hyper-V. Fall through to refresh.
     }
-    else {
-        $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $Name }
-        if ($vmFromList) {
-            return (Get-VM -Id $vmFromList.vmId)
-        }
-        else {
-            # VM may exist, without vmNotes object, try fallback if caller explicitly wants it.
-            if ($Fallback.IsPresent) {
-                return (Get-VM -Name $Name -ErrorAction SilentlyContinue)
-            }
 
-            return [System.Management.Automation.Internal.AutomationNull]::Value
-        }
+    $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $Name }
+    if ($vmFromList) {
+        $vm = Get-VM -Id $vmFromList.vmId -ErrorAction SilentlyContinue
+        if ($vm) { return $vm }
     }
+
+    # VM may exist, without vmNotes object, try fallback if caller explicitly wants it.
+    if ($Fallback.IsPresent) {
+        return (Get-VM -Name $Name -ErrorAction SilentlyContinue)
+    }
+
+    return [System.Management.Automation.Internal.AutomationNull]::Value
 }
 
 function Get-VMSwitch2 {
@@ -103,6 +144,22 @@ function Remove-VMSwitch2 {
         if ($switch) {
             Write-Log "Hyper-V VM Switch '$($switch.Name)' exists. Removing." -SubActivity
             $switch | Remove-VMSwitch -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+        }
+
+        # Always attempt NAT + DHCP cleanup for this network, even if the
+        # switch was already gone.  This closes the leak where a switch is
+        # removed but the NAT / DHCP scope survives.
+        if (-not $WhatIf) {
+            $nat = Get-NetNat -Name $NetworkName -ErrorAction SilentlyContinue
+            if ($nat) {
+                Write-Log "  Removing NAT '$NetworkName'" -SubActivity
+                Remove-NetNat -Name $NetworkName -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            $dhcp = Get-DhcpServerv4Scope -ScopeID $NetworkName -ErrorAction SilentlyContinue
+            if ($dhcp) {
+                Write-Log "  Removing DHCP scope '$NetworkName'" -SubActivity
+                $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
+            }
         }
     }
     catch {
@@ -169,6 +226,90 @@ function Clear-StrayVhdMounts {
         try { Write-Log "Clear-StrayVhdMounts: sweep failed: $($_.Exception.Message)" -Warning } catch {}
         return 0
     }
+}
+
+# Best-effort host memory reclamation, used before retrying a Start-VM that
+# failed with OOM (0x8007000E). Nothing here kills a process or touches a VM -
+# it only asks Windows to hand physical RAM back to the available pool so the
+# next Start-VM has room to back the guest's startup memory:
+#
+#   1. .NET GC in THIS host process. The parent pwsh holds the whole
+#      deployConfig, loaded modules and per-phase state; a full collect +
+#      finalize + compacting LOH collect frees managed heap.
+#   2. Trim the working set of every pwsh/powershell process (this one and the
+#      ~N concurrent VM_Create job workers). SetProcessWorkingSetSize(-1,-1)
+#      tells Windows to page each process down to its minimum resident set,
+#      pushing private committed pages out to the pagefile and returning the
+#      physical frames to the free/zeroed list. The pages fault back in on
+#      demand, so this is safe - just slower for those idle workers.
+#   3. Flush the system file cache working set (SetSystemFileCacheSize with
+#      -1,-1), releasing cached file pages that Phase 1's VHD copy/inject left
+#      resident.
+#
+# Returns the change in '\Memory\Available MBytes' (MB freed) for logging.
+function Invoke-HostMemoryReclaim {
+    [CmdletBinding()]
+    param()
+
+    $beforeMB = $null
+    try { $beforeMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue } catch {}
+
+    # Native helpers (idempotent Add-Type; -ErrorAction SilentlyContinue so a
+    # second load in the same session is a no-op).
+    try {
+        if (-not ('MemLabs.MemReclaim' -as [type])) {
+            Add-Type -ErrorAction SilentlyContinue -Namespace 'MemLabs' -Name 'MemReclaim' -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetProcessWorkingSetSize(System.IntPtr proc, System.IntPtr min, System.IntPtr max);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.IntPtr maxSize, int flags);
+'@
+        }
+    }
+    catch {}
+
+    # 1. Managed GC in the host process.
+    try {
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+        [System.GC]::Collect()
+    }
+    catch {}
+
+    # 2. Trim working sets of our PowerShell processes (host + job workers).
+    $trimmed = 0
+    try {
+        $psProcs = Get-Process -Name 'pwsh', 'powershell' -ErrorAction SilentlyContinue
+        foreach ($p in $psProcs) {
+            try {
+                if ([MemLabs.MemReclaim]::SetProcessWorkingSetSize($p.Handle, [System.IntPtr](-1), [System.IntPtr](-1))) {
+                    $trimmed++
+                }
+            }
+            catch {}
+        }
+    }
+    catch {}
+
+    # 3. Flush the system file cache working set.
+    try { [void][MemLabs.MemReclaim]::SetSystemFileCacheSize([System.IntPtr](-1), [System.IntPtr](-1), 0) } catch {}
+
+    $afterMB = $null
+    try { $afterMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue } catch {}
+
+    $freedMB = if (($null -ne $beforeMB) -and ($null -ne $afterMB)) { [Math]::Round($afterMB - $beforeMB, 0) } else { $null }
+    try {
+        if ($null -ne $freedMB) {
+            Write-Log "Invoke-HostMemoryReclaim: GC + trimmed $trimmed PowerShell working set(s) + flushed file cache; available memory changed by ${freedMB}MB (now $([Math]::Round($afterMB,0))MB)" -LogOnly
+        }
+        else {
+            Write-Log "Invoke-HostMemoryReclaim: GC + trimmed $trimmed PowerShell working set(s) + flushed file cache" -LogOnly
+        }
+    }
+    catch {}
+
+    return $freedMB
 }
 
 function Start-VM2 {
@@ -271,24 +412,111 @@ function Start-VM2 {
                 # localized error strings on non-English hosts and
                 # wrapped exceptions.
                 if (($StopError -ne $null) -and ($vm.State -ne 'Running')) {
-                    $isFileInUse = ($StopError.Exception.Message -match 'being used by another process') -or
-                                   ($StopError.Exception.Message -match '0x80070020')
-                    $reason = if ($isFileInUse) { "file-in-use" } else { "Start-VM failed: $($StopError.Exception.Message)" }
-                    write-progress2 "Start VM" -Status "Sweeping stray host mounts for $Name ($reason)" -force
-                    try { Write-Log "${Name}: Start-VM failed ($reason); running Clear-StrayVhdMounts before retry" -LogOnly } catch {}
-                    $cleared = Clear-StrayVhdMounts -VMName $Name
-                    if ($cleared -gt 0) {
-                        try { Write-Log "${Name}: cleared $cleared stray host mount(s); retrying Start-VM" -LogOnly } catch {}
-                        $StopError = $null
-                        Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                    # Collapse the (often multi-line) Hyper-V error message to a
+                    # single line BEFORE it touches any progress/log surface.
+                    # Start-VM out-of-memory errors in particular come back as
+                    # "'VM' failed to start.`r`n`r`nNot enough memory in the
+                    # system...`r`n(0x8007000E)..." - feeding those embedded
+                    # CR/LFs to the cursor-positioned Write-Progress2 renderer
+                    # shoves every managed bar around and makes the host spew
+                    # "...) contains new-line" hundreds of times (corrupted UI).
+                    $errMsg = ($StopError.Exception.Message -replace '\s*\r?\n\s*', ' ').Trim()
+
+                    $isOutOfMemory = ($errMsg -match '0x8007000E') -or ($errMsg -match 'not enough memory')
+                    if ($isOutOfMemory) {
+                        # Phase 1 starts every new VM concurrently for file
+                        # injection, so the host's committed memory peaks while
+                        # they all boot at once. A late VM can hit OOM
+                        # (0x8007000E) on that peak even though the config "fit"
+                        # the pre-flight check - the pressure is transient and
+                        # eases as earlier VMs finish OOBE and their dynamic
+                        # memory balloons back down. Back off and retry instead
+                        # of failing the whole build and rolling everything back.
+                        $oomAttempt = 0
+                        $oomMaxAttempts = 6
+                        $oomBackoffSec = 30
+                        while (($oomAttempt -lt $oomMaxAttempts) -and ($vm.State -ne 'Running')) {
+                            $oomAttempt++
+
+                            # Diagnostics: how much RAM is free, and which host
+                            # processes are holding it. We deliberately do NOT
+                            # auto-kill anything (killing the wrong host process
+                            # can corrupt a running VM or take down Hyper-V) -
+                            # we surface the top consumers so the operator can
+                            # decide what to close to relieve pressure.
+                            $availGB = $null
+                            try { $availGB = [Math]::Round((Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue / 1024, 1) } catch {}
+                            try {
+                                $allProcs = Get-Process -ErrorAction SilentlyContinue
+                                $topProcs = $allProcs |
+                                    Where-Object { $_.WorkingSet64 -gt 500MB -and $_.Name -notin @('vmms', 'vmwp', 'vmmem', 'System', 'Memory Compression', 'MsMpEng') } |
+                                    Sort-Object WorkingSet64 -Descending | Select-Object -First 5
+                                if ($topProcs) {
+                                    $procList = ($topProcs | ForEach-Object { "$($_.Name)=$([Math]::Round($_.WorkingSet64 / 1GB, 1))GB" }) -join ', '
+                                    Write-Log "${Name}: OOM reclaim hint - top non-HyperV host memory users: $procList" -LogOnly
+                                }
+                                # The Phase 1 VM_Create jobs each spawn a pwsh.exe,
+                                # so ~N concurrent workers individually fall below the
+                                # top-5 cut yet together hold a big chunk of RAM. Sum
+                                # them (plus powershell.exe) so the operator sees the
+                                # aggregate pressure the build itself is creating.
+                                $psProcs = @($allProcs | Where-Object { $_.Name -in @('pwsh', 'powershell') })
+                                if ($psProcs.Count -gt 0) {
+                                    $psTotalGB = [Math]::Round((($psProcs | Measure-Object -Property WorkingSet64 -Sum).Sum / 1GB), 1)
+                                    Write-Log "${Name}: OOM reclaim hint - $($psProcs.Count) PowerShell process(es) (pwsh/powershell) holding ${psTotalGB}GB total" -LogOnly
+                                }
+                            }
+                            catch {}
+
+                            $waitSec = $oomBackoffSec * $oomAttempt
+                            write-progress2 "Start VM" -Status "$Name : not enough host memory; ~${availGB}GB free, reclaiming + waiting ${waitSec}s then retry ($oomAttempt/$oomMaxAttempts)" -force
+                            try { Write-Log "${Name}: Start-VM out of memory (attempt $oomAttempt/$oomMaxAttempts); ~${availGB}GB available; backing off ${waitSec}s for concurrent VMs to finish booting before retry" -Warning } catch {}
+
+                            # Best-effort: GC the host process, trim PowerShell
+                            # working sets, and flush the file cache so physical
+                            # RAM returns to the available pool before we retry.
+                            try { Invoke-HostMemoryReclaim | Out-Null } catch {}
+
+                            Start-Sleep -Seconds $waitSec
+
+                            $StopError = $null
+                            Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                            $vm = Get-VM2 -Name $Name -Fallback
+                            if ($vm.State -eq 'Running') {
+                                $StopError = $null
+                                try { Write-Log "${Name}: VM started after OOM back-off (attempt $oomAttempt/$oomMaxAttempts)." } catch {}
+                                break
+                            }
+
+                            # If the failure mode changed to something other than
+                            # OOM, stop the memory-wait loop and let the normal
+                            # stray-mount / outer-retry handling take over.
+                            if ($StopError -and ($StopError.Exception.Message -notmatch '0x8007000E') -and ($StopError.Exception.Message -notmatch 'not enough memory')) {
+                                try { Write-Log "${Name}: Start-VM error changed from OOM to: $(($StopError.Exception.Message -replace '\s*\r?\n\s*', ' ').Trim())" -Warning } catch {}
+                                break
+                            }
+                        }
                     }
-                    elseif ($isFileInUse) {
-                        # No ghosts to clear, but error explicitly says
-                        # the file is locked. The lock is held by something
-                        # we can't fix from here (vmms internal handle,
-                        # antivirus, etc.) - log the diagnostic and let
-                        # the outer retry loop give it another try.
-                        try { Write-Log "${Name}: file-in-use error but Clear-StrayVhdMounts found nothing to clear; lock is held externally" -Warning } catch {}
+                    else {
+                        $isFileInUse = ($errMsg -match 'being used by another process') -or
+                                       ($errMsg -match '0x80070020')
+                        $reason = if ($isFileInUse) { "file-in-use" } else { "Start-VM failed: $errMsg" }
+                        write-progress2 "Start VM" -Status "Sweeping stray host mounts for $Name ($reason)" -force
+                        try { Write-Log "${Name}: Start-VM failed ($reason); running Clear-StrayVhdMounts before retry" -LogOnly } catch {}
+                        $cleared = Clear-StrayVhdMounts -VMName $Name
+                        if ($cleared -gt 0) {
+                            try { Write-Log "${Name}: cleared $cleared stray host mount(s); retrying Start-VM" -LogOnly } catch {}
+                            $StopError = $null
+                            Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                        }
+                        elseif ($isFileInUse) {
+                            # No ghosts to clear, but error explicitly says
+                            # the file is locked. The lock is held by something
+                            # we can't fix from here (vmms internal handle,
+                            # antivirus, etc.) - log the diagnostic and let
+                            # the outer retry loop give it another try.
+                            try { Write-Log "${Name}: file-in-use error but Clear-StrayVhdMounts found nothing to clear; lock is held externally" -Warning } catch {}
+                        }
                     }
                 }
                 $vm = Get-VM2 -Name $Name -Fallback
@@ -310,7 +538,10 @@ function Start-VM2 {
             }
 
             if ($StopError.Count -ne 0) {
-                Write-Log "${Name}: Failed to start the VM. $StopError" -Warning
+                # Flatten the error(s) to a single line - a raw multi-line
+                # Hyper-V message (e.g. OOM 0x8007000E) corrupts the progress UI.
+                $stopErrText = (($StopError | ForEach-Object { $_.ToString() }) -join '; ') -replace '\s*\r?\n\s*', ' '
+                Write-Log "${Name}: Failed to start the VM. $stopErrText" -Warning
                 if ($Passthru.IsPresent) {
                     return $false
                 }
@@ -350,6 +581,88 @@ function Start-VM2 {
         }
     }
 }
+
+function Wait-ForHeartbeat {
+    <#
+    .SYNOPSIS
+        Waits for a VM's heartbeat to reach OkApplicationsHealthy after a start/restart.
+    .DESCRIPTION
+        Polls the VM heartbeat every PollSeconds until it reaches OkApplicationsHealthy
+        or the timeout expires. This prevents PSDirect attempts against a VM that is
+        still booting (which just generates log noise) and—more importantly—prevents
+        subsequent hard-resets from firing before the OS has finished booting, which
+        can trip Windows into the recovery console after 2-3 incomplete boots.
+    .PARAMETER VmName
+        Name of the VM to wait on.
+    .PARAMETER TimeoutSeconds
+        Maximum time to wait. Defaults to 240 (4 minutes).
+    .PARAMETER PollSeconds
+        Interval between heartbeat checks. Defaults to 10.
+    .PARAMETER Stopwatch
+        Optional parent stopwatch for progress display. If supplied, progress is
+        shown via Write-ProgressElapsed; otherwise the function is silent.
+    .PARAMETER Timespan
+        Required when Stopwatch is supplied. The parent timeout timespan.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [int]$TimeoutSeconds = 240,
+        [int]$PollSeconds = 10,
+        [System.Diagnostics.Stopwatch]$Stopwatch,
+        [TimeSpan]$Timespan
+    )
+
+    $hbWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $hbLimit = New-TimeSpan -Seconds $TimeoutSeconds
+    $hbState = "Unknown"
+    # Grace period: when we first see OkApplicationsUnknown, wait up to this
+    # many additional seconds for it to promote to OkApplicationsHealthy.
+    # If it doesn't, accept Unknown — the heartbeat IC is responding, meaning
+    # the VM is booted and PSDirect-ready; the "Applications" sub-report just
+    # hasn't loaded (common on Server OS or older integration services).
+    $unknownGrace = 30
+    $unknownSince = $null
+
+    while ($hbWatch.Elapsed -lt $hbLimit) {
+        # If a parent timeout was supplied, bail if it expired too
+        if ($Stopwatch -and $Stopwatch.Elapsed -ge $Timespan) { break }
+
+        Start-Sleep -Seconds $PollSeconds
+        $vmObj = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+        $hbState = if ($vmObj) { $vmObj.Heartbeat } else { "N/A" }
+
+        if ($Stopwatch -and $Timespan) {
+            try {
+                Write-ProgressElapsed -showTimeout -stopwatch $Stopwatch -timespan $Timespan -text "Waiting for VM heartbeat after restart (heartbeat: $hbState)"
+            } catch {}
+        }
+
+        if ($hbState -eq "OkApplicationsHealthy") {
+            Write-Log "$VmName`: Heartbeat healthy after $([int]$hbWatch.Elapsed.TotalSeconds)s." -Verbose
+            return $true
+        }
+
+        if ($hbState -eq "OkApplicationsUnknown") {
+            if (-not $unknownSince) {
+                $unknownSince = $hbWatch.Elapsed
+                Write-Log "$VmName`: Heartbeat is OkApplicationsUnknown at $([int]$hbWatch.Elapsed.TotalSeconds)s — waiting up to ${unknownGrace}s for Healthy." -Verbose
+            }
+            elseif (($hbWatch.Elapsed - $unknownSince).TotalSeconds -ge $unknownGrace) {
+                Write-Log "$VmName`: Heartbeat stayed OkApplicationsUnknown for ${unknownGrace}s (total $([int]$hbWatch.Elapsed.TotalSeconds)s). VM is responsive — proceeding." -Verbose
+                return $true
+            }
+        }
+        else {
+            # State regressed (e.g. back to NoContact during a reboot cycle) — reset grace
+            $unknownSince = $null
+        }
+    }
+
+    Write-Log "$VmName`: Heartbeat did not reach OkApplicationsHealthy after $([int]$hbWatch.Elapsed.TotalSeconds)s (last: $hbState). Proceeding anyway." -Warning
+    return $false
+}
+
 function Test-TcpPort {
     # Hard-timeout TCP probe using TcpClient + WaitHandle. Test-NetConnection can hang
     # well past its own timeouts (DNS reverse lookups, ICMP fallbacks, etc.), so avoid it.
@@ -396,24 +709,30 @@ function Test-VmResponsive {
             return $false
         }
         
-        # Test heartbeat integration service
+        # Test heartbeat integration service (only fail on explicit error statuses;
+        # null/empty means the service hasn't reported yet, not that the VM is down)
         $heartbeat = $vm | Get-VMIntegrationService | Where-Object { $_.Name -eq 'Heartbeat' }
-        if ($heartbeat -and $heartbeat.Enabled -and $heartbeat.PrimaryStatusDescription -ne 'OK') {
-            Write-Log "VM $VmName heartbeat status: $($heartbeat.PrimaryStatusDescription)" -Warning
-            return $false
+        if ($heartbeat -and $heartbeat.Enabled -and $heartbeat.PrimaryStatusDescription) {
+            if ($heartbeat.PrimaryStatusDescription -notin 'OK', 'OkApplicationsHealthy', 'OkApplicationsUnknown') {
+                Write-Log "VM $VmName heartbeat status: $($heartbeat.PrimaryStatusDescription)" -Warning
+                return $false
+            }
         }
         
-        # Test basic ping with timeout
-        $pingTest = Test-Connection -ComputerName $VmName -Count 2 -Quiet -ErrorAction SilentlyContinue
-        if (-not $pingTest) {
-            Write-Log "VM $VmName not responding to ping" -Warning
+        # Get the VM's IP from Hyper-V directly (avoids DNS, which may point at
+        # the DC we're testing and can hang Test-Connection indefinitely).
+        $vmIp = ($vm | Get-VMNetworkAdapter | Select-Object -First 1).IPAddresses |
+                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
+        if (-not $vmIp) {
+            Write-Log "VM $VmName has no IPv4 address from Hyper-V" -Warning
             return $false
         }
-        
-        # Test RDP port with hard timeout + retry (Test-NetConnection can hang indefinitely)
+
+        # Test RDP port with hard timeout + retry (never uses Test-Connection or
+        # Test-NetConnection — both can hang on DNS reverse lookups).
         $tcpTimeoutMs = [Math]::Max(1000, $TimeoutSeconds * 1000 / 3)
-        if (-not (Test-TcpPort -ComputerName $VmName -Port 3389 -TimeoutMs $tcpTimeoutMs -Retries 3 -RetryDelayMs 1000)) {
-            Write-Log "VM $VmName RDP port test failed after retries" -Warning
+        if (-not (Test-TcpPort -ComputerName $vmIp -Port 3389 -TimeoutMs $tcpTimeoutMs -Retries 3 -RetryDelayMs 1000)) {
+            Write-Log "VM $VmName ($vmIp) RDP port test failed after retries" -Warning
             return $false
         }
         
@@ -445,7 +764,7 @@ function Restart-UnresponsiveVm {
             $vm = Get-VM2 -Name $VmName
             if ($vm.State -ne 'Off') {
                 Write-Log "Forcing stop of $VmName..."
-                Stop-VM2 -Name $VmName -Force -TurnOff
+                Stop-VM2 -Name $VmName -TurnOff
                 Start-Sleep -Seconds 5
             }
             
@@ -479,6 +798,85 @@ function Restart-UnresponsiveVm {
     return $false
 }
 
+function Repair-VmCimServer {
+    # Recovers a guest whose WMI/CIM server is wedged (Storage and many other
+    # cmdlets fail with "Cannot connect to CIM server. Call was canceled by the
+    # message filter"). PowerShell Direct (used by Invoke-VmCommand) runs over
+    # VMBus and keeps working even when the guest CIM/DCOM stack is hung, so we
+    # can restart winmgmt in-place and, if that is not enough, reboot the VM.
+    # Returns $true when a follow-up CIM probe succeeds.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $true)]
+        [string]$VmDomainName,
+        [Parameter(Mandatory = $false)]
+        [int]$Phase = 1,
+        [Parameter(Mandatory = $false)]
+        [switch]$AllowReboot
+    )
+
+    # Step 1: restart the WMI service inside the guest via PSDirect.
+    Write-Log "[Phase $Phase]: ${VmName}: Guest WMI/CIM server unresponsive. Restarting winmgmt in-guest..." -Warning
+    $restart = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -DisplayName "Restart guest WMI (winmgmt)" -TimeoutSeconds 120 -ScriptBlock {
+        try {
+            # -Force also restarts winmgmt's dependent services.
+            Restart-Service -Name Winmgmt -Force -ErrorAction Stop
+            Start-Sleep -Seconds 5
+            # The Storage stack also leans on the Virtual Disk Service.
+            try { Restart-Service -Name vds -Force -ErrorAction SilentlyContinue } catch {}
+            Start-Sleep -Seconds 3
+            # Probe CIM to confirm the provider is answering again.
+            $null = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            return $true
+        }
+        catch {
+            return $false
+        }
+    }
+
+    if ($restart -and -not $restart.ScriptBlockFailed -and ($restart.ScriptBlockOutput -eq $true)) {
+        Write-Log "[Phase $Phase]: ${VmName}: WMI restart succeeded; CIM probe OK."
+        return $true
+    }
+
+    Write-Log "[Phase $Phase]: ${VmName}: WMI restart did not recover the CIM server." -Warning
+    if (-not $AllowReboot) {
+        return $false
+    }
+
+    # Step 2: reboot the VM and wait for it to come back.
+    Write-Log "[Phase $Phase]: ${VmName}: Rebooting VM to clear wedged WMI/CIM server..." -Warning
+    Stop-VM2 -Name $VmName -TurnOff -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 5
+    Start-VM2 -Name $VmName -ErrorAction SilentlyContinue
+
+    $connected = Wait-ForVm -VmName $VmName -OobeComplete -TimeoutMinutes 15 -VmDomainName $VmDomainName -Quiet
+    if (-not $connected) {
+        Write-Log "[Phase $Phase]: ${VmName}: VM did not become ready after reboot." -Warning
+        return $false
+    }
+
+    # Probe CIM again after the reboot.
+    $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -DisplayName "Probe guest CIM after reboot" -TimeoutSeconds 120 -ScriptBlock {
+        try {
+            $null = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            return $true
+        }
+        catch {
+            return $false
+        }
+    }
+
+    if ($probe -and -not $probe.ScriptBlockFailed -and ($probe.ScriptBlockOutput -eq $true)) {
+        Write-Log "[Phase $Phase]: ${VmName}: CIM server healthy after reboot."
+        return $true
+    }
+
+    Write-Log "[Phase $Phase]: ${VmName}: CIM server still unresponsive after reboot." -Warning
+    return $false
+}
+
 function Stop-VM2 {
     [CmdletBinding()]
     param (
@@ -491,7 +889,14 @@ function Stop-VM2 {
         [Parameter(Mandatory = $false)]
         [int]$RetrySeconds = 10,
         [Parameter(Mandatory = $false)]
-        [switch]$TurnOff
+        [switch]$TurnOff,
+        # Accepted but intentionally ignored. Stop-VM2 always force-stops
+        # internally (see $force below), so callers that assume a -Force
+        # switch exists (mirroring Hyper-V's Stop-VM) bind cleanly instead
+        # of throwing "A parameter cannot be found that matches parameter
+        # name 'Force'."
+        [Parameter(Mandatory = $false)]
+        [switch]$Force
     )
 
     try {
@@ -506,13 +911,48 @@ function Stop-VM2 {
             return
         }
 
+        # Proactively invalidate the PSDirect session cache for this VM.
+        # After a stop/restart cycle the session will be broken, and the
+        # credential that last worked (e.g. local in Phase 1) may no
+        # longer be valid (e.g. VM is now domain-joined after Phase 2).
+        # Clearing here avoids a 30s timeout trying stale credentials on
+        # the next Get-VmSession call.
+        if ($global:ps_cache) {
+            foreach ($key in @($global:ps_cache.Keys)) {
+                if ($key -like "$Name-*") {
+                    if (Get-Command Remove-VmSession -ErrorAction SilentlyContinue) {
+                        Remove-VmSession $global:ps_cache[$key]
+                    } else {
+                        try { Remove-PSSession $global:ps_cache[$key] -ErrorAction SilentlyContinue } catch {}
+                    }
+                    $global:ps_cache.Remove($key)
+                }
+            }
+        }
+        if ($global:ps_lastGoodCred) {
+            $global:ps_lastGoodCred.Remove($Name)
+        }
+
         Write-Log "${Name}: Stopping VM" -LogOnly
 
         if ($vm) {
             $i = 0
             if ($TurnOff) {
-                Stop-VM -VM $vm -TurnOff -force:$force -WarningAction SilentlyContinue
-                start-sleep -seconds 5
+                # Use -AsJob so a wedged VM doesn't block forever
+                $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
+                $null = $stopJob | Wait-Job -Timeout 15
+                if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
+                Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 5
+                $vm = Get-VM2 -Name $Name -Fallback
+                if ($vm.State -eq "Off") {
+                    Write-Log "${Name}: VM is stopped." -LogOnly
+                    if ($Passthru.IsPresent) {
+                        return $true
+                    }
+                    return
+                }
+                Write-Log "${Name}: VM still in '$($vm.State)' after TurnOff, escalating..." -Warning
             }
             do {
                 $i++
@@ -524,14 +964,45 @@ function Stop-VM2 {
             until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
             if ($StopError.Count -ne 0) {
-                
-                Stop-VM -VM $vm -TurnOff -force:$true -WarningAction SilentlyContinue
+
+                # Escalation: TurnOff via -AsJob with timeout
+                $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
+                $null = $stopJob | Wait-Job -Timeout 15
+                if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
+                Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds $RetrySeconds
                 $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Off") {
-                    return $true
+                    if ($Passthru.IsPresent) {
+                        return $true
+                    }
+                    return
                 }
-                
+
+                # Nuclear option: kill the VM worker process when Stop-VM is
+                # completely stuck (e.g. VM wedged in "Shutting Down" state).
+                Write-Log "${Name}: Stop-VM failed, killing VM worker process" -Warning
+                try {
+                    $vmId = $vm.Id.ToString()
+                    $targetProc = Get-CimInstance Win32_Process -Filter "Name='vmwp.exe'" -ErrorAction SilentlyContinue |
+                        Where-Object { $_.CommandLine -match [regex]::Escape($vmId) }
+                    if ($targetProc) {
+                        Stop-Process -Id $targetProc.ProcessId -Force -ErrorAction Stop
+                        Start-Sleep -Seconds 5
+                        $vm = Get-VM2 -Name $Name -Fallback
+                        if ($vm.State -eq "Off") {
+                            Write-Log "${Name}: VM stopped after killing worker process" -Warning
+                            if ($Passthru.IsPresent) {
+                                return $true
+                            }
+                            return
+                        }
+                    }
+                }
+                catch {
+                    Write-Log "${Name}: Failed to kill VM worker process: $_" -Warning
+                }
+
                 Write-Log "${Name}: Failed to stop the VM. $StopError" -Warning
                 
                 if ($Passthru.IsPresent) {
@@ -560,6 +1031,81 @@ function Stop-VM2 {
             Write-Log "$Name`: Exception stopping VM $_" -Failure -LogOnly
         }
     }
+}
+
+
+function Restart-VM2Smart {
+    # Graceful-first VM restart with an optional last-resort hard power-off.
+    #
+    # A hard -TurnOff landing in a fragile guest window (OOBE / specialize /
+    # rename or domain-join reboot) can corrupt the guest onto the Windows
+    # recovery screen, so this helper ALWAYS tries a graceful guest-OS shutdown
+    # first (bounded by -GracefulTimeoutSeconds so a hung guest can't block the
+    # caller forever). It only escalates to a hard power-off when -AllowTurnOff
+    # is set AND the graceful shutdown did not bring the VM down.
+    #
+    # Returns $true if the VM was restarted (graceful succeeded, or TurnOff was
+    # used), $false if the graceful shutdown did not complete and TurnOff was
+    # not permitted (the VM is left running for the caller to keep waiting on).
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $false)]
+        [switch]$AllowTurnOff,
+        [Parameter(Mandatory = $false)]
+        [int]$GracefulTimeoutSeconds = 180,
+        [Parameter(Mandatory = $false)]
+        [string]$Reason = "restart",
+        [Parameter(Mandatory = $false)]
+        [object]$Stopwatch,
+        [Parameter(Mandatory = $false)]
+        [object]$Timespan
+    )
+
+    $vm = Get-VM2 -Name $Name -Fallback
+    if (-not $vm) {
+        Write-Log "${Name}: Restart-VM2Smart ($Reason): VM not found." -Warning
+        return $false
+    }
+
+    # 1) Graceful guest-OS shutdown first, bounded so a hung guest can't block.
+    if ($vm.State -eq 'Running') {
+        Write-Log "${Name}: Restart ($Reason): attempting graceful shutdown (up to ${GracefulTimeoutSeconds}s)..." -LogOnly
+        try {
+            $gracefulJob = Stop-VM -VM $vm -Force -WarningAction SilentlyContinue -AsJob
+            $null = $gracefulJob | Wait-Job -Timeout $GracefulTimeoutSeconds
+            if ($gracefulJob.State -eq 'Running') { Stop-Job $gracefulJob -ErrorAction SilentlyContinue }
+            Remove-Job $gracefulJob -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+            Write-Log "${Name}: Restart ($Reason): graceful shutdown attempt errored: $_" -LogOnly
+        }
+    }
+
+    # 2) Did graceful bring it down? If not, escalate only when permitted.
+    $vm = Get-VM2 -Name $Name -Fallback
+    if (-not ($vm -and $vm.State -eq 'Off')) {
+        if ($AllowTurnOff) {
+            Write-Log "${Name}: Restart ($Reason): graceful shutdown did not complete; escalating to a hard TurnOff (last resort)." -Warning
+            Stop-VM2 -Name $Name -TurnOff
+        }
+        else {
+            Write-Log "${Name}: Restart ($Reason): graceful shutdown did not complete and TurnOff is not permitted; leaving VM running." -Warning
+            return $false
+        }
+    }
+
+    # 3) Start it back up and wait for it to respond.
+    Start-Sleep -Seconds 10
+    Start-VM2 -Name $Name
+    if ($Stopwatch -and $Timespan) {
+        Wait-ForHeartbeat -VmName $Name -Stopwatch $Stopwatch -Timespan $Timespan | Out-Null
+    }
+    else {
+        Wait-ForHeartbeat -VmName $Name | Out-Null
+    }
+    return $true
 }
 
 
@@ -946,8 +1492,17 @@ function Restore-DynamicMemory {
             }
 
             if ($vm.DynamicMemoryEnabled) {
+                # On a running VM, Hyper-V only allows max memory to be
+                # increased, never decreased. Clamp to at least the current
+                # value to avoid "Invalid maximum memory amount" errors on
+                # legacy/existing VMs whose previous config was higher.
+                $effectiveMax = $maxBytes
+                if ($vm.State -eq 'Running' -and $vm.MemoryMaximum -gt $maxBytes) {
+                    $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: Keeping current max memory $($vm.MemoryMaximum) (config wants $maxBytes but VM is running)" })
+                    $effectiveMax = $vm.MemoryMaximum
+                }
                 $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: Lowering dynamic memory min to $($vmConfig.dynamicMinRam) / $($vmConfig.memory)" })
-                $vm | Set-VMMemory -MinimumBytes $minBytes -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority -Buffer $buffer -ErrorAction Stop
+                $vm | Set-VMMemory -MinimumBytes $minBytes -MaximumBytes $effectiveMax -StartupBytes $effectiveMax -Priority $priority -Buffer $buffer -ErrorAction Stop
             }
             else {
                 $wasRunning = $vm.State -eq 'Running'
@@ -1053,44 +1608,52 @@ function Set-VmProxyEnforcement {
 
     .DESCRIPTION
         Adds extended ACLs on the VM's network adapter that allow ALL traffic
-        to/from any known memlabs lab subnet (so AD, SMB, CM, SQL, and
-        inter-domain hierarchy traffic stay native), then deny outbound
-        TCP 80/443 and DNS (UDP+TCP 53) to anything else. Net effect: free
-        movement inside the lab, but any attempt to reach the public
-        Internet on web or DNS ports is blocked -- forcing HTTP/HTTPS
-        through the Squid proxy.
+        to/from any RFC 1918 private address (10/8, 172.16/12, 192.168/16),
+        then deny outbound TCP 80/443, UDP 443 (QUIC), and DNS (UDP+TCP 53)
+        to anything else. Net effect: free movement to any private IP
+        (intra-lab AD, SMB, SQL, CM, cross-domain hierarchies), but any
+        attempt to reach PUBLIC Internet IPs on web or DNS ports is blocked
+        -- forcing HTTP/HTTPS through the Squid proxy.
+
+        Because the allow rules cover all private space, the ACL set is
+        identical for every VM on the host. No per-subnet computation or
+        cross-lab reconciliation is needed.
 
         Idempotent: removes any prior memlabs proxy ACLs (weight band
         5000-5099) before re-adding.
 
     .PARAMETER VmName
         The Windows VM whose vNIC ACLs are being managed.
-
-    .PARAMETER LabSubnets
-        Array of /24 subnet base addresses (e.g. "192.168.1.0") covering
-        every memlabs network the VM is allowed to reach freely. Typically
-        produced by combining this deployConfig's vmOptions.network with
-        the output of Get-NetworkList so cross-domain hierarchies still
-        work.
     #>
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)] [string]$VmName,
-        [Parameter(Mandatory = $true)] [string[]]$LabSubnets
+        [Parameter(Mandatory = $true)] [string]$VmName
     )
 
-    # Normalize -> "x.y.z.0/24", dedupe.
-    $cidrs = @($LabSubnets |
-        Where-Object { $_ } |
-        ForEach-Object {
-            $s = $_.Trim()
-            if ($s -match '/\d+$') { $s } else { "$s/24" }
-        } |
-        Select-Object -Unique)
+    # Fixed RFC 1918 ranges -- covers every possible lab subnet without
+    # needing to enumerate them. Only public-IP traffic hits the deny rules.
+    $cidrs = @('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')
 
-    if (-not $cidrs -or $cidrs.Count -eq 0) {
-        Write-Log "[Proxy] $VmName`: No lab subnets provided; skipping enforcement (would be wide-open deny)" -Warning
-        return $false
+    # Fast-path: if existing ACLs already match the desired state, skip the
+    # expensive clear+re-add cycle (~11 WMI calls saved per VM).
+    try {
+        $existingAcls = @(Get-VMNetworkAdapterExtendedAcl -VMName $VmName -ErrorAction SilentlyContinue |
+            Where-Object { $_.Weight -ge $global:MemLabsProxyAclWeightMin -and $_.Weight -le $global:MemLabsProxyAclWeightMax })
+        $expectedTotal = ($cidrs.Count * 2) + 5   # 2 allow (in+out) per range + 5 deny rules = 11
+        if ($existingAcls.Count -eq $expectedTotal) {
+            $existingAllowCidrs = @($existingAcls |
+                Where-Object { $_.Action -eq 'Allow' } |
+                ForEach-Object { $_.RemoteIPAddress } |
+                Sort-Object -Unique)
+            $desiredCidrs = @($cidrs | Sort-Object)
+            if (($existingAllowCidrs -join ',') -eq ($desiredCidrs -join ',')) {
+                Write-Log "[Proxy] $VmName`: ACLs already current; skipping" -Verbose
+                return $true
+            }
+        }
+    }
+    catch {
+        # If we can't read ACLs, fall through to the full clear+re-add path.
     }
 
     Clear-VmProxyEnforcement -VmName $VmName
@@ -1121,27 +1684,19 @@ function Set-VmProxyEnforcement {
     }
 
     try {
-        # --- High-priority ALLOW rules (weight band 5090-5099) ---
-        # Allow all traffic both directions to/from any known lab subnet.
-        # Catches intra-subnet AD/SMB/SQL/CM, cross-subnet hierarchy traffic
-        # (CAS<->Primary across separate networks), and the Linux proxy +
-        # DCs which always live in one of these subnets.
+        # --- High-priority ALLOW rules (weights 5093-5099) ---
+        # Allow all traffic both directions to/from any RFC 1918 private IP.
+        # This covers every memlabs lab subnet regardless of how many labs
+        # or subnets exist on the host (no per-subnet enumeration needed).
+        # Intra-lab AD/SMB/SQL/CM and cross-domain hierarchy traffic all
+        # stay native. Only public-IP traffic on the denied ports is blocked.
         #
-        # Each (subnet, direction) gets a unique weight: Hyper-V's
+        # Each (range, direction) gets a unique weight: Hyper-V's
         # extended-ACL identity is (Direction + Weight + Protocol) and does
-        # NOT include RemoteIPAddress, so multiple Allow rules sharing
-        # Direction+Weight+Protocol collide -- only the first lands and the
-        # rest are silently dropped (would block cross-subnet traffic).
-        # Band 5020-5099 keeps us inside the 5000-5099 cleanup window
-        # (deny rules occupy 5000-5003); 80 slots = 40 (subnet, direction)
-        # pairs = 40 subnets per direction. Memlabs host-wide subnet union
-        # is rarely more than a handful, so warn well before we'd overflow.
-        $maxSubnets = 40
-        if ($cidrs.Count -gt $maxSubnets) {
-            Write-Log "[Proxy] $VmName`: $($cidrs.Count) lab subnets exceeds cap ($maxSubnets); only first $maxSubnets will be allowed" -Warning
-        }
+        # NOT include RemoteIPAddress, so rules sharing
+        # Direction+Weight+Protocol collide.
         $w = 5099
-        foreach ($cidr in ($cidrs | Select-Object -First $maxSubnets)) {
+        foreach ($cidr in $cidrs) {
             & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Outbound'; RemoteIPAddress = $cidr; Weight = $w }
             & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Inbound';  RemoteIPAddress = $cidr; Weight = $w - 1 }
             $w -= 2
@@ -1175,7 +1730,7 @@ function Set-VmProxyEnforcement {
         & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'UDP'; Weight = 5001 }
         & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'TCP'; Weight = 5000 }
 
-        Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (lab subnets: $($cidrs -join ', '))"
+        Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (allow all RFC 1918 private, deny public 80/443/53)"
         return $true
     }
     catch {
@@ -1191,11 +1746,8 @@ function Set-VmProxyEnforcementForConfig {
         configuration.
 
     .DESCRIPTION
-        Mirrors Set-WindowsClientProxyForConfig: enumerates the deployConfig,
-        filters via Test-VmUsesProxy, builds a union of every known memlabs
-        lab subnet (this deploy's vmOptions.network + every VM's .network +
-        Get-NetworkList for cross-domain hierarchies), then calls
-        Set-VmProxyEnforcement per VM. No-op when no Proxy VM or no
+        Enumerates the deployConfig, filters via Test-VmUsesProxy, then
+        calls Set-VmProxyEnforcement per VM. No-op when no Proxy VM or no
         opted-in clients exist.
     #>
     [CmdletBinding()]
@@ -1220,67 +1772,12 @@ function Set-VmProxyEnforcementForConfig {
         return $false
     }
 
-    # Union all known lab subnets so inter-domain hierarchy traffic isn't blocked.
-    $subnetSet = New-Object System.Collections.Generic.HashSet[string]
-    if ($deployConfig.vmOptions.network) { [void]$subnetSet.Add($deployConfig.vmOptions.network) }
-    foreach ($vm in $deployConfig.virtualMachines) {
-        if ($vm.network) { [void]$subnetSet.Add($vm.network) }
-    }
-    try {
-        $allKnown = Get-NetworkList | Select-Object -ExpandProperty Network -ErrorAction Stop
-        foreach ($n in $allKnown) { if ($n) { [void]$subnetSet.Add($n) } }
-    }
-    catch {
-        Write-Log "[Proxy] Get-NetworkList failed: $_ -- continuing with config-only subnet set" -Warning
-    }
-    $labSubnets = @($subnetSet)
-    Write-Log "[Proxy] Lab subnets allowed past enforcement: $($labSubnets -join ', ')"
-
     $ok = $true
     foreach ($vm in $clients) {
-        $r = Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets $labSubnets
+        $r = Set-VmProxyEnforcement -VmName $vm.vmName
         if (-not $r) { $ok = $false }
     }
     return $ok
-}
-
-function Get-VmProxyEnforcementSubnets {
-    <#
-    .SYNOPSIS
-        Build the global union of every memlabs lab subnet currently known
-        to the host, normalized for use as Set-VmProxyEnforcement -LabSubnets.
-
-    .DESCRIPTION
-        Combines Get-NetworkList (every lab's subnet stored in cached VM
-        metadata) with optional extras from an in-flight deployConfig
-        (vmOptions.network + any per-VM .network overrides) so that the
-        very deploy that's invoking us can also feed its brand-new subnets
-        into the union before those subnets show up in Get-NetworkList.
-    #>
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $false)] [object]$deployConfig
-    )
-
-    $set = New-Object System.Collections.Generic.HashSet[string]
-    try {
-        $allKnown = Get-NetworkList | Select-Object -ExpandProperty Network -ErrorAction Stop
-        foreach ($n in $allKnown) { if ($n) { [void]$set.Add($n) } }
-    }
-    catch {
-        Write-Log "[Proxy] Get-NetworkList failed: $_ -- continuing with deploy-only subnet set" -Warning
-    }
-    if ($deployConfig) {
-        if ($deployConfig.vmOptions -and $deployConfig.vmOptions.network) {
-            [void]$set.Add($deployConfig.vmOptions.network)
-        }
-        if ($deployConfig.virtualMachines) {
-            foreach ($vm in $deployConfig.virtualMachines) {
-                if ($vm.network) { [void]$set.Add($vm.network) }
-            }
-        }
-    }
-    return @($set)
 }
 
 function Set-VmProxyEnforcementForAllLabs {
@@ -1290,46 +1787,25 @@ function Set-VmProxyEnforcementForAllLabs {
         on the host, not just the VMs in the current deployConfig.
 
     .DESCRIPTION
-        Adding a new domain / new subnet / new lab on a host that already
-        hosts other proxy-enforced labs changes the "allowed lab subnet"
-        union. The per-deploy Set-VmProxyEnforcementForConfig only touches
-        VMs in the new deployConfig, so VMs in OTHER labs keep ACLs frozen
-        at their original deploy time and would deny traffic to the new
-        subnet (which the user almost certainly wants to permit, e.g. for
-        a freshly added second hierarchy). Similarly when a lab is removed,
-        the surviving labs keep stale allow rules for the gone subnet.
+        Enumerates every memlabs VM on the host via Get-List -Type VM.
+        For each VM with useProxy=true in its VM Note (Windows, not
+        role-excluded) -> stamps the fixed RFC 1918 allow + deny ACL set.
+        For each opted-out VM that still has stale ACLs in the memlabs
+        weight band (5000-5099) -> clears them.
 
-        This function:
-          1. Builds the current global subnet union (Get-NetworkList +
-             optional in-flight deployConfig extras).
-          2. Enumerates every memlabs VM on the host via Get-List -Type VM.
-          3. For each VM with useProxy=true in its VM Note (Windows, not
-             role-excluded) -> re-stamps ACLs against the global union.
-          4. For each opted-out VM that still has stale ACLs in the
-             memlabs weight band (5000-5099) -> clears them.
+        Because the allow rules cover all RFC 1918 private space, the ACL
+        set is identical for every VM and never needs per-subnet
+        computation or cross-lab reconciliation.
 
         Safe to call repeatedly; per-VM failures are logged and never
         abort the sweep.
-
-    .PARAMETER deployConfig
-        Optional. If supplied, its subnets are folded into the union so
-        the current deploy's brand-new networks are honored before
-        Get-NetworkList sees them.
 
     .PARAMETER WhatIf
         Standard PowerShell switch; reports the intended actions without
         touching any ACLs.
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
-    param (
-        [Parameter(Mandatory = $false)] [object]$deployConfig
-    )
-
-    $labSubnets = Get-VmProxyEnforcementSubnets -deployConfig $deployConfig
-    if (-not $labSubnets -or $labSubnets.Count -eq 0) {
-        Write-Log "[Proxy] Reconcile: no lab subnets known; skipping (would be wide-open deny)" -Warning
-        return $false
-    }
+    param ()
 
     try {
         $allVms = @(Get-List -Type VM)
@@ -1343,26 +1819,6 @@ function Set-VmProxyEnforcementForAllLabs {
         Write-Log "[Proxy] Reconcile: no memlabs VMs found on host; nothing to do"
         return $true
     }
-
-    # Cache-race guard: fold every enumerated VM's own subnet into the union
-    # BEFORE we start stamping. Get-NetworkList reads cached VM Notes; if a
-    # parallel deploy in another domain is mid-flight (Notes not yet written,
-    # or our cache is stale), Get-NetworkList can return a partial view that
-    # OMITS that domain's subnet. Without this guard we'd then re-stamp the
-    # other domain's VMs with an allow-list missing their OWN subnet,
-    # blocking their intra-lab AD / SQL / SMB / CM traffic the moment we
-    # finished applying ACLs.
-    #
-    # The Get-List -Type VM call above iterates the same VM objects we're
-    # about to touch, so any subnet we could harm by omission is right
-    # here for us to add.
-    $subnetSet = New-Object System.Collections.Generic.HashSet[string]
-    foreach ($s in $labSubnets) { if ($s) { [void]$subnetSet.Add($s) } }
-    foreach ($vm in $allVms) {
-        if ($vm.network) { [void]$subnetSet.Add($vm.network) }
-    }
-    $labSubnets = @($subnetSet)
-    Write-Log "[Proxy] Reconcile: lab subnet union = $($labSubnets -join ', ')"
 
     # Hard-exclude roles (mirrors Test-VmUsesProxy). Linux Proxy VM excluded
     # via the Proxy role itself; other Linux VMs are not Windows-NAT'd so
@@ -1385,18 +1841,8 @@ function Set-VmProxyEnforcementForAllLabs {
 
         try {
             if ($optedIn) {
-                # Safety net: never stamp a VM whose own subnet isn't in the
-                # final allow list -- doing so would deny its intra-lab AD /
-                # SQL / SMB traffic. Should never fire after the union-fold
-                # guard above, but is cheap insurance against a regression
-                # or a VM with a missing/blank .network property.
-                if ($vm.network -and ($labSubnets -notcontains $vm.network)) {
-                    Write-Log "[Proxy] Reconcile: $($vm.vmName): own subnet '$($vm.network)' not in union ($($labSubnets -join ', ')); refusing to stamp (would break intra-lab traffic)" -Warning
-                    $failed++
-                    continue
-                }
                 if ($PSCmdlet.ShouldProcess($vm.vmName, "Apply proxy enforcement ACLs")) {
-                    $r = Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets $labSubnets
+                    $r = Set-VmProxyEnforcement -VmName $vm.vmName
                     if ($r) { $applied++ } else { $failed++ }
                 }
             }

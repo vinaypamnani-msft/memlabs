@@ -20,18 +20,18 @@ When dot-sourced, the file MUST:
 2. Append a fix descriptor to the host-scoped `$fixesToPerform` array:
    ```powershell
    $fixesToPerform += [PSCustomObject]@{
-       FixName           = '<Unique-Name>'        # also used as transcript filename
-       FixVersion        = 'YYMMDD[.n]'           # monotonically increasing
-       AppliesToNew      = $true                  # apply to brand-new VMs
-       AppliesToExisting = $true                  # apply to existing VMs
-       AppliesToRoles    = @()                    # empty = all roles
-       NotAppliesToRoles = @()                    # excludes
-       DependentVMs      = @()                    # VM names that must also be online
-       ScriptBlock       = $Fix_X                 # the body defined above
-       ArgumentList      = @(...)                 # optional, forwarded to body's param block
-       RunAsAccount      = $vmNote.adminName      # optional, run under specific account
-       InjectFiles       = @('Foo.ps1')           # optional, copied to C:\staging\
-       InjectTools       = @('LogMachine')        # optional, copied to C:\tools\
+       FixName             = '<Unique-Name>'        # also used as transcript filename
+       FixVersion          = 'YYMMDD[.n]'           # monotonically increasing
+       NeededOnFreshDeploy = $true                  # $true = core code doesn't cover this; run even on fresh builds. $false = core already produces this state; skip on fresh deploy
+       AppliesToExisting   = $true                  # apply to existing VMs
+       AppliesToRoles      = @()                    # empty = all roles
+       NotAppliesToRoles   = @()                    # excludes
+       DependentVMs        = @()                    # VM names that must also be online
+       ScriptBlock         = $Fix_X                 # the body defined above
+       ArgumentList        = @(...)                 # optional, forwarded to body's param block
+       RunAsAccount        = $vmNote.adminName      # optional, run under specific account
+       InjectFiles         = @('Foo.ps1')           # optional, copied to C:\staging\
+       InjectTools         = @('LogMachine')        # optional, copied to C:\tools\
    }
    ```
 

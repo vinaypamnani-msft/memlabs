@@ -1,4 +1,5 @@
-﻿try {
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+try {
     # Load System.Drawing (maybe needed for PS5)
     [reflection.assembly]::LoadWithPartialName( "System.Drawing") | Out-Null
 }
@@ -248,6 +249,9 @@ function Get-Colors {
         #"Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
         GenConfigTip               = "Violet"
 
+        # Mouse hover highlight (paired with dark background in Set-MouseHoverHighlight)
+        GenConfigHover             = "SkyBlue"
+
         # Prompt
         GenConfigPrompt            = "SkyBlue"
         GenConfigPromptCurrentItem = "PaleGoldenRod"
@@ -308,6 +312,33 @@ function Convert-RGBtoAnsi {
     }
 }
 
+# OSC 8 hyperlink support — makes URLs and file paths ctrl+clickable in Windows Terminal / VS Code
+$script:_hyperlinkSupport = ($null -ne $env:WT_SESSION) -or ($env:TERM_PROGRAM -eq 'vscode')
+$script:_hyperlinkEsc = [char]0x1B
+$script:_hyperlinkPattern = '(https?://[^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]]|[A-Za-z]:\\[^\s<>"\x1B]{2,}[^\s<>"\x1B.,;:!?\)\]]|\\\\[A-Za-z][^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]])'
+
+function ConvertTo-Hyperlinks {
+    param([string]$Text)
+    if (-not $script:_hyperlinkSupport -or -not $Text) { return $Text }
+    if ($Text -notmatch 'https?://|[A-Za-z]:\\|\\\\[A-Za-z]') { return $Text }
+    $e = $script:_hyperlinkEsc
+    return [regex]::Replace($Text, $script:_hyperlinkPattern, {
+        param($m)
+        $link = $m.Value
+        if ($link -match '^https?://') {
+            "${e}]8;;${link}${e}\${link}${e}]8;;${e}\"
+        }
+        elseif ($link -match '^\\\\') {
+            $uri = "file:$($link -replace '\\','/')"
+            "${e}]8;;${uri}${e}\${link}${e}]8;;${e}\"
+        }
+        else {
+            $uri = "file:///$($link -replace '\\','/')"
+            "${e}]8;;${uri}${e}\${link}${e}]8;;${e}\"
+        }
+    })
+}
+
 function Write-Host2 {
     param(
         [Alias('Msg', 'Message')]
@@ -324,6 +355,7 @@ function Write-Host2 {
         }
     }
     #}
+    $Object = ConvertTo-Hyperlinks $Object
     if ($NoNewLine) {
         Write-Host $Object -NoNewline
     }

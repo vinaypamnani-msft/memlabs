@@ -1,4 +1,5 @@
-﻿# Common.Health.ps1
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+# Common.Health.ps1
 # Overall-health dashboard widget shown on the Main Menu.
 # Self-contained: queries Get-List, formats a compact status block, and
 # caches results in $Global:HealthStatsCache for ~20s so per-keystroke menu
@@ -56,7 +57,7 @@ function Get-HealthStats {
     $uptimeHours = $null
     try { $uptimeHours = [math]::Round((Get-Uptime).TotalHours, 1) } catch {}
 
-    $vmList = Get-List -Type VM
+    $vmList = Get-List -Type VM -SmartUpdate
     $pendingCount = (Get-PendingVMs | Measure-Object).Count
 
     $Global:HealthStatsCache = [PSCustomObject]@{

@@ -531,7 +531,11 @@ function Get-Menu2 {
         # are dropped entirely (not just hidden by shrink) when the rendered
         # menu would overflow the viewport. Re-evaluated on every render so
         # items reappear when the window grows. Forwarded to Show-Menu.
-        [string] $DroppableItemPattern = $null
+        [string] $DroppableItemPattern = $null,
+        # When set, Get-Menu2 returns "GOBACK" (left-arrow, right-click,
+        # back-button) as a distinct value instead of collapsing it into
+        # "ESCAPE". Lets the caller differentiate ESC from go-back.
+        [switch] $SplitEscapeFromGoBack
     )
 
     $host.ui.RawUI.FlushInputBuffer()
@@ -561,7 +565,7 @@ function Get-Menu2 {
         #foreach ($menuItem in $menuItems) {
         #    write-host "[Get-Menu2] Item: $menuItem"
         #}
-        $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect -DroppableItemPattern $DroppableItemPattern
+        $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect -DroppableItemPattern $DroppableItemPattern -SplitEscapeFromGoBack:$SplitEscapeFromGoBack
         if ($response -is [array] -or $response.MultiSelected) {
             $ReturnValue = @()
             foreach ($item in $response) {
@@ -694,6 +698,203 @@ public static bool TryGetWindowSize(out int width, out int height) {
 '@
 }
 
+# P/Invoke for ReadConsoleInput: returns keyboard AND mouse events from the
+# console input buffer. Used by Get-KeyStroke to support mouse click-to-select
+# and hover highlighting in menus.
+if (-not ('MemLabsConsole.MouseInput' -as [type])) {
+    Add-Type -Namespace MemLabsConsole -Name MouseInput -MemberDefinition @'
+// INPUT_RECORD.EventType constants
+public const ushort KEY_EVENT   = 0x0001;
+public const ushort MOUSE_EVENT = 0x0002;
+
+// MOUSE_EVENT_RECORD.dwButtonState flags
+public const uint FROM_LEFT_1ST_BUTTON_PRESSED = 0x0001;
+public const uint FROM_LEFT_2ND_BUTTON_PRESSED = 0x0004; // middle
+public const uint RIGHTMOST_BUTTON_PRESSED     = 0x0002;
+public const uint XBUTTON1_PRESSED              = 0x0008; // back/X1
+
+// MOUSE_EVENT_RECORD.dwEventFlags values
+public const uint MOUSE_MOVED  = 0x0001;
+public const uint MOUSE_WHEELED = 0x0004;
+
+// Console mode flags
+public const uint ENABLE_PROCESSED_INPUT  = 0x0001;
+public const uint ENABLE_MOUSE_INPUT      = 0x0010;
+public const uint ENABLE_WINDOW_INPUT     = 0x0008;
+public const uint ENABLE_EXTENDED_FLAGS   = 0x0080;
+public const uint ENABLE_QUICK_EDIT_MODE  = 0x0040;
+
+// Control key state flags (from dwControlKeyState in event records)
+public const uint SHIFT_PRESSED = 0x0010;
+
+// VK constants for Shift keys
+public const ushort VK_SHIFT  = 0x10;
+public const ushort VK_LSHIFT = 0xA0;
+public const ushort VK_RSHIFT = 0xA1;
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern System.IntPtr GetStdHandle(int nStdHandle);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetConsoleMode(System.IntPtr hConsole, out uint lpMode);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetConsoleMode(System.IntPtr hConsole, uint dwMode);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetNumberOfConsoleInputEvents(System.IntPtr hConsole, out uint lpcNumberOfEvents);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool FlushConsoleInputBuffer(System.IntPtr hConsoleInput);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern bool PeekConsoleInput(
+    System.IntPtr hConsoleInput,
+    [System.Runtime.InteropServices.Out] INPUT_RECORD[] lpBuffer,
+    uint nLength,
+    out uint lpNumberOfEventsRead);
+
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern short GetAsyncKeyState(int vKey);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern bool ReadConsoleInput(
+    System.IntPtr hConsoleInput,
+    [System.Runtime.InteropServices.Out] INPUT_RECORD[] lpBuffer,
+    uint nLength,
+    out uint lpNumberOfEventsRead);
+
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct COORD {
+    public short X;
+    public short Y;
+}
+
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 20)]
+public struct INPUT_RECORD {
+    [System.Runtime.InteropServices.FieldOffset(0)] public ushort EventType;
+    [System.Runtime.InteropServices.FieldOffset(4)] public KEY_EVENT_RECORD KeyEvent;
+    [System.Runtime.InteropServices.FieldOffset(4)] public MOUSE_EVENT_RECORD MouseEvent;
+}
+
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public struct KEY_EVENT_RECORD {
+    public int bKeyDown;
+    public ushort wRepeatCount;
+    public ushort wVirtualKeyCode;
+    public ushort wVirtualScanCode;
+    public char UnicodeChar;
+    public uint dwControlKeyState;
+}
+
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct MOUSE_EVENT_RECORD {
+    public COORD dwMousePosition;
+    public uint dwButtonState;
+    public uint dwControlKeyState;
+    public uint dwEventFlags;
+}
+'@
+}
+
+# Detect whether the current (possibly cached) MemLabsConsole.MouseInput type
+# includes the newer P/Invoke methods. When the type was compiled in an earlier
+# session run (before these methods were added), the guard above skips
+# recompilation and the methods are missing. The polling loop falls back to
+# GetNumberOfConsoleInputEvents in that case (original behavior).
+$script:_hasPeekConsoleInput = [MemLabsConsole.MouseInput].GetMethod('PeekConsoleInput') -ne $null
+$script:_hasFlushConsoleInput = [MemLabsConsole.MouseInput].GetMethod('FlushConsoleInputBuffer') -ne $null
+
+# The saved console mode before mouse input was enabled. Used by
+# Disable-MouseInput to restore the original state.
+$script:_savedConsoleMode = $null
+# The exact mode we set when mouse input is active. Used by Suspend/Resume
+# to avoid read-modify-write (GetConsoleMode can return values modified by
+# ConPTY, progressively corrupting the mode across Suspend/Resume cycles).
+$script:_mouseActiveMode = $null
+$script:_consoleInputHandle = $null
+# Tracks whether Shift is held for the text-selection toggle.
+# Reset by Enable-MouseInput at the start of each menu session.
+$script:_mouseShiftHeld = $false
+# Last reported mouse button bitmask (dwButtonState). Used for edge-triggered
+# (up->down) button detection so a left click is never misread as a right click
+# when a prior right-button-up record was missed/swallowed (e.g. GOBACK
+# navigated away before the up-event was read, or a ConPTY Suspend/Resume cycle
+# dropped it) and the console keeps reporting the right-button bit as "stuck".
+$script:_lastMouseButtonState = [uint32]0
+
+function Enable-MouseInput {
+    if ($Global:Common -and -not $Global:Common.MouseEnabled) {
+        return
+    }
+    if ($null -eq $script:_consoleInputHandle -or $script:_consoleInputHandle -eq [IntPtr]::Zero) {
+        # STD_INPUT_HANDLE = -10
+        $script:_consoleInputHandle = [MemLabsConsole.MouseInput]::GetStdHandle(-10)
+    }
+    $mode = [uint32]0
+    [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
+    $script:_savedConsoleMode = $mode
+    $script:_mouseShiftHeld = $false
+    $script:_lastMouseButtonState = [uint32]0
+
+    # Enable mouse input and disable Quick Edit Mode (which swallows mouse
+    # events for text selection). Preserve processed input so Ctrl+C works.
+    $newMode = ($mode -bor [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT `
+                       -bor [MemLabsConsole.MouseInput]::ENABLE_EXTENDED_FLAGS `
+                       -bor [MemLabsConsole.MouseInput]::ENABLE_WINDOW_INPUT) `
+                       -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_QUICK_EDIT_MODE)
+    [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
+    $script:_mouseActiveMode = $newMode
+
+    # Flush stale events that may linger from a previous Shift-toggle
+    # (Suspend/Resume cycle). When Quick Edit text selection was active and
+    # the mode was switched back, ConPTY can leave phantom events in the
+    # input buffer. ReadConsoleInput blocks if it finds the buffer empty
+    # after GetNumberOfConsoleInputEvents reported stale counts, causing
+    # the polling loop to hang.
+    if ($script:_hasFlushConsoleInput) {
+        [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
+    }
+}
+
+function Disable-MouseInput {
+    if ($null -ne $script:_savedConsoleMode -and $null -ne $script:_consoleInputHandle) {
+        [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $script:_savedConsoleMode)
+        $script:_savedConsoleMode = $null
+    }
+    $script:_mouseActiveMode = $null
+    $script:_mouseShiftHeld = $false
+    $script:_lastMouseButtonState = [uint32]0
+}
+
+# Suspend mouse handling while Shift is held for text selection.
+#
+# Does NOT change console mode. Toggling MOUSE_INPUT via SetConsoleMode causes
+# ConPTY to emit VT mouse-tracking enable/disable sequences (\e[?1000h/l) to
+# Windows Terminal. Those sequences interleave with our app's own VT output
+# (e.g. \e[2J\e[H clear-screen). After a Suspend/Resume cycle, the next VT
+# output write corrupts ConPTY's tracking state: clear-screen stops working and
+# subsequent mouse reads hang.
+#
+# Instead, we leave MOUSE_INPUT on and set _mouseShiftHeld. The polling loop
+# in Get-KeyStroke discards all mouse events while the flag is set. Windows
+# Terminal's built-in Shift-override already handles text selection when the
+# app has mouse tracking active (user holds Shift → terminal intercepts clicks
+# for selection instead of forwarding them as mouse events).
+function Suspend-MouseInput {
+    if ($null -ne $script:_consoleInputHandle -and $script:_hasFlushConsoleInput) {
+        [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
+    }
+}
+
+# Resume mouse handling after Shift is released.
+# Flushes any events that accumulated during the suspend.
+function Resume-MouseInput {
+    if ($null -ne $script:_consoleInputHandle -and $script:_hasFlushConsoleInput) {
+        [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
+    }
+}
+
 function Get-LiveWindowSize {
     $w = 0; $h = 0
     $gotIt = $false
@@ -727,7 +928,17 @@ function Get-RoomLeftFromCurrentPosition {
     #   3) the prompt row ("Press Enter to select...")
     #   4) one row of breathing room for the cursor / wrapped prompt
     $BottomReserve = 4
-    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - $BottomReserve)
+    # Use Get-LiveWindowSize for the height: $host.UI.RawUI.WindowSize.Height
+    # returns a stale cached value in ConPTY hosts (Windows Terminal, VS Code
+    # terminal) after a resize, just like [Console]::WindowWidth did for
+    # progress bars. A stale-large height over-estimates RoomLeft, so the
+    # layout under-paginates, the menu overflows the real (smaller) viewport
+    # and scrolls -- pushing the overflowed rows into the scrollback. Maximizing
+    # later reveals that stale scrollback as duplicated menu lines. Falls back
+    # to the cached API only if the live query fails.
+    $live = Get-LiveWindowSize
+    $winHeight = if ($live) { [int]$live.Height } else { $host.UI.RawUI.WindowSize.Height }
+    $WindowSizeY = ($winHeight - $BottomReserve)
     $CurrentPosition = $Host.UI.RawUI.CursorPosition
     # Use viewport-relative Y so scroll buffer history doesn't shrink available space.
     # CursorPosition.Y is absolute buffer row; WindowPosition.Y is the buffer row at
@@ -923,6 +1134,21 @@ function Write-MenuItem {
         }
         'Header' {
             if ($MaxShrink -or $Shrink.Header) { return $result }
+            # Track the *BG banner position for live elapsed-time updates.
+            # Always track regardless of completion state so the completion
+            # signal isn't lost if the ThreadJob finishes between a 'refresh'
+            # return and the Show-Menu redraw. The _bgCompletionHandled flag
+            # in Update-BgBannerInPlace prevents the infinite redraw loop.
+            if ([string]$MenuItem.itemName -eq '*BG') {
+                if ($global:PendingVMOperations -and $global:PendingVMOperations.Count -gt 0) {
+                    $bgPos = Get-CursorPosition
+                    $script:_bgBannerInfo = @{
+                        Y                = $bgPos.Y
+                        LongestBreakLine = $LongestBreakLine
+                        MenuItem         = $MenuItem
+                    }
+                }
+            }
             Write-MenuHeader -MenuItem $MenuItem -LongestBreakLine $LongestBreakLine
             $result.Drawn = $true
         }
@@ -1014,7 +1240,7 @@ function Get-PageLayout {
     }
 }
 
-# Render the bottom-of-menu pagination hint ("Press [PgUp/PgDn] to see more"
+# Render the bottom-of-menu pagination hint ("Press [PgUp] or [PgDn] to see more"
 # etc). Caller passes Operation and whether PgUp is available; the helper
 # writes the hint to the console. Returns nothing.
 function Write-MenuPgIndicator {
@@ -1024,7 +1250,7 @@ function Write-MenuPgIndicator {
     )
     if ($PgUpAvailable -and $Operation -eq 'PGDNNeeded') {
         Write-Host2
-        Write-Host2 'Press [PgUp/PgDn] to see more' -ForegroundColor Yellow
+        Write-Host2 'Press [PgUp] or [PgDn] to see more' -ForegroundColor Yellow
     }
     elseif ($Operation -eq 'PGDNDone') {
         Write-Host2
@@ -1079,8 +1305,17 @@ function Show-Menu {
         # are eligible to be DROPPED ENTIRELY (not just hidden by shrink) when
         # the rendered menu would otherwise overflow the viewport. Re-evaluated
         # on every render iteration so items reappear when the window grows.
-        [string]$DroppableItemPattern = $null
+        [string]$DroppableItemPattern = $null,
+        # When set, "GOBACK" is returned as-is instead of collapsed to "ESCAPE".
+        [switch]$SplitEscapeFromGoBack
     )
+    # Suppress verbose console output during interactive menu display so it
+    # doesn't corrupt the cursor-positioned rendering. Verbose messages still
+    # go to the log file. Restored in the finally block below.
+    $savedVerboseToLogOnly = $Common.VerboseToLogOnly
+    $Common.VerboseToLogOnly = $true
+    try {
+
     $LongestBreakLine = 0
     $Operation = ""
     $pageStartIndex = 0
@@ -1096,12 +1331,28 @@ function Show-Menu {
         foreach ($mi in $menuItems) { [void]$_originalItems.Add($mi) }
     }
 
+    # When the rendered menu causes the viewport to scroll (content taller
+    # than expected), stored item positions become wrong. This counter
+    # accumulates the detected scroll amount so the next render reserves
+    # fewer rows and avoids the overflow. Reset on window resize.
+    $scrollCorrection = 0
+
+    # Per-page selection memory: maps pageStartIndex to the menuItems index
+    # that was selected on that page. When the user PgDn/PgUp away and comes
+    # back, the arrow returns to wherever they left it instead of snapping to
+    # the first item.
+    $pageSelections = @{}
+
     While ($true) {
         # Reset per-iteration state. HelpPosition must be cleared each loop:
         # the shrink plan may drop the help banner this iteration even though
         # it was drawn previously, and a stale position would cause Update-Prompt
         # to paint the help box over wherever that old coordinate points.
         $HelpPosition = $null
+        $script:_bgBannerInfo = $null
+        $script:_lastBgUpdate = $null
+        $script:_lastBgRefresh = $null
+        $script:_lastActiveOpsCount = $null
 
         # Restore the full menu, then drop droppable items if they won't fit.
         # Runs every iteration so resize events (which return us to this loop
@@ -1133,12 +1384,34 @@ function Show-Menu {
         # PGUP/PGDN bookkeeping: advance the page start index based on the
         # previous render's EndIndex (saved in $pageEndIndex). PgUp always
         # snaps back to the first page (preserves prior behavior).
-        if ($operation -eq 'PGUP') {
-            $pageStartIndex = 0
-        }
-        elseif ($operation -eq 'PGDN') {
-            $pageStartIndex = $pageEndIndex + 1
-            if ($pageStartIndex -ge $menuItems.Count) { $pageStartIndex = 0 }
+        if ($operation -eq 'PGUP' -or $operation -eq 'PGDN') {
+            # Save which item was selected on the page we're leaving.
+            $leavingSelected = $menuItems | Where-Object { $_.Selected -and $_.Selectable }
+            if ($leavingSelected) {
+                $pageSelections[$pageStartIndex] = [array]::IndexOf($menuItems.ToArray(), $leavingSelected)
+            }
+
+            if ($operation -eq 'PGUP') {
+                $pageStartIndex = 0
+            }
+            else {
+                $pageStartIndex = $pageEndIndex + 1
+                if ($pageStartIndex -ge $menuItems.Count) { $pageStartIndex = 0 }
+            }
+
+            # Clear .Selected on ALL items so only one arrow renders. The
+            # correct item will be re-selected by Start-Navigation using
+            # the remembered selection (restored below) or its first-item
+            # fallback.
+            foreach ($mi in $menuItems) { $mi.Selected = $false }
+
+            # Restore remembered selection for the page we're switching to.
+            if ($pageSelections.ContainsKey($pageStartIndex)) {
+                $rememberedIdx = $pageSelections[$pageStartIndex]
+                if ($rememberedIdx -ge 0 -and $rememberedIdx -lt $menuItems.Count) {
+                    $menuItems[$rememberedIdx].Selected = $true
+                }
+            }
         }
 
         # Single pass over the menu collects every layout number we need.
@@ -1166,8 +1439,18 @@ function Show-Menu {
             $NoClear = $false
         }
 
+        # Begin synchronized output so the terminal buffers the entire
+        # clear+redraw and paints it as a single frame (no flicker).
+        [Console]::Write("`e[?2026h")
+
         if (-not $NoClear) {
-            Write-Host "`e[2J`e[H"
+            Write-Host "`e[3J`e[2J`e[H"
+            # `e[3J also clears the scrollback buffer (not just the visible
+            # screen). If a prior render overflowed the viewport, the extra
+            # rows scroll into the scrollback; a plain `e[2J leaves them there
+            # so maximizing the window later reveals them as duplicated menu
+            # lines. Wiping the scrollback on each redraw guarantees stale
+            # overflowed rows can never reappear.
             # Clearing the screen wipes the help-box pixels too; invalidate the
             # cached help text so the next Update-HelpText actually redraws it
             # instead of short-circuiting on a stale "text unchanged" match.
@@ -1182,6 +1465,16 @@ function Show-Menu {
         if ($RoomLeft -lt $TotalLineCount) {
             Write-Host "`e[2J`e[H" #Try Clearing the screen again.  Maybe this gives us enough room.
             $RoomLeft = Get-RoomLeftFromCurrentPosition
+        }
+
+        # Snapshot the viewport top before drawing content. If the viewport
+        # scrolls during rendering (content taller than expected), we detect
+        # it afterward and redraw with fewer lines.
+        $preRenderViewportTop = $Host.UI.RawUI.WindowPosition.Y
+
+        # Apply scroll correction from a previous iteration that overflowed.
+        if ($scrollCorrection -gt 0) {
+            $RoomLeft = [Math]::Max(1, $RoomLeft - $scrollCorrection)
         }
 
         # Decide which tiers of non-selectable content to drop so the menu fits.
@@ -1263,6 +1556,29 @@ function Show-Menu {
             $Operation = ''
         }
 
+        # Enforce exactly one selection arrow before drawing. A plain resize
+        # (e.g. maximizing the window) merges previously-separate pages onto
+        # one without going through the PGUP/PGDN bookkeeping that clears stale
+        # .Selected flags. Set-PointerDisplayAsPerMenu only ever updates
+        # .Selected on *displayed* items, so an item selected on a page that
+        # wasn't visible keeps its flag. When the resize makes it visible
+        # again, two arrows render (and the extra selected row looks like a
+        # duplicated line). Keep .Selected on only the first selectable item in
+        # the visible page range; clear it on every other item. If none in the
+        # visible range is selected, all flags are cleared and Start-Navigation's
+        # fallback picks the first displayed item.
+        $keptSelected = $false
+        for ($si = 0; $si -lt $menuItems.Count; $si++) {
+            $smi = $menuItems[$si]
+            if (-not $smi.Selectable -or -not $smi.Selected) { continue }
+            if (-not $keptSelected -and $si -ge $pageStartIndex -and $si -le $pageEndIndex) {
+                $keptSelected = $true
+            }
+            else {
+                $smi.Selected = $false
+            }
+        }
+
         # Reset Displayed for every item, then mark the ones we actually render.
         # Downstream selection / keystroke code still consults .Displayed.
         foreach ($mi in $menuItems) { $mi.Displayed = $false }
@@ -1309,20 +1625,47 @@ function Show-Menu {
         if (-not $Maxshrink) {
             Write-Host ""
         }
+        $pgIndicatorY = -1
+        $pgClickUp    = $false
+        $pgClickDn    = $false
         if ($PgUpAvailable -and $Operation -eq 'PGDNNEEDED') {
             $Operation = ""
             Write-MenuPgIndicator -Operation 'PGDNNEEDED' -PgUpAvailable $true
+            $pgIndicatorY = (Get-CursorPosition).Y - 1
+            $pgClickUp = $true
+            $pgClickDn = $true
         }
         elseif ($Operation -eq 'PGDNDONE') {
             $Operation = ""
             Write-MenuPgIndicator -Operation 'PGDNDONE' -PgUpAvailable $false
+            $pgIndicatorY = (Get-CursorPosition).Y - 1
+            $pgClickUp = $true
         }
         elseif ($Operation -eq 'PGDNNEEDED') {
             $Operation = ""
             Write-MenuPgIndicator -Operation 'PGDNNEEDED' -PgUpAvailable $false
+            $pgIndicatorY = (Get-CursorPosition).Y - 1
+            $pgClickDn = $true
         }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition
+
+        # End synchronized output — terminal paints the entire menu as one frame.
+        [Console]::Write("`e[?2026l")
+
+        # Detect if the viewport scrolled during rendering. This happens on
+        # small screens when text wrapping or summary functions produce more
+        # lines than the layout predicted. Scroll shifts all stored
+        # CurrentPosition values so the arrow and mouse point at the wrong
+        # rows. Reduce available room by the scroll amount and redraw.
+        $postRenderViewportTop = $Host.UI.RawUI.WindowPosition.Y
+        if ($postRenderViewportTop -gt $preRenderViewportTop) {
+            $scrollShift = $postRenderViewportTop - $preRenderViewportTop
+            $scrollCorrection += $scrollShift
+            Write-Log -Verbose "Show-Menu: viewport scrolled $scrollShift rows during render (total correction: $scrollCorrection); redrawing with fewer lines"
+            continue
+        }
+
         # Re-check the window size. If it changed while we were drawing this
         # frame, the layout we just painted is stale (text truncated for the
         # old width, items positioned for the old height, etc). Restart the
@@ -1331,13 +1674,18 @@ function Show-Menu {
         $postDrawSize = Get-LiveWindowSize
         if ($postDrawSize) {
             if ([int]$postDrawSize.Width -ne $drawWidth -or [int]$postDrawSize.Height -ne $drawHeight) {
+                $scrollCorrection = 0
                 Write-Log -Verbose "Show-Menu: window resized during draw ($drawWidth x $drawHeight -> $($postDrawSize.Width) x $($postDrawSize.Height)); redrawing"
                 continue
             }
         }
-        $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect
+        $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect -PgIndicatorY $pgIndicatorY -PgClickUp:$pgClickUp -PgClickDn:$pgClickDn
         Set-CursorPosition -x $PromptPosition.X -y $PromptPosition.Y
         write-host
+        # Collapse GOBACK into ESCAPE unless caller opted into split mode.
+        if ($return -eq "GOBACK" -and -not $SplitEscapeFromGoBack) {
+            $return = "ESCAPE"
+        }
         if ($return) {
             
             if (-not [string]::IsNullOrWhiteSpace($return.Action)) {
@@ -1359,6 +1707,9 @@ function Show-Menu {
         }
     }
 
+    } finally {
+        $Common.VerboseToLogOnly = $savedVerboseToLogOnly
+    }
 
 }
 
@@ -1426,24 +1777,551 @@ function Set-PointerDisplayAsPerMenu {
     }
 }
 
+# Track the last hovered menu item index so we can un-highlight it when the
+# mouse moves to a different row.
+$script:_lastHoveredIndex = -1
+# Track which PgIndicator word is currently hover-highlighted: 'PgUp', 'PgDn', or $null.
+$script:_lastHoveredPgWord = $null
+
+# Highlight [PgUp] or [PgDn] on the pagination indicator line when the mouse
+# hovers over the corresponding word. Restores Yellow on the previously
+# highlighted word when the mouse moves away.
+function Set-PgIndicatorHoverHighlight {
+    param(
+        [int]$MouseX,
+        [int]$MouseY,
+        [int]$PgIndicatorY,
+        [switch]$PgClickUp,
+        [switch]$PgClickDn
+    )
+    if ($PgIndicatorY -lt 0 -or $MouseY -ne $PgIndicatorY) {
+        # Mouse is not on the indicator line; clear any existing highlight
+        if ($script:_lastHoveredPgWord) {
+            Set-CursorPosition -x 0 -y $PgIndicatorY
+            Write-Host "`e[K" -NoNewline
+            Set-CursorPosition -x 0 -y $PgIndicatorY
+            if ($PgClickUp -and $PgClickDn) {
+                Write-Host2 'Press [PgUp] or [PgDn] to see more' -ForegroundColor Yellow
+            } elseif ($PgClickUp) {
+                Write-Host2 'Press [PgUp] to see more' -ForegroundColor Yellow
+            } else {
+                Write-Host2 'Press [PgDn] to see more' -ForegroundColor Yellow
+            }
+            $script:_lastHoveredPgWord = $null
+        }
+        return
+    }
+
+    # Determine which word the mouse is over based on column positions.
+    # Both:    'Press [PgUp] or [PgDn] to see more'
+    #           0     6    11   16   21
+    # PgUp only: 'Press [PgUp] to see more'  → [PgUp] at 6-11
+    # PgDn only: 'Press [PgDn] to see more'  → [PgDn] at 6-11
+    $hoveredWord = $null
+    if ($PgClickUp -and $PgClickDn) {
+        if ($MouseX -ge 6 -and $MouseX -le 11) { $hoveredWord = 'PgUp' }
+        elseif ($MouseX -ge 16 -and $MouseX -le 21) { $hoveredWord = 'PgDn' }
+    }
+    elseif ($PgClickUp) {
+        if ($MouseX -ge 6 -and $MouseX -le 11) { $hoveredWord = 'PgUp' }
+    }
+    elseif ($PgClickDn) {
+        if ($MouseX -ge 6 -and $MouseX -le 11) { $hoveredWord = 'PgDn' }
+    }
+
+    if ($hoveredWord -eq $script:_lastHoveredPgWord) { return }
+
+    # Redraw the indicator line with the hovered word in SkyBlue
+    Set-CursorPosition -x 0 -y $PgIndicatorY
+    Write-Host "`e[K" -NoNewline
+    Set-CursorPosition -x 0 -y $PgIndicatorY
+    if ($PgClickUp -and $PgClickDn) {
+        $pgUpColor = if ($hoveredWord -eq 'PgUp') { 'SkyBlue' } else { 'Yellow' }
+        $pgDnColor = if ($hoveredWord -eq 'PgDn') { 'SkyBlue' } else { 'Yellow' }
+        Write-Host2 'Press ' -ForegroundColor Yellow -NoNewline
+        Write-Host2 '[PgUp]' -ForegroundColor $pgUpColor -NoNewline
+        Write-Host2 ' or ' -ForegroundColor Yellow -NoNewline
+        Write-Host2 '[PgDn]' -ForegroundColor $pgDnColor -NoNewline
+        Write-Host2 ' to see more' -ForegroundColor Yellow
+    }
+    elseif ($PgClickUp) {
+        $pgUpColor = if ($hoveredWord -eq 'PgUp') { 'SkyBlue' } else { 'Yellow' }
+        Write-Host2 'Press ' -ForegroundColor Yellow -NoNewline
+        Write-Host2 '[PgUp]' -ForegroundColor $pgUpColor -NoNewline
+        Write-Host2 ' to see more' -ForegroundColor Yellow
+    }
+    else {
+        $pgDnColor = if ($hoveredWord -eq 'PgDn') { 'SkyBlue' } else { 'Yellow' }
+        Write-Host2 'Press ' -ForegroundColor Yellow -NoNewline
+        Write-Host2 '[PgDn]' -ForegroundColor $pgDnColor -NoNewline
+        Write-Host2 ' to see more' -ForegroundColor Yellow
+    }
+    $script:_lastHoveredPgWord = $hoveredWord
+}
+
+# Update hover highlighting: when the mouse is over a selectable menu item,
+# re-render that item's row with an underline (ANSI SGR 4). When the mouse
+# moves off, restore the original rendering. Only touches the text portion
+# (columns 3+) to avoid interfering with the selection arrow.
+function Set-MouseHoverHighlight {
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.ArrayList]$menuItems,
+        [Parameter(Mandatory)]
+        [int]$mouseY,
+        [switch]$MultiSelect
+    )
+    [System.Console]::CursorVisible = $false
+
+    # Find which menu item (if any) the mouse is over
+    $hoveredIndex = -1
+    for ($i = 0; $i -lt $menuItems.Count; $i++) {
+        if ($menuItems[$i].Displayed -and $menuItems[$i].Selectable -and $menuItems[$i].CurrentPosition -eq $mouseY) {
+            $hoveredIndex = $i
+            break
+        }
+    }
+
+    # Nothing changed
+    if ($hoveredIndex -eq $script:_lastHoveredIndex) { return }
+
+    # Un-highlight the old hovered item (re-render with original colors).
+    # Columns 0-2 are left untouched so the keyboard selection arrow is preserved.
+    if ($script:_lastHoveredIndex -ge 0 -and $script:_lastHoveredIndex -lt $menuItems.Count) {
+        $old = $menuItems[$script:_lastHoveredIndex]
+        if ($old.Displayed -and $old.Selectable) {
+            Set-CursorPosition -x 3 -y $old.CurrentPosition
+            Write-Host "`e[K" -NoNewline
+            Set-CursorPosition -x 3 -y $old.CurrentPosition
+            Write-Option $old.ItemName $old.Text -color $old.Color1 -Color2 $old.Color1 -MultiSelect:$MultiSelect -MultiSelected:$old.MultiSelected
+        }
+    }
+
+    # Highlight the new hovered item with a blue foreground + dark background.
+    # Renders the line as a single Write-Host call to avoid Write-Host2's
+    # per-segment $PSStyle.Reset (ESC[0m) which kills background color.
+    # Only the text from column 3 onward is redrawn; columns 0-2 are never touched.
+    if ($hoveredIndex -ge 0) {
+        $item = $menuItems[$hoveredIndex]
+        $fgAnsi = Get-AnsiColorCached $Global:Common.Colors.GenConfigHover
+        $bgAnsi = "`e[48;5;236m"  # dark gray background (xterm-256 #236)
+        Set-CursorPosition -x 3 -y $item.CurrentPosition
+        Write-Host "`e[K" -NoNewline
+        Set-CursorPosition -x 3 -y $item.CurrentPosition
+
+        # Strip embedded ANSI so hover color applies uniformly
+        $hoverText = if ($item.Text -and $item.Text.Contains([char]27)) {
+            (Get-AnsiCsiPattern).Replace($item.Text, '')
+        } else { $item.Text }
+
+        # Build multiselect prefix
+        $msPrefix = ""
+        if ($MultiSelect) {
+            $optionInt = $item.ItemName -as [int]
+            if ($optionInt) {
+                $check = if ($item.MultiSelected) { [char]8730 } else { " " }
+                $msPrefix = "[$check] "
+            } else {
+                $msPrefix = "    "
+            }
+        }
+
+        # Build line: [key]  text  (same layout as Write-Option)
+        $bracketSuffix = "] ".PadRight([Math]::Max(0, 4 - $item.ItemName.Length))
+        $line = "${msPrefix}[$($item.ItemName)${bracketSuffix}${hoverText}"
+
+        # Truncate to fit terminal width (mirror Write-Option's truncation)
+        $termWidth = 0
+        try {
+            $live = Get-LiveWindowSize
+            if ($live) { $termWidth = [int]$live.Width }
+        } catch { }
+        if (-not $termWidth) { $termWidth = [Console]::WindowWidth }
+        $available = $termWidth - 3 - 2  # col 3 start, 2 margin
+        if ($available -gt 0 -and $line.Length -gt $available) {
+            $line = $line.Substring(0, [Math]::Max(0, $available - 3)) + "..."
+        }
+
+        # Pad background to the width of the longest menu item so all hover
+        # highlights are the same width regardless of text length.
+        $maxLineLen = 0
+        foreach ($mi in $menuItems) {
+            if ($mi.Displayed -and $mi.Selectable -and $mi.Text) {
+                $plainText = if ($mi.Text.Contains([char]27)) {
+                    (Get-AnsiCsiPattern).Replace($mi.Text, '')
+                } else { $mi.Text }
+                $msBracketLen = 1 + $mi.ItemName.Length + [Math]::Max(0, 4 - $mi.ItemName.Length)
+                if ($MultiSelect -and ($mi.ItemName -as [int])) { $msBracketLen += 4 }
+                elseif ($MultiSelect) { $msBracketLen += 4 }
+                $thisLen = $msBracketLen + $plainText.Length
+                if ($thisLen -gt $maxLineLen) { $maxLineLen = $thisLen }
+            }
+        }
+        if ($maxLineLen -gt 0 -and $line.Length -lt $maxLineLen) {
+            $line = $line.PadRight($maxLineLen)
+        }
+
+        # Single Write-Host: fg + bg + content + reset. No intermediate resets.
+        Write-Host "${fgAnsi}${bgAnsi}${line}`e[0m" -NoNewline
+    }
+
+    $script:_lastHoveredIndex = $hoveredIndex
+}
+
+# ---------------------------------------------------------------------------
+# Live background-operation banner update
+# ---------------------------------------------------------------------------
+# Called from Get-KeyStroke's idle polling loop every ~50-75ms. Throttles to
+# once per second so the cursor save/restore doesn't flicker. Returns:
+#   'completed' - operation finished; caller should invalidate cache & redraw
+#   'refresh'   - a VM changed state; caller should invalidate cache & redraw
+#   $null       - no action needed
+function Update-BgBannerInPlace {
+    $info = $script:_bgBannerInfo
+    if (-not $info) {
+        # Clear stale completion flag when there's no banner to track
+        if (-not $global:PendingVMOperations -or $global:PendingVMOperations.Count -eq 0) {
+            $script:_bgCompletionHandled = $false
+        }
+        return $null
+    }
+
+    if (-not $global:PendingVMOperations -or $global:PendingVMOperations.Count -eq 0) {
+        $script:_bgBannerInfo = $null
+        $script:_bgCompletionHandled = $false
+        return $null
+    }
+
+    # Gather active (not-completed) ops
+    $activeOps = @()
+    $allCompleted = $true
+    foreach ($d in @($global:PendingVMOperations.Keys)) {
+        $o = $global:PendingVMOperations[$d]
+        if ($o -and -not $o.Completed) {
+            $activeOps += $o
+            $allCompleted = $false
+        }
+    }
+
+    # All ops completed — handle settle delay then signal rebuild
+    if ($allCompleted) {
+        if ($script:_bgCompletionHandled) { return $null }
+        $now = [DateTime]::UtcNow
+        if (-not $script:_bgCompletionDetectedAt) {
+            $script:_bgCompletionDetectedAt = $now
+            # Set dirty flag immediately so the rebuild after settle gets fresh data
+            $global:vm_List_Dirty = $true
+            $global:HealthStatsCache = $null
+            # Update banner to green "complete" immediately
+            $totalVMs = ($global:PendingVMOperations.Values | Measure-Object -Property VMCount -Sum).Sum
+            $totalFail = ($global:PendingVMOperations.Values | Measure-Object -Property Failures -Sum).Sum
+            $oldest = $global:PendingVMOperations.Values | Sort-Object StartTime | Select-Object -First 1
+            $elapsedSec = [math]::Round(((Get-Date) - $oldest.StartTime).TotalSeconds)
+            if ($totalFail -eq 0) {
+                $info.MenuItem.Text = "All $totalVMs VM(s) complete ($($elapsedSec)s)"
+                $info.MenuItem.Color1 = "Chartreuse"
+            } else {
+                $info.MenuItem.Text = "$totalFail/$totalVMs VM(s) had issues ($($elapsedSec)s)"
+                $info.MenuItem.Color1 = "Red"
+            }
+            # Redraw the completion banner in-place
+            $savedPos = Get-CursorPosition
+            [System.Console]::CursorVisible = $false
+            try {
+                Set-CursorPosition -X 0 -Y $info.Y
+                Write-Host "`e[2K" -NoNewline
+                Set-CursorPosition -X 0 -Y $info.Y
+                Write-MenuHeader -MenuItem $info.MenuItem -LongestBreakLine $info.LongestBreakLine
+                Set-CursorPosition -X $savedPos.X -Y $savedPos.Y
+            } catch {}
+            finally { [System.Console]::CursorVisible = $false }
+            return $null
+        }
+        if (($now - $script:_bgCompletionDetectedAt).TotalSeconds -ge 5) {
+            $script:_bgCompletionHandled = $true
+            $script:_bgCompletionDetectedAt = $null
+            return 'completed'
+        }
+        return $null
+    }
+
+    # Reset completion tracking when ops are still active
+    $script:_bgCompletionDetectedAt = $null
+
+    # Throttle to once per second
+    $now = [DateTime]::UtcNow
+    if ($script:_lastBgUpdate -and ($now - $script:_lastBgUpdate).TotalMilliseconds -lt 1000) {
+        return $null
+    }
+    $script:_lastBgUpdate = $now
+
+    # Detect state changes: either a VM transitioned within an active op
+    # (StateChanged flag) or an op itself completed since last check
+    # (active count decreased). Both should trigger a refresh.
+    $anyChanged = $false
+    foreach ($aop in $activeOps) {
+        if ($aop.StateChanged) {
+            $aop.StateChanged = $false
+            $anyChanged = $true
+        }
+    }
+    $currentActiveCount = $activeOps.Count
+    if ($null -eq $script:_lastActiveOpsCount) {
+        $script:_lastActiveOpsCount = $currentActiveCount
+    }
+    elseif ($currentActiveCount -ne $script:_lastActiveOpsCount) {
+        # An op completed (or a new one started) — treat as state change
+        $script:_lastActiveOpsCount = $currentActiveCount
+        $anyChanged = $true
+    }
+    if ($anyChanged) {
+        if (-not $script:_lastBgRefresh) { $script:_lastBgRefresh = $now }
+        if (($now - $script:_lastBgRefresh).TotalSeconds -ge 5) {
+            $script:_lastBgRefresh = $now
+            return 'refresh'
+        }
+    }
+
+    # Build combined banner text from all ops (active + completed)
+    $parts = @()
+    # Show completed ops with checkmark
+    foreach ($d in @($global:PendingVMOperations.Keys)) {
+        $cop = $global:PendingVMOperations[$d]
+        if ($cop.Completed) {
+            $shortDomain = $cop.Domain.Split('.')[0]
+            $marker = if ($cop.Failures -eq 0) { [char]0x2713 } else { '!' }
+            $parts += "$marker $shortDomain`: $($cop.VMCount)/$($cop.VMCount)"
+        }
+    }
+    # Show active ops with progress
+    foreach ($aop in $activeOps) {
+        $doneCount = $aop.VMCount - $aop.StillActive
+        $shortDomain = $aop.Domain.Split('.')[0]
+        $parts += "$($aop.Type) $shortDomain`: $doneCount/$($aop.VMCount)"
+    }
+    $oldest = $activeOps | Sort-Object StartTime | Select-Object -First 1
+    $elapsedSec = [math]::Round(((Get-Date) - $oldest.StartTime).TotalSeconds)
+    $newText = ($parts -join ' | ') + " ($($elapsedSec)s)"
+
+    # Skip redraw if text hasn't changed
+    if ($info.MenuItem.Text -eq $newText) { return $null }
+    $info.MenuItem.Text = $newText
+
+    # Save cursor, redraw the banner line in-place, restore cursor
+    $savedPos = Get-CursorPosition
+    $savedVisible = [System.Console]::CursorVisible
+    [System.Console]::CursorVisible = $false
+    try {
+        Set-CursorPosition -X 0 -Y $info.Y
+        Write-Host "`e[2K" -NoNewline
+        Set-CursorPosition -X 0 -Y $info.Y
+        Write-MenuHeader -MenuItem $info.MenuItem -LongestBreakLine $info.LongestBreakLine
+        Set-CursorPosition -X $savedPos.X -Y $savedPos.Y
+    }
+    catch {}
+    finally {
+        [System.Console]::CursorVisible = $savedVisible
+    }
+
+    return $null
+}
+
 # Get the key stroke from the user. If $WatchSize is supplied, polls every
 # ~100ms and returns $null if the window size changes before a key is pressed.
 # Otherwise blocks until a key is pressed (original behavior).
+#
+# When mouse input is enabled ($script:_savedConsoleMode is set), uses
+# ReadConsoleInput to receive both keyboard and mouse events. Returns either:
+#   - A standard KeyInfo object (keyboard), or
+#   - A [pscustomobject] with .IsMouseEvent=$true, .MouseX, .MouseY,
+#     .MouseButton (0=move, 1=left-click), .MouseFlags (from dwEventFlags)
 function Get-KeyStroke {
     param(
         # Accepts the {Width;Height} pscustomobject returned by Get-LiveWindowSize.
         # Untyped so a $null baseline (captured while window was minimized) is OK.
         $WatchSize
     )
-    if (-not $WatchSize) {
+
+    $mouseActive = ($null -ne $script:_savedConsoleMode -and $null -ne $script:_consoleInputHandle)
+
+    if (-not $WatchSize -and -not $mouseActive) {
         return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     }
+
+    # When mouse input is active, use ReadConsoleInput for unified key+mouse reading.
+    if ($mouseActive) {
+        $buf = New-Object 'MemLabsConsole.MouseInput+INPUT_RECORD[]' 1
+        while ($true) {
+            # Non-blocking peek: verify an event is truly readable before calling
+            # ReadConsoleInput (which blocks when the buffer is empty).
+            # GetNumberOfConsoleInputEvents can report phantom counts after
+            # ConPTY mode toggles (Shift-suspend/resume Quick Edit), causing
+            # ReadConsoleInput to block indefinitely on events that ConPTY
+            # consumed internally.
+            # Falls back to GetNumberOfConsoleInputEvents when PeekConsoleInput
+            # is unavailable (type compiled in a stale session).
+            $hasEvents = $false
+            if ($script:_hasPeekConsoleInput) {
+                $peekRead = [uint32]0
+                [void][MemLabsConsole.MouseInput]::PeekConsoleInput($script:_consoleInputHandle, $buf, 1, [ref]$peekRead)
+                $hasEvents = $peekRead -gt 0
+            }
+            else {
+                $eventCount = [uint32]0
+                [void][MemLabsConsole.MouseInput]::GetNumberOfConsoleInputEvents($script:_consoleInputHandle, [ref]$eventCount)
+                $hasEvents = $eventCount -gt 0
+            }
+            if ($hasEvents) {
+                $read = [uint32]0
+                [void][MemLabsConsole.MouseInput]::ReadConsoleInput($script:_consoleInputHandle, $buf, 1, [ref]$read)
+                if ($read -eq 0) {
+                    # Peek said events exist but Read got nothing — phantom event
+                    # from a ConPTY mode transition. Flush to clear the ghost.
+                    if ($script:_hasFlushConsoleInput) {
+                        [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
+                    }
+                    continue
+                }
+                if ($read -gt 0) {
+                    $rec = $buf[0]
+
+                    if ($rec.EventType -eq [MemLabsConsole.MouseInput]::KEY_EVENT) {
+                        $ke = $rec.KeyEvent
+                        $vk = $ke.wVirtualKeyCode
+
+                        # Shift toggle: hold Shift to enable native text selection
+                        $isShiftKey = ($vk -eq [MemLabsConsole.MouseInput]::VK_SHIFT -or `
+                                       $vk -eq [MemLabsConsole.MouseInput]::VK_LSHIFT -or `
+                                       $vk -eq [MemLabsConsole.MouseInput]::VK_RSHIFT)
+                        if ($isShiftKey) {
+                            if ($ke.bKeyDown -and -not $script:_mouseShiftHeld) {
+                                $script:_mouseShiftHeld = $true
+                                Suspend-MouseInput
+                            }
+                            elseif (-not $ke.bKeyDown -and $script:_mouseShiftHeld) {
+                                $script:_mouseShiftHeld = $false
+                                Resume-MouseInput
+                            }
+                            # Consume bare Shift events — don't pass to caller
+                            continue
+                        }
+
+                        if ($ke.bKeyDown) {
+                            # Non-Shift key while Shift was held (e.g. user pressed
+                            # Shift+Letter): resume mouse before returning the key
+                            if ($script:_mouseShiftHeld) {
+                                $script:_mouseShiftHeld = $false
+                                Resume-MouseInput
+                            }
+                            # Synthesize a KeyInfo object matching what ReadKey returns
+                            return [System.Management.Automation.Host.KeyInfo]::new(
+                                [int]$ke.wVirtualKeyCode,
+                                $ke.UnicodeChar,
+                                [System.Management.Automation.Host.ControlKeyStates]$ke.dwControlKeyState,
+                                $true
+                            )
+                        }
+                        continue
+                    }
+
+                    if ($rec.EventType -eq [MemLabsConsole.MouseInput]::MOUSE_EVENT) {
+                        # Ignore mouse events while Shift is held (text selection mode).
+                        # MOUSE_INPUT stays enabled so ConPTY's VT state is untouched.
+                        if ($script:_mouseShiftHeld) { continue }
+                        $me = $rec.MouseEvent
+                        $isWheel = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_WHEELED) -ne 0
+                        $isMove  = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_MOVED) -ne 0
+                        # Edge-triggered button detection. We act on the button
+                        # that NEWLY transitioned from up->down in this record,
+                        # not on whatever bits happen to be set in the snapshot.
+                        # This is what makes clicks reliable: if a prior
+                        # right-button-up record was missed/swallowed (GOBACK
+                        # navigated away before it was read, or a ConPTY
+                        # Suspend/Resume cycle dropped it), the console keeps
+                        # reporting the right bit as "stuck". A snapshot test
+                        # (dwButtonState -band RIGHTMOST) would then misread
+                        # every subsequent LEFT click as a right click (GOBACK).
+                        # Masking against the previous state ignores already-held
+                        # bits and only reacts to the genuine new press.
+                        $isBack  = $false
+                        $isClick = $false
+                        if ($me.dwEventFlags -eq 0) {
+                            # Button press/release record (not move/wheel/double-click).
+                            $prevBtn = $script:_lastMouseButtonState
+                            $newlyPressed = $me.dwButtonState -band (-bnot $prevBtn)
+                            $script:_lastMouseButtonState = $me.dwButtonState
+                            # Left takes priority over right on a simultaneous
+                            # both-buttons-down so an ambiguous press activates
+                            # rather than navigating away.
+                            if ($newlyPressed -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED) {
+                                $isClick = $true
+                            }
+                            elseif ($newlyPressed -band [MemLabsConsole.MouseInput]::RIGHTMOST_BUTTON_PRESSED) {
+                                $isBack = $true
+                            }
+                        }
+                        if ($isClick -or $isBack -or $isMove -or $isWheel) {
+                            # Wheel direction: dwButtonState high word is the signed delta.
+                            # Bit 31 indicates negative (down). Avoids [int] cast overflow
+                            # on uint values like 0xFF880000 (4286578688).
+                            $wheelBtn = 0
+                            if ($isWheel) {
+                                $wheelBtn = if ($me.dwButtonState -band 0x80000000) { 4 } else { 3 }  # 3=up, 4=down
+                            }
+                            if ($isClick -or $isBack) {
+                                Write-Log -Verbose -LogOnly "Mouse btn: btnState=0x$($me.dwButtonState.ToString('X8')) prev=0x$($prevBtn.ToString('X8')) new=0x$($newlyPressed.ToString('X8')) flags=0x$($me.dwEventFlags.ToString('X8')) -> $(if ($isBack) {'BACK'} else {'CLICK'}) at ($($me.dwMousePosition.X),$($me.dwMousePosition.Y))"
+                            }
+                            return [pscustomobject]@{
+                                IsMouseEvent = $true
+                                MouseX       = [int]$me.dwMousePosition.X
+                                MouseY       = [int]$me.dwMousePosition.Y
+                                MouseButton  = $(if ($isBack) { 2 } elseif ($isClick) { 1 } elseif ($isWheel) { $wheelBtn } else { 0 })
+                                MouseFlags   = [int]$me.dwEventFlags
+                            }
+                        }
+                        # Ignore other mouse events (X buttons, horizontal wheel, etc.)
+                        continue
+                    }
+                    # WINDOW_BUFFER_SIZE_EVENT or FOCUS_EVENT — skip
+                    continue
+                }
+            }
+
+            # No events pending — check for resize
+            if ($WatchSize) {
+                $live = Get-LiveWindowSize
+                if ($live -and ($live.Width -ne $WatchSize.Width -or $live.Height -ne $WatchSize.Height)) {
+                    return $null
+                }
+            }
+
+            # Live-update the background operation banner (elapsed time counter)
+            $bgResult = Update-BgBannerInPlace
+            if ($bgResult -in @('completed', 'refresh')) {
+                $global:vm_List_Dirty = $true        # signal Get-List to call Get-VM on next SmartUpdate
+                $global:HealthStatsCache = $null      # invalidate Quick Stats cache
+                return $null
+            }
+
+            # Fallback Shift detection: if the console's mark mode (text
+            # selection) swallowed the Shift key-up event, we'd stay in
+            # suspended mode forever. Poll the physical key state to catch
+            # the release even when no events arrive.
+            if ($script:_mouseShiftHeld) {
+                $shiftState = [MemLabsConsole.MouseInput]::GetAsyncKeyState([int][MemLabsConsole.MouseInput]::VK_SHIFT)
+                if (($shiftState -band 0x8000) -eq 0) {
+                    $script:_mouseShiftHeld = $false
+                    Resume-MouseInput
+                }
+            }
+
+            Start-Sleep -Milliseconds 50
+        }
+    }
+
+    # Non-mouse fallback: original keyboard-only poll loop
     while ($true) {
         try {
-            # Use [System.Console]::KeyAvailable (not $Host.UI.RawUI.KeyAvailable):
-            # after mstsc minimize/restore, the PS host's KeyAvailable property
-            # becomes blocking until input arrives, which freezes the resize
-            # poll loop entirely. The .NET API is guaranteed non-blocking.
             $ka = [System.Console]::KeyAvailable
         }
         catch {
@@ -1457,6 +2335,15 @@ function Get-KeyStroke {
         if ($live -and ($live.Width -ne $WatchSize.Width -or $live.Height -ne $WatchSize.Height)) {
             return $null
         }
+
+        # Live-update the background operation banner (elapsed time counter)
+        $bgResult = Update-BgBannerInPlace
+        if ($bgResult -in @('completed', 'refresh')) {
+            $global:vm_List_Dirty = $true        # signal Get-List to call Get-VM on next SmartUpdate
+            $global:HealthStatsCache = $null      # invalidate Quick Stats cache
+            return $null
+        }
+
         Start-Sleep -Milliseconds 75
     }
 }
@@ -1608,7 +2495,10 @@ function Start-Navigation {
         [Parameter(Mandatory = $true)] # Mandatory parameter
         [object]$PromptPosition, 
         [object]$HelpPosition, 
-        [switch]$MultiSelect = $false
+        [switch]$MultiSelect = $false,
+        [int]$PgIndicatorY = -1,
+        [switch]$PgClickUp = $false,
+        [switch]$PgClickDn = $false
     )
 
     $i = 0
@@ -1633,9 +2523,14 @@ function Start-Navigation {
     }
     $i = 0
     if (-not $foundSelected) {
+        # No item on this page has .Selected — pick the first selectable
+        # displayed item and clear any stale .Selected on off-page items
+        # so only one arrow ever renders.
+        foreach ($mi in $menuItems) { $mi.Selected = $false }
         foreach ($menuItem in $menuItems) {
             if ($menuItem.Selectable -and $menuItem.Displayed) {
                 $selectedIndex = $i
+                $menuItem.Selected = $true
                 break
             }
             $i++
@@ -1660,6 +2555,14 @@ function Start-Navigation {
     # Loop until the user presses the Escape key
     Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
     #Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText $menuItems[$selectedIndex].HelpText -Color $menuItems[$selectedIndex].Color1 -wait:$false
+
+    # Enable mouse input so Get-KeyStroke can return click/move events.
+    # Wrapped in try/finally to guarantee Disable-MouseInput runs on every
+    # exit path (Enter, Escape, resize, PgUp/PgDn, etc.).
+    Enable-MouseInput
+    $script:_lastHoveredIndex = -1
+    $script:_lastHoveredPgWord = $null
+    try {
     while ($true) {
         $currentsize = Get-LiveWindowSize
         if ($currentsize -and $startSize -and ($currentsize.Width -ne $startSize.Width -or $currentsize.Height -ne $startSize.Height)) {
@@ -1673,9 +2576,150 @@ function Start-Navigation {
         # falsiness skips the action-dispatch branch and re-enters the render path.
         $key = Get-KeyStroke -WatchSize $startSize
         if ($null -eq $key) {
+            # If a background op triggered this null return (refresh or
+            # completion), propagate through Show-Menu → Get-Menu2 to the
+            # outer menu loop so it rebuilds all menu items — including
+            # static text like domain stats lines.
+            if ($script:_bgCompletionHandled -or ($global:PendingVMOperations -and $global:PendingVMOperations.Count -gt 0)) {
+                $script:_bgCompletionHandled = $false  # one-shot: clear after consuming
+                return "BGCOMPLETE"
+            }
             return
         }
         write-log -Verbose -HostOnly "key: $key"
+
+        # --- Mouse event handling ---
+        if ($key.IsMouseEvent) {
+            if ($key.MouseButton -eq 2) {
+                # Back/X1 button: go back
+                if ($script:_lastHoveredIndex -ge 0) {
+                    Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
+                }
+                Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
+                Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
+                Set-CursorPosition -X $CPosition.x -Y $CPosition.y
+                return "GOBACK"
+            }
+            elseif ($key.MouseButton -eq 1) {
+                # Left click: find the menu item at the clicked Y position
+                $clickedIndex = -1
+                for ($mi = 0; $mi -lt $menuItems.Count; $mi++) {
+                    if ($menuItems[$mi].Displayed -and $menuItems[$mi].Selectable -and $menuItems[$mi].CurrentPosition -eq $key.MouseY) {
+                        $clickedIndex = $mi
+                        break
+                    }
+                }
+                if ($clickedIndex -ge 0) {
+                    # Require the item to be hover-highlighted before activating.
+                    # This prevents a focus-click (clicking the window to give it
+                    # focus) from accidentally activating whatever item is under
+                    # the cursor. First click just highlights; second click activates.
+                    if ($clickedIndex -ne $script:_lastHoveredIndex) {
+                        Set-MouseHoverHighlight -menuItems $menuItems -mouseY $key.MouseY -MultiSelect:$MultiSelect
+                        continue
+                    }
+                    # Clear hover highlight before acting on the click
+                    if ($script:_lastHoveredIndex -ge 0) {
+                        Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
+                    }
+                    $selectedIndex = $clickedIndex
+                    $buffer = $null
+
+                    if ($MultiSelect) {
+                        # In multiselect, clicking a numbered item toggles its
+                        # check mark; clicking A/N toggles all/none; clicking D
+                        # confirms. This mirrors the keyboard handler exactly.
+                        $itemName = $menuItems[$selectedIndex].ItemName
+                        $optionInt = ($itemName -as [int])
+                        if ($optionInt) {
+                            $menuItems[$selectedIndex].MultiSelected = -not $menuItems[$selectedIndex].MultiSelected
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                            continue
+                        }
+                        elseif ($itemName -eq 'A') {
+                            foreach ($mi2 in $menuItems) {
+                                if ($mi2.Selectable -and ($mi2.ItemName -as [int])) {
+                                    $mi2.MultiSelected = $true
+                                }
+                            }
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                            continue
+                        }
+                        elseif ($itemName -eq 'N') {
+                            foreach ($mi2 in $menuItems) {
+                                if ($mi2.Selectable -and ($mi2.ItemName -as [int])) {
+                                    $mi2.MultiSelected = $false
+                                }
+                            }
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                            continue
+                        }
+                        elseif ($itemName -eq 'D') {
+                            # Done: collect selected items (same as keyboard D handler)
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect -Wait
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
+                            $return = [array]($menuItems | Where-Object { $_.MultiSelected -eq $true })
+                            if (-not $return) {
+                                return "NOITEMS"
+                            }
+                            return $return
+                        }
+                        # Other letter items: fall through to confirm
+                    }
+
+                    # Single-select (or non-numeric multiselect item): confirm
+                    Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
+                    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
+                    Set-CursorPosition -X $CPosition.x -Y $CPosition.y
+                    return $menuItems[$selectedIndex]
+                }
+                elseif ($PgIndicatorY -ge 0 -and $key.MouseY -eq $PgIndicatorY) {
+                    # Click on the PgUp/PgDn indicator line.
+                    # Use the same column ranges as the hover highlight so the
+                    # clickable zone matches the visual feedback exactly.
+                    if ($PgClickUp -and $PgClickDn) {
+                        # Both: [PgUp] at cols 6-11, [PgDn] at cols 16-21
+                        if ($key.MouseX -ge 6 -and $key.MouseX -le 11) {
+                            return [PSCustomObject]@{ Action = 'PGUP'; CurrentMenu = $menuItems }
+                        }
+                        elseif ($key.MouseX -ge 16 -and $key.MouseX -le 21) {
+                            return [PSCustomObject]@{ Action = 'PGDN'; CurrentMenu = $menuItems }
+                        }
+                    }
+                    elseif ($PgClickDn -and $key.MouseX -ge 6 -and $key.MouseX -le 11) {
+                        return [PSCustomObject]@{ Action = 'PGDN'; CurrentMenu = $menuItems }
+                    }
+                    elseif ($PgClickUp -and $key.MouseX -ge 6 -and $key.MouseX -le 11) {
+                        return [PSCustomObject]@{ Action = 'PGUP'; CurrentMenu = $menuItems }
+                    }
+                }
+            }
+            elseif ($key.MouseButton -eq 3 -or $key.MouseButton -eq 4) {
+                # Mouse wheel: 3=up (PgUp), 4=down (PgDn)
+                $wheelAction = if ($key.MouseButton -eq 3) { 'PGUP' } else { 'PGDN' }
+                return [PSCustomObject]@{ Action = $wheelAction; CurrentMenu = $menuItems }
+            }
+            elseif ($key.MouseButton -eq 0) {
+                # Mouse move: update hover highlight on menu items and PgIndicator
+                Set-MouseHoverHighlight -menuItems $menuItems -mouseY $key.MouseY -MultiSelect:$MultiSelect
+                if ($PgIndicatorY -ge 0) {
+                    Set-PgIndicatorHoverHighlight -MouseX $key.MouseX -MouseY $key.MouseY -PgIndicatorY $PgIndicatorY -PgClickUp:$PgClickUp -PgClickDn:$PgClickDn
+                }
+            }
+            continue
+        }
+
+        # Keyboard event: clear any active hover highlight so arrow/type
+        # navigation doesn't leave a stale hover color on a different row.
+        if ($script:_lastHoveredIndex -ge 0) {
+            Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
+        }
+        if ($script:_lastHoveredPgWord -and $PgIndicatorY -ge 0) {
+            Set-PgIndicatorHoverHighlight -MouseX -1 -MouseY -1 -PgIndicatorY $PgIndicatorY -PgClickUp:$PgClickUp -PgClickDn:$PgClickDn
+        }
 
         $currentsize = Get-LiveWindowSize
         if ($currentsize -and $startSize -and ($currentsize.Width -ne $startSize.Width -or $currentsize.Height -ne $startSize.Height)) {
@@ -1950,6 +2994,7 @@ function Start-Navigation {
         }
         
         if ($key.VirtualKeyCode -eq 27 -or $key.VirtualKeyCode -eq 37) {
+            # 27 = Escape, 37 = Left arrow
             if ($MultiSelect) {
                 $Global:MenuHistory[$menuName] = @($menuItems | Where-Object { $_.MultiSelected -eq $true } | Select-Object -ExpandProperty Text)                
             }
@@ -1961,10 +3006,9 @@ function Start-Navigation {
             }
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
-            # 27 = Escape key
             Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
-            #Write-Host "-> You pressed ESC to exit." -ForegroundColor Red # Display the selected menu item
-            return "ESCAPE"
+            # ESC = hard escape, Left arrow = go back
+            if ($key.VirtualKeyCode -eq 27) { return "ESCAPE" } else { return "GOBACK" }
         }
 
         if ($key.Character.ToString().ToUpperInvariant() -in $ValidChars -or ($buffer -and $key.Character.ToString() -in @(0..9))) {
@@ -1987,9 +3031,19 @@ function Start-Navigation {
             }
             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
+    } # end while
+    } # end try
+    finally {
+        Disable-MouseInput
+        $script:_lastHoveredIndex = -1
+        # Move cursor below the prompt so Ctrl+C / exit output doesn't
+        # overwrite rendered menu text. PromptPosition is the row where
+        # the input prompt was drawn; +1 puts us on the first clean line.
+        if ($PromptPosition) {
+            Set-CursorPosition -X 0 -Y ($PromptPosition.Y + 1)
+        }
+        [System.Console]::CursorVisible = $true
     }
-
-    [System.Console]::CursorVisible = $true # Show the cursor
 }
 
 

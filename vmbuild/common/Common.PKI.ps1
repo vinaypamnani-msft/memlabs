@@ -1,4 +1,5 @@
-﻿###############################################################################
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+###############################################################################
 # Common.PKI.ps1
 #
 # Host-driven PKI orchestrator. Handles both single-tier (Enterprise Root CA)
@@ -67,13 +68,26 @@ function Test-PKIStepResult {
         $err = if ($Result.ScriptBlockFailed) { $Result.ScriptBlockFailed } else { $Result.ScriptBlockOutput.Error }
         Write-Log "${Indent}[$LogPrefix] $StepName FAILED: $err" -Failure
         if ($Result.ScriptBlockOutput.Log) {
-            foreach ($line in $Result.ScriptBlockOutput.Log) { Write-Log "${Indent}  [$LogPrefix][$LogSource] $line" }
+            # On failure show everything (strip the [LogOnly] marker so it isn't noise).
+            foreach ($line in $Result.ScriptBlockOutput.Log) {
+                $lineText = ([string]$line) -replace '\[LogOnly\]\s*', ''
+                Write-Log "${Indent}  [$LogPrefix][$LogSource] $lineText"
+            }
         }
         return $false
     }
     foreach ($line in $Result.ScriptBlockOutput.Log) {
-        if ($LogOnly) { Write-Log "${Indent}  [$LogPrefix][$LogSource] $line" -LogOnly }
-        else { Write-Log "${Indent}  [$LogPrefix][$LogSource] $line" }
+        # A line tagged with [LogOnly] (anywhere -- _Log prepends a timestamp) is
+        # routed to the build log file only, keeping verbose/long output (e.g.
+        # ldifde dumps) off the console. The marker is stripped before writing.
+        $lineText = [string]$line
+        $lineLogOnly = $LogOnly
+        if ($lineText -match '\[LogOnly\]') {
+            $lineLogOnly = $true
+            $lineText = $lineText -replace '\[LogOnly\]\s*', ''
+        }
+        if ($lineLogOnly) { Write-Log "${Indent}  [$LogPrefix][$LogSource] $lineText" -LogOnly }
+        else { Write-Log "${Indent}  [$LogPrefix][$LogSource] $lineText" }
     }
     return $true
 }
@@ -188,11 +202,31 @@ function Install-PKICertificateTemplates {
             }
 
             # ---- Phase A: Import templates into AD via ldifde ----
+            # The LDF files contain both the msPKI-Enterprise-Oid object (in
+            # CN=OID) and the template object (in CN=Certificate Templates).
+            # ldifde -k skips entries that already exist, so re-running is safe.
+            $configCtxA = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+            $oidContainerDN = "CN=OID,CN=Public Key Services,CN=Services,$configCtxA"
+
             foreach ($tplName in $TemplateList) {
                 $found = Find-TemplateInAD $tplName
+                $oidMissing = $false
+
                 if ($found) {
-                    _Log "Template '$tplName' already exists in AD - skipping import"
-                    continue
+                    # Template exists — but does the OID-to-name mapping?
+                    $tplOid = ($found.Properties['mspki-cert-template-oid'] | Select-Object -First 1) -as [string]
+                    if ($tplOid) {
+                        $oidSearch = New-Object System.DirectoryServices.DirectorySearcher(
+                            [ADSI]"LDAP://$oidContainerDN",
+                            "(msPKI-Cert-Template-OID=$tplOid)")
+                        $oidSearch.PropertiesToLoad.Add('cn') | Out-Null
+                        $oidMissing = ($null -eq $oidSearch.FindOne())
+                    }
+                    if (-not $oidMissing) {
+                        _Log "Template '$tplName' and OID mapping already exist in AD - skipping"
+                        continue
+                    }
+                    _Log "Template '$tplName' exists but OID mapping is missing - re-importing LDF"
                 }
 
                 $ldfSource = "C:\staging\DSC\CertificateTemplates\$tplName.ldf"
@@ -208,7 +242,7 @@ function Install-PKICertificateTemplates {
                 _Log "Importing template '$tplName' via ldifde..."
                 $output = & ldifde.exe -i -k -f $ldfTarget 2>&1
                 _Log "  ldifde exit code: $LASTEXITCODE"
-                if ($output) { _Log "  ldifde output: $($output -join ' ')" }
+                if ($output) { _Log "[LogOnly]  ldifde output: $($output -join ' ')" }
 
                 $verify = Find-TemplateInAD $tplName
                 if (-not $verify) {
@@ -449,11 +483,24 @@ function Install-SingleTierPKI {
     Write-Log "[SingleTierPKI] Step 1: Installing Enterprise Root CA on $caVMName..." -NoIndent
 
     $singleTierScript = {
-        param($CAName, $DomainName, $WebURL, $WebFolderPath)
+        param($CAName, $DomainName, $WebURL, $WebFolderPath, $FastFail)
 
         $ErrorActionPreference = 'Stop'
         $report = [System.Collections.Generic.List[string]]::new()
         function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
+
+        # Live heartbeat to the host. _Log is BUFFERED and only returns when the
+        # whole scriptblock finishes, so the long post-dcpromo CA retry loop looks
+        # frozen in real time. _Progress emits a Write-Progress record that
+        # Invoke-VmCommand -PollProgress forwards live to the operator's console
+        # (every call also grows the guest's Progress stream -> a stall heartbeat).
+        $caProgressStart = Get-Date
+        function _Progress($status) {
+            try {
+                $el = [int]((Get-Date) - $caProgressStart).TotalSeconds
+                Write-Progress -Activity "Enterprise Root CA '$CAName'" -Status "$status (elapsed ${el}s)"
+            } catch {}
+        }
 
         function Wait-CertSvcReady {
             param([int]$TimeoutSec = 60)
@@ -471,18 +518,160 @@ function Install-SingleTierPKI {
             return $false
         }
 
-        try {
-            # Check if CA is already installed (idempotency)
-            $caAlreadyInstalled = $false
+        # A CA is only "installed" once it has been CONFIGURED. The ADCS
+        # role feature alone registers the certsvc service but leaves it
+        # unconfigured; configuration writes Active=<CAName> under
+        # CertSvc\Configuration. Testing the service alone made a FAILED
+        # config look "installed", so a retry would skip the real work and
+        # then fail trying to start an unconfigured service.
+        function Test-CaConfigured {
+            $cfgRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+            if (-not (Test-Path $cfgRoot)) { return $false }
+            $active = (Get-ItemProperty -Path $cfgRoot -Name 'Active' -ErrorAction SilentlyContinue).Active
+            if ([string]::IsNullOrWhiteSpace($active)) { return $false }
+            if (-not (Test-Path (Join-Path $cfgRoot $active))) { return $false }
+            return $true
+        }
+
+        # Enterprise CA setup PUBLISHES to AD (NTAuth / AIA / Enrollment
+        # Services under the Configuration NC). On a freshly promoted forest
+        # the directory may not be ready to accept those writes yet, which
+        # surfaces as 0x80072082 ERROR_DS_RANGE_CONSTRAINT. Gate the install
+        # on the Public Key Services container being reachable (proves a DC
+        # is answering and the PKI containers exist), and that NTDS is up
+        # when the CA is co-located on the DC (the single-tier case).
+        # Probe whether the local directory will actually ACCEPT a write into the
+        # Configuration NC PKI subtree -- the operation the Enterprise CA publish
+        # performs. PROVEN ground truth (fabrikam 2026-06-23, Diag-PKICAConstraint):
+        # right after a DC (re)boot the PKI container is READABLE immediately but a
+        # Configuration-NC WRITE is rejected with 0x80072082 ERROR_DS_RANGE_CONSTRAINT
+        # for a transient window that closes purely on elapsed time (failed at
+        # boot+22..40min, SUCCEEDED at boot+64min with the directory otherwise fully
+        # healthy). A create+delete of a throwaway container under Public Key Services
+        # is the closest safe proxy for the CA's own publish write, so gating attempt 1
+        # on it makes attempt 1 wait until the directory is genuinely writable instead
+        # of burning real (destructive) CA install/uninstall cycles against a not-yet-
+        # ready directory. NOTE: a reboot would RESET this post-boot clock and make the
+        # wait LONGER, so we wait it out rather than reboot.
+        function Test-ConfigNCWritable {
             try {
-                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
-                if ($svc) {
-                    $caAlreadyInstalled = $true
-                    _Log "CA service already exists (state: $($svc.Status)) - skipping installation"
+                $rootDSE = [ADSI]"LDAP://RootDSE"
+                $configNC = $rootDSE.configurationNamingContext
+                if (-not $configNC) { return @{ Ready = $false; Transient = $true; Err = "no configNC" } }
+                $pks = [ADSI]"LDAP://CN=Public Key Services,CN=Services,$configNC"
+                $probeName = "memlabs-pkiprobe-" + ([guid]::NewGuid().ToString('N').Substring(0, 8))
+                $child = $pks.Create("container", "CN=$probeName")
+                $child.SetInfo()
+                try { $pks.Delete("container", "CN=$probeName") } catch {}
+                return @{ Ready = $true; Transient = $false; Err = $null }
+            }
+            catch {
+                $m = "$($_.Exception.Message)"
+                $transient = $m -match '0x80072082|RANGE_CONSTRAINT|acceptable range|0x8007200E|ERROR_DS_BUSY|0x8007200F|UNWILLING_TO_PERFORM|busy'
+                return @{ Ready = $false; Transient = $transient; Err = $m }
+            }
+        }
+
+        function Wait-AdDsReady {
+            param([int]$TimeoutSec = 300, [switch]$RequireWritable)
+            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $ntds = Get-Service -Name NTDS -ErrorAction SilentlyContinue
+                    if ($ntds -and $ntds.Status -ne 'Running') { Start-Sleep -Seconds 5; continue }
+                    $rootDSE = [ADSI]"LDAP://RootDSE"
+                    $configNC = $rootDSE.configurationNamingContext
+                    if ($configNC) {
+                        $pks = [ADSI]"LDAP://CN=Public Key Services,CN=Services,$configNC"
+                        if ($pks.distinguishedName) {
+                            if (-not $RequireWritable) { return $true }
+                            $probe = Test-ConfigNCWritable
+                            if ($probe.Ready) { return $true }
+                            # Keep waiting only while the directory is TRANSIENTLY
+                            # rejecting the write; a non-transient probe error
+                            # (schema/rights) shouldn't block the real install.
+                            if (-not $probe.Transient) { return $true }
+                            try { _Progress "AD DS not yet accepting Configuration-NC writes; waiting..." } catch {}
+                        }
+                    }
+                } catch {}
+                Start-Sleep -Seconds 10
+            }
+            return $false
+        }
+
+        # Forces an IMMEDIATE schema cache reload on the local DC by writing the
+        # schemaUpdateNow operational attribute on RootDSE. This is the supported
+        # instant alternative to the ~5-min automatic reload (or a reboot) and is
+        # the precise lever for the post-dcpromo window where the freshly-promoted
+        # Configuration NC rejects the Enterprise CA publish with
+        # 0x80072082 ERROR_DS_RANGE_CONSTRAINT.
+        function Invoke-SchemaCacheReload {
+            try {
+                $rootDSE = [ADSI]"LDAP://RootDSE"
+                $rootDSE.Put("schemaUpdateNow", 1)
+                $rootDSE.SetInfo()
+                return $true
+            } catch {
+                return $false
+            }
+        }
+
+        # One-shot diagnostic: bump NTDS '15 Field Engineering' so the next failed
+        # publish records the EXACT offending object/attribute in the Directory
+        # Service log. Returns the prior value so the caller can restore it.
+        function Set-NtdsFieldEngineering {
+            param([int]$Level)
+            $diagPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics'
+            $prior = $null
+            try {
+                if (Test-Path $diagPath) {
+                    $prior = (Get-ItemProperty -Path $diagPath -Name '15 Field Engineering' -ErrorAction SilentlyContinue).'15 Field Engineering'
+                    Set-ItemProperty -Path $diagPath -Name '15 Field Engineering' -Value $Level -Type DWord -Force -ErrorAction SilentlyContinue
                 }
             } catch {}
+            return $prior
+        }
 
-            if (-not $caAlreadyInstalled) {
+        # Pull any constraint/range/attribute Directory Service events since a
+        # given time so the exact failing attribute lands in the build log.
+        function Get-DsConstraintEvents {
+            param([datetime]$Since)
+            $out = @()
+            try {
+                $evts = Get-WinEvent -FilterHashtable @{ LogName = 'Directory Service'; StartTime = $Since } -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Message -match 'constraint|range|attribute' } | Select-Object -First 5
+                foreach ($e in $evts) {
+                    $flat = ($e.Message -replace '\s+', ' ')
+                    $out += "DS-Event $($e.Id) @ $($e.TimeCreated.ToString('HH:mm:ss')): " + $flat.Substring(0, [Math]::Min(220, $flat.Length))
+                }
+            } catch {}
+            return $out
+        }
+
+        try {
+            # Idempotency: only skip when the CA is genuinely CONFIGURED.
+            if (Test-CaConfigured) {
+                _Log "CA already configured (Active CA present) - skipping installation"
+                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -ne 'Running') {
+                    _Log "Starting certsvc (was $($svc.Status))..."
+                    Start-Service certsvc -ErrorAction SilentlyContinue
+                }
+                if (-not (Wait-CertSvcReady -TimeoutSec 90)) {
+                    _Log "WARNING: configured CA service slow to respond"
+                }
+            }
+            else {
+                # Service present but not configured => a prior attempt was
+                # killed/failed mid-config. Tear down the partial config so a
+                # clean re-config can run (the role feature stays installed).
+                $svcPre = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                if ($svcPre) {
+                    _Log "certsvc present but not configured (partial/failed prior install) - removing partial CA config before (re)install..."
+                    try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch { _Log "Uninstall of partial CA config returned: $($_.Exception.Message)" }
+                }
+
                 # Write CAPolicy.inf
                 _Log "Writing CAPolicy.inf..."
                 $caPolicyContent = @"
@@ -496,40 +685,142 @@ RenewalValidityPeriodUnits=5
 CRLPeriod=Weeks
 CRLPeriodUnits=2
 CRLDeltaPeriod=Days
-CRLDeltaPeriodUnits=1
+CRLDeltaPeriodUnits=0
 LoadDefaultTemplates=0
 "@
                 Set-Content -Path "C:\Windows\CAPolicy.inf" -Value $caPolicyContent -Force
 
-                # Install ADCS role
+                # Install ADCS role (idempotent)
                 _Log "Installing ADCS role..."
                 Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
 
-                # Install Enterprise Root CA
-                _Log "Installing Enterprise Root CA '$CAName'..."
-                Install-AdcsCertificationAuthority -CAType EnterpriseRootCa `
-                    -CACommonName $CAName `
-                    -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
-                    -KeyLength 2048 `
-                    -HashAlgorithmName SHA256 `
-                    -ValidityPeriod Years `
-                    -ValidityPeriodUnits 5 `
-                    -Force | Out-Null
-
-                _Log "Waiting for CA service to become ready..."
-                if (-not (Wait-CertSvcReady -TimeoutSec 60)) {
-                    throw "CA service did not become responsive within 60 seconds"
-                }
-                _Log "CA service is ready."
-            }
-            else {
-                # Ensure service is running
-                if ((Get-Service certsvc).Status -ne 'Running') {
-                    Start-Service certsvc
-                    if (-not (Wait-CertSvcReady -TimeoutSec 30)) {
-                        throw "Could not start existing CA service"
+                # Gate on AD readiness before publishing the Enterprise CA.
+                if ($FastFail) {
+                    # EXPERIMENT fast-fail pass: do NOT wait for writability -- attempt
+                    # immediately so a still-settling directory fails fast and the HOST
+                    # can reboot on the first RANGE_CONSTRAINT. (Reachable-only check.)
+                    _Log "Verifying AD DS / PKI container reachable (fast-fail experiment pass; NOT waiting for writability)..."
+                    if (-not (Wait-AdDsReady -TimeoutSec 60)) {
+                        _Log "WARNING: AD DS / PKI container not confirmed reachable after 60s - proceeding (fast-fail)."
                     }
                 }
+                else {
+                    _Log "Verifying AD DS will ACCEPT a Configuration-NC write before CA config (post-boot readiness probe)..."
+                    _Progress "waiting for AD DS to accept a Configuration-NC write..."
+                    if (-not (Wait-AdDsReady -TimeoutSec 600 -RequireWritable)) {
+                        _Log "WARNING: AD DS Configuration-NC write not confirmed ready after 600s - proceeding; the retry loop will remediate transient publish errors"
+                    }
+                    else {
+                        _Log "AD DS accepted a Configuration-NC probe write - directory is ready for the Enterprise CA publish."
+                    }
+                }
+
+                # Install Enterprise Root CA with retry + remediation. The AD
+                # publish (CCertSrvSetup::SetCASetupProperty -> LDAP writes into
+                # the Configuration NC) is REJECTED BY ntdsa with
+                # 0x80072082 ERROR_DS_RANGE_CONSTRAINT for a window right after
+                # dcpromo, until the freshly-promoted directory / schema cache
+                # settles. PROVEN on fabrikam (2026-06-23): a cold promote failed
+                # ALL retries at T+0, then succeeded on the FIRST try ~22 min
+                # later with NO reboot -- the cure is TIME, not a reboot. So:
+                #   (1) a generous time budget (~45 min) of retries that OUTLASTS the
+                #       post-boot window (PROVEN to close as late as boot+64min);
+                #   (2) on RANGE_CONSTRAINT specifically, force an IMMEDIATE schema
+                #       cache reload (schemaUpdateNow) to collapse that ~5-min
+                #       post-dcpromo window instead of waiting it out;
+                #   (3) one-shot NTDS field-engineering logging so the exact
+                #       offending attribute is captured if it still fails.
+                # Happy path is untouched: attempt 1 runs immediately and the
+                # extra machinery only engages on an actual transient failure
+                # (which is rare -- most promotes are ready by the time PKI runs).
+                $caConfigured = $false
+                $caLastErr = $null
+                $maxCaTries = 18
+                # EXPERIMENT fast-fail pass: only a few attempts so the scriptblock
+                # returns the failure to the host quickly (the host then reboots).
+                if ($FastFail) { $maxCaTries = 3 }
+                $feEnabled = $false
+                $feLevelPrior = $null
+                $caLoopStart = Get-Date
+                try {
+                    for ($caTry = 1; $caTry -le $maxCaTries; $caTry++) {
+                        try {
+                            _Log "Installing Enterprise Root CA '$CAName' (attempt $caTry/$maxCaTries)..."
+                            _Progress "publishing CA to AD (attempt $caTry/$maxCaTries)..."
+                            Install-AdcsCertificationAuthority -CAType EnterpriseRootCa `
+                                -CACommonName $CAName `
+                                -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
+                                -KeyLength 2048 `
+                                -HashAlgorithmName SHA256 `
+                                -ValidityPeriod Years `
+                                -ValidityPeriodUnits 5 `
+                                -Force | Out-Null
+                            $caConfigured = $true
+                            break
+                        }
+                        catch {
+                            $caLastErr = $_.Exception.Message
+                            # Config may have actually landed even though the cmdlet threw.
+                            if (Test-CaConfigured) {
+                                _Log "CA reports configured despite error on attempt $caTry ($caLastErr) - accepting."
+                                $caConfigured = $true
+                                break
+                            }
+                            $isRange = $caLastErr -match '0x80072082|ERROR_DS_RANGE_CONSTRAINT|acceptable range'
+                            $transient = $isRange -or ($caLastErr -match '0x8007200E|ERROR_DS_BUSY|0x8007200F|ERROR_DS_UNWILLING_TO_PERFORM|0x80072030|ERROR_DS_NO_SUCH_OBJECT|directory service')
+                            if (-not $transient) {
+                                _Log "Non-transient CA install error on attempt $caTry : $caLastErr"
+                                throw
+                            }
+                            _Log "Transient AD-publish error on attempt $caTry : $caLastErr -- remediating (tear down partial config, wait for AD, retry)."
+                            _Progress "attempt $caTry/$maxCaTries hit a transient AD error; remediating..."
+                            try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+                            try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
+                            if ($isRange) {
+                                # Post-dcpromo schema-cache window: force an immediate
+                                # reload instead of waiting it out (or rebooting).
+                                if (Invoke-SchemaCacheReload) { _Log "Forced schema cache reload (schemaUpdateNow) to clear the post-dcpromo publish window." }
+                                else { _Log "schemaUpdateNow reload attempt did not take (continuing)." }
+                                # One-shot: capture the exact failing attribute next time.
+                                if (-not $feEnabled) {
+                                    $feLevelPrior = Set-NtdsFieldEngineering -Level 5
+                                    $feEnabled = $true
+                                    _Log "Enabled NTDS '15 Field Engineering'=5 to capture the exact constraint attribute on the next attempt (prior=$feLevelPrior)."
+                                }
+                            }
+                            _Progress "attempt $caTry/${maxCaTries}: waiting for AD DS readiness after remediation..."
+                            Wait-AdDsReady -TimeoutSec 180 | Out-Null
+                            # Backoff with a ~5s heartbeat so the wait is visibly counting
+                            # down (not 'hung') and -PollProgress's stall timer keeps resetting.
+                            $backoffSec = [Math]::Min(180, 30 * $caTry)
+                            $backoffDeadline = (Get-Date).AddSeconds($backoffSec)
+                            while ((Get-Date) -lt $backoffDeadline) {
+                                $remain = [int]($backoffDeadline - (Get-Date)).TotalSeconds
+                                _Progress "attempt $caTry/$maxCaTries failed (post-dcpromo AD settling); next retry in ${remain}s"
+                                Start-Sleep -Seconds 5
+                            }
+                        }
+                    }
+                }
+                finally {
+                    if ($feEnabled) {
+                        $feRestore = 0
+                        if ($null -ne $feLevelPrior) { $feRestore = [int]$feLevelPrior }
+                        Set-NtdsFieldEngineering -Level $feRestore | Out-Null
+                        _Log "Restored NTDS '15 Field Engineering' to $feRestore."
+                        foreach ($ev in (Get-DsConstraintEvents -Since $caLoopStart)) { _Log "[DS diag] $ev" }
+                    }
+                }
+                if (-not $caConfigured) {
+                    throw "Enterprise Root CA configuration failed after $maxCaTries attempts. Last error: $caLastErr"
+                }
+
+                _Log "Waiting for CA service to become ready..."
+                _Progress "CA published; waiting for CertSvc to come online..."
+                if (-not (Wait-CertSvcReady -TimeoutSec 90)) {
+                    throw "CA service did not become responsive within 90 seconds"
+                }
+                _Log "CA service is ready."
             }
 
             # Configure CDP/AIA
@@ -618,10 +909,65 @@ LoadDefaultTemplates=0
     }
 
     Flush-LogBuffer -All
-    $result = Invoke-VmCommand -VmName $caVMName -VmDomainName $domainName `
-        -ScriptBlock $singleTierScript `
-        -ArgumentList $caName, $domainName, $webURL, $webFolderPath `
-        -DisplayName "SingleTierPKI: Install Enterprise Root CA"
+
+    # EXPERIMENT (2026-06-23): on the FIRST CA-publish RANGE_CONSTRAINT failure, reboot
+    # the CA/DC VM ONCE from the host and retry, to test whether a reboot clears the
+    # post-dcpromo settling window faster than waiting it out. The host (this function)
+    # detects the error and initiates the reboot; the in-guest job can't reboot itself.
+    # Our data says the cure is elapsed-time-since-NTDS-start and a reboot RESETS that
+    # clock, so this is EXPECTED TO NOT HELP -- but it's gated + reversible: set this to
+    # $false (or delete this block + the FastFail plumbing) to disable.
+    $rebootOnRangeConstraintExperiment = $true
+
+    # -AsJob -PollProgress: forward the guest's Write-Progress heartbeats LIVE to
+    # the console so the (now up to ~45 min) post-dcpromo CA retry loop shows a
+    # counting-down status instead of appearing hung. -TimeoutSeconds here is a
+    # STALL timeout (resets on every guest heartbeat, ~5s during backoff), NOT an
+    # absolute deadline; the inner absolute ceiling (max(TimeoutSeconds*6,1800)s
+    # = 60 min) hard-bounds a CA install that never settles -- it must EXCEED the
+    # widened ~45-min retry budget or it would kill the job mid-wait.
+    $rebootedForExperiment = $false
+    # First pass fails fast (when the experiment is on) so we can reboot on the first
+    # RANGE_CONSTRAINT; if the experiment is off this is $false = the robust path.
+    $fastFail = $rebootOnRangeConstraintExperiment
+    $result = $null
+    while ($true) {
+        $result = Invoke-VmCommand -VmName $caVMName -VmDomainName $domainName `
+            -ScriptBlock $singleTierScript `
+            -ArgumentList $caName, $domainName, $webURL, $webFolderPath, $fastFail `
+            -DisplayName "SingleTierPKI: Install Enterprise Root CA" `
+            -AsJob -PollProgress -TimeoutSeconds 600
+
+        $sbOut = $null
+        if ($result -and $result.ScriptBlockOutput) { $sbOut = $result.ScriptBlockOutput } else { $sbOut = $result }
+        $caSucceeded = ($sbOut -and $sbOut.Success)
+        $caErrText = ""
+        if ($sbOut -and $sbOut.Error) { $caErrText = "$($sbOut.Error)" }
+        $isRange = $caErrText -match '0x80072082|ERROR_DS_RANGE_CONSTRAINT|acceptable range'
+
+        if ($caSucceeded) { break }
+
+        if ($rebootOnRangeConstraintExperiment -and $isRange -and (-not $rebootedForExperiment)) {
+            Write-Log "[SingleTierPKI] EXPERIMENT: first CA-publish attempt failed with ERROR_DS_RANGE_CONSTRAINT. Rebooting $caVMName ONCE from the host to test whether a reboot clears the post-dcpromo window (our data predicts it will NOT, since a reboot resets the settle clock)..." -Warning
+            try {
+                $rebooted = Restart-VM2Smart -Name $caVMName -AllowTurnOff -Reason "PKI RANGE_CONSTRAINT reboot experiment"
+                Write-Log "[SingleTierPKI] EXPERIMENT: $caVMName restart issued (restarted=$rebooted); waiting for it to come back ready for PSDirect/AD..."
+                $null = Wait-ForVm -VmName $caVMName -PathToVerify "C:\Users" -VmDomainName $domainName -TimeoutMinutes 15
+            }
+            catch {
+                Write-Log "[SingleTierPKI] EXPERIMENT: reboot/wait of $caVMName errored: $($_.Exception.Message) - falling through to the robust retry path." -Warning
+            }
+            $rebootedForExperiment = $true
+            # After the reboot, run the ROBUST path (write-probe gate + full ~45-min
+            # budget) so the CA installs regardless of whether the reboot helped.
+            $fastFail = $false
+            continue
+        }
+
+        # Experiment off, not a RANGE_CONSTRAINT, or we already rebooted once:
+        # stop looping and let Test-PKIStepResult report the final result below.
+        break
+    }
 
     if (-not (Test-PKIStepResult -Result $result -StepName "CA installation" -LogPrefix "SingleTierPKI" -LogSource "CA" -LogOnly)) {
         return $false
@@ -1018,6 +1364,43 @@ Empty=True
     }
     Write-Log "[TwoTierPKI] Root CA files copied to host: $hostStagingPath"
 
+    # Register a static DNS A record (and reverse PTR) for the Root CA on the DC.
+    # The Root CA is a workgroup member and won't self-register via dynamic DNS.
+    # Other VMs may need to resolve its name for CRL/AIA distribution points.
+    try {
+        $rootIP = (Get-VMNetworkAdapter -VMName $rootCAVMName -ErrorAction Stop).IPAddresses |
+            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
+        if ($rootIP) {
+            $dnsScript = {
+                param($vmName, $zone, $ip)
+                $existing = Resolve-DnsName -Name "$vmName.$zone" -Type A -Server 127.0.0.1 -DnsOnly -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Type -eq 'A' }
+                if (-not $existing) {
+                    Add-DnsServerResourceRecordA -ZoneName $zone -Name $vmName -IPv4Address $ip -ErrorAction Stop
+                }
+                # Reverse PTR
+                $octets = $ip.Split('.')
+                $reverseZone = "$($octets[2]).$($octets[1]).$($octets[0]).in-addr.arpa"
+                $ptrZone = Get-DnsServerZone -Name $reverseZone -ErrorAction SilentlyContinue
+                if ($ptrZone) {
+                    $ptrExisting = Get-DnsServerResourceRecord -ZoneName $reverseZone -Name $octets[3] -RRType Ptr -ErrorAction SilentlyContinue
+                    if (-not $ptrExisting) {
+                        Add-DnsServerResourceRecordPtr -ZoneName $reverseZone -Name $octets[3] -PtrDomainName "$vmName.$zone." -ErrorAction Stop
+                    }
+                }
+            }
+            $null = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName -DisplayName "Register Root CA DNS" -SuppressLog `
+                -ScriptBlock $dnsScript -ArgumentList $rootCAVMName, $domainName, $rootIP
+            Write-Log "[TwoTierPKI] Registered DNS A record: $rootCAVMName.$domainName -> $rootIP"
+        }
+        else {
+            Write-Log "[TwoTierPKI] Could not determine Root CA IP; skipping DNS registration" -Warning
+        }
+    }
+    catch {
+        Write-Log "[TwoTierPKI] DNS registration for Root CA failed: $($_.Exception.Message)" -Warning
+    }
+
     #---------------------------------------------------------------------------
     # STEP 2: Prepare Intermediate CA
     #---------------------------------------------------------------------------
@@ -1143,11 +1526,28 @@ Empty=True
             if ($rootAlreadyPublished) {
                 _Log "  Root CA cert already published to AD (thumbprint: $rootThumbprint) - skipping"
             } else {
-                & certutil.exe -dspublish -f $rootCertFile RootCA | Out-Null
-                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -dspublish RootCA exit code $LASTEXITCODE" }
-                & certutil.exe -dspublish -f $rootCertFile NTAuthCA | Out-Null
-                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -dspublish NTAuthCA exit code $LASTEXITCODE" }
-                _Log "  Root CA cert published to AD"
+                $publishMaxRetries = 3
+                $publishSuccess = $false
+                for ($publishAttempt = 1; $publishAttempt -le $publishMaxRetries; $publishAttempt++) {
+                    & certutil.exe -dspublish -f $rootCertFile RootCA 2>&1 | Out-Null
+                    $rcRoot = $LASTEXITCODE
+                    & certutil.exe -dspublish -f $rootCertFile NTAuthCA 2>&1 | Out-Null
+                    $rcNTAuth = $LASTEXITCODE
+                    if ($rcRoot -eq 0 -and $rcNTAuth -eq 0) {
+                        $publishSuccess = $true
+                        break
+                    }
+                    _Log "WARNING: certutil -dspublish failed (attempt $publishAttempt/$publishMaxRetries): RootCA=$rcRoot, NTAuthCA=$rcNTAuth"
+                    if ($publishAttempt -lt $publishMaxRetries) {
+                        _Log "  Waiting 15s before retry (AD replication/permissions may need time)..."
+                        Start-Sleep -Seconds 15
+                    }
+                }
+                if ($publishSuccess) {
+                    _Log "  Root CA cert published to AD"
+                } else {
+                    _Log "ERROR: certutil -dspublish failed after $publishMaxRetries attempts. Subordinate CA install will likely fail."
+                }
             }
 
             # Publish root CRL to AD (idempotent with -f flag)
@@ -1179,7 +1579,7 @@ RenewalValidityPeriodUnits=5
 CRLPeriod=Weeks
 CRLPeriodUnits=2
 CRLDeltaPeriod=Days
-CRLDeltaPeriodUnits=1
+CRLDeltaPeriodUnits=0
 LoadDefaultTemplates=0
 
 [BasicConstraintsExtension]
@@ -1201,6 +1601,28 @@ Critical=Yes
                 # Install ADCS role (idempotent)
                 _Log "Installing ADCS role..."
                 Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
+
+                # Enterprise Subordinate CA setup writes Enrollment Services /
+                # NTAuth objects to the Configuration NC. If AD isn't ready to
+                # accept those writes the install fails with 0x80072082
+                # ERROR_DS_RANGE_CONSTRAINT. Gate on the Public Key Services
+                # container being reachable (proves a DC is answering and the
+                # PKI containers exist) before launching setup, so a transient
+                # AD-not-ready window doesn't burn the install.
+                $adReadyDeadline = (Get-Date).AddSeconds(180)
+                $adReady = $false
+                while ((Get-Date) -lt $adReadyDeadline) {
+                    try {
+                        $cfgNcWait = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+                        if ($cfgNcWait) {
+                            $pksWait = [ADSI]"LDAP://CN=Public Key Services,CN=Services,$cfgNcWait"
+                            if ($pksWait.distinguishedName) { $adReady = $true; break }
+                        }
+                    } catch {}
+                    Start-Sleep -Seconds 5
+                }
+                if ($adReady) { _Log "AD DS / Public Key Services container is ready for subordinate CA publish." }
+                else { _Log "WARNING: AD DS / PKI container not confirmed ready after 180s - proceeding anyway." }
 
                 # Install Enterprise Subordinate CA with offline request file
                 _Log "Installing Enterprise Subordinate CA '$IntCAName' (offline enrollment)..."
@@ -1818,7 +2240,7 @@ CertificateTemplate = SubCA
                 if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\CRLPeriod "Weeks" | Out-Null
                 if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
-                & certutil.exe -setreg CA\CRLDeltaPeriodUnits 1 | Out-Null
+                & certutil.exe -setreg CA\CRLDeltaPeriodUnits 0 | Out-Null
                 if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLDeltaPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\CRLDeltaPeriod "Days" | Out-Null
                 if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLDeltaPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }

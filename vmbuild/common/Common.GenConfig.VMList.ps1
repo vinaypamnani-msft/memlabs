@@ -1,4 +1,5 @@
-﻿# Displays a Menu based on a property, offers options in [1], [2],[3] format
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+# Displays a Menu based on a property, offers options in [1], [2],[3] format
 # With additional options passed in via additionalOptions
 function Select-Options {
     [CmdletBinding()]
@@ -420,6 +421,21 @@ function Select-Options {
                 Get-CMVersionMenu -property $property -name $name -CurrentValue $value
                 continue MainLoop
             }
+            "installOffice" {
+                $officeChannels = @("Disabled", "Current", "MonthlyEnterprise", "SemiAnnual")
+                $currentDisplay = if ($value -eq $false) { "Disabled" } else { $value }
+                Write-Log -Activity -NoNewLine "Office Channel Selection"
+                $selection = Get-Menu2 -MenuName "Office 365 Channel" -Prompt "Select Office update channel (or Disabled)" -OptionArray $officeChannels -CurrentValue $currentDisplay -Test:$false -NoClear
+                if ($selection -ne "ESCAPE") {
+                    if ($selection -eq "Disabled") {
+                        $property.installOffice = $false
+                    }
+                    else {
+                        $property.installOffice = $selection
+                    }
+                }
+                continue MainLoop
+            }
             "version" {
                 Get-CMVersionMenu -property $property -name $name -CurrentValue $value
                 continue MainLoop
@@ -771,10 +787,13 @@ function Select-VirtualMachines {
                     $machineName = $virtualMachine.vmName                    
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
+                        # NB: $IsLinux is a PowerShell 7 automatic constant -- use $vmIsLinux
+                        $vmIsLinux = Test-VmIsLinux -Vm $virtualMachine
                         $diskSummary = Get-DiskShortSummary -VirtualMachine $virtualMachine
-                        $customOptions = [ordered]@{
-                            "*B1" = ""
-                            "*B"  = "Disks%$($Global:Common.Colors.GenConfigHeader)"
+                        $customOptions = [ordered]@{}
+                        if (-not $vmIsLinux) {
+                            $customOptions["*B1"] = ""
+                            $customOptions["*B"]  = "Disks%$($Global:Common.Colors.GenConfigHeader)"
                         }
                         # Inline one row per existing disk (when present).
                         # itemName must be either a single letter or a number;
@@ -784,41 +803,45 @@ function Select-VirtualMachines {
                         # numbering, and keep a $diskNumToLetter map for the
                         # reverse lookup. "-D" prefix marks the row deletable
                         # (Delete key returns "-D<num>").
-                        $diskLettersInline = Get-VMDiskLetters -VirtualMachine $virtualMachine
                         $diskNumToLetter = @{}
-                        $diskNum = 90
-                        foreach ($dl in $diskLettersInline) {
-                            $dsize = $virtualMachine.additionalDisks.$dl
-                            $dusage = Get-VMDiskUsage -VirtualMachine $virtualMachine -Letter $dl
-                            $key = [string]$diskNum
-                            $rowText = "$($dl):  $dsize".PadRight(20) + "($dusage)"
-                            $rowColor = "DarkSeaGreen"
-                            # If a prior Invoke-RemoveDisk rejected this disk
-                            # (e.g. in use by SQL / ConfigMgr install dir),
-                            # surface that reason inline on the row and
-                            # consume the error so it doesn't also show in
-                            # the top banner. Mirrors Get-DataString's
-                            # [x] <message> pattern for property edits.
-                            $diskErrKey = "disk:$($virtualMachine.vmName):$dl"
-                            $diskErr = $null
-                            if ($global:GenConfigErrorMessages) {
-                                $diskErr = $global:GenConfigErrorMessages | Where-Object { $_.property -eq $diskErrKey } | Select-Object -First 1
+                        if (-not $vmIsLinux) {
+                            $diskLettersInline = Get-VMDiskLetters -VirtualMachine $virtualMachine
+                            $diskNum = 90
+                            foreach ($dl in $diskLettersInline) {
+                                $dsize = $virtualMachine.additionalDisks.$dl
+                                $dusage = Get-VMDiskUsage -VirtualMachine $virtualMachine -Letter $dl
+                                $key = [string]$diskNum
+                                $rowText = "$($dl):  $dsize".PadRight(20) + "($dusage)"
+                                $rowColor = "DarkSeaGreen"
+                                # If a prior Invoke-RemoveDisk rejected this disk
+                                # (e.g. in use by SQL / ConfigMgr install dir),
+                                # surface that reason inline on the row and
+                                # consume the error so it doesn't also show in
+                                # the top banner. Mirrors Get-DataString's
+                                # [x] <message> pattern for property edits.
+                                $diskErrKey = "disk:$($virtualMachine.vmName):$dl"
+                                $diskErr = $null
+                                if ($global:GenConfigErrorMessages) {
+                                    $diskErr = $global:GenConfigErrorMessages | Where-Object { $_.property -eq $diskErrKey } | Select-Object -First 1
+                                }
+                                if ($diskErr) {
+                                    # Pad to ~50 so [x] lines up roughly with the
+                                    # extras column on property rows (where things
+                                    # like "(CON-PS1SITE)" appear next to vmName).
+                                    $rowText = $rowText.PadRight(50) + "[x] $($diskErr.Message)"
+                                    $rowColor = "Salmon"
+                                    $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages | Where-Object { $_.property -ne $diskErrKey })
+                                }
+                                $customOptions["-D$key"] = "$rowText%$rowColor"
+                                $customOptions["H$key"]  = "Press Enter to change size of disk $($dl):, or Delete to remove it."
+                                $diskNumToLetter[$key] = $dl
+                                $diskNum++
                             }
-                            if ($diskErr) {
-                                # Pad to ~50 so [x] lines up roughly with the
-                                # extras column on property rows (where things
-                                # like "(CON-PS1SITE)" appear next to vmName).
-                                $rowText = $rowText.PadRight(50) + "[x] $($diskErr.Message)"
-                                $rowColor = "Salmon"
-                                $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages | Where-Object { $_.property -ne $diskErrKey })
-                            }
-                            $customOptions["-D$key"] = "$rowText%$rowColor"
-                            $customOptions["H$key"]  = "Press Enter to change size of disk $($dl):, or Delete to remove it."
-                            $diskNumToLetter[$key] = $dl
-                            $diskNum++
                         }
-                        $customOptions["M"]  = "Manage Disks  ($diskSummary)"
-                        $customOptions["HM"] = "Open the disk management screen (add, edit size, remove). Delete key on a disk row also removes it."
+                        if (-not $vmIsLinux) {
+                            $customOptions["M"]  = "Manage Disks  ($diskSummary)"
+                            $customOptions["HM"] = "Open the disk management screen (add, edit size, remove). Delete key on a disk row also removes it."
+                        }
                         if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
                             $customOptions += [ordered]@{
                                 "*B2" = ""
@@ -858,7 +881,7 @@ function Select-VirtualMachines {
                                     }
                                 }
                             }
-                            if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
+                            if (-not $vmIsLinux -and $virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
 
 
                                 if ($virtualMachine.Role -notin ("DC", "BDC")) {

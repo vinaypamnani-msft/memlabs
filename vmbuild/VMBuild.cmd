@@ -38,6 +38,13 @@ git config --global --add safe.directory E:\Memlabs
 git config --global --add safe.directory E:/memlabs
 @ECHO OFF
 
+REM Prevent inline auto-gc during fetch/pull. On Windows gc.autoDetach
+REM defaults to false (no fork), so gc runs synchronously and tries to
+REM rewrite pack files while fetch still holds handles -- causing
+REM "Unlink of file '.git/objects/pack/...' failed" hangs.
+REM Explicit gc runs in Invoke-Maintenance.ps1 instead.
+git config --local gc.auto 0 2>NUL
+
 REM ------------------------------------------------------------
 REM Detect if the current branch has been deleted from origin
 REM (e.g. a feature branch that was merged + pruned). If so,
@@ -76,9 +83,33 @@ IF NOT "%CURBRANCH%"=="" (
     )
 )
 
+REM ------------------------------------------------------------
+REM Clean up local branches whose remote tracking branch was pruned
+REM (merged + deleted on GitHub). Uses -d (not -D) so unmerged
+REM work is never lost. Skips develop/main/master and current branch.
+REM ------------------------------------------------------------
+FOR /F "tokens=1,2" %%A IN ('git for-each-ref --format="%%(refname:short) %%(upstream:track)" refs/heads/ 2^>NUL') DO (
+    IF "%%B"=="[gone]" (
+        IF /I NOT "%%A"=="develop" (
+            IF /I NOT "%%A"=="main" (
+                IF /I NOT "%%A"=="master" (
+                    ECHO  Removing stale branch: %%A
+                    git branch -d "%%A" 2>NUL
+                )
+            )
+        )
+    )
+)
+
 @ECHO ON
 git pull
 @ECHO OFF
+IF ERRORLEVEL 1 (
+    ECHO  git pull failed -- running git gc and retrying...
+    git gc 2>NUL
+    timeout /t 5 /nobreak >NUL
+    git pull
+)
 IF ERRORLEVEL 1 (
     ECHO.
     ECHO ============================================================
@@ -124,6 +155,26 @@ REM ============================================================
 powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -File ".\Clean-OldLogs.ps1"
 IF ERRORLEVEL 1 (
     ECHO WARNING: Clean-OldLogs reported an error.
+)
+
+REM ============================================================
+REM Remove the winget 'msstore' source to stop Microsoft Store
+REM "This content is blocked by your IT admin" toast spam.
+REM The msstore source background-refreshes against
+REM storeedgefd/displaycatalog.mp.microsoft.com, which Defender
+REM Network Protection blocks -- firing a toast each time. MemLabs
+REM only ever uses the 'winget' source (New-LinuxBaseImage.ps1),
+REM so removing msstore has no functional impact. Guarded so it
+REM only runs when winget exists AND msstore is still present,
+REM making it a silent no-op on every subsequent launch.
+REM ============================================================
+where winget >NUL 2>&1
+IF NOT ERRORLEVEL 1 (
+    winget source list 2>NUL | findstr /I "msstore" >NUL 2>&1
+    IF NOT ERRORLEVEL 1 (
+        ECHO Removing winget 'msstore' source to suppress Store block-page toasts...
+        winget source remove msstore >NUL 2>&1
+    )
 )
 
 REM ============================================================

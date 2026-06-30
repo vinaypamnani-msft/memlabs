@@ -1,4 +1,4 @@
-Configuration Phase9
+﻿Configuration Phase9
 {
     param
     (
@@ -8,7 +8,7 @@ Configuration Phase9
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'xFailOverCluster', 'AccessControlDsc', 'SqlServerDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'FailoverClusterDsc', 'AccessControlDsc', 'SqlServerDsc'
 
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -24,9 +24,15 @@ Configuration Phase9
     # VM's cmOptions so multi-hierarchy deploys with mixed CM versions stamp
     # the correct folder on each node. See CAS/Primary and DC Node blocks.
 
+    # Strip domain prefix from credential username if present (the multi-node
+    # DSC compilation path pre-prefixes with NetBIOS name, which would create
+    # an invalid double-prefix like "FQDN\NetBIOS\user")
+    $AdminUserName = $Admincreds.UserName
+    if ($AdminUserName -match '\\') { $AdminUserName = ($AdminUserName -split '\\', 2)[1] }
+
     # Domain Creds
     $DomainName = $deployConfig.parameters.domainName
-    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
 
@@ -62,7 +68,7 @@ Configuration Phase9
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Disable-AgentJob-Set.sql"
@@ -155,7 +161,7 @@ Configuration Phase9
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
         $PSName = $ThisVM.thisParams.PSName
         $CSName = $ThisVM.thisParams.CSName
@@ -220,10 +226,11 @@ Configuration Phase9
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
-                MachineName = $parentName
-                ExtFolder   = $CM
-                Ensure      = "Present"
-                DependsOn   = "[WriteStatus]WaitExtSchema"
+                MachineName          = $parentName
+                ExtFolder            = $CM
+                Ensure               = "Present"
+                DependsOn            = "[WriteStatus]WaitExtSchema"
+                PsDscRunAsCredential = $DomainCreds
             }
         }
 
@@ -243,7 +250,7 @@ Configuration Phase9
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
         $PSName = $ThisVM.thisParams.ParentSiteServer
 
@@ -299,7 +306,7 @@ Configuration Phase9
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         # Resolve per-VM CM version so each hierarchy uses its own source
@@ -415,7 +422,7 @@ Configuration Phase9
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         WriteStatus ADKInstall {

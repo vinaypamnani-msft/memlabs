@@ -1,4 +1,4 @@
-Configuration Phase8
+﻿Configuration Phase8
 {
     param
     (
@@ -8,7 +8,7 @@ Configuration Phase8
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'xFailOverCluster', 'AccessControlDsc', 'SqlServerDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'FailoverClusterDsc', 'AccessControlDsc', 'SqlServerDsc'
 
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -24,9 +24,15 @@ Configuration Phase8
     # VM's cmOptions so multi-hierarchy deploys with mixed CM versions stamp
     # the correct folder on each node. See CAS/Primary and DC Node blocks.
 
+    # Strip domain prefix from credential username if present (the multi-node
+    # DSC compilation path pre-prefixes with NetBIOS name, which would create
+    # an invalid double-prefix like "FQDN\NetBIOS\user")
+    $AdminUserName = $Admincreds.UserName
+    if ($AdminUserName -match '\\') { $AdminUserName = ($AdminUserName -split '\\', 2)[1] }
+
     # Domain Creds
     $DomainName = $deployConfig.parameters.domainName
-    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
 
@@ -104,6 +110,102 @@ Configuration Phase8
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
 
+        # WSUS categories baseline cab import for a REMOTE SUP site system.
+        # When the SUP/WSUS role lives on a dedicated site system (this box)
+        # rather than co-located on the site server, nobody else imports the
+        # categories cab onto THIS WSUS host: InstallRoles (Primary/CAS) and
+        # the Secondary Phase 8 path both run the import against their OWN
+        # localhost WSUS, which a remote SUP is not. Without this block the
+        # SUP's taxonomy stays at the ~17-row postinstall default until a slow
+        # upstream categories sync lands (observed on a remote SUP: Phase 11
+        # "WSUS initial sync (taxonomy) not populated [TaxonomyCats=17]").
+        #
+        # TIMING: WSUS on a dedicated SUP site system is installed + postinstalled
+        # by CM when the owning site server's InstallRoles adds the SUP role.
+        # InstallRoles runs EARLY in the site server's ScriptWorkflow -- after CM
+        # setup but BEFORE perfloading kicks the first CM update sync. So we must
+        # NOT wait for the site server's ScriptWorkflow=Completed (that's AFTER
+        # perfloading -- too late to help). Instead, poll locally for WSUS to
+        # become postinstalled (SUSDB ready) and run the import the moment it is,
+        # in parallel with the site-server CM install, so the taxonomy is loaded
+        # before/at perfloading's sync. The cab was already staged to
+        # C:\staging\wsus\ in Phase <=7. Idempotent + non-fatal:
+        # Start-WsusBaselineImportBackground short-circuits with
+        # 'already-imported' / 'no-cab' / 'no-wsusutil' as appropriate.
+        #
+        # TOP-LEVEL ONLY: `wsusutil import` is valid ONLY for a SUP that syncs
+        # from Microsoft Update (the cab is an MU-sourced catalog). A DOWNSTREAM
+        # SUP (a child primary's / secondary's SUP that syncs from the CAS/parent
+        # upstream WSUS) must NOT import -- it corrupts the local sync anchor and
+        # the next upstream sync fails with UssInternalError ("updates pipeline
+        # broken"). Downstream SUPs get their categories via replication from the
+        # upstream. So gate on the owning site server being top-level (no
+        # parentSiteCode). Start-WsusBaselineImportBackground also self-guards on
+        # the live WSUS upstream config as a belt-and-suspenders.
+        $supSiteServer = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") -and $_.Sitecode -eq $ThisVM.Sitecode } | Select-Object -First 1
+        if ($ThisVM.installSUP -eq $true -and $supSiteServer -and -not $supSiteServer.parentSiteCode) {
+            WriteStatus ImportWsusBaselineStatus {
+                Status = "Importing the WSUS categories baseline once CM postinstalls WSUS on this SUP."
+            }
+
+            Script ImportWsusBaseline {
+                GetScript  = { @{ Result = '' } }
+                TestScript = {
+                    if (-not (Test-Path 'C:\staging\wsus\WsusCategoriesBaseline.cab')) { return $true }
+                    try {
+                        [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+                        $srv = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+                        return ($srv.GetUpdateCategories().Count -ge 100)
+                    }
+                    catch { return $false }
+                }
+                SetScript  = {
+                    try { . C:\staging\DSC\phases\ScriptFunctions.ps1 } catch {}
+
+                    # Poll for local WSUS readiness: WsusUtil.exe present AND the
+                    # WSUS API answers (GetUpdateCategories throws until the SUSDB
+                    # postinstall CM runs during InstallRoles has completed).
+                    # Generous cap (~6h, polling 60s) because CM setup on the site
+                    # server can take 1-3h before InstallRoles even adds the SUP
+                    # role. Non-fatal on timeout.
+                    $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
+                    $ready = $false
+                    for ($i = 0; $i -lt 360; $i++) {
+                        if (Test-Path $wsusUtil) {
+                            try {
+                                [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+                                $srv = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+                                $null = $srv.GetUpdateCategories()
+                                $ready = $true
+                                break
+                            }
+                            catch {}
+                        }
+                        if (($i % 10) -eq 0) {
+                            try { Write-DscStatus "[Phase8-SiteSystem] Waiting for CM to install/postinstall WSUS on this SUP before importing the categories baseline (waited $i min)..." -NoLog } catch {}
+                        }
+                        Start-Sleep -Seconds 60
+                    }
+
+                    if (-not $ready) {
+                        try { Write-DscStatus "[Phase8-SiteSystem] WSUS not postinstalled after ~6h; skipping cab import (an upstream categories sync will populate the taxonomy later)." } catch {}
+                        return
+                    }
+
+                    try {
+                        Start-WsusBaselineImportBackground -Tag '[Phase8-SiteSystem]' | Out-Null
+                        Wait-WsusBaselineImport -Tag '[Phase8-SiteSystem]'
+                    }
+                    catch {
+                        # Non-fatal: an upstream categories sync will eventually
+                        # populate the taxonomy, just slower. Don't break DSC.
+                    }
+                }
+                DependsOn  = "[WriteStatus]ImportWsusBaselineStatus"
+            }
+            $nextDepend = '[Script]ImportWsusBaseline'
+        }
+
         if ($ThisVM.InstallPatchMyPC) {
             $WaitFor = @()
 
@@ -178,7 +280,7 @@ Configuration Phase8
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Disable-AgentJob-Set.sql"
@@ -290,7 +392,7 @@ Configuration Phase8
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
         $PSName = $ThisVM.thisParams.PSName
         $CSName = $ThisVM.thisParams.CSName
@@ -355,10 +457,11 @@ Configuration Phase8
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
-                MachineName = $parentName
-                ExtFolder   = $CM
-                Ensure      = "Present"
-                DependsOn   = "[WriteStatus]WaitExtSchema"
+                MachineName          = $parentName
+                ExtFolder            = $CM
+                Ensure               = "Present"
+                DependsOn            = "[WriteStatus]WaitExtSchema"
+                PsDscRunAsCredential = $DomainCreds
             }
         }
 
@@ -378,7 +481,7 @@ Configuration Phase8
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
         $PSName = $ThisVM.thisParams.ParentSiteServer
 
@@ -425,16 +528,46 @@ Configuration Phase8
             DependsOn     = $nextDepend
         }
 
+        # WSUS categories baseline cab import for this Secondary's SUP.
+        #
+        # A Secondary's SUP is ALWAYS a DOWNSTREAM/replica that syncs from the
+        # parent primary's SUP -- there is NO topology in which a Secondary is a
+        # top-level Microsoft Update source. `wsusutil import` of the MU-sourced
+        # cab is only valid for a top-level MU SUP; importing it into a downstream
+        # WSUS stamps a foreign sync anchor and the next upstream sync fails with
+        # UssInternalError (confirmed live on FAB-PS2DPMPSUP1). So this node must
+        # NEVER import -- it is an UNCONDITIONAL, topology-based no-op.
+        #
+        # We do NOT rely on the function's runtime downstream-skip guard here: a
+        # freshly-postinstalled WSUS defaults to SyncFromMicrosoftUpdate=True with
+        # no upstream set, and CM only flips it to downstream when WCM reconciles
+        # the SUP component -- so there is a window after WaitPrimary where the
+        # runtime config still looks top-level. Gating on topology (Secondary =
+        # always downstream) closes that race entirely. Categories replicate from
+        # the upstream SUP instead. (Resource kept only for the DependsOn chain.)
+        Script ImportWsusBaseline {
+            GetScript  = { @{ Result = '' } }
+            TestScript = { return $true }
+            SetScript  = {
+                try {
+                    . C:\staging\DSC\phases\ScriptFunctions.ps1
+                    Write-DscStatus '[Phase8-Secondary] Secondary SUP is always downstream - skipping WSUS cab import (categories replicate from the upstream SUP; importing the MU cab would corrupt the sync anchor / UssInternalError).'
+                }
+                catch { }
+            }
+            DependsOn  = "[WaitForEvent]WaitPrimary"
+        }
+
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WaitForEvent]WaitPrimary"
+            DependsOn = "[Script]ImportWsusBaseline"
         }
 
         WriteStatus Complete {
-            DependsOn = "[InstallODBCDriver]ODBCDriverInstall"
+            DependsOn = "[Script]ImportWsusBaseline"
             Status    = "Complete!"
         }
     }
@@ -579,16 +712,11 @@ Configuration Phase8
                 FileServer = $ThisVM.PatchMyPCFileServer
             }
             $nextDepend = '[InstallPMPC]InstallPMPC'
-            WriteStatus RebootNow {
-                Status    = "Rebooting to get Finalize PMPC"
-                DependsOn = $nextDepend
-            }
-
-            RebootNow RebootNow {
-                FileName  = 'C:\Temp\PMPCReboot.txt'
-                DependsOn = $nextDepend
-            }
-            $nextDepend = "[RebootNow]RebootNow"
+            # No RebootNow here: pmpc.msi was installed with /norestart and the
+            # forced reboot would kill the in-flight WSUS sync that perfloading
+            # kicked off after AddProduct (sync runs async on WsusService.exe
+            # and is not waited on by ScriptWorkflow). Any reboot PMPC actually
+            # needs is picked up at the next natural restart.
         }
 
         WriteStatus Complete {
@@ -606,7 +734,7 @@ Configuration Phase8
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         WriteStatus ADKInstall {

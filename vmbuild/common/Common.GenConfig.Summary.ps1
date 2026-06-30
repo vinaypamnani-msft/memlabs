@@ -1,4 +1,5 @@
-﻿function get-VMOptionsSummary {
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+function get-VMOptionsSummary {
 
     $options = $Global:Config.vmOptions
     if ($null -eq $options.timeZone) {
@@ -211,6 +212,7 @@ function Get-SortedProperties {
         'tpmEnabled'          = 'tpmEnabled'
         'BitLocker'           = 'BitLocker'
         'InstallSSMS'         = 'InstallSSMS'
+        'installOffice'       = 'InstallOffice'
         'pushClient'          = 'pushClient'
         'additionalDisks'     = 'AdditionalDisks'
         'installDP'           = 'InstallDP'
@@ -605,6 +607,12 @@ function get-VMString {
         }
         $name += "]"
     }
+    if (Test-VmIsLinux -Vm $virtualMachine) {
+        if ($virtualMachine.enableRDP) { $name += " [RDP]" }
+        if ($virtualMachine.joinDomain) { $name += " [AD]" }
+    }
+    if ($virtualMachine.useProxy) { $name += " [Proxy]" }
+    if ($virtualMachine.BitLocker) { $name += " [BL]" }
     $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 12)
     # Demoted from -LogOnly: this runs once per VM on every menu redraw and
     # stringifying $virtualMachine is expensive. Promote with -Verbose only

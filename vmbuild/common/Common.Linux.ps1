@@ -1,3 +1,4 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 # Common.Linux.ps1
 # Building blocks for Linux (Ubuntu) VMs in memlabs.
 #
@@ -14,6 +15,87 @@
 #
 # Higher-level orchestration (calling these from the create-VM scriptblock,
 # DNS registration, RDCMan exclusion, etc.) lives in Phase 1d-1g.
+
+# ── Script directory for external .sh / .py files ────────────────────────
+# All non-trivial bash scripts live as standalone files under
+# vmbuild/scripts/linux/.  Get-LinuxScript reads them, optionally prepends
+# variable assignments, and returns the content ready for
+# Invoke-LinuxVmCommand -BashCommand.
+$script:LinuxScriptDir = Join-Path (Split-Path $PSScriptRoot) 'scripts\linux'
+
+function Get-LinuxScript {
+    <#
+    .SYNOPSIS
+        Read an external bash script from scripts/linux/ and optionally
+        inject PowerShell variables as bash variable assignments.
+
+    .PARAMETER Name
+        Relative path under scripts/linux/ without the .sh extension.
+        E.g. "proxy/install-squid", "bake/01-system-updates",
+        "roles/realm-join".
+
+    .PARAMETER Variables
+        Hashtable of VARNAME = value pairs. Each is emitted as a
+        single-quoted bash assignment prepended to the script body:
+            VARNAME='value'
+        Values containing single quotes are escaped ('\'').
+
+    .PARAMETER IncludeAptRetry
+        When set, sources lib/apt-retry.sh at the top of the script
+        so the apt_retry function is available.
+
+    .OUTPUTS
+        [string] — the complete bash script body.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)][string]$Name,
+        [hashtable]$Variables,
+        [switch]$IncludeAptRetry
+    )
+
+    $scriptPath = Join-Path $script:LinuxScriptDir "$Name.sh"
+    if (-not (Test-Path $scriptPath)) {
+        throw "Get-LinuxScript: script not found: $scriptPath"
+    }
+    $body = Get-Content -Path $scriptPath -Raw
+
+    # Prepend variable assignments (single-quoted to avoid bash expansion).
+    $prefix = ''
+    if ($Variables -and $Variables.Count -gt 0) {
+        $lines = foreach ($key in $Variables.Keys) {
+            $val = $Variables[$key] -replace "'", "'\\''"
+            "${key}='${val}'"
+        }
+        $prefix = ($lines -join "`n") + "`n"
+    }
+
+    # Optionally prepend the shared apt_retry helper.
+    if ($IncludeAptRetry.IsPresent) {
+        $aptRetryPath = Join-Path $script:LinuxScriptDir 'lib\apt-retry.sh'
+        if (Test-Path $aptRetryPath) {
+            $aptRetryBody = Get-Content -Path $aptRetryPath -Raw
+            # Strip the shebang from the helper since we're inlining it.
+            $aptRetryBody = $aptRetryBody -replace '^#!/bin/bash\r?\n', ''
+            $prefix = $aptRetryBody + "`n" + $prefix
+        }
+    }
+
+    if ($prefix) {
+        # Insert prefix after the shebang line (if present) so bash sees
+        # the variables before the script body uses them.
+        if ($body -match '^(#!/[^\r\n]+\r?\n)') {
+            $shebang = $Matches[1]
+            $rest = $body.Substring($shebang.Length)
+            $body = $shebang + $prefix + $rest
+        }
+        else {
+            $body = $prefix + $body
+        }
+    }
+
+    return $body
+}
 
 function Get-LinuxAdminSshKeyPair {
     [CmdletBinding()]
@@ -136,16 +218,42 @@ public class MemlabsIsoFile {
 '@
     }
 
-    $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+    # IMAPI2FS COM object is not thread-safe; parallel Linux VM creation
+    # (runspaces) can collide on New-Object, producing 0xC0AAB138. Use a
+    # named mutex so only one thread builds an ISO at a time.
+    $mutex = [System.Threading.Mutex]::new($false, 'Global\MemlabsImapi2fsLock')
     try {
-        $fsi.FileSystemsToCreate = 3   # ISO9660 (1) | Joliet (2)
-        $fsi.VolumeName = $VolumeLabel
-        $fsi.Root.AddTree($SourceDir, $false)
-        $result = $fsi.CreateResultImage()
-        [MemlabsIsoFile]::Create($OutputIsoPath, $result.ImageStream, $result.BlockSize, $result.TotalBlocks)
+        $null = $mutex.WaitOne()
+        $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+        try {
+            $fsi.FileSystemsToCreate = 3   # ISO9660 (1) | Joliet (2)
+            $fsi.VolumeName = $VolumeLabel
+
+            # IMAPI defaults the result-image size cap to a small (CD-sized) media
+            # profile, so AddTree throws "result image ... larger than the current
+            # configured limit" once the payload exceeds ~650MB (e.g. the download-
+            # cache ISO that now carries SSMS). Raise FreeMediaBlocks (2048-byte
+            # blocks) to cover the actual source size with margin so arbitrarily
+            # large ISOs build. Harmless for the tiny cloud-init seed (a few KB).
+            try {
+                $srcBytes = (Get-ChildItem -LiteralPath $SourceDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                if (-not $srcBytes) { $srcBytes = 0 }
+                $needBlocks = [math]::Ceiling((([double]$srcBytes * 1.2) + (64 * 1MB)) / 2048)
+                if ($needBlocks -gt [double]$fsi.FreeMediaBlocks) { $fsi.FreeMediaBlocks = [int]$needBlocks }
+            }
+            catch { }
+
+            $fsi.Root.AddTree($SourceDir, $false)
+            $result = $fsi.CreateResultImage()
+            [MemlabsIsoFile]::Create($OutputIsoPath, $result.ImageStream, $result.BlockSize, $result.TotalBlocks)
+        }
+        finally {
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($fsi) | Out-Null
+        }
     }
     finally {
-        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($fsi) | Out-Null
+        $mutex.ReleaseMutex()
+        $mutex.Dispose()
     }
 }
 
@@ -350,7 +458,8 @@ chpasswd:
         'openssh-server',
         'qemu-guest-agent',
         'linux-tools-virtual',
-        'linux-cloud-tools-virtual'
+        'linux-cloud-tools-virtual',
+        'samba'
     ) + $ExtraPackages | Select-Object -Unique
     $packagesYaml = ($packages | ForEach-Object { "  - $_" }) -join "`n"
 
@@ -409,21 +518,34 @@ chpasswd:
         # the host before the reboot, unblocking Wait-LinuxVmReady for DHCP
         # VMs (LinuxServer) that have no ExpectedIPAddress fallback.
         'systemctl restart hv-kvp-daemon.service || true',
+        # Prevent maintenance-mode boot: add fsck.mode=force fsck.repair=yes
+        # to the kernel command line so filesystem inconsistencies are auto-
+        # repaired instead of prompting. The emergency.service override and
+        # no-emergency.conf from write_files above are already picked up by
+        # the daemon-reload earlier in this runcmd list.
+        'grep -q ''fsck.repair=yes'' /etc/default/grub || { sed -i ''/^GRUB_CMDLINE_LINUX_DEFAULT=/s/"$/ fsck.mode=force fsck.repair=yes"/'' /etc/default/grub && update-grub; } || true',
         # Delete the temporary bake-time console user. The bake runcmd
         # already runs userdel, but if it failed silently (|| true) the
         # account ships in the VHDX and every deployed VM inherits it.
-        'userdel -r memlabs 2>/dev/null || true'
-    ) + $ExtraRunCmd + @(
-        # Diagnostic log copy: enable memlabs-loggrab service so /var/log/cloud-init*
-        # gets mirrored to /boot/efi/memlabs/ on every boot. The ESP is FAT32 and
-        # readable by Windows via Mount-VHD without ext4 support; that lets the
-        # host extract cloud-init.log post-mortem when SSH/console didn't come up.
-        # Best-effort: if any of these fail (cloud-init died early, ESP full, ...)
-        # we still want runcmd to continue.
-        'systemctl daemon-reload || true',
-        'systemctl enable memlabs-loggrab.service || true',
-        'systemctl start memlabs-loggrab.service || true'
+        'userdel -r memlabs 2>/dev/null || true',
+        # Install sshd watchdog cron job: every 5 minutes, check tcp/22
+        # and restart sshd if it's not listening.
+        '(crontab -l 2>/dev/null | grep -v memlabs-sshd-watchdog; echo "*/5 * * * * /usr/local/sbin/memlabs-sshd-watchdog") | crontab -',
+        # Enable Samba and set vmbuildadmin's SMB password (same as console).
+        # Allow SMB through the firewall. The share gives file access to
+        # /var/log and /home/vmbuildadmin when SSH is down.
+        'ufw allow Samba || true',
+        'systemctl enable --now smbd || true'
     )
+
+    # Set vmbuildadmin's Samba password if we have the console password.
+    # printf pipes the password twice (new + confirm) to smbpasswd -a -s.
+    if ($consolePassword) {
+        $escapedPw = $consolePassword -replace "'", "'\''"
+        $runcmd += "printf '$escapedPw\n$escapedPw\n' | smbpasswd -a -s vmbuildadmin"
+    }
+
+    $runcmd = $runcmd + $ExtraRunCmd
     # Emit each runcmd item as a YAML double-quoted scalar.
     #
     # Why: plain (unquoted) YAML scalars are parsed greedily. A runcmd line
@@ -573,44 +695,6 @@ write_files:
       netplan apply
       systemctl restart systemd-resolved || true
       echo "DNS now: `$(resolvectl dns | grep -v '^`$')"
-  # Diagnostic loggrab: copies cloud-init / system logs to the EFI System
-  # Partition (FAT32 at /boot/efi) so the Windows host can read them by
-  # mounting the VHDX -- no ext4/WSL/GRUB-console gymnastics required.
-  # Runs every boot via memlabs-loggrab.service below; one-shot, fire-and-
-  # forget, never fails the boot.
-  - path: /usr/local/sbin/memlabs-loggrab
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      set +e
-      DEST=/boot/efi/memlabs
-      mkdir -p "`$DEST"
-      for f in /var/log/cloud-init.log /var/log/cloud-init-output.log /var/log/syslog /var/log/auth.log /var/log/kern.log; do
-        [ -r "`$f" ] && cp -f "`$f" "`$DEST/`$(basename `$f)" 2>/dev/null
-      done
-      {
-        echo "host: `$(hostname 2>/dev/null)"
-        echo "date: `$(date -Is 2>/dev/null)"
-        echo "uptime: `$(cat /proc/uptime 2>/dev/null)"
-        echo "kernel: `$(uname -a 2>/dev/null)"
-        echo "cloud-init-status:"
-        cloud-init status --long 2>/dev/null
-      } > "`$DEST/state.txt" 2>/dev/null
-      systemctl --no-pager --failed > "`$DEST/failed-units.txt" 2>/dev/null
-      sync
-      exit 0
-  - path: /etc/systemd/system/memlabs-loggrab.service
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=Copy cloud-init and system logs to ESP for host-side debug
-      After=cloud-init.target boot-efi.mount
-      [Service]
-      Type=oneshot
-      ExecStart=/usr/local/sbin/memlabs-loggrab
-      RemainAfterExit=no
-      [Install]
-      WantedBy=multi-user.target
   # ----------------------------------------------------------------------
   # Why this override exists (read before touching):
   #
@@ -705,6 +789,60 @@ write_files:
     content: |
       [keyfile]
       unmanaged-devices=interface-name:eth*
+  # Prevent maintenance-mode boot: if the VM hits a filesystem
+  # inconsistency or journal mismatch after a hard shutdown, systemd
+  # drops to "Give root password for maintenance" -- sshd never starts
+  # and the 20-hour deployment fails. Override emergency.service to
+  # reboot instead of prompting.
+  # Also written during bake (step 3b); having it here ensures deployed
+  # VMs always have it regardless of base image age.
+  - path: /etc/systemd/system.conf.d/no-emergency.conf
+    permissions: '0644'
+    content: |
+      [Manager]
+      DefaultTimeoutStartSec=180s
+      DefaultTimeoutStopSec=90s
+  - path: /etc/systemd/system/emergency.service.d/override.conf
+    permissions: '0644'
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=-/usr/bin/systemctl reboot
+  # sshd watchdog: every 5 minutes, verify sshd is listening on tcp/22.
+  # If the port is closed, restart the service. Logs to syslog so
+  # failures are visible in journalctl. This prevents the "long-uptime
+  # sshd goes unresponsive" issue that causes 30-min probe timeouts.
+  - path: /usr/local/sbin/memlabs-sshd-watchdog
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      if ! ss -tlnp | grep -q ':22\b'; then
+        logger -t memlabs-sshd-watchdog "tcp/22 not listening, restarting sshd"
+        systemctl restart ssh || systemctl restart sshd
+      fi
+  # Samba config: share /var/log (read-only) and /home/vmbuildadmin
+  # so admins can browse logs and files via SMB when SSH is down.
+  # Auth uses vmbuildadmin with the same password as LocalAdmin.
+  - path: /etc/samba/smb.conf
+    permissions: '0644'
+    content: |
+      [global]
+        workgroup = WORKGROUP
+        server string = %h (MemLabs)
+        security = user
+        map to guest = never
+        log file = /var/log/samba/log.%m
+        max log size = 1000
+      [logs]
+        path = /var/log
+        browseable = yes
+        read only = yes
+        valid users = vmbuildadmin
+      [home]
+        path = /home/vmbuildadmin
+        browseable = yes
+        read only = no
+        valid users = vmbuildadmin
 
 package_update: true
 package_upgrade: false
@@ -855,49 +993,13 @@ function Get-LinuxDomainJoinSeedArgs {
     # Quoting hell avoidance: build the join script as bash source, then
     # base64-encode it and emit a single runcmd line:
     #   echo <b64> | base64 -d > /root/join.sh && bash /root/join.sh
-    # The script body is opaque to PowerShell here-string parsing, YAML, and
-    # bash -c " " word splitting, so no escaping of $/`/"/' is needed inside.
-    $joinScript = @"
-#!/bin/bash
-set -uo pipefail
-DOMAIN='$domainLower'
-DC_IP='$dcIp'
-ADMIN_USER='$adminUser'
-ADMIN_PWD='$pwBashSingle'
-# Point resolver at the DC so realm discover can find AD SRV records.
-/usr/local/sbin/memlabs-set-dns "`$DC_IP" "`$DOMAIN" || true
-# Wait up to 20 minutes for the DC's A record to resolve (DC DSC may
-# still be coming up when cloud-init runs).
-for i in {1..80}; do
-  if getent hosts "`$DOMAIN" >/dev/null 2>&1; then break; fi
-  echo "memlabs-realm-join: waiting for DNS on `$DOMAIN (attempt `$i/80)"
-  sleep 15
-done
-realm discover "`$DOMAIN" || true
-# Retry the join up to 5 times in case the DC accepts auth but hasn't
-# fully replicated.
-for i in {1..5}; do
-  if echo "`$ADMIN_PWD" | realm join -U "`$ADMIN_USER" "`$DOMAIN" --install=/; then
-    JOINED=1
-    break
-  fi
-  echo "memlabs-realm-join: join attempt `$i failed, retrying in 30s"
-  sleep 30
-done
-if [ "`${JOINED:-0}" != "1" ]; then
-  echo "memlabs-realm-join: ERROR - all join attempts failed"
-  exit 1
-fi
-# Allow login as plain "user" (not "user@domain") and auto-create home dirs.
-realm permit --realm "`$DOMAIN" --all || true
-sed -i 's/^use_fully_qualified_names = .*/use_fully_qualified_names = False/' /etc/sssd/sssd.conf || true
-sed -i 's|^fallback_homedir = .*|fallback_homedir = /home/%u|' /etc/sssd/sssd.conf || true
-pam-auth-update --enable mkhomedir || true
-systemctl restart sssd || true
-# Domain Admins -> sudo NOPASSWD.
-echo '%domain\ admins ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/memlabs-domain-admins
-chmod 0440 /etc/sudoers.d/memlabs-domain-admins
-"@
+    # Uses the same realm-join.sh file as Phase 3 — single source of truth.
+    $joinScript = Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -Variables @{
+        DOMAIN     = $domainLower
+        DC_IP      = $dcIp
+        ADMIN_USER = $adminUser
+        ADMIN_PWD  = $pwBashSingle
+    }
 
     # Base64-encode the script (UTF-8 LF line endings) so it survives the
     # YAML/bash quoting layers untouched.
@@ -1034,6 +1136,52 @@ function New-LinuxVirtualMachine {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
         }
 
+        # Create DHCP reservation now that the MAC is available.
+        # AssignedIP was stamped by Set-DeployConfigIPAddresses before Phase 1.
+        # Skip if MAC is null (VM not yet started) — will retry after Start-VM2.
+        # Skip if a reservation already exists for this MAC (rerun scenario).
+        if ($DeployConfig) {
+            $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+            if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
+                # DHCP/Hyper-V CIM calls run isolated (Get-VMMacIsolated /
+                # *DHCPReservation* helpers) so their progress doesn't poison the bars.
+                try {
+                    $vmMac = Get-VMMacIsolated -VmName $VmName
+                    if ($vmMac -and $vmMac -ne '000000000000') {
+                        $assignedIP = $thisVmConfig.AssignedIP
+                        # Scope must be the /24 that contains AssignedIP -- a VM on a secondary
+                        # subnet must reserve in its own scope, not vmOptions.network.
+                        $ipOctets = ([string]$assignedIP).Split('.')
+                        $scopeId = if ($ipOctets.Count -eq 4) { "$($ipOctets[0]).$($ipOctets[1]).$($ipOctets[2]).0" }
+                                   elseif ($thisVmConfig.network) { $thisVmConfig.network }
+                                   else { $DeployConfig.vmOptions.network }
+                        # Only KEEP an existing reservation for this MAC when it points at the
+                        # VM's AssignedIP; a reservation at a different IP is stale and would put
+                        # the VM on the wrong address (and collide with that IP's rightful owner).
+                        $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
+                        if ($existing -and $existing -eq $assignedIP) {
+                            Write-Log "$VmName`: DHCP reservation already exists: $existing (MAC=$vmMac); keeping" -LogOnly
+                        }
+                        else {
+                            if ($existing) {
+                                Write-Log "$VmName`: DHCP reservation for MAC=$vmMac points to $existing but AssignedIP is $assignedIP; correcting to avoid an address collision" -LogOnly
+                            }
+                            Remove-DHCPReservation -mac $vmMac -vmName $VmName
+                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName (Linux)"
+                            Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
+                            $thisVmConfig | Add-Member -MemberType NoteProperty -Name 'ReservationCreated' -Value $true -Force
+                        }
+                    }
+                    else {
+                        Write-Log "$VmName`: MAC not yet assigned (000000000000); DHCP reservation deferred to post-start" -LogOnly
+                    }
+                }
+                catch {
+                    Write-Log "$VmName`: Could not create DHCP reservation for $($thisVmConfig.AssignedIP). $_" -Warning
+                }
+            }
+        }
+
         # Copy the base VHDX to the VM dir as its OS disk.
         $osDiskName = "$($VmName)_OS.vhdx"
         $osDiskPath = Join-Path $vm.Path $osDiskName
@@ -1107,17 +1255,33 @@ function New-LinuxVirtualMachine {
         }
         if ($DeployConfig) {
             $thisVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
-            if ($thisVm -and $thisVm.role -eq 'Proxy') {
+
+            # Use pre-allocated AssignedIP as static cloud-init IP for all
+            # Linux VMs. This means the VM boots with its reserved IP from
+            # the very first DHCP request (or statically via netplan), so
+            # there's never a window where it has a different address.
+            if ($thisVm -and $thisVm.AssignedIP) {
+                $netBase = $thisVm.network
+                if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
+                if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
+                    $base = $Matches[1]
+                    $seedArgs.StaticIPv4 = $thisVm.AssignedIP
+                    $seedArgs.Gateway = "$base.200"
+                    Write-Log "$VmName`: Using pre-assigned static IP $($seedArgs.StaticIPv4) (gw $($seedArgs.Gateway))"
+                }
+                else {
+                    Write-Log "$VmName`: Network '$netBase' isn't /24 a.b.c.0 form; falling back to DHCP" -Warning
+                }
+            }
+            elseif ($thisVm -and $thisVm.role -eq 'Proxy') {
+                # Fallback for Proxy if AssignedIP wasn't set (shouldn't happen normally)
                 $netBase = $thisVm.network
                 if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
                 if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
                     $base = $Matches[1]
                     $seedArgs.StaticIPv4 = "$base.2"
                     $seedArgs.Gateway = "$base.200"
-                    Write-Log "$VmName`: Proxy role detected; pinning to $($seedArgs.StaticIPv4) (gw $($seedArgs.Gateway))"
-                }
-                else {
-                    Write-Log "$VmName`: Proxy role but network '$netBase' isn't /24 a.b.c.0 form; falling back to DHCP" -Warning
+                    Write-Log "$VmName`: Proxy fallback; pinning to $($seedArgs.StaticIPv4) (gw $($seedArgs.Gateway))"
                 }
             }
             # enableRDP toggle: previously installed xrdp+xfce4+Firefox via
@@ -1166,6 +1330,49 @@ function New-LinuxVirtualMachine {
             return $false
         }
 
+        # Create DHCP reservation now that VM is started and has a real MAC.
+        if ($DeployConfig) {
+            $thisVmConfig2 = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+            if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated) {
+                # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
+                try {
+                    $vmMac2 = Get-VMMacIsolated -VmName $VmName
+                    if ($vmMac2 -and $vmMac2 -ne '000000000000') {
+                        # Scope must be the /24 that contains AssignedIP -- a VM on a secondary
+                        # subnet must reserve in its own scope, not vmOptions.network.
+                        $ipOctets2 = ([string]$thisVmConfig2.AssignedIP).Split('.')
+                        $scopeId2 = if ($ipOctets2.Count -eq 4) { "$($ipOctets2[0]).$($ipOctets2[1]).$($ipOctets2[2]).0" }
+                                    elseif ($thisVmConfig2.network) { $thisVmConfig2.network }
+                                    else { $DeployConfig.vmOptions.network }
+                        # Only KEEP an existing reservation for this MAC when it points at the
+                        # VM's AssignedIP; a reservation at a different IP is stale and would put
+                        # the VM on the wrong address (and collide with that IP's rightful owner).
+                        $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2
+                        if ($existing2 -and $existing2 -eq $thisVmConfig2.AssignedIP) {
+                            Write-Log "$VmName`: DHCP reservation already exists: $existing2 (MAC=$vmMac2); keeping" -LogOnly
+                        }
+                        else {
+                            if ($existing2) {
+                                Write-Log "$VmName`: DHCP reservation for MAC=$vmMac2 points to $existing2 but AssignedIP is $($thisVmConfig2.AssignedIP); correcting to avoid an address collision" -LogOnly
+                            }
+                            Remove-DHCPReservation -mac $vmMac2 -vmName $VmName
+                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName (Linux)" -LogContext $VmName
+                            Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
+                        }
+                    }
+                }
+                catch {
+                    # Add-DHCPReservationIsolated already logs each attempt and rethrows
+                    # with the full exception chain on final failure; surface a concise
+                    # WARN here plus the script stack for diagnostic completeness.
+                    $exType = $_.Exception.GetType().FullName
+                    $exMsg  = $_.Exception.Message
+                    Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP) [$exType]: $exMsg" -Warning
+                    if ($_.ScriptStackTrace) { Write-Log "$VmName`: DHCP reservation failure stack: $($_.ScriptStackTrace)" -LogOnly }
+                }
+            }
+        }
+
         return $true
     }
     catch {
@@ -1194,13 +1401,12 @@ function Get-LinuxVmExpectedStaticIP {
         Return the IP a Linux VM is expected to claim, or $null if it uses DHCP.
 
     .DESCRIPTION
-        Mirrors the role-specific static-IP logic in New-LinuxVirtualMachine
-        (Proxy -> <network>.2). DHCP-only roles (LinuxServer today, future
-        LinuxDesktop) return $null so callers can skip the KVP-independent
-        fallback probe -- a DHCP guest's IP isn't predictable from config.
+        All Linux VMs now get a pre-assigned static IP via
+        Set-DeployConfigIPAddresses (stamped as AssignedIP on the VM
+        config). The seed ISO emits a static netplan config using this IP.
 
-        Keeping this in one place means Wait-LinuxVmReady callers and the
-        seed-ISO emitter agree on which VMs have a known IP.
+        Falls back to the legacy Proxy -> <network>.2 logic if
+        AssignedIP is not set (e.g. existing-VM reruns).
     #>
     [CmdletBinding()]
     param (
@@ -1212,12 +1418,17 @@ function Get-LinuxVmExpectedStaticIP {
     )
 
     if (-not $VmObject) { return $null }
-    if ($VmObject.role -ne 'Proxy') { return $null }
 
-    $netBase = $VmObject.network
-    if (-not $netBase -and $DeployConfig) { $netBase = $DeployConfig.vmOptions.network }
-    if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
-        return "$($Matches[1]).2"
+    # Pre-assigned IP from Set-DeployConfigIPAddresses
+    if ($VmObject.AssignedIP) { return $VmObject.AssignedIP }
+
+    # Legacy fallback for Proxy
+    if ($VmObject.role -eq 'Proxy') {
+        $netBase = $VmObject.network
+        if (-not $netBase -and $DeployConfig) { $netBase = $DeployConfig.vmOptions.network }
+        if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
+            return "$($Matches[1]).2"
+        }
     }
     return $null
 }
@@ -1228,28 +1439,40 @@ function Get-LinuxVmWaitTimeout {
         Return the SSH-ready timeout (in seconds) for a Linux VM.
 
     .DESCRIPTION
-        Returns a flat 900s (15 min). SSH-ready means sshd is listening
-        and the IP is published via KVP (or matches the expected static
-        IP for the role). sshd starts in cloud-init's `config` stage,
-        which is long before `final`/runcmd runs the slow add-on installs
-        (xfce4 + xrdp + Firefox for enableRDP, realmd stack for
-        joinDomain). So those add-ons should NOT push past the base
-        budget for the SSH-ready check itself.
+        Base timeout is 900s (15 min). On large deploys (>10 VMs), disk
+        I/O contention from concurrent Windows VM boots / DSC / sysprep
+        can delay the Linux VM's cloud-init reboot significantly. Each
+        VM above 10 adds 60s to the budget, capped at 2700s (45 min).
 
-        Historical context: a 900s timeout was observed on ADA-PROXY1.
-        Root cause was the Hyper-V KVP daemon failing to publish a guest
-        IP, not a slow apt install. Wait-LinuxVmReady now falls back to
-        the role's expected static IP (see Get-LinuxVmExpectedStaticIP)
-        when KVP is silent, so that failure mode no longer needs a
-        budget bump.
+        SSH-ready means sshd is listening and the IP is published via
+        KVP (or matches the expected static IP for the role). sshd
+        starts in cloud-init's `config` stage, which is long before
+        `final`/runcmd runs the slow add-on installs (xfce4 + xrdp +
+        Firefox for enableRDP, realmd stack for joinDomain). So those
+        add-ons should NOT push past the base budget for the SSH-ready
+        check itself.
+
+        The scaling addresses the observed failure where a 37-VM deploy
+        caused the Proxy VM's post-cloud-init reboot to take >15 min
+        under I/O pressure, and the mid-wait power-cycle at 8 min reset
+        boot progress, exhausting the remaining 7 min.
     #>
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
-        [psobject]$VmObject
+        [psobject]$VmObject,
+
+        # Total VM count in the deploy. When >10, the timeout scales
+        # to accommodate host I/O contention from concurrent VM boots.
+        [Parameter(Mandatory = $false)]
+        [int]$VmCount = 0
     )
 
-    return 900
+    $base = 900
+    if ($VmCount -gt 10) {
+        $base = [Math]::Min($base + ($VmCount - 10) * 60, 2700)
+    }
+    return $base
 }
 
 function Get-LinuxVmIPAddress {
@@ -1281,168 +1504,6 @@ function Get-LinuxVmIPAddress {
         }
     }
     return $null
-}
-
-function Save-LinuxAutopsyLogs {
-    <#
-    .SYNOPSIS
-        On SSH-ready timeout, stop the VM, mount its VHDX read-only, and
-        copy cloud-init.log + state.txt off the FAT32 ESP for host-side
-        post-mortem.
-
-    .DESCRIPTION
-        The `memlabs-loggrab` service inside the guest mirrors cloud-init
-        logs to /boot/efi/memlabs on every boot. That partition is FAT32
-        and readable from Windows via Mount-VHD -- no WSL, no ext4 tooling
-        required. This function automates that mount/copy/dismount dance
-        so the operator never has to do it manually.
-
-        Sequence:
-          1. Stop-VM -TurnOff -Force  (Mount-VHD refuses a running VM's disk)
-          2. Mount-VHD -ReadOnly -NoDriveLetter
-          3. For each partition that looks like FAT and contains \memlabs\,
-             copy cloud-init.log, cloud-init-output.log, state.txt,
-             failed-units.txt to <LogsDir>\linux-autopsy\<VmName>\
-          4. Tail cloud-init.log (last 80 lines) into the deploy log so the
-             cause shows up in VMBuild.log alongside the timeout message.
-          5. Dismount-VHD (always, in finally).
-
-        Best-effort: any failure is logged but does not throw. The VM is
-        left stopped so the operator can mount the VHDX themselves if
-        more digging is needed.
-
-    .OUTPUTS
-        $true on success, $false on any failure (logged but not thrown).
-    #>
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$VmName
-    )
-
-    try {
-        $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
-        if (-not $vm) {
-            Write-Log "$VmName`: autopsy: VM not found, skipping ESP log dump" -LogOnly
-            return $false
-        }
-        $vhdx = ($vm.HardDrives | Select-Object -First 1).Path
-        if (-not $vhdx -or -not (Test-Path -LiteralPath $vhdx)) {
-            Write-Log "$VmName`: autopsy: VHDX path not resolvable ($vhdx), skipping ESP log dump" -LogOnly
-            return $false
-        }
-
-        # Mount-VHD needs the disk file unlocked. Stop the VM forcefully --
-        # at this point we've already declared SSH timeout, so the VM is
-        # going to be rebuilt or manually fixed; no harm in turning it off.
-        if ($vm.State -ne 'Off') {
-            Write-Log "$VmName`: autopsy: stopping VM (TurnOff) so VHDX can be mounted for log extraction" -LogOnly
-            try { Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop }
-            catch {
-                Write-Log "$VmName`: autopsy: Stop-VM failed: $($_.Exception.Message)" -LogOnly
-                return $false
-            }
-            # Hyper-V occasionally takes a beat to release the disk handle.
-            Start-Sleep -Seconds 2
-        }
-
-        $logsDir = if ($Common -and $Common.LogPath) { Split-Path -Parent $Common.LogPath } else { $env:TEMP }
-        $destDir = Join-Path $logsDir "linux-autopsy\$VmName"
-        if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
-
-        $mounted = $null
-        try {
-            $mounted = Mount-VHD -Path $vhdx -ReadOnly -NoDriveLetter -Passthru -ErrorAction Stop
-        }
-        catch {
-            Write-Log "$VmName`: autopsy: Mount-VHD '$vhdx' failed: $($_.Exception.Message)" -LogOnly
-            return $false
-        }
-
-        $copiedAny = $false
-        try {
-            $disk = $mounted | Get-Disk -ErrorAction Stop
-            $parts = $disk | Get-Partition -ErrorAction SilentlyContinue
-            foreach ($p in $parts) {
-                # The ESP on an Ubuntu image is a small FAT32 partition.
-                # Drive-letterless mounts surface via Get-Volume off the
-                # partition, with FileSystem='FAT32' (or sometimes 'FAT').
-                $vol = $null
-                try { $vol = $p | Get-Volume -ErrorAction Stop } catch { $vol = $null }
-                if (-not $vol) { continue }
-                if ($vol.FileSystem -notmatch '^(FAT|FAT32|exFAT)$') { continue }
-
-                # Assign a temporary mount-point folder so we can read it.
-                $mountPoint = Join-Path $env:TEMP ("memlabs-esp-{0}-{1}" -f $VmName, [guid]::NewGuid().ToString('N').Substring(0, 8))
-                New-Item -ItemType Directory -Path $mountPoint -Force | Out-Null
-                try {
-                    Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $p.PartitionNumber -AccessPath $mountPoint -ErrorAction Stop
-                }
-                catch {
-                    Write-Log "$VmName`: autopsy: cannot assign access path to partition $($p.PartitionNumber): $($_.Exception.Message)" -LogOnly
-                    Remove-Item $mountPoint -Force -ErrorAction SilentlyContinue
-                    continue
-                }
-
-                try {
-                    $memlabsDir = Join-Path $mountPoint 'memlabs'
-                    if (Test-Path -LiteralPath $memlabsDir) {
-                        Write-Log "$VmName`: autopsy: found ESP\memlabs on partition $($p.PartitionNumber); copying logs to $destDir" -LogOnly
-                        Get-ChildItem -LiteralPath $memlabsDir -File -ErrorAction SilentlyContinue | ForEach-Object {
-                            try {
-                                Copy-Item -LiteralPath $_.FullName -Destination $destDir -Force -ErrorAction Stop
-                                $copiedAny = $true
-                            }
-                            catch { Write-Log "$VmName`: autopsy: copy $($_.Name) failed: $($_.Exception.Message)" -LogOnly }
-                        }
-
-                        # Tail cloud-init.log into VMBuild.log so the cause
-                        # shows up next to the SSH timeout message and the
-                        # operator doesn't have to know about $destDir at all.
-                        $ciLog = Join-Path $destDir 'cloud-init.log'
-                        if (Test-Path -LiteralPath $ciLog) {
-                            $tail = Get-Content -LiteralPath $ciLog -Tail 80 -ErrorAction SilentlyContinue
-                            if ($tail) {
-                                Write-Log "$VmName`: autopsy: ---- cloud-init.log (last 80 lines) ----" -LogOnly
-                                foreach ($t in $tail) { Write-Log "$VmName`: ci> $t" -LogOnly }
-                                Write-Log "$VmName`: autopsy: ---- end cloud-init.log tail ----" -LogOnly
-                            }
-                        }
-
-                        # state.txt has a one-glance summary cloud-init status
-                        # + uptime + failed units; surface it on-screen too.
-                        $stateTxt = Join-Path $destDir 'state.txt'
-                        if (Test-Path -LiteralPath $stateTxt) {
-                            $stateLines = Get-Content -LiteralPath $stateTxt -ErrorAction SilentlyContinue
-                            foreach ($s in $stateLines) { Write-Log "$VmName`: state> $s" -LogOnly }
-                        }
-                    }
-                }
-                finally {
-                    try { Remove-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $p.PartitionNumber -AccessPath $mountPoint -ErrorAction Stop }
-                    catch { Write-Log "$VmName`: autopsy: Remove-PartitionAccessPath failed: $($_.Exception.Message)" -LogOnly }
-                    Remove-Item $mountPoint -Force -ErrorAction SilentlyContinue
-                }
-            }
-        }
-        finally {
-            try { Dismount-VHD -Path $vhdx -ErrorAction Stop }
-            catch { Write-Log "$VmName`: autopsy: Dismount-VHD failed: $($_.Exception.Message)" -LogOnly }
-        }
-
-        if ($copiedAny) {
-            Write-Log "$VmName`: autopsy: ESP logs saved to $destDir" -OutputStream
-            return $true
-        }
-        else {
-            Write-Log "$VmName`: autopsy: no \memlabs\ directory found on any FAT partition (memlabs-loggrab may not have run yet)" -LogOnly
-            return $false
-        }
-    }
-    catch {
-        Write-Log "$VmName`: autopsy: unexpected error: $($_.Exception.Message)" -LogOnly
-        return $false
-    }
 }
 
 function Wait-LinuxVmReady {
@@ -1500,6 +1561,15 @@ function Wait-LinuxVmReady {
     $loggedKnownHostsForIp = $null
     $lastSshErrLogSec = -9999
     $sshErrLogIntervalSec = 30
+    $restartAttempted = $false
+    $restartAfterSec = [int]($TimeoutSeconds * 0.53)  # ~53% of total; 900s→477s, 1800s→954s
+    # Track whether the guest has shown any sign of life (sshd accepted a
+    # TCP/22 connection at least once). A VM that is merely slow to finish
+    # cloud-init under heavy host I/O load looks "stuck" to the restart
+    # heuristic, but power-cycling it just discards boot progress and
+    # restarts the cold-boot clock — exactly the wrong move under load.
+    # We only power-cycle VMs that have NEVER shown sshd listening.
+    $sawSignOfLife = $false
     while ((Get-Date) -lt $deadline) {
         $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
         $ip = Get-LinuxVmIPAddress -VmName $VmName
@@ -1534,7 +1604,8 @@ function Wait-LinuxVmReady {
                 $tc.Close()
             }
             catch { }
-            $tcpLabel = if ($tcpProbeOk) { 'tcp/22 open' } else { 'tcp/22 closed' }
+            $tcpLabel = $(if ($tcpProbeOk) { 'tcp/22 open' } else { 'tcp/22 closed' })
+            if ($tcpProbeOk) { $sawSignOfLife = $true }
             write-progress2 "Wait for Linux VM" -Status "$VmName`: IP $ip ($ipSource), $tcpLabel, probing SSH (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
 
             # One-time per IP: scrub any stale known_hosts entries for this
@@ -1651,6 +1722,37 @@ function Wait-LinuxVmReady {
             }
             write-progress2 "Wait for Linux VM" -Status "$VmName`: waiting for cloud-init / DHCP (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
         }
+
+        # ── Mid-wait restart: if SSH hasn't come up after 8 minutes, the
+        # VM may be stuck at a maintenance prompt or fsck wait. Power-cycle
+        # it once and use the remaining ~7 minutes for the retry.
+        if (-not $restartAttempted -and $elapsed -ge $restartAfterSec) {
+            $restartAttempted = $true
+            if ($sawSignOfLife) {
+                # sshd has accepted TCP/22 at least once, so the guest is
+                # alive and booting — just slow (heavy host I/O contention).
+                # Restarting would throw away that progress. Keep waiting.
+                Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s, but sshd has accepted TCP/22 at least once — guest is alive but slow; NOT restarting, continuing to wait." -Warning
+            }
+            else {
+                Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s — restarting VM and retrying" -Warning
+                write-progress2 "Wait for Linux VM" -Status "$VmName`: restarting VM (no SSH after ${restartAfterSec}s)..." -force
+                try {
+                    Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop
+                    Start-Sleep -Seconds 3
+                    Start-VM -Name $VmName -ErrorAction Stop
+                    Write-Log "$VmName`: VM restarted; resuming SSH poll with $([int](($deadline - (Get-Date)).TotalSeconds))s remaining"
+                }
+                catch {
+                    Write-Log "$VmName`: VM restart failed: $($_.Exception.Message)" -Warning
+                }
+                # Reset tracking so the loop re-discovers the IP cleanly
+                $lastReportedIp = $null
+                $loggedKnownHostsForIp = $null
+                $lastHeartbeatSec = $elapsed
+            }
+        }
+
         Start-Sleep -Seconds $PollIntervalSeconds
     }
 
@@ -1720,7 +1822,7 @@ function Wait-LinuxVmReady {
         try {
             $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
             if ($vm) {
-                $uptime = if ($vm.Uptime) { [int]$vm.Uptime.TotalSeconds } else { 0 }
+                $uptime = $(if ($vm.Uptime) { [int]$vm.Uptime.TotalSeconds } else { 0 })
                 Write-Log "$VmName`:   VM state: $($vm.State); uptime ${uptime}s; heartbeat: $($vm.Heartbeat); status: $($vm.Status)" -LogOnly
             }
             else {
@@ -1797,13 +1899,6 @@ function Wait-LinuxVmReady {
 
     write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH-ready timeout after ${TimeoutSeconds}s" -force -Completed
 
-    # Last-resort autopsy: the guest's memlabs-loggrab service copies
-    # cloud-init.log to the FAT32 ESP on every boot. Mount the VHDX
-    # read-only and pull those logs to the host so the next iteration of
-    # this debug cycle doesn't require WSL + ext4 + ssh-agent gymnastics.
-    # Stops the VM (it's already declared dead) so Mount-VHD can attach.
-    try { Save-LinuxAutopsyLogs -VmName $VmName | Out-Null } catch { Write-Log "$VmName`: Save-LinuxAutopsyLogs threw: $($_.Exception.Message)" -LogOnly }
-
     return $null
 }
 
@@ -1850,11 +1945,14 @@ function Invoke-LinuxVmCommand {
         [switch]$SuppressLog,
 
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [string]$UserName = 'vmbuildadmin'
     )
 
     if (-not $DisplayName) {
-        $DisplayName = if ($BashCommand.Length -gt 80) { $BashCommand.Substring(0, 77) + '...' } else { $BashCommand }
+        $DisplayName = $(if ($BashCommand.Length -gt 80) { $BashCommand.Substring(0, 77) + '...' } else { $BashCommand })
     }
 
     $return = [pscustomobject]@{
@@ -1891,7 +1989,7 @@ function Invoke-LinuxVmCommand {
 
     # Pipe the command in via stdin to avoid Windows command-line quoting
     # mismatches; remote `bash -s` reads the entire script from stdin.
-    $remoteShell = if ($Sudo.IsPresent) { 'sudo -n bash -s' } else { 'bash -s' }
+    $remoteShell = $(if ($Sudo.IsPresent) { 'sudo -n bash -s' } else { 'bash -s' })
 
     # See Wait-LinuxVmReady probe comment: ignore host keys for internal SSH.
     # Stale known_hosts from a prior deploy with the same IP silently breaks
@@ -1901,13 +1999,23 @@ function Invoke-LinuxVmCommand {
         '-o', 'StrictHostKeyChecking=no',
         '-o', 'UserKnownHostsFile=NUL',
         '-o', 'BatchMode=yes',
-        '-o', 'ConnectTimeout=10',
+        '-o', 'ConnectTimeout=60',
         '-o', "ServerAliveInterval=$([Math]::Max(15, [int]($TimeoutSeconds / 4)))",
         '-o', 'LogLevel=ERROR',
-        "vmbuildadmin@$IPAddress",
+        "$UserName@$IPAddress",
         $remoteShell
     )
 
+    # Retry loop: SSH exit code 255 = transport-level failure (connection
+    # refused, network unreachable, connection reset). These are transient
+    # during VM boot, service restarts, and VMBus hiccups. Retry up to 3
+    # times with increasing backoff. Non-255 exit codes (remote command
+    # failures) are never retried -- the remote script ran and failed.
+    $maxSshRetries = 3
+    $sshAttempt = 0
+
+    :sshRetry while ($true) {
+    $sshAttempt++
     try {
         # Build a quoted argument string. ProcessStartInfo.ArgumentList isn't
         # available in PS 5.1, so escape manually: any arg containing whitespace
@@ -1961,6 +2069,21 @@ function Invoke-LinuxVmCommand {
             $return.ScriptBlockOutput = $stdout
         }
         else {
+            # Exit code 255 = SSH transport failure (connection refused, reset,
+            # network unreachable). Retry if we haven't exhausted attempts.
+            if ($proc.ExitCode -eq 255 -and $sshAttempt -lt $maxSshRetries) {
+                $backoff = $sshAttempt * 10
+                if (-not $SuppressLog) {
+                    Write-Log "$VmName`: SSH connection failed (attempt $sshAttempt/$maxSshRetries), retrying in ${backoff}s..." -Warning
+                }
+                Start-Sleep -Seconds $backoff
+                # Reset return object for next attempt
+                $return.ScriptBlockFailed = $false
+                $return.ScriptBlockOutput = $null
+                $return.ExitCode = -1
+                continue sshRetry
+            }
+
             $return.ScriptBlockFailed = $true
             $combined = $stdout
             if ($stderr) {
@@ -1969,13 +2092,26 @@ function Invoke-LinuxVmCommand {
             }
             $return.ScriptBlockOutput = $combined
             if (-not $SuppressLog) {
-                $excerpt = if ($combined) { ($combined -replace "`r`n", "`n").Trim() } else { '(no output)' }
+                $excerpt = $(if ($combined) { ($combined -replace "`r`n", "`n").Trim() } else { '(no output)' })
                 if ($excerpt.Length -gt 400) { $excerpt = $excerpt.Substring(0, 400) + '...' }
                 Write-Log "$VmName`: '$DisplayName' failed (exit=$($proc.ExitCode)): $excerpt" -Failure
             }
         }
     }
     catch {
+        # Retry on process-level exceptions (e.g. ssh.exe not responding) if
+        # we haven't exhausted attempts.
+        if ($sshAttempt -lt $maxSshRetries) {
+            $backoff = $sshAttempt * 10
+            if (-not $SuppressLog) {
+                Write-Log "$VmName`: SSH exception (attempt $sshAttempt/$maxSshRetries): $_ -- retrying in ${backoff}s..." -Warning
+            }
+            Start-Sleep -Seconds $backoff
+            $return.ScriptBlockFailed = $false
+            $return.ScriptBlockOutput = $null
+            $return.ExitCode = -1
+            continue sshRetry
+        }
         $return.ScriptBlockFailed = $true
         $return.ScriptBlockOutput = "$_"
         if (-not $SuppressLog) {
@@ -1983,6 +2119,8 @@ function Invoke-LinuxVmCommand {
             Write-Log "$($_.ScriptStackTrace)" -LogOnly
         }
     }
+    break sshRetry
+    } # end :sshRetry while loop
 
     return $return
 }
@@ -2207,18 +2345,218 @@ function Set-LinuxVmsDcDns {
         return $false
     }
 
+    # Re-run idempotency: check if all Linux VMs already have DNS A records
+    # on the DC. If so, the previous run completed Set-LinuxVmsDcDns
+    # successfully — the VM-side netplan override persists across reboots,
+    # so skip the expensive SSH-probe + DNS-flip loop entirely.
+    try {
+        $vmNames = @($linuxVms | ForEach-Object { $_.vmName })
+        $namesCsv = $vmNames -join ','
+        $checkResult = Invoke-VmCommand -VmName $dcVm.vmName -VmDomainName $domain -ScriptBlock {
+            param($csv, $zone)
+            foreach ($n in ($csv -split ',')) {
+                $r = Get-DnsServerResourceRecord -ZoneName $zone -Name $n -RRType A -ErrorAction SilentlyContinue
+                if ($r) { $n }
+            }
+        } -ArgumentList $namesCsv, $domain -DisplayName "Check existing Linux DNS records" -SuppressLog
+        $registered = @()
+        if (-not $checkResult.ScriptBlockFailed -and $checkResult.ScriptBlockOutput) {
+            $registered = @($checkResult.ScriptBlockOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        }
+        $missing = @($vmNames | Where-Object { $_ -notin $registered })
+        if ($missing.Count -eq 0) {
+            Write-Log "Set-LinuxVmsDcDns: All $($linuxVms.Count) Linux VM(s) already registered in DC DNS; skipping" -Success
+            return $true
+        }
+        if ($registered.Count -gt 0) {
+            Write-Log "Set-LinuxVmsDcDns: $($registered.Count)/$($linuxVms.Count) already registered; will process $($missing.Count) remaining" -LogOnly
+            $linuxVms = @($linuxVms | Where-Object { $_.vmName -in $missing })
+        }
+    }
+    catch {
+        Write-Log "Set-LinuxVmsDcDns: Could not check existing DNS records: $_" -LogOnly
+    }
+
     Write-Log "Set-LinuxVmsDcDns: Pointing $($linuxVms.Count) Linux VM(s) at DC $($dcVm.vmName) ($dcIp / $domain)" -Activity
     $allOk = $true
     foreach ($vm in $linuxVms) {
         $cmd = "/usr/local/sbin/memlabs-set-dns $dcIp $domain"
-        $res = Invoke-LinuxVmCommand -VmName $vm.vmName -BashCommand $cmd -Sudo `
-            -DisplayName "memlabs-set-dns $dcIp $domain" -TimeoutSeconds 60
-        if ($res.ScriptBlockFailed -or -not $res.CommandResult) {
+
+        # --- SSH readiness gate --------------------------------------------
+        # Phase 1 confirmed SSH, but sshd may have crashed or the VM may
+        # have rebooted during the Phase 2 DSC window (Linux VMs idle for
+        # 10-20 min while Windows DSC runs). Check heartbeat + tcp/22
+        # before burning through the DNS retries; if unreachable, restart
+        # the VM once.
+        #
+        # Timeout: 3 min base + 20s per VM above 10 (matches the scaling
+        # pattern used for DSC self-recovery and Wait-LinuxVmReady).
+        $vmCount = $linuxVms.Count + @($DeployConfig.virtualMachines | Where-Object { -not (Test-VmIsLinux -Vm $_) -and -not $_.hidden }).Count
+        $probeTimeoutSec = 180
+        if ($vmCount -gt 10) { $probeTimeoutSec += ($vmCount - 10) * 20 }
+
+        # Quick heartbeat + uptime check: if Hyper-V integration services
+        # report no heartbeat the guest OS is down (crashed / stuck at
+        # GRUB). Skip straight to restart rather than polling tcp/22 for
+        # minutes.  Also capture uptime: a VM with OkApplicationsUnknown
+        # heartbeat but >10 min uptime is stuck in boot (hv_utils loaded
+        # but sshd never started). In that case a restart is the only fix;
+        # extra TCP wait would just burn time.
+        $heartbeatHealthy = $false
+        $needsRestart = $false
+        $vmUptimeSec = 0
+        try {
+            $vmState = Get-VM -Name $vm.vmName -ErrorAction Stop
+            $vmUptimeSec = [int]$vmState.Uptime.TotalSeconds
+            if ($vmState.Heartbeat -in 'OkApplicationsHealthy', 'OkApplicationsUnknown') {
+                $heartbeatHealthy = $true
+                # OkApplicationsUnknown is the normal steady state for Linux
+                # VMs — Ubuntu doesn't implement the Hyper-V application
+                # heartbeat protocol, so it never reports OkApplicationsHealthy.
+                # Don't treat long uptime as "stuck boot"; just use the full
+                # probe timeout and let TCP/22 decide.
+            }
+            elseif ($vmState.Heartbeat) {
+                Write-Log "[Linux DNS] $($vm.vmName): heartbeat=$($vmState.Heartbeat) state=$($vmState.State) uptime=${vmUptimeSec}s -- guest not healthy, will restart" -Warning
+                $needsRestart = $true
+            }
+            else {
+                Write-Log "[Linux DNS] $($vm.vmName): no heartbeat reported, state=$($vmState.State) uptime=${vmUptimeSec}s -- will restart" -Warning
+                $needsRestart = $true
+            }
+        }
+        catch {}
+
+        $vmIpPre = Get-LinuxVmIPAddress -VmName $vm.vmName
+        if ($vmIpPre -and -not $needsRestart) {
+            $tcpUp = $false
+            # If the VM has been running for 10+ minutes, sshd should
+            # already be up.  Use a short 60s probe so we restart quickly
+            # instead of waiting the full scaled timeout (480s+ in large
+            # labs).  The long timeout only makes sense during first boot
+            # when cloud-init / dpkg may still be running.
+            $effectiveProbe = $probeTimeoutSec
+            if ($vmUptimeSec -gt 600) {
+                $effectiveProbe = [Math]::Min($effectiveProbe, 60)
+                Write-Log "[Linux DNS] $($vm.vmName): uptime ${vmUptimeSec}s, using short ${effectiveProbe}s SSH probe" -LogOnly
+            }
+            $probeEnd = (Get-Date).AddSeconds($effectiveProbe)
+            while (-not $tcpUp -and (Get-Date) -lt $probeEnd) {
+                try {
+                    $tc = [System.Net.Sockets.TcpClient]::new()
+                    $iar = $tc.BeginConnect($vmIpPre, 22, $null, $null)
+                    if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) {
+                        $tc.EndConnect($iar) | Out-Null
+                        $tcpUp = $tc.Connected
+                    }
+                    $tc.Close()
+                }
+                catch { }
+                if (-not $tcpUp) { Start-Sleep -Seconds 10 }
+            }
+            if (-not $tcpUp) {
+                if ($heartbeatHealthy) {
+                    # OS alive (heartbeat OK) but sshd isn't listening yet.
+                    # Give it 3 more minutes — sshd may be waiting on
+                    # cloud-init, dpkg lock, or entropy. Don't restart a
+                    # healthy VM; that resets boot progress.
+                    Write-Log "[Linux DNS] $($vm.vmName): tcp/22 not open after ${effectiveProbe}s but heartbeat healthy (uptime ${vmUptimeSec}s) -- waiting 3 more min for sshd" -Warning
+                    $extendEnd = (Get-Date).AddSeconds(180)
+                    while (-not $tcpUp -and (Get-Date) -lt $extendEnd) {
+                        try {
+                            $tc = [System.Net.Sockets.TcpClient]::new()
+                            $iar = $tc.BeginConnect($vmIpPre, 22, $null, $null)
+                            if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) {
+                                $tc.EndConnect($iar) | Out-Null
+                                $tcpUp = $tc.Connected
+                            }
+                            $tc.Close()
+                        }
+                        catch { }
+                        if (-not $tcpUp) { Start-Sleep -Seconds 10 }
+                    }
+                }
+                if (-not $tcpUp) {
+                    $needsRestart = $true
+                }
+            }
+        }
+        elseif (-not $vmIpPre -and -not $needsRestart) {
+            # No IP reported yet -- VM may be stuck pre-network.
+            $needsRestart = $true
+        }
+
+        if ($needsRestart) {
+            $reason = if (-not $vmIpPre) { 'no IP reported' } else { "tcp/22 not reachable at $vmIpPre (uptime ${vmUptimeSec}s)" }
+            Write-Log "[Linux DNS] $($vm.vmName): $reason. Restarting VM..." -Warning
+            Stop-VM -Name $vm.vmName -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+            Start-VM -Name $vm.vmName -ErrorAction SilentlyContinue
+            $tcpUp = $false
+            $restartEnd = (Get-Date).AddSeconds(180)
+            while (-not $tcpUp -and (Get-Date) -lt $restartEnd) {
+                $vmIpPre = Get-LinuxVmIPAddress -VmName $vm.vmName
+                if ($vmIpPre) {
+                    try {
+                        $tc = [System.Net.Sockets.TcpClient]::new()
+                        $iar = $tc.BeginConnect($vmIpPre, 22, $null, $null)
+                        if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) {
+                            $tc.EndConnect($iar) | Out-Null
+                            $tcpUp = $tc.Connected
+                        }
+                        $tc.Close()
+                    }
+                    catch { }
+                }
+                if (-not $tcpUp) { Start-Sleep -Seconds 10 }
+            }
+            if (-not $tcpUp) {
+                Write-Log "[Linux DNS] $($vm.vmName): SSH still unreachable after restart. Skipping DNS flip." -Warning
+                $allOk = $false
+                # Still attempt DNS registration from the DC side (A record)
+                # even though we can't configure the VM itself.
+                $vmIpFallback = Get-LinuxVmIPAddress -VmName $vm.vmName
+                if ($vmIpFallback) {
+                    $null = Register-LinuxVmDns -VmName $vm.vmName -Domain $domain -DCName $dcVm.vmName -IPAddress $vmIpFallback
+                }
+                continue
+            }
+            Write-Log "[Linux DNS] $($vm.vmName): SSH recovered after restart ($vmIpPre)" -LogOnly
+        }
+        # --- End SSH readiness gate ---------------------------------------
+
+        # Invoke-LinuxVmCommand has its own 3-attempt SSH retry (10s/20s
+        # backoff), but during Phase 2 the Linux VM may simply not have
+        # sshd up yet.  Wrap with an outer retry so we keep trying longer.
+        $dnsOk = $false
+        $maxDnsRetries = 3
+        for ($dnsAttempt = 1; $dnsAttempt -le $maxDnsRetries; $dnsAttempt++) {
+            # On non-final outer attempts, suppress the inner "failed" log
+            # so a recoverable SSH timeout doesn't show as an ERROR.
+            # The outer loop logs its own warning instead.
+            $isLastOuter = ($dnsAttempt -eq $maxDnsRetries)
+            $res = Invoke-LinuxVmCommand -VmName $vm.vmName -BashCommand $cmd -Sudo `
+                -DisplayName "memlabs-set-dns $dcIp $domain" -TimeoutSeconds 60 `
+                -SuppressLog:(-not $isLastOuter)
+            if (-not $res.ScriptBlockFailed -and $res.CommandResult) {
+                Write-Log "[Linux DNS] $($vm.vmName): now using DC DNS ($dcIp). $($res.ScriptBlockOutput)" -Success
+                $dnsOk = $true
+                break
+            }
+            # Only retry on SSH transport failures (exit 255). If the remote
+            # command itself failed, retrying won't help.
+            if ($res.ExitCode -ne 255) {
+                break
+            }
+            if ($dnsAttempt -lt $maxDnsRetries) {
+                $delay = 30 * $dnsAttempt
+                Write-Log "[Linux DNS] $($vm.vmName): SSH unreachable (outer attempt $dnsAttempt/$maxDnsRetries). Waiting ${delay}s..." -Warning
+                Start-Sleep -Seconds $delay
+            }
+        }
+        if (-not $dnsOk) {
             Write-Log "[Linux DNS] $($vm.vmName): failed to flip to DC DNS. $($res.ScriptBlockOutput)" -Warning
             $allOk = $false
-        }
-        else {
-            Write-Log "[Linux DNS] $($vm.vmName): now using DC DNS ($dcIp). $($res.ScriptBlockOutput)" -Success
         }
 
         # Now that the DC is promoted and has the DNS Server role, register
@@ -2234,12 +2572,212 @@ function Set-LinuxVmsDcDns {
         catch {}
         if ($vmIp) {
             $null = Register-LinuxVmDns -VmName $vm.vmName -Domain $domain -DCName $dcVm.vmName -IPAddress $vmIp
+
+            # Update LastKnownIP in VM Notes if the IP differs from what
+            # was recorded in Phase 1 (shouldn't happen now that all Linux
+            # VMs boot with static IPs, but keep as a safety net).
+            $vmNote = Get-VMNote -vmName $vm.vmName
+            $oldIp = if ($vmNote) { $vmNote.LastKnownIP } else { $null }
+            if ($oldIp -ne $vmIp) {
+                if ($oldIp) {
+                    Write-Log "[Linux DNS] $($vm.vmName): IP changed $oldIp -> $vmIp — updating LastKnownIP" -Verbose
+                }
+                Set-VMNote -vmName $vm.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $vmIp })
+            }
+            # DHCP reservation was already created by New-LinuxVirtualMachine
+            # in Phase 1 using the pre-assigned IP.
         }
         else {
             Write-Log "[Linux DNS] $($vm.vmName): could not resolve IPv4; skipping DNS A record registration" -Warning
         }
     }
     return $allOk
+}
+
+
+function Restart-LinuxVmAndWait {
+    <#
+    .SYNOPSIS
+        Reboot a Linux VM and wait until it's SSH-reachable again.
+
+    .DESCRIPTION
+        Before rebooting, checks via SSH whether a reboot is actually
+        warranted (pending reboot flag, broken dpkg state). If SSH is
+        functional and no reboot is pending, skips the reboot and returns
+        the current IP so the caller can simply retry the command.
+
+        When a reboot IS needed, issues 'sudo reboot' over SSH (or
+        Stop-VM/Start-VM as fallback), sleeps briefly for the VM to begin
+        shutting down, then calls Wait-LinuxVmReady to wait for SSH.
+        Returns the new IP on success or $null on failure.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $false)][string]$IPAddress,
+        [Parameter(Mandatory = $false)][string]$ExpectedIPAddress,
+        [Parameter(Mandatory = $false)][int]$WaitTimeoutSeconds = 900
+    )
+
+    # ── Guard: if SSH is functional, check whether a reboot is actually needed.
+    # Transient failures (apt lock, slow service start) don't require a reboot,
+    # and on a busy host the reboot itself is risky (VM may not come back for
+    # minutes). Only reboot when the OS actually flags one as pending.
+    if ($IPAddress) {
+        $rebootCheckBash = @'
+NEEDS=0
+REASONS=""
+# Ubuntu/Debian: file created by apt/dpkg when a reboot is needed (kernel update, etc.)
+if [ -f /var/run/reboot-required ]; then
+    NEEDS=1
+    REASONS="${REASONS} reboot-required"
+    echo "reboot-required packages:"
+    cat /var/run/reboot-required.pkgs 2>/dev/null | head -10 || echo "(none listed)"
+fi
+# dpkg in broken state (interrupted install, half-configured, etc.)
+if dpkg --audit 2>/dev/null | grep -q .; then
+    NEEDS=1
+    REASONS="${REASONS} dpkg-broken"
+    echo "dpkg audit:"
+    dpkg --audit 2>/dev/null | head -10
+fi
+# cloud-init still running — rebooting would interrupt first-boot setup
+if command -v cloud-init >/dev/null 2>&1; then
+    CI_STATUS=$(cloud-init status 2>/dev/null || echo "unknown")
+    echo "cloud-init: $CI_STATUS"
+    if echo "$CI_STATUS" | grep -q "running"; then
+        echo "CLOUD_INIT_ACTIVE"
+        exit 0
+    fi
+fi
+if [ "$NEEDS" = "1" ]; then
+    echo "REBOOT_NEEDED:${REASONS}"
+else
+    echo "NO_REBOOT_NEEDED"
+fi
+'@
+        $rebootCheck = Invoke-LinuxVmCommand -VmName $VmName -IPAddress $IPAddress `
+            -Sudo -TimeoutSeconds 20 -SuppressLog -BashCommand $rebootCheckBash `
+            -DisplayName "reboot-check"
+
+        if ($rebootCheck -and -not $rebootCheck.ScriptBlockFailed -and $rebootCheck.ExitCode -eq 0) {
+            $checkOutput = $rebootCheck.ScriptBlockOutput
+            if ($checkOutput -match 'CLOUD_INIT_ACTIVE') {
+                Write-Log "$VmName`: cloud-init still running; skipping reboot to avoid interrupting first-boot setup" -Warning
+                return $IPAddress
+            }
+            elseif ($checkOutput -match 'NO_REBOOT_NEEDED') {
+                Write-Log "$VmName`: SSH functional and no reboot pending; skipping reboot (caller should retry)" -Warning
+                return $IPAddress
+            }
+            elseif ($checkOutput -match 'REBOOT_NEEDED:(.+)') {
+                $reasons = $Matches[1].Trim()
+                Write-Log "$VmName`: Reboot warranted ($reasons); proceeding with reboot" -LogOnly
+                foreach ($line in ($checkOutput -split "`n")) {
+                    Write-Log "$VmName`:   reboot-check> $line" -LogOnly
+                }
+            }
+        }
+        else {
+            Write-Log "$VmName`: SSH reboot-check failed (exit=$($rebootCheck.ExitCode)); proceeding with reboot" -LogOnly
+        }
+    }
+
+    Write-Log "$VmName`: Rebooting VM for retry..."
+    # Try graceful SSH reboot first; if SSH is broken, fall back to Hyper-V.
+    if ($IPAddress) {
+        $null = Invoke-LinuxVmCommand -VmName $VmName -IPAddress $IPAddress `
+            -BashCommand 'nohup bash -c "sleep 2 && reboot" &>/dev/null &' `
+            -Sudo -TimeoutSeconds 10 -SuppressLog
+    }
+    Start-Sleep -Seconds 10
+
+    # Helper: wait for the VM to leave any transitional state (Stopping,
+    # Starting, Saving, etc.). Returns the final VM object.
+    $waitForStable = {
+        param([string]$Name, [int]$MaxWaitSec)
+        $vmObj = Get-VM -Name $Name -ErrorAction SilentlyContinue
+        if ($vmObj -and $vmObj.State -notin @('Running', 'Off')) {
+            Write-Log "$Name`: VM in '$($vmObj.State)' state; waiting up to ${MaxWaitSec}s for stable state" -LogOnly
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($sw.Elapsed.TotalSeconds -lt $MaxWaitSec) {
+                Start-Sleep -Seconds 3
+                $vmObj = Get-VM -Name $Name -ErrorAction SilentlyContinue
+                if (-not $vmObj -or $vmObj.State -in @('Running', 'Off')) { break }
+            }
+            $sw.Stop()
+            if ($vmObj -and $vmObj.State -notin @('Running', 'Off')) {
+                Write-Log "$Name`: VM still in '$($vmObj.State)' after ${MaxWaitSec}s" -Warning
+            }
+        }
+        return $vmObj
+    }
+
+    $vm = & $waitForStable $VmName 60
+
+    # If the VM is still running after the SSH reboot attempt, force via Hyper-V.
+    # Retry once if the first attempt fails (common when the VM is mid-transition).
+    $maxAttempts = 2
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        if ($vm -and $vm.State -eq 'Running') {
+            try {
+                Stop-VM -Name $VmName -Force -ErrorAction Stop
+                Start-Sleep -Seconds 3
+                Start-VM -Name $VmName -ErrorAction Stop
+                Write-Log "$VmName`: Hyper-V reboot succeeded (attempt $attempt)" -LogOnly
+                break
+            }
+            catch {
+                Write-Log "$VmName`: Hyper-V reboot failed (attempt $attempt/$maxAttempts): $_" -Warning
+                if ($attempt -lt $maxAttempts) {
+                    # Re-wait for stable state before retrying
+                    $vm = & $waitForStable $VmName 90
+                }
+            }
+        }
+        elseif ($vm -and $vm.State -eq 'Off') {
+            try {
+                Start-VM -Name $VmName -ErrorAction Stop
+                Write-Log "$VmName`: Start-VM succeeded (was Off)" -LogOnly
+                break
+            }
+            catch {
+                Write-Log "$VmName`: Start-VM failed (attempt $attempt/$maxAttempts): $_" -Warning
+                if ($attempt -lt $maxAttempts) {
+                    Start-Sleep -Seconds 10
+                    $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        else {
+            # VM in unexpected state or missing — wait and re-check
+            if ($attempt -lt $maxAttempts) {
+                $vm = & $waitForStable $VmName 90
+            }
+            else {
+                Write-Log "$VmName`: VM in unexpected state '$($vm.State)' after $maxAttempts attempts" -Warning
+                # Last resort: TurnOff is instantaneous and works in any state
+                try {
+                    Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop
+                    Start-Sleep -Seconds 3
+                    Start-VM -Name $VmName -ErrorAction Stop
+                    Write-Log "$VmName`: TurnOff + Start-VM succeeded as last resort" -LogOnly
+                }
+                catch {
+                    Write-Log "$VmName`: Last-resort TurnOff + Start failed: $_" -Warning
+                }
+            }
+        }
+    }
+
+    $newIp = Wait-LinuxVmReady -VmName $VmName -TimeoutSeconds $WaitTimeoutSeconds -ExpectedIPAddress $ExpectedIPAddress
+    if ($newIp) {
+        Write-Log "$VmName`: VM back online at $newIp after reboot" -Success
+    }
+    else {
+        Write-Log "$VmName`: VM did not come back after reboot within ${WaitTimeoutSeconds}s" -Failure
+    }
+    return $newIp
 }
 
 
@@ -2291,33 +2829,50 @@ function Install-LinuxProxyServer {
 
     # Make sure the VM is up and SSH-reachable before doing anything.
     $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
-    $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $ProxyVM
+    $vmCount = @($deployConfig.virtualMachines).Count
+    $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $ProxyVM -VmCount $vmCount
     $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
     if (-not $ip) {
         Write-Log "[Proxy] $vmName`: VM not reachable over SSH; cannot install Squid" -Failure
         return $false
     }
 
-    # Build ACL list: every subnet referenced by any non-hidden VM in this
-    # config, plus the default vmOptions.network if set. We emit /24 ACLs
-    # because all memlabs networks are /24.
-    $subnets = New-Object System.Collections.Generic.HashSet[string]
-    if ($deployConfig.vmOptions.network) {
-        [void]$subnets.Add($deployConfig.vmOptions.network)
+    # ── Network validation ──
+    # The proxy VM needs outbound internet access for apt.  DNS and HTTP
+    # must work before we attempt the install, otherwise apt hangs for
+    # minutes/hours with no useful output.  Retry with backoff to allow
+    # time for NAT/routing to come up on the host.
+    $netCheckBash = @'
+DNS_OK=0; HTTP_OK=0
+if getent hosts archive.ubuntu.com >/dev/null 2>&1; then DNS_OK=1; fi
+if [ "$DNS_OK" = "1" ]; then
+    if curl --connect-timeout 10 -sI http://archive.ubuntu.com/ubuntu/dists/ 2>/dev/null | head -1 | grep -q "200\|301\|302"; then
+        HTTP_OK=1
+    fi
+fi
+echo "DNS=$DNS_OK HTTP=$HTTP_OK"
+'@
+    $netOk = $false
+    for ($netAttempt = 1; $netAttempt -le 6; $netAttempt++) {
+        $netResult = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $netCheckBash `
+            -Sudo -TimeoutSeconds 30 -SuppressLog -DisplayName "Network check"
+        if ($netResult -and -not $netResult.ScriptBlockFailed -and $netResult.ScriptBlockOutput -match 'DNS=1 HTTP=1') {
+            $netOk = $true
+            Write-Log "[Proxy] $vmName`: Network OK (DNS + HTTP verified)" -LogOnly
+            break
+        }
+        $status = if ($netResult.ScriptBlockOutput -match 'DNS=(\d) HTTP=(\d)') { "DNS=$($Matches[1]) HTTP=$($Matches[2])" } else { "unreachable" }
+        Write-Log "[Proxy] $vmName`: Network check $netAttempt/6 failed ($status); retrying in 30s..." -Warning
+        Start-Sleep -Seconds 30
     }
-    foreach ($vm in $deployConfig.virtualMachines) {
-        if ($vm.network) { [void]$subnets.Add($vm.network) }
+    if (-not $netOk) {
+        # Collect diagnostics before failing
+        $diagBash = 'echo "=== resolv.conf ==="; cat /etc/resolv.conf; echo "=== ip route ==="; ip route show; echo "=== resolvectl ==="; resolvectl status 2>/dev/null | head -20'
+        $diag = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $diagBash -Sudo -TimeoutSeconds 15 -SuppressLog -DisplayName "Network diagnostics"
+        $diagText = if ($diag -and $diag.ScriptBlockOutput) { $diag.ScriptBlockOutput } else { "(no output)" }
+        Write-Log "[Proxy] $vmName`: No internet access after 6 attempts. apt requires DNS + HTTP to archive.ubuntu.com.`n$diagText" -Failure -OutputStream
+        return $false
     }
-    $aclLines = @()
-    $i = 0
-    foreach ($s in $subnets) {
-        # Normalize: memlabs stores "192.168.1.0" already, but be defensive.
-        $base = $s
-        if ($base -notmatch '/\d+$') { $base = "$base/24" }
-        $aclLines += "acl memlabs_net$i src $base"
-        $i++
-    }
-    $aclNames = (0..($i - 1) | ForEach-Object { "memlabs_net$_" }) -join ' '
 
     $squidConf = @"
 # memlabs Squid forward proxy
@@ -2325,17 +2880,21 @@ function Install-LinuxProxyServer {
 
 http_port 3128
 
-$($aclLines -join "`n")
-
-http_access allow $aclNames
-http_access allow localhost
+# Human-readable log format for lab diagnostics.
+# Native squid format uses Unix epoch seconds; this uses ISO timestamps
+# and reorders fields for quick visual scanning by Windows admins.
+#   TIME  CLIENT  RESULT/STATUS  METHOD  URL  RESPONSE_MS  SIZE  MIME
+logformat memlabs %{%Y-%m-%d %H:%M:%S}tl %>a %Ss/%03>Hs %rm %ru %6tr %<st %mt
+access_log daemon:/var/log/squid/access.log memlabs
 
 # Blocklist: managed via the Proxy Admin web UI (port 8443).
 # Squid reads this file on start and on 'squid -k reconfigure'.
 acl blocklist dstdomain "/etc/squid/blocklist.txt"
 http_access deny blocklist
 
-http_access deny all
+# Lab proxy: allow all traffic.  Squid's role here is outbound NAT
+# control via Hyper-V port ACLs, not access restriction.
+http_access allow all
 
 # Disable disk cache; lab proxy is for outbound NAT control, not perf.
 cache deny all
@@ -2347,23 +2906,6 @@ cache_mem 64 MB
 forwarded_for on
 via off
 
-# Standard ports allowed via CONNECT (HTTPS, etc.)
-acl SSL_ports port 443
-acl Safe_ports port 80
-acl Safe_ports port 21
-acl Safe_ports port 443
-acl Safe_ports port 70
-acl Safe_ports port 210
-acl Safe_ports port 1025-65535
-acl Safe_ports port 280
-acl Safe_ports port 488
-acl Safe_ports port 591
-acl Safe_ports port 777
-acl CONNECT method CONNECT
-
-http_access deny !Safe_ports
-http_access deny CONNECT !SSL_ports
-
 coredump_dir /var/spool/squid
 "@
 
@@ -2372,69 +2914,98 @@ coredump_dir /var/spool/squid
     $confBytes = [System.Text.Encoding]::UTF8.GetBytes($squidConf)
     $confB64 = [Convert]::ToBase64String($confBytes)
 
-    $bash = @"
-set -e
-export DEBIAN_FRONTEND=noninteractive
+    $bash = Get-LinuxScript -Name 'proxy/install-squid' -Variables @{ CONF_B64 = $confB64 } -IncludeAptRetry
 
-# Fast-path: if squid is already installed, active, and listening on 3128,
-# we still rewrite the config (subnets may have changed) and reload, but
-# skip apt-get entirely. Saves ~30-60s on re-runs.
-FAST_PATH=0
-if command -v squid >/dev/null 2>&1 && systemctl is-active --quiet squid && \
-   ss -ltn 'sport = :3128' 2>/dev/null | grep -q ':3128'; then
-    FAST_PATH=1
-fi
+    $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 900 -DisplayName "Install Squid"
 
-if [ "`$FAST_PATH" = "0" ]; then
-    # Wait for any background apt/unattended-upgrades to finish (cloud-init
-    # may still be running at this point on a freshly-provisioned VM).
-    for i in `$(seq 1 60); do
-        if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
-           ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
-            break
-        fi
-        sleep 5
-    done
+    # ── Resilient retry logic ──
+    # Separate "script ran fine but squid slow to start" (exit=0, no PROXY_READY)
+    # from actual failures (exit!=0 or ScriptBlockFailed). The former just needs
+    # more time; the latter needs a full reboot.
+    if ($result.ScriptBlockFailed -or $result.ExitCode -ne 0 -or $result.ScriptBlockOutput -notmatch 'PROXY_READY') {
+        $tail = $null
+        if ($result -and $result.ScriptBlockOutput) {
+            $lines = ($result.ScriptBlockOutput -split "`n")
+            $tail = ($lines | Select-Object -Last 20) -join "`n"
+        }
+        Write-Log "[Proxy] $vmName`: First attempt failed (exit=$($result.ExitCode), ScriptBlockFailed=$($result.ScriptBlockFailed)). Output tail:`n$tail" -Warning
 
-    # Recover from a prior hard cancel that left dpkg half-configured.
-    # No-op when dpkg is clean.
-    dpkg --configure -a || true
+        $needsReboot = $true
 
-    apt-get update -y
-    apt-get install -y squid ufw python3-flask
-fi
+        # If the install itself succeeded (exit=0) but squid just didn't start
+        # listening in time, try a lightweight self-test before rebooting.
+        # On a busy host squid may simply need more time to initialize.
+        if (-not $result.ScriptBlockFailed -and $result.ExitCode -eq 0) {
+            Write-Log "[Proxy] $vmName`: Install exited 0; checking if squid just needs more time..." -Warning
+            $selfTest = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -Sudo -TimeoutSeconds 90 `
+                -BashCommand 'for i in $(seq 1 60); do if ss -ltn "sport = :3128" 2>/dev/null | grep -q ":3128"; then echo "PROXY_READY"; exit 0; fi; sleep 1; done; echo "squid still not listening"; systemctl --no-pager status squid 2>&1 | head -15; exit 1' `
+                -DisplayName "Squid self-test (extended)"
+            if ($selfTest -and -not $selfTest.ScriptBlockFailed -and $selfTest.ExitCode -eq 0 -and $selfTest.ScriptBlockOutput -match 'PROXY_READY') {
+                Write-Log "[Proxy] $vmName`: Squid came up on extended self-test (no reboot needed)" -Success
+                $result = $selfTest
+                $needsReboot = $false
+            }
+            else {
+                Write-Log "[Proxy] $vmName`: Extended self-test still negative; will reboot." -Warning
+            }
+        }
 
-install -d -m 0755 /etc/squid
+        if ($needsReboot) {
+            # If the first attempt timed out, the SSH channel was severed but
+            # the remote apt-get/dpkg process keeps running and holds the lock.
+            # Kill orphaned apt/dpkg processes before retrying so
+            # wait_for_apt_lock doesn't spin for 300s and fail.
+            $wasTimeout = $result.ScriptBlockFailed -and $result.ScriptBlockOutput -match 'TIMEOUT'
+            if ($wasTimeout) {
+                Write-Log "[Proxy] $vmName`: First attempt timed out; killing orphaned apt/dpkg processes..." -Warning
+                $killBash = @'
+# Kill any orphaned processes left from the timed-out SSH session.
+# The SSH timeout kills the local ssh.exe but the remote bash -s
+# (and its children) keep running.  Kill them all.
+for proc in apt-get dpkg apt squid; do
+    pkill -9 -x "$proc" 2>/dev/null && echo "killed $proc" || true
+done
+# Kill orphaned bash scripts that look like our install payloads.
+# Match on the 'bash -s' processes spawned by SSH (PPID=1 after
+# the SSH channel dies and they get reparented to init).
+for pid in $(pgrep -x bash); do
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [ "$ppid" = "1" ]; then
+        echo "killed orphaned bash PID=$pid"
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+done
+# Release stale lock files
+rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
+# Recover interrupted dpkg state
+dpkg --configure -a 2>/dev/null || true
+echo "APT_CLEANUP_DONE"
+'@
+                $cleanup = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $killBash `
+                    -Sudo -TimeoutSeconds 60 -DisplayName "Kill orphaned apt processes"
+                if ($cleanup -and $cleanup.ScriptBlockOutput -match 'APT_CLEANUP_DONE') {
+                    Write-Log "[Proxy] $vmName`: Orphaned processes cleaned up; retrying without reboot" -LogOnly
+                }
+                else {
+                    Write-Log "[Proxy] $vmName`: Cleanup inconclusive; falling back to reboot" -Warning
+                    $wasTimeout = $false
+                }
+            }
 
-# Create empty blocklist if it doesn't exist so Squid doesn't fail on start.
-[ -f /etc/squid/blocklist.txt ] || touch /etc/squid/blocklist.txt
-chmod 0644 /etc/squid/blocklist.txt
-NEW_CONF=`$(mktemp)
-echo '$confB64' | base64 -d > "`$NEW_CONF"
-if [ -f /etc/squid/squid.conf ] && cmp -s "`$NEW_CONF" /etc/squid/squid.conf; then
-    rm -f "`$NEW_CONF"
-    CONF_CHANGED=0
-else
-    mv "`$NEW_CONF" /etc/squid/squid.conf
-    chmod 0644 /etc/squid/squid.conf
-    CONF_CHANGED=1
-fi
+            if (-not $wasTimeout) {
+                Write-Log "[Proxy] $vmName`: Rebooting and retrying..." -Warning
+                $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
+                $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 900
+                if (-not $ip) {
+                    Write-Log "[Proxy] $vmName`: VM not reachable after reboot; aborting." -Failure
+                    return $false
+                }
+            }
 
-systemctl enable squid >/dev/null 2>&1 || true
-if [ "`$FAST_PATH" = "0" ] || [ "`$CONF_CHANGED" = "1" ]; then
-    systemctl restart squid
-fi
+            $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 900 -DisplayName "Install Squid (retry)"
+        }
+    }
 
-# Open 3128 in ufw if installed; otherwise just stage the rule.
-command -v ufw >/dev/null 2>&1 && ufw allow 3128/tcp || true
-
-# Quick self-test
-ss -ltn 'sport = :3128' | grep -q ':3128' || { echo 'squid not listening on 3128'; exit 1; }
-
-echo PROXY_READY
-"@
-
-    $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid"
     if ($result.ScriptBlockFailed -or $result.ExitCode -ne 0) {
         Write-Log "[Proxy] $vmName`: Squid install failed (ExitCode=$($result.ExitCode))`n$($result.ScriptBlockOutput)" -Failure
         return $false
@@ -2449,201 +3020,14 @@ echo PROXY_READY
     # ---- Proxy Admin web UI ----
     # A lightweight Flask app that manages /etc/squid/blocklist.txt and
     # reloads Squid on changes. Runs as a systemd service on port 8443.
-    $proxyAdminApp = @'
-#!/usr/bin/env python3
-"""memlabs Proxy Admin - Squid blocklist manager."""
-import os, re, subprocess
-from flask import Flask, request, redirect, url_for, Markup
-
-app = Flask(__name__)
-BLOCKLIST = "/etc/squid/blocklist.txt"
-
-# Matches: domain names (.example.com, example.com), IPv4, IPv4/CIDR
-_VALID_ENTRY = re.compile(
-    r'^(?:'
-    r'\.?[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)*'
-    r'|'
-    r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:/\d{1,2})?'
-    r')$'
-)
-
-def _read_blocklist():
-    if not os.path.isfile(BLOCKLIST):
-        return []
-    with open(BLOCKLIST, "r") as f:
-        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
-
-def _write_blocklist(entries):
-    with open(BLOCKLIST, "w") as f:
-        for e in sorted(set(entries)):
-            f.write(e + "\n")
-    subprocess.run(["squid", "-k", "reconfigure"], capture_output=True, timeout=10)
-
-def _render(entries, error=None, success=None):
-    rows = ""
-    for e in entries:
-        rows += (
-            '<tr><td>{entry}</td><td>'
-            '<form method="post" action="/delete" style="margin:0">'
-            '<input type="hidden" name="entry" value="{entry}">'
-            '<button type="submit" class="btn btn-sm btn-del">Remove</button>'
-            '</form></td></tr>'
-        ).format(entry=Markup.escape(e))
-    if not entries:
-        rows = '<tr><td colspan="2" class="empty">No entries — all traffic is allowed through Squid.</td></tr>'
-    alert = ""
-    if error:
-        alert = '<div class="alert alert-error">{}</div>'.format(Markup.escape(error))
-    if success:
-        alert = '<div class="alert alert-ok">{}</div>'.format(Markup.escape(success))
-    return '''<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Proxy Admin</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;background:#1e1e2e;color:#cdd6f4;min-height:100vh;padding:2rem}
-h1{font-size:1.5rem;margin-bottom:.25rem;color:#89b4fa}
-.subtitle{color:#6c7086;margin-bottom:1.5rem;font-size:.9rem}
-.card{background:#313244;border-radius:8px;padding:1.25rem;margin-bottom:1.25rem;border:1px solid #45475a}
-table{width:100%%;border-collapse:collapse}
-th{text-align:left;padding:.5rem;border-bottom:2px solid #45475a;color:#89b4fa;font-size:.85rem;text-transform:uppercase;letter-spacing:.05em}
-td{padding:.5rem;border-bottom:1px solid #45475a;font-family:"Cascadia Code",Consolas,monospace;font-size:.9rem}
-.empty{color:#6c7086;font-style:italic;text-align:center;padding:1.5rem;font-family:inherit}
-.add-form{display:flex;gap:.5rem}
-.add-form input[type=text]{flex:1;padding:.5rem .75rem;border:1px solid #45475a;border-radius:6px;background:#1e1e2e;color:#cdd6f4;font-size:.9rem;font-family:"Cascadia Code",Consolas,monospace}
-.add-form input[type=text]:focus{outline:none;border-color:#89b4fa}
-.btn{padding:.4rem .75rem;border:none;border-radius:6px;cursor:pointer;font-size:.85rem;font-weight:500;transition:background .15s}
-.btn-add{background:#a6e3a1;color:#1e1e2e}.btn-add:hover{background:#94e2d5}
-.btn-del{background:#f38ba8;color:#1e1e2e}.btn-del:hover{background:#eba0ac}
-.btn-sm{padding:.25rem .5rem;font-size:.8rem}
-.alert{padding:.75rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
-.alert-error{background:#45475a;border:1px solid #f38ba8;color:#f38ba8}
-.alert-ok{background:#45475a;border:1px solid #a6e3a1;color:#a6e3a1}
-.help{color:#6c7086;font-size:.8rem;margin-top:.75rem}
-</style></head><body>
-<h1>Proxy Admin</h1>
-<p class="subtitle">Squid blocklist manager &mdash; blocked domains and IPs are denied through the proxy.</p>
-''' + alert + '''
-<div class="card">
-<form method="post" action="/add" class="add-form">
-<input type="text" name="entry" placeholder=".example.com or 1.2.3.4 or 10.0.0.0/8" required autofocus>
-<button type="submit" class="btn btn-add">Block</button>
-</form>
-<p class="help">Prefix with a dot to block all subdomains (e.g. <code>.windowsupdate.com</code> blocks <code>www.windowsupdate.com</code>). Plain domains block exact matches. IPv4 addresses and CIDR ranges also accepted.</p>
-</div>
-<div class="card">
-<table><thead><tr><th>Blocked Entry</th><th style="width:100px">Action</th></tr></thead>
-<tbody>''' + rows + '''</tbody></table>
-</div>
-</body></html>'''
-
-@app.route("/")
-def index():
-    return _render(_read_blocklist(), success=request.args.get("ok"))
-
-@app.route("/add", methods=["POST"])
-def add():
-    entry = (request.form.get("entry") or "").strip().lower()
-    if not entry:
-        return _render(_read_blocklist(), error="Entry cannot be empty.")
-    if not _VALID_ENTRY.match(entry):
-        return _render(_read_blocklist(), error="Invalid entry. Use a domain (.example.com), IP (1.2.3.4), or CIDR (10.0.0.0/8).")
-    if len(entry) > 253:
-        return _render(_read_blocklist(), error="Entry too long (max 253 characters).")
-    entries = _read_blocklist()
-    if entry in entries:
-        return _render(entries, error="'{}' is already blocked.".format(entry))
-    entries.append(entry)
-    _write_blocklist(entries)
-    return redirect(url_for("index", ok="Added '{}'.".format(entry)))
-
-@app.route("/delete", methods=["POST"])
-def delete():
-    entry = (request.form.get("entry") or "").strip()
-    entries = _read_blocklist()
-    entries = [e for e in entries if e != entry]
-    _write_blocklist(entries)
-    return redirect(url_for("index", ok="Removed '{}'.".format(entry)))
-
-@app.route("/health")
-def health():
-    return "ok", 200
-
-if __name__ == "__main__":
-    os.makedirs(os.path.dirname(BLOCKLIST), exist_ok=True)
-    if not os.path.isfile(BLOCKLIST):
-        open(BLOCKLIST, "a").close()
-    app.run(host="0.0.0.0", port=8443)
-'@
-
-    $proxyAdminService = @'
-[Unit]
-Description=memlabs Proxy Admin Web UI
-After=network.target squid.service
-Wants=squid.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /opt/memlabs/proxy-admin/app.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-'@
+    # The .py and .service files live under scripts/linux/proxy/.
+    $proxyAdminApp = Get-Content -Path (Join-Path $script:LinuxScriptDir 'proxy\proxy-admin.py') -Raw
+    $proxyAdminService = Get-Content -Path (Join-Path $script:LinuxScriptDir 'proxy\proxy-admin.service') -Raw
 
     $appB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($proxyAdminApp))
     $svcB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($proxyAdminService))
 
-    $webUiBash = @"
-set -e
-
-install -d -m 0755 /opt/memlabs/proxy-admin
-
-NEW_APP=`$(mktemp)
-echo '$appB64' | base64 -d > "`$NEW_APP"
-
-APP_CHANGED=0
-if [ -f /opt/memlabs/proxy-admin/app.py ] && cmp -s "`$NEW_APP" /opt/memlabs/proxy-admin/app.py; then
-    rm -f "`$NEW_APP"
-else
-    mv "`$NEW_APP" /opt/memlabs/proxy-admin/app.py
-    chmod 0755 /opt/memlabs/proxy-admin/app.py
-    APP_CHANGED=1
-fi
-
-NEW_SVC=`$(mktemp)
-echo '$svcB64' | base64 -d > "`$NEW_SVC"
-
-SVC_CHANGED=0
-if [ -f /etc/systemd/system/memlabs-proxy-admin.service ] && cmp -s "`$NEW_SVC" /etc/systemd/system/memlabs-proxy-admin.service; then
-    rm -f "`$NEW_SVC"
-else
-    mv "`$NEW_SVC" /etc/systemd/system/memlabs-proxy-admin.service
-    chmod 0644 /etc/systemd/system/memlabs-proxy-admin.service
-    systemctl daemon-reload
-    SVC_CHANGED=1
-fi
-
-systemctl enable memlabs-proxy-admin >/dev/null 2>&1 || true
-
-if [ "`$APP_CHANGED" = "1" ] || [ "`$SVC_CHANGED" = "1" ] || ! systemctl is-active --quiet memlabs-proxy-admin; then
-    systemctl restart memlabs-proxy-admin
-fi
-
-# Open 8443 in ufw
-command -v ufw >/dev/null 2>&1 && ufw allow 8443/tcp || true
-
-# Self-test: wait up to 10s for the web UI to start listening
-for i in `$(seq 1 10); do
-    if ss -ltn 'sport = :8443' 2>/dev/null | grep -q ':8443'; then
-        echo WEBUI_READY
-        exit 0
-    fi
-    sleep 1
-done
-echo 'proxy-admin not listening on 8443'
-exit 1
-"@
+    $webUiBash = Get-LinuxScript -Name 'proxy/deploy-webui' -Variables @{ APP_B64 = $appB64; SVC_B64 = $svcB64 }
 
     $result2 = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $webUiBash -Sudo -TimeoutSeconds 120 -DisplayName "Install Proxy Admin UI"
     if ($result2.ScriptBlockFailed -or $result2.ExitCode -ne 0) {
@@ -2655,6 +3039,25 @@ exit 1
     }
     else {
         Write-Log "[Proxy] $vmName`: Proxy Admin web UI listening on ${ip}:8443"
+    }
+
+    # ---- MOTD + squidlog helper ----
+    # Install a colorized squid log viewer and a login banner that
+    # advertises it so SSH sessions land with useful instructions.
+    $proxyFqdn = "$vmName.$($deployConfig.vmOptions.domainName)"
+    $squidlogContent = Get-Content -Path (Join-Path $script:LinuxScriptDir 'proxy\squidlog') -Raw
+    $squidlogB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($squidlogContent))
+
+    $motdBash = Get-LinuxScript -Name 'proxy/install-motd' -Variables @{ SQUIDLOG_B64 = $squidlogB64; PROXY_FQDN = $proxyFqdn }
+    $result3 = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $motdBash -Sudo -TimeoutSeconds 30 -DisplayName "Install MOTD + squidlog"
+    if ($result3.ScriptBlockFailed -or $result3.ExitCode -ne 0) {
+        Write-Log "[Proxy] $vmName`: MOTD install failed (ExitCode=$($result3.ExitCode))`n$($result3.ScriptBlockOutput)" -Warning
+    }
+    elseif ($result3.ScriptBlockOutput -notmatch 'MOTD_READY') {
+        Write-Log "[Proxy] $vmName`: MOTD install did not report ready`n$($result3.ScriptBlockOutput)" -Warning
+    }
+    else {
+        Write-Log "[Proxy] $vmName`: MOTD + squidlog helper installed"
     }
 
     # Mark phase complete in VM note so subsequent re-runs can short-circuit
@@ -2669,408 +3072,65 @@ exit 1
     return $true
 }
 
-function Get-LinuxXrdpBashScript {
+function Get-LinuxXrdpPackagesBashScript {
     <#
     .SYNOPSIS
-        Bash body that installs xrdp + xfce4 + Firefox (Mozilla deb) and wires
-        the default session. Idempotent: re-running after success is fast.
-
-    .DESCRIPTION
-        This used to live in the cloud-init seed ISO as a fragile sequence of
-        YAML runcmd strings (each had to survive PS / YAML / bash quoting and
-        a `Package: *` line tripped PyYAML's alias parser). Moved out of
-        cloud-init into a Phase 3 SSH-driven step (Invoke-LinuxRoleConfiguration)
-        so we can ship the whole thing as one base64-encoded bash file and stop
-        fighting four nested quoting layers.
-
-        Returns: [string] bash source. Assumes it will be run as root.
+        Bash body that installs xrdp + xfce4 desktop packages.
     #>
     [CmdletBinding()]
     param ()
 
-    return @'
-echo "[memlabs-rdp] start: $(date -Is)"
-export DEBIAN_FRONTEND=noninteractive
+    return (Get-LinuxScript -Name 'roles/xrdp-packages' -IncludeAptRetry)
+}
 
-apt-get update
-apt-get install -y \
-    xrdp xorgxrdp xfce4 xfce4-goodies dbus-x11 xorg \
-    apt-transport-https ca-certificates gnupg wget
+function Get-LinuxXrdpConfigBashScript {
+    <#
+    .SYNOPSIS
+        Bash body that configures xrdp sessions, xfce4 panel defaults,
+        disables screen lock/screensaver, and enables xrdp + firewall.
+    #>
+    [CmdletBinding()]
+    param ()
 
-# xrdp drops privs to 'xrdp'; it needs to read the snakeoil key to TLS the handshake.
-adduser xrdp ssl-cert || true
+    return (Get-LinuxScript -Name 'roles/xrdp-config')
+}
 
-# Default XDG session for vmbuildadmin and root.
-install -d -o vmbuildadmin -g vmbuildadmin -m 0755 /home/vmbuildadmin
-echo 'xfce4-session' > /home/vmbuildadmin/.xsession
-chown vmbuildadmin:vmbuildadmin /home/vmbuildadmin/.xsession
-chmod 0644 /home/vmbuildadmin/.xsession
-echo 'xfce4-session' > /root/.xsession
-chmod 0644 /root/.xsession
+function Get-LinuxFirefoxBashScript {
+    <#
+    .SYNOPSIS
+        Bash body that installs Firefox from Mozilla's deb repo (not the
+        Ubuntu snap shim) and wires it as the system default browser.
+    #>
+    [CmdletBinding()]
+    param ()
 
-# Pre-seed default xfce4 panel config so the "Welcome to the first start of
-# the panel" dialog never fires. Over xrdp it renders behind the desktop or
-# auto-dismisses with an empty panel, leaving a blank blue screen.
-if [ -d /etc/xdg/xfce4/panel ]; then
-    for UHOME in /home/vmbuildadmin /root; do
-        install -d -o "$(stat -c '%U' "$UHOME")" -g "$(stat -c '%G' "$UHOME")" -m 0700 "$UHOME/.config"
-        cp -rn /etc/xdg/xfce4 "$UHOME/.config/"
-        chown -R "$(stat -c '%U' "$UHOME"):$(stat -c '%G' "$UHOME")" "$UHOME/.config/xfce4"
-    done
-fi
-
-# Disable screen lock, screensaver, and idle blank (lab VM, not production).
-# xfce4-screensaver, light-locker, and xfce4-power-manager all race to lock.
-apt-get remove -y light-locker xfce4-screensaver 2>/dev/null || true
-for UHOME in /home/vmbuildadmin /root; do
-    UNAME=$(stat -c '%U' "$UHOME")
-    UGRP=$(stat -c '%G' "$UHOME")
-    XCONF="$UHOME/.config/xfce4/xfconf/xfce-perchannel-xml"
-    install -d -o "$UNAME" -g "$UGRP" -m 0700 "$XCONF"
-
-    # Power manager: never blank / sleep / suspend
-    cat > "$XCONF/xfce4-power-manager.xml" << 'XFCEPM'
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfce4-power-manager" version="1.0">
-  <property name="xfce4-power-manager" type="empty">
-    <property name="dpms-enabled" type="bool" value="false"/>
-    <property name="blank-on-ac" type="int" value="0"/>
-    <property name="dpms-on-ac-sleep" type="uint" value="0"/>
-    <property name="dpms-on-ac-off" type="uint" value="0"/>
-    <property name="lock-screen-suspend-hibernate" type="bool" value="false"/>
-    <property name="inactivity-on-ac" type="uint" value="0"/>
-  </property>
-</channel>
-XFCEPM
-    chown "$UNAME:$UGRP" "$XCONF/xfce4-power-manager.xml"
-
-    # Session: no auto-lock on idle
-    cat > "$XCONF/xfce4-session.xml" << 'XFCESESS'
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfce4-session" version="1.0">
-  <property name="general" type="empty">
-    <property name="LockCommand" type="string" value=""/>
-  </property>
-</channel>
-XFCESESS
-    chown "$UNAME:$UGRP" "$XCONF/xfce4-session.xml"
-done
-
-ufw allow 3389/tcp || true
-systemctl enable --now xrdp || true
-systemctl enable --now xrdp-sesman || true
-
-# Firefox: the Ubuntu 'firefox' package is a snap shim that takes 30s+ to
-# first-launch. Use the real Mozilla deb instead, pinned high so apt prefers
-# it over the transitional snap stub.
-install -d -m 0755 /etc/apt/keyrings
-wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
-    | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
-echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' \
-    > /etc/apt/sources.list.d/mozilla.list
-printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
-    > /etc/apt/preferences.d/mozilla
-apt-get update
-apt-get install -y firefox
-
-# Wire firefox as the system-wide x-www-browser / gnome-www-browser so
-# xfce4-web-browser (which calls xdg-open -> x-www-browser) opens it.
-update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/firefox 200 || true
-update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/firefox 200 || true
-update-alternatives --set x-www-browser /usr/bin/firefox || true
-update-alternatives --set gnome-www-browser /usr/bin/firefox || true
-
-# Tell XDG that firefox handles http/https/text-html system-wide.
-install -d -m 0755 /etc/xdg
-cat > /etc/xdg/mimeapps.list <<'MIMEEOF'
-[Default Applications]
-x-scheme-handler/http=firefox.desktop
-x-scheme-handler/https=firefox.desktop
-text/html=firefox.desktop
-MIMEEOF
-
-echo "[memlabs-rdp] done: $(date -Is)"
-'@
+    return (Get-LinuxScript -Name 'roles/firefox' -IncludeAptRetry)
 }
 
 function Get-LinuxClientBashScript {
     <#
     .SYNOPSIS
-        Bash body that configures GNOME Desktop for LinuxClient VMs:
-        .xsession for xrdp, Windows-like GNOME layout (Dash to Panel),
-        Edge, Intune, and sensible lab defaults. Idempotent.
+        Bash body that configures per-user GNOME settings for LinuxClient VMs:
+        .xsession for xrdp and per-user dconf fixups. Idempotent.
 
     .DESCRIPTION
         LinuxClient VMs use the UbuntuDesktop2404.vhdx base which has
-        xrdp + GNOME + GDM3 baked in.  This Phase 3 script:
-          1. Creates ~/.xsession so xrdp starts a GNOME session on X11
-          2. Installs gnome-shell-extension-dash-to-panel (Windows taskbar)
-          3. Applies dconf system defaults for a Windows-like layout:
-             - Taskbar at bottom with Windows-style element positions
-             - Minimize / maximize / close buttons on titlebars
-             - Activities hot corner disabled
-             - Screen lock & idle blank disabled (lab VM)
-             - Welcome dialog suppressed
-          4. Installs Microsoft Edge + Intune app from packages.microsoft.com
+        xrdp, GNOME, GDM3, Edge, Intune, dash-to-panel, dconf system
+        defaults, and all supporting packages baked in during image build.
+
+        This Phase 3 script handles only per-user configuration:
+          1. Creates ~/.xsession + ~/.xsessionrc so xrdp starts a GNOME
+             session on X11 (per-user files, can't be baked since
+             vmbuildadmin doesn't exist until deploy time)
+          2. Patches per-user dconf to replace Firefox with Edge in
+             taskbar favorites (safety net for users who logged in before
+             the system-wide default was applied)
         Returns: [string] bash source.  Assumes it will be run as root.
     #>
     [CmdletBinding()]
     param ()
 
-    return @'
-echo "[memlabs-gnome] start: $(date -Is)"
-export DEBIAN_FRONTEND=noninteractive
-
-# --- .xsessionrc + .xsession: GNOME on X11 over xrdp ---------------------
-# .xsessionrc is sourced by /etc/X11/Xsession BEFORE the session command
-# runs, so env vars are available to gnome-session and all children.
-# .xsession (non-executable, 0644) is read by Xsession's
-# 50x11-common_determine-startup as the session command.
-for UHOME in /home/vmbuildadmin /root; do
-    UNAME=$(stat -c '%U' "$UHOME")
-    UGRP=$(stat -c '%G' "$UHOME")
-
-    cat > "$UHOME/.xsessionrc" << 'XSESSIONRC'
-# memlabs: env vars for GNOME over xrdp (no hardware GPU)
-export XDG_SESSION_TYPE=x11
-export GDK_BACKEND=x11
-export GNOME_SHELL_SESSION_MODE=ubuntu
-export XDG_CURRENT_DESKTOP=ubuntu:GNOME
-# Mutter 46 refuses software renderers (llvmpipe) by default.
-# xrdp has no GPU, so we must allow fallback drivers.
-export MUTTER_ALLOW_FALLBACK_DRIVERS=1
-export LIBGL_ALWAYS_SOFTWARE=1
-XSESSIONRC
-    chown "$UNAME:$UGRP" "$UHOME/.xsessionrc"
-    chmod 0644 "$UHOME/.xsessionrc"
-
-    # Session command — bare line, not executable, so Xsession runs it
-    # via 'exec /bin/sh ~/.xsession' after all Xsession.d scripts.
-    echo 'gnome-session --session=ubuntu' > "$UHOME/.xsession"
-    chown "$UNAME:$UGRP" "$UHOME/.xsession"
-    chmod 0644 "$UHOME/.xsession"
-done
-
-# --- Packages: dconf-cli + gnome-tweaks + Firefox prereqs ----------------
-apt-get update
-apt-get install -y \
-    gnome-tweaks \
-    dconf-cli \
-    unzip \
-    apt-transport-https ca-certificates gnupg wget
-
-# --- dash-to-panel: install from extensions.gnome.org --------------------
-# Not packaged in Ubuntu 24.04 repos (GNOME 46 was too new at Noble freeze).
-# Query the API for the download URL matching the installed GNOME Shell.
-EXT_UUID="dash-to-panel@jderose9.github.com"
-SHELL_VER=$(gnome-shell --version 2>/dev/null | grep -oP '[\d.]+' | cut -d. -f1)
-if [ -n "$SHELL_VER" ]; then
-    DL_URL=$(wget -qO- "https://extensions.gnome.org/extension-info/?uuid=${EXT_UUID}&shell_version=${SHELL_VER}" 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin)['download_url'])" 2>/dev/null)
-    if [ -n "$DL_URL" ]; then
-        wget -qO /tmp/dash-to-panel.zip "https://extensions.gnome.org${DL_URL}"
-        install -d -m 0755 "/usr/share/gnome-shell/extensions/${EXT_UUID}"
-        unzip -o /tmp/dash-to-panel.zip -d "/usr/share/gnome-shell/extensions/${EXT_UUID}/"
-        chmod -R a+rX "/usr/share/gnome-shell/extensions/${EXT_UUID}"
-        rm -f /tmp/dash-to-panel.zip
-        echo "[memlabs-gnome] dash-to-panel installed from extensions.gnome.org (shell ${SHELL_VER})"
-    else
-        echo "[memlabs-gnome] WARNING: could not resolve dash-to-panel download URL for GNOME ${SHELL_VER}" >&2
-    fi
-else
-    echo "[memlabs-gnome] WARNING: could not detect GNOME Shell version" >&2
-fi
-
-# --- Polkit: allow colord without auth for xrdp sessions ------------------
-# Without this rule xrdp logins trigger a "color managed device" auth dialog.
-install -d -m 0755 /etc/polkit-1/rules.d
-cat > /etc/polkit-1/rules.d/45-allow-colord.rules << 'RULES'
-polkit.addRule(function(action, subject) {
-    if (action.id.indexOf("org.freedesktop.color-manager.") == 0) {
-        return polkit.Result.YES;
-    }
-});
-RULES
-
-# --- dconf: Windows-like GNOME defaults (system-wide) --------------------
-# Uses the 'local' system-db which is Ubuntu desktop's default.
-install -d -m 0755 /etc/dconf/profile
-if ! [ -f /etc/dconf/profile/user ] || ! grep -q 'system-db:local' /etc/dconf/profile/user 2>/dev/null; then
-    printf 'user-db:user\nsystem-db:local\n' > /etc/dconf/profile/user
-fi
-
-install -d -m 0755 /etc/dconf/db/local.d
-cat > /etc/dconf/db/local.d/01-memlabs-windows-like << 'DCONF'
-# ── Windows-like GNOME defaults ── memlabs LinuxClient ──
-
-# Minimize + maximize buttons  (left: app-menu │ right: min, max, close)
-[org/gnome/desktop/wm/preferences]
-button-layout='appmenu:minimize,maximize,close'
-
-# Enable extensions + pin Edge (not Firefox) to the dash/taskbar
-[org/gnome/shell]
-enabled-extensions=['dash-to-panel@jderose9.github.com', 'ding@rastersoft.com']
-welcome-dialog-last-shown-version='99.0'
-favorite-apps=['microsoft-edge.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']
-
-# Dash-to-panel: taskbar at bottom, Windows 10/11 style
-#   Left:   Show Apps (≈ Start), Left Box
-#   Center: Taskbar (running windows)
-#   Right:  System tray, Date/Time, System Menu, Show Desktop button
-[org/gnome/shell/extensions/dash-to-panel]
-panel-positions='{"0":"BOTTOM"}'
-panel-sizes='{"0":40}'
-panel-element-positions='{"0":[{"element":"showAppsButton","visible":true,"position":"stackedTL"},{"element":"activitiesButton","visible":false,"position":"stackedTL"},{"element":"leftBox","visible":true,"position":"stackedTL"},{"element":"taskbar","visible":true,"position":"centerMonitor"},{"element":"centerBox","visible":false,"position":"stackedBR"},{"element":"rightBox","visible":true,"position":"stackedBR"},{"element":"dateMenu","visible":true,"position":"stackedBR"},{"element":"systemMenu","visible":true,"position":"stackedBR"},{"element":"desktopButton","visible":true,"position":"stackedBR"}]}'
-appicon-margin=4
-appicon-padding=4
-animate-appicon-hover=false
-dot-style-focused='DASHES'
-dot-style-unfocused='DOTS'
-trans-use-custom-opacity=false
-hide-overview-on-startup=true
-show-apps-icon-file=''
-
-# Disable Activities hot-corner
-[org/gnome/desktop/interface]
-enable-hot-corners=false
-
-# Desktop icons (Home + Trash)
-[org/gnome/shell/extensions/ding]
-show-home=true
-show-trash=true
-
-# No screen lock / idle blank (lab VM, not production)
-[org/gnome/desktop/session]
-idle-delay=uint32 0
-
-[org/gnome/desktop/screensaver]
-lock-enabled=false
-
-[org/gnome/desktop/notifications]
-show-banners=true
-DCONF
-
-dconf update
-
-# --- Microsoft Edge: Intune enrollment requires Edge 102+ ----------------
-install -d -m 0755 /etc/apt/keyrings
-wget -qO- https://packages.microsoft.com/keys/microsoft.asc \
-    | gpg --dearmor | tee /etc/apt/keyrings/microsoft.gpg > /dev/null
-echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/edge stable main' \
-    > /etc/apt/sources.list.d/microsoft-edge.list
-apt-get update
-apt-get install -y microsoft-edge-stable
-
-# Wire Edge as default browser system-wide.
-update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/microsoft-edge-stable 200 || true
-update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/microsoft-edge-stable 200 || true
-update-alternatives --set x-www-browser /usr/bin/microsoft-edge-stable || true
-update-alternatives --set gnome-www-browser /usr/bin/microsoft-edge-stable || true
-
-# Suppress GNOME keyring password prompt on Edge launch. xrdp sessions don't
-# auto-unlock the keyring via PAM, so Edge prompts for a keyring password on
-# every start. --password-store=basic stores credentials in Edge's profile dir
-# instead (plaintext, acceptable for a lab VM with no real secrets).
-if [ -f /usr/share/applications/microsoft-edge.desktop ]; then
-    sed -i 's|Exec=/usr/bin/microsoft-edge-stable|Exec=/usr/bin/microsoft-edge-stable --password-store=basic|g' \
-        /usr/share/applications/microsoft-edge.desktop
-fi
-
-# Login script: auto-repair Edge .desktop after apt upgrades (which reset it)
-# and ensure the user's taskbar favorites have Edge instead of Firefox.
-# Runs via /etc/profile.d/ so it fires on every interactive login (xrdp, SSH).
-cat > /etc/profile.d/memlabs-edge-fixup.sh << 'FIXUP'
-#!/bin/bash
-# memlabs: ensure Edge .desktop has --password-store=basic and taskbar has Edge.
-# Runs once per login; exits immediately if nothing to fix.
-
-# Fix 1: re-patch .desktop if Edge update removed --password-store=basic
-DESKTOP=/usr/share/applications/microsoft-edge.desktop
-if [ -f "$DESKTOP" ] && grep -q 'Exec=/usr/bin/microsoft-edge-stable ' "$DESKTOP" \
-   && ! grep -q '\-\-password-store=basic' "$DESKTOP"; then
-    sudo sed -i 's|Exec=/usr/bin/microsoft-edge-stable|Exec=/usr/bin/microsoft-edge-stable --password-store=basic|g' \
-        "$DESKTOP" 2>/dev/null
-fi
-
-# Fix 2: swap firefox.desktop for microsoft-edge.desktop in taskbar favorites
-if command -v dconf >/dev/null 2>&1; then
-    FAVS=$(dconf read /org/gnome/shell/favorite-apps 2>/dev/null)
-    if echo "$FAVS" | grep -q 'firefox.desktop'; then
-        NEW=$(echo "$FAVS" | sed "s/'firefox.desktop'/'microsoft-edge.desktop'/g")
-        dconf write /org/gnome/shell/favorite-apps "$NEW" 2>/dev/null
-    fi
-fi
-FIXUP
-chmod 0644 /etc/profile.d/memlabs-edge-fixup.sh
-
-# Allow vmbuildadmin to run the sed without a password (needed for .desktop fixup)
-if ! grep -q 'memlabs-edge-fixup' /etc/sudoers.d/memlabs-edge-fixup 2>/dev/null; then
-    echo 'ALL ALL=(root) NOPASSWD: /usr/bin/sed -i s*Exec=/usr/bin/microsoft-edge-stable*Exec=/usr/bin/microsoft-edge-stable --password-store=basic* /usr/share/applications/microsoft-edge.desktop' \
-        > /etc/sudoers.d/memlabs-edge-fixup
-    chmod 0440 /etc/sudoers.d/memlabs-edge-fixup
-fi
-
-install -d -m 0755 /etc/xdg
-cat > /etc/xdg/mimeapps.list << 'MIMEEOF'
-[Default Applications]
-x-scheme-handler/http=microsoft-edge.desktop
-x-scheme-handler/https=microsoft-edge.desktop
-text/html=microsoft-edge.desktop
-MIMEEOF
-
-# --- PAM: auto-unlock GNOME Keyring on xrdp login -------------------------
-# microsoft-identity-broker (pulled in by intune-portal) stores Entra ID
-# auth tokens in GNOME Keyring via libsecret / Secret Service D-Bus API.
-# xrdp's default PAM config doesn't include pam_gnome_keyring.so, so the
-# keyring stays locked → broker can't persist tokens → enrollment fails
-# or re-prompts every session.
-# Add auth + session hooks to /etc/pam.d/xrdp-sesman so the keyring is
-# unlocked (or created) automatically using the login password.
-if [ -f /etc/pam.d/xrdp-sesman ]; then
-    if ! grep -q 'pam_gnome_keyring.so' /etc/pam.d/xrdp-sesman; then
-        sed -i '/^@include common-auth/a auth       optional     pam_gnome_keyring.so' \
-            /etc/pam.d/xrdp-sesman
-        sed -i '/^@include common-session/a session    optional     pam_gnome_keyring.so auto_start' \
-            /etc/pam.d/xrdp-sesman
-        echo '[memlabs-gnome] added pam_gnome_keyring.so to xrdp-sesman PAM config'
-    fi
-fi
-
-# --- Microsoft Intune app (intune-portal) --------------------------------
-# Uses the same Microsoft signing key already imported above.
-echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main' \
-    > /etc/apt/sources.list.d/microsoft-prod.list
-apt-get update
-apt-get install -y intune-portal
-
-# --- Per-user fixup: replace Firefox with Edge in taskbar favorites -------
-# System-wide dconf defaults only apply to keys the user hasn't set yet.
-# Once a user logs in, GNOME writes per-user favorite-apps (including
-# firefox.desktop from Ubuntu's default). Patch every existing user's
-# dconf database so Edge replaces Firefox in the taskbar on next login.
-for UHOME in /home/vmbuildadmin /root; do
-    UNAME=$(stat -c '%U' "$UHOME" 2>/dev/null) || continue
-    # dbus-launch + dconf requires the user's XDG_RUNTIME_DIR; using
-    # gsettings/dconf as root with DCONF_PROFILE won't write to the
-    # per-user db. Instead, use the dconf CLI under su.
-    if [ -d "$UHOME/.config/dconf" ]; then
-        su - "$UNAME" -c "
-            export DCONF_PROFILE=/etc/dconf/profile/user
-            CURRENT=\$(dconf read /org/gnome/shell/favorite-apps 2>/dev/null)
-            if echo \"\$CURRENT\" | grep -q 'firefox.desktop'; then
-                NEW=\$(echo \"\$CURRENT\" | sed \"s/'firefox.desktop'/'microsoft-edge.desktop'/g\")
-                dconf write /org/gnome/shell/favorite-apps \"\$NEW\"
-                echo '[memlabs-gnome] replaced firefox with edge in favorite-apps for $UNAME'
-            elif [ -z \"\$CURRENT\" ] || [ \"\$CURRENT\" = \"@as []\" ]; then
-                dconf write /org/gnome/shell/favorite-apps \"['microsoft-edge.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']\"
-                echo '[memlabs-gnome] set favorite-apps with edge for $UNAME'
-            fi
-        " || true
-    fi
-done
-
-echo "[memlabs-gnome] done: $(date -Is)"
-'@
+    return (Get-LinuxScript -Name 'roles/client-config')
 }
 
 function Get-LinuxRealmJoinBashScript {
@@ -3079,10 +3139,9 @@ function Get-LinuxRealmJoinBashScript {
         Bash body that installs realmd + sssd stack and joins the lab AD.
 
     .DESCRIPTION
-        Extracted from Get-LinuxDomainJoinSeedArgs so the same script can run
-        from Phase 3 SSH dispatch instead of cloud-init. Caller supplies
-        $Domain (lowercase), $DcIp, $AdminUser, $AdminPassword. We
-        single-quote-escape the password into bash. Returns [string] bash.
+        Reads the shared realm-join.sh script and injects the domain,
+        DC IP, admin user, and password as bash variables. Used by both
+        Phase 3 SSH dispatch and cloud-init seed.
     #>
     [CmdletBinding()]
     param (
@@ -3095,55 +3154,12 @@ function Get-LinuxRealmJoinBashScript {
     $pwBashSingle = $AdminPassword -replace "'", "'\''"
     $domainLower = $Domain.ToLower()
 
-    return @"
-echo "[memlabs-realm-join] start: `$(date -Is)"
-export DEBIAN_FRONTEND=noninteractive
-
-apt-get update
-apt-get install -y realmd sssd sssd-tools adcli krb5-user packagekit \
-    samba-common-bin oddjob oddjob-mkhomedir libnss-sss libpam-sss
-
-DOMAIN='$domainLower'
-DC_IP='$dcIp'
-ADMIN_USER='$AdminUser'
-ADMIN_PWD='$pwBashSingle'
-
-/usr/local/sbin/memlabs-set-dns "`$DC_IP" "`$DOMAIN" || true
-
-for i in {1..80}; do
-  if getent hosts "`$DOMAIN" >/dev/null 2>&1; then break; fi
-  echo "[memlabs-realm-join] waiting for DNS on `$DOMAIN (attempt `$i/80)"
-  sleep 15
-done
-
-realm discover "`$DOMAIN" || true
-
-JOINED=0
-for i in {1..5}; do
-  if echo "`$ADMIN_PWD" | realm join -U "`$ADMIN_USER" "`$DOMAIN" --install=/; then
-    JOINED=1
-    break
-  fi
-  echo "[memlabs-realm-join] attempt `$i failed, retry in 30s"
-  sleep 30
-done
-
-if [ "`$JOINED" != "1" ]; then
-  echo "[memlabs-realm-join] ERROR: all join attempts failed"
-  exit 1
-fi
-
-realm permit --realm "`$DOMAIN" --all || true
-sed -i 's/^use_fully_qualified_names = .*/use_fully_qualified_names = False/' /etc/sssd/sssd.conf || true
-sed -i 's|^fallback_homedir = .*|fallback_homedir = /home/%u|' /etc/sssd/sssd.conf || true
-pam-auth-update --enable mkhomedir || true
-systemctl restart sssd || true
-
-echo '%domain\ admins ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/memlabs-domain-admins
-chmod 0440 /etc/sudoers.d/memlabs-domain-admins
-
-echo "[memlabs-realm-join] done: `$(date -Is)"
-"@
+    return (Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -Variables @{
+        DOMAIN    = $domainLower
+        DC_IP     = $DcIp
+        ADMIN_USER = $AdminUser
+        ADMIN_PWD  = $pwBashSingle
+    })
 }
 
 function Invoke-LinuxRoleConfiguration {
@@ -3154,7 +3170,7 @@ function Invoke-LinuxRoleConfiguration {
 
     .DESCRIPTION
         Decides which bash modules apply based on VM flags:
-          - enableRDP=true       -> Get-LinuxXrdpBashScript
+          - enableRDP=true       -> xrdp packages, xrdp config, Firefox
           - role='LinuxClient'   -> Get-LinuxClientBashScript
           - joinDomain=true      -> Get-LinuxRealmJoinBashScript
         Concatenates the modules into a single bash script, base64-encodes it,
@@ -3181,11 +3197,25 @@ function Invoke-LinuxRoleConfiguration {
 
     if ($Vm.PSObject.Properties.Name -contains 'enableRDP' -and [bool]$Vm.enableRDP) {
         $ops.Add([pscustomobject]@{
-            Name       = 'enableRDP'
-            Label      = 'Installing XRDP + xfce4 + Firefox'
-            Script     = (Get-LinuxXrdpBashScript)
+            Name       = 'xrdpPackages'
+            Label      = 'Installing XRDP + xfce4 packages'
+            Script     = (Get-LinuxXrdpPackagesBashScript)
             TimeoutSec = 1800
-            Tag        = 'memlabs-xrdp'
+            Tag        = 'memlabs-xrdp-packages'
+        })
+        $ops.Add([pscustomobject]@{
+            Name       = 'xrdpConfig'
+            Label      = 'Configuring XRDP + xfce4 desktop'
+            Script     = (Get-LinuxXrdpConfigBashScript)
+            TimeoutSec = 300
+            Tag        = 'memlabs-xrdp-config'
+        })
+        $ops.Add([pscustomobject]@{
+            Name       = 'firefox'
+            Label      = 'Installing Firefox (Mozilla deb)'
+            Script     = (Get-LinuxFirefoxBashScript)
+            TimeoutSec = 600
+            Tag        = 'memlabs-firefox'
         })
     }
 
@@ -3239,7 +3269,8 @@ function Invoke-LinuxRoleConfiguration {
     # Wait for SSH first; the VM may have rebooted between phases.
     Write-Progress2 -Activity $activity -Status "Waiting for SSH" -force
     $expectedIp  = Get-LinuxVmExpectedStaticIP -VmObject $Vm -DeployConfig $DeployConfig
-    $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $Vm
+    $vmCount = @($DeployConfig.virtualMachines).Count
+    $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $Vm -VmCount $vmCount
     $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
     if (-not $ip) {
         Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable; cannot apply config." -Failure
@@ -3247,53 +3278,121 @@ function Invoke-LinuxRoleConfiguration {
     }
 
     # Wait for cloud-init to finish before applying any configuration.
-    # The Ubuntu Desktop base image runs a first-boot cloud-init that does
-    # apt-get update, package installs, user creation, and a final reboot.
-    # If we start our apt-get installs while cloud-init still holds the
-    # dpkg lock, the command fails under set -euo pipefail and the whole
-    # module aborts. Even if our commands slip through, cloud-init's final
-    # reboot overwrites our dconf/xsession/mimeapps changes.
-    #
-    # Two-phase gate:
-    #   1) SSH in and run `cloud-init status --wait`. This blocks until
-    #      cloud-init reaches 'done' or 'error'. If cloud-init already
-    #      finished (reboot already happened), this returns instantly with
-    #      exit 0 and we skip straight to the install modules.
-    #   2) If the SSH session was killed (reboot just happened mid-wait),
-    #      sleep 15s then re-probe SSH. Once SSH is back, cloud-init is
-    #      fully done and the system is stable for our install scripts.
-    Write-Progress2 -Activity $activity -Status "Waiting for cloud-init to finish" -force
-    Write-Log "[LinuxConfig] $vmName`: waiting for cloud-init to complete (reboot expected after)"
-    $ciResult = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip `
-        -BashCommand 'cloud-init status --wait 2>/dev/null; echo "cloud-init exit=$?"' `
-        -Sudo -DisplayName 'cloud-init-wait' -TimeoutSeconds 600
-    $ciCleanExit = $ciResult -and $ciResult.CommandResult
-    if ($ciCleanExit) {
-        $ciOutput = ($ciResult.ScriptBlockOutput -split "`n" | Select-Object -Last 5) -join ' | '
-        Write-Log "[LinuxConfig] $vmName`: cloud-init already done: $ciOutput"
+    # Quick non-blocking probe first: if cloud-init already finished (rerun,
+    # or Server image with no cloud-init), skip the wait entirely.
+    Write-Progress2 -Activity $activity -Status "Checking cloud-init status" -force
+    $ciProbe = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip `
+        -BashCommand 'cloud-init status 2>/dev/null || echo "status: disabled"' `
+        -Sudo -DisplayName 'cloud-init-probe' -TimeoutSeconds 30
+    $ciStatus = ''
+    if ($ciProbe -and $ciProbe.ScriptBlockOutput) {
+        if ($ciProbe.ScriptBlockOutput -match 'status:\s*(\S+)') { $ciStatus = $Matches[1] }
+    }
+
+    if ($ciStatus -in @('done', 'disabled')) {
+        Write-Log "[LinuxConfig] $vmName`: cloud-init already finished (status: $ciStatus). Skipping wait."
     }
     else {
-        # Connection reset by reboot — this is the normal path for Desktop
-        # images on first boot. Wait for SSH to come back after the reboot.
-        Write-Log "[LinuxConfig] $vmName`: cloud-init wait session ended (likely rebooting)"
-        Write-Progress2 -Activity $activity -Status "Waiting for post-cloud-init reboot" -force
-        Write-Log "[LinuxConfig] $vmName`: waiting for VM to come back after cloud-init reboot"
-        # Sleep briefly so the VM has time to actually go down; otherwise
-        # Wait-LinuxVmReady may immediately succeed against the old
-        # (pre-reboot) SSH session before the kernel starts shutting down.
-        Start-Sleep -Seconds 15
-        $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
-        if (-not $ip) {
-            Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable after cloud-init reboot." -Failure
-            return $false
+        # cloud-init is still running (first boot). Poll status + last log
+        # line so the progress row shows what cloud-init is actually doing
+        # (similar to how CM DSC shows ConfigMgr log tails).
+        Write-Log "[LinuxConfig] $vmName`: cloud-init status '$ciStatus'; polling until done (reboot expected after)"
+        $ciStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $ciTimeoutSec = 600
+        $ciDone = $false
+        while ($ciStopwatch.Elapsed.TotalSeconds -lt $ciTimeoutSec) {
+            # Single SSH call: get status + last useful log line in one round-trip.
+            $ciPoll = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip `
+                -BashCommand '{ cloud-init status 2>/dev/null || echo "status: unknown"; } && echo "---LOGTAIL---" && tail -n 5 /var/log/cloud-init.log 2>/dev/null | grep -v "^$" | tail -n 1' `
+                -Sudo -DisplayName 'cloud-init-poll' -TimeoutSeconds 30
+
+            if (-not ($ciPoll -and $ciPoll.CommandResult)) {
+                # SSH failed — VM is likely rebooting (cloud-init final reboot).
+                Write-Log "[LinuxConfig] $vmName`: SSH lost during cloud-init poll (likely rebooting)"
+                Write-Progress2 -Activity $activity -Status "Waiting for post-cloud-init reboot" -force
+                Start-Sleep -Seconds 15
+                $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
+                if (-not $ip) {
+                    Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable after cloud-init reboot." -Failure
+                    return $false
+                }
+                Write-Log "[LinuxConfig] $vmName`: SSH ready after cloud-init reboot at $ip"
+                $ciDone = $true
+                break
+            }
+
+            # Parse status and log tail from combined output.
+            $pollOutput = $ciPoll.ScriptBlockOutput
+            $pollStatus = ''
+            $pollLogLine = ''
+            if ($pollOutput -match 'status:\s*(\S+)') { $pollStatus = $Matches[1] }
+            if ($pollOutput -match '---LOGTAIL---\s*(.+)') {
+                $pollLogLine = $Matches[1].Trim()
+                # Strip timestamp prefix (e.g. "2026-05-30 12:34:56,789 - ") for cleaner display.
+                $pollLogLine = $pollLogLine -replace '^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d+\s+-\s+', ''
+                # Truncate long lines for the progress bar.
+                if ($pollLogLine.Length -gt 120) { $pollLogLine = $pollLogLine.Substring(0, 117) + '...' }
+            }
+
+            if ($pollStatus -in @('done', 'error', 'disabled')) {
+                Write-Log "[LinuxConfig] $vmName`: cloud-init finished (status: $pollStatus)"
+                $ciDone = $true
+                break
+            }
+
+            $elapsed = $ciStopwatch.Elapsed.ToString('mm\:ss')
+            $statusMsg = "cloud-init [$elapsed]: $pollLogLine"
+            Write-Progress2 -Activity $activity -Status $statusMsg -force
+
+            Start-Sleep -Seconds 5
         }
-        Write-Log "[LinuxConfig] $vmName`: SSH ready after cloud-init reboot at $ip"
+
+        if (-not $ciDone) {
+            Write-Log "[LinuxConfig] $vmName`: cloud-init poll timed out after ${ciTimeoutSec}s" -Warning
+
+            # Dump diagnostic state before killing anything so we have a
+            # full post-mortem in the deploy log.
+            $ciDiag = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -Sudo `
+                -BashCommand @'
+echo "=== PROCESS TREE ==="
+pstree -palT $(pgrep -f "/var/lib/cloud/instance/scripts/runcmd" 2>/dev/null) 2>/dev/null || echo "(runcmd PID not found)"
+echo "=== CLOUD-INIT STATUS ==="
+cloud-init status --long 2>/dev/null || echo "status: unknown"
+echo "=== CLOUD-INIT LOG (last 40 lines) ==="
+tail -40 /var/log/cloud-init.log 2>/dev/null
+echo "=== CLOUD-INIT OUTPUT (last 40 lines) ==="
+tail -40 /var/log/cloud-init-output.log 2>/dev/null
+echo "=== FAILED SYSTEMD UNITS ==="
+systemctl --no-pager --failed 2>/dev/null
+echo "=== APT/DPKG LOCKS ==="
+fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>&1 || echo "no locks"
+'@ `
+                -DisplayName 'cloud-init-diag' -TimeoutSeconds 30
+            if ($ciDiag -and $ciDiag.ScriptBlockOutput) {
+                foreach ($diagLine in ($ciDiag.ScriptBlockOutput -split "`n")) {
+                    Write-Log "[LinuxConfig] $vmName`: ci-diag> $diagLine" -LogOnly
+                }
+            }
+
+            # Kill the stuck cloud-init process tree and neutralize the
+            # power_state reboot so the VM doesn't surprise-restart later.
+            Write-Log "[LinuxConfig] $vmName`: killing stuck cloud-init and cancelling pending reboot" -Warning
+            $ciKill = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -Sudo `
+                -BashCommand 'pkill -9 -f "/var/lib/cloud/instance/scripts/runcmd" 2>/dev/null; pkill -9 -f "cloud-init modules" 2>/dev/null; shutdown -c 2>/dev/null; cloud-init status 2>/dev/null || echo "status: killed"' `
+                -DisplayName 'cloud-init-kill' -TimeoutSeconds 30
+            if ($ciKill -and $ciKill.ScriptBlockOutput) {
+                Write-Log "[LinuxConfig] $vmName`: cloud-init cleanup result: $($ciKill.ScriptBlockOutput.Trim())" -LogOnly
+            }
+        }
     }
 
     # Run each module as its own SSH invocation so the Phase 3 row reflects
-    # exactly what's running. Fail-fast: a module failure aborts subsequent
-    # modules and returns $false (matches the old single-blob behavior).
+    # exactly what's running. If a module fails, reboot the VM and retry that
+    # module once before aborting. A fresh boot clears stale dpkg locks,
+    # hung apt processes, and broken service state that commonly cause
+    # transient failures.
     $i = 0
+    $rebooted = $false
     foreach ($op in $ops) {
         $i++
         $statusText = "[$i/$($ops.Count)] $($op.Label)"
@@ -3310,13 +3409,34 @@ function Invoke-LinuxRoleConfiguration {
 
         $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -DisplayName $op.Tag -TimeoutSeconds $op.TimeoutSec
         if (-not ($result -and $result.CommandResult)) {
-            $tail = $null
-            if ($result -and $result.ScriptBlockOutput) {
-                $lines = ($result.ScriptBlockOutput -split "`n")
-                $tail = ($lines | Select-Object -Last 20) -join "`n"
+            # If we haven't rebooted yet, try a reboot-and-retry for this module.
+            if (-not $rebooted) {
+                $tail = $null
+                if ($result -and $result.ScriptBlockOutput) {
+                    $lines = ($result.ScriptBlockOutput -split "`n")
+                    $tail = ($lines | Select-Object -Last 10) -join "`n"
+                }
+                Write-Log "[LinuxConfig] $vmName`: module '$($op.Name)' failed (exit=$($result.ExitCode)); rebooting for retry. Tail:`n$tail" -Warning
+                $rebooted = $true
+                $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 900
+                if (-not $ip) {
+                    Write-Log "[LinuxConfig] $vmName`: VM not reachable after reboot; aborting." -Failure
+                    return $false
+                }
+                # Retry the same module after reboot.
+                Write-Progress2 -Activity $activity -Status "[$i/$($ops.Count)] $($op.Label) (retry after reboot)" -force
+                Write-Log "[Phase 3]: $vmName`: [$i/$($ops.Count)] $($op.Label) (retry after reboot)" -OutputStream
+                $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -DisplayName "$($op.Tag)-retry" -TimeoutSeconds $op.TimeoutSec
             }
+            if (-not ($result -and $result.CommandResult)) {
+                $tail = $null
+                if ($result -and $result.ScriptBlockOutput) {
+                    $lines = ($result.ScriptBlockOutput -split "`n")
+                    $tail = ($lines | Select-Object -Last 20) -join "`n"
+                }
             Write-Log "[LinuxConfig] $vmName`: module '$($op.Name)' FAILED (exit=$($result.ExitCode)). Tail:`n$tail" -Failure
             return $false
+            }
         }
         Write-Log "[Phase 3]: $vmName`: $($op.Label) complete." -Success
     }
@@ -3434,7 +3554,7 @@ function Set-WindowsClientProxy {
                 $connPath = Join-Path $ieRegPath 'Connections'
                 if (-not (Test-Path $connPath)) { New-Item -Path $connPath -Force | Out-Null }
                 $old = (Get-ItemProperty -Path $connPath -Name 'DefaultConnectionSettings' -EA SilentlyContinue).DefaultConnectionSettings
-                $ctr = if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 }
+                $ctr = $(if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 })
                 if ($enable) {
                     $pB = [Text.Encoding]::ASCII.GetBytes($proxy)
                     $bB = [Text.Encoding]::ASCII.GetBytes($bypass)
@@ -3471,6 +3591,16 @@ function Set-WindowsClientProxy {
             New-ItemProperty -Path $key -Name 'ProxySettingsPerUser' -PropertyType DWord -Value 0 -Force | Out-Null
 
             $ieKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+            # ProxySettingsPerUser=0 on the REGULAR IE key (not just the Policies
+            # key above) is the switch WinINET actually reads to force machine-
+            # wide proxy for every user + SYSTEM. Without it, WinINET stays in
+            # per-user mode: the HKLM ProxyServer string is only a template and
+            # Windows consumes/blanks it into the per-machine
+            # DefaultConnectionSettings blob on the next reboot (seen on
+            # ZZ-MOCHI: HKLM IE ProxyServer = '' after a Phase 10 reboot while
+            # WinHTTP still pointed at :3128). Setting it here makes the HKLM
+            # ProxyServer authoritative and persistent across reboots.
+            New-ItemProperty -Path $ieKey -Name 'ProxySettingsPerUser' -PropertyType DWord -Value 0 -Force | Out-Null
             New-ItemProperty -Path $ieKey -Name 'ProxyEnable' -PropertyType DWord -Value 1 -Force | Out-Null
             New-ItemProperty -Path $ieKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
             New-ItemProperty -Path $ieKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
@@ -3707,7 +3837,7 @@ function Remove-WindowsClientProxy {
                 $connPath = Join-Path $ieRegPath 'Connections'
                 if (-not (Test-Path $connPath)) { return }
                 $old = (Get-ItemProperty -Path $connPath -Name 'DefaultConnectionSettings' -EA SilentlyContinue).DefaultConnectionSettings
-                $ctr = if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 }
+                $ctr = $(if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 })
                 if ($enable) {
                     $pB = [Text.Encoding]::ASCII.GetBytes($proxy)
                     $bB = [Text.Encoding]::ASCII.GetBytes($bypass)
@@ -3746,6 +3876,10 @@ function Remove-WindowsClientProxy {
             New-ItemProperty -Path $ieKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
             Remove-ItemProperty -Path $ieKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
             Remove-ItemProperty -Path $ieKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+            # Restore per-user proxy mode (reverse of the machine-wide enforce
+            # in Set-WindowsClientProxy) so a de-proxied VM goes back to the
+            # Windows default of per-user settings.
+            Remove-ItemProperty -Path $ieKey -Name 'ProxySettingsPerUser' -ErrorAction SilentlyContinue
             & $writeConnBlob $ieKey '' '' $false
 
             # 3a-edge) Edge browser policy
@@ -3959,241 +4093,17 @@ function Set-WindowsClientProxyForConfig {
     }
 
     $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
-    $bypassNet = $deployConfig.vmOptions.network
 
     $ok = $true
     foreach ($vm in $clients) {
+        # Bypass the proxy for the client's OWN subnet, not the domain default
+        # network. A client on a secondary network (e.g. 10.0.2.0) must bypass
+        # for 10.0.2.* — using vmOptions.network would bypass the wrong subnet.
+        $bypassNet = $vm.network
+        if (-not $bypassNet) { $bypassNet = $deployConfig.vmOptions.network }
         Write-Log "[Proxy] Configuring $($vm.vmName) -> $proxyFqdn`:3128"
         $r = Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
                 -ProxyFqdn $proxyFqdn -BypassNetwork $bypassNet
-        if (-not $r) { $ok = $false }
-    }
-    return $ok
-}
-
-function Set-ProxyAdminAccessOnVm {
-    <#
-    .SYNOPSIS
-        Install host's memlabs ed25519 keypair on a Windows VM and create
-        Public-Desktop shortcuts for SSHing to the Proxy and tailing the
-        Squid access log.
-
-    .DESCRIPTION
-        Cloud-init already authorizes the host's ed25519 public key for
-        vmbuildadmin on every Linux VM. This drops the matching private
-        key (plus .pub) into C:\ProgramData\memlabs\ssh on the target VM
-        with admin-only ACLs so an interactive Administrator can ssh
-        without typing a password, and stamps two shortcuts on the
-        all-users desktop pointing at ssh.exe.
-
-        Idempotent. Safe to call repeatedly.
-    #>
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory)] [string]$VmName,
-        [Parameter(Mandatory)] [string]$Domain,
-        [Parameter(Mandatory)] [string]$ProxyFqdn,
-        [Parameter(Mandatory)] [string]$PrivateKeyContent,
-        [Parameter(Mandatory)] [string]$PublicKeyContent,
-        [Parameter(Mandatory)] [string]$ProxyIP
-    )
-
-    $scriptBlock = {
-        param($privKey, $pubKey, $proxyFqdn, $proxyIP)
-        $ErrorActionPreference = 'Stop'
-        try {
-            $sshDir = 'C:\ProgramData\memlabs\ssh'
-            if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Force | Out-Null }
-
-            $privPath = Join-Path $sshDir 'memlabs_ed25519'
-            $pubPath  = "$privPath.pub"
-
-            # Write LF-only (OpenSSH on Windows is happy with either, but
-            # ed25519 PEM blocks prefer LF). Use [IO.File] to avoid BOM.
-            [System.IO.File]::WriteAllText($privPath, ($privKey -replace "`r`n", "`n"))
-            [System.IO.File]::WriteAllText($pubPath, ($pubKey -replace "`r`n", "`n"))
-
-            # ACL story on the SOURCE key (C:\ProgramData\memlabs\ssh):
-            #   - Owner = BUILTIN\Administrators, FullControl for SYSTEM + Admins.
-            #   - Authenticated Users get READ. Lab-only tradeoff: any logged-in
-            #     domain user can read the private key, but it's the same key
-            #     that's already authorized for vmbuildadmin on every Linux VM
-            #     in the lab, so the exposure is bounded.
-            #
-            # Why allow Authenticated Users read: shortcuts on Public Desktop
-            # are launched by domain admins whose UAC-filtered token does NOT
-            # carry the Administrators SID. With an Admins-only ACL, ssh.exe
-            # under that token can't open() the key and falls back to a
-            # password prompt ('Load key ...: Permission denied').
-            #
-            # The wrapper (memlabs-ssh-proxy.cmd, installed below) copies the
-            # key into the caller's %LOCALAPPDATA% with a user-private ACL,
-            # then runs ssh -i on that copy. OpenSSH's strict-permissions
-            # check then sees a file owned by the current user with no other
-            # principals, which it accepts.
-            #
-            # NOTE: starting from `New-Object FileSecurity` (empty descriptor)
-            # leaves owner unset, which OpenSSH treats as untrusted and
-            # rejects the key. Always start from Get-Acl and mutate.
-            $acl = Get-Acl -Path $privPath
-            $acl.SetAccessRuleProtection($true, $false)
-            foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRule($r) }
-            $sysSid  = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'         # NT AUTHORITY\SYSTEM
-            $admSid  = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'     # BUILTIN\Administrators
-            $authSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-11'         # NT AUTHORITY\Authenticated Users
-            $acl.SetOwner($admSid)
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $sysSid, 'FullControl', 'Allow')))
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $admSid, 'FullControl', 'Allow')))
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $authSid, 'Read', 'Allow')))
-            Set-Acl -Path $privPath -AclObject $acl
-
-            # Locate ssh.exe (built-in OpenSSH client; present on all current
-            # server SKUs by default). Fall back to Get-Command.
-            $sshExe = 'C:\Windows\System32\OpenSSH\ssh.exe'
-            if (-not (Test-Path $sshExe)) {
-                $cmd = Get-Command ssh.exe -ErrorAction SilentlyContinue
-                if ($cmd) { $sshExe = $cmd.Source }
-            }
-            if (-not (Test-Path $sshExe)) {
-                return @{ Ok = $false; Error = "ssh.exe not found on target VM" }
-            }
-
-            $desktop = 'C:\Users\Public\Desktop'
-            $shell = New-Object -ComObject WScript.Shell
-
-            # Install a wrapper that stages a user-private copy of the key
-            # under %LOCALAPPDATA%\memlabs\ssh on first use. OpenSSH on
-            # Windows requires the key file to be readable ONLY by the caller
-            # (or SYSTEM/Admins) AND owned by one of those -- the source key
-            # in ProgramData allows Authenticated Users read, which OpenSSH
-            # rejects with 'bad permissions'. Per-user copy sidesteps both
-            # the strict check and the UAC token-filtering issue (non-elevated
-            # admins don't carry the Admins SID and can't read an Admins-only
-            # ACL even though they're nominally admins).
-            $wrapperPath = Join-Path $sshDir 'memlabs-ssh-proxy.cmd'
-            $wrapper = @"
-@echo off
-setlocal
-set SRC=$privPath
-set DST=%LOCALAPPDATA%\memlabs\ssh\memlabs_ed25519
-if not exist "%LOCALAPPDATA%\memlabs\ssh" mkdir "%LOCALAPPDATA%\memlabs\ssh" >nul 2>&1
-if not exist "%DST%" (
-    copy /Y "%SRC%" "%DST%" >nul
-    icacls "%DST%" /inheritance:r >nul 2>&1
-    icacls "%DST%" /grant:r "%USERNAME%:F" >nul 2>&1
-    icacls "%DST%" /grant:r "SYSTEM:F" >nul 2>&1
-)
-"$sshExe" -i "%DST%" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyIP %*
-endlocal
-"@
-            [System.IO.File]::WriteAllText($wrapperPath, $wrapper)
-
-            # Interactive SSH shell. cmd.exe /k keeps the window open after
-            # ssh exits so the user can see any messages.
-            $lnk1 = Join-Path $desktop "SSH to $proxyFqdn.lnk"
-            $sc1 = $shell.CreateShortcut($lnk1)
-            $sc1.TargetPath = 'C:\Windows\System32\cmd.exe'
-            $sc1.Arguments = "/k `"$wrapperPath`""
-            $sc1.WorkingDirectory = 'C:\'
-            $sc1.IconLocation = "$sshExe,0"
-            $sc1.Description = "SSH to $proxyFqdn ($proxyIP) as vmbuildadmin"
-            $sc1.Save()
-
-            # Squid access-log tail (pass tail command as wrapper args)
-            $lnk2 = Join-Path $desktop 'Squid Access Log.lnk'
-            $sc2 = $shell.CreateShortcut($lnk2)
-            $sc2.TargetPath = 'C:\Windows\System32\cmd.exe'
-            $sc2.Arguments = "/k `"$wrapperPath`" sudo tail -n 100 -F /var/log/squid/access.log"
-            $sc2.WorkingDirectory = 'C:\'
-            $sc2.IconLocation = "$sshExe,0"
-            $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn ($proxyIP)"
-            $sc2.Save()
-
-            # Proxy Admin web UI (opens default browser)
-            $lnk3 = Join-Path $desktop "Proxy Admin - $proxyFqdn.lnk"
-            $sc3 = $shell.CreateShortcut($lnk3)
-            $sc3.TargetPath = "http://${proxyIP}:8443"
-            $sc3.Description = "Open Proxy Admin blocklist manager on $proxyFqdn ($proxyIP)"
-            $sc3.Save()
-
-            return @{ Ok = $true; SshDir = $sshDir; Shortcuts = @($lnk1, $lnk2, $lnk3) }
-        }
-        catch {
-            return @{ Ok = $false; Error = $_.ToString() }
-        }
-    }
-
-    $result = Invoke-VmCommand -VmName $VmName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -ArgumentList $PrivateKeyContent, $PublicKeyContent, $ProxyFqdn, $ProxyIP `
-        -DisplayName "Install proxy SSH key + shortcuts"
-    if ($result.ScriptBlockFailed) {
-        Write-Log "[Proxy] $VmName`: Set-ProxyAdminAccessOnVm ScriptBlockFailed: $($result.ScriptBlockOutput)" -Failure
-        return $false
-    }
-    $payload = $result.ScriptBlockOutput
-    if (-not $payload -or -not $payload.Ok) {
-        Write-Log "[Proxy] $VmName`: Set-ProxyAdminAccessOnVm failed: $($payload.Error)" -Failure
-        return $false
-    }
-    Write-Log "[Proxy] $VmName`: Installed SSH key + Public Desktop shortcuts (-> $ProxyIP)"
-    return $true
-}
-
-function Set-ProxyAdminAccessForConfig {
-    <#
-    .SYNOPSIS
-        Push the host SSH key + Squid-log shortcuts to every DC and CM
-        site-server VM in a deploy config, so operators can SSH to the
-        Proxy from those VMs without typing a password.
-
-    .DESCRIPTION
-        Scope is limited to roles that an operator routinely RDPs to
-        (DC, BDC, CAS, Primary, Secondary, SiteSystem, PassiveSite).
-        Skipped entirely if the config contains no Proxy VM.
-
-        Idempotent. Safe to call repeatedly.
-    #>
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory)] [object]$deployConfig
-    )
-
-    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
-    if (-not $proxyVm) {
-        # Add-to-existing case: Proxy may live in the existing hierarchy.
-        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
-        if ($existingProxyName) {
-            $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' }
-        }
-    }
-    if (-not $proxyVm) { return $true }
-
-    $adminRoles = @('DC', 'BDC', 'CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite')
-    $targets = @($deployConfig.virtualMachines | Where-Object {
-        ($_.role -in $adminRoles) -and -not $_.hidden -and -not (Test-VmIsLinux -Vm $_)
-    })
-    if (-not $targets) { return $true }
-
-    $key = Get-LinuxAdminSshKeyPair
-    $privContent = (Get-Content -Raw -Path $key.PrivateKeyPath)
-    $pubContent  = (Get-Content -Raw -Path $key.PublicKeyPath)
-
-    $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
-    $proxyIP = Get-LinuxVmExpectedStaticIP -VmObject $proxyVm -DeployConfig $deployConfig
-    if (-not $proxyIP) {
-        Write-Log "[Proxy] Could not determine Proxy IP from network; skipping SSH shortcuts" -Warning
-        return $false
-    }
-
-    $ok = $true
-    foreach ($vm in $targets) {
-        Write-Log "[Proxy] Installing SSH key + shortcuts on $($vm.vmName) -> $proxyIP ($proxyFqdn)"
-        $r = Set-ProxyAdminAccessOnVm -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
-                -ProxyFqdn $proxyFqdn -PrivateKeyContent $privContent -PublicKeyContent $pubContent `
-                -ProxyIP $proxyIP
         if (-not $r) { $ok = $false }
     }
     return $ok
@@ -4426,33 +4336,36 @@ function Invoke-LinuxBaseImageBake {
     <#
     .SYNOPSIS
         First-boot a base VHDX on an internet-connected switch, install
-        Hyper-V integration daemons + agents via apt, then cloud-init clean
-        so the image is pristine for downstream lab deploys.
+        Hyper-V integration daemons, desktop environment, Edge, Intune, and
+        supporting packages via SSH-driven steps with per-step error checking.
 
     .DESCRIPTION
-        memlabs lab subnets DNS-forward to the domain DC. Until the DC is
-        provisioned, Linux VMs created in phase 1 cannot resolve
-        archive.ubuntu.com and apt fails. The Hyper-V KVP daemon is what
-        publishes the guest IP back to the host via
-        Get-VMNetworkAdapter.IPAddresses; without it, host-side IP discovery
-        breaks. Solution: bake the daemons + qemu-guest-agent into the base
-        VHDX during image build (which has internet) so deploy time needs
-        zero apt.
+        SSH-driven bake: cloud-init creates a temporary user with SSH key,
+        then the host SSHes in and drives each installation step sequentially.
+        Every step is validated before proceeding. On failure the bake aborts
+        with a detailed error and leaves the VM running so you can SSH in to
+        diagnose.
 
-        Creates a temp Gen2 VM from $VhdxPath, attaches a NoCloud seed ISO
-        that installs the packages, runs `cloud-init clean --logs --seed
-        --machine-id`, and powers off. Removes the temp VM, leaves the
-        modified VHDX in place. Re-runnable; safe if interrupted.
+        Server variant bakes: HV daemons, qemu-guest-agent, system updates.
+        Desktop variant additionally bakes: ubuntu-desktop-minimal, GDM3,
+        NetworkManager, xrdp, Microsoft Edge, Intune Portal, dash-to-panel,
+        GNOME dconf defaults, and supporting system configuration.
+
+        Re-runnable; stale VMs from interrupted runs are cleaned up on entry.
 
     .PARAMETER VhdxPath
         Path to the VHDX to modify in place.
 
     .PARAMETER SwitchName
-        Hyper-V switch with outbound internet (e.g. 'Default Switch',
-        'MemLabsNAT'). Default tries 'Default Switch'.
+        Hyper-V switch with outbound internet. Default: 'Default Switch'
+        (mapped to MemLabsNAT with static IP 172.16.200.10).
 
     .PARAMETER TimeoutMinutes
-        Wall-clock cap on the bake VM. Hard powers off on timeout.
+        Wall-clock cap for the entire bake. Hard powers off on timeout.
+
+    .PARAMETER BakeIPAddress
+        IP address to SSH into the bake VM. Auto-set to 172.16.200.10 for
+        MemLabsNAT. Required for custom switches.
     #>
     [CmdletBinding()]
     param (
@@ -4465,16 +4378,12 @@ function Invoke-LinuxBaseImageBake {
         [Parameter(Mandatory = $false)]
         [int]$TimeoutMinutes = 20,
 
-        # Server: minimal cloud-image + Hyper-V daemons (existing behavior).
-        # Desktop: additionally bake `ubuntu-desktop-minimal` + GDM3 + NetworkManager
-        # + xrdp into the image so the resulting VHDX boots straight into a real
-        # Ubuntu Desktop session for MDM/EDR testing (Intune for Linux, Defender
-        # for Endpoint, etc.). Cloud-init still runs at deploy time to consume
-        # the per-VM seed ISO; the renderer override below makes it emit netplan
-        # configs that NetworkManager owns instead of systemd-networkd.
         [Parameter(Mandatory = $false)]
         [ValidateSet('Server', 'Desktop')]
-        [string]$Variant = 'Server'
+        [string]$Variant = 'Server',
+
+        [Parameter(Mandatory = $false)]
+        [string]$BakeIPAddress
     )
 
     if (-not (Test-Path $VhdxPath)) {
@@ -4499,30 +4408,23 @@ function Invoke-LinuxBaseImageBake {
         $SwitchName = 'MemLabsNAT'
 
         # Migration: earlier bake code created a NAT named 'MemLabsNATNat'
-        # with prefix 172.16.200.0/24.  Test-NetworkNat (called by
-        # Add-SwitchAndDhcp) names NATs by subnet ('172.16.200.0') and will
-        # fail to create a duplicate-prefix NAT.  Remove the legacy name so
-        # the standard pipeline succeeds.
+        # with prefix 172.16.200.0/24.  Remove the legacy name so the
+        # standard pipeline succeeds.
         $legacyNat = Get-NetNat -Name 'MemLabsNATNat' -ErrorAction SilentlyContinue
         if ($legacyNat) {
             Write-Log "Bake: removing legacy NAT 'MemLabsNATNat' (replaced by '172.16.200.0')." -Warning
             Remove-NetNat -Name 'MemLabsNATNat' -Confirm:$false -ErrorAction SilentlyContinue
         }
 
-        # Reuse the same Add-SwitchAndDhcp / Test-NetworkSwitch / Test-DHCPScope
-        # pipeline that New-Lab uses for domain networks. This creates the
-        # internal switch, sets host IP to .200, adds the NetNat, installs
-        # DHCP if needed, and creates a scope (.20-.199, gateway .200, DNS
-        # 8.8.8.8).  The bake VM will get an address via DHCP; the static
-        # network-config in the seed ISO is a belt-and-suspenders fallback.
         $switchOk = Add-SwitchAndDhcp -NetworkName $SwitchName -NetworkSubnet '172.16.200.0' -DNSServer '8.8.8.8'
         if (-not $switchOk) {
             throw "Bake: failed to create/verify switch + DHCP for '$SwitchName' (172.16.200.0/24)."
         }
         $isMemLabsNAT = $true
+        if (-not $BakeIPAddress) { $BakeIPAddress = '172.16.200.10' }
     }
     else {
-        # Caller picked a custom switch (e.g. 'External' on host that already has internet); just verify it exists.
+        # Caller picked a custom switch; just verify it exists.
         $switch = @(Get-VMSwitch -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $SwitchName })
         if ($switch.Count -eq 0) {
             throw "Bake: Hyper-V switch '$SwitchName' not found. Pick a switch with outbound internet (-BakeSwitchName), or use 'MemLabsNAT' to auto-create one. Available: $((Get-VMSwitch | Select-Object -ExpandProperty Name) -join ', ')"
@@ -4530,6 +4432,23 @@ function Invoke-LinuxBaseImageBake {
         if ($switch.Count -gt 1) {
             throw "Bake: found $($switch.Count) Hyper-V switches named '$SwitchName'; remove the duplicates and re-run."
         }
+        if (-not $BakeIPAddress) {
+            throw "Bake: -BakeIPAddress is required when using a custom switch ('$SwitchName'). MemLabsNAT auto-assigns 172.16.200.10."
+        }
+    }
+
+    # SSH keypair for connecting to the bake VM.  Same ed25519 key used for
+    # deployed VMs; the bake user 'memlabs' gets it via cloud-init.
+    $keyPair = Get-LinuxAdminSshKeyPair
+    $sshPubKey = $keyPair.PublicKey
+
+    # Password for bake console user (vmconnect debugging).
+    if (-not $Common -or -not $Common.LocalAdmin) {
+        throw "Bake: `$Common.LocalAdmin not available. Run via New-LinuxBaseImage.ps1."
+    }
+    try { $bakePwd = $Common.LocalAdmin.GetNetworkCredential().Password } catch { $bakePwd = $null }
+    if (-not $bakePwd) {
+        throw "Bake: could not extract password from `$Common.LocalAdmin."
     }
 
     $vmName = "memlabs-bake-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -4546,10 +4465,7 @@ local-hostname: memlabs-bake
     # Static network config for the MemLabsNAT switch (172.16.200.0/24).
     # Belt-and-suspenders with the DHCP scope created by Add-SwitchAndDhcp
     # above -- if cloud-init reads this file the static config wins; if not,
-    # DHCP provides the address.  Gateway is .200 (the host vNIC IP set by
-    # Test-NetworkSwitch, matching every other memlabs network).
-    # cloud-init reads 'network-config' from the NoCloud seed alongside
-    # meta-data and user-data.
+    # DHCP provides the address.
     $networkConfig = @"
 version: 2
 renderer: networkd
@@ -4565,48 +4481,18 @@ ethernets:
       addresses: [8.8.8.8, 1.1.1.1]
 "@
 
-    # cloud-init bake recipe:
-    #   - install KVP/VSS daemons (Hyper-V integration), qemu-guest-agent,
-    #     openssh-server (already present but be explicit)
-    #   - enable the services (will auto-start at deploy time, no apt needed)
-    #   - cloud-init clean: wipe instance state so next boot (with a new
-    #     instance-id from the deploy seed) re-runs the full first-boot flow
-    #   - truncate machine-id so each deployed VM regenerates a unique one
-    #   - remove cloud-init netplan so deploy seed's network config wins
-    #   - power off; the script polls VM state and removes the temp VM
-    #
-    # Desktop variant adds: ubuntu-desktop-minimal + GDM3 + NetworkManager
-    # (real Ubuntu Desktop package surface for MDM/EDR posture checks) and
-    # xrdp/xorgxrdp so a baked image can be RDP'd into without per-deploy
-    # apt traffic.
-    #
-    # Networking notes:
-    #   Previous bake forced cloud-init's netplan renderer to NetworkManager
-    #   and disabled systemd-networkd. That looked clean but it removed the
-    #   only DHCP mechanism that actually works on first boot:
-    #     - Ubuntu 24.04 dropped isc-dhcp-client entirely (no dhclient
-    #       fallback for anyone).
-    #     - NetworkManager doesn't auto-claim eth0 in the first ~60s after a
-    #       cloud-init reseed, so the deploy's Wait-ForLinuxVm loop times
-    #       out with no IPv4.
-    #   Fix: leave netplan on its default systemd-networkd renderer (same as
-    #   the Server variant, which is proven working), keep NM installed +
-    #   enabled for the GUI session, but tell NM to leave eth* unmanaged so
-    #   the two don't race for the lease. NM still owns wifi / dynamic GUI
-    #   connections; networkd owns the static lab interface.
-    $desktopPackagesYaml = ''
-    $desktopRuncmdYaml = ''
-    # Always bake the hv-kvp-daemon.service override so the deployed VHDX
-    # boots with our race-free unit on disk from the start.  Without this
-    # the upstream unit (BindsTo= + ConditionPathExists= on /dev/vmbus/hv_kvp)
-    # runs before cloud-init's write_files writes the override, fails due
-    # to the ~40s device-registration race, and systemd marks the unit
-    # dependency-failed for the rest of the boot.  KVP stays dark and the
-    # host can't read the guest IP.
-    #
+    # ── Minimal cloud-init seed ──────────────────────────────────────────
+    # Cloud-init ONLY creates the bake user (with SSH key + passwordless
+    # sudo) and writes the hv-kvp-daemon.service override.  Everything else
+    # (packages, services, config) is driven via SSH from the host so each
+    # step gets validated individually with detailed error reporting.
+    # On failure the VM is left running for interactive SSH debugging.
+    $bakePwdQuoted = "'" + ($bakePwd -replace "'", "''") + "'"
+
+    # hv-kvp-daemon.service override: race-free polling for /dev/vmbus/hv_kvp.
     # The deploy seed ISO writes the same file via its own write_files
-    # (idempotent overwrite); having it baked in just ensures the very
-    # first systemd pass uses the override.
+    # (idempotent overwrite); having it baked in ensures the very first
+    # systemd pass uses the override.
     $bakeWriteFilesYaml = @'
 
 write_files:
@@ -4633,23 +4519,9 @@ write_files:
 '@
 
     if ($Variant -eq 'Desktop') {
-        $desktopPackagesYaml = @'
-  - ubuntu-desktop-minimal
-  - gdm3
-  - network-manager
-  - xrdp
-  - xorgxrdp
-'@
-
         # NetworkManager keyfile config: keep NM running for the GUI, but
         # ignore the lab interface so systemd-networkd's DHCP wins
         # unambiguously on every boot.
-        # NOTE: "`n" is required because PowerShell here-strings do NOT
-        # include a trailing newline. Without it, the last line of the
-        # previous write_files entry (WantedBy=multi-user.target) runs
-        # into this entry's '- path:' on the same line, producing a
-        # duplicate 'content:' key that makes cloud-init write NM keyfile
-        # config into the KVP service path.
         $bakeWriteFilesYaml += "`n"
         $bakeWriteFilesYaml += @'
   - path: /etc/NetworkManager/conf.d/10-memlabs-unmanage-eth.conf
@@ -4657,29 +4529,12 @@ write_files:
       [keyfile]
       unmanaged-devices=interface-name:eth*
 '@
-
-        $desktopRuncmdYaml = @'
-  - systemctl set-default graphical.target
-  - systemctl enable gdm3.service || true
-  - systemctl enable NetworkManager.service || true
-  - systemctl enable xrdp.service || true
-  - adduser xrdp ssl-cert || true
-  - ufw allow 3389/tcp || true
-  - "dpkg -l ubuntu-desktop-minimal xrdp xorgxrdp | grep -c '^ii' | grep -q '^3$' || { echo 'BAKE FAILED: desktop packages not installed'; shutdown -c; poweroff; }"
-'@
     }
 
-    # Temporary console user for bake debugging (vmconnect).  Password comes
-    # from $Common.LocalAdmin so nothing is hardcoded in the repo.  The user
-    # is deleted from /etc/shadow before cloud-init clean so the baked VHDX
-    # ships with no stale credentials.
-    $bakeUserYaml = ''
-    $bakeUserCleanupYaml = ''
-    if ($Common -and $Common.LocalAdmin) {
-        try { $bakePwd = $Common.LocalAdmin.GetNetworkCredential().Password } catch { $bakePwd = $null }
-        if ($bakePwd) {
-            $bakePwdQuoted = "'" + ($bakePwd -replace "'", "''") + "'"
-            $bakeUserYaml = @"
+    $userData = @"
+#cloud-config
+hostname: memlabs-bake
+preserve_hostname: false
 
 users:
   - name: memlabs
@@ -4687,43 +4542,11 @@ users:
     lock_passwd: false
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
+    ssh_authorized_keys:
+      - $sshPubKey
 
 ssh_pwauth: true
-"@
-            $bakeUserCleanupYaml = '  - userdel -r memlabs 2>/dev/null || true'
-        }
-    }
-
-    $userData = @"
-#cloud-config
-hostname: memlabs-bake
-preserve_hostname: false
-$bakeUserYaml
-
-package_update: true
-package_upgrade: false
-packages:
-  - linux-tools-virtual
-  - linux-cloud-tools-virtual
-  - qemu-guest-agent
-  - openssh-server
-$desktopPackagesYaml
 $bakeWriteFilesYaml
-runcmd:
-  - systemctl daemon-reload || true
-  - systemctl enable qemu-guest-agent.service || true
-  - systemctl enable hv-kvp-daemon.service || true
-  - systemctl enable hv-vss-daemon.service || true
-  - dpkg -s "linux-cloud-tools-`$(uname -r)" >/dev/null 2>&1 || apt-get install -y "linux-tools-`$(uname -r)" "linux-cloud-tools-`$(uname -r)" || true
-$desktopRuncmdYaml
-$bakeUserCleanupYaml
-  - systemctl stop unattended-upgrades.service 2>/dev/null || true
-  - systemctl disable unattended-upgrades.service 2>/dev/null || true
-  - cloud-init clean --logs --seed --machine-id || true
-  - truncate -s 0 /etc/machine-id
-  - rm -f /var/lib/dbus/machine-id
-  - rm -f /etc/netplan/50-cloud-init.yaml
-  - shutdown -h now
 "@
 
     [System.IO.File]::WriteAllText((Join-Path $stageDir 'meta-data'), ($metaData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
@@ -4748,13 +4571,11 @@ $bakeUserCleanupYaml
     }
 
     Write-Log "Bake: creating temp VM '$vmName' from $VhdxPath on switch '$SwitchName' (variant=$Variant)" -Activity
-    # Desktop bake pulls ~1.5GB of packages and runs through dpkg postinst
-    # hooks for the full GNOME stack; 2GB OOMs partway through. 4GB is plenty
-    # for the duration of the bake (the resulting deployed VMs use their own
-    # memory setting from the deploy config, this is just for the bake VM).
-    $bakeMemoryBytes = if ($Variant -eq 'Desktop') { 4GB } else { 2GB }
-    $bakeProcs = if ($Variant -eq 'Desktop') { 4 } else { 2 }
+    # Desktop bake pulls ~2GB+ of packages; 4GB RAM avoids OOM during dpkg.
+    $bakeMemoryBytes = $(if ($Variant -eq 'Desktop') { 4GB } else { 2GB })
+    $bakeProcs = $(if ($Variant -eq 'Desktop') { 4 } else { 2 })
     $vm = New-VM -Name $vmName -Generation 2 -MemoryStartupBytes $bakeMemoryBytes -VHDPath $VhdxPath -SwitchName $SwitchName -ErrorAction Stop
+    $bakeSucceeded = $false
     try {
         Set-VM -VM $vm -ProcessorCount $bakeProcs -CheckpointType Disabled -ErrorAction Stop
         Set-VMFirmware -VM $vm -EnableSecureBoot Off -ErrorAction Stop
@@ -4767,15 +4588,13 @@ $bakeUserCleanupYaml
         Write-Log "Bake: VM started; monitoring NIC traffic to verify network connectivity..."
 
         # Enable Hyper-V resource metering so we can read NIC byte counters.
-        # Without metering, Get-VMNetworkAdapter.BytesReceived is always 0.
         Enable-VMResourceMetering -VM $vm -ErrorAction SilentlyContinue
 
-        # NIC traffic check.  We can't rely on KVP for an IP (the daemon is
-        # being installed during this bake), but we CAN verify the NIC is
-        # sending/receiving traffic.  If the interface name doesn't match the
-        # network-config (e.g. eth0 vs enp1s0), netplan silently ignores the
-        # config and the NIC stays completely dark -- zero bytes in/out.
-        # Catch that within 90s instead of waiting the full bake timeout.
+        # ── NIC traffic check ────────────────────────────────────────────
+        # Can't rely on KVP for an IP (the daemon is being installed during
+        # this bake), but we CAN verify the NIC is sending/receiving traffic.
+        # If the interface name doesn't match the network-config, netplan
+        # silently ignores the config and the NIC stays completely dark.
         $nicWaitSec = 90
         $nicElapsed = 0
         $nicOk = $false
@@ -4785,8 +4604,6 @@ $bakeUserCleanupYaml
             $nic = Get-VMNetworkAdapter -VMName $vmName -ErrorAction SilentlyContinue
             $rxBytes = 0; $txBytes = 0
             if ($nic) {
-                # Measure-VM aggregates metered traffic; fall back to NIC
-                # counters if metering data isn't available yet.
                 try {
                     $report = (Measure-VM -VM $vm -ErrorAction SilentlyContinue).NetworkMeteredTrafficReport
                     if ($report) {
@@ -4806,39 +4623,184 @@ $bakeUserCleanupYaml
         }
         if (-not $nicOk) {
             Write-Log "Bake: VM '$vmName' has zero NIC traffic after ${nicWaitSec}s. Network config likely failed (interface name mismatch?). Aborting." -Failure
-            Stop-VM -Name $vmName -TurnOff -Force -ErrorAction SilentlyContinue
-            throw "Bake: VM '$vmName' has zero NIC traffic after ${nicWaitSec}s. The guest interface name may not match the network-config. Check 'ip link' in the guest console."
+            throw "Bake: VM '$vmName' has zero NIC traffic after ${nicWaitSec}s. The guest interface name may not match the network-config. Check 'ip link' via console: vmconnect localhost $vmName"
         }
 
-        Write-Log "Bake: waiting up to $TimeoutMinutes min for cloud-init + shutdown..."
+        # ── Wait for SSH ─────────────────────────────────────────────────
+        Write-Log "Bake: waiting for SSH at $BakeIPAddress (memlabs user)..." -Activity
+        $sshDeadline = (Get-Date).AddMinutes(5)
+        $sshReady = $false
+        while ((Get-Date) -lt $sshDeadline) {
+            Start-Sleep -Seconds 5
+            # TCP/22 probe
+            $tcpOk = $false
+            try {
+                $tc = [System.Net.Sockets.TcpClient]::new()
+                $iar = $tc.BeginConnect($BakeIPAddress, 22, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(2000, $false)) {
+                    $tc.EndConnect($iar) | Out-Null
+                    $tcpOk = $tc.Connected
+                }
+                $tc.Close()
+            } catch { }
+            if (-not $tcpOk) { continue }
 
-        $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
-        $clean = $false
-        while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Seconds 10
+            # SSH probe
+            $probe = Invoke-LinuxVmCommand -VmName $vmName -BashCommand 'echo BAKE_SSH_OK' `
+                -IPAddress $BakeIPAddress -UserName 'memlabs' -TimeoutSeconds 15 -SuppressLog
+            if ($probe.CommandResult -and $probe.ScriptBlockOutput -match 'BAKE_SSH_OK') {
+                $sshReady = $true
+                break
+            }
+        }
+        if (-not $sshReady) {
+            throw "Bake: SSH not reachable at $BakeIPAddress within 5 minutes. Console: vmconnect localhost $vmName"
+        }
+        Write-Log "Bake: SSH connected to memlabs@$BakeIPAddress." -Success
+
+        # ── Bake step helper ─────────────────────────────────────────────
+        # Runs a bash script via SSH as root (sudo), checks the exit code,
+        # and throws with detailed output on failure. Uses a hashtable for
+        # the mutable step counter (reference type survives inner function
+        # scope).
+        $totalSteps = $(if ($Variant -eq 'Desktop') { 10 } else { 5 })
+        $ctx = @{ Step = 0 }
+
+        function Invoke-BakeStep {
+            param([string]$Name, [string]$Script, [int]$Timeout = 180, [int]$Retries = 0)
+            $ctx.Step++
+            $label = "[$($ctx.Step)/$totalSteps]"
+            $maxAttempts = 1 + $Retries
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Log "Bake $label $Name$(if ($attempt -gt 1) { " (retry $($attempt-1)/$Retries)" })" -Activity
+            $r = Invoke-LinuxVmCommand -VmName $vmName -BashCommand $Script `
+                -IPAddress $BakeIPAddress -UserName 'memlabs' -Sudo `
+                -TimeoutSeconds $Timeout -DisplayName "Bake: $Name"
+            if ($r.CommandResult) {
+                $lines = $(if ($r.ScriptBlockOutput) { ($r.ScriptBlockOutput -split "`n").Count } else { 0 })
+                Write-Log "Bake $label $Name - OK ($lines lines)" -Success
+                return $r
+            }
+            if ($attempt -lt $maxAttempts) {
+                $backoff = $attempt * 15
+                Write-Log "Bake $label $Name failed (exit=$($r.ExitCode)), retrying in ${backoff}s..." -Warning
+                Start-Sleep -Seconds $backoff
+                continue
+            }
+            $out = $(if ($r.ScriptBlockOutput) { $r.ScriptBlockOutput.Trim() } else { '(no output)' })
+                if ($out.Length -gt 2000) { $out = '...' + $out.Substring($out.Length - 2000) }
+                Write-Log "Bake $label FAILED: $Name (exit=$($r.ExitCode))" -Failure
+                Write-Log $out -LogOnly
+                throw "Bake FAILED at step $label '$Name' (exit=$($r.ExitCode)).`n`nLast output:`n$out`n`nVM '$vmName' left running at $BakeIPAddress for debugging.`nSSH: ssh -i `"$($keyPair.PrivateKeyPath)`" memlabs@$BakeIPAddress"
+            }
+        }
+
+        # ── Step 1: System updates ───────────────────────────────────────
+        $updTimeout = $(if ($Variant -eq 'Desktop') { 1200 } else { 600 })
+        Invoke-BakeStep -Name "System updates (apt-get update + dist-upgrade)" -Timeout $updTimeout -Retries 2 `
+            -Script (Get-LinuxScript -Name 'bake/01-system-updates' -IncludeAptRetry)
+
+        # ── Step 2: Base packages ────────────────────────────────────────
+        Invoke-BakeStep -Name "Base packages (HVL, qemu-guest-agent)" -Timeout 300 -Retries 2 `
+            -Script (Get-LinuxScript -Name 'bake/02-base-packages' -IncludeAptRetry)
+
+        # ── Step 3: Enable base services ─────────────────────────────────
+        Invoke-BakeStep -Name "Enable base services" -Timeout 120 `
+            -Script (Get-LinuxScript -Name 'bake/03-enable-base-services' -IncludeAptRetry)
+
+        # ── Step 3b: Prevent maintenance-mode boot on fsck failure ───────
+        Invoke-BakeStep -Name "Prevent maintenance-mode boot" -Timeout 60 `
+            -Script (Get-LinuxScript -Name 'bake/03b-maintenance-prevention')
+
+        # ── Step 4: DHCP watchdog service ────────────────────────────────
+        Invoke-BakeStep -Name "DHCP watchdog service" -Timeout 60 `
+            -Script (Get-LinuxScript -Name 'bake/04-dhcp-watchdog')
+
+        if ($Variant -eq 'Desktop') {
+            # ── Step 5: Desktop packages ─────────────────────────────────
+            Invoke-BakeStep -Name "Desktop packages (GNOME, xrdp, tools)" -Timeout 1800 -Retries 2 `
+                -Script (Get-LinuxScript -Name 'bake/05-desktop-packages' -IncludeAptRetry)
+
+            # ── Step 6: Desktop services ─────────────────────────────────
+            Invoke-BakeStep -Name "Enable desktop services" -Timeout 120 `
+                -Script (Get-LinuxScript -Name 'bake/06-desktop-services')
+
+            # ── Step 7: Microsoft repos + Edge + Intune ──────────────────
+            Invoke-BakeStep -Name "Microsoft Edge + Intune" -Timeout 600 -Retries 2 `
+                -Script (Get-LinuxScript -Name 'bake/07-edge-intune' -IncludeAptRetry)
+
+            # ── Step 8: Desktop system configuration ─────────────────────
+            Invoke-BakeStep -Name "Desktop system configuration" -Timeout 120 `
+                -Script (Get-LinuxScript -Name 'bake/08-desktop-config')
+
+            # ── Step 9: dash-to-panel extension ──────────────────────────
+            Invoke-BakeStep -Name "dash-to-panel extension" -Timeout 120 `
+                -Script (Get-LinuxScript -Name 'bake/09-dash-to-panel' -IncludeAptRetry)
+        } # end Desktop-only steps
+
+        # ── Validation ───────────────────────────────────────────────────
+        $validationScript = $(if ($Variant -eq 'Desktop') {
+            Get-LinuxScript -Name 'bake/validate-desktop'
+        } else {
+            Get-LinuxScript -Name 'bake/validate-server'
+        })
+
+        Invoke-BakeStep -Name "Validation" -Timeout 60 -Script $validationScript
+
+        # ── Cleanup + shutdown ───────────────────────────────────────────
+        # Only runs after validation passed. Removes the bake user, cleans
+        # cloud-init state, and shuts down so the VHDX is pristine.
+        Write-Log "Bake: all steps passed. Running cleanup and shutdown..." -Activity
+        $cleanupResult = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $BakeIPAddress `
+            -UserName 'memlabs' -Sudo -TimeoutSeconds 120 `
+            -DisplayName "Bake: Cleanup + shutdown" -BashCommand (Get-LinuxScript -Name 'bake/cleanup')
+        # Cleanup+shutdown may report exit code 1 because the shutdown command
+        # kills the SSH session before it can return. That's expected - check
+        # for the success marker in output instead of exit code.
+        if ($cleanupResult.ScriptBlockOutput -notmatch 'Cleanup complete') {
+            $out = $(if ($cleanupResult.ScriptBlockOutput) { $cleanupResult.ScriptBlockOutput.Trim() } else { '(no output)' })
+            Write-Log "Bake: cleanup script may not have completed fully:`n$out" -Warning
+        }
+
+        # ── Wait for shutdown ────────────────────────────────────────────
+        Write-Log "Bake: waiting for VM to power off..."
+        $shutdownDeadline = (Get-Date).AddMinutes(5)
+        $cleanShutdown = $false
+        while ((Get-Date) -lt $shutdownDeadline) {
+            Start-Sleep -Seconds 5
             $state = (Get-VM -Name $vmName -ErrorAction SilentlyContinue).State
-            if ($state -eq 'Off') { $clean = $true; break }
+            if ($state -eq 'Off') { $cleanShutdown = $true; break }
         }
-        if (-not $clean) {
-            Write-Log "Bake: VM did not shutdown within $TimeoutMinutes min; forcing off." -Warning
+        if (-not $cleanShutdown) {
+            Write-Log "Bake: VM did not power off within 5 min after shutdown command; forcing off." -Warning
             Stop-VM -Name $vmName -TurnOff -Force -ErrorAction SilentlyContinue
-            throw "Bake VM '$vmName' did not shutdown within $TimeoutMinutes minutes."
         }
-        Write-Log "Bake: VM shut down cleanly." -Success
+        else {
+            Write-Log "Bake: VM shut down cleanly." -Success
+        }
+
+        $bakeSucceeded = $true
     }
     finally {
-        # Stop the VM before removing it.  Remove-VM -Force should handle
-        # running VMs, but an explicit TurnOff is more reliable at releasing
-        # the VHDX file handle so the caller can move/delete it immediately.
+        # On success: remove the temp VM (keeps the VHDX).
+        # On failure: leave the VM running for SSH/console debugging.
+        # Stale VMs from failed runs are cleaned up at the top of the next invocation.
         $bakeVM = Get-VM -Name $vmName -ErrorAction SilentlyContinue
         if ($bakeVM) {
-            if ($bakeVM.State -ne 'Off') {
-                Stop-VM -VM $bakeVM -TurnOff -Force -ErrorAction SilentlyContinue
+            if ($bakeSucceeded) {
+                if ($bakeVM.State -ne 'Off') {
+                    Stop-VM -VM $bakeVM -TurnOff -Force -ErrorAction SilentlyContinue
+                }
+                Disable-VMResourceMetering -VM $bakeVM -ErrorAction SilentlyContinue
+                Remove-VM -VM $bakeVM -Force -ErrorAction SilentlyContinue
             }
-            Disable-VMResourceMetering -VM $bakeVM -ErrorAction SilentlyContinue
-            # Remove-VM keeps the VHDX file; we only want to drop the VM
-            # config and DVD attachment.
-            Remove-VM -VM $bakeVM -Force -ErrorAction SilentlyContinue
+            else {
+                Disable-VMResourceMetering -VM $bakeVM -ErrorAction SilentlyContinue
+                Write-Log "Bake: FAILED - VM '$vmName' left running for debugging:" -Warning
+                Write-Log "  SSH:     ssh -i `"$($keyPair.PrivateKeyPath)`" memlabs@$BakeIPAddress" -Warning
+                Write-Log "  Console: vmconnect localhost $vmName" -Warning
+                Write-Log "  Cleanup: Stop-VM '$vmName' -TurnOff; Remove-VM '$vmName' -Force" -Warning
+            }
         }
         Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -4846,7 +4808,5 @@ $bakeUserCleanupYaml
     Write-Log "Bake complete on $VhdxPath" -Success
     return $true
 }
-
-
 
 

@@ -1,4 +1,4 @@
-# Enable-LogMachine.ps1
+﻿# Enable-LogMachine.ps1
 # Idempotent: checks actual shortcut/assoc existence, not flag files.
 
 function Add-Permissions {
@@ -407,6 +407,51 @@ if (-not (Test-Path $blmPortalLink)) {
     }
 }
 
+# --- Report Server (PBIRS / SSRS) shortcut ---
+$rpLink = "$desktopPath\Report Server.url"
+if (-not (Test-Path $rpLink)) {
+    $rpSvc = Get-Service -Name 'PowerBIReportServer','SQLServerReportingServices','ReportServer' -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' } | Select-Object -First 1
+    if ($rpSvc) {
+        try {
+            $rpFqdn = "$env:COMPUTERNAME.$((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).Domain)"
+            # Detect HTTPS by checking for an HTTPS URL reservation in WMI
+            $rpScheme = 'http'
+            try {
+                $rpWmiNs = Get-WmiObject -Namespace root\Microsoft\SqlServer\ReportServer -Class __Namespace -ErrorAction Stop
+                $rpRsName = $rpWmiNs.Name
+                $rpVer = (Get-WmiObject -Namespace "root\Microsoft\SqlServer\ReportServer\$rpRsName" -Class __Namespace -ErrorAction Stop).Name
+                $rpCfg = Get-WmiObject -Namespace "root\Microsoft\SqlServer\ReportServer\$rpRsName\$rpVer\Admin" -Class MSReportServer_ConfigurationSetting -ErrorAction Stop
+                $rpUrls = $rpCfg.ListReservedUrls()
+                if ($rpUrls -and $rpUrls.UrlString) {
+                    $rpHttps = $rpUrls.UrlString | Where-Object { $_ -like 'https:*' -and $_ -match 'Reports' }
+                    if ($rpHttps) { $rpScheme = 'https' }
+                }
+            } catch {}
+            $rpUrl = "$rpScheme`://$rpFqdn/Reports"
+            $rpBody = @("[InternetShortcut]", "URL=$rpUrl")
+            $rpIconDll = "$env:windir\System32\imageres.dll"
+            if (Test-Path $rpIconDll) { $rpBody += @("IconFile=$rpIconDll", "IconIndex=77") }
+            $rpBody | Out-File -FilePath $rpLink -Encoding ASCII -Force
+            if (Test-Path $rpLink) { $script:shortcutsCreated = $true }
+        } catch {}
+    }
+}
+
+# --- Report Server Logs shortcut ---
+if (-not (Test-Path "$desktopPath\Report Server Logs.lnk")) {
+    $rpLogPath = $null
+    # PBIRS default install path
+    if (Test-Path "C:\PBIRS\PBIRS\LogFiles") { $rpLogPath = "C:\PBIRS\PBIRS\LogFiles" }
+    # SSRS default install path
+    if (-not $rpLogPath -and (Test-Path "C:\Program Files\Microsoft SQL Server Reporting Services\SSRS\LogFiles")) {
+        $rpLogPath = "C:\Program Files\Microsoft SQL Server Reporting Services\SSRS\LogFiles"
+    }
+    if ($rpLogPath) {
+        New-Shortcut -LinkPath "$desktopPath\Report Server Logs.lnk" -TargetPath $rpLogPath | Out-Null
+        $script:shortcutsCreated = $true
+    }
+}
+
 # --- WSUS shortcuts ---
 $wsus = "$env:ProgramFiles\Update Services\AdministrationSnapin\wsus.msc"
 if (Test-Path $wsus) {
@@ -536,6 +581,62 @@ elseif (-not $proxyConfigured -and $taskExists) {
     # Proxy was removed; clean up the task
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     Write-Status "Removed logon task '$taskName' (proxy no longer configured)"
+}
+
+# --- Machine proxy re-stamp task: HKLM IE proxy values get blanked by Windows
+#     on first interactive logon in machine-wide mode (ProxySettingsPerUser=0)
+#     even though the per-user mirror task isn't touching HKLM. This SYSTEM
+#     task re-writes the canonical machine-wide HKLM values at every boot and
+#     at every user logon, so the values self-heal within seconds.
+$systemTaskName = 'MemLabs-SetMachineProxy'
+$hklmProxyServer = (Get-ItemProperty -Path $hklmIeKey -Name 'ProxyServer' -ErrorAction SilentlyContinue).ProxyServer
+$systemTaskExists = Get-ScheduledTask -TaskName $systemTaskName -ErrorAction SilentlyContinue
+
+if ($proxyConfigured -and $hklmProxyServer) {
+    $machineTaskScript = @'
+$srv = '__PROXY_SERVER__'
+$ie  = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+Set-ItemProperty $ie -Name ProxyEnable           -Value 1    -Type DWord  -Force -ErrorAction SilentlyContinue
+Set-ItemProperty $ie -Name ProxyServer           -Value $srv -Type String -Force -ErrorAction SilentlyContinue
+Set-ItemProperty $ie -Name ProxySettingsPerUser  -Value 0    -Type DWord  -Force -ErrorAction SilentlyContinue
+$conn = ($ie + '\Connections')
+if (-not (Test-Path $conn)) { New-Item $conn -Force | Out-Null }
+$old = (Get-ItemProperty $conn -Name DefaultConnectionSettings -EA SilentlyContinue).DefaultConnectionSettings
+$ctr = if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old,0)+1 } else { 46 }
+$pB = [Text.Encoding]::ASCII.GetBytes($srv)
+$blob = New-Object byte[] (4+4+4+$pB.Length+4+0+4+32); $o=0
+[Array]::Copy([BitConverter]::GetBytes([uint32]$ctr),0,$blob,$o,4); $o+=4
+[Array]::Copy([BitConverter]::GetBytes([uint32]3),0,$blob,$o,4); $o+=4
+[Array]::Copy([BitConverter]::GetBytes([uint32]$pB.Length),0,$blob,$o,4); $o+=4
+if ($pB.Length) { [Array]::Copy($pB,0,$blob,$o,$pB.Length); $o+=$pB.Length }
+[Array]::Copy([BitConverter]::GetBytes([uint32]0),0,$blob,$o,4); $o+=4
+Set-ItemProperty $conn -Name DefaultConnectionSettings -Value $blob -Type Binary -Force -ErrorAction SilentlyContinue
+'@ -replace '__PROXY_SERVER__', $hklmProxyServer
+
+    try {
+        $sysAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
+            -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -Command `"$($machineTaskScript -replace '"', '\"')`""
+        $sysTriggers = @(
+            New-ScheduledTaskTrigger -AtStartup
+            New-ScheduledTaskTrigger -AtLogOn
+        )
+        $sysSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+        $sysPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        Register-ScheduledTask -TaskName $systemTaskName -Action $sysAction -Trigger $sysTriggers `
+            -Settings $sysSettings -Principal $sysPrincipal `
+            -Description 'Re-stamp HKLM IE proxy values (Windows blanks them on first logon in machine-wide mode)' `
+            -Force | Out-Null
+        # Fire it once now so the current state self-heals immediately.
+        Start-ScheduledTask -TaskName $systemTaskName -ErrorAction SilentlyContinue
+        Write-Status "Registered SYSTEM task '$systemTaskName' (re-stamp HKLM proxy at boot + logon)"
+    }
+    catch {
+        Write-Status "Failed to register machine proxy re-stamp task: $_"
+    }
+}
+elseif (-not $proxyConfigured -and $systemTaskExists) {
+    Unregister-ScheduledTask -TaskName $systemTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Write-Status "Removed SYSTEM task '$systemTaskName' (proxy no longer configured)"
 }
 
 # --- Clean up legacy flag files ---

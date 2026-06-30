@@ -151,6 +151,8 @@ function Select-ConfigMenu {
     try { Get-HealthStats -Force | Out-Null } catch {}
     while ($true) {
 
+        Complete-PendingVMOperation | Out-Null
+
         $built = Build-ConfigMenuOptions
         $customOptions = $built.Options
         $domainMap = $built.DomainMap
@@ -161,7 +163,7 @@ function Select-ConfigMenu {
             $global:GoBack = $false        
         }
         else {
-            $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false -AcceptsDelete
+            $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false -AcceptsDelete -SplitEscapeFromGoBack
         }
 
         write-Verbose "1 response $response"
@@ -173,6 +175,9 @@ function Select-ConfigMenu {
         }
 
         if ($response -eq "ESCAPE") {
+            exit 0
+        }
+        if ($response -eq "GOBACK") {
             $response = "!"
         }
         $SelectedConfig = $null
@@ -207,6 +212,15 @@ function Select-ConfigMenu {
                 }
             }
             "v" { Select-VMMenu }
+            "m" {
+                $Global:Common.MouseEnabled = -not $Global:Common.MouseEnabled
+                try {
+                    [PSCustomObject]@{
+                        MouseEnabled = $Global:Common.MouseEnabled
+                    } | ConvertTo-Json | Set-Content -Path (Join-Path $Global:Common.CachePath "mouse-preference.json") -Encoding UTF8
+                }
+                catch {}
+            }
             "r" { 
                 $response = Read-YesOrNoWithTimeout -Prompt "This will delete your current memlabs.rdg and memlabs-mremoteng.xml and re-create them. Are you Sure? (Y/n)" -HideHelp -Default "y" -timeout 10
                 if ($response -eq "y") {
@@ -295,6 +309,35 @@ function Build-ConfigMenuOptions {
     $customOptions += [ordered]@{ "*F0" = "Check-OverallHealth" }
     $customOptions += [ordered]@{ "*HELP" = "Update-HelpText" }
     $customOptions += [ordered]@{ "*BT" = "" }
+
+    # Background operation status banner (visible from main menu too)
+    $allOps = @()
+    if ($global:PendingVMOperations) {
+        foreach ($d in @($global:PendingVMOperations.Keys)) {
+            $o = $global:PendingVMOperations[$d]
+            if ($o) { $allOps += $o }
+        }
+    }
+    if ($allOps.Count -gt 0) {
+        $parts = @()
+        foreach ($aop in $allOps) {
+            $shortDomain = $aop.Domain.Split('.')[0]
+            if ($aop.Completed) {
+                $marker = if ($aop.Failures -eq 0) { [char]0x2713 } else { '!' }
+                $parts += "$marker $shortDomain`: $($aop.VMCount)/$($aop.VMCount)"
+            } else {
+                $doneCount = $aop.VMCount - $aop.StillActive
+                $parts += "$($aop.Type) $shortDomain`: $doneCount/$($aop.VMCount)"
+            }
+        }
+        $oldest = $allOps | Sort-Object StartTime | Select-Object -First 1
+        $elapsedSec = [math]::Round(((Get-Date) - $oldest.StartTime).TotalSeconds)
+        $bannerText = ($parts -join ' | ') + " ($($elapsedSec)s)"
+        $customOptions += [ordered]@{
+            "*BG" = "$bannerText%DarkGoldenrod"
+        }
+    }
+
     $customOptions += [ordered]@{ "*B0" = "Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
     $customOptions += [ordered]@{ "C" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
     $customOptions += [ordered]@{ "HC" = "Use this option to create a new domain!" }
@@ -336,7 +379,7 @@ function Build-ConfigMenuOptions {
     $customOptions += [ordered]@{"P" = "Show Passwords" }
     $customOptions += [ordered]@{ "HP" = "Show the default passwords for all accounts in all domains" }
     $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "Other%$($Global:Common.Colors.GenConfigHeader)" }
-    $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{"R" = "Regenerate Remote Connection files (RDCMan / mRemoteNG) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
     $customOptions += [ordered]@{ "HR" = "In case your memlabs.rdg file is broken, you can force it to get re-created" }
     if ($common.DevBranch) {
         $customOptions += [ordered]@{"#" = "Switch to Main branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
@@ -352,6 +395,9 @@ function Build-ConfigMenuOptions {
         $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
         $customOptions += [ordered]@{ "HF" = "Uh oh.. Looks like a deployment may have failed.  Delete the failed VMs and start over!" }
     }
+    $mouseState = if ($Global:Common.MouseEnabled) { "ON" } else { "OFF" }
+    $customOptions += [ordered]@{"M" = "Mouse Support [$mouseState]%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "HM" = "Toggle mouse support in menus (hover, click, scroll). Setting is remembered across sessions." }
     $customOptions += [ordered]@{"^" = "Exit script" }
     $customOptions += [ordered]@{ "H^" = "Same as Ctrl-C, Exits the script without saving." }
     if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
@@ -464,6 +510,9 @@ function Select-DomainMenu {
         Write-Verbose "2 Select-DomainMenu"
         while ($true) {
 
+            # Check whether a background Stop/Start operation has finished
+            Complete-PendingVMOperation | Out-Null
+
             $vms = get-list -type vm -DomainName $domain -SmartUpdate
             if (-not $vms) { break }
 
@@ -481,7 +530,7 @@ function Select-DomainMenu {
             }
 
             switch ($response.ToLowerInvariant()) {
-                "2" { Select-StopDomain -domain $domain }
+                "2" { Select-StopDomain -domain $domain -AllSelected }
                 "1" { Select-StartDomain -domain $domain }
                 "3" { select-OptimizeDomain -domain $domain }
                 "d" { Select-DeleteDomain -domain $domain }
@@ -515,6 +564,8 @@ function Build-DomainSubMenuOptions {
 
     $notRunning = ($vms | Where-Object { $_.State -ne "Running" }).Count
     $running = ($vms | Where-Object { $_.State -eq "Running" }).Count
+    $stopping = ($vms | Where-Object { $_.State -eq "Stopping" }).Count
+    $starting = ($vms | Where-Object { $_.State -eq "Starting" }).Count
 
     $checkPoint = $null
     $DC = $vms | Where-Object { $_.role -eq "DC" }
@@ -522,11 +573,43 @@ function Build-DomainSubMenuOptions {
         $checkPoint = (Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }).Count
     }
 
+    # Background operation status banner
+    $bgBanner = [ordered]@{}
+    $allOps = @()
+    if ($global:PendingVMOperations) {
+        foreach ($d in @($global:PendingVMOperations.Keys)) {
+            $o = $global:PendingVMOperations[$d]
+            if ($o) { $allOps += $o }
+        }
+    }
+    if ($allOps.Count -gt 0) {
+        $parts = @()
+        foreach ($aop in $allOps) {
+            $shortDomain = $aop.Domain.Split('.')[0]
+            if ($aop.Completed) {
+                $marker = if ($aop.Failures -eq 0) { [char]0x2713 } else { '!' }
+                $parts += "$marker $shortDomain`: $($aop.VMCount)/$($aop.VMCount)"
+            } else {
+                $doneCount = $aop.VMCount - $aop.StillActive
+                $parts += "$($aop.Type) $shortDomain`: $doneCount/$($aop.VMCount)"
+            }
+        }
+        $oldest = $allOps | Sort-Object StartTime | Select-Object -First 1
+        $elapsedSec = [math]::Round(((Get-Date) - $oldest.StartTime).TotalSeconds)
+        $bannerText = ($parts -join ' | ') + " ($($elapsedSec)s)"
+        $bgBanner = [ordered]@{
+            "*BG" = "$bannerText%DarkGoldenrod"
+        }
+    }
+
     $customOptions = [ordered]@{
         "*F1"   = "Get-LabVMs -DomainName $domain"
         "*BZ"   = ""
         "*HELP" = "Update-HelpText"
         "*B0"   = ""
+    }
+    if ($bgBanner.Count -gt 0) { $customOptions += $bgBanner }
+    $customOptions += [ordered]@{
         "*B1"   = "VM Management%$($Global:Common.Colors.GenConfigHeader)"
         "M"     = "Modify - Edit or Add VMs to this domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)"
         "HM"    = "Use this option to modify the domain, adding new roles, or new VMs"
@@ -700,7 +783,7 @@ function Select-MainMenu {
     }
 
     while ($true) {
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
         $global:GoBack = $false
         Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $true
@@ -891,7 +974,7 @@ function Build-MainMenuOptions {
     $preOptions = [ordered]@{}
     $preOptions += [ordered]@{ "*F1" = "Show-GenConfigErrorMessages" }
     $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)" }
-    $preOptions += [ordered]@{ "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+    $preOptions += [ordered]@{ "V" = "$('Global VM Options'.PadRight(25)) $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
     $preOptions += [ordered]@{ "HV" = "Change Global Options, such as domain name, netbios name, timezone, etc" }
     # Top-level site servers (CAS, or standalone Primary) own cmOptions per-VM.
     # Display rules:
@@ -927,10 +1010,10 @@ function Build-MainMenuOptions {
             }
             $cmSummary = $parts -join $sep
         }
-        $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $cmSummary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+        $preOptions += [ordered]@{"C" = "$('ConfigMgr Options'.PadRight(25)) $cmSummary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         $preOptions += [ordered]@{ "HC" = "Change Configuration Manager Options on the top-level site server (Version, licensing, PKI, BitLocker, etc.)" }
     }
-    $preOptions += [ordered]@{ "P" = "PKI Settings      `t $(Get-PKIOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+    $preOptions += [ordered]@{ "P" = "$('PKI Settings'.PadRight(25)) $(Get-PKIOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
     $preOptions += [ordered]@{ "HP" = "Configure PKI Certificate Authority settings, Issuing CA, and Offline Root CA" }
 
     $customOptions = [ordered]@{}
@@ -1199,7 +1282,7 @@ if ($InternalUseOnly.IsPresent) {
         Write-OrangePoint -NoIndent "Without a snapshot, if something fails it may not be possible to recover"
         $response = Read-YesOrNoWithTimeout -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (y/N)" -HideHelp -Default "n" -timeout 30
         if (-not [String]::IsNullOrWhiteSpace($response) -and $response.ToLowerInvariant() -eq "y") {
-            $result = Select-StopDomain -domain $Global:Config.vmOptions.DomainName -response "C"
+            $result = Select-StopDomain -domain $Global:Config.vmOptions.DomainName -response "C" -Sync
             $filename = $splitpath = Split-Path -Path $return.ConfigFileName -Leaf
             $comment = [System.Io.Path]::GetFileNameWithoutExtension($filename)
             if ($comment -ne $splitpath) {
@@ -1208,7 +1291,7 @@ if ($InternalUseOnly.IsPresent) {
             else {
                 get-SnapshotDomain -domain $Global:Config.vmOptions.DomainName
             }
-            Select-StartDomain -domain $Global:Config.vmOptions.DomainName -response "C"
+            Select-StartDomain -domain $Global:Config.vmOptions.DomainName -response "C" -Sync
         }
     }
     return $return

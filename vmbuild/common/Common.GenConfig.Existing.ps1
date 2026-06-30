@@ -1,3 +1,4 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 # Common.GenConfig.Existing.ps1
 # Helpers used by genconfig.ps1 when working with existing networks,
 # subnets, role lists, and existing/sample configs:
@@ -16,7 +17,7 @@ Function Get-DomainStatsLine {
 
     $stats = ""
     try {
-        $ListCache = Get-List -Type VM -Domain $DomainName
+        $ListCache = Get-List -Type VM -Domain $DomainName -SmartUpdate
         $ExistingCasCount = ($ListCache | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
         $ExistingPriCount = ($ListCache | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
         $ExistingSecCount = ($ListCache | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count
@@ -290,28 +291,28 @@ function Format-Roles {
     $padding = 22
     foreach ($role in $Roles) {
         switch ($role) {
-            "DC" { $newRoles += "$($role.PadRight($padding))`t[New Domain Controller.. Only 1 allowed per domain!]" }
-            "BDC" { $newRoles += "$($role.PadRight($padding))`t[Backup Domain Controllers.  As many as you want per domain]" }
-            "CAS" { $newRoles += "$($role.PadRight($padding))`t[New CAS.. Only 1 allowed per subnet!]" }
-            "CAS and Primary" { $newRoles += "$($role.PadRight($padding))`t[New CAS and Primary Site]" }
-            "Primary" { $newRoles += "$($role.PadRight($padding))`t[New Primary site (Standalone or join a CAS)]" }
-            "Secondary" { $newRoles += "$($role.PadRight($padding))`t[New Secondary site (Attach to Primary)]" }
-            "FileServer" { $newRoles += "$($role.PadRight($padding))`t[New File Server]" }
-            "SiteSystem" { $newRoles += "$($role.PadRight($padding))`t[New Site System for a Site. Can be MP/DP/PullDP/SUP or Reporting Point]" }
-            "DomainMember" { $newRoles += "$($role.PadRight($padding))`t[New VM joined to the domain. Can be a standalone SQL server on server OS]" }
-            "SQLAO" { $newRoles += "$($role.PadRight($padding))`t[SQL High Availability Always On Cluster]" }
-            "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS joined to the domain. Can be a SQL Server]" }
-            "DomainMember (Client)" { $newRoles += "$($role.PadRight($padding))`t[New VM with Client OS joined to the domain]" }
-            "SqlServer" { $newRoles += "$($role.PadRight($padding))`t[New VM with Server OS and SQL that is joined to the domain.]" }
-            "WorkgroupMember" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access]" }
-            "InternetClient" { $newRoles += "$($role.PadRight($padding))`t[New VM in workgroup with Internet Access, isolated from the domain]" }
-            "AADClient" { $newRoles += "$($role.PadRight($padding))`t[New VM that boots to OOBE, allowing AAD join from OOBE]" }
-            "OSDClient" { $newRoles += "$($role.PadRight($padding))`t[New bare VM without any OS]" }
-            "WSUS" { $newRoles += "$($role.PadRight($padding))`t[Standalone WSUS Server]" }
-            "StandaloneRootCA" { $newRoles += "$($role.PadRight($padding))`t[Offline Root CA for two-tier PKI (workgroup, powered off after setup)]" }
-            "Proxy" { $newRoles += "$($role.PadRight($padding))`t[Linux Squid forward proxy (1 per domain, Ubuntu Server 24.04)]" }
-            "LinuxServer" { $newRoles += "$($role.PadRight($padding))`t[Generic Ubuntu Server 24.04 VM (DHCP, optional domain join)]" }
-            "LinuxClient" { $newRoles += "$($role.PadRight($padding))`t[Ubuntu Desktop 24.04 workstation for MDM/EDR testing (GNOME, xrdp, optional domain join)]" }
+            "DC" { $newRoles += "$($role.PadRight($padding)) [New Domain Controller.. Only 1 allowed per domain!]" }
+            "BDC" { $newRoles += "$($role.PadRight($padding)) [Backup Domain Controllers.  As many as you want per domain]" }
+            "CAS" { $newRoles += "$($role.PadRight($padding)) [New CAS.. Only 1 allowed per subnet!]" }
+            "CAS and Primary" { $newRoles += "$($role.PadRight($padding)) [New CAS and Primary Site]" }
+            "Primary" { $newRoles += "$($role.PadRight($padding)) [New Primary site (Standalone or join a CAS)]" }
+            "Secondary" { $newRoles += "$($role.PadRight($padding)) [New Secondary site (Attach to Primary)]" }
+            "FileServer" { $newRoles += "$($role.PadRight($padding)) [New File Server]" }
+            "SiteSystem" { $newRoles += "$($role.PadRight($padding)) [New Site System for a Site. Can be MP/DP/PullDP/SUP or Reporting Point]" }
+            "DomainMember" { $newRoles += "$($role.PadRight($padding)) [New VM joined to the domain. Can be a standalone SQL server on server OS]" }
+            "SQLAO" { $newRoles += "$($role.PadRight($padding)) [SQL High Availability Always On Cluster]" }
+            "DomainMember (Server)" { $newRoles += "$($role.PadRight($padding)) [New VM with Server OS joined to the domain. Can be a SQL Server]" }
+            "DomainMember (Client)" { $newRoles += "$($role.PadRight($padding)) [New VM with Client OS joined to the domain]" }
+            "SqlServer" { $newRoles += "$($role.PadRight($padding)) [New VM with Server OS and SQL that is joined to the domain.]" }
+            "WorkgroupMember" { $newRoles += "$($role.PadRight($padding)) [New VM in workgroup with Internet Access]" }
+            "InternetClient" { $newRoles += "$($role.PadRight($padding)) [New VM in workgroup with Internet Access, isolated from the domain]" }
+            "AADClient" { $newRoles += "$($role.PadRight($padding)) [New VM that boots to OOBE, allowing AAD join from OOBE]" }
+            "OSDClient" { $newRoles += "$($role.PadRight($padding)) [New bare VM without any OS]" }
+            "WSUS" { $newRoles += "$($role.PadRight($padding)) [Standalone WSUS Server]" }
+            "StandaloneRootCA" { $newRoles += "$($role.PadRight($padding)) [Offline Root CA for two-tier PKI (workgroup, powered off after setup)]" }
+            "Proxy" { $newRoles += "$($role.PadRight($padding)) [Linux Squid forward proxy (1 per domain, Ubuntu Server 24.04)]" }
+            "LinuxServer" { $newRoles += "$($role.PadRight($padding)) [Generic Ubuntu Server 24.04 VM (DHCP, optional domain join)]" }
+            "LinuxClient" { $newRoles += "$($role.PadRight($padding)) [Ubuntu Desktop 24.04 workstation for MDM/EDR testing (GNOME, xrdp, optional domain join)]" }
             default { $newRoles += $role }
         }
     }
@@ -356,9 +357,7 @@ function Select-RolesForExisting {
     }
 
     $existingRoles2 = @()
-    $CurrentValue = $null
     if ($enhance) {
-        $CurrentValue = "DomainMember"
         foreach ($item in $existingRoles) {
 
             switch ($item) {
@@ -585,7 +584,7 @@ function Get-EnhancedNetworkList {
         }
 
 
-        if ($sb -eq "Internet" -or ($sb -eq "cluster")) {
+        if ($sb -eq "Internet" -or ($sb -eq "cluster") -or ($sb -eq "ClusterV2")) {
             $returnSubnetList += $subnet
             continue
         }
@@ -648,7 +647,7 @@ function Get-EnhancedSubnetList {
 
 
     foreach ($sb in $SubnetList) {
-        if ($sb -eq "Internet" -or ($sb -eq "cluster")) {
+        if ($sb -eq "Internet" -or ($sb -eq "cluster") -or ($sb -eq "ClusterV2")) {
             $subnetListModified += $sb
             continue
         }
@@ -991,7 +990,7 @@ function New-UserConfig {
     $netbiosName = $Domain.Split(".")[0]
     $vmOptions = [PSCustomObject]@{
         prefix            = $prefix
-        basePath          = "E:\VirtualMachines"
+        basePath          = (Get-MemlabsVmStorageRoot)
         domainName        = $Domain
         domainNetBiosName = $netbiosName
         adminName         = $adminUser
@@ -1029,13 +1028,14 @@ function New-UserConfig {
         $inferredUsePKI = if ($existingPkiOptions -and $existingPkiOptions.EnablePKI) { $true } else { $false }
         $synthesized = [PSCustomObject]@{
             Version            = $inferredVersion
-            Install            = $true
+            Install             = $true
             PrePopulateObjects = $true
             EVALVersion        = $false
             OfflineSCP         = $false
             OfflineSUP         = $false
             UsePKI             = $inferredUsePKI
             EnableBLM          = $false
+            WsusImportBaseline = $true
         }
         $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $synthesized -force
         Write-Log "New-UserConfig: Synthesized cmOptions from defaults (Version=$inferredVersion, UsePKI=$inferredUsePKI) for domain $Domain - existing site server $($topLevelSite.vmName) had no cmOptions in VM note." -Verbose

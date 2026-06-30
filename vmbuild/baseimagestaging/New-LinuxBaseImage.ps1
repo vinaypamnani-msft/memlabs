@@ -55,7 +55,7 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Hyper-V switch name for the bake VM. Must have outbound internet.")]
     [string]$BakeSwitchName = 'Default Switch',
 
-    [Parameter(Mandatory = $false, HelpMessage = "Wall-clock timeout for the bake VM. Defaults to 20 min (Server) / 60 min (Desktop, since apt-installing ubuntu-desktop-minimal over NAT can take 30+ min).")]
+    [Parameter(Mandatory = $false, HelpMessage = "Wall-clock timeout for the bake VM. Defaults to 20 min (Server) / 90 min (Desktop: GNOME + Edge + Intune + dash-to-panel + system updates).")]
     [ValidateRange(5, 240)]
     [int]$BakeTimeoutMinutes
 )
@@ -70,7 +70,9 @@ if (-not $PSBoundParameters.ContainsKey('DiskSizeGB') -or $DiskSizeGB -eq 0) {
     $DiskSizeGB = if ($Desktop.IsPresent) { 50 } else { 30 }
 }
 if (-not $PSBoundParameters.ContainsKey('BakeTimeoutMinutes') -or $BakeTimeoutMinutes -eq 0) {
-    $BakeTimeoutMinutes = if ($Desktop.IsPresent) { 60 } else { 20 }
+    # Desktop: SSH-driven bake installs GNOME + Edge + Intune + dash-to-panel +
+    # system updates + validation; 90 min accommodates slow mirrors.
+    $BakeTimeoutMinutes = if ($Desktop.IsPresent) { 90 } else { 20 }
 }
 
 # Check for admin rights (qemu-img doesn't strictly require it, but Hyper-V mounts later will)

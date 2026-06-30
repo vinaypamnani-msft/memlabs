@@ -1,4 +1,4 @@
-#Upgrade-Console.ps1
+﻿#Upgrade-Console.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath

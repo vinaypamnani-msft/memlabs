@@ -1,4 +1,4 @@
-# PKISync.ps1
+﻿# PKISync.ps1
 # This script allows updating PKI objects in Active Directory for the
 # cross-forest certificate enrollment
 #

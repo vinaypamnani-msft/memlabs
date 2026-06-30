@@ -1,3 +1,4 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 Function Get-LabVMs {
     param (
         [Parameter(Mandatory = $false)]
@@ -6,7 +7,7 @@ Function Get-LabVMs {
         [string] $DomainName
     )
 
-    $vms = Get-List -Type VM -domain $DomainName
+    $vms = Get-List -Type VM -domain $DomainName -SmartUpdate
 
     # Reserve lines for menu options below the VM panel so key items (Modify,
     # Start, Stop) are visible on the first page without pressing PgDn.
@@ -31,7 +32,7 @@ Function Get-LabVMs {
     if ($vms) {
         
         # Define colors for state and role
-        $stateColor = @{ "Running" = "Green"; "Off" = "Red" }
+        $stateColor = @{ "Running" = "Green"; "Off" = "Red"; "Stopping" = "DarkGoldenrod"; "Starting" = "DarkGoldenrod" }
         $roleColor = @{ "CAS" = "Yellow"; "Primary" = "Yellow"; "DC" = "White"; "SiteSystem" = "Yellow"; "DomainMember" = "Cyan" }
 
         # Extract properties and headers

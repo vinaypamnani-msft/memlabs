@@ -1,4 +1,4 @@
-configuration Phase3
+﻿configuration Phase3
 {
     param
     (
@@ -18,6 +18,17 @@ configuration Phase3
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
     $NetBiosDomainName = $deployConfig.vmoptions.domainNetBiosName
+
+    # Log share + CM admin credential, used by the Phase 3 "ScriptWorkflow
+    # Download" pre-warm task (RegisterTaskScheduler). Mirrors Phase8.ps1 so
+    # the pre-warm runs ScriptWorkflow.ps1 with the same identity/args the real
+    # Phase 8 workflow uses.
+    $DomainAdminName = $deployConfig.vmOptions.adminName
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
+    $AdminUserName = $Admincreds.UserName
+    if ($AdminUserName -match '\\') { $AdminUserName = ($AdminUserName -split '\\', 2)[1] }
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
     $l = $ConfigurationData.LocaleSettings
 
@@ -105,8 +116,51 @@ configuration Phase3
             $addUserDependency += "[AddUserToLocalAdminGroup]$DscNodeName"
         }
 
+        # Phase 2 DSC (SetWindowsProxy resource) configures WinHTTP, machine.config
+        # <defaultProxy>, and registry. However, .NET reads machine.config once per
+        # AppDomain — if the Phase 3 WmiPrvSE process reuses a cached AppDomain,
+        # DefaultWebProxy may still be empty. Read WinHTTP (guaranteed set by Phase 2)
+        # and stamp DefaultWebProxy in this AppDomain so all download resources
+        # (InstallVCRedist, InstallOleDb, InstallADK, etc.) inherit the proxy.
+        Script EnsureProcessProxy {
+            DependsOn  = $addUserDependency
+            GetScript  = { @{ Result = "$([System.Net.WebRequest]::DefaultWebProxy)" } }
+            TestScript = {
+                try {
+                    $output = & netsh winhttp show proxy 2>$null
+                    if ($output -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
+                        $current = [System.Net.WebRequest]::DefaultWebProxy
+                        if ($current) {
+                            $resolved = $current.GetProxy([System.Uri]"https://aka.ms")
+                            if ($resolved -and $resolved.Host -ne 'aka.ms') { return $true }
+                        }
+                        return $false
+                    }
+                } catch {}
+                return $true   # No WinHTTP proxy configured; not a proxy client
+            }
+            SetScript  = {
+                $output = & netsh winhttp show proxy 2>$null
+                if ($output -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
+                    $proxyAddr = $Matches[1].Trim()
+                    $bypass = ''
+                    if ($output -match 'Bypass List\s*:\s*(.+)') { $bypass = $Matches[1].Trim() }
+                    $wp = New-Object System.Net.WebProxy("http://$proxyAddr", $true)
+                    if ($bypass -and $bypass -ne '(none)') {
+                        $wp.BypassList = @($bypass -split ';' | ForEach-Object {
+                            $e = $_.Trim()
+                            if ($e -and $e -ne '<local>') { '^' + ([Regex]::Escape($e) -replace '\\\*','.*') + '$' }
+                        } | Where-Object { $_ })
+                        $wp.BypassProxyOnLocal = $true
+                    }
+                    [System.Net.WebRequest]::DefaultWebProxy = $wp
+                    Write-Verbose "EnsureProcessProxy: set DefaultWebProxy to http://$proxyAddr"
+                }
+            }
+        }
+
         WriteStatus InstallFeature {
-            DependsOn = $addUserDependency
+            DependsOn = '[Script]EnsureProcessProxy'
             Status    = "Installing required windows features for role $featureRoles"
         }
 
@@ -134,8 +188,11 @@ configuration Phase3
             # Check if false, for older configs that didn't have this prop
 
             $ssmsDownloadUrl = $deployConfig.URLS.SSMS
-            if ($l.LanguageTag -ne "en-US") {
-                $ssmsDownloadUrl = $ssmsDownloadUrl + "?clcid=" + $l.LanguageID
+            if ($l -and $l.LanguageTag -and $l.LanguageTag -ne "en-US" -and $l.LanguageID) {
+                # Use & when the URL already has a query string (e.g. go.microsoft.com/fwlink/?linkid=...),
+                # otherwise ? (e.g. a bare aka.ms link). Appending a 2nd ? would corrupt the fwlink.
+                $clcidSep = if ($ssmsDownloadUrl -like "*`?*") { "&" } else { "?" }
+                $ssmsDownloadUrl = $ssmsDownloadUrl + $clcidSep + "clcid=" + $l.LanguageID
             }
 
             WriteStatus SSMS {
@@ -203,6 +260,28 @@ configuration Phase3
                         DependsOn     = $prevDepend
                     }
                     $prevDepend = "[DownLoadSCCM]DownLoadSCCM"
+
+                    # Pre-warm the ConfigMgr setup pre-req download (~10 min) in
+                    # the background, NOW that the CM media is extracted, so the
+                    # redist folder is already populated by the time Phase 8 runs
+                    # setupdl.exe. Reuses the tried-and-true RegisterTaskScheduler
+                    # infra to launch ScriptWorkflow.ps1 -DownloadOnly, which runs
+                    # ONLY the setupdl download and exits (no workflow steps).
+                    # setupdl is idempotent, so whatever it finishes persists on
+                    # disk; Phase 8 (Stop-CMSetupPrereqPrewarm) stops this task and
+                    # kills any running setupdl.exe before its own download so the
+                    # two never race. Set() returns once the task STARTS, so Phase 3
+                    # does not block on the ~10-min download. Task name MUST match
+                    # Stop-CMSetupPrereqPrewarm in ScriptFunctions.ps1.
+                    RegisterTaskScheduler PreWarmSetupDL {
+                        TaskName       = "ScriptWorkflow Download"
+                        ScriptName     = "ScriptWorkflow.ps1"
+                        ScriptPath     = $PSScriptRoot
+                        ScriptArgument = "$DeployConfigPath $LogPath -DownloadOnly"
+                        AdminCreds     = $CMAdmin
+                        Ensure         = "Present"
+                        DependsOn      = "[DownLoadSCCM]DownLoadSCCM"
+                    }
                 }
 
                 FileReadAccessShare CMSourceSMBShare {
@@ -244,7 +323,7 @@ configuration Phase3
         InstallSQLClient SQLClientInstall {
             DependsOn = "[WriteStatus]SQLClientInstall"
             URL       = $deployConfig.URLS.SQLClient
-            Path      = "C:\temp\sqlncli.msi"
+            Path      = "C:\Windows\Temp\sqlncli.msi"
             Ensure    = "Present"
         }
 
@@ -316,6 +395,36 @@ configuration Phase3
                 Status    = "Requesting IIS Certificate for PKI"
                 DependsOn = $nextDepend
             }
+
+            # Refresh template cache before CertReq so OID-to-name resolution
+            # works correctly. Without this, CertReq's Test() compares the raw
+            # OID against the template name, always fails, and re-creates the
+            # cert on every run.
+            Script RefreshTemplateCache {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                    # Clear the local certificate template cache timestamp so
+                    # the crypto API re-queries AD for template OID→name mapping
+                    foreach ($hive in @('HKLM','HKCU')) {
+                        $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+                    }
+                    # Also remove any duplicate DP certs — keep only the newest
+                    $fn = 'ConfigMgr Client DistributionPoint Certificate'
+                    $dupes = @(Get-ChildItem Cert:\LocalMachine\My |
+                        Where-Object { $_.FriendlyName -eq $fn } | Sort-Object NotBefore -Descending)
+                    if ($dupes.Count -gt 1) {
+                        foreach ($old in $dupes | Select-Object -Skip 1) {
+                            Remove-Item "Cert:\LocalMachine\My\$($old.Thumbprint)" -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+                DependsOn  = $nextDepend
+            }
+            $nextDepend = "[Script]RefreshTemplateCache"
+
             $subject = $ThisVM.vmName + "." + $DomainName
             $friendlyName = 'ConfigMgr WebServer Certificate'
             CertReq SSLCert {
@@ -352,7 +461,7 @@ configuration Phase3
                 $friendlyName = 'ConfigMgr Client DistributionPoint Certificate'
                 CertReq SSLCert2 {
                     Subject             = "Client DistributionPoint Cert"
-                    #SubjectAltName      = "DNS=" + $subject
+                    SubjectAltName      = "DNS=" + $subject + "&DNS=" + $($ThisVM.VmName)
                     KeyLength           = '2048'
                     Exportable          = $true
                     ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
@@ -374,6 +483,7 @@ configuration Phase3
                     FriendlyName = $friendlyName
                     Path         = 'c:\temp\ConfigMgrClientDistributionPointCertificate.pfx'
                     Password     = $Admincreds
+                    MatchSource  = $true
                     DependsOn    = $nextDepend
                 }
                 $nextDepend = "[CertificateExport]SSLCert"

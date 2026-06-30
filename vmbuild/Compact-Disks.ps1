@@ -563,14 +563,17 @@ $btnXaml
             $rd = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($dlgXaml))
             $dlg = [System.Windows.Markup.XamlReader]::Load($rd)
             $dlg.Owner = $window
-            $result = 'KeepGoing'
+            # Use a hashtable so closures can mutate the value in-place.
+            # A bare $result scalar + .GetNewClosure() captures by value;
+            # the closure's assignment would update its own copy, not ours.
+            $box = @{ Result = 'KeepGoing' }
             if ($IncludeSafeStop) {
-                $dlg.FindName('BtnSafeStop').Add_Click({ $result = 'SafeStop'; $dlg.DialogResult = $true }.GetNewClosure())
+                $dlg.FindName('BtnSafeStop').Add_Click({ $box.Result = 'SafeStop'; $dlg.DialogResult = $true }.GetNewClosure())
             }
-            $dlg.FindName('BtnKeepGoing').Add_Click({ $result = 'KeepGoing'; $dlg.DialogResult = $true }.GetNewClosure())
-            $dlg.FindName('BtnForceKill').Add_Click({ $result = 'ForceKill'; $dlg.DialogResult = $true }.GetNewClosure())
+            $dlg.FindName('BtnKeepGoing').Add_Click({ $box.Result = 'KeepGoing'; $dlg.DialogResult = $true }.GetNewClosure())
+            $dlg.FindName('BtnForceKill').Add_Click({ $box.Result = 'ForceKill'; $dlg.DialogResult = $true }.GetNewClosure())
             [void]$dlg.ShowDialog()
-            return $result
+            return $box.Result
         }
 
         $window.Add_Closing({
@@ -1115,9 +1118,9 @@ $btnXaml
                 # Killing the powershell job process orphans any defrag.exe
                 # children it spawned; they keep the volume busy and block
                 # the cleanup-time dismount. Reap them directly. Same for
-                # cleanmgr.exe (zero risk - it's user-mode).
+                # cleanmgr.exe and dism.exe (zero risk - user-mode).
                 if ($killedNow -gt 0) {
-                    foreach ($procName in @('defrag','cleanmgr')) {
+                    foreach ($procName in @('defrag','cleanmgr','dism')) {
                         try {
                             $procs = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
                             foreach ($pr in $procs) {
@@ -1138,7 +1141,7 @@ $btnXaml
             }
 
             # ----- Launch prep jobs (one per VM, all in parallel) -----
-            while ($prepQueue.Count -gt 0) {
+            while ($prepQueue.Count -gt 0 -and -not $UiSync.ForceClose -and -not $UiSync.StopRequested) {
                 $vm = $prepQueue.Dequeue()
                 if ($vm.PSObject.Properties['PreFlightFail'] -and $vm.PreFlightFail) {
                     # Deferred (NOT failed): wait until others compact and
@@ -2004,7 +2007,7 @@ $btnXaml
             $activePrepJobs = $stillPrep
 
             # ----- Launch compact jobs -----
-            while ($activeJobs.Count -lt $MaxConcurrentJobs -and $diskQueue.Count -gt 0) {
+            while ($activeJobs.Count -lt $MaxConcurrentJobs -and $diskQueue.Count -gt 0 -and -not $UiSync.ForceClose -and -not $UiSync.StopRequested) {
                 $disk = $diskQueue.Dequeue()
                 Add-UiLog ("[START] $($disk.VMName) - $($disk.FileName)")
                 try {
@@ -2344,7 +2347,7 @@ $btnXaml
                                             Write-PhaseLog "defrag ${letter}: $defragArgs"
                                             try {
                                                 $proc = Start-Process -FilePath 'defrag.exe' `
-                                                    -ArgumentList "${letter}:",($defragArgs -split '\s+') `
+                                                    -ArgumentList "${letter}: $defragArgs" `
                                                     -WindowStyle Hidden -PassThru -ErrorAction Stop
                                                 if ($proc.WaitForExit($defragTimeoutMin * 60 * 1000)) {
                                                     Write-PhaseLog "  defrag ${letter}: $defragArgs complete (exit $($proc.ExitCode))"
@@ -2610,13 +2613,16 @@ $btnXaml
             # Skip the throttle sleep when we have free compact slots AND
             # queued disks waiting: the next loop iteration's "Launch compact
             # jobs" block will fill them right away. Otherwise a job that
-            # finishes early just sits idle for the full 400ms tick before
+            # finishes early just sits idle for the throttle tick before
             # its slot gets refilled, wasting wall time on every reap.
+            # On ForceClose, skip the sleep entirely so the throw at the
+            # top of the next iteration fires immediately.
+            if ($UiSync.ForceClose) { continue }
             $haveCapacity = ($activeJobs.Count -lt $MaxConcurrentJobs) -and ($diskQueue.Count -gt 0)
             if (-not $haveCapacity -and (
                     $activePrepJobs.Count -gt 0 -or $activeJobs.Count -gt 0 -or
                     $prepQueue.Count -gt 0 -or $diskQueue.Count -gt 0)) {
-                Start-Sleep -Milliseconds 400
+                Start-Sleep -Milliseconds 200
             }
         }
 
@@ -2633,20 +2639,59 @@ $btnXaml
         # running is what we're trying to avoid in the first place.
         $forceKill = $UiSync.ForceClose -or ($UiSync.WindowClosed -and -not $UiSync.StopRequested)
         if ($forceKill) {
+            # Drain queues immediately so nothing else can start.
+            while ($prepQueue.Count -gt 0) { [void]$prepQueue.Dequeue() }
+            while ($diskQueue.Count -gt 0) { [void]$diskQueue.Dequeue() }
+
+            # Kill job processes directly via process tree kill.
+            # Stop-Job is slow (waits for graceful termination); killing
+            # the process tree is immediate and also reaps child processes
+            # (defrag.exe, dism.exe, cleanmgr.exe) spawned by the job.
+            $allJobs = @()
             foreach ($vm in $activePrepJobs) {
-                if ($vm.Job) {
-                    Stop-Job  -Job $vm.Job -ErrorAction SilentlyContinue
-                    Remove-Job -Job $vm.Job -Force -ErrorAction SilentlyContinue
-                    $vm.Status = 'Cancelled'
-                }
+                if ($vm.Job) { $allJobs += $vm.Job; $vm.Status = 'Cancelled' }
             }
             foreach ($disk in $activeJobs) {
-                if ($disk.Job) {
-                    Stop-Job  -Job $disk.Job -ErrorAction SilentlyContinue
-                    Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
-                    $disk.Status = 'Cancelled'
-                }
+                if ($disk.Job) { $allJobs += $disk.Job; $disk.Status = 'Cancelled' }
             }
+            foreach ($j in $allJobs) {
+                # Each PS job runs in a child powershell.exe / pwsh.exe.
+                # Kill the process tree (job process + its children like
+                # defrag.exe) for instant teardown. Fall back to Stop-Job
+                # if we can't find the process.
+                $killed = $false
+                try {
+                    # ChildJobs[0].InstanceId is a GUID we can't directly
+                    # map to a PID, but we can match by job Name -> child
+                    # process command line, or just kill via Stop-Job after
+                    # the process tree sweep below. The fastest path is to
+                    # grab the process from the job's handle.
+                    $childJob = $j.ChildJobs[0]
+                    if ($childJob -and $childJob.PSObject.Properties['Process'] -and $childJob.Process) {
+                        try {
+                            $childJob.Process.Kill($true)  # $true = kill entire process tree
+                            $killed = $true
+                        } catch {}
+                    }
+                } catch {}
+                if (-not $killed) {
+                    try { Stop-Job -Job $j -ErrorAction SilentlyContinue } catch {}
+                }
+                try { Remove-Job -Job $j -Force -ErrorAction SilentlyContinue } catch {}
+            }
+
+            # Reap any orphan child processes our jobs may have spawned.
+            # These survive Stop-Job because they're independent process
+            # trees once started by Start-Process inside the job.
+            foreach ($procName in @('defrag','cleanmgr','dism')) {
+                try {
+                    $procs = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
+                    foreach ($pr in $procs) {
+                        try { Stop-Process -Id $pr.Id -Force -ErrorAction SilentlyContinue } catch {}
+                    }
+                } catch {}
+            }
+
             # We just killed jobs that may have been holding VHDs mounted
             # or in the middle of a snapshot merge. Dismount any leftover
             # mounted VHDs immediately so the host doesn't keep them open.

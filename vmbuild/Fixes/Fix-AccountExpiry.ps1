@@ -15,10 +15,10 @@ $Fix_AccountExpiry = {
 }
 
 $fixesToPerform += [PSCustomObject]@{
-    FixName           = "Fix-AccountExpiry"
-    FixVersion        = "230922"
-    AppliesToNew      = $true
-    AppliesToExisting = $true
+    FixName             = "Fix-AccountExpiry"
+    FixVersion          = "211119"
+    NeededOnFreshDeploy = $true
+    AppliesToExisting   = $true
     AppliesToRoles    = @()
     NotAppliesToRoles = @("DC", "OSDClient", "AADClient")
     DependentVMs      = @()

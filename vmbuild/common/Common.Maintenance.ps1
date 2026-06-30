@@ -1,3 +1,4 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 
 function Start-Maintenance {
 
@@ -7,17 +8,17 @@ function Start-Maintenance {
         [object]$DeployConfig
     )
 
-    $applyNewOnly = $false
+    $freshDeployOnly = $false
     if ($DeployConfig) {
         Write-log "Start-Maintenance called with DeployConfig"
         $allVMs = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden }
-        $vmsNeedingMaintenance = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden } | Sort-Object vmName
-        $applyNewOnly = $true
+        $vmsNeedingMaintenance = @($allVMs | Sort-Object vmName)
+        $freshDeployOnly = $true
     }
     else {
         Write-log -verbose "Start-Maintenance called without DeployConfig"
         $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
-        $vmsNeedingMaintenance = $allVMs | Where-Object { -not $_.memLabsVersion -or $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
+        $vmsNeedingMaintenance = @($allVMs | Sort-Object vmName)
     }
 
     Write-Log -Verbose "Latest Hotfix Version: $($Common.LatestHotfixVersion)"
@@ -36,9 +37,70 @@ function Start-Maintenance {
         -not ($_.operatingSystem -like "Ubuntu*" -or $_.operatingSystem -like "Debian*" -or $_.operatingSystem -like "Linux*") -and
         -not ($_.deployedOS -like "Ubuntu*" -or $_.deployedOS -like "Debian*" -or $_.deployedOS -like "Linux*")
     }
+
+    # Pre-filter: skip VMs where every fix is already recorded in appliedFixes.
+    # This avoids starting a job/thread for VMs that have nothing to do.
+    # Bulk-read all VM notes in a single Get-VM call (one CIM round-trip)
+    # instead of per-VM Get-VMNote calls that serialize on vmms.exe.
+    $allFixDefs = Get-VMFixes -ReturnDummyList
+    $relevantFixes = if ($freshDeployOnly) {
+        $allFixDefs | Where-Object { $_.NeededOnFreshDeploy -eq $true }
+    } else {
+        $allFixDefs | Where-Object { $_.AppliesToExisting -eq $true }
+    }
+    $vmNoteCache = @{}
+    try {
+        foreach ($hvm in (Get-VM -ErrorAction SilentlyContinue)) {
+            if ($hvm.Notes -like "*lastUpdate*") {
+                try { $vmNoteCache[$hvm.Name] = $hvm.Notes | ConvertFrom-Json } catch {}
+            }
+        }
+    } catch {}
+
+    $countUpToDate = 0
+    $vmsNeedingMaintenance = @($vmsNeedingMaintenance | Where-Object {
+        $note = $vmNoteCache[$_.vmName]
+        if ($note -and $note.appliedFixes) {
+            # Per-fix tracking: skip if every relevant fix is already recorded
+            $missing = $false
+            foreach ($fix in $relevantFixes) {
+                if (-not (Test-VMFixApplied -VMNote $note -FixName $fix.FixName -FixVersion $fix.FixVersion)) {
+                    $missing = $true
+                    break
+                }
+            }
+            if (-not $missing) {
+                Write-Log "$($_.vmName): All fixes recorded, skipping." -Verbose
+                $countUpToDate++
+                return $false
+            }
+        }
+        elseif ($note -and
+                ($note.PSObject.Properties.Name -notcontains 'appliedFixes') -and
+                $note.memLabsVersion -and
+                $note.memLabsVersion -ge $Common.LatestHotfixVersion) {
+            # Transitional: VM managed by old watermark system (no appliedFixes
+            # property). Watermark is at or past the latest fix, so seed all fix
+            # versions into appliedFixes and skip. This is a one-time migration;
+            # subsequent runs use the per-fix check above.
+            $seeded = @{}
+            foreach ($fix in $allFixDefs) {
+                $seeded[$fix.FixName] = [string]$fix.FixVersion
+            }
+            $note | Add-Member -MemberType NoteProperty -Name "appliedFixes" -Value ([PSCustomObject]$seeded) -Force
+            $note | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
+            $json = ($note | ConvertTo-Json) -replace "`r`n","" -replace "    "," " -replace "  "," "
+            try { Set-VM -Name $_.vmName -Notes $json -ErrorAction SilentlyContinue } catch {}
+            Write-Log "$($_.vmName): Seeded appliedFixes from watermark ($($note.memLabsVersion)), skipping." -Verbose
+            $countUpToDate++
+            return $false
+        }
+        return $true
+    })
+
     $newVmsNeedingMaintenance = @()
     foreach ($vm in $vmsNeedingMaintenance) {
-        Write-Log -Verbose "VM Name: $($vm.vmName) Version: $($vm.memLabsVersion)"
+        Write-Log -Verbose "VM Name: $($vm.vmName)"
         $mutexName = $vm.vmName
 
         try {
@@ -60,14 +122,14 @@ function Start-Maintenance {
         }
     }
     $vmCount = ($newVmsNeedingMaintenance | Measure-Object).Count
-    $countNotNeeded = $allVMs.Count - $vmCount
+    $countNotNeeded = $countUpToDate
 
     $text = "Performing maintenance"
     $maintenanceDoNotStart = $false
     Write-Log $text -Activity
     $stoppedCount = 0
     $stoppedVms = @()
-    if ($applyNewOnly -eq $false) {
+    if ($freshDeployOnly -eq $false) {
         if ($vmCount -gt 0) {
             $response = Read-YesOrNoWithTimeout -Prompt "$($newVmsNeedingMaintenance.Count) VM(s) [$($newVmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (y/N)" -HideHelp -Default "n" -timeout 15
             if ($response -eq "n") {
@@ -117,7 +179,7 @@ function Start-Maintenance {
     #foreach ($vm in $newVmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
     #    $i++
     #    Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
-    #    $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
+    #    $worked = Start-VMMaintenance -VMName $vm.vmName -FreshDeployOnly:$freshDeployOnly
     #    if ($worked) { $countWorked++ } else {
     #        $failedDomains += $vm.domain
     #        $countFailed++
@@ -185,8 +247,8 @@ function Start-VMMaintenance {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VMName")]
         [object] $VMName,
-        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to new")]
-        [switch] $ApplyNewOnly
+        [Parameter(Mandatory = $false, HelpMessage = "Apply only fixes needed on fresh deploy")]
+        [switch] $FreshDeployOnly
     )
 
     Write-Log "Starting maintenance for VM: $VMName"
@@ -222,9 +284,7 @@ function Start-VMMaintenance {
     }
 
     $global:MaintenanceActivity = $VMName
-    $latestFixVersion = $Common.LatestHotfixVersion
     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
-    $vmVersion = $vmNoteObject.memLabsVersion
 
     # This should never happen, since parent filters these out. Leaving just-in-case.
     if ($inProgress) {
@@ -232,49 +292,59 @@ function Start-VMMaintenance {
         return $false
     }
 
-    # This should never happen, unless Get-List provides outdated version, so check again with current VMNote object
-    if ($vmVersion -ge $latestFixVersion -and -not $ApplyNewOnly.IsPresent) {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "VM Version ($vmVersion) is up-to-date."
-        return $true
-    }
-
-    if ($ApplyNewOnly.IsPresent) {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Newly deployed VM is NOT up-to-date. Required Hotfix Version is $latestFixVersion. Performing maintenance..."
+    if ($FreshDeployOnly.IsPresent) {
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance on newly deployed VM..." -force
     }
     else {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM (version $vmVersion) is NOT up-to-date. Required Hotfix Version is $latestFixVersion. Performing maintenance..."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance..." -force
     }
 
-    if ($ApplyNewOnly.IsPresent) {
-        $vmFixes = Get-VMFixes -newVM $true -VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
+    if ($FreshDeployOnly.IsPresent) {
+        $vmFixes = Get-VMFixes -newVM $true -VMName $VMName | Where-Object { $_.NeededOnFreshDeploy -eq $true }
     }
     else {
         $vmFixes = Get-VMFixes -newVM $false -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
     }
 
-    $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes -ApplyNewOnly:$ApplyNewOnly
+    $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes -FreshDeployOnly:$FreshDeployOnly
 
     if ($worked) {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM maintenance completed successfully."
-        Set-VMNote -vmName $VMName -vmVersion ([string]$latestFixVersion) -forceVersionUpdate
-        $logoffusers = {
-            try {
-                query user 2>&1 | Select-Object -skip 1 | ForEach-Object {
-                    logoff ($_ -split "\s+")[-6]
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM maintenance completed successfully." -force
+
+        # If a user is logged in, start any AtLogOn scheduled tasks directly
+        # so they run immediately instead of waiting for the next logon cycle.
+        # This replaces the old approach of force-logging-off all users.
+        $startLogonTasks = {
+            $logonTasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
+                $_.State -ne 'Disabled' -and
+                $_.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' }
+            }
+            $started = @()
+            foreach ($task in $logonTasks) {
+                try {
+                    $actions = $task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }
+                    Start-ScheduledTask -TaskName $task.TaskName -ErrorAction Stop
+                    $started += "$($task.TaskName) [$($actions -join '; ')]"
+                } catch {
+                    $started += "$($task.TaskName) [FAILED: $($_.Exception.Message)]"
                 }
             }
-            catch {}
+            return $started
         }
         try {
-            if ($ApplyNewOnly.IsPresent) {
-                Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $logoffusers
+            if ($FreshDeployOnly.IsPresent) {
+                $result = Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $startLogonTasks -DisplayName "Start logon tasks" -SuppressLog
+                if ($result.ScriptBlockOutput) {
+                    Write-Log "$VMName`: Started logon tasks: $($result.ScriptBlockOutput -join ', ')" -Verbose
+                }
             }
         }
         catch {}
     }
     else {
-        Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log." -Failure
-        Show-Notification -ToastText "$VMName`: VM maintenance failed. Review VMBuild.log." -ToastTag $VMName
+        $domainLog = if ($vmNoteObject.domain) { "VMBuild.$($vmNoteObject.domain).log" } else { "VMBuild.log" }
+        Write-Log "$VMName`: VM maintenance failed. Review $domainLog." -Failure
+        Show-Notification -ToastText "$VMName`: VM maintenance failed. Review $domainLog." -ToastTag $VMName
     }
 
     return $worked
@@ -289,11 +359,11 @@ function Start-VMFixes {
         [object] $VMFixes,
         [Parameter(Mandatory = $false, HelpMessage = "SkipVMShutdown")]
         [switch] $SkipVMShutdown,
-        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to new")]
-        [switch] $ApplyNewOnly
+        [Parameter(Mandatory = $false, HelpMessage = "Apply only fixes needed on fresh deploy")]
+        [switch] $FreshDeployOnly
     )
 
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Applying fixes to the virtual machine."
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Applying fixes to the virtual machine." -force
 
     $success = $false
     $toStop = @()
@@ -331,7 +401,7 @@ function Start-VMFixes {
 
     if (-not $hasDependentVMs) {
         # Fast path: batch all fixes into a single remote call per session type
-        $batchResult = Start-VMFixesBatched -VMName $VMName -VMDomain $vmDomain -VMFixes $sortedFixes -ApplyNewOnly:$ApplyNewOnly
+        $batchResult = Start-VMFixesBatched -VMName $VMName -VMDomain $vmDomain -VMFixes $sortedFixes -FreshDeployOnly:$FreshDeployOnly
         $success = $batchResult.Success
         $toStop = $batchResult.VMsToStop
         $fixesAppliedCount = $batchResult.AppliedCount
@@ -343,13 +413,11 @@ function Start-VMFixes {
         $fixesApplicableCount = 0
         foreach ($vmFix in $sortedFixes) {
             if ($vmFix.AppliesToThisVM) { $fixesApplicableCount++ }
-            $status = Start-VMFix -vmName $VMName -vmFix $vmFix -ApplyNewOnly:$ApplyNewOnly
+            $status = Start-VMFix -vmName $VMName -vmFix $vmFix -FreshDeployOnly:$FreshDeployOnly
             $toStop += $status.VMsToStop
             $success = $status.Success
             if ($status.Applied) { $fixesAppliedCount++ }
             if (-not $success) {
-                $resetVersion = [int]($vmFix.FixVersion) - 1
-                Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
                 break
             }
         }
@@ -358,7 +426,7 @@ function Start-VMFixes {
     # If deploying a new VM and fixes were applicable but none actually ran
     # their script block, something is wrong — do not stamp the version.
     # (If zero were applicable, e.g. OSDClient/AADClient, that's expected.)
-    if ($ApplyNewOnly.IsPresent -and $fixesApplicableCount -gt 0 -and $fixesAppliedCount -eq 0 -and $success) {
+    if ($FreshDeployOnly.IsPresent -and $fixesApplicableCount -gt 0 -and $fixesAppliedCount -eq 0 -and $success) {
         Write-Log "$VMName`: WARNING - $fixesApplicableCount maintenance fixes were applicable but none were applied. Version will NOT be stamped." -Warning
         $success = $false
     }
@@ -394,7 +462,7 @@ function Start-VMFixesBatched {
         [Parameter(Mandatory = $true)]
         [object[]] $VMFixes,
         [Parameter(Mandatory = $false)]
-        [switch] $ApplyNewOnly
+        [switch] $FreshDeployOnly
     )
 
     $return = [PSCustomObject]@{
@@ -406,20 +474,35 @@ function Start-VMFixesBatched {
 
     $vmNote = Get-VMNote -VMName $VMName
 
-    # Stamp non-applicable fixes immediately (host-side, no remote call needed)
+    # Classify each fix and build a status table
     $applicableFixes = @()
+    $naFixes = @()
+    $statusLines = @()
     foreach ($vmFix in $VMFixes) {
-        if ($vmNote.memLabsVersion -ge $vmFix.FixVersion -and -not $ApplyNewOnly.IsPresent) {
-            # Already applied
+        $applied = Test-VMFixApplied -VMNote $vmNote -FixName $vmFix.FixName -FixVersion $vmFix.FixVersion
+        $isNA = -not $vmFix.AppliesToThisVM
+        if ($applied) {
+            $label = if ($isNA) { "N/A" } else { "Applied" }
+            $statusLines += "  {0,-25} {1,-12} $label" -f $vmFix.FixName, $vmFix.FixVersion
             continue
         }
-        if (-not $vmFix.AppliesToThisVM) {
-            Set-VMNote -VMName $VMName -vmVersion $vmFix.FixVersion
+        if ($isNA) {
+            $statusLines += "  {0,-25} {1,-12} N/A" -f $vmFix.FixName, $vmFix.FixVersion
+            $naFixes += $vmFix
             continue
         }
+        $statusLines += "  {0,-25} {1,-12} PENDING" -f $vmFix.FixName, $vmFix.FixVersion
         $return.ApplicableCount++
         $applicableFixes += $vmFix
     }
+    Write-Log "$VMName`: Fix status ($($applicableFixes.Count) pending, $($VMFixes.Count) total):" -LogOnly
+    foreach ($line in $statusLines) { Write-Log "$VMName`: $line" -LogOnly }
+
+    # Batch-stamp all N/A fixes in one CIM write instead of per-fix Set-VMNote calls
+    if ($naFixes.Count -gt 0) {
+        $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $naFixes
+    }
+    foreach ($line in $statusLines) { Write-Log "$VMName`: $line" -LogOnly }
 
     if ($applicableFixes.Count -eq 0) {
         $return.Success = $true
@@ -427,7 +510,7 @@ function Start-VMFixesBatched {
     }
 
     # Start the VM
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting $VMName for batched maintenance."
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting $VMName for batched maintenance." -force
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $VMDomain -WaitForConnect -Quiet
     if ($status.StartedVM) { $return.VMsToStop += $VMName }
     if ($status.StartFailed) { return $return }
@@ -438,18 +521,81 @@ function Start-VMFixesBatched {
     if ($allInjectFiles -or $allInjectTools) {
         try {
             $ps = Get-VmSession -VmName $VMName -VmDomainName $VMDomain
+
+            # Probe with content hash for InjectFiles so an updated fix script
+            # on the host overwrites a stale copy on the VM (filename-only
+            # check would let yesterday's broken Fix-*.sql persist forever).
+            # Tool folders stay existence-only — they're large bundles
+            # (SSMS etc.) that we don't version per build.
+            $expectedFileHashes = @{}
             foreach ($file in $allInjectFiles) {
                 $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+                if (Test-Path -LiteralPath $sourcePath) {
+                    try {
+                        $expectedFileHashes["C:\staging\$file"] = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA1 -ErrorAction Stop).Hash
+                    }
+                    catch { }
+                }
+            }
+            $toolProbe = @()
+            foreach ($toolFolder in $allInjectTools) { $toolProbe += "C:\tools\$toolFolder" }
+
+            $matchingFiles = @()
+            $existingTools = @()
+            if ($expectedFileHashes.Count -gt 0 -or $toolProbe.Count -gt 0) {
+                $fileItems = @($expectedFileHashes.GetEnumerator() | ForEach-Object {
+                        [pscustomobject]@{ Path = $_.Key; Hash = $_.Value }
+                    })
+                try {
+                    $probe = Invoke-Command -Session $ps -ScriptBlock {
+                        param($files, $tools)
+                        $matched = foreach ($i in $files) {
+                            if (Test-Path -LiteralPath $i.Path) {
+                                try {
+                                    $h = (Get-FileHash -LiteralPath $i.Path -Algorithm SHA1 -ErrorAction Stop).Hash
+                                    if ($h -eq $i.Hash) { $i.Path }
+                                }
+                                catch { }
+                            }
+                        }
+                        $existing = foreach ($t in $tools) {
+                            if (Test-Path -LiteralPath $t) { $t }
+                        }
+                        [pscustomobject]@{ MatchingFiles = @($matched); ExistingTools = @($existing) }
+                    } -ArgumentList $fileItems, $toolProbe -ErrorAction Stop
+                    if ($probe) {
+                        $matchingFiles = @($probe.MatchingFiles)
+                        $existingTools = @($probe.ExistingTools)
+                    }
+                }
+                catch {
+                    Write-Log "$VMName`: Could not probe existing files/tools; will copy all. $_" -LogOnly
+                }
+            }
+
+            foreach ($file in $allInjectFiles) {
                 $targetPathInVM = "C:\staging\$file"
-                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM..."
+                if ($targetPathInVM -in $matchingFiles) {
+                    Write-Log "$VMName`: $file already present (hash match), skipping copy." -LogOnly
+                    continue
+                }
+                $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM..." -force
                 Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
             }
             foreach ($toolFolder in $allInjectTools) {
+                $targetPathInVM = "C:\tools\$toolFolder"
+                if ($targetPathInVM -in $existingTools) {
+                    Write-Log "$VMName`: Tool '$toolFolder' already present on VM, skipping copy." -LogOnly
+                    continue
+                }
                 $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
                 if (Test-Path $sourcePath) {
-                    $targetPathInVM = "C:\tools\$toolFolder"
-                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..."
-                    Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Recurse -Force -ErrorAction Stop
+                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..." -force
+                    $copyResult = Copy-ItemSafe -VMName $VMName -VmDomainName $VMDomain -Path $sourcePath -Destination "C:\tools" -Recurse -Container -Force
+                    if ($copyResult -eq $false) {
+                        throw "Copy-ItemSafe failed copying tool '$toolFolder' to VM"
+                    }
                 }
             }
         }
@@ -503,42 +649,51 @@ function Start-VMFixesBatched {
             $fixDefs = $json | ConvertFrom-Json
             $results = @()
             foreach ($def in $fixDefs) {
+                $markerPath = "C:\staging\Fix\$($def.Name).result.json"
+                # Pre-clean the marker so a crash that never reaches the wrapper's
+                # finally{} write leaves NO marker (= failure).
+                if (Test-Path $markerPath) { Remove-Item $markerPath -Force -ErrorAction SilentlyContinue }
+
                 $sb = [scriptblock]::Create($def.Script)
-                $r = $null
+                $threw = $null
                 try {
+                    # Pipeline output is deliberately DISCARDED ($null = ...): the
+                    # verdict comes from the marker file, not the return value.
                     if ($def.Args) {
                         $fixArgs = @($def.Args)
-                        $r = & $sb @fixArgs
+                        $null = & $sb @fixArgs
                     }
                     else {
-                        $r = & $sb
+                        $null = & $sb
                     }
                 }
                 catch {
-                    # The wrapper should normally catch its own exceptions; this
-                    # catches only catastrophic failures (e.g. wrapper compilation).
-                    $r = [pscustomobject]@{
-                        FixName       = $def.Name
-                        Success       = $false
-                        Message       = $null
-                        Errors        = @()
-                        ExceptionInfo = "$($_.Exception.Message)`n$($_.ScriptStackTrace)"
-                        ComputerName  = $env:COMPUTERNAME
-                        DurationSec   = 0
-                        IsStructured  = $true
-                    }
+                    # The wrapper normally catches its own exceptions and records them
+                    # in the marker; this catches only catastrophic failures (e.g.
+                    # wrapper compilation).
+                    $threw = "$($_.Exception.Message)`n$($_.ScriptStackTrace)"
                 }
-                # Normalize whatever came back into a structured record
-                if ($r -is [pscustomobject] -and ($r.PSObject.Properties.Name -contains 'IsStructured')) {
-                    $results += $r
+
+                # AUTHORITATIVE: derive the result from the marker file the wrapper
+                # wrote, NOT from the pipeline return value. Cmdlet output leaking
+                # onto the success stream can turn the pipeline value into an array,
+                # which then coerces to Success=$true ([bool]@(...) is true) -- exactly
+                # how a fix that never created its scheduled task got stamped
+                # 'applied'. An explicit marker is REQUIRED to call a fix successful.
+                $rec = $null
+                if (Test-Path $markerPath) {
+                    try { $rec = Get-Content -Path $markerPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch { $rec = $null }
+                }
+                if ($rec -and ($rec.PSObject.Properties.Name -contains 'IsStructured')) {
+                    $results += $rec
                 }
                 else {
                     $results += [pscustomobject]@{
                         FixName       = $def.Name
-                        Success       = [bool]$r
+                        Success       = $false
                         Message       = $null
                         Errors        = @()
-                        ExceptionInfo = $null
+                        ExceptionInfo = $(if ($threw) { $threw } else { "No result marker produced ($markerPath missing/unreadable); treating as failure (no explicit success)." })
                         ComputerName  = $env:COMPUTERNAME
                         DurationSec   = 0
                         IsStructured  = $true
@@ -564,37 +719,63 @@ function Start-VMFixesBatched {
             return $return
         }
 
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Executing $($groupFixes.Count) fixes in batch (account: $(if ($key -eq '__default__') {'default'} else {$key}))..."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Executing $($groupFixes.Count) fixes in batch (account: $(if ($key -eq '__default__') {'default'} else {$key}))..." -force
 
-        try {
-            $rawOutput = Invoke-Command -Session $ps -ScriptBlock $batchRunner -ArgumentList $fixDefsJson -ErrorVariable batchErr -ErrorAction SilentlyContinue
-        }
-        catch {
-            Write-Log "$VMName`: Batched fix execution failed with exception: $_" -Warning
-            return $return
+        # Run the in-guest batch, then read each fix's authoritative result marker.
+        # If any fix did not report explicit success, retry the WHOLE group once:
+        # fixes are idempotent and the group is fail-fast, so a re-run re-attempts
+        # the one that failed (and continues past it). Only the final $results is
+        # processed/stamped below, so there is no double-stamping.
+        $maxGroupAttempts = 2
+        $groupAttempt = 0
+        $results = @()
+        while ($groupAttempt -lt $maxGroupAttempts) {
+            $groupAttempt++
+            $batchErr = $null
+
+            try {
+                $rawOutput = Invoke-Command -Session $ps -ScriptBlock $batchRunner -ArgumentList $fixDefsJson -ErrorVariable batchErr -ErrorAction SilentlyContinue
+            }
+            catch {
+                Write-Log "$VMName`: Batched fix execution failed with exception (attempt $groupAttempt): $_" -Warning
+                $rawOutput = $null
+            }
+
+            if ($batchErr -and $batchErr.Count -ne 0) {
+                Write-Log "$VMName`: Batched fix execution had errors (attempt $groupAttempt): $($batchErr[0].ToString().Trim())" -Warning
+            }
+
+            if (-not $rawOutput) {
+                Write-Log "$VMName`: Batched fix returned no output (attempt $groupAttempt)." -Warning
+                $results = @()
+            }
+            else {
+                try {
+                    $results = $rawOutput | ConvertFrom-Json
+                    if ($results -isnot [array]) { $results = @($results) }
+                }
+                catch {
+                    Write-Log "$VMName`: Failed to parse batched fix results (attempt $groupAttempt): $_" -Warning
+                    $results = @()
+                }
+            }
+
+            $allOk = ($results.Count -ge $groupFixes.Count) -and (@($results | Where-Object { -not $_.Success }).Count -eq 0)
+            if ($allOk -or ($groupAttempt -ge $maxGroupAttempts)) { break }
+
+            $failedNames = @($results | Where-Object { -not $_.Success } | ForEach-Object { $_.FixName }) -join ', '
+            if (-not $failedNames) { $failedNames = '(no/partial results)' }
+            Write-Log "$VMName`: Fix(es) did not report explicit success on attempt $groupAttempt [$failedNames]; retrying batch once." -Warning
+            Start-Sleep -Seconds 5
         }
 
-        if ($batchErr.Count -ne 0) {
-            Write-Log "$VMName`: Batched fix execution had errors: $($batchErr[0].ToString().Trim())" -Warning
-        }
-
-        # Parse results
-        if (-not $rawOutput) {
-            Write-Log "$VMName`: Batched fix returned no output." -Warning
-            return $return
-        }
-
-        try {
-            $results = $rawOutput | ConvertFrom-Json
-            # Ensure it's an array
-            if ($results -isnot [array]) { $results = @($results) }
-        }
-        catch {
-            Write-Log "$VMName`: Failed to parse batched fix results: $_" -Warning
+        if (-not $results -or $results.Count -eq 0) {
+            Write-Log "$VMName`: Batched fixes produced no usable results after $groupAttempt attempt(s)." -Warning
             return $return
         }
 
         $accountForTranscript = if ($key -eq "__default__") { $null } else { $key }
+        $groupApplied = @()
 
         foreach ($r in $results) {
             $matchingFix = $groupFixes | Where-Object { $_.FixName -eq $r.Name -or $_.FixName -eq $r.FixName } | Select-Object -First 1
@@ -618,14 +799,16 @@ function Start-VMFixesBatched {
             Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $fixDisplayName -VMDomainAccount $accountForTranscript
 
             if ($r.Success) {
-                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied."
-                Set-VMNote -vmName $VMName -vmVersion $matchingFix.FixVersion
+                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied." -force
+                $groupApplied += $matchingFix
                 $return.AppliedCount++
             }
             else {
                 Write-Log "$VMName`: Fix '$fixDisplayName' ($($matchingFix.FixVersion)) failed in batch." -Warning
-                $resetVersion = [int]($matchingFix.FixVersion) - 1
-                Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
+                # Stamp fixes that succeeded before the failure
+                if ($groupApplied.Count -gt 0) {
+                    $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $groupApplied
+                }
                 return $return
             }
         }
@@ -636,9 +819,16 @@ function Start-VMFixesBatched {
             Write-Log "$VMName`: Batch stopped before fix '$($failedFix.FixName)'. Possible crash in scriptblock." -Warning
             # Pull transcript for the fix that we suspect crashed mid-execution
             Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $failedFix.FixName -VMDomainAccount $accountForTranscript
-            $resetVersion = [int]($failedFix.FixVersion) - 1
-            Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
+            # Stamp fixes that succeeded before the crash
+            if ($groupApplied.Count -gt 0) {
+                $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $groupApplied
+            }
             return $return
+        }
+
+        # Batch-stamp all successful fixes from this group in one CIM write
+        if ($groupApplied.Count -gt 0) {
+            $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $groupApplied
         }
     }
 
@@ -653,8 +843,8 @@ function Start-VMFix {
         [string] $vmName,
         [Parameter(Mandatory = $true, HelpMessage = "vmFix")]
         [object] $vmFix,
-        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to new")]
-        [switch] $ApplyNewOnly
+        [Parameter(Mandatory = $false, HelpMessage = "Apply only fixes needed on fresh deploy")]
+        [switch] $FreshDeployOnly
     )
 
     $return = [PSCustomObject]@{
@@ -668,25 +858,30 @@ function Start-VMFix {
     $vmNote = Get-VMNote -VMName $vmName
     $vmDomain = $vmNote.domain
 
+    if (-not $vmDomain) {
+        Write-Log "$vmName`: No domain found in VMNote (vmNote=$($null -ne $vmNote)); assuming unmanaged. Skipping fix '$($vmFix.FixName)'." -LogOnly -Warning
+        $return.Success = $true
+        return $return
+    }
 
     # Check applicability
     $fixName = $vmFix.FixName
     $fixVersion = $vmFix.FixVersion
     write-log -LogOnly "Applying Fix $fixName $fixVersion to $vmName"
-    if ($vmNote.memLabsVersion -ge $fixVersion -and -not $ApplyNewOnly.IsPresent) {
+    if (Test-VMFixApplied -VMNote $vmNote -FixName $fixName -FixVersion $fixVersion) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) has been applied already."
         $return.Success = $true
         return $return
     }
 
     if (-not $vmFix.AppliesToThisVM) {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) is not applicable. Updating version to '$fixVersion'"
-        Set-VMNote -VMName $vmName -vmVersion $fixVersion
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) is not applicable."
+        Set-VMNote -VMName $vmName -FixApplied $fixName -FixAppliedVersion $fixVersion
         $return.Success = $true
         return $return
     }
 
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) is applicable. Applying fix now."
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) is applicable. Applying fix now." -force
 
     # Start dependent VM's
     if ($vmFix.DependentVMs) {
@@ -695,6 +890,10 @@ function Start-VMFix {
         foreach ($vm in $dependentVMs) {
             if ([string]::IsNullOrWhiteSpace($vm)) { continue }
             $note = Get-VMNote -VMName $vm
+            if (-not $note -or [string]::IsNullOrWhiteSpace($note.domain)) {
+                Write-Log "$VMName`: Dependent VM '$vm' has no resolvable domain (note=$($null -ne $note)); skipping start." -LogOnly -Warning
+                continue
+            }
             $status = Start-VMIfNotRunning -VMName $vm -VMDomain $note.domain -WaitForConnect -Quiet
             if ($status.StartedVM) {
                 $return.VMsToStop += $vm
@@ -705,7 +904,7 @@ function Start-VMFix {
             }
         }
     }
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting $VMName."
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting $VMName." -force
     # Start VM to apply fix
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
     if ($status.StartedVM) {
@@ -733,22 +932,85 @@ function Start-VMFix {
     }
 
     start-sleep -Milliseconds 200
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Connecting to $VMName"
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Connecting to $VMName" -force
     if ($vmFix.InjectFiles -or $vmFix.InjectTools) {
         try {
             $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
+
+            # Probe with content hash for InjectFiles so an updated fix script
+            # on the host overwrites a stale copy on the VM (filename-only
+            # check would let yesterday's broken Fix-*.sql persist forever).
+            # Tool folders stay existence-only — they're large bundles
+            # (SSMS etc.) that we don't version per build.
+            $expectedFileHashes = @{}
             foreach ($file in $vmFix.InjectFiles) {
                 $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+                if (Test-Path -LiteralPath $sourcePath) {
+                    try {
+                        $expectedFileHashes["C:\staging\$file"] = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA1 -ErrorAction Stop).Hash
+                    }
+                    catch { }
+                }
+            }
+            $toolProbe = @()
+            foreach ($toolFolder in $vmFix.InjectTools) { $toolProbe += "C:\tools\$toolFolder" }
+
+            $matchingFiles = @()
+            $existingTools = @()
+            if ($expectedFileHashes.Count -gt 0 -or $toolProbe.Count -gt 0) {
+                $fileItems = @($expectedFileHashes.GetEnumerator() | ForEach-Object {
+                        [pscustomobject]@{ Path = $_.Key; Hash = $_.Value }
+                    })
+                try {
+                    $probe = Invoke-Command -Session $ps -ScriptBlock {
+                        param($files, $tools)
+                        $matched = foreach ($i in $files) {
+                            if (Test-Path -LiteralPath $i.Path) {
+                                try {
+                                    $h = (Get-FileHash -LiteralPath $i.Path -Algorithm SHA1 -ErrorAction Stop).Hash
+                                    if ($h -eq $i.Hash) { $i.Path }
+                                }
+                                catch { }
+                            }
+                        }
+                        $existing = foreach ($t in $tools) {
+                            if (Test-Path -LiteralPath $t) { $t }
+                        }
+                        [pscustomobject]@{ MatchingFiles = @($matched); ExistingTools = @($existing) }
+                    } -ArgumentList $fileItems, $toolProbe -ErrorAction Stop
+                    if ($probe) {
+                        $matchingFiles = @($probe.MatchingFiles)
+                        $existingTools = @($probe.ExistingTools)
+                    }
+                }
+                catch {
+                    Write-Log "$VMName`: Could not probe existing files/tools; will copy all. $_" -LogOnly
+                }
+            }
+
+            foreach ($file in $vmFix.InjectFiles) {
                 $targetPathInVM = "C:\staging\$file"
-                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM [$targetPathInVM]..."
+                if ($targetPathInVM -in $matchingFiles) {
+                    Write-Log "$VMName`: $file already present (hash match), skipping copy." -LogOnly
+                    continue
+                }
+                $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM [$targetPathInVM]..." -force
                 Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
             }
             foreach ($toolFolder in $vmFix.InjectTools) {
+                $targetPathInVM = "C:\tools\$toolFolder"
+                if ($targetPathInVM -in $existingTools) {
+                    Write-Log "$VMName`: Tool '$toolFolder' already present on VM, skipping copy." -LogOnly
+                    continue
+                }
                 $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
                 if (Test-Path $sourcePath) {
-                    $targetPathInVM = "C:\tools\$toolFolder"
-                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..."
-                    Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Recurse -Force -ErrorAction Stop
+                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..." -force
+                    $copyResult = Copy-ItemSafe -VMName $VMName -VmDomainName $vmDomain -Path $sourcePath -Destination "C:\tools" -Recurse -Container -Force
+                    if ($copyResult -eq $false) {
+                        throw "Copy-ItemSafe failed copying tool '$toolFolder' to VM"
+                    }
                 }
             }
         }
@@ -760,44 +1022,75 @@ function Start-VMFix {
     }
 
     start-sleep -Milliseconds 200
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting ScriptBlock on $VMName"
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting ScriptBlock on $VMName" -force
 
     # Wrap the fix body so we get a structured return + transcript on the VM
     $HashArguments.ScriptBlock = New-VMFixScriptBlock -FixName $fixName -Body $vmFix.ScriptBlock
 
-    # Drop -CommandReturnsBool: output is now a structured PSCustomObject.
-    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
-    $rawOut = $result.ScriptBlockOutput
-    $isStructured = ($null -ne $rawOut) -and ($rawOut -is [pscustomobject]) -and `
-                    ($rawOut.PSObject.Properties.Name -contains 'IsStructured')
-
+    # Output is a structured PSCustomObject, but the AUTHORITATIVE success signal
+    # is the marker file the wrapper writes (read below in a separate call), not
+    # the pipeline return value -- cmdlet output leaking onto the success stream
+    # can't be allowed to mask the real result. A fix is stamped 'applied' ONLY on
+    # an explicit success marker, and a non-success result is retried once.
     $fixSucceeded = $false
-    if ($result.ScriptBlockFailed) {
-        # Transport/session failure - body never ran (or failed catastrophically).
-        $fixSucceeded = $false
-    }
-    elseif ($isStructured) {
-        $fixSucceeded = [bool]$rawOut.Success
-        if ($rawOut.Message) {
-            Write-Log "$VMName`: [$fixName] $($rawOut.Message)"
+    $rawOut = $null
+    $isStructured = $false
+    $maxFixAttempts = 2
+    for ($fixAttempt = 1; $fixAttempt -le $maxFixAttempts; $fixAttempt++) {
+        $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
+
+        # Authoritative: read the marker file in a SEPARATE transaction.
+        $marker = Get-VMFixResultMarker -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount
+        if ($marker -and ($marker.PSObject.Properties.Name -contains 'IsStructured')) {
+            $rawOut = $marker
+            $isStructured = $true
         }
-        if ($rawOut.Errors -and $rawOut.Errors.Count -gt 0) {
-            foreach ($e in $rawOut.Errors) {
-                Write-Log "$VMName`: [$fixName] ERROR: $e" -Warning
+        else {
+            # Fall back to the pipeline ONLY if it is itself an explicit structured
+            # record; a bare/array value is NOT accepted as success.
+            $pipe = $result.ScriptBlockOutput
+            if (($null -ne $pipe) -and ($pipe -is [pscustomobject]) -and ($pipe.PSObject.Properties.Name -contains 'IsStructured')) {
+                $rawOut = $pipe
+                $isStructured = $true
+            }
+            else {
+                $rawOut = $null
+                $isStructured = $false
             }
         }
-        if ($rawOut.ExceptionInfo) {
-            Write-Log "$VMName`: [$fixName] EXCEPTION on VM: $($rawOut.ExceptionInfo)" -Warning
-        }
-        Write-Log -LogOnly "$VMName`: [$fixName] Success=$($rawOut.Success) DurationSec=$($rawOut.DurationSec)"
-    }
-    else {
-        # Legacy bool return (back-compat)
-        $fixSucceeded = ($rawOut -eq $true)
-    }
 
-    # Always pull the on-VM transcript and dump it to the host log (LogOnly).
-    Get-VMFixTranscript -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount
+        if ($result.ScriptBlockFailed) {
+            # Transport/session failure - body never ran (or failed catastrophically).
+            $fixSucceeded = $false
+        }
+        elseif ($isStructured) {
+            $fixSucceeded = [bool]$rawOut.Success
+            if ($rawOut.Message) {
+                Write-Log "$VMName`: [$fixName] $($rawOut.Message)"
+            }
+            if ($rawOut.Errors -and $rawOut.Errors.Count -gt 0) {
+                foreach ($e in $rawOut.Errors) {
+                    Write-Log "$VMName`: [$fixName] ERROR: $e" -Warning
+                }
+            }
+            if ($rawOut.ExceptionInfo) {
+                Write-Log "$VMName`: [$fixName] EXCEPTION on VM: $($rawOut.ExceptionInfo)" -Warning
+            }
+            Write-Log -LogOnly "$VMName`: [$fixName] Success=$($rawOut.Success) DurationSec=$($rawOut.DurationSec)"
+        }
+        else {
+            # No explicit success marker -> NOT applied (legacy bool no longer trusted).
+            $fixSucceeded = $false
+            Write-Log "$VMName`: [$fixName] produced no explicit success marker (attempt $fixAttempt)." -Warning
+        }
+
+        # Always pull the on-VM transcript for this attempt (LogOnly).
+        Get-VMFixTranscript -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount
+
+        if ($fixSucceeded -or ($fixAttempt -ge $maxFixAttempts)) { break }
+        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) did not report success on attempt $fixAttempt; retrying once." -Warning
+        Start-Sleep -Seconds 5
+    }
 
     if (-not $fixSucceeded) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
@@ -806,8 +1099,8 @@ function Start-VMFix {
         $return.Success = $false
     }
     else {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) applied. Updating version to $fixVersion."
-        Set-VMNote -vmName $VMName -vmVersion $fixVersion
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) applied." -force
+        Set-VMNote -vmName $VMName -FixApplied $fixName -FixAppliedVersion $fixVersion
         $return.Success = $true
         $return.Applied = $true
     }
@@ -847,7 +1140,7 @@ function Start-VMIfNotRunning {
     }
 
     if ($vm.State -ne "Running") {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting VM for maintenance and waiting for it to be ready to connect."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting VM for maintenance and waiting for it to be ready to connect." -force
         $started = Start-VM2 -Name $VMName -Passthru
         if ($started) {
             $return.StartedVM = $true
@@ -910,6 +1203,12 @@ if (-not (Test-Path 'C:\staging\Fix')) {
     New-Item -Path 'C:\staging\Fix' -ItemType Directory -Force | Out-Null
 }
 `$__transcriptPath = "C:\staging\Fix\`$__FixName.txt"
+`$__resultPath = "C:\staging\Fix\`$__FixName.result.json"
+# Clear any stale result marker up front. A catastrophic failure that prevents
+# the finally{} write then leaves NO marker, and the host treats 'no marker' as
+# 'the fix did NOT succeed' -- an explicit success marker is REQUIRED to stamp a
+# fix as applied (so cmdlet output leaking onto the pipeline can never mask it).
+try { if (Test-Path `$__resultPath) { Remove-Item `$__resultPath -Force -ErrorAction SilentlyContinue } } catch { }
 `$__result = [pscustomobject]@{
     FixName       = `$__FixName
     Success       = `$false
@@ -965,6 +1264,13 @@ finally {
     `$__sw.Stop()
     `$__result.DurationSec = [math]::Round(`$__sw.Elapsed.TotalSeconds, 2)
     try { Stop-Transcript | Out-Null } catch { }
+    # Authoritative result marker: the batch runner / host read THIS file (in a
+    # separate step), not the scriptblock's pipeline return value. Written last so
+    # it reflects the final Success/Message/Errors after the body + catch ran.
+    try {
+        if (-not (Test-Path 'C:\staging\Fix')) { New-Item -Path 'C:\staging\Fix' -ItemType Directory -Force | Out-Null }
+        `$__result | ConvertTo-Json -Depth 6 -Compress | Set-Content -Path `$__resultPath -Encoding UTF8 -Force
+    } catch { }
 }
 `$__result
 "@
@@ -1016,6 +1322,142 @@ function Get-VMFixTranscript {
     }
 }
 
+function Get-VMFixResultMarker {
+    <#
+    .SYNOPSIS
+        Reads C:\staging\Fix\<FixName>.result.json from a VM (written by the
+        New-VMFixScriptBlock wrapper) and returns the parsed structured result,
+        or $null if the marker is missing/unreadable.
+    .DESCRIPTION
+        This is the AUTHORITATIVE success signal for a fix. It is read in a
+        SEPARATE call from the fix execution so that pipeline-stream leakage from
+        the fix body (cmdlet output that turns the scriptblock's return value into
+        an array and coerces to a bogus Success=$true) can never affect the
+        verdict. No marker == the fix did NOT report explicit success.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $true)][string]$VMDomain,
+        [Parameter(Mandatory = $true)][string]$FixName,
+        [string]$VMDomainAccount
+    )
+    $sb = {
+        param($name)
+        $p = "C:\staging\Fix\$name.result.json"
+        if (Test-Path $p) { Get-Content -Path $p -Raw -ErrorAction SilentlyContinue }
+    }
+    $args = @{
+        VmName       = $VMName
+        VMDomainName = $VMDomain
+        ScriptBlock  = $sb
+        ArgumentList = @($FixName)
+        DisplayName  = "Pull result marker: $FixName"
+        SuppressLog  = $true
+    }
+    if ($VMDomainAccount) { $args.VmDomainAccount = $VMDomainAccount }
+    try {
+        $r = Invoke-VmCommand @args
+        if ($r -and $r.ScriptBlockOutput) {
+            $raw = (@($r.ScriptBlockOutput) -join "`n")
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                return ($raw | ConvertFrom-Json)
+            }
+        }
+    }
+    catch {
+        Write-Log "$VMName`: Failed to read result marker for [$FixName]: $_" -LogOnly -Warning
+    }
+    return $null
+}
+
+function Get-MaintenanceInjectPaths {
+    <#
+    .SYNOPSIS
+        Scans all Fix*.ps1 files and returns the unique InjectFiles and
+        InjectTools declared across every fix. Used by Copy-ToolToVM to
+        pre-stage maintenance files during Phase 2 so Phase 10 can skip
+        the redundant (and potentially stalling) PSDirect copy.
+    #>
+    $fixesDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'Fixes'
+    $injectFiles = @()
+    $injectTools = @()
+    if (Test-Path $fixesDir) {
+        $fixesToPerform = @()
+        # Dummy variables so fix scripts can dot-source without errors
+        $vmNote = $null; $dc = $null; $NewVM = $true
+        Get-ChildItem -Path $fixesDir -Filter 'Fix*.ps1' -File | ForEach-Object {
+            . $_.FullName
+        }
+        foreach ($fix in $fixesToPerform) {
+            if ($fix.InjectFiles) { $injectFiles += $fix.InjectFiles }
+            if ($fix.InjectTools) { $injectTools += $fix.InjectTools }
+        }
+    }
+    [PSCustomObject]@{
+        Files = @($injectFiles | Select-Object -Unique)
+        Tools = @($injectTools | Select-Object -Unique)
+    }
+}
+
+function Test-VMFixApplied {
+    <#
+    .SYNOPSIS
+        Checks whether a specific fix has already been applied to a VM by
+        inspecting the per-fix tracking dictionary in the VM notes.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $VMNote,
+        [Parameter(Mandatory = $true)]
+        [string] $FixName,
+        [Parameter(Mandatory = $true)]
+        [string] $FixVersion
+    )
+
+    if (-not $VMNote -or
+        -not ($VMNote.PSObject.Properties.Name -contains 'appliedFixes') -or
+        -not $VMNote.appliedFixes) {
+        return $false
+    }
+    if (-not ($VMNote.appliedFixes.PSObject.Properties.Name -contains $FixName)) {
+        return $false
+    }
+    return ($VMNote.appliedFixes.$FixName -ge $FixVersion)
+}
+
+function Set-VMNoteFixBatch {
+    <#
+    .SYNOPSIS
+        Stamps multiple fixes into appliedFixes in a single CIM read+write.
+        Returns the updated VM note object so the caller can reuse it.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $VMName,
+        [Parameter(Mandatory = $true)]
+        [object[]] $Fixes
+    )
+
+    $vmNote = Get-VMNote -VMName $VMName
+    if (-not $vmNote) { return $null }
+
+    $appliedFixes = @{}
+    if ($vmNote.PSObject.Properties.Name -contains 'appliedFixes' -and $vmNote.appliedFixes) {
+        foreach ($prop in $vmNote.appliedFixes.PSObject.Properties) {
+            $appliedFixes[$prop.Name] = $prop.Value
+        }
+    }
+    foreach ($fix in $Fixes) {
+        $appliedFixes[$fix.FixName] = [string]$fix.FixVersion
+    }
+    $vmNote | Add-Member -MemberType NoteProperty -Name "appliedFixes" -Value ([PSCustomObject]$appliedFixes) -Force
+    Set-VMNote -vmName $VMName -vmNote $vmNote
+    return $vmNote
+}
+
 function Get-VMFixes {
     [CmdletBinding()]
     param (
@@ -1031,7 +1473,38 @@ function Get-VMFixes {
     }
     else {
         $vmNote = Get-VMNote -VMName $VMName
-        $dc = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -eq $vmNote.domain }
+        if ($Common.InJob) {
+            # In job workers, skip Get-List (triggers expensive Get-VM +
+            # Get-VMNetworkAdapter -All bulk warmup that serializes on vmms.exe
+            # across all parallel workers). Instead, do a single targeted
+            # Get-VM enumeration and resolve the DC by reading notes
+            # (role=DC + matching domain). DC names are user-chosen in
+            # genconfig and are NOT guaranteed to follow a "<prefix>-DC"
+            # convention -- guessing by name produces phantom dependent VMs
+            # whose Get-VMNote returns null and crashes Start-VMIfNotRunning
+            # with "Cannot bind argument ... empty string". Only Fix-CMFullAdmin
+            # consumes $dc.vmName today.
+            $dc = $null
+            if ($vmNote.domain) {
+                $dcMatches = @()
+                try {
+                    foreach ($hvm in (Get-VM -ErrorAction SilentlyContinue)) {
+                        if ($hvm.Notes -like "*lastUpdate*" -and $hvm.Notes -like "*`"role`":*`"DC`"*") {
+                            try {
+                                $hvmNote = $hvm.Notes | ConvertFrom-Json
+                                if ($hvmNote.role -eq 'DC' -and $hvmNote.domain -eq $vmNote.domain) {
+                                    $dcMatches += [PSCustomObject]@{ vmName = $hvm.Name; role = 'DC'; domain = $hvmNote.domain }
+                                }
+                            } catch {}
+                        }
+                    }
+                } catch {}
+                if ($dcMatches.Count -gt 0) { $dc = $dcMatches }
+            }
+        }
+        else {
+            $dc = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -eq $vmNote.domain }
+        }
     }
 
     $fixesToPerform = @()
@@ -1071,12 +1544,6 @@ function Get-VMFixes {
             $topLevelSite = $vmNote.role -eq "CAS" -or ($vmNote.role -eq "Primary" -and (-not $vmNote.parentSiteCode))
             if ($applicableRoles -contains "CASorStandalonePrimary" -and $topLevelSite) {
                 $applicable = $true
-            }
-        }
-
-        if (-not $newVM) {
-            if ($vmNote.memLabsVersion -ge $vmFix.FixVersion) {
-                $applicable = $false
             }
         }
 

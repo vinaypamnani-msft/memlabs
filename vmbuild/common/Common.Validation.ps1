@@ -1,4 +1,5 @@
-﻿function Add-ValidationMessage {
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+function Add-ValidationMessage {
     param (
         [string]$Message,
         [object]$ReturnObject,
@@ -204,6 +205,10 @@ function Test-ValidVmOptions {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'Cluster'. Please use a different subnet." -ReturnObject $ReturnObject -Warning
         }
 
+        if ($ConfigObject.vmOptions.network -eq "10.250.251.0") {
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'ClusterV2'. Please use a different subnet." -ReturnObject $ReturnObject -Warning
+        }
+
         if ($ConfigObject.vmOptions.network -eq "10.1.0.0") {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'External'. Please use a different subnet." -ReturnObject $ReturnObject -Warning
         }
@@ -346,13 +351,48 @@ function Test-ValidCmOptions {
             Add-ValidationMessage -Message "CM Options Validation: BitLocker Management requires ConfigMgr version 2002 or later. Current version is [$cmVer]." -ReturnObject $ReturnObject -Failure
         }
 
-        # Warn if no client VMs have tpmEnabled
-        $clientVMs = $ConfigObject.virtualMachines | Where-Object { $_.role -in ("DomainMember", "InternetClient", "AADClient") -and -not $_.Hidden }
+        # Warn if domain-joined client VMs lack TPM (non-domain roles excluded — they don't receive BLM policy)
+        $clientVMs = $ConfigObject.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not $_.Hidden }
         if ($clientVMs) {
             $noTPM = $clientVMs | Where-Object { $_.tpmEnabled -eq $false }
             if ($noTPM) {
                 Add-ValidationMessage -Message "BLM Warning: The following client VMs have tpmEnabled=false and will require a startup password for BitLocker: $($noTPM.vmName -join ', '). Consider enabling vTPM for unattended encryption." -ReturnObject $ReturnObject -Warning
             }
+        }
+
+        # Reject BitLocker on non-domain roles
+        $badBLM = $ConfigObject.virtualMachines | Where-Object { $_.BitLocker -eq $true -and $_.role -in 'InternetClient', 'WorkgroupMember', 'AADClient' -and -not $_.Hidden }
+        if ($badBLM) {
+            Add-ValidationMessage -Message "BLM Validation: BitLocker cannot be used on non-domain-joined VMs (they never receive ConfigMgr BLM policy). Removing BitLocker from: $($badBLM.vmName -join ', ')." -ReturnObject $ReturnObject -Warning
+            foreach ($vm in $badBLM) { $vm.PsObject.Members.Remove("BitLocker") }
+        }
+    }
+
+    # Office deployment validation
+    $officeVMs = $ConfigObject.virtualMachines | Where-Object { $_.installOffice -and $_.installOffice -ne $false -and -not $_.Hidden }
+    if ($officeVMs) {
+        $hasPrimary = $ConfigObject.virtualMachines | Where-Object { $_.role -eq 'Primary' -and -not $_.Hidden }
+        if (-not $hasPrimary) {
+            Add-ValidationMessage -Message "Office Validation: installOffice is set on $($officeVMs.vmName -join ', ') but no Primary site server exists to create the SCCM application deployment. Removing installOffice." -ReturnObject $ReturnObject -Warning
+            foreach ($vm in $officeVMs) { $vm.installOffice = $false }
+        }
+        elseif (-not $cmOptions.PrePopulateObjects) {
+            Add-ValidationMessage -Message "Office Validation: installOffice requires PrePopulateObjects (Office deployment runs during perfloading). Removing from: $($officeVMs.vmName -join ', ')." -ReturnObject $ReturnObject -Warning
+            foreach ($vm in $officeVMs) { $vm.installOffice = $false }
+        }
+
+        # Reject Office on server OS
+        $serverOffice = $officeVMs | Where-Object { $_.operatingSystem -like '*Server*' }
+        if ($serverOffice) {
+            Add-ValidationMessage -Message "Office Validation: installOffice is not supported on Server OS. Removing from: $($serverOffice.vmName -join ', ')." -ReturnObject $ReturnObject -Warning
+            foreach ($vm in $serverOffice) { $vm.installOffice = $false }
+        }
+
+        # Reject Office when pushClient is disabled
+        $noPushOffice = $officeVMs | Where-Object { $_.pushClient -eq $false }
+        if ($noPushOffice) {
+            Add-ValidationMessage -Message "Office Validation: installOffice requires pushClient (SCCM client agent needed for deployment). Removing from: $($noPushOffice.vmName -join ', ')." -ReturnObject $ReturnObject -Warning
+            foreach ($vm in $noPushOffice) { $vm.installOffice = $false }
         }
     }
 
@@ -728,14 +768,28 @@ function Test-ValidVmMemory {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify desired memory with MB/GB; For example: 4GB" -ReturnObject $ReturnObject -Failure
         }
 
-        # memory less than 512MB
-        if ($vmMemory.ToUpperInvariant().EndsWith("MB") -and $([int]$vmMemory.ToUpperInvariant().Replace("MB", "")) -lt 512 ) {
-            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be more than 512MB" -ReturnObject $ReturnObject -Failure
-        }
+        # numeric portion (everything before the MB/GB suffix) must be a whole number;
+        # guard the [int] casts below so a non-numeric value (e.g. "*GB") yields a clean
+        # validation message instead of throwing "Cannot convert value '*' to type System.Int32".
+        if ($vmMemory -is [string] -and ($vmMemory.ToUpperInvariant().EndsWith("MB") -or $vmMemory.ToUpperInvariant().EndsWith("GB"))) {
 
-        # memory greater than 64GB
-        if ($vmMemory.ToUpperInvariant().EndsWith("GB") -and $([int]$vmMemory.ToUpperInvariant().Replace("GB", "")) -gt 64 ) {
-            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be less than 64GB" -ReturnObject $ReturnObject -Failure
+            $vmMemoryNumber = $vmMemory.ToUpperInvariant().Replace("MB", "").Replace("GB", "")
+            $parsedMemory = 0
+
+            if (-not [int]::TryParse($vmMemoryNumber, [ref]$parsedMemory)) {
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Specify a whole number with MB/GB; For example: 4GB" -ReturnObject $ReturnObject -Failure
+            }
+            else {
+                # memory less than 512MB
+                if ($vmMemory.ToUpperInvariant().EndsWith("MB") -and $parsedMemory -lt 512 ) {
+                    Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be more than 512MB" -ReturnObject $ReturnObject -Failure
+                }
+
+                # memory greater than 64GB
+                if ($vmMemory.ToUpperInvariant().EndsWith("GB") -and $parsedMemory -gt 64 ) {
+                    Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory value [$vmMemory] is invalid. Should be less than 64GB" -ReturnObject $ReturnObject -Failure
+                }
+            }
         }
     }
 
@@ -756,13 +810,19 @@ function Test-ValidVmDisks {
 
     # Additional Disks
     if ($VM.additionalDisks) {
-        $validLetters = 69..89 | ForEach-Object { [char]$_ }    # Letters E-Y
+        # S is reserved for the SQL ISO mount (Phase 4 SqlSetup SourcePath), so
+        # it is excluded from the valid additional-disk letters.
+        $validLetters = 69..89 | ForEach-Object { [char]$_ } | Where-Object { $_ -ne 'S' }    # Letters E-Y excluding S
         $disks = $VM.additionalDisks
         $disks | Get-Member -MemberType NoteProperty | ForEach-Object {
 
+            # S is reserved for the SQL ISO mount
+            if ($_.Name -eq 'S') {
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains additional disk [S]; S: is reserved for the SQL ISO mount and cannot be used as a data disk." -ReturnObject $ReturnObject -Failure
+            }
             # valid drive letter
-            if ($_.Name.Length -ne 1 -or $validLetters -notcontains $_.Name) {
-                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must have a single drive letter between E and Y." -ReturnObject $ReturnObject -Failure
+            elseif ($_.Name.Length -ne 1 -or $validLetters -notcontains $_.Name) {
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must have a single drive letter between E and Y (excluding S)." -ReturnObject $ReturnObject -Failure
             }
 
             $size = $($vm.additionalDisks."$($_.Name)")
@@ -1616,6 +1676,25 @@ function Test-Configuration {
                     if ($vm.sqlport -ne 1433) {
                         Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] SQL Port must be 1433 on SQLAO due to issue SqlServerDSC #329" -ReturnObject $return -Failure
                     }
+                    if ($vm.sqlVersion -match '201[0-6]') {
+                        Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] SQLAO does not support $($vm.sqlVersion). Use SQL Server 2017 or later." -ReturnObject $return -Failure
+                    }
+                    # Both replicas of a SQLAO pair must sit on the SAME domain network.
+                    # The failover cluster forms a single client-facing cluster IP + AG
+                    # listener IP on one subnet; if the two nodes live on different
+                    # networks, no single IP is hostable by both and New-Cluster fails
+                    # with "no appropriate ClusterAndClient network was found to host it".
+                    # Only the primary node carries OtherNode, so check from there.
+                    if ($vm.OtherNode) {
+                        $otherVm = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $vm.OtherNode }
+                        if ($otherVm) {
+                            $thisNet  = if ($vm.network) { $vm.network } else { $ConfigObject.vmOptions.network }
+                            $otherNet = if ($otherVm.network) { $otherVm.network } else { $ConfigObject.vmOptions.network }
+                            if ($thisNet -ne $otherNet) {
+                                Add-ValidationMessage -Message "SQL Validation: SQLAO nodes [$($vm.vmName)] ($thisNet) and [$($vm.OtherNode)] ($otherNet) are on different networks. Both replicas must share one network so the cluster/AG IP is hostable by both." -ReturnObject $return -Failure
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1628,6 +1707,35 @@ function Test-Configuration {
                 }
                 if ($vm.InstallSup -and -not $vm.SiteCode) {
                     Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a SiteCode." -ReturnObject $return -Failure
+                }
+
+                # Determine if this WSUS/SUP will use the Windows Internal Database (WID).
+                # Mirrors Phase6.ps1: WID is used unless a SQL database server is specified
+                # (explicit wsusDataBaseServer other than WID, a local sqlVersion, a
+                # remoteSQLVM, or a resolved WSUSSqlServer).
+                $usesWid = $false
+                if ($vm.wsusDataBaseServer) {
+                    $usesWid = ($vm.wsusDataBaseServer -eq "WID")
+                }
+                else {
+                    $usesWid = -not ($vm.sqlVersion -or $vm.remoteSQLVM -or $vm.thisParams.WSUSSqlServer)
+                }
+
+                if ($usesWid) {
+                    # WID co-located with WSUS is memory-hungry: during the first full
+                    # catalog sync the WsusPool IIS app pool plus the WID sqlservr.exe
+                    # can exceed 4-5GB. On an undersized VM the pool hits its memory
+                    # recycle cap mid-Categories, returns 503, and the sync is killed /
+                    # restarts forever. Require at least 8GB so the first sync survives.
+                    $memGB = $null
+                    if ($vm.memory -is [string]) {
+                        $m = $vm.memory.ToUpperInvariant()
+                        if ($m.EndsWith("GB")) { $memGB = [int]$m.Replace("GB", "") }
+                        elseif ($m.EndsWith("MB")) { $memGB = [math]::Floor([int]$m.Replace("MB", "") / 1024) }
+                    }
+                    if ($null -ne $memGB -and $memGB -lt 8) {
+                        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] uses WID for the WSUS database and has only [$($vm.memory)] memory. WID + WSUS catalog sync needs at least 8GB or the first sync gets OOM/recycle-killed mid-sync. Increase memory to 8GB or more, or use a remote SQL server." -ReturnObject $return -Failure
+                    }
                 }
 
                 if ($vm.InstallSUP) {                  
@@ -1872,19 +1980,8 @@ function Test-Configuration {
         if ($final) {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
 
-            $vms = $deployConfig.virtualMachines
-            $runningVMs = (get-vm | Where-Object { $_.State -eq "Running" }).Name
-            $newvms = @()
-            foreach ($vm in $vms) {
-                if ($vm.vmName -in $runningVMs) {
-                    continue;
-                }
-
-                $newvms += $vm
-            }
-            $totalMemory = $newvms.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
-            $totalMemory = $totalMemory.Sum / 1GB
-            $availableMemory = Get-AvailableMemoryGB
+            $totalMemory = ($deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum).Sum / 1GB
+            $availableMemory = Get-AvailableMemoryGB -ExcludeVMs $deployConfig.virtualMachines.vmName
 
             if ($totalMemory -gt $availableMemory) {
                 if (-not $enableDebug) {
@@ -2064,7 +2161,63 @@ function Test-Configuration {
             Write-Progress2 -Activity "Validating Configuration" -Status "Adding Existing" -PercentComplete 90
             Add-ExistingVMsToDeployConfig -config $deployConfig
 
+            # Guard: don't silently stack NEW VMs onto a domain whose core
+            # infrastructure never finished deploying + validating. The failed
+            # first deploy that leaves a half-built DC / site server (e.g. a
+            # Primary with no SQL installed) is exactly the state that produces
+            # confusing downstream failures when more VMs are added on top of
+            # it. Add-ExistingVMsToDeployConfig has just folded the existing
+            # (hidden) VMs into the config, so their persisted lastPhaseComplete
+            # is available here. Phase 11 (validation) stamps lastPhaseComplete
+            # = 11, so a critical existing VM below 11 means it never completed.
+            # Scoped to DC / site servers (the backbone that reliably reaches 11
+            # -- powered-off / role-special VMs like OSDClient / StandaloneRootCA
+            # are intentionally excluded) and only when there are genuinely NEW
+            # (non-hidden) VMs being added. This is a WARNING (acknowledge-and-
+            # continue), not a hard failure, so a deliberate "I know it's broken,
+            # extend anyway" / resume-and-add still works; flip -Warning to
+            # -Failure to make it blocking.
+            try {
+                $newVMsBeingAdded = @($deployConfig.virtualMachines | Where-Object { -not $_.hidden })
+                if ($newVMsBeingAdded.Count -gt 0) {
+                    $criticalRoles = @('DC', 'CAS', 'Primary', 'Secondary')
+                    $existingCriticalVMs = @($deployConfig.virtualMachines | Where-Object { $_.hidden -and ($_.role -in $criticalRoles) })
+                    $currentBuildVersion = $Common.MemLabsVersion
+                    foreach ($criticalVM in $existingCriticalVMs) {
+                        $criticalNote = Get-VMNote -VMName $criticalVM.vmName
+                        if (-not $criticalNote) { continue }
+                        # Don't flag LEGACY VMs. Phase 11 (validation) didn't exist
+                        # in older MemLabs builds, so a VM deployed by an older build
+                        # could never reach lastPhaseComplete=11 and must not be
+                        # treated as "incomplete". Skip the check when the existing
+                        # VM was last deployed by an OLDER build than the one running
+                        # now. memLabsVersion is the completed-at stamp (set with
+                        # -UpdateVersion); memLabsDeployVersion is written on every
+                        # note touch, so it's the fallback -- which means a CURRENT-
+                        # build VM that failed before the version stamp (the real
+                        # footgun: a half-built Primary) still has the current build
+                        # in memLabsDeployVersion and is therefore still checked.
+                        # String -lt matches the YYMMDD.N comparison Set-VMNote's
+                        # own version-update path already uses.
+                        $criticalVer = if ($criticalNote.memLabsVersion) { $criticalNote.memLabsVersion } else { $criticalNote.memLabsDeployVersion }
+                        if ($currentBuildVersion -and $criticalVer -and ($criticalVer -lt $currentBuildVersion)) {
+                            Write-Log "Add-VM completeness pre-check: skipping legacy $($criticalVM.role) '$($criticalVM.vmName)' (deployed by older build $criticalVer < current $currentBuildVersion; predates Phase 11)." -LogOnly
+                            continue
+                        }
+                        $criticalPhase = if ($criticalNote.lastPhaseComplete) { [int]$criticalNote.lastPhaseComplete } else { 0 }
+                        if ($criticalPhase -lt 11) {
+                            $newNames = ($newVMsBeingAdded | Select-Object -ExpandProperty vmName) -join ', '
+                            Add-ValidationMessage -Message "Existing $($criticalVM.role) '$($criticalVM.vmName)' never finished deployment + validation (lastPhaseComplete=$criticalPhase, expected 11). Adding new VM(s) [$newNames] on top of an incomplete domain is not recommended -- the underlying deployment failed and stacking more VMs onto it will likely fail too. Finish/repair the existing deployment first (re-run it to completion, or remove + redeploy '$($criticalVM.vmName)'), then add the new VMs." -ReturnObject $return -Warning
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-Log "Add-VM completeness pre-check failed (non-fatal): $_" -LogOnly
+            }
+
             # Add thisParams
+
             $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
             $return.DeployConfig = $deployConfigEx
 

@@ -1,4 +1,4 @@
-configuration Phase4
+﻿configuration Phase4
 {
     param
     (
@@ -64,6 +64,19 @@ configuration Phase4
                 DependsOn = $nextDepend
             }
             $nextDepend = '[RebootNow]RebootNow'
+
+            # SQL media is no longer copied to C:\temp\SQL at VM create time; the
+            # SQL ISO is mounted by the host before Phase 4 and assigned drive
+            # letter S: below. C:\temp\SQL_CU still holds the downloaded CU and
+            # must exist before DownloadSQLCU writes into it.
+            File SqlCuDir {
+                Type            = 'Directory'
+                DestinationPath = 'C:\temp\SQL_CU'
+                Ensure          = 'Present'
+                DependsOn       = $nextDepend
+            }
+            $nextDepend = '[File]SqlCuDir'
+
             if ($sqlUpdateEnabled) {
 
                 WriteStatus DownloadSQLCU {
@@ -80,6 +93,86 @@ configuration Phase4
                 $nextDepend = '[DownloadFile]DownloadSQLCU'
             }
 
+            # Ensure sqlncli.msi is present at the Windows Installer registered
+            # source path so the CU can patch the SQL Native Client (error 1706).
+            # Query the Installer registry for the actual InstallSource, then
+            # copy sqlncli.msi from C:\Windows\Temp (where Phase3 InstallSQLClient
+            # downloads the current version). Do NOT use the SQL ISO copy — it
+            # ships an older version that mismatches the installed product.
+            Script RestoreSqlNcliSource {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = {
+                    $productsPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products'
+                    foreach ($product in (Get-ChildItem $productsPath -ErrorAction SilentlyContinue)) {
+                        $props = Get-ItemProperty "$($product.PSPath)\InstallProperties" -ErrorAction SilentlyContinue
+                        if ($props.DisplayName -match 'SQL Server.*Native Client') {
+                            $source = $props.InstallSource
+                            if ($source -and -not (Test-Path (Join-Path $source 'sqlncli.msi'))) {
+                                Write-Verbose "sqlncli.msi missing from registered InstallSource: $source"
+                                return $false
+                            }
+                        }
+                    }
+                    return $true
+                }
+                SetScript  = {
+                    $ncli = 'C:\Windows\Temp\sqlncli.msi'
+                    if (-not (Test-Path $ncli)) {
+                        Write-Verbose "sqlncli.msi not found at $ncli (Phase3 InstallSQLClient should have placed it here)"
+                        return
+                    }
+
+                    $productsPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products'
+                    foreach ($product in (Get-ChildItem $productsPath -ErrorAction SilentlyContinue)) {
+                        $props = Get-ItemProperty "$($product.PSPath)\InstallProperties" -ErrorAction SilentlyContinue
+                        if ($props.DisplayName -match 'SQL Server.*Native Client') {
+                            $source = $props.InstallSource
+                            if ($source) {
+                                if (-not (Test-Path $source)) {
+                                    New-Item -ItemType Directory -Path $source -Force | Out-Null
+                                }
+                                $dest = Join-Path $source 'sqlncli.msi'
+                                if (-not (Test-Path $dest)) {
+                                    Copy-Item $ncli $dest -Force
+                                    Write-Verbose "Restored sqlncli.msi to $dest from $ncli"
+                                }
+                            }
+                        }
+                    }
+                }
+                DependsOn  = $nextDepend
+            }
+            $nextDepend = '[Script]RestoreSqlNcliSource'
+
+            # The host mounts the SQL ISO to this VM's DVD drive before Phase 4.
+            # Assign it the deterministic letter S: so SqlSetup -SourcePath is
+            # stable (raw CD-ROM letters float, and a reboot happened above).
+            Script AssignSqlIsoDriveLetter {
+                GetScript  = { @{ Result = '' } }
+                TestScript = { Test-Path 'S:\setup.exe' }
+                SetScript  = {
+                    # Find the optical volume holding the SQL media (setup.exe at
+                    # its root) and relabel it S:. DriveType 5 = CD-ROM, which is
+                    # how a mounted ISO presents.
+                    $assigned = $false
+                    foreach ($vol in (Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue)) {
+                        if (-not $vol.DriveLetter) { continue }
+                        if (Test-Path (Join-Path "$($vol.DriveLetter)\" 'setup.exe')) {
+                            if ($vol.DriveLetter -ne 'S:') {
+                                $vol.DriveLetter = 'S:'
+                                Set-CimInstance -InputObject $vol -ErrorAction Stop
+                            }
+                            $assigned = $true
+                            break
+                        }
+                    }
+                    if (-not $assigned) {
+                        throw "SQL ISO not found on any CD-ROM volume (expected setup.exe at the optical drive root). The host should have mounted it before Phase 4."
+                    }
+                }
+                DependsOn  = $nextDepend
+            }
+            $nextDepend = '[Script]AssignSqlIsoDriveLetter'
 
             WriteStatus InstallSQL {
                 DependsOn = $nextDepend
@@ -96,7 +189,7 @@ configuration Phase4
                 InstanceDir         = $SQLInstanceDir
                 SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
                 Features            = $features
-                SourcePath          = 'C:\temp\SQL'
+                SourcePath          = 'S:\'
                 UpdateEnabled       = $sqlUpdateEnabled
                 UpdateSource        = "C:\temp\SQL_CU"
                 SQLSysAdminAccounts = $SQLSysAdminAccounts
@@ -112,8 +205,66 @@ configuration Phase4
             Status    = "Adding SQL logins and roles"
         }
 
+        # Fast-fail gate: confirm the local SQL instance is actually reachable
+        # BEFORE the SqlLogin/SqlRole/SqlMemory resources run. Those SqlServerDsc
+        # resources connect with a ~600s connect timeout, so against a missing or
+        # down instance EACH one hangs ~10 min (observed: a Hidden Primary whose
+        # SQL was never installed -- the install block above is skipped for
+        # existing/Hidden VMs -- wedged Phase 4 for 30+ min on "Adding SQL logins
+        # and roles"). This Script connects via the same path with a 5s timeout:
+        # on a healthy box Test passes instantly (no-op); when SQL is unreachable
+        # it waits up to 3 min (covers a just-started service) then throws ONE
+        # clear, actionable error instead of three opaque 600s stalls.
+        $cvSqlInstance = $SQLInstanceName
+        if ($SQLInstanceName -eq 'MSSQLSERVER') {
+            $cvSqlSvc = 'MSSQLSERVER'
+            $cvSqlDs  = $node.NodeName
+        }
+        else {
+            $cvSqlSvc = "MSSQL`$$SQLInstanceName"
+            $cvSqlDs  = "$($node.NodeName)\$SQLInstanceName"
+        }
+        $cvHiddenStr = [string][bool]$ThisVM.Hidden
+
+        $sqlReachTest = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+try {
+    `$cs = 'Data Source=$cvSqlDs;Initial Catalog=master;Integrated Security=True;Connect Timeout=5;Encrypt=False;TrustServerCertificate=True'
+    `$c = New-Object System.Data.SqlClient.SqlConnection `$cs
+    `$c.Open(); `$c.Close(); `$c.Dispose()
+    return `$true
+} catch { return `$false }
+"@
+
+        $sqlReachSet = @"
+`$ErrorActionPreference = 'Stop'
+`$cs = 'Data Source=$cvSqlDs;Initial Catalog=master;Integrated Security=True;Connect Timeout=5;Encrypt=False;TrustServerCertificate=True'
+`$deadline = (Get-Date).AddMinutes(3)
+`$err = ''
+do {
+    try { `$c = New-Object System.Data.SqlClient.SqlConnection `$cs; `$c.Open(); `$c.Close(); `$c.Dispose(); return } catch { `$err = `$_.Exception.Message }
+    Start-Sleep -Seconds 10
+} while ((Get-Date) -lt `$deadline)
+`$svc = Get-Service -Name '$cvSqlSvc' -ErrorAction SilentlyContinue
+if (-not `$svc) {
+    throw "SQL instance '$cvSqlInstance' is NOT installed on $($node.NodeName) (no '$cvSqlSvc' service). Phase 4's SQL install step is skipped for existing/Hidden VMs (Hidden=$cvHiddenStr) AND the host does not mount the SQL ISO for Hidden VMs, so the SqlLogin/SqlRole resources have no instance to connect to (each would otherwise hang ~600s). Remedy: rebuild SQL on this VM -- delete + recreate it, or re-deploy it non-Hidden -- then re-run Phase 4. Last connect error: `$err"
+}
+if (`$svc.Status -ne 'Running') {
+    try { Start-Service -Name '$cvSqlSvc' -ErrorAction Stop; Start-Sleep -Seconds 20; `$c = New-Object System.Data.SqlClient.SqlConnection `$cs; `$c.Open(); `$c.Close(); `$c.Dispose(); return } catch { `$err = `$_.Exception.Message }
+}
+throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc.Status)) but is not accepting local connections after 3 min. Check the SQL errorlog, the TCP/IP protocol state, and that it is listening on the expected port. Last connect error: `$err"
+"@
+
+        Script EnsureSqlReachable {
+            DependsOn  = '[WriteStatus]AddSQLPermissions'
+            GetScript  = { @{ Result = '' } }
+            TestScript = $sqlReachTest
+            SetScript  = $sqlReachSet
+        }
+        $nextDepend = '[Script]EnsureSqlReachable'
+
         # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
-        $sqlDependency = @('[WriteStatus]AddSQLPermissions')
+        $sqlDependency = @('[Script]EnsureSqlReachable')
         $i = 0
         foreach ($account in $SQLSysAdminAccounts | Where-Object { $_ -notlike "BUILTIN*" } ) {
             if (-not $account) {
@@ -166,6 +317,26 @@ configuration Phase4
 
         $nextDepend = '[ChangeSqlInstancePort]SqlInstancePort'
 
+        # Enable SQL Browser when using a named instance or non-default port.
+        # SQL Browser is required for remote clients that connect by instance
+        # name without a port, and also helps discovery when the default instance
+        # listens on a non-standard port.
+        if ($SQLInstanceName -ne 'MSSQLSERVER' -or $SQLport -ne 1433) {
+            Script EnableSqlBrowser {
+                DependsOn  = '[ChangeSqlInstancePort]SqlInstancePort'
+                GetScript  = { @{ Result = (Get-Service SQLBrowser -ErrorAction SilentlyContinue).Status } }
+                TestScript = {
+                    $svc = Get-Service SQLBrowser -ErrorAction SilentlyContinue
+                    return ($svc -and $svc.Status -eq 'Running' -and $svc.StartType -eq 'Automatic')
+                }
+                SetScript  = {
+                    Set-Service -Name SQLBrowser -StartupType Automatic -ErrorAction SilentlyContinue
+                    Start-Service -Name SQLBrowser -ErrorAction SilentlyContinue
+                }
+            }
+            $nextDepend = '[Script]EnableSqlBrowser'
+        }
+
         if (-not ($thisVM.Hidden)) {
             if ($ThisVM.SqlServiceAccount -and ($ThisVM.SqlServiceAccount -ne "LocalSystem")) {
                 $SPNs = @()
@@ -182,26 +353,126 @@ configuration Phase4
 
                 # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
                 $spnDependency = @($nextDepend)
-                $i = 0
 
                 WriteStatus SetSQLSPN {
                     DependsOn = $nextDepend
                     Status    = "Updating SQL SPNs ($($SPNs -join ",")) for $($ThisVM.SqlServiceAccount)"
                 }
 
-                foreach ($spn in $SPNs ) {
-                    $i++
-
-                    ADServicePrincipalName "spn$i" {
-                        Ensure               = 'Present'
-                        ServicePrincipalName = $spn
-                        Account              = $ThisVM.SqlServiceAccount
-                        DependsOn            = $nextDepend
-                        PsDscRunAsCredential = $Admincreds
-                    }
-
-                    $spnDependency += "[ADServicePrincipalName]spn$i"
+                # Register SPNs via a single Script resource that targets the
+                # PDC explicitly.  When two SQLAO nodes run Phase 4 in parallel,
+                # each writes SPNs to the same AD account (e.g. FryerSvc).  If
+                # they talk to different DCs, the concurrent writes to the
+                # multi-valued servicePrincipalName attribute cause a replication
+                # conflict and last-writer-wins discards one node's SPNs.
+                # Targeting the PDC serialises all writes through one DC.
+                $cvSPNList    = ($SPNs | ForEach-Object { "'$_'" }) -join ','
+                $cvSvcAccount = $ThisVM.SqlServiceAccount
+                $cvDCName     = $deployConfig.parameters.DCName
+                Script SetSQLSPNs {
+                    DependsOn            = '[WriteStatus]SetSQLSPN'
+                    PsDscRunAsCredential = $Admincreds
+                    GetScript  = { return @{ Result = (Get-Date).ToString() } }
+                    TestScript = [string]"
+                        `$spns    = @($cvSPNList)
+                        `$account = '$cvSvcAccount'
+                        `$dc      = '$cvDCName'
+                        `$user = Get-ADUser -Identity `$account -Server `$dc -Properties servicePrincipalName -ErrorAction SilentlyContinue
+                        if (-not `$user) { return `$false }
+                        foreach (`$s in `$spns) {
+                            if (`$user.servicePrincipalName -notcontains `$s) { return `$false }
+                        }
+                        return `$true
+                    "
+                    SetScript  = [string]"
+                        `$spns    = @($cvSPNList)
+                        `$account = '$cvSvcAccount'
+                        `$dc      = '$cvDCName'
+                        foreach (`$s in `$spns) {
+                            # Try adding the SPN directly first — this is a fast
+                            # targeted write. Only if it fails with a duplicate
+                            # constraint do we scan the directory for the holder.
+                            try {
+                                Set-ADUser -Identity `$account -Server `$dc -Add @{ servicePrincipalName = `$s } -ErrorAction Stop
+                            }
+                            catch {
+                                if (`$_.Exception.Message -match 'constraint|already exists|duplicate|not unique') {
+                                    # SPN is held by another account — find and remove it
+                                    `$holder = Get-ADObject -Filter { servicePrincipalName -eq `$s } -Server `$dc -Properties servicePrincipalName -ErrorAction SilentlyContinue
+                                    if (`$holder) {
+                                        foreach (`$h in `$holder) {
+                                            Set-ADObject -Identity `$h -Server `$dc -Remove @{ servicePrincipalName = `$s } -ErrorAction SilentlyContinue
+                                        }
+                                    }
+                                    # Retry the add after clearing
+                                    Set-ADUser -Identity `$account -Server `$dc -Add @{ servicePrincipalName = `$s } -ErrorAction Stop
+                                }
+                                elseif (`$_.Exception.Message -match 'specified value already exists') {
+                                    # SPN already on this account — nothing to do
+                                }
+                                else {
+                                    throw
+                                }
+                            }
+                        }
+                    "
                 }
+                $spnDependency += '[Script]SetSQLSPNs'
+
+                # Grant the SQL service account "Write servicePrincipalName" on
+                # its own AD object. Without this, SQL Server's startup SPN
+                # self-registration fails with 0x2098 (insufficient access) and
+                # SQL marks Kerberos as unavailable, falling back to NTLM for
+                # ALL inbound connections. We use WriteProperty on the
+                # servicePrincipalName attribute (not the validated write, which
+                # doesn't work for user service accounts).
+                $sqlSvcAccountName = $ThisVM.SqlServiceAccount
+                $sqlDCName = $deployConfig.parameters.DCName
+                Script GrantSPNWritePermission {
+                    GetScript  = { return @{ Result = "N/A" } }
+                    TestScript = {
+                        try {
+                            $user = Get-ADUser -Identity $using:sqlSvcAccountName -Server $using:sqlDCName -ErrorAction Stop
+                            $dn = $user.DistinguishedName
+                            $acl = Get-Acl "AD:\$dn" -ErrorAction Stop
+                            # servicePrincipalName attribute GUID
+                            $spnAttrGuid = [Guid]'28630EBB-41D5-11D1-A9C1-0000F80367C1'
+                            $sid = $user.SID
+                            $hasRight = $acl.Access | Where-Object {
+                                $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) -eq $sid -and
+                                $_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty -and
+                                $_.ObjectType -eq $spnAttrGuid -and
+                                $_.AccessControlType -eq 'Allow'
+                            }
+                            return [bool]$hasRight
+                        }
+                        catch {
+                            return $false
+                        }
+                    }
+                    SetScript  = {
+                        Import-Module ActiveDirectory -ErrorAction Stop
+                        $dc = $using:sqlDCName
+                        $user = Get-ADUser -Identity $using:sqlSvcAccountName -Server $dc -ErrorAction Stop
+                        $dn = $user.DistinguishedName
+                        $acl = Get-Acl "AD:\$dn" -ErrorAction Stop
+                        # servicePrincipalName attribute GUID — grants WriteProperty
+                        # so SQL Server can self-register SPNs at startup
+                        $spnAttrGuid = [Guid]'28630EBB-41D5-11D1-A9C1-0000F80367C1'
+                        $sid = New-Object System.Security.Principal.SecurityIdentifier($user.SID)
+                        $ace = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+                            $sid,
+                            [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty,
+                            [System.Security.AccessControl.AccessControlType]::Allow,
+                            $spnAttrGuid
+                        )
+                        $acl.AddAccessRule($ace)
+                        Set-Acl "AD:\$dn" $acl -ErrorAction Stop
+                    }
+                    DependsOn            = $spnDependency
+                    PsDscRunAsCredential = $Admincreds
+                }
+                $spnDependency += '[Script]GrantSPNWritePermission'
 
                 [System.Management.Automation.PSCredential]$sqlUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlServiceAccount)", $Admincreds.Password)
                 [System.Management.Automation.PSCredential]$sqlAgentUser = New-Object System.Management.Automation.PSCredential ("$($NetBiosDomainName)\$($ThisVM.SqlAgentAccount)", $Admincreds.Password)
@@ -270,6 +541,10 @@ configuration Phase4
             }
         }
 
+        # Ola Hallengren MaintenanceSolution requires STRING_AGG (SQL 2017+)
+        $skipBackupSolution = $ThisVM.sqlVersion -match '201[0-6]'
+
+        if (-not $skipBackupSolution) {
         WriteStatus DownloadBackupSolution {
             DependsOn = $nextDepend
             Status    = "Downloading '$($backupSolutionURL)'"
@@ -306,6 +581,7 @@ configuration Phase4
         }
 
         $nextDepend = '[SqlScript]InstallBackupSolution'
+        }
 
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Index-AgentJob-Set.sql"

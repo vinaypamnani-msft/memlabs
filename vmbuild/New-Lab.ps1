@@ -53,7 +53,11 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "No prompt for domain snapshot")]
     [switch]$NoSnapshot,
     [Parameter(Mandatory = $false, HelpMessage = "Do not auto-remove Phase 1 VMs on failure (keep them around for forensics).")]
-    [switch]$KeepFailedVMs
+    [switch]$KeepFailedVMs,
+    [Parameter(Mandatory = $false, HelpMessage = "Disable mouse support in menus.")]
+    [switch]$DisableMouse,
+    [Parameter(Mandatory = $false, HelpMessage = "Open a secondary window showing verbose log output in real time.")]
+    [switch]$VerboseWindow
 
 )
 
@@ -107,12 +111,30 @@ $NewLabsuccess = $false
 $enableVerbose = if ($PSBoundParameters.Verbose -eq $true) { $true } else { $false };
 $enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false };
 
+# Validate Common.ps1 has UTF-8 BOM before dot-sourcing (PS5.1 needs BOM for non-ASCII chars)
+$commonPath = Join-Path $PSScriptRoot 'Common.ps1'
+$bomBytes = [System.IO.File]::ReadAllBytes($commonPath)[0..2]
+if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq 0xBF)) {
+    Write-Host "ERROR: Common.ps1 is missing UTF-8 BOM. PS5.1 will fail to parse non-ASCII characters." -ForegroundColor Red
+    Write-Host "Run: git checkout -- vmbuild/Common.ps1" -ForegroundColor Yellow
+    Write-Host "Or restore BOM: `$c = [IO.File]::ReadAllText('$commonPath'); [IO.File]::WriteAllText('$commonPath', `$c, [Text.UTF8Encoding]::new(`$true))" -ForegroundColor Yellow
+    exit 1
+}
+
 # Dot source common
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose -InJob:$false
 
 if ($global:init_failed) {
     Write-Log "Failed to initialize common. Exiting." -Failure
     exit 1
+}
+
+if ($DisableMouse) {
+    $Global:Common.MouseEnabled = $false
+}
+
+if ($VerboseWindow -and $enableVerbose) {
+    Start-VerboseTailWindow
 }
 
 
@@ -594,11 +616,19 @@ try {
     $timer = New-Object -TypeName System.Diagnostics.Stopwatch
     $timer.Start()
 
+    # Build stats: accumulate per-phase and per-VM timing throughout the build
+    $global:BuildStats = @{
+        Phases = @{}   # keyed by phase number -> @{ Elapsed; Success; Warning; Failed; VMCount }
+        VMs    = @{}   # keyed by vmName      -> @{ Role; Phases = @{ N -> @{ Elapsed } } }
+    }
+
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
-    Write-Log "Starting deployment. Review VMBuild.$domainName.log"
+    $domainLogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
+    Write-Log "Starting deployment. Review log:"
+    Write-Host2 "  $domainLogPath"
     try { Flush-LogBuffer -All } catch { }
-    $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
+    $Common.LogPath = $domainLogPath
 
     #Rename the old log.
     try {
@@ -608,6 +638,29 @@ try {
         Write-Log -verbose "Could not rename existing $($Common.LogPath)"
     }
 
+    # Banner: stamp the fresh log with session details and a copy of the config
+    # so the deployment is self-contained even if the JSON on disk is removed.
+    Write-Log "========================================" -LogOnly
+    Write-Log "Deployment log started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -LogOnly
+    Write-Log "Configuration: $Configuration" -LogOnly
+    Write-Log "ConfigFile: $($Global:configfile)" -LogOnly
+    Write-Log "Domain: $domainName" -LogOnly
+    Write-Log "MemLabs Version: $($Common.MemLabsVersion)" -LogOnly
+    try {
+        $gitBranch = git -C $PSScriptRoot rev-parse --abbrev-ref HEAD 2>$null
+        $gitHash   = git -C $PSScriptRoot rev-parse --short HEAD 2>$null
+        if ($gitBranch -and $gitHash) {
+            Write-Log "Git: $gitBranch @ $gitHash" -LogOnly
+        }
+    } catch { }
+    Write-Log "PowerShell: $($PSVersionTable.PSVersion) (PID $PID)" -LogOnly
+    Write-Log "Host PID: $PID | Parent PID: $((Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId)" -LogOnly
+    Write-Log "StartPhase: $StartPhase | Phase: $Phase" -LogOnly
+    Write-Log "----------------------------------------" -LogOnly
+    Write-Log "Deploy config JSON:" -LogOnly
+    Write-Log ($deployConfig | ConvertTo-Json -Depth 10 -Compress) -LogOnly
+    Write-Log "========================================" -LogOnly
+    try { Flush-LogBuffer -Path $Common.LogPath } catch { }
 
     if ($Restore) {
         Write-Log "### RESTORE SNAPSHOT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
@@ -653,11 +706,38 @@ try {
         }
     }
 
+    # ── Pre-fetch network state for fast verification ───────────────────
+    # On reruns every switch and DHCP scope already exists.  Querying each
+    # one individually costs ~12 WMI calls per network (switch, adapter,
+    # IPs, NAT, DHCP service ×5, scope, scope-options).  Bulk-fetch once
+    # and check in-memory to short-circuit the common case.  Any network
+    # that fails the fast check falls through to Add-SwitchAndDhcp which
+    # has full retry/recovery logic (including DHCP service restarts).
+    $_netCache = $null
+    if (-not $WhatIf.IsPresent) {
+        try {
+            $_netCache = @{
+                Switches = @(Get-VMSwitch -SwitchType Internal -ErrorAction SilentlyContinue)
+                Scopes   = @(Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)
+                Nats     = @(Get-NetNat -ErrorAction SilentlyContinue)
+                Adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
+                IPs      = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+            }
+            Write-Log "Pre-cached network state: $($_netCache.Switches.Count) switches, $($_netCache.Scopes.Count) DHCP scopes, $($_netCache.Nats.Count) NAT rules." -LogOnly
+        }
+        catch {
+            Write-Log "Network state pre-fetch failed ($_); will verify each network individually." -LogOnly
+            $_netCache = $null
+        }
+    }
+
     # Test if hyper-v switch exists, if not create it
     $AddedScopes = @($deployConfig.vmOptions.network)
-    $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
-    if (-not $worked) {
-        exit 1
+    if (-not (Test-NetworkFastPath -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -Cache $_netCache)) {
+        $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
+        if (-not $worked) {
+            exit 1
+        }
     }
 
     # Create additional switches
@@ -667,28 +747,55 @@ try {
                 continue
             }
             $AddedScopes += $virtualMachine.network
-            $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
-            $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
-            $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
-            if (-not $worked) {
-                exit 1
+            if (-not (Test-NetworkFastPath -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -Cache $_netCache)) {
+                $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
+                $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+                $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
+                if (-not $worked) {
+                    exit 1
+                }
             }
         }
     }
 
     # Internet Client VM Switch and DHCP Scope
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
-    $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -WhatIf:$WhatIf
-    if ($containsIN -and (-not $worked)) {
-        exit 1
+    if (-not (Test-NetworkFastPath -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -Cache $_netCache)) {
+        $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -WhatIf:$WhatIf
+        if ($containsIN -and (-not $worked)) {
+            exit 1
+        }
     }
 
     # AO VM switch and DHCP scope
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
+
+    # Legacy SQLAO VMs use DHCP on the Cluster network (10.250.250.0).
+    # If any VMs are connected to the Cluster switch, ensure DHCP+NAT exist.
+    # New-style SQLAO uses static IPs on ClusterV2 and does not need the
+    # Cluster network at all.
+    $clusterSwitch = Get-VMSwitch -Name 'Cluster' -ErrorAction SilentlyContinue
+    if ($clusterSwitch) {
+        $clusterVMs = @(Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
+            Where-Object { $_.SwitchName -eq 'Cluster' })
+        if ($clusterVMs.Count -gt 0) {
+            Write-Log "Cluster switch has $($clusterVMs.Count) legacy VM(s). Verifying DHCP/NAT..."
+            if (-not (Test-NetworkFastPath -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -Cache $_netCache)) {
+                $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
+                if (-not $worked) {
+                    exit 1
+                }
+            }
+        }
+    }
+
+    # New-style SQLAO: ClusterV2 with static IPs only (no DHCP, no NAT).
     if ($containsAO) {
-        $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
-        if (-not $worked) {
-            exit 1
+        if (-not (Test-NetworkFastPath -NetworkName "ClusterV2" -NetworkSubnet "10.250.251.0" -Cache $_netCache)) {
+            $worked = Add-SwitchNoDhcp -NetworkName "ClusterV2" -NetworkSubnet "10.250.251.0" -WhatIf:$WhatIf
+            if (-not $worked) {
+                exit 1
+            }
         }
     }
 
@@ -734,10 +841,65 @@ try {
         $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig -WhatIf:$WhatIf
     }
 
+    # AADClient idempotency: if an AADClient VM exists from a prior interrupted
+    # run but never reached oobeComplete, it is in an unrecoverable state
+    # (partial DSC, half-sysprepped, etc.). Delete it now so Phase 1 can
+    # re-create from a fresh VHDX. If -StartPhase would skip Phase 1, override
+    # it so the AADClient gets rebuilt before Phase 2 runs.
+    $forcePhase1ForAAD = $false
+    $global:ForcePhase1VmNames = @()
+    $needCacheFlush = $false
+    foreach ($vm in $deployConfig.virtualMachines) {
+        if ($vm.role -ne "AADClient" -or $vm.hidden) { continue }
+        $existingVm = Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue
+        if (-not $existingVm) {
+            # VM doesn't exist — force Phase 1 so it gets created even with -StartPhase 2+
+            $global:ForcePhase1VmNames += $vm.vmName
+            $forcePhase1ForAAD = $true
+            # Only warn if Phase 1 would have been skipped (otherwise it runs naturally)
+            if ($StartPhase -and $StartPhase -gt 1) {
+                Write-Log "[Phase 0] $($vm.vmName): AADClient does not exist. Forcing Phase 1 to create it." -Warning
+            }
+            continue
+        }
+        $note = Get-VMNote -VMName $vm.vmName
+        if ($note -and $note.oobeComplete) { continue }
+        Write-Log "[Phase 0] $($vm.vmName): AADClient exists but oobeComplete is not set (interrupted prior run). Deleting so Phase 1 can re-create." -Warning
+        Remove-VirtualMachine -VmName $vm.vmName -Force -SkipProxyCleanup
+        $global:ForcePhase1VmNames += $vm.vmName
+        $forcePhase1ForAAD = $true
+        $needCacheFlush = $true
+    }
+    if ($forcePhase1ForAAD) {
+        $runPhase1 = $true
+        if ($needCacheFlush) {
+            # Flush the VM list cache so Phase 1 sees the deleted VM as missing
+            Get-List -FlushCache
+        }
+    }
+
     # Define phases
     $start = 1
     $maxPhase = 11
     $global:StartPhase = $StartPhase
+
+    # Pre-build the host download-cache ISO ONCE, before any phase fans out to
+    # per-VM jobs. Building it here (single host process) instead of lazily inside
+    # each VM's DSC step avoids N separate processes racing to build the same
+    # content-addressed ISO (and leaking per-PID cache-build-* staging dirs on
+    # contention). The per-VM step then just finds the already-built ISO and mounts
+    # it. Pure optimization: any failure is logged and ignored (guests fall back to
+    # direct download). Skipped under -WhatIf and when the cache is disabled.
+    if (-not $WhatIf -and (Test-MemlabsDownloadCacheEnabled)) {
+        try {
+            Write-Log "Pre-building host download-cache ISO before phases..." -LogOnly
+            $null = Get-MemlabsCacheIsoForDeploy -DeployConfig $deployConfig -StartPhase ([int]$StartPhase)
+        }
+        catch {
+            Write-Log "Download-cache pre-build failed (non-fatal): $($_.Exception.Message)" -LogOnly
+        }
+    }
+
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
@@ -759,8 +921,14 @@ try {
             }
 
             if ($StartPhase -and $i -lt $StartPhase) {
-                Write-OrangePoint "Skipped Phase $i because -StartPhase is $StartPhase." -ForegroundColor Yellow -WriteLog
-                continue
+                # Don't skip Phase 1 if we deleted stuck AADClient VMs that need re-creation
+                if ($i -eq 1 -and $forcePhase1ForAAD) {
+                    Write-Log "[Phase 1] Forced by AADClient cleanup (overriding -StartPhase $StartPhase)." -Warning
+                }
+                else {
+                    Write-OrangePoint "Skipped Phase $i because -StartPhase is $StartPhase." -ForegroundColor Yellow -WriteLog
+                    continue
+                }
             }
 
             if ($StopPhase -and $i -gt $StopPhase) {
@@ -778,6 +946,8 @@ try {
             }
             else {
                 if ($i -eq 1) {
+                    $global:ForcePhase1VmNames = @()
+
                     # Clear out vm remove list
                     $global:vm_remove_list = @()
 
@@ -808,6 +978,20 @@ try {
                     # must run before the proxy client config / enforcement so
                     # the Proxy is fully configured before clients route to it.
                 }
+                if ($i -eq 5) {
+                    # Validate SQLAO health immediately after Phase 5 DSC so
+                    # cluster/AG/listener problems surface now instead of
+                    # waiting until Phase 8 (CAS install) or Phase 11.
+                    $hasSQLAO = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden }).Count -gt 0
+                    if ($hasSQLAO) {
+                        $sqlaoValid = Test-SQLAOPostPhase5 -DeployConfig $deployConfig
+                        if (-not $sqlaoValid) {
+                            Write-Log "[Phase 5] SQLAO validation failed. Stopping build." -Failure
+                            $configured = $false
+                            break
+                        }
+                    }
+                }
                 if ($i -eq 11) {
                     # Phase 11 passed: merge the Phase 8 auto-snapshot if it exists
                     if (-not $global:NoSnapshot) {
@@ -817,20 +1001,10 @@ try {
                         Write-Log "[Phase 11] Skipping snapshot merge (-NoSnapshot was specified)" -LogOnly
                     }
 
-                    # Cross-lab proxy ACL reconciliation. Runs here (post-
-                    # Phase 11 success) rather than in Phase 2 because:
-                    #   - This deploy's VMs are now fully built, verified,
-                    #     and their subnets/useProxy values are populated
-                    #     in Get-NetworkList cache.
-                    #   - Parallel deploys in other domains may have been
-                    #     mid-flight during our Phase 2, which made the
-                    #     global subnet union unreliable.
-                    # Per-VM safety net inside Set-VmProxyEnforcementForAllLabs
-                    # refuses to stamp any VM whose own subnet isn't in the
-                    # final union, so even with concurrent labs we never
-                    # shrink a VM's allow-list below its own subnet.
+                    # Cross-lab proxy ACL reconciliation. Uses fixed RFC 1918
+                    # allow ranges so no subnet-union computation is needed.
                     try {
-                        Set-VmProxyEnforcementForAllLabs -deployConfig $deployConfig | Out-Null
+                        Set-VmProxyEnforcementForAllLabs | Out-Null
                     }
                     catch {
                         Write-Log "[Phase 11] Proxy cross-lab reconcile failed (non-fatal): $_" -Warning
@@ -849,7 +1023,12 @@ try {
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
         Write-Log "Log file: $($Common.LogPath)" -Warning -NoIndent
         if ($currentPhase -ge 2) {
-            if ($currentPhase -eq 8) {
+            $offerRestore = $false
+            if ($currentPhase -eq 8 -and $deployConfig) {
+                try { $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig }
+                catch { $offerRestore = $false }
+            }
+            if ($offerRestore) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
@@ -868,6 +1047,9 @@ try {
 
 
         }
+        # Show build stats collected so far (partial build)
+        Write-BuildSummary
+        Save-BuildStats -Configuration $Configuration -TotalElapsed $timer.Elapsed -Success $false
         Write-Host
     }
     else {
@@ -943,9 +1125,12 @@ try {
                     if ($proxyVm) {
                         $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
                         Write-Log "[Proxy] Enabling proxy on existing VM $($vm.vmName) -> $proxyFqdn`:3128"
+                        # Bypass the VM's OWN subnet (a VM on a secondary subnet must not
+                        # proxy its local traffic); fall back to the deployment default.
+                        $bypassNet = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
                         Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
-                            -ProxyFqdn $proxyFqdn -BypassNetwork $deployConfig.vmOptions.network
-                        Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets (Get-VmProxyEnforcementSubnets -deployConfig $deployConfig)
+                            -ProxyFqdn $proxyFqdn -BypassNetwork $bypassNet
+                        Set-VmProxyEnforcement -VmName $vm.vmName
                     }
                     else {
                         Write-Log "[Proxy] $($vm.vmName): useProxy=true but no Proxy VM found; skipping" -Warning
@@ -959,6 +1144,16 @@ try {
                 }
             }
         }
+
+        # Retrieve guest-side component timing from ScriptWorkflow.json
+        # Skip on partial-phase runs — VMs may not be running and timing is incomplete
+        if (-not $Phase -and -not $SkipPhase) {
+            Get-GuestTimingStats -deployConfig $deployConfig
+        }
+
+        # Show complete build stats
+        Write-BuildSummary
+        Save-BuildStats -Configuration $Configuration -TotalElapsed $timer.Elapsed -Success $true
 
         Write-Host
         Set-TitleBar "SCRIPT FINISHED"
@@ -985,6 +1180,27 @@ finally {
 
     }
     $global:mutexes = @()
+    $global:BuildStats = $null
+
+    # Eject the download-cache DVD from THIS deployment's VMs and evict stale
+    # cache ISOs. Per-VM and scoped to our own VMs only, so a concurrently-running
+    # deployment's mounts are never disturbed. Eviction never deletes an ISO any
+    # VM on the host still has mounted.
+    if ($deployConfig -and $deployConfig.virtualMachines) {
+        try {
+            foreach ($cacheVm in $deployConfig.virtualMachines) {
+                if ($cacheVm.vmName) {
+                    Dismount-MemlabsCacheIsoFromVm -VmName $cacheVm.vmName
+                    Dismount-MemlabsDscIsoFromVm -VmName $cacheVm.vmName
+                }
+            }
+            Remove-StaleMemlabsCacheIso
+            Remove-StaleMemlabsDscIso
+        }
+        catch {
+            Write-Log "Download cache cleanup failed (non-fatal): $_" -LogOnly
+        }
+    }
 
     if ($enableDebug) {
         Write-Host 'Config Stored in $global:DebugConfig'
@@ -998,7 +1214,12 @@ finally {
         Write-Log "Log file: $($Common.LogPath)" -Warning -NoIndent
         $exitcode = 2
         if ($currentPhase -ge 2 -and $currentPhase -le $maxPhase) {
-            if ($currentPhase -eq 8) {
+            $offerRestore = $false
+            if ($currentPhase -eq 8 -and $deployConfig) {
+                try { $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig }
+                catch { $offerRestore = $false }
+            }
+            if ($offerRestore) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
                 Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
@@ -1023,23 +1244,63 @@ finally {
         }
     }
 
-    Write-Host -NoNewline "Please Wait.. Stopping running jobs."
+    # Stop running jobs with live progress. Kill child processes early to
+    # avoid Remove-Job -Force blocking for 10+ seconds per stuck job.
+    $runningJobs = @(Get-Job | Where-Object { $_.State -eq 'Running' })
+    $totalJobs = $runningJobs.Count
+    $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $blankLine = " " * 100
+    $showElapsed = { [math]::Floor($stopWatch.Elapsed.TotalSeconds) }
 
-    foreach ($job in Get-Job) {
-        if (-not $enableVerbose) {
-            $job | Stop-Job
-            Write-Host -NoNewline "."
+    if ($totalJobs -gt 0 -and -not $enableVerbose) {
+        # 1) Kill child pwsh.exe processes immediately — this is what actually
+        #    unblocks stuck PSDirect/WMI I/O. Do it before StopJobAsync so
+        #    the async stop finds the process already gone.
+        Write-Host -NoNewline "`r${blankLine}`rStopping $totalJobs job(s): killing child processes... ($(& $showElapsed)s)"
+        try {
+            $childProcs = Get-CimInstance Win32_Process -Filter "ParentProcessId = $PID AND Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
+                          Where-Object { $_.CommandLine -match '-s\s+-NoLogo' }
+            foreach ($proc in $childProcs) {
+                Write-Log "Killing job child process PID $($proc.ProcessId)" -LogOnly
+                Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+            }
         }
-    }
-    if (-not $global:Common.DevBranch) {
-        foreach ($job in Get-Job) {
-            if (-not $enableVerbose) {
-                $job | Remove-Job
-                Write-Host -NoNewline "."
+        catch { }
+
+        # 2) Signal all jobs to stop (fast — processes are already dead)
+        foreach ($job in $runningJobs) {
+            try { $job.StopJobAsync() } catch { }
+        }
+
+        # 3) Wait-Job actively checks child process status and transitions
+        #    jobs out of Running once it detects the process exited. The
+        #    manual Get-Job polling we had before only read cached state and
+        #    never noticed the child was dead, leaving jobs stuck in Running.
+        Write-Host -NoNewline "`r${blankLine}`rWaiting for jobs to stop... ($(& $showElapsed)s)"
+        $null = $runningJobs | Wait-Job -Timeout 10 -ErrorAction SilentlyContinue
+
+        # 4) Remove all jobs — they should be Stopped/Failed/Completed now.
+        #    Any still somehow Running get Remove-Job -Force (child is dead
+        #    so it shouldn't block).
+        $remaining = @(Get-Job)
+        if ($remaining.Count -gt 0) {
+            Write-Host -NoNewline "`r${blankLine}`rRemoving $($remaining.Count) job(s)... ($(& $showElapsed)s)"
+            foreach ($job in $remaining) {
+                Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
             }
         }
     }
-    Write-host "`r                                                                                                                              "
+    elseif ($totalJobs -eq 0) {
+        # Still may have completed/failed jobs to clean up
+        foreach ($job in @(Get-Job)) {
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $stopWatch.Stop()
+    if ($totalJobs -gt 0 -and -not $enableVerbose) {
+        $totalElapsed = & $showElapsed
+        Write-Host "`r${blankLine}`rJobs stopped. (${totalElapsed}s)"
+    }
     # Close PS Sessions
     foreach ($session in $global:ps_cache.Keys) {
         Write-Log "Closing PS Session $session" -Verbose
@@ -1066,7 +1327,7 @@ finally {
             Write-Host
 
             foreach ($vmname in $global:vm_remove_list) {
-                Remove-VirtualMachine -VmName $vmname -Migrate $Migrate -Force
+                Remove-VirtualMachine -VmName $vmname -Migrate $Migrate -Force -SkipProxyCleanup
             }
 
             # Get-Job | Stop-Job
