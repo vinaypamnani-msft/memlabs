@@ -589,6 +589,145 @@ Function Get-SiteCodeMenu {
 }
 
 
+Function Get-PushClientSiteMenu {
+    <#
+    .SYNOPSIS
+    Dropdown for the per-VM pushClient TARGET SITE CODE. Options are every
+    eligible site server (Primary/Secondary in the config + existing domain)
+    plus "No".
+
+    Subnet rules (a subnet maps to exactly one boundary/site):
+      - If the VM's subnet is ALREADY in use by an EXISTING (deployed / hidden)
+        VM, the subnet's boundary is committed -- the choice is LOCKED to that
+        existing site (only that site or "No" for this VM).
+      - Otherwise (the subnet only has new/editable VMs) every eligible site is
+        offered, and picking a site CASCADES to all other editable VMs on the
+        same subnet so the whole subnet moves together. "No" stays per-VM.
+
+    Sets $property.pushClient to the site code string or $false.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $false, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name = "pushClient",
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+
+    $config = $global:config
+    $domain = $null
+    if ($config -and $config.vmOptions) { $domain = $config.vmOptions.domainName }
+
+    $eligible = @(Get-EligiblePushSites -Config $config -Domain $domain)
+    if ($eligible.Count -eq 0) {
+        Write-Host2 -ForegroundColor Khaki "No ConfigMgr site servers in this configuration; client push is unavailable."
+        return
+    }
+
+    $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+
+    # Subnet this VM lives on (explicit per-VM network, else the deployment default).
+    $subnet = $null
+    if ($property.network) { $subnet = $property.network }
+    elseif ($config -and $config.vmOptions) { $subnet = $config.vmOptions.network }
+
+    $thisVmName = $property.vmName
+
+    # ----- Is the subnet already used by an EXISTING (deployed / hidden) VM? -----
+    # If so the boundary is committed and the assignment is not changeable.
+    $lockedSite = $null
+    if ($subnet) {
+        # (a) Hidden peers folded into the config (deploy-assembly context).
+        if ($config -and $config.virtualMachines) {
+            foreach ($ovm in $config.virtualMachines) {
+                if ($ovm -eq $property) { continue }
+                if ($thisVmName -and $ovm.vmName -and ($ovm.vmName -eq $thisVmName)) { continue }
+                if ($ovm.hidden -ne $true) { continue }
+                $oNet = if ($ovm.network) { $ovm.network } else { $config.vmOptions.network }
+                if ($oNet -ne $subnet) { continue }
+                if (($ovm.pushClient -is [string]) -and $ovm.pushClient) { $lockedSite = $ovm.pushClient; break }
+            }
+        }
+        # (b) Already-deployed VMs in the domain (interactive add-to-existing context).
+        if (-not $lockedSite -and $domain) {
+            try {
+                $deployedOnSubnet = @(Get-List -Type VM -DomainName $domain | Where-Object {
+                        $_.network -eq $subnet -and $_.role -in $pushableRoles -and
+                        (-not ($thisVmName -and $_.vmName -eq $thisVmName))
+                    })
+                if ($deployedOnSubnet.Count -gt 0) {
+                    # Prefer an explicit site code already stamped on a deployed VM;
+                    # otherwise resolve the subnet to the site those VMs push to.
+                    $withSite = $deployedOnSubnet | Where-Object { ($_.pushClient -is [string]) -and $_.pushClient } | Select-Object -First 1
+                    if ($withSite) {
+                        $lockedSite = $withSite.pushClient
+                    }
+                    else {
+                        $synthetic = [PSCustomObject]@{ vmName = $thisVmName; network = $subnet; pushClient = $true }
+                        $lockedSite = Resolve-PushClientSite -VM $synthetic -Config $config -Domain $domain -EligibleSites $eligible
+                    }
+                }
+            }
+            catch {
+                Write-Log "Get-PushClientSiteMenu: existing-subnet lookup failed for '$subnet': $($_.Exception.Message)" -LogOnly -Warning
+            }
+        }
+    }
+
+    $noOption = "No (do not push a client)"
+    $options = @($noOption)
+    if ($lockedSite) {
+        $options += "$lockedSite"
+    }
+    else {
+        foreach ($s in (@($eligible | ForEach-Object { $_.SiteCode }) | Select-Object -Unique)) { $options += "$s" }
+    }
+
+    $currentDisplay = if (($CurrentValue -is [string]) -and $CurrentValue) { $CurrentValue } else { $noOption }
+    $prompt = if ($lockedSite) {
+        "Subnet $subnet is already in use by an existing VM assigned to site $lockedSite; choose $lockedSite or No"
+    }
+    else {
+        "Select the site to push the ConfigMgr client from (or No)"
+    }
+
+    $selection = Get-Menu2 -MenuName "Client Push Site" -Prompt $prompt -OptionArray $options -CurrentValue $currentDisplay -Test:$false -NoClear
+    if ([string]::IsNullOrWhiteSpace($selection) -or $selection -eq "ESCAPE") { return }
+
+    if ($selection -eq $noOption) {
+        # "No" is per-VM; never cascades.
+        $property.pushClient = $false
+    }
+    else {
+        $property.pushClient = $selection
+
+        # Cascade to the other EDITABLE (non-hidden) pushing VMs on this subnet so
+        # the whole subnet targets one site. Only fires on the unlocked path -- a
+        # locked subnet only ever offers its single existing site. Peers set to
+        # "No" are left off.
+        if (-not $lockedSite -and $subnet -and $config -and $config.virtualMachines) {
+            foreach ($ovm in $config.virtualMachines) {
+                if ($ovm -eq $property) { continue }
+                if ($thisVmName -and $ovm.vmName -and ($ovm.vmName -eq $thisVmName)) { continue }
+                if ($ovm.hidden -eq $true) { continue }
+                if ($ovm.role -notin $pushableRoles) { continue }
+                $oNet = if ($ovm.network) { $ovm.network } else { $config.vmOptions.network }
+                if ($oNet -ne $subnet) { continue }
+                # Don't flip an explicit "No" (boolean $false) back on.
+                if (($ovm.pushClient -is [bool]) -and ($ovm.pushClient -eq $false)) { continue }
+                if ($ovm.pushClient -ne $selection) {
+                    $ovm.pushClient = $selection
+                    Write-Host2 -ForegroundColor Khaki "  Also set $($ovm.vmName) (same subnet $subnet) to push from $selection."
+                }
+            }
+        }
+    }
+    Get-TestResult -SuccessOnError | Out-Null
+}
+
+
 Function Get-SqlVersionMenu {
     [CmdletBinding()]
     param (

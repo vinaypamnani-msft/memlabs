@@ -6393,8 +6393,9 @@ function Test-DomainMemberFunctionality {
     # If the guest reported NeedsPushCheck, enrich with deploy config context.
     if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.NeedsPushCheck) {
         if ($pushExpected) {
-            $result.ScriptBlockOutput.Details.Add("  WARN: pushClient=$true in config but no ccmsetup evidence on VM — push may have failed or still be in progress on the site server side")
-            $pushTarget = if ($isExternallyManaged -and $externalSiteServer) { "the REMOTE managing site server $externalSiteServer (site $expectedSiteCode)" } else { "the Primary" }
+            $pushSite = if ($CurrentItem.pushClient -is [string]) { $CurrentItem.pushClient } else { "the site" }
+            $result.ScriptBlockOutput.Details.Add("  WARN: pushClient=$($CurrentItem.pushClient) in config but no ccmsetup evidence on VM — push from $pushSite may have failed or still be in progress on the site server side")
+            $pushTarget = if ($isExternallyManaged -and $externalSiteServer) { "the REMOTE managing site server $externalSiteServer (site $expectedSiteCode)" } else { "the site server for $pushSite" }
             $result.ScriptBlockOutput.Details.Add("  Check ccmsetup on ${pushTarget}: Get-CMDevice -Name '$VMName' | Select IsClient,ClientActiveStatus")
         }
         else {

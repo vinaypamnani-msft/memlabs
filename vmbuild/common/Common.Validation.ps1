@@ -396,6 +396,58 @@ function Test-ValidCmOptions {
         }
     }
 
+    # pushClient target-site validation. pushClient is a site code string (the
+    # site to push the client from) or $false. Verify each explicit site code
+    # exists, and enforce one-site-per-subnet (a subnet maps to exactly one
+    # boundary group, so two VMs on the same subnet cannot push to different
+    # sites).
+    try {
+        $pushRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+        $pushVMs = @($ConfigObject.virtualMachines | Where-Object {
+                $_.role -in $pushRoles -and -not $_.Hidden -and ($_.pushClient -is [string]) -and $_.pushClient
+            })
+        if ($pushVMs.Count -gt 0) {
+            $eligiblePush = @(Get-EligiblePushSites -Config $ConfigObject -Domain $ConfigObject.vmOptions.domainName)
+            $validCodes = @($eligiblePush | ForEach-Object { $_.SiteCode })
+
+            # 1) Unknown site code -> re-resolve to a real one (or $false).
+            $badSite = @($pushVMs | Where-Object { $validCodes -notcontains $_.pushClient })
+            if ($badSite.Count -gt 0) {
+                foreach ($vm in $badSite) {
+                    $fixed = Resolve-PushClientSite -VM $vm -Config $ConfigObject -Domain $ConfigObject.vmOptions.domainName -EligibleSites $eligiblePush
+                    $vm.pushClient = $fixed
+                }
+                Add-ValidationMessage -Message "Client Push Validation: pushClient on $($badSite.vmName -join ', ') referenced a site code that does not exist; reset to the resolved site (or disabled where no site applies)." -ReturnObject $ReturnObject -Warning
+                $pushVMs = @($pushVMs | Where-Object { ($_.pushClient -is [string]) -and $_.pushClient })
+            }
+
+            # 2) One-site-per-subnet. Group the still-valid pushed VMs by subnet.
+            $defaultNet = $ConfigObject.vmOptions.network
+            $bySubnet = @{}
+            foreach ($vm in $pushVMs) {
+                $net = if ($vm.network) { $vm.network } else { $defaultNet }
+                if (-not $net) { continue }
+                if (-not $bySubnet.ContainsKey($net)) { $bySubnet[$net] = @() }
+                $bySubnet[$net] += $vm
+            }
+            foreach ($net in $bySubnet.Keys) {
+                $vmsOnNet = @($bySubnet[$net])
+                $distinct = @($vmsOnNet | ForEach-Object { $_.pushClient } | Select-Object -Unique)
+                if ($distinct.Count -gt 1) {
+                    # Coerce all VMs on the subnet to the site that hosts that
+                    # subnet's own site server if present, else the first seen.
+                    $ownSite = $eligiblePush | Where-Object { $_.Network -eq $net } | Select-Object -First 1
+                    $target = if ($ownSite) { $ownSite.SiteCode } else { $distinct[0] }
+                    foreach ($vm in $vmsOnNet) { $vm.pushClient = $target }
+                    Add-ValidationMessage -Message "Client Push Validation: VMs on subnet $net targeted different sites ($($distinct -join ', ')). A subnet maps to one boundary group; all were set to push from $target." -ReturnObject $ReturnObject -Warning
+                }
+            }
+        }
+    }
+    catch {
+        Write-Log "pushClient validation skipped: $($_.Exception.Message)" -LogOnly -Warning
+    }
+
     if ($cmOptions.usePKI) {
         # When UsePKI is enabled, pkiOptions must have a valid IssuingCAVM
         if (-not $ConfigObject.pkiOptions) {

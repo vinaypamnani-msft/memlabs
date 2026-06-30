@@ -682,7 +682,22 @@ function Add-NewVMForRole {
         if ($ConfigToModify.domainDefaults -and ($null -ne $ConfigToModify.domainDefaults.$defaultKey)) {
             $defaultVal = [bool]$ConfigToModify.domainDefaults.$defaultKey
         }
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name "pushClient" -Value $defaultVal -Force
+        # pushClient stores a TARGET SITE CODE string (or $false). Resolve the
+        # boolean default to a concrete site code (the site whose subnet matches
+        # this VM, else the first Primary) so the new VM is consistent with the
+        # site-code model. Falls back to $false / the boolean when no CM site
+        # exists yet.
+        $pushValue = $defaultVal
+        if ($defaultVal) {
+            $domForPush = $null
+            if ($ConfigToModify.vmOptions) { $domForPush = $ConfigToModify.vmOptions.domainName }
+            $eligiblePush = @(Get-EligiblePushSites -Config $ConfigToModify -Domain $domForPush)
+            if ($eligiblePush.Count -gt 0) {
+                $resolved = Resolve-PushClientSite -VM $virtualMachine -Config $ConfigToModify -Domain $domForPush -EligibleSites $eligiblePush
+                if ($resolved) { $pushValue = $resolved } else { $pushValue = $false }
+            }
+        }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name "pushClient" -Value $pushValue -Force
     }
 
     # Add useProxy property for Windows VMs that can sensibly route through

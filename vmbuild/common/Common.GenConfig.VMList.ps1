@@ -436,6 +436,10 @@ function Select-Options {
                 }
                 continue MainLoop
             }
+            "pushClient" {
+                Get-PushClientSiteMenu -property $property -name $name -CurrentValue $value
+                continue MainLoop
+            }
             "version" {
                 Get-CMVersionMenu -property $property -name $name -CurrentValue $value
                 continue MainLoop

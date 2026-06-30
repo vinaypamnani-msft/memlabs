@@ -566,26 +566,51 @@ function Get-UserConfiguration {
             # pushClient property: auto-add for DomainMember and site system VMs.
             # Precedence: existing per-VM value > legacy cmOptions.pushClientToDomainMembers
             # > domainDefaults.PushCMClientToClients/Servers/SiteSystems > $true.
+            # The stored value is a TARGET SITE CODE string (push from that site)
+            # or $false (no push). Legacy boolean $true is migrated to a concrete
+            # site code below so the genconfig dropdown, client push, and boundary
+            # creation all key off the same explicit site.
             $siteSystemRoles = @('Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
-            if (($vm.role -eq 'DomainMember' -or $vm.role -in $siteSystemRoles) -and ($null -eq $vm.pushClient)) {
-                $pushDefault = $true
-                if ($config.cmOptions -and ($null -ne $config.cmOptions.pushClientToDomainMembers)) {
-                    # Legacy single-value migration: apply to all eligible VMs
-                    $pushDefault = [bool]$config.cmOptions.pushClientToDomainMembers
+            if (($vm.role -eq 'DomainMember' -or $vm.role -in $siteSystemRoles)) {
+                if ($null -eq $vm.pushClient) {
+                    $pushDefault = $true
+                    if ($config.cmOptions -and ($null -ne $config.cmOptions.pushClientToDomainMembers)) {
+                        # Legacy single-value migration: apply to all eligible VMs
+                        $pushDefault = [bool]$config.cmOptions.pushClientToDomainMembers
+                    }
+                    elseif ($config.domainDefaults) {
+                        if ($vm.role -in $siteSystemRoles) {
+                            $key = 'PushCMClientToSiteSystems'
+                        }
+                        else {
+                            $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+                            $key = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
+                        }
+                        if ($null -ne $config.domainDefaults.$key) {
+                            $pushDefault = [bool]$config.domainDefaults.$key
+                        }
+                    }
+                    $vm | Add-Member -MemberType NoteProperty -Name "pushClient" -Value $pushDefault -Force
                 }
-                elseif ($config.domainDefaults) {
-                    if ($vm.role -in $siteSystemRoles) {
-                        $key = 'PushCMClientToSiteSystems'
-                    }
-                    else {
-                        $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
-                        $key = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
-                    }
-                    if ($null -ne $config.domainDefaults.$key) {
-                        $pushDefault = [bool]$config.domainDefaults.$key
+
+                # Migrate a boolean/stale pushClient to its resolved TARGET SITE
+                # CODE. Only when a CM site exists in the config or existing
+                # domain (a CM-less domain pushes nothing; leaving the boolean is
+                # harmless since every consumer also gates on cmManagesDomain).
+                if (-not (($vm.pushClient -is [bool]) -and ($vm.pushClient -eq $false))) {
+                    $domForPush = $null
+                    if ($config.vmOptions) { $domForPush = $config.vmOptions.domainName }
+                    $eligibleForPush = @(Get-EligiblePushSites -Config $config -Domain $domForPush)
+                    if ($eligibleForPush.Count -gt 0) {
+                        $resolvedSite = Resolve-PushClientSite -VM $vm -Config $config -Domain $domForPush -EligibleSites $eligibleForPush
+                        if ($resolvedSite) {
+                            if ($vm.pushClient -ne $resolvedSite) { $vm.pushClient = $resolvedSite }
+                        }
+                        else {
+                            $vm.pushClient = $false
+                        }
                     }
                 }
-                $vm | Add-Member -MemberType NoteProperty -Name "pushClient" -Value $pushDefault -Force
             }
         }
 
@@ -1431,6 +1456,115 @@ function Add-VMToAccountLists {
             }
         }
     }
+}
+
+function Get-EligiblePushSites {
+    <#
+    .SYNOPSIS
+    Returns the site servers a client can be pushed to (the sites that own a
+    boundary group): every Primary and Secondary in the config AND in the
+    existing domain. Each entry: [PSCustomObject]@{ SiteCode; Network; Role }.
+    De-duplicated by SiteCode (config entry wins so an in-flight subnet change
+    is reflected). Used by Resolve-PushClientSite, the genconfig dropdown, and
+    validation. PS5.1-safe (no ternary / null-conditional).
+    #>
+    param (
+        [Parameter(Mandatory = $false)] [object] $Config,
+        [Parameter(Mandatory = $false)] [string] $Domain
+    )
+
+    $sites = @()
+    $seen = @{}
+
+    # Config sites first (authoritative for an in-progress edit / fresh deploy).
+    if ($Config -and $Config.virtualMachines) {
+        $defaultNet = $null
+        if ($Config.vmOptions) { $defaultNet = $Config.vmOptions.network }
+        foreach ($vm in ($Config.virtualMachines | Where-Object { $_.role -in 'Primary', 'Secondary' })) {
+            if (-not $vm.siteCode) { continue }
+            $key = $vm.siteCode.ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $net = if ($vm.network) { $vm.network } else { $defaultNet }
+            $sites += [PSCustomObject]@{ SiteCode = $vm.siteCode; Network = $net; Role = $vm.role }
+            $seen[$key] = $true
+        }
+    }
+
+    # Existing domain sites (for add-to-existing where the Primary is hidden).
+    if ($Domain) {
+        try {
+            foreach ($e in @(Get-ExistingSiteServer -DomainName $Domain | Where-Object { $_.Role -in 'Primary', 'Secondary' })) {
+                if (-not $e.SiteCode) { continue }
+                $key = $e.SiteCode.ToLowerInvariant()
+                if ($seen.ContainsKey($key)) { continue }
+                $sites += [PSCustomObject]@{ SiteCode = $e.SiteCode; Network = $e.Network; Role = $e.Role }
+                $seen[$key] = $true
+            }
+        }
+        catch {
+            Write-Log "Get-EligiblePushSites: failed to enumerate existing site servers for '$Domain': $($_.Exception.Message)" -LogOnly -Warning
+        }
+    }
+
+    return $sites
+}
+
+function Resolve-PushClientSite {
+    <#
+    .SYNOPSIS
+    Resolves a VM's effective client-push TARGET site code.
+    pushClient is a site code string (push from that site) or $false (no push).
+    Returns the site code string, or $false when the VM should not get a client.
+
+    Resolution:
+      - pushClient -eq $false           -> $false (explicit opt-out).
+      - pushClient is a valid site code -> that site code (kept as-is).
+      - pushClient -eq $true / invalid  -> auto-resolve: the site whose own
+        subnet matches this VM's subnet, else the FIRST Primary, else the first
+        eligible site. $false when no CM site exists at all.
+    This makes every legacy pushClient=$true VM on a given subnet resolve to the
+    same site, so the subnet->site mapping (and its boundary) is consistent.
+    PS5.1-safe (no ternary / null-conditional).
+    #>
+    param (
+        [Parameter(Mandatory = $true)] [object] $VM,
+        [Parameter(Mandatory = $false)] [object] $Config,
+        [Parameter(Mandatory = $false)] [string] $Domain,
+        [Parameter(Mandatory = $false)] [object] $EligibleSites
+    )
+
+    if ($null -eq $VM) { return $false }
+
+    # Explicit opt-out (boolean $false).
+    if (($VM.pushClient -is [bool]) -and ($VM.pushClient -eq $false)) { return $false }
+
+    $eligible = @($EligibleSites)
+    if (-not $eligible -or $eligible.Count -eq 0) {
+        $eligible = @(Get-EligiblePushSites -Config $Config -Domain $Domain)
+    }
+    if (-not $eligible -or $eligible.Count -eq 0) { return $false }
+
+    $codes = @($eligible | ForEach-Object { $_.SiteCode })
+
+    # Already a valid site code string -> keep it.
+    if (($VM.pushClient -is [string]) -and $VM.pushClient -and ($codes -contains $VM.pushClient)) {
+        return $VM.pushClient
+    }
+
+    # Needs resolution ($true, an invalid/stale code, or defaulting).
+    $subnet = $null
+    if ($VM.network) { $subnet = $VM.network }
+    elseif ($Config -and $Config.vmOptions) { $subnet = $Config.vmOptions.network }
+
+    if ($subnet) {
+        $match = $eligible | Where-Object { $_.Network -eq $subnet } | Select-Object -First 1
+        if ($match) { return $match.SiteCode }
+    }
+
+    $firstPri = $eligible | Where-Object { $_.Role -eq 'Primary' } | Select-Object -First 1
+    if ($firstPri) { return $firstPri.SiteCode }
+
+    return (@($eligible)[0]).SiteCode
 }
 
 

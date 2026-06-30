@@ -1437,20 +1437,31 @@ function ConvertTo-DeployConfigEx {
                 # --- ClientPush
                 $thisVMNetwork = $thisVMObject.Network
 
-                # Push to any DomainMember (incl. SQL) or site system VM that has pushClient enabled
-                # (per-VM opt-in/out). Treat null/absent as $true for back-compat with configs
-                # that haven't been re-saved.
+                # Push to any DomainMember (incl. SQL) or site system VM whose
+                # pushClient TARGET SITE is this Primary's site or one of its
+                # reporting Secondaries. pushClient is now a site code string
+                # (the site to push from) or $false (no push). Resolve-PushClientSite
+                # turns legacy $true / stale values into a concrete site code, so
+                # a client on ANY subnet lands on the correct site (subnet no
+                # longer has to match the site server's own subnet).
                 $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+                $eligiblePushSites = @(Get-EligiblePushSites -Config $deployConfig -Domain $DomainName)
                 $ClientNames = get-list2 -DeployConfig $deployConfig | Where-Object {
                     $_.role -in $pushableRoles -and ($_.pushClient -ne $false)
                 }
+                # Site codes this Primary is responsible for pushing: its own
+                # site + any child Secondary (a Secondary has no client-push
+                # workflow of its own; the parent Primary pushes its clients).
+                $myPushSiteCodes = @($thisVM.siteCode)
+                $myPushSiteCodes += (get-list2 -deployConfig $deployConfig | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }).siteCode
+                $myPushSiteCodes = @($myPushSiteCodes | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
+
                 $clientPush = @()
-                $clientPush += ($ClientNames | Where-Object { $_.network -eq $thisVMNetwork }).vmName
-
-
-                $Secondaries = get-list2 -deployConfig $deployConfig | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }
-                foreach ($second in $Secondaries) {
-                    $clientPush += ($ClientNames | Where-Object { $_.network -eq $second.network }).vmName
+                foreach ($cn in $ClientNames) {
+                    $targetSite = Resolve-PushClientSite -VM $cn -Config $deployConfig -Domain $DomainName -EligibleSites $eligiblePushSites
+                    if ($targetSite -and ($myPushSiteCodes -contains $targetSite)) {
+                        $clientPush += $cn.vmName
+                    }
                 }
                 $clientPush = ($clientPush | Where-Object { $_ -and $_.Trim() } | select-object -unique)
                 if ($clientPush) {
@@ -1489,6 +1500,29 @@ function ConvertTo-DeployConfigEx {
                     Subnet   = $vm.network
                 }
             }
+
+            # Client-subnet boundaries: a pushed client can live on a subnet that
+            # hosts no site server (e.g. 172.16.1.0). Add a (pushTargetSite,
+            # clientSubnet) pair for every distinct pushed subnet not already
+            # mapped, so InstallBoundaryGroups builds the boundary in the right
+            # site's BG and the DC creates the matching AD subnet. Without this a
+            # client on a standalone subnet gets no boundary and never assigns.
+            $bgPushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+            $bgEligibleSites = @(Get-EligiblePushSites -Config $deployConfig -Domain $DomainName)
+            foreach ($vm in get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -in $bgPushableRoles -and ($_.pushClient -ne $false) }) {
+                $targetSite = Resolve-PushClientSite -VM $vm -Config $deployConfig -Domain $DomainName -EligibleSites $bgEligibleSites
+                if (-not $targetSite) { continue }
+                $vmSubnet = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
+                if (-not $vmSubnet) { continue }
+                # Skip if this subnet is already mapped (to its own site server,
+                # or already added for another pushed VM on the same subnet).
+                if ($vmSubnet -in $sitesAndNetworks.Subnet) { continue }
+                $sitesAndNetworks += [PSCustomObject]@{
+                    SiteCode = $targetSite
+                    Subnet   = $vmSubnet
+                }
+            }
+
             $thisParams | Add-Member -MemberType NoteProperty -Name "sitesAndNetworks" -Value $sitesAndNetworks -Force
         }
 
