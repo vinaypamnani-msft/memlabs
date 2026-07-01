@@ -4842,6 +4842,34 @@ $global:VM_Config = {
                 if ($noStatus) { $effectiveThreshold = $firstRestartHeartbeatThreshold }
 
                 if ($failedHeartbeats -ge $effectiveThreshold) {
+                    # Fail-fast on a corrupt / bugchecking guest. A guest that is
+                    # triple-faulting or BSODing on boot (commonly the result of a hard
+                    # power-off during OOBE/specialize) can NEVER be recovered by another
+                    # power-cycle -- it just crashes again on the next boot. Hyper-V logs
+                    # this on the HOST (this loop runs host-side) as Worker-Admin events
+                    # 18560 (triple fault) / 18590 (unrecoverable processor error) /
+                    # 18602 (guest reported a fatal error / bugcheck). None of these are
+                    # ever emitted by a healthy-but-slow boot, so their presence is an
+                    # unambiguous "the guest OS is broken" signal. Detecting >=2 in the
+                    # recent window (a genuine loop, not a single transient BSOD) lets us
+                    # stop after the first restart instead of burning the full restart
+                    # budget + ~150 heartbeat tries (~30+ min) on a VM that must be
+                    # deleted and recreated. Best-effort: any query failure falls through
+                    # to the normal restart/timeout behavior.
+                    try {
+                        $fatalEvents = @(Get-WinEvent -FilterHashtable @{
+                                LogName   = 'Microsoft-Windows-Hyper-V-Worker-Admin'
+                                Id        = 18560, 18590, 18602
+                                StartTime = (Get-Date).AddMinutes(-20)
+                            } -ErrorAction SilentlyContinue | Where-Object { $_.Message -match [regex]::Escape($currentItem.vmName) })
+                        if ($fatalEvents.Count -ge 2) {
+                            $codes = ($fatalEvents | Group-Object Id | ForEach-Object { "$($_.Name)x$($_.Count)" }) -join ' '
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: guest OS is bugchecking / triple-faulting on boot (Hyper-V-Worker events $codes in the last 20 min). The guest is CORRUPT -- almost always from a hard power-off during OOBE/specialize -- and cannot be recovered by another power-cycle. Failing this VM now; DELETE and RECREATE it (remove the VM + its folder, then re-run New-Lab), then resume the deploy." -Failure -OutputStream
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Guest is corrupt (BSOD/triple-fault boot loop); failing -- delete + recreate this VM"
+                            return
+                        }
+                    }
+                    catch {}
                     if ($forcedRestartCount -ge $forcedRestartMax) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: VM still unresponsive after $forcedRestartCount restart attempt(s) and $failedHeartbeats heartbeat tries. Failing this VM instead of power-cycling it again (a forced power-off mid-OOBE/specialize corrupts the guest)." -Failure -OutputStream
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "VM unresponsive; failing after $forcedRestartCount restart attempt(s)"
