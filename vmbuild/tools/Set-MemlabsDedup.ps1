@@ -210,9 +210,26 @@ function Show-DedupState {
     }
 }
 
+function Import-DedupModuleNative {
+    # On PS7 the Deduplication module is edition-flagged 'Desktop' and loads through a
+    # WinPSCompatSession remoting proxy by default. That proxy DESERIALIZES objects and
+    # mis-binds [bool] parameters -- e.g. 'Set-DedupVolume -OptimizeInUseFiles $false'
+    # fails with 'A positional parameter cannot be found that accepts argument False'.
+    # -SkipEditionCheck loads the (CIM/CDXML-backed) module natively in-process, which
+    # binds bool params correctly AND removes the WinPSCompat warning. Fall back to the
+    # default (compat) import if the native load isn't possible.
+    if (Get-Module -Name Deduplication) { return }
+    try {
+        Import-Module Deduplication -SkipEditionCheck -ErrorAction Stop -WarningAction SilentlyContinue
+    }
+    catch {
+        Import-Module Deduplication -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+    }
+}
+
 function Assert-DedupAvailable {
     if (Get-Command -Name Get-DedupVolume -ErrorAction SilentlyContinue) {
-        Import-Module Deduplication -ErrorAction SilentlyContinue
+        Import-DedupModuleNative
         return
     }
 
@@ -225,7 +242,7 @@ function Assert-DedupAvailable {
     if ($r -and $r.RestartNeeded -and $r.RestartNeeded.ToString() -ne 'No') {
         Write-Warn2 "The dedup feature install reports a reboot is required to fully activate."
     }
-    Import-Module Deduplication -ErrorAction SilentlyContinue
+    Import-DedupModuleNative
     if (-not (Get-Command -Name Get-DedupVolume -ErrorAction SilentlyContinue)) {
         throw "Failed to load the Deduplication module after installing FS-Data-Deduplication."
     }
@@ -306,7 +323,7 @@ if ($Disable) {
 
     try {
         Get-DedupSchedule -ErrorAction SilentlyContinue | ForEach-Object {
-            Set-DedupSchedule -Name $_.Name -Enabled $false -ErrorAction SilentlyContinue | Out-Null
+            Set-DedupSchedule -Name $_.Name -Enabled:$false -ErrorAction SilentlyContinue | Out-Null
         }
         Write-Ok "Dedup schedules disabled."
     }
@@ -332,17 +349,24 @@ else {
 }
 
 # Explicit flag overrides win regardless of UsageType preset.
-Set-DedupVolume -Volume $vol `
-    -OptimizeInUseFiles $false `
-    -OptimizePartialFiles $false `
-    -MinimumFileAgeDays $MinimumFileAgeDays `
-    -ExcludeFileType 'iso' | Out-Null
-Write-Ok "Applied: OptimizeInUseFiles=False, OptimizePartialFiles=False, MinimumFileAgeDays=$MinimumFileAgeDays, ExcludeFileType=iso"
+# Use -Param:$false colon syntax so the [bool] value binds correctly even if the
+# module was loaded through the WinPS compat proxy (bare '$false' binds positionally).
+try {
+    Set-DedupVolume -Volume $vol `
+        -OptimizeInUseFiles:$false `
+        -OptimizePartialFiles:$false `
+        -MinimumFileAgeDays $MinimumFileAgeDays `
+        -ExcludeFileType 'iso' -ErrorAction Stop | Out-Null
+    Write-Ok "Applied: OptimizeInUseFiles=False, OptimizePartialFiles=False, MinimumFileAgeDays=$MinimumFileAgeDays, ExcludeFileType=iso"
+}
+catch {
+    Write-Bad "Set-DedupVolume failed: $($_.Exception.Message)"
+}
 
 # Make sure the maintenance schedules are on so savings are actually realized.
 try {
     Get-DedupSchedule -ErrorAction SilentlyContinue | ForEach-Object {
-        Set-DedupSchedule -Name $_.Name -Enabled $true -ErrorAction SilentlyContinue | Out-Null
+        Set-DedupSchedule -Name $_.Name -Enabled:$true -ErrorAction SilentlyContinue | Out-Null
     }
     Write-Ok "Dedup schedules enabled."
 }
