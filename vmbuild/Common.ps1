@@ -6974,8 +6974,19 @@ function Get-Tools {
                                         break
                                     }
                                     Write-Log "Corrupt cached download detected for '$fileName'; purging '$downloadPath' and re-downloading." -Warning
-                                    try { Remove-Item -Path $downloadPath -Force -ErrorAction SilentlyContinue } catch {}
-                                    try { Remove-Item -Path $fileDestination -Force -ErrorAction SilentlyContinue } catch {}
+                                    try { Remove-Item -Path $downloadPath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+                                    # $fileDestination is usually the staging FOLDER (Copy-Item
+                                    # drops the file into it); only the single staged file may be
+                                    # a partial/corrupt copy. Never Remove-Item the folder itself
+                                    # (that would recurse-delete every staged tool and prompt for
+                                    # -Recurse). Resolve the specific staged file and remove only that.
+                                    $stagedFilePath = $fileDestination
+                                    if (Test-Path -LiteralPath $fileDestination -PathType Container) {
+                                        $stagedFilePath = Join-Path $fileDestination (Split-Path $downloadPath -Leaf)
+                                    }
+                                    if ((Test-Path -LiteralPath $stagedFilePath -PathType Leaf)) {
+                                        try { Remove-Item -LiteralPath $stagedFilePath -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+                                    }
                                     if ($tool.md5) {
                                         $rd = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload -IgnoreHashFailure:$IgnoreHashFailure -hashAlg "MD5" -UseCDN:$UseCDN
                                         $redownloaded = $rd.success
