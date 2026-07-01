@@ -180,6 +180,14 @@ function Add-NewVMForRole {
             # Generic Linux server: same base image as Proxy, DHCP networking.
             $OperatingSystem = "Ubuntu Server 24.04 LTS"
         }
+        elseif ($role -eq "LinuxClient") {
+            # Ubuntu Desktop workstation (UbuntuDesktop2404.vhdx) -- no OS choice.
+            # Without this branch a LinuxClient falls into the final else, where
+            # $role.Contains("Client") pre-fills operatingSystem from
+            # domainDefaults.DefaultClientOS (a Windows client OS), so a new
+            # LinuxClient would show up as Windows 10/11.
+            $OperatingSystem = "Ubuntu Desktop 24.04 LTS"
+        }
         elseif ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
             $OSList = Get-SupportedOperatingSystemsForRole -role $role
             if (-not $OSList -or $OSList.Count -eq 0) {
