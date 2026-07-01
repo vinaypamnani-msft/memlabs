@@ -1869,8 +1869,11 @@ function New-MRemoteNGFileFromHyperV {
         }
     }
 
-    # Restart mRemoteNG if we stopped it (or start it fresh after saving)
-    if ($killed -or $shouldSave) {
+    # Restart mRemoteNG ONLY if it was actually running when we started (we stopped
+    # it to edit the file). Do NOT launch it just because we saved changes ($shouldSave):
+    # regenerating the connection file must not pop mRemoteNG open when the user never
+    # had it running.
+    if ($killed) {
         $mRNGExe = $null
         foreach ($p in @((Join-Path $env:ProgramData "memlabs\mRemoteNG\mRemoteNG.exe"), "$env:ProgramFiles\mRemoteNG\mRemoteNG.exe", "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe", "C:\ProgramData\chocolatey\lib\mremoteng\tools\mRemoteNG.exe")) {
             if (Test-Path $p) { $mRNGExe = $p; break }
@@ -1923,6 +1926,10 @@ function New-MRemoteNGFileFromHyperV {
         else {
             Write-GreenCheck "Updated $MRemoteNGFile" -ForegroundColor ForestGreen
         }
+    }
+    elseif ($shouldSave) {
+        # File was regenerated but mRemoteNG was not running — leave it closed.
+        Write-GreenCheck "Updated $MRemoteNGFile" -ForegroundColor ForestGreen
     }
 
     # ALWAYS-ON diag: re-read the file shortly after relaunching mRemoteNG.exe and
