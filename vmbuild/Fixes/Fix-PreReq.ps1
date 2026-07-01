@@ -23,13 +23,27 @@ $Fix_Prereq = {
     # mid-flight. Retry the read-modify-write-verify a few times with backoff,
     # and confirm the change actually persisted by re-reading IISSSLState rather
     # than trusting Put() returning without error.
+    #
+    # $everReadState tracks whether we EVER successfully read the component's
+    # IISSSLState in any attempt. This distinguishes the two failure modes:
+    #   - never read (query kept returning nothing / WMI kept throwing): the SMS
+    #     Provider / SCI namespace was transiently unavailable, which also shows
+    #     up on the CAS as New-CMAdministrativeUser "No object corresponds" and
+    #     SQL Named-Pipes errors during the same window. This is NOT an EHTTP
+    #     misconfiguration -- we simply couldn't observe the state. Since the fix
+    #     is idempotent and re-runs every maintenance pass, a soft skip
+    #     (Success=$true) is correct; hard-failing here spuriously marks the whole
+    #     CAS maintenance as failed on a transient provider hiccup.
+    #   - read succeeded but Put() never persisted: a genuine, actionable failure
+    #     (Success=$false).
     $maxAttempts = 4
     $errs = @()
+    $everReadState = $false
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         try {
             $component = Get-WmiObject -Namespace $NameSpace -Query $query -ErrorAction Stop
             if (-not $component) {
-                $errs += "Attempt ${attempt}: SMS_SCI_Component query returned nothing"
+                $errs += "Attempt ${attempt}: SMS_SCI_Component query returned nothing (SMS Provider/SCI transiently unavailable)"
                 Write-FixLog $errs[-1] -Level Warning
                 if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds (10 * $attempt) }
                 continue
@@ -43,6 +57,7 @@ $Fix_Prereq = {
                 if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds (10 * $attempt) }
                 continue
             }
+            $everReadState = $true
             $value = $props[$index].Value
             $enabled = ($value -band 1024) -eq 1024 -or ($value -eq 63) -or ($value -eq 1472) -or ($value -eq 1504)
             if ($enabled) {
@@ -75,12 +90,23 @@ $Fix_Prereq = {
         if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds (10 * $attempt) }
     }
 
+    if (-not $everReadState) {
+        # We never successfully observed IISSSLState -- the SMS Provider / SCI was
+        # transiently unavailable (query returned nothing / WMI threw on every
+        # attempt). This is not an EHTTP misconfiguration, so soft-skip rather than
+        # failing the whole CAS maintenance; the fix re-runs next pass once the
+        # provider is answering.
+        $msg = "Could not read EHTTP (IISSSLState) after $maxAttempts attempts (SMS Provider transiently unavailable) - skipping, will retry next maintenance"
+        Write-FixLog $msg -Level Warning
+        return [pscustomobject]@{ Success = $true; Message = $msg; Errors = $errs }
+    }
+
     [pscustomobject]@{ Success = $false; Message = "Failed to force EHTTP (IISSSLState) after $maxAttempts attempts"; Errors = $errs }
 }
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-PreReq"
-    FixVersion        = "260616.0"
+    FixVersion        = "260630.0"
     NeededOnFreshDeploy = $false
     AppliesToExisting   = $true
     AppliesToRoles    = @("CAS")
