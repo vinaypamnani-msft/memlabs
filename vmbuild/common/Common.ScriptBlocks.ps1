@@ -362,6 +362,62 @@ $global:VM_Create = {
         if (-not $CreateVM) {
             # Check if memory amount or processor count changed; skip dynamic memory toggle for existing VMs
             $restart = $false
+
+            # Set-VMMemory on a RUNNING VM (the deploy-time 99% dynamic-memory pin
+            # below) can block indefinitely inside VMMS with NO native timeout --
+            # observed live: a Phase 0 pin hung the whole per-VM job for 14+ min
+            # while the guest was "Operating normally" and MemoryMinimum never
+            # changed, i.e. the cmdlet itself was wedged in the management path.
+            # Run that best-effort pin under Start-ThreadJob (Start-Job fallback)
+            # with a per-attempt kill-timeout so a wedged VMMS degrades to a logged
+            # skip instead of stalling the phase. NB: killing the job cannot abort
+            # the in-flight native VMMS call, but Wait-Job -Timeout returns control
+            # so the phase proceeds while the orphan thread unwinds with its
+            # runspace. Returns a status object; the caller logs. Only the pin uses
+            # this (its -ErrorAction SilentlyContinue is already best-effort); the
+            # other Set-VMMemory calls stop the VM first / run on a stopped VM and
+            # keep their -ErrorAction Stop fatal semantics.
+            function Invoke-VMMemoryPinWithWatchdog {
+                param(
+                    [Parameter(Mandatory)] [string] $VmName,
+                    [Parameter(Mandatory)] [hashtable] $MemoryParams,
+                    [int] $TimeoutSec = 60,
+                    [int] $MaxAttempts = 2
+                )
+                $useThreadJob = $null -ne (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+                $body = {
+                    param($name, $p)
+                    Set-VMMemory -VMName $name @p -ErrorAction Stop
+                }
+                for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+                    $job = $null
+                    try {
+                        if ($useThreadJob) {
+                            $job = Start-ThreadJob -ScriptBlock $body -ArgumentList $VmName, $MemoryParams -ErrorAction Stop
+                        }
+                        else {
+                            $job = Start-Job -ScriptBlock $body -ArgumentList $VmName, $MemoryParams -ErrorAction Stop
+                        }
+                        if (Wait-Job -Job $job -Timeout $TimeoutSec) {
+                            $jobErrors = $null
+                            Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jobErrors | Out-Null
+                            try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                            if ($jobErrors -and $jobErrors.Count -gt 0) {
+                                return [pscustomobject]@{ Status = 'Error'; Detail = $jobErrors[0].ToString(); Attempt = $attempt }
+                            }
+                            return [pscustomobject]@{ Status = 'OK'; Detail = $null; Attempt = $attempt }
+                        }
+                        try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+                        try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                    }
+                    catch {
+                        if ($job) { try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {} }
+                        return [pscustomobject]@{ Status = 'Error'; Detail = $_.Exception.Message; Attempt = $attempt }
+                    }
+                }
+                return [pscustomobject]@{ Status = 'TimedOut'; Detail = $null; Attempt = $MaxAttempts }
+            }
+
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Checking if memory has changed."
             $vm = Get-VM2 -name $currentItem.VmName
             # VM vs Config
@@ -417,7 +473,20 @@ $global:VM_Create = {
                 if ($vm.DynamicMemoryEnabled) {
                     if ($vm.MemoryMinimum -ne $pinnedMin) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Pinning dynamic memory min to 99% for deploy" -LogOnly
-                        $vm | Set-VMMemory -MinimumBytes $pinnedMin -MaximumBytes $memory -StartupBytes $memory -ErrorAction SilentlyContinue
+                        $pinResult = Invoke-VMMemoryPinWithWatchdog -VmName $currentItem.vmName -TimeoutSec 60 -MaxAttempts 2 -MemoryParams @{
+                            MinimumBytes = $pinnedMin
+                            MaximumBytes = $memory
+                            StartupBytes = $memory
+                        }
+                        switch ($pinResult.Status) {
+                            'OK' { }
+                            'TimedOut' {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): Dynamic memory pin timed out (VMMS unresponsive after $($pinResult.Attempt) attempt(s)); continuing without pin." -Warning -LogOnly
+                            }
+                            default {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): Dynamic memory pin did not apply: $($pinResult.Detail); continuing." -Warning -LogOnly
+                            }
+                        }
                     }
                 }
                 else {
