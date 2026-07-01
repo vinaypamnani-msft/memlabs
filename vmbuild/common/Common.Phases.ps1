@@ -1802,6 +1802,14 @@ function Wait-Phase {
         }
     }
 
+    # Phase 1 (VM creation) aborts the ENTIRE phase on ANY VM-creation failure --
+    # not just the DC/CAS. Every VM in the config is required for the deployment to
+    # complete, so once one base-image copy / OOBE attempt fails there is nothing to
+    # gain by finishing the other 20+ creates: it only burns time and leaves the
+    # operator more half-built VMs to clean up (the corrupt-base-image case). Stop
+    # as soon as the first VM job reports a failure and let the operator re-run.
+    $phase1StopsOnAnyFailure = ($phaseStr -eq "1")
+
     try {
 
         Set-PS7ProgressWidth # Refresh progress bar width in case the terminal was resized
@@ -2175,8 +2183,8 @@ function Wait-Phase {
                         # DC/CAS failure still needs to stop the phase even if already displayed.
                         # Only for foundational deploy phases (2-9); maintenance (10 /
                         # "Maintenance") and validation (11) never abort their siblings.
-                        if ($OutputObject.LogLevel -eq 3 -and $phaseStopsOnCritFailure -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) {
-                            $critRole = if ($jobName.Contains("[DC]")) { "DC" } else { "CAS" }
+                        if ($OutputObject.LogLevel -eq 3 -and (($phaseStopsOnCritFailure -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) -or $phase1StopsOnAnyFailure)) {
+                            $critRole = if ($jobName.Contains("[DC]")) { "DC" } elseif ($jobName.Contains("[CAS]")) { "CAS" } else { "VM creation" }
                             Write-RedX "$critRole failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try { $jobs | Stop-Job } catch {}
                             $return.Failed++
@@ -2187,8 +2195,8 @@ function Wait-Phase {
 
                     if ($OutputObject.LogLevel -eq 3) {
                         Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
-                        if ($phaseStopsOnCritFailure -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) {
-                            $critRole = if ($jobName.Contains("[DC]")) { "DC" } else { "CAS" }
+                        if (($phaseStopsOnCritFailure -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) -or $phase1StopsOnAnyFailure) {
+                            $critRole = if ($jobName.Contains("[DC]")) { "DC" } elseif ($jobName.Contains("[CAS]")) { "CAS" } else { "VM creation" }
                             Write-RedX "$critRole failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try {
                                 $jobs | Stop-Job
