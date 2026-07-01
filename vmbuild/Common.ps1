@@ -8059,6 +8059,56 @@ function Get-FileFromStorage {
     return $success
 }
 
+function Test-FileEdgeReadable {
+    # Cheap on-disk corruption probe. Reads the FIRST and LAST page of a file so a
+    # bad sector on a failing/damaged volume surfaces as an I/O exception (cyclic
+    # redundancy check / device error) instead of being silently trusted. A full
+    # re-hash of every cached multi-GB file on every run would be far too slow;
+    # touching both extents is near-free and reliably trips the same CRC fault that
+    # a later Copy-Item/BITS/robocopy would hit.
+    # Returns $false ONLY when the read fails with a media-corruption signature; any
+    # other error (sharing/access) returns $true so we never delete + redownload a
+    # multi-GB file over an ambiguous, non-corruption error.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [int]$ProbeBytes = 65536
+    )
+
+    $fs = $null
+    try {
+        $fs = [System.IO.FileStream]::new($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $len = $fs.Length
+        if ($len -le 0) { return $true }
+        $chunk = [int][Math]::Min([int64]$ProbeBytes, $len)
+        $buf = New-Object byte[] $chunk
+
+        # First page
+        [void]$fs.Seek(0, [System.IO.SeekOrigin]::Begin)
+        if ($fs.Read($buf, 0, $chunk) -le 0) { return $false }
+
+        # Last page (only if the file is larger than one probe chunk)
+        if ($len -gt $chunk) {
+            [void]$fs.Seek($len - $chunk, [System.IO.SeekOrigin]::Begin)
+            if ($fs.Read($buf, 0, $chunk) -le 0) { return $false }
+        }
+        return $true
+    }
+    catch {
+        $msg = $_.Exception.Message
+        if ($msg -match 'cyclic redundancy|CRC|data error|I/O error|IO error|device|corrupt|unreadable|0x80070570|0x8007001F|0x80070017') {
+            Write-Log "Edge-read probe detected corruption in '$Path': $($msg.Trim())" -Warning
+            return $false
+        }
+        # Non-corruption error (locked / access denied / etc) -- do NOT force a redownload.
+        Write-Log -LogOnly "Edge-read probe on '$Path' hit a non-corruption error (treating as readable): $($msg.Trim())"
+        return $true
+    }
+    finally {
+        if ($fs) { $fs.Dispose() }
+    }
+}
+
 function Get-FileWithHash {
 
     param(
@@ -8122,9 +8172,23 @@ function Get-FileWithHash {
                     $return.download = $true
                 }
                 else {
-                    # Write-Log "ForceDownload switch not present. Skip downloading '$fileNameLeaf'." -LogOnly
-                    $return.download = $false
-                    $return.success = $true
+                    # The hash marker matches, so we would normally trust the cached
+                    # file WITHOUT re-reading it. But the marker is only a CACHED hash
+                    # value -- a file that rotted on disk (bad sector) after the marker
+                    # was written still "matches". Cheaply probe the first and last page:
+                    # if the media is damaged the read throws a CRC error and we fall
+                    # into the same delete + redownload recovery as a hash mismatch.
+                    if (-not $WhatIf -and -not (Test-FileEdgeReadable -Path $localImagePath)) {
+                        Write-OrangePoint "Cached $FileName passed the hash-marker check but FAILED a CRC edge-read probe (corrupt on disk). Purging file + hash marker and redownloading..."
+                        Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
+                        Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
+                        $return.download = $true
+                    }
+                    else {
+                        # Write-Log "ForceDownload switch not present. Skip downloading '$fileNameLeaf'." -LogOnly
+                        $return.download = $false
+                        $return.success = $true
+                    }
                 }
             }
             else {
