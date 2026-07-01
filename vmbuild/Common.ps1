@@ -8082,10 +8082,13 @@ function Get-FileFromStorage {
 }
 
 function Test-FileEdgeReadable {
-    # On-disk corruption probe. By default reads the FIRST and LAST page of a file so a
-    # bad sector on a failing/damaged volume surfaces as an I/O exception (cyclic
-    # redundancy check / device error) instead of being silently trusted -- the cheap
-    # path for small/less-critical files.
+    # On-disk corruption probe. By default reads the FIRST and LAST page of a file PLUS
+    # one random probe-sized read per GB of file size, so a bad sector on a failing/
+    # damaged volume surfaces as an I/O exception (cyclic redundancy check / device
+    # error) instead of being silently trusted. The per-GB spot reads cheaply widen
+    # coverage into the middle of large files (which the two edges miss) without paying
+    # for a full sequential scan -- e.g. a 12GB VHDX gets the two edges + 12 random
+    # interior reads.
     # With -FullScan it reads the ENTIRE file sequentially (in large chunks, no hashing)
     # so a bad sector ANYWHERE -- not just the two extents -- is caught. Used for VHDX
     # base images, whose mid-file rot passes the edge probe but hard-fails the later
@@ -8131,6 +8134,26 @@ function Test-FileEdgeReadable {
         if ($len -gt $chunk) {
             [void]$fs.Seek($len - $chunk, [System.IO.SeekOrigin]::Begin)
             if ($fs.Read($buf, 0, $chunk) -le 0) { return $false }
+        }
+
+        # Random spot checks: ~1 per GB, each a probe-sized read at a random offset
+        # within its own 1GB window. Cheaply catches mid-file rot the two edges miss;
+        # a bad sector under any probe throws a CRC/device error caught below.
+        $oneGB = 1073741824
+        $spotCount = [int][Math]::Floor([double]$len / $oneGB)
+        if ($spotCount -gt 0) {
+            $rng = [System.Random]::new()
+            $maxOffset = $len - $chunk
+            for ($g = 0; $g -lt $spotCount; $g++) {
+                $windowStart = [int64]$g * $oneGB
+                $windowEnd = [int64][Math]::Min([int64]($windowStart + $oneGB), $maxOffset)
+                if ($windowEnd -le $windowStart) { continue }
+                $offset = $windowStart + [int64]($rng.NextDouble() * ($windowEnd - $windowStart))
+                if ($offset -lt 0) { $offset = 0 }
+                if ($offset -gt $maxOffset) { $offset = $maxOffset }
+                [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                if ($fs.Read($buf, 0, $chunk) -le 0) { return $false }
+            }
         }
         return $true
     }
