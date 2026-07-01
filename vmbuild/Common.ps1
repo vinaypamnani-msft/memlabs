@@ -6759,6 +6759,60 @@ function Get-VmSession {
 }
 
 
+function Invoke-ChkdskScanForCorruption {
+    # When a file operation fails with a cyclic-redundancy-check / I/O read error,
+    # the volume the file lives on has filesystem or media damage. Run the ONLINE
+    # scanner 'chkdsk <drive> /scan' (read-only, no dismount) up to $Passes times to
+    # let NTFS self-heal minor corruption via the spot-verifier/spot-fixer. Returns
+    # $true when the FINAL pass reports the volume clean (self-repaired or never
+    # damaged), $false when errors remain (needs offline /f /r or the disk is failing).
+    param (
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [int]$Passes = 2
+    )
+
+    $drive = $null
+    try { $drive = Split-Path -Path $Path -Qualifier -ErrorAction SilentlyContinue } catch {}
+    if ([string]::IsNullOrWhiteSpace($drive)) {
+        Write-Log "Invoke-ChkdskScanForCorruption: could not determine the drive for '$Path'; skipping chkdsk." -Warning
+        return $false
+    }
+
+    if (-not (Get-Command chkdsk.exe -ErrorAction SilentlyContinue)) {
+        Write-Log "Invoke-ChkdskScanForCorruption: chkdsk.exe not available; skipping scan of '$drive'." -Warning
+        return $false
+    }
+
+    $lastExit = -1
+    for ($pass = 1; $pass -le $Passes; $pass++) {
+        Write-Log "Corruption detected on '$drive'; running online scan 'chkdsk $drive /scan' (pass $pass of $Passes)..." -Warning
+        try {
+            $out = & chkdsk.exe $drive /scan 2>&1
+            $lastExit = $LASTEXITCODE
+            foreach ($line in $out) {
+                if ($line -and -not [string]::IsNullOrWhiteSpace($line.ToString())) {
+                    Write-Log ("chkdsk $drive /scan: " + $line.ToString().Trim()) -LogOnly
+                }
+            }
+            Write-Log "chkdsk $drive /scan pass $pass exit code: $lastExit" -LogOnly
+        }
+        catch {
+            Write-Log "chkdsk $drive /scan pass $pass threw: $($_.Exception.Message)" -Warning
+            $lastExit = -1
+        }
+    }
+
+    # chkdsk /scan exit code: 0 = no problems found (clean, or spot-fixed and now
+    # clean). Anything else = problems remain / could not be checked.
+    if ($lastExit -eq 0) {
+        Write-Log "chkdsk $drive /scan reports the volume is clean after $Passes pass(es); continuing." -Success
+        return $true
+    }
+
+    Write-Log "chkdsk $drive /scan did NOT clear the corruption (final exit $lastExit). '$drive' likely needs an offline 'chkdsk $drive /f /r' and/or the physical disk is failing (check SMART). Move the workspace/downloads to a healthy drive." -Failure
+    return $false
+}
+
 
 function Get-Tools {
     param (
@@ -6894,10 +6948,56 @@ function Get-Tools {
                     }
                     else {
                         Write-Log -LogOnly "Copying $fileName to $fileDestination."
-                        try {
-                            Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                        $copied = $false
+                        $copyAttempt = 0
+                        while (-not $copied -and $copyAttempt -lt 2) {
+                            $copyAttempt++
+                            try {
+                                Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false -ErrorAction Stop
+                                $copied = $true
+                            }
+                            catch {
+                                $copyErr = $_.Exception.Message
+                                Write-Log "Copy of '$fileName' to staging failed (attempt $copyAttempt): $copyErr" -Warning
+                                # A cyclic-redundancy-check / I/O read error means the CACHED
+                                # download at $downloadPath is corrupt on disk (bad sector /
+                                # failing volume). Purge the corrupt cache (and any partial
+                                # destination) and re-download once, then retry the copy.
+                                $isCorruptRead = $copyErr -match 'cyclic redundancy|CRC|data error|I/O error|IO error|corrupt'
+                                if ($isCorruptRead -and $copyAttempt -lt 2) {
+                                    # Filesystem/media damage. Attempt an online self-repair
+                                    # (chkdsk /scan x2). If it can't clear it, the error was
+                                    # already reported by the helper -- give up on this file.
+                                    $volumeClean = Invoke-ChkdskScanForCorruption -Path $downloadPath -Passes 2
+                                    if (-not $volumeClean) {
+                                        $allSuccess = $false
+                                        break
+                                    }
+                                    Write-Log "Corrupt cached download detected for '$fileName'; purging '$downloadPath' and re-downloading." -Warning
+                                    try { Remove-Item -Path $downloadPath -Force -ErrorAction SilentlyContinue } catch {}
+                                    try { Remove-Item -Path $fileDestination -Force -ErrorAction SilentlyContinue } catch {}
+                                    if ($tool.md5) {
+                                        $rd = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload -IgnoreHashFailure:$IgnoreHashFailure -hashAlg "MD5" -UseCDN:$UseCDN
+                                        $redownloaded = $rd.success
+                                    }
+                                    else {
+                                        $redownloaded = Get-File -Source $url -Destination $downloadPath -DisplayName "Re-downloading '$fileName' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN
+                                    }
+                                    if (-not $redownloaded) {
+                                        Write-Log "Re-download of '$fileName' failed; cannot stage it." -Failure
+                                        $allSuccess = $false
+                                        break
+                                    }
+                                }
+                                else {
+                                    # Not a recoverable corrupt-read, or the retry after
+                                    # re-download also failed -- give up on this file.
+                                    Write-Log "Giving up staging '$fileName' after $copyAttempt attempt(s)." -Failure
+                                    $allSuccess = $false
+                                    break
+                                }
+                            }
                         }
-                        catch {}
                     }
                 }
             }
