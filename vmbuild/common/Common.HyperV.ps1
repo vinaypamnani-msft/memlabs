@@ -66,14 +66,53 @@ function Install-HyperV {
         catch {}
     }
 
-    if ((get-service -name vmms).Status -ne "Running") {
+    $vmmsService = Get-Service -Name vmms -ErrorAction SilentlyContinue
+    if (-not $vmmsService) {
+        throw "Install-HyperV: The Hyper-V Virtual Machine Management Service (vmms) is not registered on this host. Hyper-V does not appear to be installed."
+    }
+    if ($vmmsService.Status -ne "Running") {
         Start-Service vmms
-        if ((get-service -name vmms).Status -eq "Running") {
+        if ((Get-Service -Name vmms).Status -eq "Running") {
             Write-Log "Hyper-V Virtual Machine Management Service started successfully." -Success
         }
         else {
-            Write-Log "Failed to start Hyper-V Virtual Machine Management Service." -Failure
+            throw "Install-HyperV: Failed to start the Hyper-V Virtual Machine Management Service (vmms). Cannot continue without Hyper-V."
         }
+    }
+
+    # Wait for vmms to be genuinely READY, not just "Running". Immediately after
+    # the service transitions to Running (cold host boot, or a just-started
+    # service), the VM object store isn't warm yet and the first Get-VM throws
+    # "Hyper-V encountered an error trying to access an object ... because the
+    # object was not found. ... Verify that the Virtual Machine Management
+    # service on the computer is running." Downstream callers (Get-List at
+    # Common.Config.ps1, Start-Maintenance -> Get-VMFixes) then cascade into a
+    # cryptic null-valued-expression crash. Poll Get-VM here until it succeeds
+    # so the rest of the run sees a ready service instead of failing hard.
+    $vmmsReadyTimeoutSec = 120
+    $vmmsReadySw = [System.Diagnostics.Stopwatch]::StartNew()
+    $vmmsReady = $false
+    $lastVmmsError = $null
+    while ($vmmsReadySw.Elapsed.TotalSeconds -lt $vmmsReadyTimeoutSec) {
+        try {
+            # -ErrorAction Stop so the transient "object was not found" surfaces
+            # as a catchable exception instead of a non-terminating error.
+            $null = Get-VM -ErrorAction Stop
+            $vmmsReady = $true
+            break
+        }
+        catch {
+            $lastVmmsError = $_.Exception.Message
+            Start-Sleep -Seconds 3
+        }
+    }
+    $vmmsReadySw.Stop()
+
+    if (-not $vmmsReady) {
+        throw "Install-HyperV: Hyper-V Virtual Machine Management Service (vmms) reports Running but is not answering Get-VM after $vmmsReadyTimeoutSec seconds. Last error: $lastVmmsError"
+    }
+    elseif ($vmmsReadySw.Elapsed.TotalSeconds -ge 3) {
+        Write-Log "Install-HyperV: vmms became ready for Get-VM after $([Math]::Round($vmmsReadySw.Elapsed.TotalSeconds,1))s." -LogOnly
     }
 }
 

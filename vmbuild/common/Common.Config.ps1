@@ -3450,7 +3450,17 @@ function Get-List {
                     Flush-LogBuffer -All
                     # Bulk-fetch network adapters in one WMI call before iterating VMs
                     Invoke-VMNetworkBulkWarmup
-                    $virtualMachines = Get-VM
+                    try {
+                        $virtualMachines = Get-VM
+                    }
+                    catch {
+                        # vmms can transiently throw "object was not found" right
+                        # after the service starts (VM store not yet warm). Retry
+                        # once after a short settle rather than failing the build.
+                        Write-Log "Get-List: Get-VM threw ($($_.Exception.Message)); retrying after 3s..." -LogOnly
+                        Start-Sleep -Seconds 3
+                        $virtualMachines = Get-VM
+                    }
                     Write-Log "Get-List: Get-VM returned $($virtualMachines.Count) VMs. Building cache..." -LogOnly
                     Flush-LogBuffer -All
                     $vmIndex = 0
