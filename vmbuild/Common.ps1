@@ -1265,6 +1265,28 @@ function Get-File {
 
             # All rounds exhausted
             Write-Log "Get-File: Copy of '$sourceDisplay' failed after $maxRounds rounds of BITS + robocopy. Last error: $lastError" -Failure
+
+            # If the SOURCE is a cached azureFiles file (e.g. a base-image VHDX) the copy
+            # may have failed because the cached file rotted on disk (bad sector). Confirm
+            # by fully reading the source ONCE here -- this cost is only paid when a copy
+            # has ALREADY failed (rare), never on healthy deploys. If the source is
+            # genuinely corrupt, purge it + its .MD5 hash marker so the NEXT deploy's
+            # download/verify pass re-downloads a clean copy from Azure, then tell the
+            # operator to re-run. We do NOT re-download inline (multi-GB, and parallel
+            # Phase 1 jobs share the source), and we do NOT delete a good source when the
+            # copy failed for other reasons (destination full/flaky, contention).
+            if (($Source -is [string]) -and $Common.AzureFilesPath -and ($Source -like "$($Common.AzureFilesPath)*") -and (Test-Path -LiteralPath $Source -PathType Leaf)) {
+                if (-not (Test-FileEdgeReadable -Path $Source -FullScan)) {
+                    $srcLeaf = Split-Path $Source -Leaf
+                    Write-Log "Get-File: Cached source '$srcLeaf' is CORRUPT on disk (bad sector). Purging it and its .MD5 hash marker." -Failure
+                    try { Remove-Item -LiteralPath $Source -Force -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch {}
+                    foreach ($mk in @("$Source.MD5", "$Source.md5")) {
+                        if (Test-Path -LiteralPath $mk) { try { Remove-Item -LiteralPath $mk -Force -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch {} }
+                    }
+                    Write-Log "Get-File: ACTION REQUIRED -- re-run the deployment. The purged file will be re-downloaded from Azure and verified before Phase 1." -Failure
+                }
+            }
+
             if ($lastError -is [System.Management.Automation.ErrorRecord]) { throw $lastError }
             return $false
         }
@@ -8193,18 +8215,16 @@ function Get-FileWithHash {
                     # The hash marker matches, so we would normally trust the cached
                     # file WITHOUT re-reading it. But the marker is only a CACHED hash
                     # value -- a file that rotted on disk (bad sector) after the marker
-                    # was written still "matches". Probe the actual bytes: if the media is
-                    # damaged the read throws a CRC error and we fall into the same
-                    # delete + redownload recovery as a hash mismatch.
-                    #   - VHDX base images get a FULL sequential read-scan: their mid-file
-                    #     rot passes an edge probe but hard-fails the later copy-into-VM
-                    #     with no recovery, so they must be fully read here (single-threaded,
-                    #     before Phase 1 fans out).
-                    #   - Everything else gets the cheap first/last-page edge probe.
-                    $scanFull = $localImagePath -match '\.vhdx$'
-                    if (-not $WhatIf -and -not (Test-FileEdgeReadable -Path $localImagePath -FullScan:$scanFull)) {
-                        $probeKind = if ($scanFull) { 'full-file read-scan' } else { 'CRC edge-read probe' }
-                        Write-OrangePoint "Cached $FileName passed the hash-marker check but FAILED a $probeKind (corrupt on disk). Purging file + hash marker and redownloading..."
+                    # was written still "matches". Cheaply probe the first and last page:
+                    # if the media is damaged the read throws a CRC error and we fall
+                    # into the same delete + redownload recovery as a hash mismatch.
+                    # We deliberately do NOT full-read every cached file here -- that would
+                    # add minutes to every healthy deploy. Mid-file rot that passes this
+                    # cheap probe is caught later at the Phase 1 copy (Get-File), which
+                    # confirms the source is corrupt, purges it, and asks the operator to
+                    # re-run (the next deploy's verify pass then re-downloads it).
+                    if (-not $WhatIf -and -not (Test-FileEdgeReadable -Path $localImagePath)) {
+                        Write-OrangePoint "Cached $FileName passed the hash-marker check but FAILED a CRC edge-read probe (corrupt on disk). Purging file + hash marker and redownloading..."
                         Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
                         Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
                         $return.download = $true
