@@ -648,15 +648,19 @@
                     DependsOn     = $nextDepend
                 }
                 $nextDepend = "[DownLoadSCCM]DownLoadSCCM"
-            }
 
-            FileReadAccessShare CMSourceSMBShare {
-                Name      = $CM
-                Path      = "c:\$CM"
-                DependsOn = $nextDepend
-            }
+                # URL-download CM: share the extracted C:\CMCB tree. For ISO CM the
+                # host has already mounted the CM ISO and created the CMCB share
+                # pointing at the DVD (Mount-CmIsoForPhase), so we must NOT re-point
+                # it back at C:\CMCB here.
+                FileReadAccessShare CMSourceSMBShare {
+                    Name      = $CM
+                    Path      = "c:\$CM"
+                    DependsOn = $nextDepend
+                }
 
-            $nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
+                $nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
+            }
         }
 
         WriteStatus RunScriptWorkflow {

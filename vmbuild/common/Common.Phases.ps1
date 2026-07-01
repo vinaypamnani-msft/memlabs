@@ -229,23 +229,10 @@ function Mount-SqlIsoForPhase {
             Write-Log "[Phase 4]: $($vm.vmName): Could not resolve SQL ISO path for '$($vm.sqlVersion)'; skipping mount." -Warning
             continue
         }
-
-        # Already mounted with the correct ISO -> no-op (idempotent re-run).
-        $existing = Get-VMDvdDrive -VMName $vm.vmName -ErrorAction SilentlyContinue
-        if ($existing -and $existing.Path -eq $sqlIsoPath) {
-            Write-Log "[Phase 4]: $($vm.vmName): SQL ISO already mounted ($sqlIsoPath)."
-            continue
-        }
-
-        Write-Log "[Phase 4]: $($vm.vmName): Mounting SQL ISO $sqlIsoPath as a DVD drive"
-        $dvd = Set-VMDvdDrive -VMName $vm.vmName -Path $sqlIsoPath -Passthru
-        if (-not $dvd) {
-            Write-Log "[Phase 4]: $($vm.vmName): Failed mounting SQL ISO. Retrying after eject."
-            Get-VMDvdDrive -VMName $vm.vmName | Set-VMDvdDrive -Path $null
-            Start-Sleep -Seconds 20
-            $dvd = Set-VMDvdDrive -VMName $vm.vmName -Path $sqlIsoPath -Passthru
-        }
-        if (-not $dvd) {
+        # Idempotent, per-drive, multi-drive-safe (see Mount-IsoOnVm): a re-run is a
+        # no-op, and it never evicts another disc that may be co-mounted. The guest
+        # picks the SQL disc by content (Phase4 AssignSqlIsoDriveLetter -> S:).
+        if (-not (Mount-IsoOnVm -VmName $vm.vmName -IsoPath $sqlIsoPath -Context "SQL" -Phase 4)) {
             Write-Log "[Phase 4]: $($vm.vmName): Failed mounting SQL ISO $sqlIsoPath as a DVD drive" -Failure -OutputStream
         }
     }
@@ -254,17 +241,234 @@ function Mount-SqlIsoForPhase {
 # Ejects the SQL ISO from every SQL VM in the config. Called after a SUCCESSFUL
 # Phase 4 so nothing is mounted at rest (avoids baking a host ISO path into
 # checkpoints / .memlabs exports). On a failed Phase 4 the ISO is deliberately
-# left mounted for debugging.
+# left mounted for debugging. Per-ISO eject (Dismount-IsoFromVm) so a co-mounted
+# cache / CM disc is left untouched.
 function Dismount-SqlIsoForPhase {
     param([object]$deployConfig)
 
     $sqlVMs = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion -and -not $_.hidden }
     foreach ($vm in $sqlVMs) {
-        $dvd = Get-VMDvdDrive -VMName $vm.vmName -ErrorAction SilentlyContinue
-        if ($dvd -and $dvd.Path) {
-            Write-Log "[Phase 4]: $($vm.vmName): Ejecting SQL ISO from DVD drive"
-            $dvd | Set-VMDvdDrive -Path $null
+        $sqlIsoPath = Get-SqlIsoPathForVm -VirtualMachine $vm
+        if ($sqlIsoPath) {
+            Dismount-IsoFromVm -VmName $vm.vmName -IsoPath $sqlIsoPath -Context "SQL" -Phase 4
         }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# ConfigMgr media (ISO) mount-on-demand.
+#
+# When the selected CM version is an ISO (cmDownloadVersion.filename ends .iso),
+# we no longer copy ~800MB of media to C:\CMCB at VM-create time. Instead we
+# mount the CM ISO on the site server's DVD drive on-demand right before the
+# phase that needs it (Phase 8 install; Phase 9 secondary/passive add; Phase 2
+# cross-forest schema extension), install directly from the DVD, and eject
+# after the phase succeeds.
+#
+# All mounts/ejects go through Mount-IsoOnVm / Dismount-IsoFromVm, which are
+# idempotent, drive-specific (keyed by ISO path), and multi-drive-safe: the CM
+# ISO gets its own DVD drive and can coexist with a SQL / cache disc on the same
+# VM. The guest reads the CM disc by content (SMSSETUP\BIN\X64\Setup.exe), never
+# by "the CD-ROM", so co-mounted discs don't confuse it.
+#
+# The CMCB SMB share (read by the schema-extension resources over SMB as
+# \\<server>\CMCB\SMSSETUP\BIN\X64\extadsch.exe) is pointed at the CM DVD drive.
+# REdist stays a LOCAL writable folder C:\<CM>\REdist (setupdl writes there);
+# the share NAME "CMCB" and the local folder path are independent objects.
+#
+# URL-download CM versions (cmDownloadVersion.downloadUrl) are unaffected: they
+# keep the old method (DownloadSCCM extracts to C:\CMCB, DSC FileReadAccessShare
+# shares C:\CMCB). Get-CmIsoPathForVersion returns $null for those, so nothing
+# below mounts anything and every function no-ops.
+# ---------------------------------------------------------------------------
+
+# Host path to the CM ISO for a CM version, or $null when the version is a
+# URL-download (no ISO in the file list).
+function Get-CmIsoPathForVersion {
+    param([string]$CmVersion)
+    if (-not $CmVersion) { return $null }
+    $azureFileList = if ($Common) { $Common.AzureFileList } else { $null }
+    if (-not $azureFileList) { return $null }
+    $cmFiles = @($azureFileList.CMVersions | Where-Object { $_.versions -contains $CmVersion })
+    $cmIso = $cmFiles.filename | Where-Object { $_ -and $_.ToLowerInvariant().EndsWith(".iso") } | Select-Object -First 1
+    if (-not $cmIso) { return $null }
+    return (Join-Path $Common.AzureFilesPath $cmIso)
+}
+
+# CM share name: CMTP for tech-preview, CMCB otherwise (matches Phase8/9 $CM).
+function Get-CmShareName {
+    param([object]$Vm, [object]$deployConfig)
+    $cmVer = if ($Vm.cmOptions -and $Vm.cmOptions.version) { $Vm.cmOptions.version } else { $deployConfig.cmOptions.version }
+    if ($cmVer -eq "tech-preview") { return "CMTP" }
+    return "CMCB"
+}
+
+# Top-level site servers (CAS / standalone or top-level Primary; no
+# ParentSiteServer) that install CM from LOCAL media and expose the CMCB share.
+# Child Primaries / Secondaries install from the parent's CM-owned
+# SMS_<sitecode>\cd.latest share, so they are excluded. Returns objects carrying
+# the VM, resolved ISO path, and share name; ISO-only (URL versions skipped).
+function Get-CmMediaSiteServers {
+    param([object]$deployConfig, [switch]$IncludeHidden)
+    $list = @()
+    foreach ($vm in $deployConfig.virtualMachines) {
+        if ($vm.role -notin @('CAS', 'Primary')) { continue }
+        if ($vm.thisParams -and $vm.thisParams.ParentSiteServer) { continue }
+        if ($vm.hidden -and -not $IncludeHidden) { continue }
+        $cmVer = if ($vm.cmOptions -and $vm.cmOptions.version) { $vm.cmOptions.version } else { $deployConfig.cmOptions.version }
+        $isoPath = Get-CmIsoPathForVersion -CmVersion $cmVer
+        if (-not $isoPath) { continue }
+        $list += [pscustomobject]@{ Vm = $vm; IsoPath = $isoPath; ShareName = (Get-CmShareName -Vm $vm -deployConfig $deployConfig) }
+    }
+    return $list
+}
+
+# External top-level site servers referenced by cross-forest joiners
+# (thisParams.ExternalTopLevelSiteServer). A different domain's DC reads their
+# CMCB share during its Phase 2 schema extension, so their media must be mounted
+# before Phase 2. Resolvable from the (multi-domain / add-run) deployConfig.
+function Get-CmExternalSchemaServers {
+    param([object]$deployConfig)
+    $list = @()
+    $seen = @{}
+    foreach ($vm in $deployConfig.virtualMachines) {
+        $ext = if ($vm.thisParams) { $vm.thisParams.ExternalTopLevelSiteServer } else { $null }
+        if (-not $ext) { continue }
+        $extName = ($ext -split '\.')[0]
+        if ($seen.ContainsKey($extName)) { continue }
+        $seen[$extName] = $true
+        $extVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $extName } | Select-Object -First 1
+        if (-not $extVm) { continue }  # external server not in this config; its own CMCB share must already exist
+        $cmVer = if ($extVm.cmOptions -and $extVm.cmOptions.version) { $extVm.cmOptions.version } else { $deployConfig.cmOptions.version }
+        $isoPath = Get-CmIsoPathForVersion -CmVersion $cmVer
+        if (-not $isoPath) { continue }
+        $list += [pscustomobject]@{ Vm = $extVm; IsoPath = $isoPath; ShareName = (Get-CmShareName -Vm $extVm -deployConfig $deployConfig) }
+    }
+    return $list
+}
+
+# Mount the CM ISO on one site server's single DVD (idempotent) and (re)create
+# the CMCB SMB share pointing at that DVD + ensure the writable REdist folder.
+function Set-CmMediaMountAndShare {
+    param([object]$Target, [object]$deployConfig, [int]$Phase)
+    $vm = $Target.Vm
+    $vmName = $vm.vmName
+    $isoPath = $Target.IsoPath
+    $shareName = $Target.ShareName
+    $domain = if ($vm.Domain) { $vm.Domain } else { $deployConfig.vmOptions.domainName }
+
+    # Mount the CM ISO on its own drive (idempotent, per-drive, multi-drive-safe).
+    if (-not (Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase)) {
+        Write-Log "[Phase $Phase]: $($vmName): Failed mounting CM ISO $isoPath as a DVD drive" -Failure -OutputStream
+        return
+    }
+
+    # In-guest: point the CMCB share at the CM DVD (read-only) and ensure the
+    # local writable REdist folder exists. Waits briefly for the guest to surface
+    # the CD-ROM volume that carries the CM media.
+    $shareScript = {
+        param($ShareName)
+        $deadline = (Get-Date).AddSeconds(60)
+        $cd = $null
+        while (-not $cd -and (Get-Date) -lt $deadline) {
+            $cd = Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | Where-Object {
+                Test-Path ("$($_.DriveLetter):\SMSSETUP\BIN\X64\Setup.exe")
+            } | Select-Object -First 1
+            if (-not $cd) { Start-Sleep -Seconds 3 }
+        }
+        if (-not $cd) { throw "CM media DVD not visible (no CD-ROM with SMSSETUP\BIN\X64\Setup.exe)" }
+        $root = "$($cd.DriveLetter):\"
+        New-Item -Path "C:\$ShareName\REdist" -ItemType Directory -Force | Out-Null
+
+        # Preferred: share the CM DVD directly (true zero-copy) so the schema
+        # extension reads \\<server>\CMCB\SMSSETUP\BIN\X64\extadsch.exe off the
+        # media. If a host won't share a read-only optical volume, fall back to
+        # staging just extadsch.exe (a few MB -- all the schema step needs over
+        # SMB) into C:\<CM>\SMSSETUP\BIN\X64 and sharing that local folder.
+        # Setup.exe installs directly from the DVD either way, and setupdl still
+        # writes REdist locally to C:\<CM>\REdist regardless of the share.
+        try {
+            $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
+            if ($share -and $share.Path -ne $root) {
+                Remove-SmbShare -Name $ShareName -Force -ErrorAction SilentlyContinue
+                $share = $null
+            }
+            if (-not $share) {
+                New-SmbShare -Name $ShareName -Path $root -ReadAccess "Everyone" -ErrorAction Stop | Out-Null
+            }
+            return "OK: $ShareName -> $root"
+        }
+        catch {
+            $localRoot = "C:\$ShareName"
+            $localBin = Join-Path $localRoot "SMSSETUP\BIN\X64"
+            New-Item -Path $localBin -ItemType Directory -Force | Out-Null
+            Copy-Item -Path (Join-Path $root "SMSSETUP\BIN\X64\extadsch.exe") -Destination $localBin -Force -ErrorAction SilentlyContinue
+            $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
+            if ($share -and $share.Path -ne $localRoot) {
+                Remove-SmbShare -Name $ShareName -Force -ErrorAction SilentlyContinue
+                $share = $null
+            }
+            if (-not $share) {
+                New-SmbShare -Name $ShareName -Path $localRoot -ReadAccess "Everyone" -ErrorAction Stop | Out-Null
+            }
+            return "OK(local extadsch fallback): $ShareName -> $localRoot"
+        }
+    }
+    $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName) -DisplayName "Share CM media ($shareName)"
+    if ($res.ScriptBlockFailed) {
+        Write-Log "[Phase $Phase]: $($vmName): Failed to create CM media share '$shareName'. $($res.ScriptBlockOutput)" -Warning
+    }
+    else {
+        Write-Log "[Phase $Phase]: $($vmName): CM media share ready ($($res.ScriptBlockOutput))" -LogOnly
+    }
+}
+
+# Remove the CMCB share on one site server and eject the CM ISO (leaves any
+# SQL / cache / OS ISO on the drive untouched by matching the exact ISO path).
+function Clear-CmMediaMount {
+    param([object]$Target, [object]$deployConfig, [int]$Phase)
+    $vm = $Target.Vm
+    $vmName = $vm.vmName
+    $isoPath = $Target.IsoPath
+    $shareName = $Target.ShareName
+    $domain = if ($vm.Domain) { $vm.Domain } else { $deployConfig.vmOptions.domainName }
+
+    $unshare = { param($ShareName) Remove-SmbShare -Name $ShareName -Force -ErrorAction SilentlyContinue; "ok" }
+    $null = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $unshare -ArgumentList @($shareName) -SuppressLog -DisplayName "Remove CM media share ($shareName)"
+
+    # Per-ISO eject (leaves any co-mounted SQL / cache disc untouched).
+    Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
+}
+
+# Mount CM media for the top-level site servers this phase needs (Phase 8:
+# non-hidden installers; Phase 9: include hidden parents for later adds).
+function Mount-CmIsoForPhase {
+    param([object]$deployConfig, [int]$Phase)
+    $targets = if ($Phase -ge 9) { Get-CmMediaSiteServers -deployConfig $deployConfig -IncludeHidden } else { Get-CmMediaSiteServers -deployConfig $deployConfig }
+    foreach ($t in $targets) { Set-CmMediaMountAndShare -Target $t -deployConfig $deployConfig -Phase $Phase }
+}
+
+# Eject CM media from the top-level site servers after a successful phase.
+function Dismount-CmIsoForPhase {
+    param([object]$deployConfig, [int]$Phase)
+    $targets = if ($Phase -ge 9) { Get-CmMediaSiteServers -deployConfig $deployConfig -IncludeHidden } else { Get-CmMediaSiteServers -deployConfig $deployConfig }
+    foreach ($t in $targets) { Clear-CmMediaMount -Target $t -deployConfig $deployConfig -Phase $Phase }
+}
+
+# Mount CM media on the external top-level site servers referenced by
+# cross-forest joiners, so their CMCB share serves extadsch to the joining
+# domain's DC during Phase 2. No-op unless a cross-forest join is configured.
+function Mount-CmIsoForExternalSchema {
+    param([object]$deployConfig)
+    foreach ($t in (Get-CmExternalSchemaServers -deployConfig $deployConfig)) {
+        Set-CmMediaMountAndShare -Target $t -deployConfig $deployConfig -Phase 2
+    }
+}
+
+function Dismount-CmIsoForExternalSchema {
+    param([object]$deployConfig)
+    foreach ($t in (Get-CmExternalSchemaServers -deployConfig $deployConfig)) {
+        Clear-CmMediaMount -Target $t -deployConfig $deployConfig -Phase 2
     }
 }
 
@@ -397,6 +601,15 @@ function Start-Phase {
         Mount-SqlIsoForPhase -deployConfig $deployConfig
     }
 
+    # Cross-forest: mount the CM ISO on the EXTERNAL top-level site servers before
+    # Phase 2 so a joining domain's DC can read their CMCB share for schema
+    # extension. No-op for URL-download CM versions / non-cross-forest configs.
+    # (Local site-server CM mounts happen just before Wait-Phase for 8/9 so the
+    # Phase 8 pre-install auto-snapshot doesn't capture the mounted ISO.)
+    if ($Phase -eq 2) {
+        Mount-CmIsoForExternalSchema -deployConfig $deployConfig
+    }
+
     # Allocate the SQLAO cluster heartbeat IPs (10.250.251.x) once, serially, here
     # -- before the parallel Phase 5 jobs fan out -- so every node gets a unique IP
     # with no mutex and no cross-job race. Only Phase 5 needs these.
@@ -420,6 +633,16 @@ function Start-Phase {
         return $true
     }
     $global:PhaseSkipped = $false
+
+    # Mount the CM ISO on the top-level site servers now -- AFTER Start-PhaseJobs
+    # (which takes the Phase 8 pre-install auto-snapshot) so the transient
+    # rollback checkpoint doesn't capture the mounted ISO, and BEFORE Wait-Phase
+    # so the media + CMCB share are ready long before the DSC run reaches CM
+    # setup. No-op for URL-download CM versions. Idempotent on -StartPhase reruns.
+    if ($Phase -eq 8 -or $Phase -eq 9) {
+        Mount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
+    }
+
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig
 
     # Phase 2 builds tool zips keyed by fingerprint. Clean up any stale
@@ -432,6 +655,16 @@ function Start-Phase {
     # so the VM can be inspected; a -StartPhase 4 retry re-mounts idempotently.
     if ($Phase -eq 4 -and $result.Failed -eq 0) {
         Dismount-SqlIsoForPhase -deployConfig $deployConfig
+    }
+
+    # Eject the CM ISO + drop the CMCB share after a SUCCESSFUL CM phase, so the
+    # host ISO path isn't baked into checkpoints / .memlabs exports. On failure
+    # leave it mounted for inspection; a -StartPhase retry re-mounts idempotently.
+    if ($Phase -eq 2 -and $result.Failed -eq 0) {
+        Dismount-CmIsoForExternalSchema -deployConfig $deployConfig
+    }
+    if (($Phase -eq 8 -or $Phase -eq 9) -and $result.Failed -eq 0) {
+        Dismount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
     }
 
     Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures. Time: $($result.Elapsed)"

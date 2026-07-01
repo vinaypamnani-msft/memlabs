@@ -1380,64 +1380,15 @@ $global:VM_Create = {
             # Phase 4 (Mount-SqlIsoForPhase in Common.Phases.ps1) and Phase 4 DSC
             # installs SQL directly from it (drive letter S:). See plan: mount-
             # install-eject, single DVD reused after the create-time CM/OSD copies.
-            #Copy CM to the VM
+            #CM media is no longer copied to the VM at create time. When the CM
+            #version is an ISO, the host mounts the CM ISO on-demand to the site
+            #server's DVD drive right before Phase 8 (and Phase 9 / cross-forest
+            #Phase 2) via Mount-CmIsoForPhase in Common.Phases.ps1, and CM is
+            #installed directly from the DVD (REdist stays local at C:\CMCB\REdist).
+            #URL-download CM versions still extract to C:\CMCB via the DownloadSCCM
+            #DSC resource in Phase 8. So there is nothing to do here at create time.
             if ($currentItem.CMInstallDir -and $createVM) {
-
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files to the VM."
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Mounting ISO" -force
-
-                # Determine which SQL version files should be used
-                $CMFiles = $azureFileList.CMVersions | Where-Object { $deployConfig.cmOptions.version -in $_.versions }
-
-                if ($CMFiles.filename) {
-                    # CM Iso Path
-                    $CMIso = $CMFiles.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }                
-                    $CMIsoPath = Join-Path $Common.AzureFilesPath $CMIso
-
-                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounting $CMIsoPath as a DVD drive"
-                    # Add CM ISO to guest
-                    $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $CMIsoPath -Passthru
-
-                    if (-not $dvd) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed Mounting $CMIsoPath as a DVD drive. Retrying"
-                        Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
-                        start-sleep -Seconds 20
-                        $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $CMIsoPath -Passthru
-                    }
-                    write-log "[Phase $Phase]: $($currentItem.vmName): DVD = $dvd"
-
-                    if (-not $dvd) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed Mounting $CMIsoPath as a DVD drive" -Failure -OutputStream
-                        return
-
-                    }
-                    # Create CM Dir inside VM
-                    # Create directory and copy files from DVD in one call
-                    Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Copying from DVD" -force
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Create CM directory and copy from CD-ROM" -ScriptBlock {
-                        New-Item -Path "C:\CMCB\cd.retail.LN" -ItemType Directory -Force | Out-Null
-                        $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }
-                        Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\CMCB\cd.retail.LN" -Recurse -Force -Confirm:$false
-                    }
-                    if ($result.ScriptBlockFailed) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy CM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                        return
-                    }
-               
-
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test CM Files" -ScriptBlock { get-item "c:\CMCB\cd.retail.LN\SMSSETUP\BIN\X64\setup.exe" }
-                    if ($result.ScriptBlockFailed) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy CM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                        return
-                    }
-
-                    # Eject ISO from guest
-                    Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
-                    Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Done" -Completed -force
-                }
-                else {
-                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files : Not needed. $currentItem"
-                }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): CM installation media will be mounted from ISO at install time (no create-time copy to C:\CMCB)." -LogOnly
             }
         }
         
@@ -1466,34 +1417,29 @@ $global:VM_Create = {
                 foreach ($isoFile in $isoFiles) {
                     $isoIndex++
 
-                    # SQL Iso Path
+                    # OS ISO Path
                     $Iso = $isoFile.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
                     Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Mounting $($isoFile.id) ($isoIndex/$isoTotal)" -force
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying $iso files to the VM."
                     $IsoPath = Join-Path $Common.AzureFilesPath $Iso
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounting $IsoPath to the VM."
-                    Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
-                    $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $isoPath -Passthru -ErrorVariable $err
-                    if ($dvd) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DVD successfully mounted from $($dvd.Path)"
-                    }
-                    else {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to mount DVD from $isoPath $err"
-                        start-sleep -seconds 30
-                        $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $isoPath -Passthru -ErrorVariable $err
-                        if (-not $dvd) {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): 2nd try - Failed to mount DVD from $isoPath $err"
-                        }
-                        else {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DVD successfully mounted on retry from $($dvd.Path)"
-                        }
+                    # Idempotent, per-drive, multi-drive-safe mount (gets its own drive
+                    # if a cache/other disc is already mounted). The guest copy below
+                    # picks THIS OS disc by content (sources\install.wim), never "the
+                    # CD-ROM", so a co-mounted disc can't be copied by mistake.
+                    if (-not (Mount-IsoOnVm -VmName $currentItem.vmName -IsoPath $IsoPath -Context "OS ($($isoFile.id))" -Phase $Phase)) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to mount OS ISO $IsoPath after retries" -Failure -OutputStream
+                        return
                     }
                     $dirname = (join-path $driveLetter "OSD" $isoFile.id)
 
                     $CopyIsoFiles = {
                         param ($dirname)
-                        New-Item -Path $dirname -ItemType Directory -Force
-                        $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }
+                        New-Item -Path $dirname -ItemType Directory -Force | Out-Null
+                        $cd = Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | Where-Object {
+                            Test-Path ("$($_.DriveLetter):\sources\install.wim")
+                        } | Select-Object -First 1
+                        if (-not $cd) { throw "OS media DVD not visible (no CD-ROM with sources\install.wim)" }
                         Copy-Item -Path "$($cd.DriveLetter):\*" -Destination $dirname -Recurse -Force -Confirm:$false
                     }
 
@@ -1502,8 +1448,8 @@ $global:VM_Create = {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying ISO WIM files to $dirname"
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock $CopyIsoFiles -ArgumentList $dirname
                     if ($result.ScriptBlockFailed) {
-                        $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Get-ChildItem "$($cd.DriveLetter):" }
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Contents of Drive: $($result2.ScriptBlockOutput) Mounted on $((Get-VMDvdDrive -VMName $currentItem.vmName).Path)"
+                        $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | ForEach-Object { "$($_.DriveLetter): $($_.FileSystemLabel)" } }
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): CD-ROM volumes: $($result2.ScriptBlockOutput)"
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy ISO WIM files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                         return
                     }
@@ -1514,7 +1460,7 @@ $global:VM_Create = {
                         return
                     }
 
-                    Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                    Dismount-IsoFromVm -VmName $currentItem.vmName -IsoPath $IsoPath -Context "OS ($($isoFile.id))" -Phase $Phase
                 }
                 Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Done" -Completed -force
         }

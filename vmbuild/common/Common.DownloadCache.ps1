@@ -425,46 +425,97 @@ function Get-MemlabsCacheStringHash {
     finally { $sha1.Dispose() }
 }
 
-function Mount-MemlabsCacheIsoToVm {
-    # Mount the cache ISO read-only on a VM's DVD drive (Gen2 SCSI = hot-add OK).
-    # Idempotent: a no-op if this ISO is already mounted.
+function Mount-IsoOnVm {
+    # Idempotent, per-drive, multi-drive-safe ISO mount. Manages ONLY the DVD drive
+    # that holds (or will hold) THIS exact ISO and never touches another disc:
+    #   1. This ISO already attached to some drive  -> verified, no-op (return $true).
+    #   2. An EMPTY DVD drive exists                 -> mount there (controller-specific).
+    #   3. No empty drive (all busy with other ISOs) -> Add a NEW DVD drive for it.
+    # Because every mount targets a specific controller/location and every eject is
+    # keyed by ISO path (Dismount-IsoFromVm), multiple ISOs can be mounted on the
+    # same VM at once (e.g. cache + SQL + CM). Returns $true only after verifying the
+    # ISO is actually attached; never throws.
     #
-    # IMPORTANT -- single-DVD invariant: the create-time CM/OS media copy
-    # (Common.ScriptBlocks.ps1) and the Phase 4 SQL ISO mount (Mount-SqlIsoForPhase)
-    # both drive the VM's DVD with Set-VMDvdDrive WITHOUT a controller selector,
-    # which is only unambiguous when the VM has exactly ONE DVD drive. So the cache
-    # must never create a SECOND drive. It mounts only to an existing EMPTY drive,
-    # or -- only when the VM has no DVD drive at all (0 -> 1 is unambiguous) -- adds
-    # one. If the single drive is busy (CM/SQL/OS ISO present), the cache YIELDS
-    # this pass and re-mounts on a later phase once the drive is free. The cache is
-    # opportunistic, so being transiently evicted by a CM/SQL mount/eject is fine
-    # (the guest just falls back to a direct download until the cache is back).
-    param([string]$VmName, [string]$IsoPath)
-    if (-not $IsoPath -or -not (Test-Path $IsoPath)) { return $false }
-    try {
-        $dvds = @(Get-VMDvdDrive -VMName $VmName -ErrorAction Stop)
-        foreach ($d in $dvds) {
-            if ($d.Path -and $d.Path -eq $IsoPath) { return $true }
-        }
-        $empty = $dvds | Where-Object { -not $_.Path } | Select-Object -First 1
-        if ($empty) {
-            Set-VMDvdDrive -VMName $VmName -ControllerNumber $empty.ControllerNumber -ControllerLocation $empty.ControllerLocation -Path $IsoPath -ErrorAction Stop
-            return $true
-        }
-        if ($dvds.Count -eq 0) {
-            Add-VMDvdDrive -VMName $VmName -Path $IsoPath -ErrorAction Stop
-            return $true
-        }
-        # The only DVD drive is occupied by a CM/SQL/OS ISO. Do NOT add a 2nd drive
-        # (it would break the no-controller Set-VMDvdDrive calls above); defer.
-        Write-Log "DownloadCache: $VmName DVD drive busy; deferring cache mount to a later phase." -LogOnly
+    # Gen2 (SCSI) supports hot-add of a new DVD drive while running. Gen1 (IDE)
+    # cannot hot-add while running -- Add-VMDvdDrive then throws, is caught, and the
+    # function returns $false (opportunistic callers like the cache simply yield).
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$IsoPath,
+        [string]$Context = "ISO",
+        [int]$Phase = 0
+    )
+    if (-not $IsoPath -or -not (Test-Path $IsoPath)) {
+        Write-Log "$($VmName): $Context ISO mount skipped -- path missing: $IsoPath" -LogOnly
         return $false
+    }
+    $tag = ""
+    if ($Phase -gt 0) { $tag = "[Phase $Phase]: " }
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            $dvds = @(Get-VMDvdDrive -VMName $VmName -ErrorAction Stop)
+            # 1. Already mounted with this exact ISO (idempotent).
+            if ($dvds | Where-Object { $_.Path -eq $IsoPath }) { return $true }
+            # 2. Reuse an empty drive.
+            $empty = $dvds | Where-Object { -not $_.Path } | Select-Object -First 1
+            if ($empty) {
+                Set-VMDvdDrive -VMName $VmName -ControllerNumber $empty.ControllerNumber -ControllerLocation $empty.ControllerLocation -Path $IsoPath -ErrorAction Stop
+            }
+            else {
+                # 3. All existing drives are busy with OTHER ISOs -> add a new one.
+                Add-VMDvdDrive -VMName $VmName -Path $IsoPath -ErrorAction Stop
+            }
+            # Verify the mount landed.
+            $dvds = @(Get-VMDvdDrive -VMName $VmName -ErrorAction Stop)
+            if ($dvds | Where-Object { $_.Path -eq $IsoPath }) {
+                Write-Log "$tag$($VmName): Mounted $Context ISO $IsoPath" -LogOnly
+                return $true
+            }
+        }
+        catch {
+            Write-Log "$tag$($VmName): $Context ISO mount attempt $attempt failed: $($_.Exception.Message)" -LogOnly
+        }
+        if ($attempt -lt 3) { Start-Sleep -Seconds ([Math]::Min(20, 5 * $attempt)) }
+    }
+    Write-Log "$tag$($VmName): Failed to mount $Context ISO $IsoPath after 3 attempts" -LogOnly
+    return $false
+}
+
+function Dismount-IsoFromVm {
+    # Idempotent, per-drive eject. Ejects ONLY the drive(s) whose media is this exact
+    # ISO path -- leaves every other mounted ISO and every empty drive untouched.
+    # No-op when the ISO isn't mounted. Never throws.
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$IsoPath,
+        [string]$Context = "ISO",
+        [int]$Phase = 0
+    )
+    $tag = ""
+    if ($Phase -gt 0) { $tag = "[Phase $Phase]: " }
+    try {
+        foreach ($d in @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue)) {
+            if ($d.Path -and $d.Path -eq $IsoPath) {
+                Set-VMDvdDrive -VMName $VmName -ControllerNumber $d.ControllerNumber -ControllerLocation $d.ControllerLocation -Path $null -ErrorAction SilentlyContinue
+                Write-Log "$tag$($VmName): Ejected $Context ISO $IsoPath" -LogOnly
+            }
+        }
     }
     catch {
-        Write-Log "DownloadCache: failed to mount cache ISO to $VmName : $($_.Exception.Message)" -LogOnly
-        return $false
+        Write-Log "$tag$($VmName): $Context ISO eject failed: $($_.Exception.Message)" -LogOnly
     }
 }
+
+function Mount-MemlabsCacheIsoToVm {
+    # Mount the cache ISO read-only on a VM's DVD drive. Idempotent + per-drive +
+    # multi-drive via Mount-IsoOnVm: reuses an empty drive, or adds its own drive
+    # when the existing drives are busy with other ISOs (cache no longer has to
+    # yield). Dismount-MemlabsCacheIsoFromVm ejects only cache-*.iso by name, so
+    # the cache never disturbs a co-mounted CM/SQL/OS disc.
+    param([string]$VmName, [string]$IsoPath)
+    return (Mount-IsoOnVm -VmName $VmName -IsoPath $IsoPath -Context "cache")
+}
+
 
 function Dismount-MemlabsCacheIsoFromVm {
     # Eject only OUR cache-*.iso from this VM (leaves any OS/other DVD untouched).
@@ -555,36 +606,14 @@ function Get-MemlabsDscIsoForPayload {
 }
 
 function Mount-MemlabsDscIsoToVm {
-    # Mount the DSC payload ISO read-only on the VM's single DVD drive, honoring the
-    # SAME single-DVD invariant as Mount-MemlabsCacheIsoToVm: mount only to an
-    # existing EMPTY drive, or add one when there is none (0->1 is unambiguous).
-    # If the one drive is busy (CM/SQL/OS ISO), yield $false -- the caller then
-    # direct-copies. The DSC ISO is mounted only transiently (the caller ejects it
-    # right after the in-guest copy), so it never lingers to break a later mount.
+    # Mount the DSC payload ISO read-only on the VM. Idempotent + per-drive +
+    # multi-drive via Mount-IsoOnVm (reuses an empty drive or adds its own). The
+    # caller ejects it right after the in-guest copy (Dismount-MemlabsDscIsoFromVm,
+    # by dsc-*.iso name), so it never disturbs a co-mounted CM/SQL/OS/cache disc.
     param([string]$VmName, [string]$IsoPath)
-    if (-not $IsoPath -or -not (Test-Path $IsoPath)) { return $false }
-    try {
-        $dvds = @(Get-VMDvdDrive -VMName $VmName -ErrorAction Stop)
-        foreach ($d in $dvds) {
-            if ($d.Path -and $d.Path -eq $IsoPath) { return $true }
-        }
-        $empty = $dvds | Where-Object { -not $_.Path } | Select-Object -First 1
-        if ($empty) {
-            Set-VMDvdDrive -VMName $VmName -ControllerNumber $empty.ControllerNumber -ControllerLocation $empty.ControllerLocation -Path $IsoPath -ErrorAction Stop
-            return $true
-        }
-        if ($dvds.Count -eq 0) {
-            Add-VMDvdDrive -VMName $VmName -Path $IsoPath -ErrorAction Stop
-            return $true
-        }
-        Write-Log "DownloadCache: $VmName DVD drive busy; DSC ISO not mounted (caller will direct-copy)." -LogOnly
-        return $false
-    }
-    catch {
-        Write-Log "DownloadCache: failed to mount DSC ISO to $VmName : $($_.Exception.Message)" -LogOnly
-        return $false
-    }
+    return (Mount-IsoOnVm -VmName $VmName -IsoPath $IsoPath -Context "DSC")
 }
+
 
 function Dismount-MemlabsDscIsoFromVm {
     # Eject only OUR dsc-*.iso from this VM (leaves any OS/cache/other DVD alone).

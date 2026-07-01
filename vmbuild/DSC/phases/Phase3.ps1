@@ -246,6 +246,12 @@
 
                
 
+                # URL-download CM versions extract to C:\CMCB (DownloadSCCM) and
+                # share C:\CMCB for schema extension. ISO CM versions are mounted
+                # on-demand by the host right before Phase 8 (Mount-CmIsoForPhase
+                # in Common.Phases.ps1), which also creates the CMCB share pointing
+                # at the DVD and installs directly from it -- so there is nothing to
+                # download, pre-warm, or share here for the ISO case.
                 if ($ThisVM.thisParams.cmDownloadVersion.downloadUrl) {
 
                     WriteStatus DownLoadSCCM {
@@ -261,36 +267,13 @@
                     }
                     $prevDepend = "[DownLoadSCCM]DownLoadSCCM"
 
-                    # Pre-warm the ConfigMgr setup pre-req download (~10 min) in
-                    # the background, NOW that the CM media is extracted, so the
-                    # redist folder is already populated by the time Phase 8 runs
-                    # setupdl.exe. Reuses the tried-and-true RegisterTaskScheduler
-                    # infra to launch ScriptWorkflow.ps1 -DownloadOnly, which runs
-                    # ONLY the setupdl download and exits (no workflow steps).
-                    # setupdl is idempotent, so whatever it finishes persists on
-                    # disk; Phase 8 (Stop-CMSetupPrereqPrewarm) stops this task and
-                    # kills any running setupdl.exe before its own download so the
-                    # two never race. Set() returns once the task STARTS, so Phase 3
-                    # does not block on the ~10-min download. Task name MUST match
-                    # Stop-CMSetupPrereqPrewarm in ScriptFunctions.ps1.
-                    RegisterTaskScheduler PreWarmSetupDL {
-                        TaskName       = "ScriptWorkflow Download"
-                        ScriptName     = "ScriptWorkflow.ps1"
-                        ScriptPath     = $PSScriptRoot
-                        ScriptArgument = "$DeployConfigPath $LogPath -DownloadOnly"
-                        AdminCreds     = $CMAdmin
-                        Ensure         = "Present"
-                        DependsOn      = "[DownLoadSCCM]DownLoadSCCM"
+                    FileReadAccessShare CMSourceSMBShare {
+                        Name      = $CM
+                        Path      = "c:\$CM"
+                        DependsOn = $prevDepend
                     }
+                    $nextDepend = @($nextDepend, "[FileReadAccessShare]CMSourceSMBShare")
                 }
-
-                FileReadAccessShare CMSourceSMBShare {
-                    Name      = $CM
-                    Path      = "c:\$CM"
-                    DependsOn = $prevDepend
-                }
-                $nextDepend = @($nextDepend, "[FileReadAccessShare]CMSourceSMBShare")
-                #$nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
             }
         }
 

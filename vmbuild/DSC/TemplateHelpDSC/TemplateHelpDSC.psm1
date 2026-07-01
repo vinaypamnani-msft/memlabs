@@ -3379,10 +3379,32 @@ class InitializeDisks {
 
         Write-Status "Initializing disks"
 
-        # Move CD-ROM drive to Z: before assigning disk letters
-        if (-not (Get-Volume -DriveLetter "Z" -ErrorAction SilentlyContinue)) {
-            Write-Status "Moving CD-ROM drive to Z:.."
-            Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter = 'Z:' }
+        # Park every CD-ROM (mounted ISO) on a HIGH drive letter before assigning
+        # data-disk letters, so no disc can squat a data-disk letter. Multiple
+        # discs may be mounted at once (SQL / CM / cache), so relabel each one that
+        # isn't already high. Idempotent: a disc already on a high letter is left
+        # alone. Each consumer later finds ITS disc by content (SQL -> setup.exe at
+        # root -> S:; CM -> SMSSETUP; cache -> MEMLABSCACHE label), never by letter.
+        try {
+            $highLetters = @('Z', 'Y', 'X', 'W', 'V', 'U', 'T')
+            $usedLetters = @{}
+            foreach ($v in (Get-Volume -ErrorAction SilentlyContinue)) {
+                if ($v.DriveLetter) { $usedLetters[([string]$v.DriveLetter).TrimEnd(':')] = $true }
+            }
+            foreach ($cd in (Get-WmiObject -Class Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue)) {
+                if (-not $cd.DriveLetter) { continue }
+                $cur = ([string]$cd.DriveLetter).TrimEnd(':')
+                if ($highLetters -contains $cur) { continue }
+                $free = $highLetters | Where-Object { -not $usedLetters.ContainsKey($_) } | Select-Object -First 1
+                if (-not $free) { continue }
+                Write-Status "Moving CD-ROM $($cd.DriveLetter) to ${free}:.."
+                $cd | Set-WmiInstance -Arguments @{DriveLetter = "${free}:" } -ErrorAction SilentlyContinue | Out-Null
+                $usedLetters.Remove($cur) | Out-Null
+                $usedLetters["$free"] = $true
+            }
+        }
+        catch {
+            Write-Status "CD-ROM drive-letter parking skipped (non-fatal): $($_.Exception.Message)"
         }
 
         $_VM = $this.VM | ConvertFrom-Json

@@ -548,6 +548,19 @@ CurrentBranch=1
         }
     }
 
+    # Prefer the mounted CM ISO (DVD) when present. The host mounts the CM ISO on
+    # this site server's DVD right before Phase 8 (Mount-CmIsoForPhase), so we run
+    # setupdl.exe + setup.exe DIRECTLY off the read-only media instead of a
+    # create-time copy under C:\CMCB. The C:\CMCB\cd.retail* resolution above is
+    # the fallback for URL-download CM versions (DownloadSCCM extracts there).
+    # $CMDir has no trailing slash so "$CMDir\SMSSETUP\..." stays a valid path.
+    $cmDvd = Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | Where-Object {
+        Test-Path ("$($_.DriveLetter):\SMSSETUP\BIN\X64\Setup.exe")
+    } | Select-Object -First 1
+    if ($cmDvd) {
+        $CMDir = "$($cmDvd.DriveLetter):"
+        Write-DscStatus "Installing ConfigMgr from mounted ISO on drive $CMDir"
+    }
 
     $CMBin = "$CMDir\SMSSETUP\BIN\X64"
     $CMSetupDL = "$CMBin\Setupdl.exe"
