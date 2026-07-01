@@ -448,35 +448,55 @@
 
 
 
+        # sitesAndNetworks can carry MULTIPLE entries with the SAME SiteCode but
+        # different subnets: the first (Primary/Secondary) pass maps each site
+        # server's own subnet, while the client-subnet-boundary pass adds a
+        # (pushTargetSite, clientSubnet) pair for every distinct pushed subnet --
+        # which can reuse a SiteCode already present. ADReplicationSite and
+        # ADReplicationSiteLink are keyed on SiteCode (Name), so emitting them
+        # per-entry produced duplicate DSC resources with the same key ->
+        # 'A conflict was detected between resources [ADReplicationSiteLink]...'.
+        # Emit the site + site link ONCE per unique SiteCode, and one subnet
+        # resource per entry (subnets are already de-duped upstream, each mapped
+        # to its owning site).
         $adSiteDependency = @($nextDepend)
+        $emittedSiteCodes = @{}
         $i = 0
         foreach ($site in $adsites) {
             $i++
-            ADReplicationSite "ADSite$($i)" {
-                Ensure    = 'Present'
-                Name      = $site.SiteCode
-                DependsOn = $nextDepend
+            if (-not $emittedSiteCodes.ContainsKey($site.SiteCode)) {
+                $emittedSiteCodes[$site.SiteCode] = $i
+
+                ADReplicationSite "ADSite$($i)" {
+                    Ensure    = 'Present'
+                    Name      = $site.SiteCode
+                    DependsOn = $nextDepend
+                }
+
+                ADReplicationSiteLink "HQSiteLink$($i)" {
+                    Name                          = "SiteLink Default-First-Site-Name to $($site.SiteCode) 2-way"
+                    SitesIncluded                 = @('Default-First-Site-Name', $site.SiteCode)
+                    Cost                          = 99
+                    ReplicationFrequencyInMinutes = 1
+                    Ensure                        = 'Present'
+                    OptionChangeNotification      = $true
+                    OptionTwoWaySync              = $true
+                    DependsOn                     = "[ADReplicationSite]ADSite$($i)"
+                }
+                $adSiteDependency += "[ADReplicationSiteLink]HQSiteLink$($i)"
             }
+
+            # The AD site this subnet belongs to (the index of the entry that
+            # first emitted the ADReplicationSite for this SiteCode).
+            $siteResIndex = $emittedSiteCodes[$site.SiteCode]
 
             ADReplicationSubnet "ADSubnet$($i)" {
                 Name        = "$($site.Subnet)/24"
                 Site        = $site.SiteCode
                 Location    = $site.SiteCode
                 Description = 'Created by vmbuild'
-                DependsOn   = "[ADReplicationSite]ADSite$($i)"
+                DependsOn   = "[ADReplicationSite]ADSite$($siteResIndex)"
             }
-
-            ADReplicationSiteLink "HQSiteLink$($i)" {
-                Name                          = "SiteLink Default-First-Site-Name to $($site.SiteCode) 2-way"
-                SitesIncluded                 = @('Default-First-Site-Name', $site.SiteCode)
-                Cost                          = 99
-                ReplicationFrequencyInMinutes = 1
-                Ensure                        = 'Present'
-                OptionChangeNotification      = $true
-                OptionTwoWaySync              = $true
-                DependsOn                     = "[ADReplicationSite]ADSite$($i)"
-            }
-            $adSiteDependency += "[ADReplicationSiteLink]HQSiteLink$($i)"
             $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"
             $nextDepend = $adSiteDependency
         }
