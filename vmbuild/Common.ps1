@@ -373,6 +373,48 @@ $Script:LogRotateExitRegistered = $false
 # runs in its own scope) can still see and flush it.
 if (-not $global:LogBuffers) { $global:LogBuffers = @{} }
 
+# --- Structured JSON log sidecar (<logbase>.jsonl) -------------------------
+# Alongside the CMTrace .log (kept for CMTrace / OneTrace / the memlabs log
+# viewer), we emit a lean newline-delimited JSON file that is trivial for AI /
+# grep / jq to consume. It carries ONLY the non-redundant fields: the CMTrace
+# line's split date+time collapse to a single ISO-8601 UTC 't', and its
+# duplicated component/context/file fields collapse to one 'comp' (+ 'at'
+# file:line on non-INFO lines only). See Write-Log for the exact schema.
+# Enabled by default; set $env:MEMLABS_JSON_LOG=0 (or 'false'/'off') to disable.
+$Script:JsonLogEnabled = -not ($env:MEMLABS_JSON_LOG -in @('0', 'false', 'False', 'off'))
+# One run id per process, tagged onto every line so an agent can group a run.
+# Honors an inherited $env:MEMLABS_RUN_ID so child job processes can share it.
+if (-not $global:MemLabsRunId) {
+    $global:MemLabsRunId = $env:MEMLABS_RUN_ID
+    if (-not $global:MemLabsRunId) {
+        $global:MemLabsRunId = '{0:yyyyMMdd-HHmmss}-{1}' -f (Get-Date), $PID
+    }
+}
+
+function Get-JsonLogEscaped {
+    # Minimal RFC-8259 string escaping for a single JSON value. The text has
+    # already been stripped of control/non-ASCII chars (except TAB) upstream in
+    # Write-Log, so in practice this only escapes ", \ and TAB -- but it stays
+    # correct for any residual control char.
+    param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) { return '' }
+    $sb = [System.Text.StringBuilder]::new($Value.Length + 8)
+    foreach ($ch in $Value.ToCharArray()) {
+        switch ($ch) {
+            '"' { [void]$sb.Append('\"') }
+            '\' { [void]$sb.Append('\\') }
+            "`n" { [void]$sb.Append('\n') }
+            "`r" { [void]$sb.Append('\r') }
+            "`t" { [void]$sb.Append('\t') }
+            default {
+                if ([int]$ch -lt 32) { [void]$sb.Append(('\u{0:x4}' -f [int]$ch)) }
+                else { [void]$sb.Append($ch) }
+            }
+        }
+    }
+    return $sb.ToString()
+}
+
 function Get-LogBufferEntry {
     param([string]$Path)
     if (-not $global:LogBuffers.ContainsKey($Path)) {
@@ -390,7 +432,7 @@ function Invoke-LogRotateIfNeeded {
     # Only rotate the base VMBuild.log (menu log). Domain-specific deploy
     # logs (VMBuild.<domain>.log) get a fresh file per deployment via the
     # timestamp-rename in New-Lab.ps1 and should never be split mid-build.
-    if ($Path -notmatch '[/\\]VMBuild\.log$') { return }
+    if ($Path -notmatch '[/\\]VMBuild\.(log|jsonl)$') { return }
     try {
         $entry = $global:LogBuffers[$Path]
         if ($entry) {
@@ -861,6 +903,39 @@ function Write-Log {
 
                 if ($forceFlush -or $sizeFlush -or $ageFlush) {
                     Flush-LogBuffer -Path $logPath
+                }
+
+                # Lean JSON sidecar line (<logbase>.jsonl). Reuses the same
+                # buffer + flush machinery keyed by the .jsonl path, so the
+                # size/age/force/exit flush and Flush-LogBuffer -All all cover
+                # it for free. Only non-redundant fields are emitted; 'at' is
+                # added just for WARN/ERROR/VERBOSE (the lines you investigate)
+                # so bulk INFO stays compact.
+                if ($Script:JsonLogEnabled) {
+                    $jsonPath = [System.IO.Path]::ChangeExtension($logPath, '.jsonl')
+                    $lvlName = switch ($logLevel) { 0 { 'VERBOSE' } 2 { 'WARN' } 3 { 'ERROR' } default { 'INFO' } }
+                    $domVal = $null
+                    $leaf = [System.IO.Path]::GetFileName($logPath)
+                    if ($leaf -match '^VMBuild\.(.+)\.log$') { $domVal = $Matches[1] }
+                    $jb = [System.Text.StringBuilder]::new(192)
+                    [void]$jb.Append('{"t":"').Append([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')).Append('"')
+                    [void]$jb.Append(',"lvl":"').Append($lvlName).Append('"')
+                    [void]$jb.Append(',"comp":"').Append((Get-JsonLogEscaped $caller)).Append('"')
+                    if ($domVal) { [void]$jb.Append(',"dom":"').Append((Get-JsonLogEscaped $domVal)).Append('"') }
+                    [void]$jb.Append(',"run":"').Append($global:MemLabsRunId).Append('"')
+                    if ($tid -and $tid -ne 1) { [void]$jb.Append(',"tid":').Append($tid) }
+                    if ($logLevel -ne 1 -and $file) {
+                        $atVal = ($file -replace ':\s*line\s*', ':').Trim()
+                        if ($atVal) { [void]$jb.Append(',"at":"').Append((Get-JsonLogEscaped $atVal)).Append('"') }
+                    }
+                    [void]$jb.Append(',"msg":"').Append((Get-JsonLogEscaped $Text)).Append('"}')
+
+                    $jsonEntry = Get-LogBufferEntry -Path $jsonPath
+                    [void]$jsonEntry.Builder.Append($jb.ToString()).Append("`n")
+                    $jsonAge = ([DateTime]::UtcNow - $jsonEntry.LastFlushUtc).TotalSeconds
+                    if ($forceFlush -or $jsonEntry.Builder.Length -ge $Script:LogBufferMaxBytes -or $jsonAge -ge $Script:LogBufferMaxAgeSeconds) {
+                        Flush-LogBuffer -Path $jsonPath
+                    }
                 }
             }
         }

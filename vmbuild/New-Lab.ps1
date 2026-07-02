@@ -630,9 +630,29 @@ try {
     try { Flush-LogBuffer -All } catch { }
     $Common.LogPath = $domainLogPath
 
-    #Rename the old log.
+    # The deploy config JSON is written to a sidecar file next to the log
+    # (<logbase>.config.json) instead of a giant single line inside the log,
+    # so the log stays readable/greppable while the deployment remains
+    # self-contained.
+    $configSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".config.json")
+    $jsonlSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".jsonl")
+
+    #Rename the old log (and its config/jsonl sidecars) with a shared timestamp so history is preserved and they stay matched.
     try {
-        Get-ChildItem $Common.LogPath -ErrorAction SilentlyContinue | Rename-Item -NewName { $_.BaseName + (Get-Date -Format "yyyyMMdd-HHmmss") + $_.Extension }
+        $rotateStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $logStem = [System.IO.Path]::GetFileNameWithoutExtension($Common.LogPath)
+        if (Test-Path $Common.LogPath) {
+            $logItem = Get-Item $Common.LogPath
+            Rename-Item -Path $logItem.FullName -NewName ($logItem.BaseName + $rotateStamp + $logItem.Extension) -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $configSidecar) {
+            # Match the rotated log's stem: VMBuild.<domain><stamp>.config.json
+            Rename-Item -Path $configSidecar -NewName ($logStem + $rotateStamp + ".config.json") -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $jsonlSidecar) {
+            # Match the rotated log's stem: VMBuild.<domain><stamp>.jsonl
+            Rename-Item -Path $jsonlSidecar -NewName ($logStem + $rotateStamp + ".jsonl") -ErrorAction SilentlyContinue
+        }
     }
     catch {
         Write-Log -verbose "Could not rename existing $($Common.LogPath)"
@@ -657,8 +677,16 @@ try {
     Write-Log "Host PID: $PID | Parent PID: $((Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId)" -LogOnly
     Write-Log "StartPhase: $StartPhase | Phase: $Phase" -LogOnly
     Write-Log "----------------------------------------" -LogOnly
-    Write-Log "Deploy config JSON:" -LogOnly
-    Write-Log ($deployConfig | ConvertTo-Json -Depth 10 -Compress) -LogOnly
+    try {
+        # Pretty-print (no -Compress) to the sidecar so it's readable + diffable.
+        ($deployConfig | ConvertTo-Json -Depth 10) | Set-Content -Path $configSidecar -Encoding UTF8 -ErrorAction Stop
+        Write-Log "Deploy config JSON written to: $configSidecar" -LogOnly
+    }
+    catch {
+        # Fall back to inline if the sidecar can't be written, so the deployment stays self-contained.
+        Write-Log "Deploy config JSON (sidecar write failed: $($_.Exception.Message)):" -LogOnly
+        Write-Log ($deployConfig | ConvertTo-Json -Depth 10 -Compress) -LogOnly
+    }
     Write-Log "========================================" -LogOnly
     try { Flush-LogBuffer -Path $Common.LogPath } catch { }
 
