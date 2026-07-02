@@ -278,8 +278,15 @@ function Enable-Office {
     if ($clients.Count -eq 0) {
         $clients = @(Add-DomainMemberClient -Config $Config -BaseName 'OFFCLI')
     }
-    foreach ($vm in $clients) { $vm | Add-Member -NotePropertyName 'installOffice' -NotePropertyValue 'Current' -Force }
-    Write-Host "  [Office] cmOptions.PrePopulateObjects=true; installOffice=Current on: $(@($clients | ForEach-Object { $_.vmName }) -join ', ')" -ForegroundColor Green
+    # Office deploys via SCCM, so each target needs the client agent pushed to it.
+    # Set pushClient=$true per-VM (Get-UserConfiguration resolves it to a real site
+    # code) so validation doesn't strip installOffice -- required when the config's
+    # cmOptions.pushClientToDomainMembers is false (e.g. legacy CSTest configs).
+    foreach ($vm in $clients) {
+        $vm | Add-Member -NotePropertyName 'installOffice' -NotePropertyValue 'Current' -Force
+        $vm | Add-Member -NotePropertyName 'pushClient'    -NotePropertyValue $true     -Force
+    }
+    Write-Host "  [Office] cmOptions.PrePopulateObjects=true; installOffice=Current + pushClient=true on: $(@($clients | ForEach-Object { $_.vmName }) -join ', ')" -ForegroundColor Green
 }
 
 function Set-FeatureOverrides {
