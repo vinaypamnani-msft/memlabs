@@ -988,7 +988,22 @@ try {
                     $deployConfig = ConvertTo-DeployConfigEx -DeployConfig $deployConfig
                 }
                 if ($i -eq 2) {
-                    # PKI: orchestrate CA installation post-Phase2 (single-tier or two-tier).
+                    # Linux DNS flip from bootstrap public DNS (1.1.1.1) to the
+                    # DC happens inside Start-PhaseDeployment for Phase 2 -- it
+                    # must run before the proxy client config / enforcement so
+                    # the Proxy is fully configured before clients route to it.
+                }
+                if ($i -eq 3) {
+                    # PKI: orchestrate CA installation post-Phase3 (single-tier or two-tier).
+                    # Deliberately run AFTER Phase 3 (not immediately after Phase 2): the CA
+                    # publish writes to the freshly-promoted DC's Configuration NC, which
+                    # rejects writes with 0x80072082 ERROR_DS_RANGE_CONSTRAINT for a transient
+                    # post-dcpromo window. Letting Phase 3 (media download/prep) run first gives
+                    # the DC extra settle time so the common case installs on the first attempt;
+                    # the in-guest write-probe gate + retry/remediation loop still wait the window
+                    # out if it hasn't closed yet. Phase 3 consumes no PKI certs (the first cert
+                    # consumer is the Phase 8 HTTPS flip), so deferring one phase costs no
+                    # autoenrollment lead time in practice.
                     # Only trigger for NEW VMs (non-hidden). If only existing/hidden VMs have
                     # InstallCA, PKI is already deployed and should not be re-orchestrated.
                     $hasPKI = @($deployConfig.virtualMachines | Where-Object { $_.InstallCA -and -not $_.hidden }).Count -gt 0
@@ -1000,11 +1015,6 @@ try {
                             break
                         }
                     }
-
-                    # Linux DNS flip from bootstrap public DNS (1.1.1.1) to the
-                    # DC happens inside Start-PhaseDeployment for Phase 2 -- it
-                    # must run before the proxy client config / enforcement so
-                    # the Proxy is fully configured before clients route to it.
                 }
                 if ($i -eq 5) {
                     # Validate SQLAO health immediately after Phase 5 DSC so
