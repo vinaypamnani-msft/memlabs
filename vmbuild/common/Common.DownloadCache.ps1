@@ -506,6 +506,49 @@ function Dismount-IsoFromVm {
     }
 }
 
+function Dismount-IsoFromAllVMs {
+    # Host-wide safety gate: eject a specific ISO (by full path) from EVERY VM's DVD
+    # drive BEFORE the host deletes / re-downloads that ISO on disk. A VM that still
+    # has the ISO mounted locks the file (the delete/redownload then fails and leaves a
+    # stale copy) and, if the file were swapped underneath it, would read torn content.
+    # So any re-download of an ISO we manage must first confirm no VM has it mounted --
+    # this makes that true by ejecting it. Ejects ONLY the drive(s) whose media is this
+    # exact path; leaves every other mounted ISO and every empty drive untouched. Never
+    # throws (Hyper-V unavailable / access denied -> logs and returns). Returns the list
+    # of VM names it ejected the ISO from (empty when nothing was mounted).
+    param(
+        [Parameter(Mandatory)][string]$IsoPath
+    )
+    $ejected = New-Object System.Collections.Generic.List[string]
+    $target = $IsoPath
+    try { $target = [System.IO.Path]::GetFullPath($IsoPath) } catch { }
+    try {
+        $vms = @(Get-VM -ErrorAction SilentlyContinue)
+    }
+    catch {
+        Write-Log -LogOnly "Dismount-IsoFromAllVMs: Get-VM failed ($($_.Exception.Message)); skipping mount check for $IsoPath"
+        return $ejected
+    }
+    foreach ($vm in $vms) {
+        try {
+            foreach ($d in @(Get-VMDvdDrive -VMName $vm.Name -ErrorAction SilentlyContinue)) {
+                if (-not $d.Path) { continue }
+                $mounted = $d.Path
+                try { $mounted = [System.IO.Path]::GetFullPath($d.Path) } catch { }
+                if ($mounted -ieq $target) {
+                    Set-VMDvdDrive -VMName $vm.Name -ControllerNumber $d.ControllerNumber -ControllerLocation $d.ControllerLocation -Path $null -ErrorAction SilentlyContinue
+                    $ejected.Add($vm.Name)
+                    Write-Log "Ejected ISO '$IsoPath' from VM '$($vm.Name)' (state: $($vm.State)) before re-download." -Warning
+                }
+            }
+        }
+        catch {
+            Write-Log -LogOnly "Dismount-IsoFromAllVMs: eject from $($vm.Name) failed: $($_.Exception.Message)"
+        }
+    }
+    return $ejected
+}
+
 function Mount-MemlabsCacheIsoToVm {
     # Mount the cache ISO read-only on a VM's DVD drive. Idempotent + per-drive +
     # multi-drive via Mount-IsoOnVm: reuses an empty drive, or adds its own drive

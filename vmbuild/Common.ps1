@@ -8275,6 +8275,20 @@ function Get-FileWithHash {
     $fileNameLeaf = Split-Path $FileName -Leaf
     $localImagePath = Join-Path $Common.AzureFilesPath $FileName
     $localImageHashPath = "$localImagePath.$hashAlg"
+    $isIso = $fileNameLeaf -like '*.iso'
+
+    # Before deleting/overwriting an ISO we manage, confirm no VM still has it mounted
+    # (a mounted ISO locks the file, so the delete + redownload would fail and leave a
+    # stale copy). Ejects the exact ISO from every VM's DVD drive; no-op for non-ISO
+    # files and when the helper/Hyper-V isn't available.
+    $ejectIsoBeforeRedownload = {
+        if ($isIso -and -not $WhatIf -and (Get-Command Dismount-IsoFromAllVMs -ErrorAction SilentlyContinue)) {
+            $ejectedFrom = @(Dismount-IsoFromAllVMs -IsoPath $localImagePath)
+            if ($ejectedFrom.Count -gt 0) {
+                Write-Log "Ejected '$fileNameLeaf' from $($ejectedFrom.Count) VM(s) before re-download: $($ejectedFrom -join ', ')" -Warning
+            }
+        }
+    }
 
     $return = [PSCustomObject]@{
         success  = $true
@@ -8306,6 +8320,7 @@ function Get-FileWithHash {
                 Write-Log -logonly "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
                 if ($ForceDownload.IsPresent) {
                     Write-WhiteI "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
+                    & $ejectIsoBeforeRedownload
                     Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
                     $return.download = $true
                 }
@@ -8323,6 +8338,7 @@ function Get-FileWithHash {
                     # re-run (the next deploy's verify pass then re-downloads it).
                     if (-not $WhatIf -and -not (Test-FileEdgeReadable -Path $localImagePath)) {
                         Write-OrangePoint "Cached $FileName passed the hash-marker check but FAILED a CRC edge-read probe (corrupt on disk). Purging file + hash marker and redownloading..."
+                        & $ejectIsoBeforeRedownload
                         Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
                         Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
                         $return.download = $true
@@ -8336,6 +8352,7 @@ function Get-FileWithHash {
             }
             else {
                 Write-OrangePoint "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
+                & $ejectIsoBeforeRedownload
                 Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
                 Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
                 $return.download = $true

@@ -4459,6 +4459,7 @@ $global:VM_Config = {
         $dscResumeMax = 1                  # gentle in-place resumes before escalating a stranded PendingConfiguration to a reboot
         $lastLcmSampleTime = [DateTime]::MinValue  # throttle for the guest LCM-state poll
         $certPulseDone = $false   # one-shot guard for the PKI cert pre-stage handshake
+        $sqlSetupSummaryDumped = $false   # one-shot: dump SQL Setup Summary.txt to the build log on the first SQL-install stall
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Started Monitoring $($currentItem.role) configuration."
         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Ready and Waiting for job progress"
@@ -5169,6 +5170,60 @@ $global:VM_Config = {
                             # the pending config IN PLACE via Stop + Start-DscConfiguration -UseExisting (no reboot --
                             # pending.mof is already on disk). Tier 2 (if it's STILL stranded a window later): restart
                             # the VM so the boot-resume path re-applies pending.mof. Respect a running ScriptWorkflow task.
+
+                            # SQL install stall: when DSC_SqlSetup fails it re-stages pending.mof, so a SQL-install
+                            # stall shows up here as a stranded PendingConfiguration. Pull the SQL Setup Summary.txt
+                            # (and the referenced component log) into the build log so the operator sees the ACTUAL
+                            # setup error instead of just the frozen "Installing 'SQL Server ...'" status. On a
+                            # non-recoverable failure -- corrupt install media (MSI 1335 'the cabinet file ... is
+                            # corrupt') -- every resume re-reads the same bad file and loops until the phase times
+                            # out, so fail the VM fast with a clear remediation instead of resuming.
+                            if (-not $sqlSetupSummaryDumped -and $currentStatus -match 'SQL Server') {
+                                $sqlSum = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -ScriptBlock {
+                                    $sum = Get-ChildItem 'C:\Program Files\Microsoft SQL Server\*\Setup Bootstrap\Log\Summary.txt' -ErrorAction SilentlyContinue |
+                                        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                                    if (-not $sum) { return $null }
+                                    $text = @(Get-Content -LiteralPath $sum.FullName -ErrorAction SilentlyContinue)
+                                    $grab = { param($rx) @($text | Where-Object { $_ -match $rx }) }
+                                    $exit = (& $grab 'Exit code \(Decimal\):|Exit code \(HRESULT\):' | Select-Object -First 2) -join ' | '
+                                    $final = & $grab 'Final result:'
+                                    $compErr = & $grab 'Component error code:'
+                                    $errDesc = & $grab 'Error description:'
+                                    $compLog = @(& $grab 'Component log file:' | ForEach-Object { ($_ -split ':', 2)[1].Trim() })
+                                    $compTail = $null
+                                    if ($compLog.Count -gt 0 -and (Test-Path -LiteralPath $compLog[0])) {
+                                        $compTail = (@(Get-Content -LiteralPath $compLog[0] -Tail 40 -ErrorAction SilentlyContinue)) -join "`r`n"
+                                    }
+                                    $hard = $false
+                                    foreach ($d in $errDesc) { if ($d -match 'corrupt|cannot be used|cabinet') { $hard = $true } }
+                                    foreach ($c in $compErr) { if ($c -match '(^|\D)1335(\D|$)') { $hard = $true } }
+                                    [pscustomobject]@{
+                                        Path      = $sum.FullName
+                                        LastWrite = $sum.LastWriteTime
+                                        Fresh     = ($sum.LastWriteTime -gt (Get-Date).AddMinutes(-60))
+                                        Exit      = ("" + $exit).Trim()
+                                        Final     = ("" + ($final | Select-Object -First 1)).Trim()
+                                        CompErr   = (($compErr | ForEach-Object { $_.Trim() }) -join '; ')
+                                        ErrDesc   = (($errDesc | ForEach-Object { $_.Trim() }) -join '; ')
+                                        CompLog   = ($compLog -join '; ')
+                                        CompTail  = $compTail
+                                        IsHard    = $hard
+                                        Full      = ($text -join "`r`n")
+                                    }
+                                } -SuppressLog
+                                if (-not $sqlSum.ScriptBlockFailed -and $sqlSum.ScriptBlockOutput) {
+                                    $s = $sqlSum.ScriptBlockOutput
+                                    $sqlSetupSummaryDumped = $true
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): SQL Setup FAILED. $($s.Final); $($s.Exit); $($s.CompErr); $($s.ErrDesc); log: $($s.CompLog)" -Warning -OutputStream
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): SQL Setup Summary.txt ($($s.Path), written $($s.LastWrite)):`r`n$($s.Full)" -LogOnly
+                                    if ($s.CompTail) { Write-Log "[Phase $Phase]: $($currentItem.vmName): SQL Setup component log tail:`r`n$($s.CompTail)" -LogOnly }
+                                    if ($s.IsHard -and $s.Fresh) {
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: SQL Server setup hit a NON-RECOVERABLE error ($($s.ErrDesc)) -- resuming would loop on the same fault. This is corrupt install media: verify/replace the SQL ISO (its cabinet is corrupt), then re-run Phase $Phase." -Failure -OutputStream
+                                        break
+                                    }
+                                }
+                            }
+
                             $swTaskRunning = $false
                             $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
                                 $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
