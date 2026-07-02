@@ -709,8 +709,28 @@ try {
             Write-Log "Failed to download tools to inject inside Virtual Machines." -Warning
         }
     }
- 
-    if ($runPhase1) {
+
+    # The downloaded artifacts (OS base images, SQL/OS ISOs, CM media) are consumed by
+    # deploy phases 1-8. Historically the download/verify pass only ran when Phase 1 was
+    # scheduled (new VMs to create), so a phased re-run (-StartPhase / -Phase) that skips
+    # Phase 1 never verified the files -- a missing or on-disk-corrupt SQL ISO wasn't
+    # caught here and the guest SQL install in Phase 4 would loop on the bad media forever
+    # (MSI 1335 / setup exit -2068052681). Run the verify pass whenever ANY file-consuming
+    # phase (1-8) will actually execute, honoring the same -Phase/-SkipPhase/-StartPhase/
+    # -StopPhase filters the phase loop below uses. The pass is cheap on healthy files
+    # (reads the .MD5 marker + a CRC edge-probe; only re-hashes/re-downloads corrupt or
+    # missing files), so this adds no meaningful time to a healthy re-run.
+    $needFiles = $false
+    for ($fp = 1; $fp -le 8; $fp++) {
+        if ($Phase -and $fp -notin $Phase) { continue }
+        if ($SkipPhase -and $fp -in $SkipPhase) { continue }
+        if ($StartPhase -and $fp -lt $StartPhase) { continue }
+        if ($StopPhase -and $fp -gt $StopPhase) { continue }
+        $needFiles = $true
+        break
+    }
+
+    if ($runPhase1 -or $needFiles) {
         # Download required files
         $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
         if (-not $success) {
