@@ -669,6 +669,42 @@ function Get-UserConfiguration {
             }
         }
 
+        # Every Primary site MUST have a DP and an MP. If none is configured for a
+        # Primary's site (no dedicated SiteSystem DP/MP, no pull DP, and the Primary
+        # itself hasn't opted in), auto-enable the missing role ON THE PRIMARY so the
+        # site is functional. Recording it in the config (rather than relying solely
+        # on the deploy-time site-server fallback) makes the intent visible and keeps
+        # Phase 11 validation satisfied. Only Primaries present in this config are
+        # considered, so add-to-existing (where the Primary is a hidden existing VM)
+        # is untouched. CAS sites host no DP/MP and are skipped.
+        foreach ($vm in $config.virtualMachines) {
+            if ($vm.Role -ne "Primary") { continue }
+            $primarySiteCode = $vm.siteCode
+            if ([string]::IsNullOrWhiteSpace($primarySiteCode)) { continue }
+
+            $siteHasDP = $config.virtualMachines | Where-Object { $_.siteCode -eq $primarySiteCode -and $_.installDP -eq $true } | Select-Object -First 1
+            if (-not $siteHasDP) {
+                Write-Log "Get-UserConfiguration: No DP configured for site $primarySiteCode; enabling installDP on Primary $($vm.vmName)." -LogOnly
+                if ($null -eq $vm.installDP) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
+                }
+                else {
+                    $vm.installDP = $true
+                }
+            }
+
+            $siteHasMP = $config.virtualMachines | Where-Object { $_.siteCode -eq $primarySiteCode -and $_.installMP -eq $true } | Select-Object -First 1
+            if (-not $siteHasMP) {
+                Write-Log "Get-UserConfiguration: No MP configured for site $primarySiteCode; enabling installMP on Primary $($vm.vmName)." -LogOnly
+                if ($null -eq $vm.installMP) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
+                }
+                else {
+                    $vm.installMP = $true
+                }
+            }
+        }
+
         # Migrate root-level cmOptions onto the top-level site server VM.
         # Runs last so the legacy-shape reads above still see $config.cmOptions.
         Move-CmOptionsToTopLevelSiteServer -Config $config
