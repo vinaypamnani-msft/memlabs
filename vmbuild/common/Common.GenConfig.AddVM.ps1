@@ -468,6 +468,10 @@ function Add-NewVMForRole {
                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS" -force
             }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
+            # A Primary can optionally host its own DP/MP in addition to dedicated
+            # SiteSystem DPs (e.g. to serve as a Pull DP source). Default both off.
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installDP' -Value $false -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $false -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr Primary Site" -force
 
             $virtualMachine.Memory = "10GB"

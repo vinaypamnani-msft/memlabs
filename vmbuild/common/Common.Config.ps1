@@ -496,13 +496,19 @@ function Get-UserConfiguration {
                 if ($null -eq $vm.InstallSUP) {
                     $vm | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $false -Force
                 }
-                if ($vm.Role -eq "SiteSystem") {
+                # InstallDP / InstallMP are valid on a SiteSystem AND on a Primary: a
+                # Primary can host its own DP/MP in ADDITION to dedicated SiteSystem DPs
+                # (e.g. so it can serve as a Pull DP's source). Default both to false so
+                # the properties exist and are editable / readable everywhere.
+                if ($vm.Role -in "SiteSystem", "Primary") {
                     if ($null -eq $vm.InstallMP) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $false -Force
                     }
                     if ($null -eq $vm.InstallDP) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
                     }
+                }
+                if ($vm.Role -eq "SiteSystem") {
                     if ($null -eq $vm.InstallSMSProv) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
                     }
@@ -638,6 +644,27 @@ function Get-UserConfiguration {
                 if ($vm.Role -eq "SiteSystem") {
                     $vm | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
                     $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
+                }
+            }
+        }
+
+        # Auto-heal Pull DP sources: a Pull DP's source MUST be an installed DP,
+        # otherwise Add-CMDistributionPoint -SourceDistributionPoint fails ("No object
+        # corresponds to the specified parameters") and the pull DP never installs. If
+        # the source is a site server (Primary/Secondary/SiteSystem) that isn't yet
+        # flagged as a DP, enable installDP on it so the pull DP has a real source. A
+        # source that still can't be a DP (e.g. a non-site-server role) is left alone
+        # and hard-fails config validation.
+        foreach ($vm in $config.virtualMachines) {
+            if ([string]::IsNullOrWhiteSpace($vm.pullDPSourceDP)) { continue }
+            $srcVM = $config.virtualMachines | Where-Object { $_.vmName -eq $vm.pullDPSourceDP } | Select-Object -First 1
+            if ($srcVM -and ($srcVM.Role -in "Primary", "Secondary", "SiteSystem") -and (-not $srcVM.installDP)) {
+                Write-Log "Get-UserConfiguration: Pull DP [$($vm.vmName)] source [$($srcVM.vmName)] is not a DP; enabling installDP on the source." -LogOnly
+                if ($null -eq $srcVM.installDP) {
+                    $srcVM | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
+                }
+                else {
+                    $srcVM.installDP = $true
                 }
             }
         }

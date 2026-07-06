@@ -103,6 +103,28 @@ foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -eq "Site
     }
 }
 
+# The site server (this Primary) can host its OWN DP/MP in ADDITION to any
+# dedicated SiteSystem DPs, when installDP / installMP are set on the Primary role.
+# Previously the site server only became a DP via the "no DP in this site" fallback
+# at the very bottom; an explicit installDP makes it a real, declared DP (which also
+# lets it serve as a valid Pull DP source). ThisVM is the box running this script.
+if ($ThisVM -and $ThisVM.role -eq "Primary") {
+    if ($ThisVM.installDP -and -not ($DPs.ServerName -contains $ThisVM.vmName) -and -not ($PullDPs.ServerName -contains $ThisVM.vmName)) {
+        Write-DscStatus "Primary site server '$($ThisVM.vmName)' has installDP -- adding its own DP in site $SiteCode"
+        $DPs += [PSCustomObject]@{
+            ServerName     = $ThisVM.vmName
+            ServerSiteCode = $SiteCode
+        }
+    }
+    if ($ThisVM.installMP -and -not ($MPs.ServerName -contains $ThisVM.vmName)) {
+        Write-DscStatus "Primary site server '$($ThisVM.vmName)' has installMP -- adding its own MP in site $SiteCode"
+        $MPs += [PSCustomObject]@{
+            ServerName     = $ThisVM.vmName
+            ServerSiteCode = $SiteCode
+        }
+    }
+}
+
 # Trim nulls/blanks
 $DPNames = $DPs.ServerName | Where-Object { $_ -and $_.Trim() }
 $PullDPNames = $PullDPs.ServerName | Where-Object { $_ -and $_.Trim() }

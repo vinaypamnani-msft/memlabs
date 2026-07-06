@@ -1338,6 +1338,22 @@ function Test-ValidRoleSiteSystem {
             Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which does not match Source DP [$($source.vmName)] sitecode [$($source.siteCode)]" -ReturnObject $ReturnObject -Warning
         }
 
+        # A Pull DP's source MUST itself be an installed, standard (non-pull) DP.
+        # Otherwise Add-CMDistributionPoint -SourceDistributionPoint throws "No object
+        # corresponds to the specified parameters" and the pull DP never installs. The
+        # source can be a dedicated SiteSystem DP or a site server (Primary) with
+        # installDP enabled. This is a hard FAIL -- a pull DP with a non-DP source is a
+        # broken config that would silently never provision.
+        if (-not $source) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] Pull DP source [$($VM.pullDPSourceDP)] was not found in the configuration or domain." -ReturnObject $ReturnObject -Failure
+        }
+        elseif (-not $source.installDP) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] Pull DP source [$($source.vmName)] is not a Distribution Point (installDP is not enabled). A Pull DP's source must be an installed DP." -ReturnObject $ReturnObject -Failure
+        }
+        elseif ($source.enablePullDP) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] Pull DP source [$($source.vmName)] is itself a Pull DP. A Pull DP's source must be a standard (non-pull) DP." -ReturnObject $ReturnObject -Failure
+        }
+
     }
 
 }
