@@ -3780,6 +3780,32 @@ function Test-CMSiteFunctionality {
                 }
             }
 
+            # 3b. Per-member IsClient snapshot. This is the value CM's policy
+            # provider reads to decide whether to project per-resource application
+            # deployment policy (CCM_ApplicationCIAssignment) to a member. colleval
+            # snapshots IsClient from SMS_R_System.Client when the resource is first
+            # ADDED to the collection; a plain RequestRefresh doesn't always rewrite
+            # it for existing members. When Client=1 but IsClient=0, the site
+            # silently skips projecting the Office assignment to that client -- the
+            # exact "member but no policy" Phase 11 WARN. Surface it here every run.
+            foreach ($e in $expected) {
+                try {
+                    $rsys = Get-WmiObject -Namespace $ns -Class SMS_R_System -Filter "NetbiosName='$e'" -ErrorAction Stop | Select-Object -First 1
+                    if (-not $rsys) { $results.Details.Add("INFO: IsClient[$e]: not discovered (no SMS_R_System row)"); continue }
+                    $fcm = Get-WmiObject -Namespace $ns -Class SMS_FullCollectionMembership -Filter "CollectionID='$($col.CollectionID)' AND ResourceID=$($rsys.ResourceID)" -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($rsys.Client -eq 1 -and $fcm -and -not $fcm.IsClient) {
+                        $results.Details.Add("WARN: IsClient[$e]: Client=1 but membership IsClient=0 (STALE snapshot) -- site will NOT project the Office assignment here until IsClient is refreshed (drop+re-add membership / bump the query rule)")
+                    }
+                    elseif ($fcm) {
+                        $results.Details.Add("INFO: IsClient[$e]: Client=$($rsys.Client) IsClient=$($fcm.IsClient) ResourceID=$($rsys.ResourceID)")
+                    }
+                    else {
+                        $results.Details.Add("INFO: IsClient[$e]: Client=$($rsys.Client) (not yet in collection membership)")
+                    }
+                }
+                catch { $results.Details.Add("INFO: IsClient[$e]: check skipped: $($_.Exception.Message)") }
+            }
+
             # 4. Deployment exists targeting this collection
             $results.Details.Add("CMD: Get-WmiObject -Namespace '$ns' -Class SMS_ApplicationAssignment -Filter `"TargetCollectionID='$($col.CollectionID)'`"")
             try {
@@ -6684,6 +6710,148 @@ function Test-DomainMemberFunctionality {
         if ($officeResult.ScriptBlockOutput -is [hashtable] -and $officeResult.ScriptBlockOutput.Details) {
             foreach ($detail in $officeResult.ScriptBlockOutput.Details) {
                 $result.ScriptBlockOutput.Details.Add($detail)
+            }
+        }
+
+        # HOST-SIDE DIAGNOSTIC: if the client couldn't see the Office deployment
+        # policy, reach into the managing Primary and collect the SERVER-side
+        # projection state for THIS specific client, so the WARN carries the
+        # root-cause data instead of a guess. The decisive signals:
+        #   - SMS_R_System.Client                    (does CM know it's a client?)
+        #   - SMS_FullCollectionMembership.IsClient  (the snapshot policypv reads;
+        #     when Client=1 but IsClient=0 the site skips projecting per-resource
+        #     app policy -> the exact "member but no assignment" symptom)
+        #   - SMS_CIAssignmentTargetedMachines       (is the assignment PROJECTED
+        #     to this ResourceID at all? present => server projected it, so the
+        #     gap is client-side pull; absent => server-side projection gap)
+        # This runs on the Primary (host has Invoke-VmCommand to it); a client
+        # scriptblock cannot see the site database.
+        $officeWarned = ($officeResult.ScriptBlockOutput -is [hashtable] -and $officeResult.ScriptBlockOutput.Details -and
+            @($officeResult.ScriptBlockOutput.Details | Where-Object { $_ -match 'Office deployment policy not visible' }).Count -gt 0)
+        if ($officeWarned) {
+            # Resolve the Primary that owns this client's Office deployment: prefer
+            # the Primary whose siteCode matches the client's push site, else the
+            # parent Primary of that site, else the first Primary in the config.
+            $pushSite = $CurrentItem.pushClient
+            $diagPrimary = $null
+            if ($pushSite -and $pushSite -ne $false) {
+                $diagPrimary = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'Primary' -and $_.siteCode -eq $pushSite } | Select-Object -First 1
+                if (-not $diagPrimary) {
+                    $secForSite = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'Secondary' -and $_.siteCode -eq $pushSite } | Select-Object -First 1
+                    if ($secForSite -and $secForSite.parentSiteCode) {
+                        $diagPrimary = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'Primary' -and $_.siteCode -eq $secForSite.parentSiteCode } | Select-Object -First 1
+                    }
+                }
+            }
+            if (-not $diagPrimary) {
+                $diagPrimary = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'Primary' } | Select-Object -First 1
+            }
+            if ($diagPrimary -and $diagPrimary.siteCode) {
+                $result.ScriptBlockOutput.Details.Add("DIAG: collecting server-side Office projection state for $VMName from Primary $($diagPrimary.vmName) [site $($diagPrimary.siteCode)]...")
+                $officeServerDiag = {
+                    param($sc, $clientName)
+                    $d = [System.Collections.Generic.List[string]]::new()
+                    $ns = "root\SMS\site_$sc"
+                    $colName = 'MEMLABS-Office Install Targets'
+                    try {
+                        $col = Get-WmiObject -Namespace $ns -Class SMS_Collection -Filter "Name='$colName'" -ErrorAction Stop | Select-Object -First 1
+                    }
+                    catch { $d.Add("DIAG: SMS_Collection query failed on Primary: $($_.Exception.Message)"); return , @($d) }
+                    if (-not $col) { $d.Add("DIAG: collection '$colName' not found on Primary"); return , @($d) }
+                    $cid = $col.CollectionID
+                    $d.Add("DIAG: collection '$colName' = $cid (MemberCount=$($col.MemberCount))")
+
+                    $rid = $null
+                    try {
+                        $r = Get-WmiObject -Namespace $ns -Class SMS_R_System -Filter "NetbiosName='$clientName'" -ErrorAction Stop | Select-Object -First 1
+                    }
+                    catch { $r = $null }
+                    if ($r) {
+                        $rid = $r.ResourceID
+                        $d.Add("DIAG: SMS_R_System[$clientName] ResourceID=$rid Client=$($r.Client) Obsolete=$($r.Obsolete) Active=$($r.Active) ClientVersion=$($r.ClientVersion)")
+                    }
+                    else {
+                        $d.Add("DIAG: SMS_R_System[$clientName] NO ROW -- client not discovered by CM")
+                    }
+
+                    if ($rid) {
+                        try {
+                            $mem = Get-WmiObject -Namespace $ns -Class SMS_FullCollectionMembership -Filter "CollectionID='$cid' AND ResourceID=$rid" -ErrorAction Stop | Select-Object -First 1
+                        }
+                        catch { $mem = $null }
+                        if ($mem) {
+                            $d.Add("DIAG: SMS_FullCollectionMembership[$cid].IsClient=$($mem.IsClient) for $clientName (policypv skips per-resource app policy when IsClient=0)")
+                            if ($r -and $r.Client -eq 1 -and -not $mem.IsClient) {
+                                $d.Add("DIAG: >>> ROOT CAUSE: Client=1 but IsClient=0 (stale membership snapshot). colleval snapshots IsClient at ADD time; a plain RequestRefresh may not rewrite it for existing members. Remedy: drop+re-add membership (bump the query rule) or Clear+re-eval so IsClient is re-snapshotted from Client.")
+                            }
+                        }
+                        else {
+                            $d.Add("DIAG: $clientName (ResourceID=$rid) is NOT in SMS_FullCollectionMembership for $cid -- not a member")
+                        }
+                    }
+
+                    try {
+                        $ass = Get-WmiObject -Namespace $ns -Class SMS_ApplicationAssignment -Filter "TargetCollectionID='$cid'" -ErrorAction Stop | Select-Object -First 1
+                    }
+                    catch { $ass = $null }
+                    if ($ass) {
+                        $d.Add("DIAG: Assignment '$($ass.AssignmentName)' AssignmentID=$($ass.AssignmentID) Enabled=$($ass.AssignmentEnabled) LastModified=$($ass.LastModificationTime)")
+                        try {
+                            $tm = @(Get-WmiObject -Namespace $ns -Class SMS_CIAssignmentTargetedMachines -Filter "AssignmentID=$($ass.AssignmentID)" -ErrorAction Stop)
+                            $d.Add("DIAG: assignment projected to $($tm.Count) machine(s) (SMS_CIAssignmentTargetedMachines)")
+                            if ($rid) {
+                                if (@($tm | Where-Object { $_.ResourceID -eq $rid }).Count -gt 0) {
+                                    $d.Add("DIAG: assignment IS projected to $clientName (ResourceID=$rid) -> server-side policy EXISTS; the gap is client-side (policy download / policy reset needed on the client)")
+                                }
+                                else {
+                                    $d.Add("DIAG: assignment is NOT projected to $clientName (ResourceID=$rid) -> SERVER-SIDE projection gap (IsClient / policypv not writing the CCM_ApplicationCIAssignment)")
+                                }
+                            }
+                        }
+                        catch { $d.Add("DIAG: SMS_CIAssignmentTargetedMachines query failed: $($_.Exception.Message)") }
+                    }
+                    else {
+                        $d.Add("DIAG: no SMS_ApplicationAssignment targets $cid")
+                    }
+
+                    try {
+                        $cdr = Get-WmiObject -Namespace $ns -Class SMS_CombinedDeviceResources -Filter "Name='$clientName'" -ErrorAction Stop | Select-Object -First 1
+                        if ($cdr) { $d.Add("DIAG: SMS_CombinedDeviceResources[$clientName] LastPolicyRequest=$($cdr.LastPolicyRequest) LastActiveTime=$($cdr.LastActiveTime) ClientState=$($cdr.ClientState) IsActive=$($cdr.IsActive)") }
+                    }
+                    catch {}
+
+                    # policypv.log tail: shows whether the site is (re)projecting policy.
+                    try {
+                        $inst = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction SilentlyContinue).'Installation Directory'
+                        if ($inst) {
+                            $pv = Join-Path $inst 'Logs\policypv.log'
+                            if (Test-Path $pv) {
+                                $d.Add("DIAG: policypv.log (last write $((Get-Item $pv).LastWriteTime.ToString('HH:mm:ss'))) tail:")
+                                foreach ($ln in @(Get-Content $pv -Tail 5 -ErrorAction SilentlyContinue)) {
+                                    $m = $ln; if ($ln -match '\[LOG\[(.*?)\]LOG\]') { $m = $Matches[1] }
+                                    $d.Add("    $($m.Substring(0, [Math]::Min(140, $m.Length)))")
+                                }
+                            }
+                        }
+                    }
+                    catch {}
+
+                    return , @($d)
+                }
+                try {
+                    $srvDiag = Invoke-VmCommand -VmName $diagPrimary.vmName -VmDomainName $domain `
+                        -ScriptBlock $officeServerDiag -ArgumentList $diagPrimary.siteCode, $VMName `
+                        -DisplayName "Phase11-Office-ServerDiag" -SuppressLog -AsJob -TimeoutSeconds 180
+                    if ($srvDiag.ScriptBlockOutput) {
+                        foreach ($ln in @($srvDiag.ScriptBlockOutput)) { $result.ScriptBlockOutput.Details.Add($ln) }
+                    }
+                    else {
+                        $result.ScriptBlockOutput.Details.Add("DIAG: server-side Office diagnostic on $($diagPrimary.vmName) returned no output (see build log)")
+                    }
+                }
+                catch {
+                    $result.ScriptBlockOutput.Details.Add("DIAG: server-side Office diagnostic on $($diagPrimary.vmName) failed: $($_.Exception.Message)")
+                }
             }
         }
     }
