@@ -756,6 +756,18 @@ function Install-PullDP {
         #=================
         $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         if (-not $dpinstalled) {
+            # The source DP MUST already be an installed standard DP, otherwise
+            # Add-CMDistributionPoint -SourceDistributionPoint throws a terminating
+            # "No object corresponds to the specified parameters" that aborts the
+            # caller. Guard here so a not-yet-ready source degrades to a retry/skip
+            # instead of taking down the whole InstallDPMPClient run.
+            $sourceDPObj = Get-CMDistributionPoint -SiteSystemServerName $SourceDPFQDN -SiteCode $ServerSiteCode
+            if (-not $sourceDPObj) {
+                Write-DscStatus "Pull DP source '$SourceDPFQDN' is not an installed Distribution Point yet; cannot add pull DP $DPFQDN this pass."
+                if ($i -gt 10) { $installFailure = $true }
+                else { Start-Sleep -Seconds 30 }
+                continue
+            }
             Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role as a Pull DP, with Source DP $SourceDPFQDN."
             $Date = [DateTime]::Now.AddYears(30)
             if ($usePKI) {

@@ -209,6 +209,27 @@ foreach ($MP in $MPs) {
     Install-MP -ServerFQDN $MPFQDN -ServerSiteCode $MP.ServerSiteCode -usePKI:$usePKI
 }
 
+# A Pull DP requires its Source DP to already be an INSTALLED standard DP.
+# Add-CMDistributionPoint -EnablePullDP -SourceDistributionPoint throws
+# "No object corresponds to the specified parameters" (a terminating error that
+# aborts this whole script) when the source isn't a DP yet. The source is
+# frequently the site server itself (e.g. the Primary), which is NOT in $DPs and
+# only gets a DP from the "force install DP on Site Server" fallback further
+# below -- code that never runs once the pull-DP add throws. That leaves the site
+# with no DP and the pull DP permanently uninstalled. Install every unique pull-DP
+# source as a standard DP FIRST so the source object exists before we add pull DPs.
+$EnsuredSourceDPs = @{}
+foreach ($PDP in $PullDPs) {
+    if ([string]::IsNullOrWhiteSpace($PDP.ServerName)) { continue }
+    if ([string]::IsNullOrWhiteSpace($PDP.SourceDP)) { continue }
+    $SourceDPFQDN = $PDP.SourceDP.Trim() + "." + $DomainFullName
+    if ($EnsuredSourceDPs.ContainsKey($SourceDPFQDN)) { continue }
+    $EnsuredSourceDPs[$SourceDPFQDN] = $true
+    if (-not (Get-CMDistributionPoint -SiteSystemServerName $SourceDPFQDN -SiteCode $PDP.ServerSiteCode)) {
+        Write-DscStatus "Pull DP source '$SourceDPFQDN' is not a Distribution Point yet. Installing standard DP on the source first (required before adding pull DPs)."
+        Install-DP -ServerFQDN $SourceDPFQDN -ServerSiteCode $PDP.ServerSiteCode -usePKI:$usePKI
+    }
+}
 
 foreach ($PDP in $PullDPs) {
 
