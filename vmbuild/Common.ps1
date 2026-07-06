@@ -3310,6 +3310,7 @@ function New-VmNote {
             role                 = $ThisVM.role
             deployedOS           = $ThisVM.operatingSystem
             domain               = $DeployConfig.vmOptions.domainName
+            domainNetBiosName    = $DeployConfig.vmOptions.domainNetBiosName
             adminName            = $DeployConfig.vmOptions.adminName
             network              = $network
             prefix               = $DeployConfig.vmOptions.prefix
@@ -3416,6 +3417,41 @@ function Get-VMNote {
         Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return $null
     }
+}
+
+function Get-DomainNetbiosName {
+    <#
+    .SYNOPSIS
+        Resolve the authoritative NetBIOS domain name for a MemLabs domain from its
+        persisted VM notes -- NEVER derived from the DNS FQDN (wrong in a disjoint
+        namespace where the NetBIOS name differs from the DNS first label).
+    .DESCRIPTION
+        Set-VMNote stamps domainNetBiosName (the value the domain was actually created
+        with, i.e. deployConfig.vmOptions.domainNetBiosName -> Phase 2 ADDomain
+        DomainNetBiosName) onto every VM note of the domain. This reads it back so a
+        CROSS-domain caller (e.g. a forest-trust peer) can get the correct NetBIOS name
+        of another domain on the host by reading that domain's notes instead of guessing
+        from its FQDN. Returns $null when no note carries the value (caller may then fall
+        back to the DNS label with a warning).
+    .PARAMETER DomainName
+        DNS/FQDN of the domain whose NetBIOS name is wanted.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$DomainName
+    )
+    try {
+        $vms = @(Get-List -Type VM -DomainName $DomainName -SmartUpdate | Where-Object { $_.domainNetBiosName })
+        if ($vms.Count -eq 0) { return $null }
+        # Prefer the DC's note (the canonical per-domain record); else any VM in the domain.
+        $dc = @($vms | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1)
+        $pick = if ($dc) { $dc } else { @($vms | Select-Object -First 1) }
+        if ($pick -and $pick.domainNetBiosName) { return [string]$pick.domainNetBiosName }
+    }
+    catch {
+        Write-Log "Get-DomainNetbiosName failed for '$DomainName': $($_.Exception.Message)" -LogOnly -Verbose
+    }
+    return $null
 }
 
 function Set-VMNote {

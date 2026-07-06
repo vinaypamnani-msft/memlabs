@@ -4306,12 +4306,68 @@ function Test-SiteSystemFunctionality {
 
             $results.Details.Add("CMD: Get-SmbShare -Name 'SMS_DP`$'")
             $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
-            if (-not $share) {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: SMB share 'SMS_DP`$' missing -- content library not initialized")
+            if ($share) {
+                $results.Details.Add("OK: SMB share 'SMS_DP`$' exposes '$($share.Path)'")
             }
             else {
-                $results.Details.Add("OK: SMB share 'SMS_DP`$' exposes '$($share.Path)'")
+                # Share not published yet. On a fresh deploy DistMgr provisions the DP
+                # content library (the ?:\SMS_DP$ folder + SMS_DP$ share + IIS vdirs)
+                # asynchronously from the site server, so the share can legitimately be
+                # absent while the install is still in flight -- this mirrors the
+                # site-server-side "DP not yet visible in SMS_DistributionPointInfo
+                # (install may still be propagating)" WARN that the Primary's own Phase 11
+                # job already emits. Per the "only soften if we can validate it's in
+                # progress AND working" rule, ONLY downgrade to WARN when we have positive
+                # LOCAL proof the DP role install reached this box AND has not failed;
+                # with no such evidence (or a logged init failure) keep the hard FAIL.
+                $inProgress = New-Object System.Collections.Generic.List[string]
+                $fatal      = New-Object System.Collections.Generic.List[string]
+
+                # (a) DP role registry key -- written when the DP provider is provisioned
+                #     (same key Common.Config reads for the DP's "Site Code").
+                if (Test-Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP') {
+                    $inProgress.Add('DP registry key HKLM:\SOFTWARE\Microsoft\SMS\DP present')
+                }
+
+                # (b) content-library folder -- the SMS_DP$ share maps here and the folder
+                #     tree is laid down during provisioning (drives per Capture-WorkingPkiDp).
+                $dpDir = $null
+                foreach ($drv in @('E:', 'F:', 'D:', 'G:', 'C:')) {
+                    $cand = "$drv\SMS_DP`$"
+                    if (Test-Path -LiteralPath $cand) { $dpDir = $cand; break }
+                }
+                if ($dpDir) { $inProgress.Add("content library folder '$dpDir' exists") }
+
+                # (c) smsdpprov.log -- a recent last-write proves active progress; scan the
+                #     tail for a terminal content-library-init failure (=> genuinely broken).
+                if ($dpDir) {
+                    $dpLog = "$dpDir\sms\logs\smsdpprov.log"
+                    if (Test-Path -LiteralPath $dpLog) {
+                        try {
+                            $lw = (Get-Item -LiteralPath $dpLog -ErrorAction Stop).LastWriteTime
+                            $ageMin = [int]((Get-Date) - $lw).TotalMinutes
+                            $inProgress.Add("smsdpprov.log last-write ${ageMin}m ago")
+                            $tail = @(Get-Content -LiteralPath $dpLog -Tail 25 -ErrorAction SilentlyContinue)
+                            $bad = @($tail | Where-Object { $_ -match 'Failed to create the content library|CreateContentLibrary.*fail|fatal error' })
+                            if ($bad.Count -gt 0) { $fatal.Add($bad[-1].Trim()) }
+                        }
+                        catch {}
+                    }
+                }
+
+                if ($fatal.Count -gt 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: SMB share 'SMS_DP`$' missing and smsdpprov.log reports a content-library init failure: $($fatal[-1])")
+                }
+                elseif ($inProgress.Count -gt 0) {
+                    # In progress with no logged failure -> WARN, do NOT fail (self-heals on
+                    # the next Phase 11 pass once DistMgr publishes the share).
+                    $results.Details.Add("WARN: SMB share 'SMS_DP`$' not published yet -- DP content library still initializing (in progress: $($inProgress -join '; ')). DistMgr publishes the share when provisioning completes; re-run Phase 11 to confirm.")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: SMB share 'SMS_DP`$' missing and no DP install activity detected (no DP registry key / content library folder) -- content library not initialized")
+                }
             }
 
             # WDS service for PXE -- optional. memlabs DPs may be created
@@ -5236,11 +5292,17 @@ function Test-ForestTrustFunctionality {
     }
 
     $forestTrustScript = {
-        param($localDomain, $remoteForest, $remoteDcFqdn, $externalSiteCode)
+        param($localDomain, $remoteForest, $remoteDcFqdn, $externalSiteCode, $remoteNetbios)
 
         # Informational: Passed stays $true so the trust checks never fail the DC.
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-        $remoteNetbios = ($remoteForest -split '\.')[0]
+        # $remoteNetbios is the TRUE NetBIOS name of the trusted forest, resolved on the host
+        # from that domain's persisted VM notes and passed in -- NEVER derived from the DNS
+        # FQDN (disjoint namespaces differ). It's used for NETBIOS\principal checks below.
+        # $remoteDnsShort is the DNS first label, used ONLY for CA-name matching, because
+        # MemLabs names CAs '<dns-first-label>-<vm>-CA' regardless of the NetBIOS name.
+        $remoteDnsShort = ($remoteForest -split '\.')[0]
+        if ([string]::IsNullOrWhiteSpace($remoteNetbios)) { $remoteNetbios = $remoteDnsShort }
         $localDcFqdn = "$env:COMPUTERNAME.$localDomain"
 
         # --- A1: Forest trust object ---
@@ -5357,16 +5419,18 @@ function Test-ForestTrustFunctionality {
         }
 
         # --- C1: Remote root CA trusted in the enterprise Root + NTAuth stores ---
-        $results.Details.Add("CMD: certutil -store -enterprise Root / NTAuth (looking for '$remoteNetbios-')")
+        # CA CN follows the '<dns-first-label>-<vm>-CA' naming convention, so match on the
+        # DNS short name (NOT the NetBIOS name, which can differ in a disjoint namespace).
+        $results.Details.Add("CMD: certutil -store -enterprise Root / NTAuth (looking for '$remoteDnsShort-')")
         try {
             $rootStore = & certutil -store -enterprise Root 2>&1 | Out-String
             $ntauthStore = & certutil -store -enterprise NTAuth 2>&1 | Out-String
-            $needle = [regex]::Escape("$remoteNetbios-")
+            $needle = [regex]::Escape("$remoteDnsShort-")
             if ($rootStore -match $needle) {
-                $results.Details.Add("OK: Remote CA '$remoteNetbios-*' present in enterprise Root store")
+                $results.Details.Add("OK: Remote CA '$remoteDnsShort-*' present in enterprise Root store")
             }
             else {
-                $results.Details.Add("WARN: Remote CA '$remoteNetbios-*' NOT found in enterprise Root store (InstallRootCertificate dspublish RootCA may have failed)")
+                $results.Details.Add("WARN: Remote CA '$remoteDnsShort-*' NOT found in enterprise Root store (InstallRootCertificate dspublish RootCA may have failed)")
             }
             if ($ntauthStore -match $needle) {
                 $results.Details.Add("OK: Remote CA present in enterprise NTAuth store")
@@ -5386,7 +5450,7 @@ function Test-ForestTrustFunctionality {
             $caContainer = [ADSI]"LDAP://CN=Certification Authorities,CN=Public Key Services,CN=Services,$configNC"
             $names = @()
             foreach ($c in $caContainer.Children) { $names += [string]$c.Properties['cn'].Value }
-            if (@($names | Where-Object { $_ -like "$remoteNetbios-*" }).Count -gt 0) {
+            if (@($names | Where-Object { $_ -like "$remoteDnsShort-*" }).Count -gt 0) {
                 $results.Details.Add("OK: Remote root CA published in local AD Certification Authorities [$($names -join ', ')]")
             }
             else {
@@ -5447,8 +5511,17 @@ function Test-ForestTrustFunctionality {
         return $results
     }
 
+    # Resolve the trusted forest's TRUE NetBIOS name from its persisted VM notes (host-side).
+    # Never derive it from the FQDN -- a disjoint-namespace forest's NetBIOS name differs from
+    # its DNS first label. Fall back to the DNS label only when no note carries the value.
+    $remoteNetbios = Get-DomainNetbiosName -DomainName $remoteForest
+    if ([string]::IsNullOrWhiteSpace($remoteNetbios)) {
+        $remoteNetbios = ($remoteForest -split '\.')[0]
+        Write-Log "[Phase $Phase] $VMName [ForestTrust]: no persisted NetBIOS name for '$remoteForest'; falling back to DNS label '$remoteNetbios'" -LogOnly
+    }
+
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $forestTrustScript -ArgumentList @($domain, $remoteForest, $remoteDcFqdn, $externalSiteCode) `
+        -ScriptBlock $forestTrustScript -ArgumentList @($domain, $remoteForest, $remoteDcFqdn, $externalSiteCode, $remoteNetbios) `
         -DisplayName "Phase11-ForestTrust-Test" -SuppressLog -AsJob -TimeoutSeconds 300
 
     $null = Format-TestResult -VMName $VMName -RoleLabel 'ForestTrust' -Result $result

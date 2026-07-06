@@ -450,7 +450,22 @@ if ($blmEnabled) {
     }
 
     $blmGroup       = 'BLM Helpdesk Users'
-    $netbios        = ($DomainFullName -split '\.')[0]
+    # Authoritative NetBIOS domain name -- deployConfig.vmOptions.domainNetBiosName is the
+    # single source of truth (it is what Phase 2 actually created the domain with via the
+    # ADDomain resource's DomainNetBiosName). NEVER derive it from the FQDN: in a disjoint
+    # namespace the NetBIOS name differs from the DNS first label (e.g. DNS
+    # 'wacky.sandwich.lab' with NetBIOS 'TACO'). If the field is somehow absent, fall back to
+    # AD's authoritative Get-ADDomain.NetBIOSName (we run on the domain-joined primary), NOT
+    # the DNS label. Used BOTH for the pre-qualified group names AND -- critically -- for the
+    # installer's -DomainName parameter, which the MBAM installer feeds VERBATIM into
+    # Get-DomainMachineName as "{DomainName}\{COMPUTERNAME}$" to CREATE LOGIN the site-server
+    # machine account on (possibly remote) SQL. That name MUST be the NetBIOS domain (SQL's
+    # LookupAccountName rejects the DNS-suffix form 'contoso.dns.suffix\HOST$' with 'Windows
+    # NT user or group ... not found'). See the -DomainName pass-through below.
+    $netbios        = $deployConfig.vmOptions.domainNetBiosName
+    if ([string]::IsNullOrWhiteSpace($netbios)) {
+        try { $netbios = (Get-ADDomain -ErrorAction Stop).NetBIOSName } catch { }
+    }
     $qualifiedGroup = "$netbios\$blmGroup"
     $localServerFqdn = "$env:COMPUTERNAME.$DomainFullName"
     $cmDbName       = "CM_$SiteCode"
@@ -849,7 +864,17 @@ if ($blmEnabled) {
                     '-SiteInstall','Both'
                     '-HelpdeskUsersGroupName',"`"$qualifiedGroup`""
                     '-HelpdeskAdminsGroupName',"`"$qualifiedGroup`""
-                    '-DomainName',$DomainFullName
+                    # MUST be the NetBIOS domain name, NOT the FQDN. The installer's
+                    # Get-DomainMachineName builds the SQL login as
+                    # "{0}\{1}$" -f $DomainName, $env:COMPUTERNAME and (on the REMOTE-SQL path
+                    # only -- local SQL uses NETWORK SERVICE) runs CREATE LOGIN for it on the
+                    # SQL box. Passing the FQDN produced 'pushlab.sandwich.lab\PL-MELT$', which
+                    # SQL's LookupAccountName cannot resolve -> 'Windows NT user or group ... not
+                    # found' -> Set-MachineUserOnSql fails -> whole portal install rolls back
+                    # (the observed PL-MELT BLM failure). The installer's own error text says to
+                    # pass the NetBIOS name here. -DomainName is used for nothing else (the
+                    # Helpdesk groups are passed pre-qualified above).
+                    '-DomainName',$netbios
                 )
                 # Named instance: pass -SqlInstanceName separately and ensure
                 # SQL Browser is running on the SQL host (required for instance
