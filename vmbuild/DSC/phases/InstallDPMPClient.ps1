@@ -270,18 +270,38 @@ foreach ($PDP in $PullDPs) {
     Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN -usePKI:$usePKI
 }
 
-# Force install DP/MP on PS Site Server if none present
+# Force install DP/MP on PS Site Server ONLY when the site has no dedicated DP/MP.
+# The whole point of a standalone DPMP is to keep those roles OFF the Primary, so
+# we must NOT fall back onto the site server whenever a dedicated DP/MP is
+# configured for this site -- even if it hasn't registered in CM yet at this
+# instant (avoids a race where the site server grabs the role the DPMP is meant to
+# own). The fallback only fires for a genuinely DP/MP-less site (e.g. a minimal
+# Primary-only config with no SiteSystem DPMP).
 $dpCount = (Get-CMDistributionPoint -SiteCode $SiteCode | Measure-Object).Count
 $mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
 
+$configuredDPsThisSite = @($DPs | Where-Object { $_.ServerSiteCode -eq $SiteCode }).Count `
+    + @($PullDPs | Where-Object { $_.ServerSiteCode -eq $SiteCode }).Count
+$configuredMPsThisSite = @($MPs | Where-Object { $_.ServerSiteCode -eq $SiteCode }).Count
+
 if ($dpCount -eq 0) {
-    Write-DscStatus "No DP's were found in this site. Forcing DP install on Site Server $ThisMachineName"
-    Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
+    if ($configuredDPsThisSite -eq 0) {
+        Write-DscStatus "No DP's found or configured in site $SiteCode. Forcing DP install on Site Server $ThisMachineName"
+        Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
+    }
+    else {
+        Write-DscStatus "No DP registered in site $SiteCode yet, but $configuredDPsThisSite dedicated DP(s) are configured -- NOT forcing a DP onto site server $ThisMachineName (the standalone DP owns this role)."
+    }
 }
 
 if ($mpCount -eq 0) {
-    Write-DscStatus "No MP's were found in this site. Forcing MP install on Site Server $ThisMachineName"
-    Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
+    if ($configuredMPsThisSite -eq 0) {
+        Write-DscStatus "No MP's found or configured in site $SiteCode. Forcing MP install on Site Server $ThisMachineName"
+        Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
+    }
+    else {
+        Write-DscStatus "No MP registered in site $SiteCode yet, but $configuredMPsThisSite dedicated MP(s) are configured -- NOT forcing an MP onto site server $ThisMachineName (the standalone MP owns this role)."
+    }
 }
 
 # Mark completed
