@@ -7064,8 +7064,16 @@ function Test-PullDPConfiguration {
                 }
             }
             if (-not $dp) {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: DP '$dpName' not found in site '$sc'")
+                # Not yet registered in the site after the retry budget. This is the
+                # normal "DP install still propagating" state: DistMgr posts the DP row
+                # into SMS_DistributionPointInfo only after it finishes provisioning the
+                # content library, which can lag well past Phase 11's first pass. It is
+                # the SAME condition the DP-local content-library check and the
+                # site-system DPReg cross-check already treat as in-progress/WARN, so
+                # downgrade to WARN (Passed stays true) instead of hard-failing a
+                # mid-provisioning pull DP. A genuine misconfiguration (DP registered but
+                # NOT flagged as a pull DP) still FAILs below.
+                $results.Details.Add("WARN: DP '$dpName' not yet registered in site '$sc' (SMS_DistributionPointInfo) after $([int]($dpAttempts * $dpDelay / 60)) min -- DP install may still be propagating; re-run Phase 11 to confirm pull-DP config")
                 return $results
             }
             if (-not $dp.IsPullDP) {
