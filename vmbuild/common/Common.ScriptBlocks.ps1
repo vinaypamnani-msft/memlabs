@@ -2311,8 +2311,95 @@ $global:VM_Config = {
                                 }
                             }
                             if ($retryCount -eq 2) {
+                                # Stronger recovery before giving up. An APIPA-stuck guest
+                                # adapter frequently will NOT take a lease from a plain
+                                # 'ipconfig /renew' (retries 0/1) -- the DHCP client is
+                                # wedged in the fallback state. Force a full release +
+                                # adapter restart (a clean DORA from scratch) IN-GUEST, and
+                                # make sure the host scope is Active before the last check.
+                                try {
+                                    Write-Progress2 $Activity -Status "Resetting guest network adapter on $($currentItem.vmName)" -percentcomplete 11 -force
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Still APIPA after NIC reconnect; forcing full guest adapter reset (release/restart/renew)." -Warning -OutputStream
+
+                                    # An Inactive scope hands out nothing -> guest falls to
+                                    # APIPA. Re-activate it if it somehow went Inactive.
+                                    try {
+                                        $scopeState = Get-DhcpServerv4Scope -ScopeId $currentNetwork -ErrorAction SilentlyContinue
+                                        if ($scopeState -and $scopeState.State -ne 'Active') {
+                                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP scope $currentNetwork state is '$($scopeState.State)'; re-activating." -Warning -OutputStream
+                                            Set-DhcpServerv4Scope -ScopeId $currentNetwork -State Active -ErrorAction SilentlyContinue
+                                        }
+                                    }
+                                    catch { }
+
+                                    # Full guest-side DORA. The PSDirect (VMBus) session is
+                                    # NOT over IP, so restarting the guest NIC is safe -- it
+                                    # doesn't drop our management channel.
+                                    $null = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "ResetGuestNet" -ScriptBlock {
+                                        try { ipconfig /release | Out-Null } catch { }
+                                        Start-Sleep -Seconds 2
+                                        try { Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -or $_.Status -eq 'Disconnected' } | Restart-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+                                        Start-Sleep -Seconds 6
+                                        try { ipconfig /renew | Out-Null } catch { }
+                                    }
+                                    Start-Sleep -Seconds 12
+                                }
+                                catch {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Guest adapter reset attempt threw: $($_.Exception.Message)" -Warning -OutputStream
+                                }
+                            }
+                            if ($retryCount -eq 3) {
                                 $count = (Get-VMSwitch).Count
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Could not obtain a DHCP IP Address ($ip) Should be on $($currentNetwork) ($count Hyper-V switches in use. If this is over 20, this could be the issue)" -Failure -OutputStream
+
+                                # ---- Rich diagnostics so the next occurrence is actionable ----
+                                # host-side NIC binding (right switch? connected?)
+                                try {
+                                    $diagNic = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction SilentlyContinue
+                                    foreach ($n in @($diagNic)) {
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG host NIC '$($n.Name)' Switch='$($n.SwitchName)' Connected=$($n.Connected) MAC=$($n.MacAddress)" -OutputStream
+                                    }
+                                }
+                                catch { }
+                                # host-side scope state + exhaustion
+                                try {
+                                    $diagScope = Get-DhcpServerv4Scope -ScopeId $currentNetwork -ErrorAction SilentlyContinue
+                                    if ($diagScope) {
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG DHCP scope $currentNetwork State=$($diagScope.State) Range=$($diagScope.StartRange)-$($diagScope.EndRange)" -OutputStream
+                                        $diagStats = Get-DhcpServerv4ScopeStatistics -ScopeId $currentNetwork -ErrorAction SilentlyContinue
+                                        if ($diagStats) {
+                                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG DHCP scope stats Free=$($diagStats.Free) InUse=$($diagStats.InUse) Reserved=$($diagStats.Reserved) PercentInUse=$($diagStats.PercentageInUse)" -OutputStream
+                                        }
+                                    }
+                                    else {
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG DHCP scope $currentNetwork NOT FOUND on host DHCP server." -OutputStream
+                                    }
+                                }
+                                catch { }
+                                # host-side reservation for this VM's MAC
+                                try {
+                                    $diagMac = Get-VMMacIsolated -VmName $currentItem.vmName -ExcludeCluster
+                                    if ($diagMac) {
+                                        $diagResv = Get-DhcpServerv4Reservation -ScopeId $currentNetwork -ErrorAction SilentlyContinue | Where-Object { ($_.ClientId -replace '-', '') -eq ($diagMac -replace '-', '') }
+                                        if ($diagResv) {
+                                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG reservation for MAC $diagMac -> $($diagResv.IPAddress)" -OutputStream
+                                        }
+                                        else {
+                                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG no DHCP reservation found for MAC $diagMac in scope $currentNetwork." -OutputStream
+                                        }
+                                    }
+                                }
+                                catch { }
+                                # guest-side ipconfig /all (to the build log)
+                                try {
+                                    $diagGuest = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "DiagIpconfig" -ScriptBlock { ipconfig /all | Out-String }
+                                    if ($diagGuest -and $diagGuest.ScriptBlockOutput) {
+                                        foreach ($gline in ($diagGuest.ScriptBlockOutput -split "`r?`n")) {
+                                            if ($gline.Trim()) { Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG guest ipconfig: $($gline.Trim())" -LogOnly }
+                                        }
+                                    }
+                                }
+                                catch { }
                                 return
                             }
                             $retryCount++
