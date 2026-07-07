@@ -30,14 +30,27 @@ $Fix_LocalAdminAccount = {
     }
 }
 
-$fixesToPerform += [PSCustomObject]@{
-    FixName           = "Fix_LocalAdminAccount"
-    FixVersion        = "240710"
-    NeededOnFreshDeploy = $true
-    AppliesToExisting   = $true
-    AppliesToRoles    = @()
-    NotAppliesToRoles = @("DC", "OSDClient", "AADClient")
-    DependentVMs      = @()
-    ScriptBlock       = $Fix_LocalAdminAccount
-    ArgumentList      = @($Common.LocalAdmin.GetNetworkCredential().Password)
+# Defense-in-depth: Initialize-Storage now fails fast (Common.ps1) when the
+# vmbuildadmin credential can't be obtained, so $Common.LocalAdmin should never be
+# $null by the time maintenance runs. This guard is the second layer: the
+# ArgumentList below is evaluated at descriptor-load time (when Get-VMFixes
+# dot-sources every Fix*.ps1), so a bare $Common.LocalAdmin.GetNetworkCredential()
+# on a null LocalAdmin would throw "You cannot call a method on a null-valued
+# expression" and abort the ENTIRE fix sweep -- not just this fix. Skip
+# registering this fix instead; it is idempotent and re-applies once creds load.
+if ($null -ne $Common.LocalAdmin) {
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix_LocalAdminAccount"
+        FixVersion        = "240710"
+        NeededOnFreshDeploy = $true
+        AppliesToExisting   = $true
+        AppliesToRoles    = @()
+        NotAppliesToRoles = @("DC", "OSDClient", "AADClient")
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_LocalAdminAccount
+        ArgumentList      = @($Common.LocalAdmin.GetNetworkCredential().Password)
+    }
+}
+else {
+    Write-Log "Fix_LocalAdminAccount: `$Common.LocalAdmin is null (storage/credential init incomplete); skipping this fix this pass." -Warning
 }

@@ -9089,6 +9089,22 @@ if (-not $Common.Initialized) {
                 Write-Log "failed to get the storage JSON file. Using Offline Mode" -Warning
             }
 
+            # Fail fast if the local admin (vmbuildadmin) credential could not be obtained.
+            # Offline mode is only viable when that credential is ALREADY cached on disk
+            # (Common.CachePath\vmbuildadmin.txt). If it is not, either storage init was
+            # short-circuited before Get-LocalAdminCredential ran (missing cached
+            # fileList/productID) or the SAS token is expired -- and nothing downstream
+            # (Set-VMNote, Invoke-VmCommand, the Fix_* maintenance fixes, DSC) can work
+            # without it. Stop here with an actionable message instead of limping into
+            # maintenance and dying with an opaque "You cannot call a method on a
+            # null-valued expression" from $Common.LocalAdmin.GetNetworkCredential().
+            if (-not $InJob -and -not $effectiveSkipStorageInit -and $null -eq $Common.LocalAdmin) {
+                if ([string]::IsNullOrWhiteSpace($Common.FatalError)) {
+                    $Common.FatalError = "Local admin credential (vmbuildadmin) is unavailable. In offline mode it must be cached at '$(Join-Path $Common.CachePath 'vmbuildadmin.txt')'. Your storage config / SAS token has likely expired -- refresh the storage config (update your token and re-run) before deploying."
+                }
+                Write-Log "Critical: $($Common.FatalError)" -Failure
+            }
+
 
             if ((-not $InJob -or $GetLatestHotfixVersion) -and -not $effectiveSkipMaintenanceRefresh -and -not $common.OfflineMode) {
                 Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
