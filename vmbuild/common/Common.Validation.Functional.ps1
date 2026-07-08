@@ -359,6 +359,15 @@ function Test-VmFunctionality {
         $testsPassed = Test-LinuxSmbAccess -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
+    # ---- Linux domain-join validation ----
+    # For a Linux VM with joinDomain=true: verify it actually realm-joined the
+    # lab AD domain. Informational (WARN, never fails the VM) with full
+    # diagnostics on failure -- the usual root cause is DNS not pointing at the DC.
+    if ($testsPassed -and $vmIsLinux -and ($CurrentItem.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$CurrentItem.joinDomain) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying AD domain join"
+        $null = Test-LinuxDomainJoin -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
     # ---- Proxy validation ----
     # 1) For the Proxy VM itself: verify Squid is listening on TCP 3128.
     if ($testsPassed -and $role -eq 'Proxy') {
@@ -9206,6 +9215,96 @@ function Test-LinuxSmbAccess {
     }
 
     $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: OK - Samba accessible on $vmIp:445"; Level = 'Success' })
+    return $true
+}
+
+function Test-LinuxDomainJoin {
+    <#
+    .SYNOPSIS
+        Phase 11 check for a Linux VM with joinDomain=true: verify it actually
+        realm-joined the lab AD domain.
+    .DESCRIPTION
+        Runs over SSH (Invoke-LinuxVmCommand). Considers the VM joined when
+        `realm list` reports the domain (authoritative -- realm only lists a
+        domain once sssd is configured against it). On success emits OK.
+
+        On failure it gathers the actionable diagnostics -- sssd active-state,
+        /etc/krb5.keytab presence, the resolver (which DC/DNS the box is using),
+        whether the DC name resolves + is pingable, and `adcli testjoin` -- so the
+        common root cause (resolver not pointing at the DC -> "Couldn't find
+        usable domain controller") is visible in the build log. Informational
+        only: always returns $true (never fails the VM); the WARN reaches the
+        console via the Phase 11 output buffer. joinDomain is a best-effort lab
+        convenience and the realm-join script is idempotent, so a re-run of
+        Phase 3 re-attempts the join.
+    .OUTPUTS
+        Boolean: always $true (informational).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $RoleLabel = $CurrentItem.role
+    $domain = $DeployConfig.vmOptions.domainName
+    $domainLower = if ($domain) { $domain.ToLower() } else { $domain }
+
+    if (-not (Get-Command Invoke-LinuxVmCommand -ErrorAction SilentlyContinue)) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Domain-join check skipped (Invoke-LinuxVmCommand unavailable)" -LogOnly
+        return $true
+    }
+
+    $vmIp = Get-LinuxVmIPAddress -VmName $VMName
+    if (-not $vmIp) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Domain-join check skipped (no IP from KVP)" -LogOnly
+        return $true
+    }
+
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Verifying AD domain join ($domain)" -LogOnly
+
+    # Authoritative check: realm list reports the joined domain.
+    $realmProbe = Invoke-LinuxVmCommand -VMName $VMName -IPAddress $vmIp -Sudo -TimeoutSeconds 30 `
+        -DisplayName 'Phase11-realm-list' `
+        -BashCommand "realm list --name-only 2>/dev/null || true"
+    $realmOut = ''
+    if ($realmProbe -and $realmProbe.ScriptBlockOutput) { $realmOut = ($realmProbe.ScriptBlockOutput | Out-String) }
+
+    if ($domainLower -and ($realmOut -match [regex]::Escape($domainLower))) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - realm-joined to $domain" -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: OK - joined to AD domain $domain"; Level = 'Success' })
+        return $true
+    }
+
+    # Not joined -- collect diagnostics so the root cause is in the build log.
+    # DC IP: memlabs convention <network>.1 (same derivation the realm-join uses).
+    $netBase = $CurrentItem.network
+    if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
+    $dcIp = ''
+    if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') { $dcIp = "$($Matches[1]).1" }
+
+    $diagCmd = @"
+echo '=== realm list ==='; realm list 2>&1 || echo '(realm not joined / not installed)'
+echo '=== sssd active ==='; systemctl is-active sssd 2>&1
+echo '=== keytab ==='; ls -l /etc/krb5.keytab 2>&1 || echo '(no /etc/krb5.keytab)'
+echo '=== resolver ==='; (resolvectl status 2>/dev/null | grep -E 'DNS Servers|DNS Domain' || cat /etc/resolv.conf) 2>&1
+echo '=== DNS: $domainLower ==='; getent hosts '$domainLower' 2>&1 || echo '(domain name does not resolve)'
+echo '=== DC ping ($dcIp) ==='; (test -n '$dcIp' && ping -c1 -W2 '$dcIp' >/dev/null 2>&1 && echo 'DC $dcIp reachable' || echo 'DC $dcIp NOT reachable') 2>&1
+echo '=== adcli testjoin ==='; adcli testjoin '$domainLower' 2>&1 || echo '(adcli testjoin failed)'
+"@
+    $diag = Invoke-LinuxVmCommand -VMName $VMName -IPAddress $vmIp -Sudo -TimeoutSeconds 60 `
+        -DisplayName 'Phase11-domainjoin-diag' -BashCommand $diagCmd
+    if ($diag -and $diag.ScriptBlockOutput) {
+        foreach ($line in ($diag.ScriptBlockOutput -split "`n")) {
+            $t = $line.TrimEnd()
+            if ($t) { Write-Log "[Phase $Phase] $VMName [$RoleLabel]: dj-diag> $t" -LogOnly }
+        }
+    }
+
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - joinDomain=true but not joined to $domain. Most common cause is DNS: the VM's resolver must point at the DC ($dcIp) so it can find the AD SRV records. Re-run '-StartPhase 3' after the DC's DNS is serving; the realm-join is idempotent. See dj-diag lines in the build log." -Warning
+    $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: WARN - NOT joined to AD domain $domain (joinDomain=true) -- likely DNS/DC reachability; see dj-diag in log"; Level = 'Warning' })
     return $true
 }
 
