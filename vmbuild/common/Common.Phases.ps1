@@ -895,6 +895,7 @@ function Start-PhaseJobs {
     # Determine single vs. multi-DSC
     $multiNodeDsc = $true
     $ConfigurationData = $null
+    $linuxDispatchOnly = $false
     if ($Phase -gt 1 -and $Phase -lt 10) {
         $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
         if (-not $ConfigurationData) {
@@ -932,6 +933,12 @@ function Start-PhaseJobs {
 
             Write-Log "[Phase $Phase] No Windows DSC nodes, but Linux VM(s) require this phase; proceeding to per-VM Linux dispatch." -LogOnly
             $multiNodeDsc = $false
+            # Linux-only fall-through: there is NO Windows DSC work this phase, so
+            # the loop must dispatch ONLY the Linux/Proxy per-VM jobs and skip every
+            # Windows VM (including the DC). Without this the DC would fall through
+            # to a single-node Windows DSC dispatch and fail on a missing
+            # Phase3DC.ps1 (the DC has no standalone Phase-3 config).
+            $linuxDispatchOnly = $true
         }
         elseif ($ConfigurationData.AllNodes.NodeName -contains "LOCALHOST") {
             $multiNodeDsc = $false
@@ -1544,6 +1551,20 @@ function Start-PhaseJobs {
             ($Phase -gt 3 -or ($Phase -eq 2 -and $currentItem.role -ne 'Proxy'))) {
             Write-Log "[Phase $Phase] Skipping Linux VM $($currentItem.vmName) (no Windows DSC)" -LogOnly
             continue
+        }
+
+        # Linux-only fall-through: ConfigurationData was null (no Windows DSC
+        # nodes this phase) but a Linux/Proxy VM still needs it. Dispatch ONLY
+        # the Linux/Proxy targets and skip every other VM -- especially the DC,
+        # which would otherwise fall through to a single-node Windows DSC job
+        # and fail on a missing Phase3DC.ps1.
+        if ($linuxDispatchOnly) {
+            $isLinuxTarget = ($Phase -eq 3 -and (Test-VmIsLinux -Vm $currentItem))
+            $isProxyTarget = ($Phase -eq 2 -and $currentItem.role -eq 'Proxy')
+            if (-not ($isLinuxTarget -or $isProxyTarget)) {
+                Write-Log "[Phase $Phase] Skipping $($currentItem.vmName) [$($currentItem.role)] (Linux-only dispatch: no Windows DSC work this phase)" -LogOnly
+                continue
+            }
         }
 
         # Skip multi-node DSC (& monitoring) for all machines except those in the ConfigurationData.AllNodes
