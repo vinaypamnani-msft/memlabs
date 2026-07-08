@@ -559,6 +559,14 @@ function get-VMString {
         $name += $temp.PadRight(39, " ")
     }
 
+    # Clients (DomainMembers) don't own a site code, but when the CM client is
+    # pushed to them they report to a site. pushClient carries the authoritative
+    # TARGET SITE CODE (Resolve-PushClientSite). Surface it so the details line
+    # matches the site-based line color below.
+    if (-not $virtualMachine.siteCode -and ($virtualMachine.pushClient -is [string]) -and $virtualMachine.pushClient) {
+        $name += "  CM  [Client->$($virtualMachine.pushClient)]"
+    }
+
     if ($virtualMachine.remoteSQLVM) {
         $sqlVM = $allVMs | Where-Object { $_.vmName -eq $virtualMachine.remoteSQLVM }
         if ($sqlVM.OtherNode) { $name += "  SQL AO [$($sqlVM.vmName),$($sqlVM.OtherNode)]" }
@@ -719,9 +727,19 @@ function get-VMString {
             }
             "DomainMember" {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+
+                # pushClient is the authoritative site code this client is pushed
+                # from / reports to (Resolve-PushClientSite writes it). Prefer it
+                # over the remoteSQL/network heuristics so the line color matches
+                # the owning site exactly (the network heuristic mis-colors a
+                # client whose push site isn't the site server on its own subnet).
+                $pushSiteCode = if ($virtualMachine.pushClient -is [string]) { $virtualMachine.pushClient } else { $null }
                 $siteVM = $allVMs | Where-Object { $_.RemoteSQLVM -eq $virtualMachine.vmName -and $_.role -in ("CAS", "Primary", "Secondary") } | Select-Object -First 1
 
-                if ($siteVM -and $siteVM.SiteCode) {
+                if ($pushSiteCode -and $ColorMap.ContainsKey($pushSiteCode)) {
+                    $color = $ColorMap[$pushSiteCode]
+                }
+                elseif ($siteVM -and $siteVM.SiteCode) {
                     try {
                         $color = $ColorMap[$($siteVM.SiteCode)]
                     }
