@@ -898,17 +898,42 @@ function Start-PhaseJobs {
     if ($Phase -gt 1 -and $Phase -lt 10) {
         $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
         if (-not $ConfigurationData) {
-            # Nothing applicable for this phase
-            return [PSCustomObject]@{
-                Failed         = 0
-                Success        = 0
-                Jobs           = 0
-                Applicable     = $false
-                AdditionalData = $null
+            # No Windows DSC nodes need this phase. Normally that means the phase
+            # is a no-op -- EXCEPT when the only work is a non-DSC Linux dispatch
+            # handled later in the per-VM loop:
+            #   Phase 2 -> $global:Proxy_Install   (Proxy role: Squid install)
+            #   Phase 3 -> $global:Linux_Configure (all Linux: realm-join, xrdp, etc.)
+            # Get-PhaseNConfigurationData filters ALL Linux roles out and counts
+            # only Windows nodes, so adding ONLY a Linux VM to an existing domain
+            # (every Windows member already deployed/hidden) yields null here.
+            # Without this guard we early-return Applicable=$false and never
+            # dispatch the Linux job -- so a LinuxServer/LinuxClient with
+            # joinDomain=true gets created but is never actually realm-joined.
+            # Fall through with no DSC nodes so the loop reaches the Linux/Proxy
+            # dispatch branches.
+            $hasLinuxPhaseWork = $false
+            if ($Phase -eq 3) {
+                $hasLinuxPhaseWork = @($deployConfig.virtualMachines | Where-Object { (Test-VmIsLinux -Vm $_) -and -not $_.hidden }).Count -gt 0
             }
-        }
+            elseif ($Phase -eq 2) {
+                $hasLinuxPhaseWork = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' -and -not $_.hidden }).Count -gt 0
+            }
 
-        if ($ConfigurationData.AllNodes.NodeName -contains "LOCALHOST") {
+            if (-not $hasLinuxPhaseWork) {
+                # Nothing applicable for this phase
+                return [PSCustomObject]@{
+                    Failed         = 0
+                    Success        = 0
+                    Jobs           = 0
+                    Applicable     = $false
+                    AdditionalData = $null
+                }
+            }
+
+            Write-Log "[Phase $Phase] No Windows DSC nodes, but Linux VM(s) require this phase; proceeding to per-VM Linux dispatch." -LogOnly
+            $multiNodeDsc = $false
+        }
+        elseif ($ConfigurationData.AllNodes.NodeName -contains "LOCALHOST") {
             $multiNodeDsc = $false
         }
     }
