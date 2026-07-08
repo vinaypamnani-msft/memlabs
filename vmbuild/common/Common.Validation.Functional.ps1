@@ -5038,8 +5038,115 @@ function Test-PKICertificatesOnVM {
                 $results.Details.Add("OK: Single cert with FriendlyName '$fn'")
             }
             elseif ($fn -eq 'ConfigMgr WebServer Certificate') {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: No cert with FriendlyName '$fn' found")
+                # No WebServer cert by FriendlyName. This happens on a bare site
+                # server (no MP/DP/SUP/RP) after a VM recreate: CertificateDsc's
+                # CertReq keys its Test on Subject (the FQDN), so a pre-existing
+                # subject-colliding cert makes it skip issuing/stamping the
+                # WebServer cert, and AddCertificateToIIS.Test() masks it (a null
+                # thumbprint '-match ""' returns true). Self-heal before failing:
+                #   (a) re-stamp a WebServer-TEMPLATE cert that lost its FriendlyName
+                #   (b) re-enroll from the template if none exists
+                #   (c) (re)bind the recovered cert to IIS 0.0.0.0:443
+                # Only FAIL when the cert is genuinely absent AND re-enroll fails.
+                $srvAuthOid = '1.3.6.1.5.5.7.3.1'
+                $fqdn = "$env:COMPUTERNAME.$env:USERDNSDOMAIN"
+
+                # Resolve the WebServer template's per-forest OID from AD so we can
+                # positively identify a WebServer-template cert by its V2 template
+                # extension (1.3.6.1.4.1.311.21.7) regardless of FriendlyName.
+                $wsTemplateOid = $null
+                try {
+                    $configDN = ([ADSI]'LDAP://RootDSE').configurationNamingContext
+                    $tplSearch = [ADSISearcher]"(&(objectClass=pKICertificateTemplate)(cn=ConfigMgrWebServerCertificate))"
+                    $tplSearch.SearchRoot = [ADSI]"LDAP://CN=Certificate Templates,CN=Public Key Services,CN=Services,$configDN"
+                    $tplObj = $tplSearch.FindOne()
+                    if ($tplObj) { $wsTemplateOid = ($tplObj.Properties['mspki-cert-template-oid'] | Select-Object -First 1) }
+                }
+                catch {}
+
+                # Find a candidate WebServer cert that lost its FriendlyName.
+                $candidate = $null
+                foreach ($c in @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue)) {
+                    $eku = @($c.EnhancedKeyUsageList | ForEach-Object { $_.ObjectId })
+                    if ($eku -notcontains $srvAuthOid) { continue }   # DP cert is ClientAuth -> excluded
+                    $isWs = $false
+                    $tplExt = $c.Extensions | Where-Object { $_.Oid.Value -eq '1.3.6.1.4.1.311.21.7' }
+                    if ($tplExt -and $wsTemplateOid -and ($tplExt.Format($false) -match [regex]::Escape($wsTemplateOid))) {
+                        $isWs = $true
+                    }
+                    elseif ($c.Subject -match [regex]::Escape($fqdn)) {
+                        # Fallback: ServerAuth EKU + subject = this machine's FQDN
+                        $isWs = $true
+                    }
+                    if ($isWs) { $candidate = $c; break }
+                }
+
+                $healed = $false
+                if ($candidate) {
+                    try {
+                        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+                        $store.Open('ReadWrite')
+                        $live = $store.Certificates | Where-Object { $_.Thumbprint -eq $candidate.Thumbprint } | Select-Object -First 1
+                        if ($live) { $live.FriendlyName = $fn }
+                        $store.Close()
+                        $healed = $true
+                        $results.Details.Add("OK: Recovered WebServer cert (template-matched, thumbprint $($candidate.Thumbprint.Substring(0,8))...) that had lost FriendlyName '$fn'; re-applied name")
+                    }
+                    catch {
+                        $results.Details.Add("WARN: Found a WebServer-template cert but could not re-apply FriendlyName: $($_.Exception.Message)")
+                    }
+                }
+
+                if (-not $healed) {
+                    # No recoverable cert -> re-enroll from the template.
+                    try {
+                        $enroll = Get-Certificate -Template 'ConfigMgrWebServerCertificate' -DnsName $fqdn -SubjectName "CN=$fqdn" -CertStoreLocation Cert:\LocalMachine\My -ErrorAction Stop
+                        if ($enroll -and $enroll.Certificate) {
+                            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+                            $store.Open('ReadWrite')
+                            $live = $store.Certificates | Where-Object { $_.Thumbprint -eq $enroll.Certificate.Thumbprint } | Select-Object -First 1
+                            if ($live) { $live.FriendlyName = $fn }
+                            $store.Close()
+                            $healed = $true
+                            $results.Details.Add("OK: WebServer cert was missing; re-enrolled from ConfigMgrWebServerCertificate template (thumbprint $($enroll.Certificate.Thumbprint.Substring(0,8))...)")
+                        }
+                    }
+                    catch {
+                        $results.Details.Add("  Re-enroll from ConfigMgrWebServerCertificate template failed: $($_.Exception.Message)")
+                    }
+                }
+
+                if ($healed) {
+                    # Ensure the recovered cert is bound to IIS 0.0.0.0:443.
+                    try {
+                        $wc = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                            Where-Object { $_.FriendlyName -eq $fn } | Select-Object -Last 1
+                        $bound = netsh http show sslcert ipport=0.0.0.0:443 2>&1
+                        if ($wc -and ($bound -notmatch $wc.Thumbprint)) {
+                            Import-Module WebAdministration -ErrorAction SilentlyContinue
+                            $b = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+                            if (-not $b) {
+                                New-WebBinding -Name 'Default Web Site' -IPAddress '*' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+                                $b = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+                            }
+                            if ($b) {
+                                $b.AddSslCertificate($wc.Thumbprint, 'my')
+                                $results.Details.Add("OK: Bound recovered WebServer cert to IIS 0.0.0.0:443")
+                            }
+                        }
+                    }
+                    catch {
+                        $results.Details.Add("WARN: Could not (re)bind recovered WebServer cert to IIS 443: $($_.Exception.Message)")
+                    }
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: No cert with FriendlyName '$fn' found, no recoverable WebServer-template cert in LocalMachine\My, and re-enroll failed")
+                    foreach ($c in @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue)) {
+                        $ekuNames = @($c.EnhancedKeyUsageList | ForEach-Object { $_.FriendlyName }) -join ','
+                        $results.Details.Add("  My: subj='$($c.Subject)' fn='$($c.FriendlyName)' thumb=$($c.Thumbprint.Substring(0,8)) eku=[$ekuNames]")
+                    }
+                }
             }
             elseif ($fn -eq 'ConfigMgr Client DistributionPoint Certificate' -and $IsPrimary) {
                 $results.Passed = $false

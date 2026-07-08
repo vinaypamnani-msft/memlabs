@@ -7122,6 +7122,39 @@ class AddCertificateToIIS {
         Write-Status "Installing cert $_FriendlyName to IIS"
         $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
         if (-not $cert) {
+            # The friendly-named cert is missing. This happens when CertReq's
+            # subject-only Test skipped stamping it (a subject-colliding cert
+            # already existed at Phase 3 time on a recreated VM), leaving a
+            # CA-issued ServerAuth template cert for this host with no/other
+            # FriendlyName. Recover it by re-stamping the name instead of
+            # failing the whole config. Filter to a CA-issued (Issuer != Subject)
+            # cert from an AD template (has the V2 template extension) with
+            # ServerAuth EKU and this host's FQDN in the subject -- that excludes
+            # SQL's self-signed CN=FQDN ServerAuth cert.
+            $fqdn = "$env:COMPUTERNAME.$env:USERDNSDOMAIN"
+            $srvAuthOid = '1.3.6.1.5.5.7.3.1'
+            $candidate = Get-ChildItem Cert:\LocalMachine\My | Where-Object {
+                ($_.EnhancedKeyUsageList.ObjectId -contains $srvAuthOid) -and
+                ($_.Subject -match [regex]::Escape($fqdn)) -and
+                ($_.Issuer -ne $_.Subject) -and
+                ($_.Extensions.Oid.Value -contains '1.3.6.1.4.1.311.21.7')
+            } | Sort-Object NotBefore -Descending | Select-Object -First 1
+            if ($candidate) {
+                try {
+                    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+                    $store.Open('ReadWrite')
+                    $live = $store.Certificates | Where-Object { $_.Thumbprint -eq $candidate.Thumbprint } | Select-Object -First 1
+                    if ($live) { $live.FriendlyName = $_FriendlyName }
+                    $store.Close()
+                    Write-Status "Recovered CA-issued ServerAuth cert (thumbprint $($candidate.Thumbprint.Substring(0,8))...) that had lost FriendlyName '$_FriendlyName'; re-applied name"
+                }
+                catch {
+                    Write-Status "Failed to re-apply FriendlyName to recovered cert: $_"
+                }
+                $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+            }
+        }
+        if (-not $cert) {
             Write-Status "Could not find cert with friendly Name $_FriendlyName"
             throw "Could not find cert with friendly Name $_FriendlyName"
         }
@@ -7152,6 +7185,13 @@ class AddCertificateToIIS {
         try {
             $_FriendlyName = $this.FriendlyName
             $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+            # A missing friendly-named cert must NOT report 'in desired state':
+            # with $cert null, $thumbPrint is empty and '$certdata -match ""'
+            # matches the empty pattern -> returns $true, masking a genuinely
+            # missing/renamed cert so Set() never runs to recover + bind it.
+            if (-not $cert -or [string]::IsNullOrEmpty($cert.Thumbprint)) {
+                return $false
+            }
             $certdata = netsh http show sslcert ipport=0.0.0.0:443
             $thumbPrint = $($cert.Thumbprint).ToLower()
             if ($certdata.ToLower() -match $thumbPrint ) {
