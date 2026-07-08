@@ -64,41 +64,24 @@
             }
         }
 
-        $AddIISCert = $false
-        # Install feature roles
+        # Install feature roles. (The PKI IIS web-server cert request that used
+        # to be gated off $AddIISCert here was relocated to Phase 8 -- the
+        # Enterprise CA is now published by the post-Phase-3 PKI orchestrator, so
+        # requesting it in Phase 3 dead-locked with "No Certificate Authority
+        # could be found". See the per-node "PKI IIS web-server certificate"
+        # blocks in Phase8.ps1.)
         $featureRoles = @($ThisVM.role)
         if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") {
             $featureRoles += "Site Server"
-            $AddIISCert = $true
         }
 
         if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") {
             $featureRoles += "WSUS"
-            $AddIISCert = $true
         }
 
-        if ($ThisVM.installRP -eq $true) {
-            $AddIISCert = $true
-        }
-
-        if ($ThisVM.installMP -eq $true) {
-            $AddIISCert = $true
-        }
-
-        if ($ThisVM.installDP -eq $true) {
-            $AddIISCert = $true
-        }
-
-        $caVM = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
-        if (-not $caVM) {
-            $AddIISCert = $false
-        }
-
-        # Per-VM cmOptions (multi-hierarchy safe).
+        # Per-VM cmOptions (multi-hierarchy safe); $cmo is reused below for the
+        # CM source-folder ($CM) selection.
         $cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
-        if (-not $cmo.UsePKI) {
-            $AddIISCert = $false
-        }
 
         WriteStatus AddLocalAdmin {
             Status = "Adding required accounts [$($ThisVM.thisParams.LocalAdminAccounts -join ',')] to Administrators group"
@@ -360,121 +343,11 @@
             $nextDepend = "[Registry]RAMDiskTFTPBlockSize"
         }
 
-        if ($AddIISCert) {
-
-
-            WriteStatus RebootNow {
-                Status    = "Rebooting to get Group Membership"
-                DependsOn = $nextDepend
-            }
-
-            RebootNow RebootNow {
-                FileName  = 'C:\Temp\IISGroupReboot.txt'
-                DependsOn = $nextDepend
-            }
-            $nextDepend = "[RebootNow]RebootNow"
-
-            WriteStatus RequestIISCerts {
-                Status    = "Requesting IIS Certificate for PKI"
-                DependsOn = $nextDepend
-            }
-
-            # Refresh template cache before CertReq so OID-to-name resolution
-            # works correctly. Without this, CertReq's Test() compares the raw
-            # OID against the template name, always fails, and re-creates the
-            # cert on every run.
-            Script RefreshTemplateCache {
-                GetScript  = { @{ Result = 'N/A' } }
-                TestScript = { $false }
-                SetScript  = {
-                    try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
-                    # Clear the local certificate template cache timestamp so
-                    # the crypto API re-queries AD for template OID→name mapping
-                    foreach ($hive in @('HKLM','HKCU')) {
-                        $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
-                        Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
-                    }
-                    # Also remove any duplicate DP certs — keep only the newest
-                    $fn = 'ConfigMgr Client DistributionPoint Certificate'
-                    $dupes = @(Get-ChildItem Cert:\LocalMachine\My |
-                        Where-Object { $_.FriendlyName -eq $fn } | Sort-Object NotBefore -Descending)
-                    if ($dupes.Count -gt 1) {
-                        foreach ($old in $dupes | Select-Object -Skip 1) {
-                            Remove-Item "Cert:\LocalMachine\My\$($old.Thumbprint)" -Force -ErrorAction SilentlyContinue
-                        }
-                    }
-                }
-                DependsOn  = $nextDepend
-            }
-            $nextDepend = "[Script]RefreshTemplateCache"
-
-            $subject = $ThisVM.vmName + "." + $DomainName
-            $friendlyName = 'ConfigMgr WebServer Certificate'
-            CertReq SSLCert {
-                Subject             = $subject
-                SubjectAltName      = "DNS=" + $subject + "&DNS=" + $($ThisVM.VmName)
-                KeyLength           = '2048'
-                Exportable          = $false
-                ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
-                #OID                 = '1.3.6.1.5.5.7.3.1'
-                #KeyUsage            = '0xa0'
-                CertificateTemplate = 'ConfigMgrWebServerCertificate'
-                AutoRenew           = $true
-                FriendlyName        = $friendlyName
-                #Credential          = $Credential
-                #UseMachineContext   = $true
-                KeyType             = 'RSA'
-                RequestType         = 'CMC'
-                DependsOn           = $nextDepend
-            }
-            $nextDepend = "[CertReq]SSLCert"
-
-            WriteStatus AddIISCerts {
-                Status    = "Adding IIS Certificate for PKI"
-                DependsOn = $nextDepend
-            }
-            AddCertificateToIIS AddCert {
-                FriendlyName = $friendlyName
-                DependsOn    = $nextDepend
-            }
-            $nextDepend = "[AddCertificateToIIS]AddCert"
-
-            if ($ThisVM.role -eq "Primary") {
-
-                $friendlyName = 'ConfigMgr Client DistributionPoint Certificate'
-                CertReq SSLCert2 {
-                    Subject             = "Client DistributionPoint Cert"
-                    SubjectAltName      = "DNS=" + $subject + "&DNS=" + $($ThisVM.VmName)
-                    KeyLength           = '2048'
-                    Exportable          = $true
-                    ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
-                    #OID                 = '1.3.6.1.5.5.7.3.1'
-                    #KeyUsage            = '0xa0'
-                    CertificateTemplate = 'ConfigMgrClientDistributionPointCertificate'
-                    AutoRenew           = $true
-                    FriendlyName        = $friendlyName
-                    #Credential          = $Credential
-                    #UseMachineContext   = $true
-                    KeyType             = 'RSA'
-                    RequestType         = 'CMC'
-                    DependsOn           = $nextDepend
-                }
-                $nextDepend = "[CertReq]SSLCert2"
-
-                CertificateExport SSLCert {
-                    Type         = 'PFX'
-                    FriendlyName = $friendlyName
-                    Path         = 'c:\temp\ConfigMgrClientDistributionPointCertificate.pfx'
-                    Password     = $Admincreds
-                    MatchSource  = $true
-                    DependsOn    = $nextDepend
-                }
-                $nextDepend = "[CertificateExport]SSLCert"
-            }
-        }
-
-
-        #  }
+        # PKI IIS web-server cert request relocated to Phase 8 (per site-server
+        # node). It ran here in Phase 3 previously, but the Enterprise CA is now
+        # published by the post-Phase-3 PKI orchestrator, so requesting a cert in
+        # Phase 3 dead-locked ("No Certificate Authority could be found"). See the
+        # "PKI IIS web-server certificate" blocks in Phase8.ps1.
 
         WriteStatus Complete {
             DependsOn = $nextDepend

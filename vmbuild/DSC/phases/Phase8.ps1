@@ -8,7 +8,7 @@
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'FailoverClusterDsc', 'AccessControlDsc', 'SqlServerDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'FailoverClusterDsc', 'AccessControlDsc', 'SqlServerDsc', 'CertificateDsc'
 
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -110,6 +110,121 @@
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
 
+        # --- PKI IIS web-server certificate (relocated here from Phase 3) -----
+        # The Enterprise CA + templates are published by the post-Phase-3 PKI
+        # orchestrator (New-Lab), so requesting these in Phase 3 dead-locked with
+        # "No Certificate Authority could be found". By Phase 8 the CA exists, so
+        # we request + bind the web cert here, gated BEFORE this node's main work
+        # so it lands before the site's HTTPS flip (EnableHTTPS in ScriptWorkflow).
+        # Same gate + logic as the old Phase 3 $AddIISCert block.
+        $cmoCert = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        $caVMCert = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
+        $AddIISCert = $false
+        if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") { $AddIISCert = $true }
+        if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") { $AddIISCert = $true }
+        if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
+        if (-not $caVMCert) { $AddIISCert = $false }
+        if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
+
+        $nextDepend = $null
+        if ($AddIISCert) {
+
+            WriteStatus PkiRebootForGroup {
+                Status = "Rebooting to get Group Membership (PKI cert enrollment)"
+            }
+
+            RebootNow PkiGroupReboot {
+                FileName  = 'C:\Temp\IISGroupReboot.txt'
+                DependsOn = "[WriteStatus]PkiRebootForGroup"
+            }
+            $nextDepend = "[RebootNow]PkiGroupReboot"
+
+            WriteStatus PkiRequestCerts {
+                Status    = "Requesting IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
+
+            # Refresh the local certificate template cache before CertReq so its
+            # Test() resolves the template OID to its name (otherwise it re-creates
+            # the cert on every run). Also prunes duplicate DP certs.
+            Script PkiRefreshTemplateCache {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                    foreach ($hive in @('HKLM', 'HKCU')) {
+                        $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+                    }
+                    $fn = 'ConfigMgr Client DistributionPoint Certificate'
+                    $dupes = @(Get-ChildItem Cert:\LocalMachine\My |
+                        Where-Object { $_.FriendlyName -eq $fn } | Sort-Object NotBefore -Descending)
+                    if ($dupes.Count -gt 1) {
+                        foreach ($old in $dupes | Select-Object -Skip 1) {
+                            Remove-Item "Cert:\LocalMachine\My\$($old.Thumbprint)" -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+            $nextDepend = "[Script]PkiRefreshTemplateCache"
+
+            $subjectCert = $ThisVM.vmName + "." + $DomainName
+            CertReq PkiWebCert {
+                Subject             = $subjectCert
+                SubjectAltName      = "DNS=" + $subjectCert + "&DNS=" + $($ThisVM.VmName)
+                KeyLength           = '2048'
+                Exportable          = $false
+                ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                CertificateTemplate = 'ConfigMgrWebServerCertificate'
+                AutoRenew           = $true
+                FriendlyName        = 'ConfigMgr WebServer Certificate'
+                KeyType             = 'RSA'
+                RequestType         = 'CMC'
+                DependsOn           = $nextDepend
+            }
+            $nextDepend = "[CertReq]PkiWebCert"
+
+            WriteStatus PkiAddCerts {
+                Status    = "Adding IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
+            AddCertificateToIIS PkiAddCert {
+                FriendlyName = 'ConfigMgr WebServer Certificate'
+                DependsOn    = "[WriteStatus]PkiAddCerts"
+            }
+            $nextDepend = "[AddCertificateToIIS]PkiAddCert"
+
+            if ($ThisVM.role -eq "Primary") {
+                CertReq PkiDpCert {
+                    Subject             = "Client DistributionPoint Cert"
+                    SubjectAltName      = "DNS=" + $subjectCert + "&DNS=" + $($ThisVM.VmName)
+                    KeyLength           = '2048'
+                    Exportable          = $true
+                    ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                    CertificateTemplate = 'ConfigMgrClientDistributionPointCertificate'
+                    AutoRenew           = $true
+                    FriendlyName        = 'ConfigMgr Client DistributionPoint Certificate'
+                    KeyType             = 'RSA'
+                    RequestType         = 'CMC'
+                    DependsOn           = $nextDepend
+                }
+                $nextDepend = "[CertReq]PkiDpCert"
+
+                CertificateExport PkiDpCertExport {
+                    Type         = 'PFX'
+                    FriendlyName = 'ConfigMgr Client DistributionPoint Certificate'
+                    Path         = 'c:\temp\ConfigMgrClientDistributionPointCertificate.pfx'
+                    Password     = $Admincreds
+                    MatchSource  = $true
+                    DependsOn    = $nextDepend
+                }
+                $nextDepend = "[CertificateExport]PkiDpCertExport"
+            }
+        }
+
         # WSUS categories baseline cab import for a REMOTE SUP site system.
         # When the SUP/WSUS role lives on a dedicated site system (this box)
         # rather than co-located on the site server, nobody else imports the
@@ -145,7 +260,8 @@
         $supSiteServer = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") -and $_.Sitecode -eq $ThisVM.Sitecode } | Select-Object -First 1
         if ($ThisVM.installSUP -eq $true -and $supSiteServer -and -not $supSiteServer.parentSiteCode) {
             WriteStatus ImportWsusBaselineStatus {
-                Status = "Importing the WSUS categories baseline once CM postinstalls WSUS on this SUP."
+                Status    = "Importing the WSUS categories baseline once CM postinstalls WSUS on this SUP."
+                DependsOn = $nextDepend
             }
 
             Script ImportWsusBaseline {
@@ -266,6 +382,96 @@
 
     Node $AllNodes.Where{ $_.Role -eq 'WSUS' }.NodeName
     {
+        $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
+
+        # --- PKI IIS web-server certificate (relocated here from Phase 3) -----
+        # The Enterprise CA + templates are published by the post-Phase-3 PKI
+        # orchestrator (New-Lab), so requesting these in Phase 3 dead-locked with
+        # "No Certificate Authority could be found". By Phase 8 the CA exists, so
+        # we request + bind the web cert here, gated BEFORE this node's main work
+        # so it lands before the site's HTTPS flip (EnableHTTPS in ScriptWorkflow).
+        # Same gate + logic as the old Phase 3 $AddIISCert block.
+        $cmoCert = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        $caVMCert = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
+        $AddIISCert = $false
+        if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") { $AddIISCert = $true }
+        if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") { $AddIISCert = $true }
+        if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
+        if (-not $caVMCert) { $AddIISCert = $false }
+        if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
+
+        $nextDepend = $null
+        if ($AddIISCert) {
+
+            WriteStatus PkiRebootForGroup {
+                Status = "Rebooting to get Group Membership (PKI cert enrollment)"
+            }
+
+            RebootNow PkiGroupReboot {
+                FileName  = 'C:\Temp\IISGroupReboot.txt'
+                DependsOn = "[WriteStatus]PkiRebootForGroup"
+            }
+            $nextDepend = "[RebootNow]PkiGroupReboot"
+
+            WriteStatus PkiRequestCerts {
+                Status    = "Requesting IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
+
+            # Refresh the local certificate template cache before CertReq so its
+            # Test() resolves the template OID to its name (otherwise it re-creates
+            # the cert on every run). Also prunes duplicate DP certs.
+            Script PkiRefreshTemplateCache {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                    foreach ($hive in @('HKLM', 'HKCU')) {
+                        $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+                    }
+                    $fn = 'ConfigMgr Client DistributionPoint Certificate'
+                    $dupes = @(Get-ChildItem Cert:\LocalMachine\My |
+                        Where-Object { $_.FriendlyName -eq $fn } | Sort-Object NotBefore -Descending)
+                    if ($dupes.Count -gt 1) {
+                        foreach ($old in $dupes | Select-Object -Skip 1) {
+                            Remove-Item "Cert:\LocalMachine\My\$($old.Thumbprint)" -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+            $nextDepend = "[Script]PkiRefreshTemplateCache"
+
+            $subjectCert = $ThisVM.vmName + "." + $DomainName
+            CertReq PkiWebCert {
+                Subject             = $subjectCert
+                SubjectAltName      = "DNS=" + $subjectCert + "&DNS=" + $($ThisVM.VmName)
+                KeyLength           = '2048'
+                Exportable          = $false
+                ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                CertificateTemplate = 'ConfigMgrWebServerCertificate'
+                AutoRenew           = $true
+                FriendlyName        = 'ConfigMgr WebServer Certificate'
+                KeyType             = 'RSA'
+                RequestType         = 'CMC'
+                DependsOn           = $nextDepend
+            }
+            $nextDepend = "[CertReq]PkiWebCert"
+
+            WriteStatus PkiAddCerts {
+                Status    = "Adding IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
+            AddCertificateToIIS PkiAddCert {
+                FriendlyName = 'ConfigMgr WebServer Certificate'
+                DependsOn    = "[WriteStatus]PkiAddCerts"
+            }
+            $nextDepend = "[AddCertificateToIIS]PkiAddCert"
+        }
+
         WriteStatus Complete {
             DependsOn = $nextDepend
             Status    = "Complete!"
@@ -488,8 +694,97 @@
         #$ParentSiteCode = ($deployConfig.virtualMachines | where-object { $_.vmName -eq ($Node.NodeName) }).ParentSiteCode
         #$PSName = ($deployConfig.virtualMachines | where-object { $_.Role -eq "Primary" -and $_.SiteCode -eq $ParentSiteCode }).vmName
 
+        # --- PKI IIS web-server certificate (relocated here from Phase 3) -----
+        # The Enterprise CA + templates are published by the post-Phase-3 PKI
+        # orchestrator (New-Lab), so requesting these in Phase 3 dead-locked with
+        # "No Certificate Authority could be found". By Phase 8 the CA exists, so
+        # we request + bind the web cert here, gated BEFORE this node's main work
+        # so it lands before the site's HTTPS flip (EnableHTTPS in ScriptWorkflow).
+        # Same gate + logic as the old Phase 3 $AddIISCert block.
+        $cmoCert = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        $caVMCert = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
+        $AddIISCert = $false
+        if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") { $AddIISCert = $true }
+        if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") { $AddIISCert = $true }
+        if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
+        if (-not $caVMCert) { $AddIISCert = $false }
+        if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
+
+        $nextDepend = $null
+        if ($AddIISCert) {
+
+            WriteStatus PkiRebootForGroup {
+                Status = "Rebooting to get Group Membership (PKI cert enrollment)"
+            }
+
+            RebootNow PkiGroupReboot {
+                FileName  = 'C:\Temp\IISGroupReboot.txt'
+                DependsOn = "[WriteStatus]PkiRebootForGroup"
+            }
+            $nextDepend = "[RebootNow]PkiGroupReboot"
+
+            WriteStatus PkiRequestCerts {
+                Status    = "Requesting IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
+
+            # Refresh the local certificate template cache before CertReq so its
+            # Test() resolves the template OID to its name (otherwise it re-creates
+            # the cert on every run). Also prunes duplicate DP certs.
+            Script PkiRefreshTemplateCache {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                    foreach ($hive in @('HKLM', 'HKCU')) {
+                        $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+                    }
+                    $fn = 'ConfigMgr Client DistributionPoint Certificate'
+                    $dupes = @(Get-ChildItem Cert:\LocalMachine\My |
+                        Where-Object { $_.FriendlyName -eq $fn } | Sort-Object NotBefore -Descending)
+                    if ($dupes.Count -gt 1) {
+                        foreach ($old in $dupes | Select-Object -Skip 1) {
+                            Remove-Item "Cert:\LocalMachine\My\$($old.Thumbprint)" -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+            $nextDepend = "[Script]PkiRefreshTemplateCache"
+
+            $subjectCert = $ThisVM.vmName + "." + $DomainName
+            CertReq PkiWebCert {
+                Subject             = $subjectCert
+                SubjectAltName      = "DNS=" + $subjectCert + "&DNS=" + $($ThisVM.VmName)
+                KeyLength           = '2048'
+                Exportable          = $false
+                ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                CertificateTemplate = 'ConfigMgrWebServerCertificate'
+                AutoRenew           = $true
+                FriendlyName        = 'ConfigMgr WebServer Certificate'
+                KeyType             = 'RSA'
+                RequestType         = 'CMC'
+                DependsOn           = $nextDepend
+            }
+            $nextDepend = "[CertReq]PkiWebCert"
+
+            WriteStatus PkiAddCerts {
+                Status    = "Adding IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
+            AddCertificateToIIS PkiAddCert {
+                FriendlyName = 'ConfigMgr WebServer Certificate'
+                DependsOn    = "[WriteStatus]PkiAddCerts"
+            }
+            $nextDepend = "[AddCertificateToIIS]PkiAddCert"
+        }
+
         WriteStatus ODBCDriverInstall {            
-            Status = "Downloading and installing ODBC driver version 18"
+            Status    = "Downloading and installing ODBC driver version 18"
+            DependsOn = $nextDepend
         }
 
         InstallODBCDriver ODBCDriverInstall {
@@ -589,8 +884,125 @@
         $cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
         $CM = if ($cmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
+        # --- PKI IIS web-server certificate (relocated here from Phase 3) -----
+        # The Enterprise CA + templates are published by the post-Phase-3 PKI
+        # orchestrator (New-Lab), so requesting these in Phase 3 dead-locked with
+        # "No Certificate Authority could be found". By Phase 8 the CA exists, so
+        # we request + bind the web cert here, gated BEFORE this node's main work
+        # (incl. the RebootNow, which must precede RegisterTaskScheduler so the
+        # reboot cannot kill the in-flight ScriptWorkflow) and before the HTTPS
+        # flip. Same gate + logic as the old Phase 3 $AddIISCert block.
+        $cmoCert = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        $caVMCert = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
+        $AddIISCert = $false
+        if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") { $AddIISCert = $true }
+        if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") { $AddIISCert = $true }
+        if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
+        if (-not $caVMCert) { $AddIISCert = $false }
+        if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
+
+        $nextDepend = $null
+        if ($AddIISCert) {
+
+            WriteStatus PkiRebootForGroup {
+                Status = "Rebooting to get Group Membership (PKI cert enrollment)"
+            }
+
+            RebootNow PkiGroupReboot {
+                FileName  = 'C:\Temp\IISGroupReboot.txt'
+                DependsOn = "[WriteStatus]PkiRebootForGroup"
+            }
+            $nextDepend = "[RebootNow]PkiGroupReboot"
+
+            WriteStatus PkiRequestCerts {
+                Status    = "Requesting IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
+
+            # Refresh the local certificate template cache before CertReq so its
+            # Test() resolves the template OID to its name (otherwise it re-creates
+            # the cert on every run). Also prunes duplicate DP certs.
+            Script PkiRefreshTemplateCache {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                    foreach ($hive in @('HKLM', 'HKCU')) {
+                        $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+                    }
+                    $fn = 'ConfigMgr Client DistributionPoint Certificate'
+                    $dupes = @(Get-ChildItem Cert:\LocalMachine\My |
+                        Where-Object { $_.FriendlyName -eq $fn } | Sort-Object NotBefore -Descending)
+                    if ($dupes.Count -gt 1) {
+                        foreach ($old in $dupes | Select-Object -Skip 1) {
+                            Remove-Item "Cert:\LocalMachine\My\$($old.Thumbprint)" -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+            $nextDepend = "[Script]PkiRefreshTemplateCache"
+
+            $subjectCert = $ThisVM.vmName + "." + $DomainName
+            CertReq PkiWebCert {
+                Subject             = $subjectCert
+                SubjectAltName      = "DNS=" + $subjectCert + "&DNS=" + $($ThisVM.VmName)
+                KeyLength           = '2048'
+                Exportable          = $false
+                ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                CertificateTemplate = 'ConfigMgrWebServerCertificate'
+                AutoRenew           = $true
+                FriendlyName        = 'ConfigMgr WebServer Certificate'
+                KeyType             = 'RSA'
+                RequestType         = 'CMC'
+                DependsOn           = $nextDepend
+            }
+            $nextDepend = "[CertReq]PkiWebCert"
+
+            WriteStatus PkiAddCerts {
+                Status    = "Adding IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
+            AddCertificateToIIS PkiAddCert {
+                FriendlyName = 'ConfigMgr WebServer Certificate'
+                DependsOn    = "[WriteStatus]PkiAddCerts"
+            }
+            $nextDepend = "[AddCertificateToIIS]PkiAddCert"
+
+            if ($ThisVM.role -eq "Primary") {
+                CertReq PkiDpCert {
+                    Subject             = "Client DistributionPoint Cert"
+                    SubjectAltName      = "DNS=" + $subjectCert + "&DNS=" + $($ThisVM.VmName)
+                    KeyLength           = '2048'
+                    Exportable          = $true
+                    ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                    CertificateTemplate = 'ConfigMgrClientDistributionPointCertificate'
+                    AutoRenew           = $true
+                    FriendlyName        = 'ConfigMgr Client DistributionPoint Certificate'
+                    KeyType             = 'RSA'
+                    RequestType         = 'CMC'
+                    DependsOn           = $nextDepend
+                }
+                $nextDepend = "[CertReq]PkiDpCert"
+
+                CertificateExport PkiDpCertExport {
+                    Type         = 'PFX'
+                    FriendlyName = 'ConfigMgr Client DistributionPoint Certificate'
+                    Path         = 'c:\temp\ConfigMgrClientDistributionPointCertificate.pfx'
+                    Password     = $Admincreds
+                    MatchSource  = $true
+                    DependsOn    = $nextDepend
+                }
+                $nextDepend = "[CertificateExport]PkiDpCertExport"
+            }
+        }
+
         WriteStatus ADKInstall {
-            Status = "Downloading and installing ADK"
+            Status    = "Downloading and installing ADK"
+            DependsOn = $nextDepend
         }
 
         InstallADK ADKInstall {
@@ -741,8 +1153,97 @@
         [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
+        # --- PKI IIS web-server certificate (relocated here from Phase 3) -----
+        # The Enterprise CA + templates are published by the post-Phase-3 PKI
+        # orchestrator (New-Lab), so requesting these in Phase 3 dead-locked with
+        # "No Certificate Authority could be found". By Phase 8 the CA exists, so
+        # we request + bind the web cert here, gated BEFORE this node's main work
+        # so it lands before the site's HTTPS flip. Same gate + logic as the old
+        # Phase 3 $AddIISCert block.
+        $cmoCert = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        $caVMCert = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
+        $AddIISCert = $false
+        if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") { $AddIISCert = $true }
+        if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") { $AddIISCert = $true }
+        if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
+        if (-not $caVMCert) { $AddIISCert = $false }
+        if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
+
+        $nextDepend = $null
+        if ($AddIISCert) {
+
+            WriteStatus PkiRebootForGroup {
+                Status = "Rebooting to get Group Membership (PKI cert enrollment)"
+            }
+
+            RebootNow PkiGroupReboot {
+                FileName  = 'C:\Temp\IISGroupReboot.txt'
+                DependsOn = "[WriteStatus]PkiRebootForGroup"
+            }
+            $nextDepend = "[RebootNow]PkiGroupReboot"
+
+            WriteStatus PkiRequestCerts {
+                Status    = "Requesting IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
+
+            # Refresh the local certificate template cache before CertReq so its
+            # Test() resolves the template OID to its name (otherwise it re-creates
+            # the cert on every run). Also prunes duplicate DP certs.
+            Script PkiRefreshTemplateCache {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                    foreach ($hive in @('HKLM', 'HKCU')) {
+                        $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+                    }
+                    $fn = 'ConfigMgr Client DistributionPoint Certificate'
+                    $dupes = @(Get-ChildItem Cert:\LocalMachine\My |
+                        Where-Object { $_.FriendlyName -eq $fn } | Sort-Object NotBefore -Descending)
+                    if ($dupes.Count -gt 1) {
+                        foreach ($old in $dupes | Select-Object -Skip 1) {
+                            Remove-Item "Cert:\LocalMachine\My\$($old.Thumbprint)" -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+            $nextDepend = "[Script]PkiRefreshTemplateCache"
+
+            $subjectCert = $ThisVM.vmName + "." + $DomainName
+            CertReq PkiWebCert {
+                Subject             = $subjectCert
+                SubjectAltName      = "DNS=" + $subjectCert + "&DNS=" + $($ThisVM.VmName)
+                KeyLength           = '2048'
+                Exportable          = $false
+                ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                CertificateTemplate = 'ConfigMgrWebServerCertificate'
+                AutoRenew           = $true
+                FriendlyName        = 'ConfigMgr WebServer Certificate'
+                KeyType             = 'RSA'
+                RequestType         = 'CMC'
+                DependsOn           = $nextDepend
+            }
+            $nextDepend = "[CertReq]PkiWebCert"
+
+            WriteStatus PkiAddCerts {
+                Status    = "Adding IIS Certificate for PKI"
+                DependsOn = $nextDepend
+            }
+            AddCertificateToIIS PkiAddCert {
+                FriendlyName = 'ConfigMgr WebServer Certificate'
+                DependsOn    = "[WriteStatus]PkiAddCerts"
+            }
+            $nextDepend = "[AddCertificateToIIS]PkiAddCert"
+        }
+
         WriteStatus ADKInstall {
-            Status = "Downloading and installing ADK"
+            Status    = "Downloading and installing ADK"
+            DependsOn = $nextDepend
         }
 
         InstallADK ADKInstall {
