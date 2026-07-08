@@ -9265,6 +9265,55 @@ function Test-LinuxDomainJoin {
 
     Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Verifying AD domain join ($domain)" -LogOnly
 
+    # DC IP: memlabs convention <network>.1 (same derivation the realm-join uses).
+    # Computed here so both the DNS assertion below and the failure diagnostics
+    # further down can use it.
+    $netBase = $CurrentItem.network
+    if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
+    $dcIp = ''
+    if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') { $dcIp = "$($Matches[1]).1" }
+
+    # ---- Explicit DNS assertion (its own OK/WARN line) ----
+    # The #1 realm-join failure is the guest resolving the AD domain via PUBLIC
+    # DNS instead of the DC -- the lab AD domain often collides with a real
+    # internet domain (e.g. contoso.com), so public resolvers answer AD queries
+    # with wrong (public) IPs and the _msdcs SRV zone NXDOMAINs. Verify the AD
+    # domain resolves to a PRIVATE address (ideally the DC) and the SRV zone is
+    # answerable. Runs regardless of join state, so a joined-but-misrouted box
+    # (or a box the DNS fix hasn't reached) is still flagged on its own line.
+    if ($domainLower) {
+        $dnsCmd = @"
+A=`$(getent hosts '$domainLower' 2>/dev/null | awk '{print `$1}' | head -1)
+if nslookup -type=srv _ldap._tcp.dc._msdcs.$domainLower 2>/dev/null | grep -qiE 'service|priority|^_ldap'; then SRV=ok; else SRV=bad; fi
+if [ -f /etc/systemd/resolved.conf.d/memlabs-dc-route.conf ]; then ROUTE=present; else ROUTE=absent; fi
+echo "A=`${A:-none} SRV=`$SRV ROUTE=`$ROUTE"
+"@
+        $dnsProbe = Invoke-LinuxVmCommand -VMName $VMName -IPAddress $vmIp -Sudo -TimeoutSeconds 45 `
+            -DisplayName 'Phase11-dns-check' -BashCommand $dnsCmd
+        $aRec = 'none'; $srv = 'bad'; $route = 'absent'
+        if ($dnsProbe -and $dnsProbe.ScriptBlockOutput) {
+            $dnsOut = ($dnsProbe.ScriptBlockOutput | Out-String)
+            if ($dnsOut -match 'A=(\S+)') { $aRec = $Matches[1] }
+            if ($dnsOut -match 'SRV=(\S+)') { $srv = $Matches[1] }
+            if ($dnsOut -match 'ROUTE=(\S+)') { $route = $Matches[1] }
+        }
+        $aIsPrivate = $aRec -match '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)'
+        $aIsDc = ($dcIp -and $aRec -eq $dcIp)
+        if ($aRec -ne 'none' -and $aIsPrivate -and $srv -eq 'ok') {
+            $dcNote = if ($aIsDc) { " (DC $dcIp)" } else { " ($aRec, private)" }
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - AD DNS resolves to the DC$dcNote and the SRV zone answers (route drop-in $route)" -LogOnly
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: OK - AD DNS -> DC$dcNote, SRV zone OK"; Level = 'Success' })
+        }
+        else {
+            $reason = if ($aRec -eq 'none') { "the AD domain does not resolve" }
+                      elseif (-not $aIsPrivate) { "the AD domain resolves to a PUBLIC IP ($aRec) -- the guest is using public DNS, not the DC" }
+                      elseif ($srv -ne 'ok') { "the AD SRV zone (_ldap._tcp.dc._msdcs.$domainLower) does not answer" }
+                      else { "AD DNS looks wrong (A=$aRec SRV=$srv)" }
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - $reason. Expected the DC ($dcIp) to be authoritative for '$domain'. memlabs-set-dns writes /etc/systemd/resolved.conf.d/memlabs-dc-route.conf (route drop-in currently $route) to route the AD domain to the DC; re-run '-StartPhase 3' or apply it manually." -Warning
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: WARN - AD DNS misrouted (A=$aRec SRV=$srv route=$route) -- guest not resolving '$domain' via the DC"; Level = 'Warning' })
+        }
+    }
+
     # Authoritative check: realm list reports the joined domain.
     $realmProbe = Invoke-LinuxVmCommand -VMName $VMName -IPAddress $vmIp -Sudo -TimeoutSeconds 30 `
         -DisplayName 'Phase11-realm-list' `
@@ -9279,11 +9328,7 @@ function Test-LinuxDomainJoin {
     }
 
     # Not joined -- collect diagnostics so the root cause is in the build log.
-    # DC IP: memlabs convention <network>.1 (same derivation the realm-join uses).
-    $netBase = $CurrentItem.network
-    if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
-    $dcIp = ''
-    if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') { $dcIp = "$($Matches[1]).1" }
+    # ($dcIp / $netBase were derived above for the DNS assertion.)
 
     # Comprehensive one-shot diagnostic bundle. Everything an operator needs to
     # root-cause a failed realm-join is collected here so the build log alone is
