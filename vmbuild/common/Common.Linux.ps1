@@ -659,12 +659,15 @@ write_files:
       [Resolve]
       FallbackDNS=1.1.1.1 8.8.8.8
   # Helper: once the DC is online and serving DNS for the AD domain,
-  # invoke this to make the DC the primary resolver while keeping public
-  # resolvers as fallback. Usage (run as root):
+  # invoke this to route AD-domain resolution to the DC. Usage (run as root):
   #   memlabs-set-dns 192.168.6.1 [adatum.com]
-  # The script writes a netplan drop-in (60-memlabs-dc-dns.yaml) that
-  # merges with the cloud-init-generated 50-cloud-init.yaml. Per-link DNS
-  # becomes: <DC>, 1.1.1.1, 8.8.8.8 with the AD domain as search suffix.
+  # It writes a netplan drop-in (60-memlabs-dc-dns.yaml, DC first on the link)
+  # AND a systemd-resolved routing-domain drop-in that forces ALL queries for
+  # the AD domain (incl. the _msdcs SRV zone) to the DC ONLY. The routing
+  # domain is the authoritative fix: netplan MERGES nameserver lists so public
+  # DNS ends up ahead of the DC, and the lab AD domain often collides with a
+  # REAL internet domain (e.g. contoso.com) whose public resolvers happily
+  # answer AD queries with wrong (Azure) IPs while the SRV lookups NXDOMAIN.
   - path: /usr/local/sbin/memlabs-set-dns
     permissions: '0755'
     content: |
@@ -680,6 +683,8 @@ write_files:
       if [[ -n "`$SEARCH" ]]; then
         SEARCH_LINE="        search: [`$SEARCH]"
       fi
+      # 1) netplan drop-in: DC first on the link (persists across reboot; DC
+      #    forwards external names, public kept as belt-and-braces fallback).
       cat > /etc/netplan/60-memlabs-dc-dns.yaml <<EOF
       network:
         version: 2
@@ -693,8 +698,26 @@ write_files:
       EOF
       chmod 600 /etc/netplan/60-memlabs-dc-dns.yaml
       netplan apply
+      # 2) systemd-resolved routing domain: '~<domain>' tied to global DNS=<DC>
+      #    is a MORE-SPECIFIC route than the per-link '.' default, so every AD
+      #    query goes to the DC only while everything else still uses the link's
+      #    (public) DNS. This wins regardless of netplan's list-merge ordering
+      #    and regardless of whether the AD domain name exists on the internet.
+      if [[ -n "`$SEARCH" ]]; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        cat > /etc/systemd/resolved.conf.d/memlabs-dc-route.conf <<EOF
+      [Resolve]
+      DNS=`$DC_DNS
+      Domains=~`$SEARCH
+      EOF
+        chmod 644 /etc/systemd/resolved.conf.d/memlabs-dc-route.conf
+      fi
       systemctl restart systemd-resolved || true
-      echo "DNS now: `$(resolvectl dns | grep -v '^`$')"
+      echo "DNS now: `$(resolvectl dns 2>/dev/null | grep -v '^`$')"
+      if [[ -n "`$SEARCH" ]]; then
+        echo "AD route: `$(resolvectl domain 2>/dev/null | grep -i "`$SEARCH" || echo '(routing domain pending)')"
+        echo "SRV test: `$(getent hosts "`$SEARCH" 2>/dev/null | head -1 || echo '(domain not resolving yet)')"
+      fi
   # ----------------------------------------------------------------------
   # Why this override exists (read before touching):
   #
