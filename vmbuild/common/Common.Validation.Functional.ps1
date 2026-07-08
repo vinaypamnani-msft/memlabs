@@ -9285,22 +9285,45 @@ function Test-LinuxDomainJoin {
     $dcIp = ''
     if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') { $dcIp = "$($Matches[1]).1" }
 
+    # Comprehensive one-shot diagnostic bundle. Everything an operator needs to
+    # root-cause a failed realm-join is collected here so the build log alone is
+    # sufficient (we rarely get hands-on the VM): identity/join state, sssd +
+    # its journal, Kerberos (keytab/krb5.conf/clock-skew -- AD rejects tickets
+    # >5min skew), the resolver + netplan (the #1 cause is DNS not pointing at
+    # the DC), live AD SRV-record lookups, DC reachability on each AD port
+    # (53/88/389/445 via bash /dev/tcp -- no nc dependency), adcli discovery, and
+    # the realm-join echoes captured in cloud-init-output.log.
     $diagCmd = @"
+echo '=== hostname / identity ==='; hostnamectl 2>&1 | grep -Ei 'hostname|chassis' ; id vmbuildadmin 2>&1
+echo '=== clock (Kerberos needs <5min skew vs DC) ==='; timedatectl 2>&1 | grep -Ei 'Local time|Universal|synchronized|NTP service' ; date -u
 echo '=== realm list ==='; realm list 2>&1 || echo '(realm not joined / not installed)'
-echo '=== sssd active ==='; systemctl is-active sssd 2>&1
-echo '=== keytab ==='; ls -l /etc/krb5.keytab 2>&1 || echo '(no /etc/krb5.keytab)'
-echo '=== resolver ==='; (resolvectl status 2>/dev/null | grep -E 'DNS Servers|DNS Domain' || cat /etc/resolv.conf) 2>&1
-echo '=== DNS: $domainLower ==='; getent hosts '$domainLower' 2>&1 || echo '(domain name does not resolve)'
-echo '=== DC ping ($dcIp) ==='; (test -n '$dcIp' && ping -c1 -W2 '$dcIp' >/dev/null 2>&1 && echo 'DC $dcIp reachable' || echo 'DC $dcIp NOT reachable') 2>&1
+echo '=== net ads testjoin ==='; net ads testjoin 2>&1 || echo '(net ads testjoin failed / samba not installed)'
+echo '=== adcli info ($domainLower) ==='; adcli info '$domainLower' 2>&1 | head -30 || echo '(adcli info failed -- cannot discover DC via SRV)'
 echo '=== adcli testjoin ==='; adcli testjoin '$domainLower' 2>&1 || echo '(adcli testjoin failed)'
+echo '=== sssd active ==='; systemctl is-active sssd 2>&1 ; systemctl is-enabled sssd 2>&1
+echo '=== sssd journal (last 40) ==='; journalctl -u sssd --no-pager -n 40 2>&1 || echo '(no sssd journal)'
+echo '=== /etc/sssd/sssd.conf ==='; (test -f /etc/sssd/sssd.conf && sed -E 's/(ldap_default_authtok|password) *=.*/\1 = <redacted>/' /etc/sssd/sssd.conf) 2>&1 || echo '(no /etc/sssd/sssd.conf)'
+echo '=== keytab ==='; ls -l /etc/krb5.keytab 2>&1 || echo '(no /etc/krb5.keytab)'; klist -k 2>&1 | head -20 || true
+echo '=== /etc/krb5.conf ==='; cat /etc/krb5.conf 2>&1 || echo '(no /etc/krb5.conf)'
+echo '=== resolver ==='; resolvectl status 2>&1 | grep -Ei 'Current DNS|DNS Servers|DNS Domain|Link ' || cat /etc/resolv.conf 2>&1
+echo '=== /etc/resolv.conf ==='; cat /etc/resolv.conf 2>&1
+echo '=== netplan ==='; for f in /etc/netplan/*.yaml; do echo "-- `$f --"; cat "`$f" 2>&1; done
+echo '=== memlabs-set-dns present ==='; ls -l /usr/local/sbin/memlabs-set-dns 2>&1 || echo '(helper missing)'
+echo '=== DNS: A record $domainLower ==='; getent hosts '$domainLower' 2>&1 || echo '(domain name does not resolve)'
+echo '=== DNS: SRV _ldap._tcp.dc._msdcs.$domainLower ==='; (nslookup -type=srv _ldap._tcp.dc._msdcs.$domainLower 2>&1 | grep -Ei 'service|server|priority|can.t find|NXDOMAIN|timed out') || echo '(nslookup unavailable or no SRV records -- AD DNS not reachable)'
+echo '=== DC reachability ($dcIp) ==='; if [ -n '$dcIp' ]; then ping -c1 -W2 '$dcIp' >/dev/null 2>&1 && echo 'ping OK' || echo 'ping FAILED'; for p in 53 88 389 445; do (timeout 3 bash -c "echo > /dev/tcp/$dcIp/`$p" 2>/dev/null && echo "tcp/`$p OPEN" || echo "tcp/`$p CLOSED/filtered"); done; else echo '(no DC IP derived from network)'; fi
+echo '=== realm-join echoes (cloud-init-output.log) ==='; grep -a 'memlabs-realm-join' /var/log/cloud-init-output.log 2>&1 | tail -30 || echo '(no realm-join output in cloud-init log)'
 "@
-    $diag = Invoke-LinuxVmCommand -VMName $VMName -IPAddress $vmIp -Sudo -TimeoutSeconds 60 `
+    $diag = Invoke-LinuxVmCommand -VMName $VMName -IPAddress $vmIp -Sudo -TimeoutSeconds 120 `
         -DisplayName 'Phase11-domainjoin-diag' -BashCommand $diagCmd
     if ($diag -and $diag.ScriptBlockOutput) {
         foreach ($line in ($diag.ScriptBlockOutput -split "`n")) {
             $t = $line.TrimEnd()
             if ($t) { Write-Log "[Phase $Phase] $VMName [$RoleLabel]: dj-diag> $t" -LogOnly }
         }
+    }
+    else {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: dj-diag> (diagnostic collection returned no output -- SSH may have failed)" -LogOnly
     }
 
     Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - joinDomain=true but not joined to $domain. Most common cause is DNS: the VM's resolver must point at the DC ($dcIp) so it can find the AD SRV records. Re-run '-StartPhase 3' after the DC's DNS is serving; the realm-join is idempotent. See dj-diag lines in the build log." -Warning
