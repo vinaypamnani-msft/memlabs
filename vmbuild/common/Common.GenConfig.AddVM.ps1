@@ -688,14 +688,21 @@ function Add-NewVMForRole {
     # made '$role -eq DomainMember' false), so the property never appeared.
     $siteSystemRoles = @('Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
     if ($actualRoleName -eq 'DomainMember' -or $actualRoleName -in $siteSystemRoles) {
+        # Canonical per-role fallback matching Get-NewDomainDefaults
+        # (NewDomain.ps1): Clients ON, Servers OFF, SiteSystems OFF. Site
+        # servers install the CM client locally during CM setup, so they are
+        # NOT a client-push target by default (a $true fallback here wrongly
+        # turned pushClient ON for site servers on domains whose domainDefaults
+        # predates the PushCMClientToSiteSystems key).
         if ($actualRoleName -in $siteSystemRoles) {
             $defaultKey = 'PushCMClientToSiteSystems'
+            $defaultVal = $false
         }
         else {
             $isClientOS = $virtualMachine.operatingSystem -and $virtualMachine.operatingSystem -like "Windows 1*"
-            $defaultKey = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
+            if ($isClientOS) { $defaultKey = 'PushCMClientToClients'; $defaultVal = $true }
+            else { $defaultKey = 'PushCMClientToServers'; $defaultVal = $false }
         }
-        $defaultVal = $true
         if ($ConfigToModify.domainDefaults -and ($null -ne $ConfigToModify.domainDefaults.$defaultKey)) {
             $defaultVal = [bool]$ConfigToModify.domainDefaults.$defaultKey
         }

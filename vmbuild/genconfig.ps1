@@ -1210,6 +1210,17 @@ do {
         }
         $c = Test-Configuration -InputObject $Global:Config
         Convert-ValidationMessages -TestObject $c
+        # Non-blocking informational advisories (auto-fix notices + "incomplete
+        # domain" style warnings). These do NOT fail validation, so surface them
+        # in yellow so the operator sees what was auto-corrected / advised.
+        if ($c.InfoMessage -and $c.InfoMessage.Length -gt 0) {
+            foreach ($infoMsg in (($c.InfoMessage.ToString() -split "\r\n"))) {
+                if (-not [string]::IsNullOrWhiteSpace($infoMsg)) {
+                    Write-Host2 -ForegroundColor Yellow "  [i] $($infoMsg.Trim())"
+                    Write-Log "Deploy advisory: $($infoMsg.Trim())" -LogOnly
+                }
+            }
+        }
         Write-Host
         Write-Verbose "12"
 

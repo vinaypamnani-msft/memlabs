@@ -4,9 +4,38 @@ function Add-ValidationMessage {
         [string]$Message,
         [object]$ReturnObject,
         [switch]$Failure,
-        [switch]$Warning
+        [switch]$Warning,
+        [switch]$Information
     )
     Write-Log -Verbose $Message
+
+    # Informational messages are NON-BLOCKING advisories / auto-fix notices.
+    # They must NOT increment Problems (the .Valid gate keys on Problems) and
+    # must NOT land in .Message (which Convert-ValidationMessages / the menu
+    # funnel into hard error lines). They are collected separately in
+    # .InfoMessage so callers can surface them as advisories without failing
+    # validation. Short-circuit here before the blocking bookkeeping below.
+    if ($Information.IsPresent) {
+        if (-not ($ReturnObject.PSObject.Properties.Name -contains 'Informational')) {
+            $ReturnObject | Add-Member -NotePropertyName Informational -NotePropertyValue 0 -Force
+        }
+        if (-not ($ReturnObject.PSObject.Properties.Name -contains 'InfoMessage')) {
+            $ReturnObject | Add-Member -NotePropertyName InfoMessage -NotePropertyValue ([System.Text.StringBuilder]::new()) -Force
+        }
+        $ReturnObject.Informational += 1
+        [void]$ReturnObject.InfoMessage.AppendLine($Message)
+        try {
+            $caller = (Get-PSCallStack | Select-Object -Skip 1 -First 1)
+            $callerName = if ($caller) { $caller.FunctionName } else { '<unknown>' }
+            $callerLine = if ($caller) { $caller.ScriptLineNumber } else { 0 }
+            Write-Log "[ValidationInformation] $Message  (from $callerName`:$callerLine)" -LogOnly
+        }
+        catch {
+            Write-Log "[ValidationInformation] $Message" -LogOnly
+        }
+        return
+    }
+
     $ReturnObject.Problems += 1
     [void]$ReturnObject.Message.AppendLine($Message)
 
@@ -417,7 +446,7 @@ function Test-ValidCmOptions {
                     $fixed = Resolve-PushClientSite -VM $vm -Config $ConfigObject -Domain $ConfigObject.vmOptions.domainName -EligibleSites $eligiblePush
                     $vm.pushClient = $fixed
                 }
-                Add-ValidationMessage -Message "Client Push Validation: pushClient on $($badSite.vmName -join ', ') referenced a site code that does not exist; reset to the resolved site (or disabled where no site applies)." -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "Client Push Validation: pushClient on $($badSite.vmName -join ', ') referenced a site code that does not exist; reset to the resolved site (or disabled where no site applies)." -ReturnObject $ReturnObject -Information
                 $pushVMs = @($pushVMs | Where-Object { ($_.pushClient -is [string]) -and $_.pushClient })
             }
 
@@ -443,14 +472,14 @@ function Test-ValidCmOptions {
                     $offenders = @($vmsOnNet | Where-Object { $_.pushClient -ne $target })
                     if ($offenders.Count -gt 0) {
                         foreach ($vm in $offenders) { $vm.pushClient = $target }
-                        Add-ValidationMessage -Message "Client Push Validation: subnet $net hosts site server $target; $($offenders.vmName -join ', ') were repointed to push from $target (a site server's subnet maps to its own boundary group)." -ReturnObject $ReturnObject -Warning
+                        Add-ValidationMessage -Message "Client Push Validation: subnet $net hosts site server $target; $($offenders.vmName -join ', ') were repointed to push from $target (a site server's subnet maps to its own boundary group)." -ReturnObject $ReturnObject -Information
                     }
                 }
                 elseif ($distinct.Count -gt 1) {
                     # No site server on this subnet: coerce all to the first seen.
                     $target = $distinct[0]
                     foreach ($vm in $vmsOnNet) { $vm.pushClient = $target }
-                    Add-ValidationMessage -Message "Client Push Validation: VMs on subnet $net targeted different sites ($($distinct -join ', ')). A subnet maps to one boundary group; all were set to push from $target." -ReturnObject $ReturnObject -Warning
+                    Add-ValidationMessage -Message "Client Push Validation: VMs on subnet $net targeted different sites ($($distinct -join ', ')). A subnet maps to one boundary group; all were set to push from $target." -ReturnObject $ReturnObject -Information
                 }
             }
         }
@@ -1580,6 +1609,8 @@ function Test-Configuration {
             Failures     = 0
             Warnings     = 0
             Problems     = 0
+            Informational = 0
+            InfoMessage  = [System.Text.StringBuilder]::new()
         }
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing Filepath" -PercentComplete 1
         if ($FilePath) {
@@ -2252,10 +2283,11 @@ function Test-Configuration {
             # Scoped to DC / site servers (the backbone that reliably reaches 11
             # -- powered-off / role-special VMs like OSDClient / StandaloneRootCA
             # are intentionally excluded) and only when there are genuinely NEW
-            # (non-hidden) VMs being added. This is a WARNING (acknowledge-and-
-            # continue), not a hard failure, so a deliberate "I know it's broken,
-            # extend anyway" / resume-and-add still works; flip -Warning to
-            # -Failure to make it blocking.
+            # (non-hidden) VMs being added. This is an INFORMATION advisory
+            # (non-blocking): it is surfaced to the operator but does not fail
+            # validation, so a deliberate "I know it's broken, extend anyway" /
+            # resume-and-add still works. Flip -Information to -Failure to make
+            # it a hard block (or -Warning to block with warning semantics).
             try {
                 $newVMsBeingAdded = @($deployConfig.virtualMachines | Where-Object { -not $_.hidden })
                 if ($newVMsBeingAdded.Count -gt 0) {
@@ -2286,7 +2318,7 @@ function Test-Configuration {
                         $criticalPhase = if ($criticalNote.lastPhaseComplete) { [int]$criticalNote.lastPhaseComplete } else { 0 }
                         if ($criticalPhase -lt 11) {
                             $newNames = ($newVMsBeingAdded | Select-Object -ExpandProperty vmName) -join ', '
-                            Add-ValidationMessage -Message "Existing $($criticalVM.role) '$($criticalVM.vmName)' never finished deployment + validation (lastPhaseComplete=$criticalPhase, expected 11). Adding new VM(s) [$newNames] on top of an incomplete domain is not recommended -- the underlying deployment failed and stacking more VMs onto it will likely fail too. Finish/repair the existing deployment first (re-run it to completion, or remove + redeploy '$($criticalVM.vmName)'), then add the new VMs." -ReturnObject $return -Warning
+                            Add-ValidationMessage -Message "Existing $($criticalVM.role) '$($criticalVM.vmName)' never finished deployment + validation (lastPhaseComplete=$criticalPhase, expected 11). Adding new VM(s) [$newNames] on top of an incomplete domain is not recommended -- the underlying deployment failed and stacking more VMs onto it will likely fail too. Finish/repair the existing deployment first (re-run it to completion, or remove + redeploy '$($criticalVM.vmName)'), then add the new VMs." -ReturnObject $return -Information
                         }
                     }
                 }

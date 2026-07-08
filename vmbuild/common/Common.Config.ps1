@@ -571,7 +571,8 @@ function Get-UserConfiguration {
 
             # pushClient property: auto-add for DomainMember and site system VMs.
             # Precedence: existing per-VM value > legacy cmOptions.pushClientToDomainMembers
-            # > domainDefaults.PushCMClientToClients/Servers/SiteSystems > $true.
+            # (DomainMember-only) > domainDefaults.PushCMClientToClients/Servers/SiteSystems
+            # > canonical per-role fallback (Clients ON, Servers OFF, SiteSystems OFF).
             # The stored value is a TARGET SITE CODE string (push from that site)
             # or $false (no push). Legacy boolean $true is migrated to a concrete
             # site code below so the genconfig dropdown, client push, and boundary
@@ -579,22 +580,29 @@ function Get-UserConfiguration {
             $siteSystemRoles = @('Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
             if (($vm.role -eq 'DomainMember' -or $vm.role -in $siteSystemRoles)) {
                 if ($null -eq $vm.pushClient) {
-                    $pushDefault = $true
-                    if ($config.cmOptions -and ($null -ne $config.cmOptions.pushClientToDomainMembers)) {
-                        # Legacy single-value migration: apply to all eligible VMs
+                    # Canonical per-role fallback, matching Get-NewDomainDefaults
+                    # (NewDomain.ps1): Clients ON, Servers OFF, SiteSystems OFF.
+                    # Site servers install the CM client LOCALLY during CM setup,
+                    # so they must NOT be a client-push target by default. The old
+                    # hardcoded $true fallback here (used when domainDefaults
+                    # predates the PushCMClientToSiteSystems key, e.g. an existing
+                    # domain) is what wrongly turned pushClient ON for site servers.
+                    if ($vm.role -in $siteSystemRoles) {
+                        $key = 'PushCMClientToSiteSystems'
+                        $pushDefault = $false
+                    }
+                    else {
+                        $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+                        if ($isClientOS) { $key = 'PushCMClientToClients'; $pushDefault = $true }
+                        else { $key = 'PushCMClientToServers'; $pushDefault = $false }
+                    }
+                    # Legacy single-value cmOptions.pushClientToDomainMembers is a
+                    # DomainMember-only knob; it must never force a site system on.
+                    if ($vm.role -eq 'DomainMember' -and $config.cmOptions -and ($null -ne $config.cmOptions.pushClientToDomainMembers)) {
                         $pushDefault = [bool]$config.cmOptions.pushClientToDomainMembers
                     }
-                    elseif ($config.domainDefaults) {
-                        if ($vm.role -in $siteSystemRoles) {
-                            $key = 'PushCMClientToSiteSystems'
-                        }
-                        else {
-                            $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
-                            $key = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
-                        }
-                        if ($null -ne $config.domainDefaults.$key) {
-                            $pushDefault = [bool]$config.domainDefaults.$key
-                        }
+                    elseif ($config.domainDefaults -and ($null -ne $config.domainDefaults.$key)) {
+                        $pushDefault = [bool]$config.domainDefaults.$key
                     }
                     $vm | Add-Member -MemberType NoteProperty -Name "pushClient" -Value $pushDefault -Force
                 }
