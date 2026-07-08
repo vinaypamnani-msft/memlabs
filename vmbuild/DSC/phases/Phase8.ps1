@@ -131,20 +131,30 @@
         $nextDepend = $null
         if ($AddIISCert) {
 
-            WriteStatus PkiRebootForGroup {
-                Status = "Rebooting to get Group Membership (PKI cert enrollment)"
-            }
-
-            RebootNow PkiGroupReboot {
-                FileName  = 'C:\Temp\IISGroupReboot.txt'
-                DependsOn = "[WriteStatus]PkiRebootForGroup"
-            }
-            $nextDepend = "[RebootNow]PkiGroupReboot"
-
             WriteStatus PkiRequestCerts {
-                Status    = "Requesting IIS Certificate for PKI"
-                DependsOn = $nextDepend
+                Status = "Requesting IIS Certificate for PKI"
             }
+
+            # Refresh the machine's Kerberos ticket so its PAC carries the
+            # 'ConfigMgr IIS Servers' AD group SID (which grants Enroll on the CM
+            # cert templates) WITHOUT a reboot: the DC adds this computer account to
+            # that group in Phase 2, and every site server already reboots in Phase
+            # 3 (IIS feature + .NET installs) AFTER the group is created, so by Phase
+            # 8 the machine token is normally already current. Purging the machine
+            # (0x3e7 = SYSTEM LUID) Kerberos ticket cache forces a fresh TGT on the
+            # next auth -- the CMC enrollment DCOM call to the CA -- so enrollment is
+            # deterministic even on a -StartPhase 8 re-run, with no reboot. Replaces
+            # the old dedicated 'IISGroupReboot' RebootNow.
+            Script PkiRefreshGroupToken {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+                    try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+            $nextDepend = "[Script]PkiRefreshGroupToken"
 
             # Refresh the local certificate template cache before CertReq so its
             # Test() resolves the template OID to its name (otherwise it re-creates
@@ -167,7 +177,7 @@
                         }
                     }
                 }
-                DependsOn  = "[WriteStatus]PkiRequestCerts"
+                DependsOn  = "[Script]PkiRefreshGroupToken"
             }
             $nextDepend = "[Script]PkiRefreshTemplateCache"
 
@@ -405,20 +415,30 @@
         $nextDepend = $null
         if ($AddIISCert) {
 
-            WriteStatus PkiRebootForGroup {
-                Status = "Rebooting to get Group Membership (PKI cert enrollment)"
-            }
-
-            RebootNow PkiGroupReboot {
-                FileName  = 'C:\Temp\IISGroupReboot.txt'
-                DependsOn = "[WriteStatus]PkiRebootForGroup"
-            }
-            $nextDepend = "[RebootNow]PkiGroupReboot"
-
             WriteStatus PkiRequestCerts {
-                Status    = "Requesting IIS Certificate for PKI"
-                DependsOn = $nextDepend
+                Status = "Requesting IIS Certificate for PKI"
             }
+
+            # Refresh the machine's Kerberos ticket so its PAC carries the
+            # 'ConfigMgr IIS Servers' AD group SID (which grants Enroll on the CM
+            # cert templates) WITHOUT a reboot: the DC adds this computer account to
+            # that group in Phase 2, and every site server already reboots in Phase
+            # 3 (IIS feature + .NET installs) AFTER the group is created, so by Phase
+            # 8 the machine token is normally already current. Purging the machine
+            # (0x3e7 = SYSTEM LUID) Kerberos ticket cache forces a fresh TGT on the
+            # next auth -- the CMC enrollment DCOM call to the CA -- so enrollment is
+            # deterministic even on a -StartPhase 8 re-run, with no reboot. Replaces
+            # the old dedicated 'IISGroupReboot' RebootNow.
+            Script PkiRefreshGroupToken {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+                    try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+            $nextDepend = "[Script]PkiRefreshGroupToken"
 
             # Refresh the local certificate template cache before CertReq so its
             # Test() resolves the template OID to its name (otherwise it re-creates
@@ -441,7 +461,7 @@
                         }
                     }
                 }
-                DependsOn  = "[WriteStatus]PkiRequestCerts"
+                DependsOn  = "[Script]PkiRefreshGroupToken"
             }
             $nextDepend = "[Script]PkiRefreshTemplateCache"
 
@@ -715,20 +735,30 @@
         $nextDepend = $null
         if ($AddIISCert) {
 
-            WriteStatus PkiRebootForGroup {
-                Status = "Rebooting to get Group Membership (PKI cert enrollment)"
-            }
-
-            RebootNow PkiGroupReboot {
-                FileName  = 'C:\Temp\IISGroupReboot.txt'
-                DependsOn = "[WriteStatus]PkiRebootForGroup"
-            }
-            $nextDepend = "[RebootNow]PkiGroupReboot"
-
             WriteStatus PkiRequestCerts {
-                Status    = "Requesting IIS Certificate for PKI"
-                DependsOn = $nextDepend
+                Status = "Requesting IIS Certificate for PKI"
             }
+
+            # Refresh the machine's Kerberos ticket so its PAC carries the
+            # 'ConfigMgr IIS Servers' AD group SID (which grants Enroll on the CM
+            # cert templates) WITHOUT a reboot: the DC adds this computer account to
+            # that group in Phase 2, and every site server already reboots in Phase
+            # 3 (IIS feature + .NET installs) AFTER the group is created, so by Phase
+            # 8 the machine token is normally already current. Purging the machine
+            # (0x3e7 = SYSTEM LUID) Kerberos ticket cache forces a fresh TGT on the
+            # next auth -- the CMC enrollment DCOM call to the CA -- so enrollment is
+            # deterministic even on a -StartPhase 8 re-run, with no reboot. Replaces
+            # the old dedicated 'IISGroupReboot' RebootNow.
+            Script PkiRefreshGroupToken {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+                    try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+            $nextDepend = "[Script]PkiRefreshGroupToken"
 
             # Refresh the local certificate template cache before CertReq so its
             # Test() resolves the template OID to its name (otherwise it re-creates
@@ -751,7 +781,7 @@
                         }
                     }
                 }
-                DependsOn  = "[WriteStatus]PkiRequestCerts"
+                DependsOn  = "[Script]PkiRefreshGroupToken"
             }
             $nextDepend = "[Script]PkiRefreshTemplateCache"
 
@@ -889,9 +919,8 @@
         # orchestrator (New-Lab), so requesting these in Phase 3 dead-locked with
         # "No Certificate Authority could be found". By Phase 8 the CA exists, so
         # we request + bind the web cert here, gated BEFORE this node's main work
-        # (incl. the RebootNow, which must precede RegisterTaskScheduler so the
-        # reboot cannot kill the in-flight ScriptWorkflow) and before the HTTPS
-        # flip. Same gate + logic as the old Phase 3 $AddIISCert block.
+        # so it lands before the site's HTTPS flip (EnableHTTPS in ScriptWorkflow).
+        # Same gate + logic as the old Phase 3 $AddIISCert block.
         $cmoCert = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
         $caVMCert = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
         $AddIISCert = $false
@@ -906,20 +935,32 @@
         $nextDepend = $null
         if ($AddIISCert) {
 
-            WriteStatus PkiRebootForGroup {
-                Status = "Rebooting to get Group Membership (PKI cert enrollment)"
-            }
-
-            RebootNow PkiGroupReboot {
-                FileName  = 'C:\Temp\IISGroupReboot.txt'
-                DependsOn = "[WriteStatus]PkiRebootForGroup"
-            }
-            $nextDepend = "[RebootNow]PkiGroupReboot"
-
             WriteStatus PkiRequestCerts {
-                Status    = "Requesting IIS Certificate for PKI"
-                DependsOn = $nextDepend
+                Status = "Requesting IIS Certificate for PKI"
             }
+
+            # Refresh the machine's Kerberos ticket so its PAC carries the
+            # 'ConfigMgr IIS Servers' AD group SID (which grants Enroll on the CM
+            # cert templates) WITHOUT a reboot: the DC adds this computer account to
+            # that group in Phase 2, and every site server already reboots in Phase
+            # 3 (IIS feature + .NET installs) AFTER the group is created, so by Phase
+            # 8 the machine token is normally already current. Purging the machine
+            # (0x3e7 = SYSTEM LUID) Kerberos ticket cache forces a fresh TGT on the
+            # next auth -- the CMC enrollment DCOM call to the CA -- so enrollment is
+            # deterministic even on a -StartPhase 8 re-run, with no reboot. Replaces
+            # the old dedicated 'IISGroupReboot' RebootNow. NOTE: the site server's
+            # own ScriptWorkflow (RegisterTaskScheduler, below) is unaffected -- no
+            # reboot fires here anymore.
+            Script PkiRefreshGroupToken {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+                    try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+            $nextDepend = "[Script]PkiRefreshGroupToken"
 
             # Refresh the local certificate template cache before CertReq so its
             # Test() resolves the template OID to its name (otherwise it re-creates
@@ -942,7 +983,7 @@
                         }
                     }
                 }
-                DependsOn  = "[WriteStatus]PkiRequestCerts"
+                DependsOn  = "[Script]PkiRefreshGroupToken"
             }
             $nextDepend = "[Script]PkiRefreshTemplateCache"
 
@@ -1174,20 +1215,30 @@
         $nextDepend = $null
         if ($AddIISCert) {
 
-            WriteStatus PkiRebootForGroup {
-                Status = "Rebooting to get Group Membership (PKI cert enrollment)"
-            }
-
-            RebootNow PkiGroupReboot {
-                FileName  = 'C:\Temp\IISGroupReboot.txt'
-                DependsOn = "[WriteStatus]PkiRebootForGroup"
-            }
-            $nextDepend = "[RebootNow]PkiGroupReboot"
-
             WriteStatus PkiRequestCerts {
-                Status    = "Requesting IIS Certificate for PKI"
-                DependsOn = $nextDepend
+                Status = "Requesting IIS Certificate for PKI"
             }
+
+            # Refresh the machine's Kerberos ticket so its PAC carries the
+            # 'ConfigMgr IIS Servers' AD group SID (which grants Enroll on the CM
+            # cert templates) WITHOUT a reboot: the DC adds this computer account to
+            # that group in Phase 2, and every site server already reboots in Phase
+            # 3 (IIS feature + .NET installs) AFTER the group is created, so by Phase
+            # 8 the machine token is normally already current. Purging the machine
+            # (0x3e7 = SYSTEM LUID) Kerberos ticket cache forces a fresh TGT on the
+            # next auth -- the CMC enrollment DCOM call to the CA -- so enrollment is
+            # deterministic even on a -StartPhase 8 re-run, with no reboot. Replaces
+            # the old dedicated 'IISGroupReboot' RebootNow.
+            Script PkiRefreshGroupToken {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+                    try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+            $nextDepend = "[Script]PkiRefreshGroupToken"
 
             # Refresh the local certificate template cache before CertReq so its
             # Test() resolves the template OID to its name (otherwise it re-creates
@@ -1210,7 +1261,7 @@
                         }
                     }
                 }
-                DependsOn  = "[WriteStatus]PkiRequestCerts"
+                DependsOn  = "[Script]PkiRefreshGroupToken"
             }
             $nextDepend = "[Script]PkiRefreshTemplateCache"
 
