@@ -58,6 +58,27 @@ for i in {1..5}; do
 done
 
 if [ "$JOINED" != "1" ]; then
+    # The usual cause of a persistent failure here is a PRE-EXISTING computer
+    # account: adcli finds the stale account and tries to RESET its password
+    # over Kerberos kpasswd, which a Windows DC rejects with
+    #   "Couldn't set password for computer account: <NAME>$: Message stream modified".
+    # Creating the account FRESH instead sets the password over the sealed LDAP
+    # bind (no kpasswd), which succeeds. So delete any stale account for our name
+    # with the admin creds and retry the join once. The account name is the
+    # hostname truncated to the 15-char NetBIOS limit (e.g. ps1-linuxclient2 ->
+    # PS1-LINUXCLIENT); the delete is safe because that name is deterministic for
+    # this VM and its DNS record already points here.
+    NETBIOS="$(hostname -s | tr '[:lower:]' '[:upper:]' | cut -c1-15)"
+    echo "[memlabs-realm-join] join failed; removing any stale computer account '$NETBIOS' and retrying fresh"
+    echo "$ADMIN_PWD" | adcli delete-computer "$NETBIOS" --domain "$DOMAIN" --login-user "$ADMIN_USER" --stdin-password 2>&1 || true
+    sleep 5
+    if echo "$ADMIN_PWD" | realm join -v -U "$ADMIN_USER" "$DOMAIN" --install=/; then
+        JOINED=1
+        echo "[memlabs-realm-join] joined after removing stale computer account"
+    fi
+fi
+
+if [ "$JOINED" != "1" ]; then
     # Surface the real failure that realmd hid behind REALMD_OPERATION. Run
     # adcli directly (-v, --stdin-password) for the explicit message -- e.g.
     # "Invalid credentials", "Insufficient permissions to modify computer
