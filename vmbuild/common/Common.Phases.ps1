@@ -1545,10 +1545,16 @@ function Start-PhaseJobs {
         # Phase 3 has another ($global:Linux_Configure, all Linux). Skip
         # every other Linux case so we don't queue a $global:VM_Config job
         # that would hang on "Waiting for VM to respond" (Invoke-VmCommand
-        # is Windows-only). That means: Phase 4+ for any Linux, AND Phase 2
+        # is Windows-only). That means: Phase 4-10 for any Linux, AND Phase 2
         # for non-Proxy Linux roles (LinuxClient, LinuxServer).
+        # EXCEPT Phase 11 (functional validation): Test-VmFunctionality has
+        # dedicated Linux branches ($vmIsLinux -> ping/SSH/SMB health, proxy,
+        # and the joinDomain AD-DNS/realm checks over SSH), so Linux VMs MUST
+        # reach the Phase 11 dispatch. Skipping them here left every Linux VM
+        # unvalidated (Phase 11 logged "No VMs need this step" on a Linux-only
+        # add-to-existing).
         if ((Test-VmIsLinux -Vm $currentItem) -and
-            ($Phase -gt 3 -or ($Phase -eq 2 -and $currentItem.role -ne 'Proxy'))) {
+            (($Phase -gt 3 -and $Phase -ne 11) -or ($Phase -eq 2 -and $currentItem.role -ne 'Proxy'))) {
             Write-Log "[Phase $Phase] Skipping Linux VM $($currentItem.vmName) (no Windows DSC)" -LogOnly
             continue
         }
