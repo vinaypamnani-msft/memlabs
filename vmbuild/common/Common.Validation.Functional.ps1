@@ -302,8 +302,13 @@ function Test-VmFunctionality {
         $testsPassed = Test-BLMFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
-    # Verify maintenance scheduled tasks are present (confirms Phase 10 ran correctly)
-    if ($testsPassed -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
+    # Verify maintenance scheduled tasks are present (confirms Phase 10 ran correctly).
+    # Windows-only: Test-MaintenanceTasks probes the guest over PSDirect for Windows
+    # Scheduled Tasks, which Linux doesn't have (Phase 10 maintenance skips Linux VMs
+    # entirely). Running it against a Linux VM just burns the PSDirect timeout and
+    # emits a spurious 'scheduled-task check skipped (probe timed out)' WARN, so gate
+    # it behind -not $vmIsLinux like the DSC LCM check below.
+    if ($testsPassed -and -not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying maintenance tasks"
         $testsPassed = Test-MaintenanceTasks -VMName $VMName -Domain $domain
     }
