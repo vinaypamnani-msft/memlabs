@@ -44,6 +44,11 @@ function Get-LinuxScript {
         When set, sources lib/apt-retry.sh at the top of the script
         so the apt_retry function is available.
 
+    .PARAMETER IncludeSetDcDns
+        When set, sources lib/set-dc-dns.sh at the top of the script so the
+        memlabs_set_dc_dns <dc-ip> <domain> function is available (the single
+        source of truth for the DC-DNS config, shared with Set-LinuxVmsDcDns).
+
     .OUTPUTS
         [string] — the complete bash script body.
     #>
@@ -51,7 +56,8 @@ function Get-LinuxScript {
     param (
         [Parameter(Mandatory)][string]$Name,
         [hashtable]$Variables,
-        [switch]$IncludeAptRetry
+        [switch]$IncludeAptRetry,
+        [switch]$IncludeSetDcDns
     )
 
     $scriptPath = Join-Path $script:LinuxScriptDir "$Name.sh"
@@ -78,6 +84,18 @@ function Get-LinuxScript {
             # Strip the shebang from the helper since we're inlining it.
             $aptRetryBody = $aptRetryBody -replace '^#!/bin/bash\r?\n', ''
             $prefix = $aptRetryBody + "`n" + $prefix
+        }
+    }
+
+    # Optionally prepend the shared memlabs_set_dc_dns helper (single source of
+    # truth for the DC-DNS config, shared with Set-LinuxVmsDcDns).
+    if ($IncludeSetDcDns.IsPresent) {
+        $setDcDnsPath = Join-Path $script:LinuxScriptDir 'lib\set-dc-dns.sh'
+        if (Test-Path $setDcDnsPath) {
+            $setDcDnsBody = Get-Content -Path $setDcDnsPath -Raw
+            # Strip the shebang from the helper since we're inlining it.
+            $setDcDnsBody = $setDcDnsBody -replace '^#!/bin/bash\r?\n', ''
+            $prefix = $setDcDnsBody + "`n" + $prefix
         }
     }
 
@@ -1017,7 +1035,7 @@ function Get-LinuxDomainJoinSeedArgs {
     # base64-encode it and emit a single runcmd line:
     #   echo <b64> | base64 -d > /root/join.sh && bash /root/join.sh
     # Uses the same realm-join.sh file as Phase 3 — single source of truth.
-    $joinScript = Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -Variables @{
+    $joinScript = Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -IncludeSetDcDns -Variables @{
         DOMAIN     = $domainLower
         DC_IP      = $dcIp
         ADMIN_USER = $adminUser
@@ -2410,44 +2428,13 @@ function Set-LinuxVmsDcDns {
     Write-Log "Set-LinuxVmsDcDns: Pointing $($linuxVms.Count) Linux VM(s) at DC $($dcVm.vmName) ($dcIp / $domain)" -Activity
     $allOk = $true
     foreach ($vm in $linuxVms) {
-        # Write the DC-DNS config INLINE rather than shelling to the baked
-        # /usr/local/sbin/memlabs-set-dns helper. That helper is frozen into the
-        # cloud-init seed at VM-CREATION time, so an existing VM keeps whatever
-        # (possibly pre-routing-domain) version it was born with -- calling it on
-        # a re-run just rewrites the OLD broken resolver. Writing the netplan
-        # drop-in + the authoritative systemd-resolved routing-domain drop-in
-        # here (identical to realm-join.sh's configure_dc_dns) makes this Phase 2
-        # flip self-heal an existing box regardless of its baked helper version.
-        # Single-quoted here-string so bash $(...) / '^$' stay literal; the two
-        # PS values are injected via .Replace(). Invoke-LinuxVmCommand pipes this
-        # to `bash -s` over stdin and strips CRLF->LF, so heredocs are safe.
-        $dnsScript = @'
-set -euo pipefail
-cat > /etc/netplan/60-memlabs-dc-dns.yaml <<EOF
-network:
-  version: 2
-  ethernets:
-    primary:
-      match:
-        name: "e*"
-      nameservers:
-        addresses: [__DCIP__, 1.1.1.1, 8.8.8.8]
-        search: [__DOMAIN__]
-EOF
-chmod 600 /etc/netplan/60-memlabs-dc-dns.yaml
-netplan apply || true
-mkdir -p /etc/systemd/resolved.conf.d
-cat > /etc/systemd/resolved.conf.d/memlabs-dc-route.conf <<EOF
-[Resolve]
-DNS=__DCIP__
-Domains=~__DOMAIN__
-EOF
-chmod 644 /etc/systemd/resolved.conf.d/memlabs-dc-route.conf
-systemctl restart systemd-resolved || true
-echo "DNS: $(resolvectl dns 2>/dev/null | grep -v '^$' | head -3)"
-echo "AD route: $(resolvectl domain 2>/dev/null | grep -i "__DOMAIN__" || echo '(routing domain pending)')"
-'@
-        $cmd = $dnsScript.Replace('__DCIP__', $dcIp).Replace('__DOMAIN__', $domain)
+        # DC-DNS config comes from the shared lib/set-dc-dns.sh (single source of
+        # truth, also used by realm-join.sh) instead of the stale baked
+        # /usr/local/sbin/memlabs-set-dns helper. Load the memlabs_set_dc_dns
+        # function body and invoke it with this DC + domain. Invoke-LinuxVmCommand
+        # pipes to `bash -s` over stdin and strips CRLF->LF, so the heredocs inside
+        # the function terminate correctly on the guest.
+        $cmd = (Get-LinuxScript -Name 'lib/set-dc-dns') + "`nmemlabs_set_dc_dns '$dcIp' '$domain'`n"
 
         # --- SSH readiness gate --------------------------------------------
         # Phase 1 confirmed SSH, but sshd may have crashed or the VM may
@@ -3221,7 +3208,7 @@ function Get-LinuxRealmJoinBashScript {
     $pwBashSingle = $AdminPassword -replace "'", "'\''"
     $domainLower = $Domain.ToLower()
 
-    return (Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -Variables @{
+    return (Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -IncludeSetDcDns -Variables @{
         DOMAIN    = $domainLower
         DC_IP     = $DcIp
         ADMIN_USER = $AdminUser
