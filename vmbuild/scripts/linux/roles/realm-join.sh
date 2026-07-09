@@ -12,6 +12,13 @@ set -euo pipefail
 echo "[memlabs-realm-join] start: $(date -Is)"
 export DEBIAN_FRONTEND=noninteractive
 
+# AD account names in these labs are created lowercase, and the Kerberos AS-REQ
+# matches the client principal case-sensitively -- an uppercased user yields
+# "Client '<User>@<REALM>' not found in Kerberos database". Normalize the join
+# user to lowercase so realm join / adcli always use the stored form (applies to
+# the join, the stale-account delete, and the adcli-join diagnostic below).
+ADMIN_USER="$(printf '%s' "$ADMIN_USER" | tr '[:upper:]' '[:lower:]')"
+
 # Idempotency: skip if already joined to the target domain.
 if command -v realm >/dev/null 2>&1 && realm list 2>/dev/null | grep -qi "$DOMAIN"; then
     echo "[memlabs-realm-join] already joined to $DOMAIN; skipping."
@@ -79,15 +86,28 @@ if [ "$JOINED" != "1" ]; then
 fi
 
 if [ "$JOINED" != "1" ]; then
-    # Surface the real failure that realmd hid behind REALMD_OPERATION. Run
-    # adcli directly (-v, --stdin-password) for the explicit message -- e.g.
-    # "Invalid credentials", "Insufficient permissions to modify computer
-    # account", "Couldn't set computer password", "already exists" -- and tail
-    # the realmd journal. These land in the Phase 3 build log so the actual
-    # cause is diagnosable without shelling into the box.
+    # Surface the real failure realmd hides behind REALMD_OPERATION, PLUS the
+    # environment context needed to root-cause a join failure from the Phase 3
+    # build log alone (no shelling into the box). All best-effort (|| true).
+    NETBIOS="$(hostname -s | tr '[:lower:]' '[:upper:]' | cut -c1-15)"
     echo "[memlabs-realm-join] ERROR: all join attempts failed -- capturing detailed diagnostics"
-    echo "[memlabs-realm-join] --- adcli join -v (direct) ---"
+    echo "[memlabs-realm-join] context: domain=$DOMAIN dc=$DC_IP login-user=$ADMIN_USER netbios=$NETBIOS hostname=$(hostname -f 2>/dev/null)"
+    echo "[memlabs-realm-join] --- clock (timedatectl) ---"
+    timedatectl 2>&1 | grep -Ei 'Local time|Universal|synchronized|NTP' || true
+    echo "[memlabs-realm-join] --- resolver (resolvectl) ---"
+    resolvectl status 2>/dev/null | grep -Ei 'Current DNS|DNS Servers|DNS Domain' || true
+    echo "[memlabs-realm-join] --- AD name resolution (getent hosts $DOMAIN) ---"
+    getent hosts "$DOMAIN" 2>&1 || true
+    echo "[memlabs-realm-join] --- adcli info ---"
+    adcli info "$DOMAIN" 2>&1 | grep -Ei 'domain-name|domain-controller|realm|usable' || true
+    echo "[memlabs-realm-join] --- realm discover ---"
+    realm discover "$DOMAIN" 2>&1 | tail -25 || true
+    echo "[memlabs-realm-join] --- adcli join -v (direct, login-user=$ADMIN_USER) ---"
     echo "$ADMIN_PWD" | adcli join -v --domain "$DOMAIN" --login-user "$ADMIN_USER" --stdin-password 2>&1 || true
+    echo "[memlabs-realm-join] --- /etc/krb5.conf ---"
+    sed -n '1,40p' /etc/krb5.conf 2>/dev/null || true
+    echo "[memlabs-realm-join] --- klist -A ---"
+    klist -A 2>&1 || true
     echo "[memlabs-realm-join] --- realmd journal (last 80) ---"
     journalctl -b _COMM=realmd --no-pager 2>/dev/null | tail -80 || true
     exit 1
