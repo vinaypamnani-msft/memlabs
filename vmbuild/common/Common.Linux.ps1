@@ -2368,42 +2368,86 @@ function Set-LinuxVmsDcDns {
         return $false
     }
 
-    # Re-run idempotency: check if all Linux VMs already have DNS A records
-    # on the DC. If so, the previous run completed Set-LinuxVmsDcDns
-    # successfully — the VM-side netplan override persists across reboots,
-    # so skip the expensive SSH-probe + DNS-flip loop entirely.
+    # Re-run idempotency: a Linux VM is "already flipped" ONLY when its GUEST
+    # actually routes the AD domain to the DC -- i.e. the systemd-resolved
+    # routing drop-in /etc/systemd/resolved.conf.d/memlabs-dc-route.conf exists
+    # and names THIS DC + domain. The old signal (does the DC hold the VM's A
+    # record?) was WRONG: a guest can register its own A record while still
+    # resolving the domain apex / AD SRV records via PUBLIC DNS (netplan merges
+    # the nameserver list so the DC lands last, and a lab domain that collides
+    # with a real internet domain answers AD queries with wrong public IPs).
+    # That false-positive is exactly what made this Phase 2 flip no-op on an
+    # already-broken box. So probe each guest for the route drop-in and skip
+    # only VMs that already have it current; any VM we can't confirm falls
+    # through to the full flip below (cheap grep, 20s cap, no restart gate).
     try {
-        $vmNames = @($linuxVms | ForEach-Object { $_.vmName })
-        $namesCsv = $vmNames -join ','
-        $checkResult = Invoke-VmCommand -VmName $dcVm.vmName -VmDomainName $domain -ScriptBlock {
-            param($csv, $zone)
-            foreach ($n in ($csv -split ',')) {
-                $r = Get-DnsServerResourceRecord -ZoneName $zone -Name $n -RRType A -ErrorAction SilentlyContinue
-                if ($r) { $n }
+        $needFlip = [System.Collections.Generic.List[object]]::new()
+        foreach ($vm in $linuxVms) {
+            $probeIp = Get-LinuxVmIPAddress -VmName $vm.vmName
+            if (-not $probeIp) { $needFlip.Add($vm); continue }
+            $routeCheck = "grep -qF `"Domains=~$domain`" /etc/systemd/resolved.conf.d/memlabs-dc-route.conf 2>/dev/null && grep -qF `"DNS=$dcIp`" /etc/systemd/resolved.conf.d/memlabs-dc-route.conf 2>/dev/null && echo OK || echo MISSING"
+            $pr = Invoke-LinuxVmCommand -VmName $vm.vmName -IPAddress $probeIp -BashCommand $routeCheck -Sudo -DisplayName "check dc-route.conf" -TimeoutSeconds 20 -SuppressLog
+            if ($pr -and -not $pr.ScriptBlockFailed -and "$($pr.ScriptBlockOutput)".Trim() -eq 'OK') {
+                Write-Log "Set-LinuxVmsDcDns: $($vm.vmName) already routes '$domain' to DC $dcIp; skipping" -LogOnly
             }
-        } -ArgumentList $namesCsv, $domain -DisplayName "Check existing Linux DNS records" -SuppressLog
-        $registered = @()
-        if (-not $checkResult.ScriptBlockFailed -and $checkResult.ScriptBlockOutput) {
-            $registered = @($checkResult.ScriptBlockOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+            else {
+                $needFlip.Add($vm)
+            }
         }
-        $missing = @($vmNames | Where-Object { $_ -notin $registered })
-        if ($missing.Count -eq 0) {
-            Write-Log "Set-LinuxVmsDcDns: All $($linuxVms.Count) Linux VM(s) already registered in DC DNS; skipping" -Success
+        if ($needFlip.Count -eq 0) {
+            Write-Log "Set-LinuxVmsDcDns: All $($linuxVms.Count) Linux VM(s) already route '$domain' to the DC; skipping" -Success
             return $true
         }
-        if ($registered.Count -gt 0) {
-            Write-Log "Set-LinuxVmsDcDns: $($registered.Count)/$($linuxVms.Count) already registered; will process $($missing.Count) remaining" -LogOnly
-            $linuxVms = @($linuxVms | Where-Object { $_.vmName -in $missing })
+        if ($needFlip.Count -lt $linuxVms.Count) {
+            Write-Log "Set-LinuxVmsDcDns: $($linuxVms.Count - $needFlip.Count)/$($linuxVms.Count) already routed; processing $($needFlip.Count) remaining" -LogOnly
         }
+        $linuxVms = @($needFlip)
     }
     catch {
-        Write-Log "Set-LinuxVmsDcDns: Could not check existing DNS records: $_" -LogOnly
+        Write-Log "Set-LinuxVmsDcDns: Could not pre-check guest DNS routing: $_" -LogOnly
     }
 
     Write-Log "Set-LinuxVmsDcDns: Pointing $($linuxVms.Count) Linux VM(s) at DC $($dcVm.vmName) ($dcIp / $domain)" -Activity
     $allOk = $true
     foreach ($vm in $linuxVms) {
-        $cmd = "/usr/local/sbin/memlabs-set-dns $dcIp $domain"
+        # Write the DC-DNS config INLINE rather than shelling to the baked
+        # /usr/local/sbin/memlabs-set-dns helper. That helper is frozen into the
+        # cloud-init seed at VM-CREATION time, so an existing VM keeps whatever
+        # (possibly pre-routing-domain) version it was born with -- calling it on
+        # a re-run just rewrites the OLD broken resolver. Writing the netplan
+        # drop-in + the authoritative systemd-resolved routing-domain drop-in
+        # here (identical to realm-join.sh's configure_dc_dns) makes this Phase 2
+        # flip self-heal an existing box regardless of its baked helper version.
+        # Single-quoted here-string so bash $(...) / '^$' stay literal; the two
+        # PS values are injected via .Replace(). Invoke-LinuxVmCommand pipes this
+        # to `bash -s` over stdin and strips CRLF->LF, so heredocs are safe.
+        $dnsScript = @'
+set -euo pipefail
+cat > /etc/netplan/60-memlabs-dc-dns.yaml <<EOF
+network:
+  version: 2
+  ethernets:
+    primary:
+      match:
+        name: "e*"
+      nameservers:
+        addresses: [__DCIP__, 1.1.1.1, 8.8.8.8]
+        search: [__DOMAIN__]
+EOF
+chmod 600 /etc/netplan/60-memlabs-dc-dns.yaml
+netplan apply || true
+mkdir -p /etc/systemd/resolved.conf.d
+cat > /etc/systemd/resolved.conf.d/memlabs-dc-route.conf <<EOF
+[Resolve]
+DNS=__DCIP__
+Domains=~__DOMAIN__
+EOF
+chmod 644 /etc/systemd/resolved.conf.d/memlabs-dc-route.conf
+systemctl restart systemd-resolved || true
+echo "DNS: $(resolvectl dns 2>/dev/null | grep -v '^$' | head -3)"
+echo "AD route: $(resolvectl domain 2>/dev/null | grep -i "__DOMAIN__" || echo '(routing domain pending)')"
+'@
+        $cmd = $dnsScript.Replace('__DCIP__', $dcIp).Replace('__DOMAIN__', $domain)
 
         # --- SSH readiness gate --------------------------------------------
         # Phase 1 confirmed SSH, but sshd may have crashed or the VM may
