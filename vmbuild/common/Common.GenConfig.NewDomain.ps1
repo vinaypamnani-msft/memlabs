@@ -198,6 +198,26 @@ function Get-NewMachineName {
         $SkipOne = $true
     }
 
+    if ($Role -eq "LinuxClient" -or $Role -eq "LinuxServer") {
+        # Machine name = prefix + RoleName + <number>, and must fit the 15-char
+        # NetBIOS / AD sAMAccountName limit: a domain-joined Linux VM's machine
+        # account name is the hostname truncated to 15 chars, so an over-15 name
+        # is silently truncated to a possibly-colliding account (e.g.
+        # PS1-LINUXCLIENT2 -> PS1-LINUXCLIENT). Prefer the descriptive
+        # "LinuxClient"/"LinuxServer", but fall back to the compact
+        # "LinuxWKS"/"LinuxSRV" when the preferred name won't fit. Reserve 2 chars
+        # for the numeric suffix so up to 99 of a role still fit.
+        $preferredName = if ($Role -eq "LinuxClient") { "LinuxClient" } else { "LinuxServer" }
+        $shortName = if ($Role -eq "LinuxClient") { "LinuxWKS" } else { "LinuxSRV" }
+        $prefixLen = ($ConfigToCheck.vmOptions.prefix).Length
+        if (($prefixLen + $preferredName.Length + 2) -gt 15) {
+            $RoleName = $shortName
+        }
+        else {
+            $RoleName = $preferredName
+        }
+    }
+
     [int]$i = 1
     while ($true) {
         if ($SkipOne -and $i -eq 1) {

@@ -640,7 +640,8 @@ function Test-ValidMachineName {
     param (
         [string] $name,
         [object] $ReturnObject,
-        [switch] $LinuxName
+        [switch] $LinuxName,
+        [switch] $EnforceNetBios
     )
 
     if (-not $name) {
@@ -650,10 +651,15 @@ function Test-ValidMachineName {
     write-log "Testing $name" -Verbose
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>_') + '\]' + '\"'+'\s')]"
 
-    # 15-char limit is a Windows NetBIOS / AD sAMAccountName constraint.
-    # Linux VMs are not subject to it (hostname limit is 64).
-    if (-not $LinuxName -and $name.Length -gt 15) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name: $name. Windows computer name cannot be more than 15 characters long (Currently $($name.Length))." -ReturnObject $ReturnObject -Warning
+    # 15-char limit is a Windows NetBIOS / AD sAMAccountName constraint. It
+    # applies to every Windows VM, AND to any DOMAIN-JOINED Linux VM: realm join
+    # derives the machine account name from the hostname truncated to 15 chars,
+    # so an over-15 name (e.g. PS1-LINUXCLIENT2) is silently truncated to a
+    # possibly-colliding account (PS1-LINUXCLIENT). A non-domain Linux VM is only
+    # bound by the 64-char hostname limit below.
+    if (($name.Length -gt 15) -and (-not $LinuxName -or $EnforceNetBios)) {
+        $nameKind = if ($LinuxName) { "domain-joined Linux VM's AD machine account name (the hostname is truncated to 15 chars)" } else { "Windows computer name" }
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name: $name. $nameKind cannot be more than 15 characters long (Currently $($name.Length))." -ReturnObject $ReturnObject -Warning
     }
 
     if ($LinuxName -and $name.Length -gt 64) {
@@ -716,7 +722,10 @@ function Test-ValidVmSupported {
         $vmName = $($ConfigObject.vmOptions.prefix) + $vmName
     }
     $isLinuxVm = Test-VmIsLinux -Vm $VM
-    Test-ValidMachineName $vmName -ReturnObject $ReturnObject -LinuxName:$isLinuxVm
+    # A domain-joined Linux VM must also honor the 15-char NetBIOS limit (its AD
+    # machine account name is the hostname truncated to 15 chars).
+    $enforceNetBios = $isLinuxVm -and ($VM.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$VM.joinDomain
+    Test-ValidMachineName $vmName -ReturnObject $ReturnObject -LinuxName:$isLinuxVm -EnforceNetBios:$enforceNetBios
 
     if ($VM.remoteSQLVM) {
         Test-ValidMachineName $VM.remoteSQLVM -ReturnObject $ReturnObject
