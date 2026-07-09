@@ -43,10 +43,13 @@ done
 realm discover "$DOMAIN" || true
 
 # Retry the join up to 5 times in case the DC accepts auth but hasn't
-# fully replicated.
+# fully replicated. Run with -v so adcli's underlying KDC/LDAP messages (the
+# ACTUAL reason) reach stdout/stderr -- realmd otherwise collapses every
+# failure to an opaque "Failed to join the domain" plus a journalctl
+# REALMD_OPERATION pointer the host can't see.
 JOINED=0
 for i in {1..5}; do
-    if echo "$ADMIN_PWD" | realm join -U "$ADMIN_USER" "$DOMAIN" --install=/; then
+    if echo "$ADMIN_PWD" | realm join -v -U "$ADMIN_USER" "$DOMAIN" --install=/; then
         JOINED=1
         break
     fi
@@ -55,7 +58,17 @@ for i in {1..5}; do
 done
 
 if [ "$JOINED" != "1" ]; then
-    echo "[memlabs-realm-join] ERROR: all join attempts failed"
+    # Surface the real failure that realmd hid behind REALMD_OPERATION. Run
+    # adcli directly (-v, --stdin-password) for the explicit message -- e.g.
+    # "Invalid credentials", "Insufficient permissions to modify computer
+    # account", "Couldn't set computer password", "already exists" -- and tail
+    # the realmd journal. These land in the Phase 3 build log so the actual
+    # cause is diagnosable without shelling into the box.
+    echo "[memlabs-realm-join] ERROR: all join attempts failed -- capturing detailed diagnostics"
+    echo "[memlabs-realm-join] --- adcli join -v (direct) ---"
+    echo "$ADMIN_PWD" | adcli join -v --domain "$DOMAIN" --login-user "$ADMIN_USER" --stdin-password 2>&1 || true
+    echo "[memlabs-realm-join] --- realmd journal (last 80) ---"
+    journalctl -b _COMM=realmd --no-pager 2>/dev/null | tail -80 || true
     exit 1
 fi
 
