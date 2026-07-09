@@ -4573,25 +4573,58 @@ function Test-ReportingFunctionality {
         [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls
 
-        $results.Details.Add("CMD: New-WebServiceProxy ReportService2005.asmx / GetItemType('/')")
+        # Poll instead of failing on the first miss. A freshly-installed or
+        # recently-restarted Power BI Report Server reports its Windows service
+        # as Running well before its HTTP listener + ReportServer DB connection
+        # are live: the first requests fail with "There was an error downloading
+        # ...ReportService2005.asmx" (HTTP 503 / connection refused) for a couple
+        # of minutes while the RS web service warms up its app domains. Phase 11
+        # runs right after Phase 10 with no reboot, so on a fresh deploy it can
+        # land squarely in that warmup window and spuriously FAIL an otherwise
+        # healthy RP. Bounded well under the 300s outer Invoke-VmCommand timeout.
+        $results.Details.Add("CMD: New-WebServiceProxy ReportService2005.asmx / GetItemType('/') (polled)")
         $soapOk = $false
         $lastErr = ''
+        $maxAttempts = 8          # ~8 x 15s = up to ~120s of polling
+        $retryDelay = 15
+        $bouncedService = $false
         try {
-            foreach ($soapUri in $soapUrls) {
-                try {
-                    $ssrsProxy = New-WebServiceProxy -Uri $soapUri -UseDefaultCredential -ErrorAction Stop
-                    $itemType = $ssrsProxy.GetItemType("/")
-                    if ($itemType -eq 'Folder') {
-                        $results.Details.Add("OK: SOAP API healthy at '$soapUri' (root = Folder)")
-                        $soapOk = $true
-                        break
+            for ($attempt = 1; $attempt -le $maxAttempts -and -not $soapOk; $attempt++) {
+                foreach ($soapUri in $soapUrls) {
+                    try {
+                        $ssrsProxy = New-WebServiceProxy -Uri $soapUri -UseDefaultCredential -ErrorAction Stop
+                        $itemType = $ssrsProxy.GetItemType("/")
+                        if ($itemType -eq 'Folder') {
+                            $note = if ($attempt -gt 1) { " (attempt $attempt)" } else { "" }
+                            $results.Details.Add("OK: SOAP API healthy at '$soapUri' (root = Folder)$note")
+                            $soapOk = $true
+                            break
+                        }
+                        else {
+                            $lastErr = "$soapUri -> unexpected root type '$itemType'"
+                        }
                     }
-                    else {
-                        $lastErr = "$soapUri -> unexpected root type '$itemType'"
+                    catch {
+                        $lastErr = "$soapUri -> $($_.Exception.Message)"
                     }
                 }
-                catch {
-                    $lastErr = "$soapUri -> $($_.Exception.Message)"
+                if (-not $soapOk -and $attempt -lt $maxAttempts) {
+                    # Once the endpoint has been unresponsive for ~45s, bounce the
+                    # Reporting service a single time to force it to reinitialize
+                    # its HTTP listener + ReportServer DB connection -- the proven
+                    # cold-start nudge -- then keep polling.
+                    if (-not $bouncedService -and $attempt -eq 3) {
+                        try {
+                            $results.Details.Add("  SOAP still unresponsive after $attempt attempts; restarting '$($svc.Name)' to force warmup")
+                            Restart-Service -Name $svc.Name -Force -ErrorAction Stop
+                            Start-Sleep -Seconds 10
+                        }
+                        catch {
+                            $results.Details.Add("  Service restart failed: $($_.Exception.Message)")
+                        }
+                        $bouncedService = $true
+                    }
+                    Start-Sleep -Seconds $retryDelay
                 }
             }
         }
@@ -4601,7 +4634,7 @@ function Test-ReportingFunctionality {
         }
         if (-not $soapOk) {
             $results.Passed = $false
-            $results.Details.Add("FAIL: Reporting SOAP API not functional (last error: $lastErr)")
+            $results.Details.Add("FAIL: Reporting SOAP API not functional after $maxAttempts attempts (last error: $lastErr)")
         }
 
         return $results
