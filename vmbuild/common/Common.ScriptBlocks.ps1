@@ -66,6 +66,23 @@ $global:Phase10Job = {
         }
         else {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Maintenance completed successfully for $($currentItem.role)." -OutputStream -Success
+            # Record Phase 10 (maintenance) as the highest completed phase on this
+            # VM. lastPhaseComplete is monotonic (Math.Max), so a higher prior value
+            # (e.g. 11 from a previous full run) is never regressed. Without a stamp
+            # here Phase 10/11 leave the note at the last DSC phase (8 for a
+            # CAS/Primary), which later makes "add VMs to existing domain" validation
+            # falsely report the domain never finished. See Common.Validation.ps1.
+            try {
+                $note10 = Get-VMNote -VMName $currentItem.vmName
+                if ($note10) {
+                    $existing10 = if ($note10.PSObject.Properties['lastPhaseComplete']) { [int]$note10.lastPhaseComplete } else { 0 }
+                    $note10 | Add-Member -MemberType NoteProperty -Name 'lastPhaseComplete' -Value ([Math]::Max($existing10, 10)) -Force
+                    Set-VMNote -VMName $currentItem.vmName -vmNote $note10
+                }
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stamp lastPhaseComplete=10: $_" -LogOnly
+            }
         }
     }
     catch {
@@ -133,6 +150,25 @@ $global:Phase11Job = {
         }
 
         if ($passed) {
+            # Validation passed: record Phase 11 as the highest completed phase on
+            # this VM. This is the durable "deployment fully succeeded" marker read
+            # by later validation (expected 11) in Common.Validation.ps1. Without it
+            # a fully-validated lab stays at lastPhaseComplete=8 (the last DSC phase
+            # for a CAS/Primary), so adding VMs to that domain is wrongly rejected
+            # as "never finished deployment". Monotonic Math.Max never regresses a
+            # higher value.
+            try {
+                $note11 = Get-VMNote -VMName $currentItem.vmName
+                if ($note11) {
+                    $existing11 = if ($note11.PSObject.Properties['lastPhaseComplete']) { [int]$note11.lastPhaseComplete } else { 0 }
+                    $note11 | Add-Member -MemberType NoteProperty -Name 'lastPhaseComplete' -Value ([Math]::Max($existing11, 11)) -Force
+                    Set-VMNote -VMName $currentItem.vmName -vmNote $note11
+                }
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stamp lastPhaseComplete=11: $_" -LogOnly
+            }
+
             # Remove the Read-DSCLog desktop shortcut now that validation passed
             # and re-enable WU services that Phase 1 disabled for the deploy.
             $domainName = $deployConfig.vmOptions.domainName
