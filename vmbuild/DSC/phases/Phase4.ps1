@@ -151,38 +151,22 @@
             # mount's \DosDevices\S: reservation still lingers in MountedDevices) and
             # auto-assigns the next free letter instead. So the SQL disc floats
             # between runs. Force it to the deterministic letter S: so SqlSetup
-            # -SourcePath ('S:\') is stable. Defense in layers: skip entirely when
-            # SQL is already installed, free S: (live holder + stale reservation),
-            # then assign via CIM -> WMI -> mountvol until S:\setup.exe resolves.
+            # -SourcePath ('S:\') is stable.
+            #
+            # We ALWAYS ensure S: when the ISO is mounted and do NOT try to shortcut
+            # on "SQL already installed": SqlSetup owns its own idempotency and only
+            # skips when ALL requested features are present. A partially-installed
+            # instance (e.g. SQLENGINE present but CONN/BC missing) still needs
+            # setup.exe -- and therefore S: -- to add the remaining features, so a
+            # premature skip here would starve setup.exe of its media and strand the
+            # config. Relabeling an already-idle ISO to S: is cheap and harmless.
+            #
+            # Defense in layers: free S: (live holder + stale reservation), then
+            # assign via CIM -> WMI -> mountvol until S:\setup.exe resolves.
             Script AssignSqlIsoDriveLetter {
                 GetScript  = { @{ Result = '' } }
-                TestScript = {
-                    if (Test-Path 'S:\setup.exe') { return $true }
-                    # Idempotent on re-runs: if a SQL instance is already registered,
-                    # SqlSetup's Test skips and the ISO is never consumed, so the
-                    # drive-letter assignment is unnecessary. Without this, a re-run's
-                    # freshly re-mounted ISO floats to a different letter and forces a
-                    # pointless (and stale-S:-prone) reassignment that hard-fails.
-                    $instKey = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL'
-                    if (Test-Path $instKey) {
-                        $p = Get-ItemProperty -Path $instKey -ErrorAction SilentlyContinue
-                        if ($p -and @($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }).Count -gt 0) {
-                            return $true
-                        }
-                    }
-                    return $false
-                }
+                TestScript = { Test-Path 'S:\setup.exe' }
                 SetScript  = {
-                    # (0) If SQL is already installed, the ISO is unnecessary; no-op.
-                    $instKey = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL'
-                    if (Test-Path $instKey) {
-                        $p = Get-ItemProperty -Path $instKey -ErrorAction SilentlyContinue
-                        if ($p -and @($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }).Count -gt 0) {
-                            Write-Verbose "SQL instance already installed; skipping SQL ISO drive-letter assignment."
-                            return
-                        }
-                    }
-
                     $mountvol = "$env:SystemRoot\System32\mountvol.exe"
 
                     # (1) Locate the optical volume holding the SQL media (setup.exe
