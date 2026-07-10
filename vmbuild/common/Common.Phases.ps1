@@ -338,11 +338,38 @@ function Get-CmExternalSchemaServers {
         if ($seen.ContainsKey($extName)) { continue }
         $seen[$extName] = $true
         $extVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $extName } | Select-Object -First 1
-        if (-not $extVm) { continue }  # external server not in this config; its own CMCB share must already exist
-        $cmVer = if ($extVm.cmOptions -and $extVm.cmOptions.version) { $extVm.cmOptions.version } else { $deployConfig.cmOptions.version }
+        if ($extVm) {
+            $cmVer = if ($extVm.cmOptions -and $extVm.cmOptions.version) { $extVm.cmOptions.version } else { $deployConfig.cmOptions.version }
+            $isoPath = Get-CmIsoPathForVersion -CmVersion $cmVer
+            if (-not $isoPath) { continue }
+            $list += [pscustomobject]@{ Vm = $extVm; IsoPath = $isoPath; ShareName = (Get-CmShareName -Vm $extVm -deployConfig $deployConfig) }
+            continue
+        }
+
+        # Not in this deployConfig: the cross-forest joiner (e.g. cstest8b) was
+        # deployed as a SEPARATE lab from the external CAS (e.g. cstest8's
+        # CST-CASSITE). An ISO-based CM ejects its media after its OWN Phase 8, so
+        # that CAS's CMCB share now points at an empty ejected DVD -- the joiner's
+        # Phase 2 schema-extend then waits forever for extadsch.exe. Resolve the
+        # external CAS host-wide from persisted VM notes and re-mount its CM ISO +
+        # CMCB share for the duration of this Phase 2.
+        $hostVm = $null
+        try { $hostVm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $extName } | Select-Object -First 1 }
+        catch { $hostVm = $null }
+        if (-not $hostVm) {
+            Write-Log "[Phase 2]: External schema server '$extName' (referenced by cross-forest joiner) not found on this host; its CMCB share must already exist for schema extension to succeed." -Warning
+            continue
+        }
+        $cmVer = if ($hostVm.cmOptions -and $hostVm.cmOptions.version) { $hostVm.cmOptions.version } else { $null }
         $isoPath = Get-CmIsoPathForVersion -CmVersion $cmVer
-        if (-not $isoPath) { continue }
-        $list += [pscustomobject]@{ Vm = $extVm; IsoPath = $isoPath; ShareName = (Get-CmShareName -Vm $extVm -deployConfig $deployConfig) }
+        if (-not $isoPath) {
+            # URL-download CM -> persistent C:\CMCB share on the CAS; nothing to re-mount.
+            Write-Log "[Phase 2]: External schema server '$extName' uses URL-download CM (persistent CMCB share); no ISO re-mount needed." -LogOnly
+            continue
+        }
+        $shareName = if ($cmVer -eq "tech-preview") { "CMTP" } else { "CMCB" }
+        Write-Log "[Phase 2]: External schema server '$extName' resolved host-wide (domain '$($hostVm.domain)', CM '$cmVer'); will re-mount CM ISO + '$shareName' share." -LogOnly
+        $list += [pscustomobject]@{ Vm = $hostVm; IsoPath = $isoPath; ShareName = $shareName }
     }
     return $list
 }

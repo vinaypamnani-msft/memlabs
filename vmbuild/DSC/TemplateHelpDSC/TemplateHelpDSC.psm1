@@ -1884,7 +1884,15 @@ class WaitForExtendSchemaFile {
         $extadschpath2 = Join-Path -Path $_FilePath -ChildPath "cd.retail\SMSSETUP\BIN\X64\extadsch.exe"
         $extadschpath3 = Join-Path -Path $_FilePath -ChildPath "cd.retail.LN\SMSSETUP\BIN\X64\extadsch.exe"
         $extadschpath4 = Join-Path -Path $_FilePath -ChildPath "cd.preview\SMSSETUP\BIN\X64\extadsch.exe"
+        # Bound the wait: without a deadline a missing external CMCB share (e.g. a
+        # cross-forest joiner deployed after the external CAS ejected its ISO-based
+        # CM media) hangs Phase 2 indefinitely. Fail with an actionable message so
+        # the phase surfaces the real problem instead of spinning forever.
+        $waitDeadline = (Get-Date).AddMinutes(30)
         while (!(Test-Path $extadschpath) -and !(Test-Path $extadschpath2) -and !(Test-Path $extadschpath3) -and !(Test-Path $extadschpath4)) {
+            if ((Get-Date) -gt $waitDeadline) {
+                throw "extadsch.exe never appeared under \\$($this.MachineName)\$($this.ExtFolder) within 30 minutes. The external top-level site server's CM media / CMCB share is not available -- an ISO-based CM ejects its media after its own Phase 8, leaving the CMCB share pointing at an empty ejected DVD. Ensure the external CAS is running with its CM ISO mounted and the CMCB share pointing at it (the host re-mounts it before Phase 2 for cross-forest joiners)."
+            }
             Write-Verbose "Testing $extadschpath and $extadschpath2 and $extadschpath3"
             Write-Status "Wait for extadsch.exe exist on $($this.MachineName), will try 10 seconds later..."
             Start-Sleep -Seconds 10
