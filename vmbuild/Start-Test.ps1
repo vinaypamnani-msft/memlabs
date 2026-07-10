@@ -315,6 +315,22 @@ function Run-Test {
     $Tests = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name } | Where-Object { $_.Name.ToLowerInvariant().StartsWith($Test) }
 
     foreach ($testjson in $Tests) {
+        # Always pull the latest code before each test so every run picks up the
+        # newest New-Lab.ps1 / Common.ps1 / DSC / phase scripts without restarting
+        # the runner. --rebase --autostash keeps any local edits and never creates a
+        # merge commit; a pull failure is non-fatal (continue with the current tree).
+        try {
+            Write-Host "git pull (before $(Split-Path $testjson -Leaf))..." -ForegroundColor Cyan
+            $pullOutput = & git -C $PSScriptRoot pull --rebase --autostash 2>&1
+            $pullExit = $LASTEXITCODE
+            $pullOutput | ForEach-Object { Write-Host "  $_" }
+            if ($pullExit -ne 0) {
+                Write-Host "  git pull returned $pullExit; continuing with the current tree." -ForegroundColor Yellow
+            }
+        }
+        catch {
+            Write-Host "  git pull failed: $($_.Exception.Message); continuing with the current tree." -ForegroundColor Yellow
+        }
         $outputFile = Split-Path $testjson -leaf
         $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
         $config = Get-Content $testjson -Force | ConvertFrom-Json
