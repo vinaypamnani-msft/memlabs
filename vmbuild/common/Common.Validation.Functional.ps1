@@ -6727,6 +6727,68 @@ function Test-DomainMemberFunctionality {
                 }
                 catch {}
 
+                # When registration is incomplete (no assigned site, WRONG assigned
+                # site, or no registration GUID), pull the client-side registration
+                # and location logs so a validation rerun captures the ROOT CAUSE
+                # inline instead of a bare WARN. These logs live only on the guest
+                # (C:\Windows\CCM\Logs) and are otherwise lost on VHD compaction.
+                # DIAG lines are indented (not FAIL:/WARN: anchored) so they land in
+                # the per-domain VMBuild log for diagnosis without altering the
+                # pass/fail verdict. PS5.1-safe (runs on down-level Win10/11 clients).
+                $regIncomplete = ((-not $assigned) -or ("$assigned" -ne "$expSite") -or (-not $clientId))
+                if ($regIncomplete) {
+                    $logDir = 'C:\Windows\CCM\Logs'
+                    # Unwrap a CMTrace <![LOG[msg]LOG]!> envelope to "HH:mm:ss  msg".
+                    $unwrap = {
+                        param($line)
+                        $mm = [regex]::Match([string]$line, '<!\[LOG\[(.*?)\]LOG\]!><time="([^"]*)"')
+                        if ($mm.Success) {
+                            $tt = ($mm.Groups[2].Value -split '\.')[0]
+                            return ('{0}  {1}' -f $tt, (($mm.Groups[1].Value) -replace '\s+', ' ').Trim())
+                        }
+                        return (([string]$line) -replace '\s+', ' ').Trim()
+                    }
+                    $grabLog = {
+                        param($file, $pattern, $keep)
+                        if (Test-Path $file) {
+                            $hits = Get-Content $file -Tail 400 -ErrorAction SilentlyContinue |
+                                Where-Object { $_ -match $pattern } | Select-Object -Last $keep
+                            return @($hits | ForEach-Object { & $unwrap $_ })
+                        }
+                        return @()
+                    }
+                    $reg.Details.Add("  DIAG: registration incomplete (assigned='$assigned', expected='$expSite', clientId='$clientId') -- collecting client registration logs")
+                    if (-not (Test-Path $logDir)) {
+                        $reg.Details.Add("  DIAG: '$logDir' not present -- ConfigMgr client logs unavailable for registration diagnosis")
+                    }
+                    else {
+                        # ClientIDManagerStartup.log -> registration GUID / RegTask / cert
+                        $cidLines = & $grabLog (Join-Path $logDir 'ClientIDManagerStartup.log') 'RegTask|[Rr]egist|Assigning|GUID|[Ee]rror|[Ff]ail|denied|forbidden|401|certificate|[Cc]ert ' 8
+                        # LocationServices.log -> MP + assigned-site lookup
+                        $lsLines = & $grabLog (Join-Path $logDir 'LocationServices.log') 'Assign|[Ss]ite code|management point|[Bb]oundary|[Ee]rror|[Ff]ail|LSGet|Current AD|forest|MP ' 8
+                        # CcmMessaging.log -> MP comms (cert/auth/transport) failures
+                        $msgLines = & $grabLog (Join-Path $logDir 'CcmMessaging.log') '[Ee]rror|[Ff]ail|401|403|denied|forbidden|certificate|reject|WINHTTP|0x8' 6
+                        if ($cidLines.Count) {
+                            $reg.Details.Add("  DIAG ClientIDManagerStartup.log (last $($cidLines.Count) registration lines):")
+                            foreach ($l in $cidLines) { $reg.Details.Add("      $l") }
+                        }
+                        else {
+                            $reg.Details.Add("  DIAG ClientIDManagerStartup.log: no registration/error lines matched (client may never have attempted registration)")
+                        }
+                        if ($lsLines.Count) {
+                            $reg.Details.Add("  DIAG LocationServices.log (last $($lsLines.Count) MP/site lines):")
+                            foreach ($l in $lsLines) { $reg.Details.Add("      $l") }
+                        }
+                        else {
+                            $reg.Details.Add("  DIAG LocationServices.log: no MP/site/error lines matched")
+                        }
+                        if ($msgLines.Count) {
+                            $reg.Details.Add("  DIAG CcmMessaging.log (last $($msgLines.Count) error lines):")
+                            foreach ($l in $msgLines) { $reg.Details.Add("      $l") }
+                        }
+                    }
+                }
+
                 return $reg
             }
             $regResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
