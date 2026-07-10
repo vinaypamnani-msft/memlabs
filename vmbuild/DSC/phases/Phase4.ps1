@@ -144,30 +144,129 @@
             }
             $nextDepend = '[Script]RestoreSqlNcliSource'
 
-            # The host mounts the SQL ISO to this VM's DVD drive before Phase 4.
-            # Assign it the deterministic letter S: so SqlSetup -SourcePath is
-            # stable (raw CD-ROM letters float, and a reboot happened above).
+            # The host mounts the SQL ISO to this VM's DVD drive before Phase 4
+            # (Mount-SqlIsoForPhase, runs every Phase 4 pass). It is ejected on a
+            # successful phase, so a RE-RUN re-mounts a FRESH optical volume with a
+            # new volume GUID -> Windows can't reclaim the old letter (the prior
+            # mount's \DosDevices\S: reservation still lingers in MountedDevices) and
+            # auto-assigns the next free letter instead. So the SQL disc floats
+            # between runs. Force it to the deterministic letter S: so SqlSetup
+            # -SourcePath ('S:\') is stable. Defense in layers: skip entirely when
+            # SQL is already installed, free S: (live holder + stale reservation),
+            # then assign via CIM -> WMI -> mountvol until S:\setup.exe resolves.
             Script AssignSqlIsoDriveLetter {
                 GetScript  = { @{ Result = '' } }
-                TestScript = { Test-Path 'S:\setup.exe' }
+                TestScript = {
+                    if (Test-Path 'S:\setup.exe') { return $true }
+                    # Idempotent on re-runs: if a SQL instance is already registered,
+                    # SqlSetup's Test skips and the ISO is never consumed, so the
+                    # drive-letter assignment is unnecessary. Without this, a re-run's
+                    # freshly re-mounted ISO floats to a different letter and forces a
+                    # pointless (and stale-S:-prone) reassignment that hard-fails.
+                    $instKey = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL'
+                    if (Test-Path $instKey) {
+                        $p = Get-ItemProperty -Path $instKey -ErrorAction SilentlyContinue
+                        if ($p -and @($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }).Count -gt 0) {
+                            return $true
+                        }
+                    }
+                    return $false
+                }
                 SetScript  = {
-                    # Find the optical volume holding the SQL media (setup.exe at
-                    # its root) and relabel it S:. DriveType 5 = CD-ROM, which is
-                    # how a mounted ISO presents.
-                    $assigned = $false
+                    # (0) If SQL is already installed, the ISO is unnecessary; no-op.
+                    $instKey = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL'
+                    if (Test-Path $instKey) {
+                        $p = Get-ItemProperty -Path $instKey -ErrorAction SilentlyContinue
+                        if ($p -and @($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }).Count -gt 0) {
+                            Write-Verbose "SQL instance already installed; skipping SQL ISO drive-letter assignment."
+                            return
+                        }
+                    }
+
+                    $mountvol = "$env:SystemRoot\System32\mountvol.exe"
+
+                    # (1) Locate the optical volume holding the SQL media (setup.exe
+                    #     at its root). DriveType 5 = CD-ROM = mounted ISO.
+                    $sqlVol = $null
                     foreach ($vol in (Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue)) {
-                        if (-not $vol.DriveLetter) { continue }
-                        if (Test-Path (Join-Path "$($vol.DriveLetter)\" 'setup.exe')) {
-                            if ($vol.DriveLetter -ne 'S:') {
-                                $vol.DriveLetter = 'S:'
-                                Set-CimInstance -InputObject $vol -ErrorAction Stop
-                            }
-                            $assigned = $true
+                        if ($vol.DriveLetter -and (Test-Path (Join-Path "$($vol.DriveLetter)\" 'setup.exe'))) {
+                            $sqlVol = $vol
                             break
                         }
                     }
-                    if (-not $assigned) {
+                    if (-not $sqlVol) {
                         throw "SQL ISO not found on any CD-ROM volume (expected setup.exe at the optical drive root). The host should have mounted it before Phase 4."
+                    }
+                    if ($sqlVol.DriveLetter -eq 'S:') {
+                        Write-Verbose "SQL ISO already on S:."
+                        return
+                    }
+
+                    # (2) Free S: so the reassignment can't be rejected with "Not available".
+                    #  (2a) If a LIVE volume currently occupies S:, park it on a high free letter.
+                    $high = @('Z', 'Y', 'X', 'W', 'V', 'U', 'T')
+                    $used = @{}
+                    foreach ($v in (Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue)) {
+                        if ($v.DriveLetter) { $used[([string]$v.DriveLetter).TrimEnd(':')] = $true }
+                    }
+                    $sHolder = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = 'S:'" -ErrorAction SilentlyContinue
+                    if ($sHolder) {
+                        $free = $high | Where-Object { -not $used.ContainsKey($_) } | Select-Object -First 1
+                        if ($free) {
+                            Write-Verbose "Parking current S: holder on ${free}: to free S: for the SQL ISO."
+                            try {
+                                $wmiHolder = Get-WmiObject -Class Win32_Volume -ErrorAction SilentlyContinue | Where-Object { $_.DeviceID -eq $sHolder.DeviceID } | Select-Object -First 1
+                                if ($wmiHolder) { $wmiHolder | Set-WmiInstance -Arguments @{ DriveLetter = "${free}:" } -ErrorAction SilentlyContinue | Out-Null }
+                            }
+                            catch {}
+                        }
+                    }
+                    #  (2b) Clear any leftover mount-point mapping for S:.
+                    try { & $mountvol S: /D 2>$null | Out-Null } catch {}
+                    #  (2c) Clear a STALE MountedDevices reservation (\DosDevices\S:) left by a
+                    #       prior mount whose volume no longer exists -- the actual cause of the
+                    #       "Not available" rejection -- but only if no live volume holds S: now.
+                    try {
+                        $stillHeld = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = 'S:'" -ErrorAction SilentlyContinue
+                        if (-not $stillHeld) {
+                            $md = 'HKLM:\SYSTEM\MountedDevices'
+                            if ($null -ne (Get-ItemProperty -Path $md -Name '\DosDevices\S:' -ErrorAction SilentlyContinue)) {
+                                Remove-ItemProperty -Path $md -Name '\DosDevices\S:' -ErrorAction SilentlyContinue
+                            }
+                        }
+                    }
+                    catch {}
+
+                    # (3) Assign S: to the SQL disc, trying each method until S:\setup.exe resolves.
+                    $assigned = $false
+                    #  (3a) CIM InputObject.
+                    try {
+                        $sqlVol.DriveLetter = 'S:'
+                        Set-CimInstance -InputObject $sqlVol -ErrorAction Stop
+                        $assigned = (Test-Path 'S:\setup.exe')
+                    }
+                    catch { Write-Verbose "CIM S: assign failed: $($_.Exception.Message)" }
+                    #  (3b) WMI Set-WmiInstance (the method InitializeDisks uses successfully).
+                    if (-not $assigned) {
+                        try {
+                            $wmiVol = Get-WmiObject -Class Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue | Where-Object { $_.DeviceID -eq $sqlVol.DeviceID } | Select-Object -First 1
+                            if ($wmiVol) { $wmiVol | Set-WmiInstance -Arguments @{ DriveLetter = 'S:' } -ErrorAction SilentlyContinue | Out-Null }
+                            $assigned = (Test-Path 'S:\setup.exe')
+                        }
+                        catch { Write-Verbose "WMI S: assign failed: $($_.Exception.Message)" }
+                    }
+                    #  (3c) mountvol bind by device path.
+                    if (-not $assigned) {
+                        try {
+                            & $mountvol S: $sqlVol.DeviceID 2>$null | Out-Null
+                            Start-Sleep -Seconds 1
+                            $assigned = (Test-Path 'S:\setup.exe')
+                        }
+                        catch { Write-Verbose "mountvol S: assign failed: $($_.Exception.Message)" }
+                    }
+
+                    if (-not $assigned) {
+                        throw "Failed to assign S: to SQL ISO volume ($($sqlVol.DeviceID)) after CIM/WMI/mountvol attempts. Current optical letter: $($sqlVol.DriveLetter)."
                     }
                 }
                 DependsOn  = $nextDepend
