@@ -27,7 +27,7 @@ fi
 
 wait_for_apt_lock
 apt_retry apt-get update
-apt_retry apt-get install -y realmd sssd sssd-tools adcli krb5-user packagekit \
+apt_retry apt-get install -y realmd sssd sssd-ad sssd-tools adcli krb5-user packagekit \
     samba-common-bin oddjob oddjob-mkhomedir libnss-sss libpam-sss
 
 # Point resolver at the DC so realm discover can find AD SRV records.
@@ -49,14 +49,20 @@ done
 
 realm discover "$DOMAIN" || true
 
-# Retry the join up to 5 times in case the DC accepts auth but hasn't
-# fully replicated. Run with -v so adcli's underlying KDC/LDAP messages (the
-# ACTUAL reason) reach stdout/stderr -- realmd otherwise collapses every
-# failure to an opaque "Failed to join the domain" plus a journalctl
-# REALMD_OPERATION pointer the host can't see.
+# Join via Samba (net ads join) rather than the default adcli backend. adcli
+# sets the machine account password over the Kerberos kpasswd protocol, which
+# Windows Server 2025 rejects with "Couldn't set password for computer account
+# ...: Message stream modified" -- a known W2025 interop issue. Samba's
+# net ads join sets the password over SAMR/LDAP instead, which works (see MS
+# Community Hub: "Problems to join Debian/Ubuntu machines to a domain").
+#
+# Retry up to 5 times in case the DC accepts auth but hasn't fully replicated.
+# -v surfaces the underlying KDC/LDAP messages. The password is piped TWICE
+# because realm's own kinit AND the net ads join it spawns each read one
+# password line from stdin; an extra unread line is harmless.
 JOINED=0
 for i in {1..5}; do
-    if echo "$ADMIN_PWD" | realm join -v -U "$ADMIN_USER" "$DOMAIN" --install=/; then
+    if printf '%s\n%s\n' "$ADMIN_PWD" "$ADMIN_PWD" | realm join -v --membership-software=samba -U "$ADMIN_USER" "$DOMAIN" --install=/; then
         JOINED=1
         break
     fi
@@ -65,21 +71,18 @@ for i in {1..5}; do
 done
 
 if [ "$JOINED" != "1" ]; then
-    # The usual cause of a persistent failure here is a PRE-EXISTING computer
-    # account: adcli finds the stale account and tries to RESET its password
-    # over Kerberos kpasswd, which a Windows DC rejects with
-    #   "Couldn't set password for computer account: <NAME>$: Message stream modified".
-    # Creating the account FRESH instead sets the password over the sealed LDAP
-    # bind (no kpasswd), which succeeds. So delete any stale account for our name
-    # with the admin creds and retry the join once. The account name is the
+    # Fallback: if the join still fails, a stale/partial computer account can be
+    # the cause. Delete any existing account for our NetBIOS name with the admin
+    # creds (adcli delete-computer removes it over LDAP, not kpasswd) and retry
+    # the samba join once so it is created fresh. The account name is the
     # hostname truncated to the 15-char NetBIOS limit (e.g. ps1-linuxclient2 ->
-    # PS1-LINUXCLIENT); the delete is safe because that name is deterministic for
+    # PS1-LINUXCLIENT); the delete is safe because the name is deterministic for
     # this VM and its DNS record already points here.
     NETBIOS="$(hostname -s | tr '[:lower:]' '[:upper:]' | cut -c1-15)"
     echo "[memlabs-realm-join] join failed; removing any stale computer account '$NETBIOS' and retrying fresh"
     echo "$ADMIN_PWD" | adcli delete-computer "$NETBIOS" --domain "$DOMAIN" --login-user "$ADMIN_USER" --stdin-password 2>&1 || true
     sleep 5
-    if echo "$ADMIN_PWD" | realm join -v -U "$ADMIN_USER" "$DOMAIN" --install=/; then
+    if printf '%s\n%s\n' "$ADMIN_PWD" "$ADMIN_PWD" | realm join -v --membership-software=samba -U "$ADMIN_USER" "$DOMAIN" --install=/; then
         JOINED=1
         echo "[memlabs-realm-join] joined after removing stale computer account"
     fi

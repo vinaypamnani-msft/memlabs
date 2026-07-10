@@ -1020,6 +1020,7 @@ function Get-LinuxDomainJoinSeedArgs {
     $extraPackages = @(
         'realmd',
         'sssd',
+        'sssd-ad',
         'sssd-tools',
         'adcli',
         'krb5-user',
