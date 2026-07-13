@@ -1457,6 +1457,34 @@ if ($UpdateRequired) {
         Write-DscStatus "No updates found."
     }
 
+    # Best-effort CM in-console-version -> baseline build-number map. Used by the
+    # version guard below (skip a same-version/no-op update) and by the monitor
+    # loop's INSTALL_WAITING_PARENT handling (accept 'already at target' as done).
+    # Unknown/future versions are absent on purpose: the code then falls through
+    # to the normal path (no false skips) and the bounded monitor loop still
+    # protects against a wedge.
+    $cmVersionBuildMap = @{
+        '2103' = 9049; '2107' = 9058; '2111' = 9068; '2203' = 9078
+        '2207' = 9088; '2211' = 9096; '2303' = 9106; '2309' = 9122
+        '2403' = 9128; '2409' = 9132
+    }
+    $targetBuild = $cmVersionBuildMap["$($cmo.version)"]
+    $currentBuildNum = 0
+    [int]::TryParse("$originalbuildnumber", [ref]$currentBuildNum) | Out-Null
+
+    # Version guard: if the site is ALREADY at (or above) the build this update
+    # would install, applying it is a no-op self-update. On a top-level site
+    # (a CAS / standalone primary has NO parent) that same-version update can
+    # wedge the state machine at INSTALL_WAITING_PARENT forever -- observed on
+    # CT1-CS1SITE (build 9122 = 2309) being told to 'update to 2309'. Skip it
+    # here rather than entering the monitor loop.
+    if ($updatepack -ne "" -and $targetBuild -and $currentBuildNum -ge $targetBuild) {
+        Write-DscStatus "Site is already at build $currentBuildNum (>= $targetBuild for CM $($cmo.version)); '$($updatepack.Name)' is a same-version/no-op update. Skipping to avoid an INSTALL_WAITING_PARENT wedge on a top-level site."
+        $Configuration.UpgradeSCCM.Status = 'Completed'
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+        $updatepack = ""
+    }
+
     $updateCompleted = $false
     # Work on update
     while ($updatepack -ne "") {
@@ -1653,7 +1681,19 @@ if ($UpdateRequired) {
                 }
             }
         }
-        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {   
+        # Bounded, self-healing monitor loop. The OLD loop was UNBOUNDED and only
+        # exited on PREREQ_ERROR / INSTALL_FAILED / INSTALL_SUCCESS -- so a persistent
+        # INSTALL_WAITING_PARENT (196611) on a TOP-LEVEL site (a CAS / standalone
+        # primary has NO parent to wait for) spun forever (observed live on
+        # CT1-CS1SITE applying a same-version 2309 update). Add: an overall deadline,
+        # a WAITING_PARENT special-case (already-at-target => accept as done; else a
+        # one-shot SMS_EXECUTIVE self-heal so cmupdate/hman re-evaluate), and
+        # cmupdate.log / hman.log diagnostics on give-up.
+        $monitorStart = Get-Date
+        $monitorDeadlineMin = 120
+        $waitingParentSince = $null
+        $smsExecSelfHealed = $false
+        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {
             if ($updatepack.Flag -eq 1) {
                 Write-DscStatus "Update State: PREREQ_ONLY"
                 try {
@@ -1668,7 +1708,66 @@ if ($UpdateRequired) {
             #    Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
             #}
 
-            Write-DscStatus "Updating to '$($updatepack.Name)'. Current State: $($state[$updatepack.State])"
+            $elapsedMin = ((Get-Date) - $monitorStart).TotalMinutes
+
+            # INSTALL_WAITING_PARENT (196611) on a top-level site is anomalous: the
+            # site has no parent, so cmupdate can sit here indefinitely. Fast-accept
+            # when already at the target build; otherwise bounce SMS_EXECUTIVE once.
+            if ($updatepack.State -eq 196611) {
+                if (-not $waitingParentSince) { $waitingParentSince = Get-Date }
+                $wpMin = ((Get-Date) - $waitingParentSince).TotalMinutes
+
+                $isTopLevel = $false
+                $curBuild = 0
+                try {
+                    $selfSite = Get-CMSite | Where-Object { $_.SiteCode -eq $sitecode }
+                    if ($selfSite -and [string]::IsNullOrEmpty("$($selfSite.ReportingSiteCode)")) { $isTopLevel = $true }
+                    [int]::TryParse("$($selfSite.BuildNumber)", [ref]$curBuild) | Out-Null
+                }
+                catch {}
+
+                if ($isTopLevel -and $wpMin -ge 8) {
+                    if ($targetBuild -and $curBuild -ge $targetBuild) {
+                        Write-DscStatus "'$($updatepack.Name)' stuck at INSTALL_WAITING_PARENT on top-level site $sitecode for $([int]$wpMin)m, but site is already at build $curBuild (>= $targetBuild). Treating as already-updated and continuing."
+                        $updateCompleted = $true
+                        break
+                    }
+                    if (-not $smsExecSelfHealed) {
+                        Write-DscStatus "'$($updatepack.Name)' stuck at INSTALL_WAITING_PARENT on top-level site $sitecode for $([int]$wpMin)m. Restarting SMS_EXECUTIVE once to force CONFIGURATION_MANAGER_UPDATE to re-evaluate. See cmupdate.log/hman.log."
+                        Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+                        $smsExecSelfHealed = $true
+                        Start-Sleep -Seconds 120
+                    }
+                }
+            }
+            else {
+                $waitingParentSince = $null
+            }
+
+            # Overall deadline: scrape cmupdate/hman/dmpdownloader tails and fail with
+            # an actionable message instead of spinning forever.
+            if ($elapsedMin -ge $monitorDeadlineMin) {
+                $diag = ""
+                try {
+                    $cmInstallDir = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction SilentlyContinue).'Installation Directory'
+                    if ($cmInstallDir) {
+                        foreach ($lg in @('cmupdate.log', 'hman.log', 'dmpdownloader.log')) {
+                            $lp = Join-Path $cmInstallDir "Logs\$lg"
+                            if (Test-Path $lp) {
+                                $tail = (Get-Content -Path $lp -Tail 8 -ErrorAction SilentlyContinue) -join "`n"
+                                if ($tail) { $diag += "`n--- $lg (tail) ---`n$tail" }
+                            }
+                        }
+                    }
+                }
+                catch {}
+                Write-DscStatus "Update '$($updatepack.Name)' did not complete within $monitorDeadlineMin min (last state: $($state[$updatepack.State]) [$($updatepack.State)]). On a top-level site INSTALL_WAITING_PARENT never clears -- the site has no parent. See cmupdate.log/hman.log.$diag"
+                $upgradingfailed = $true
+                $updateCompleted = $true
+                break
+            }
+
+            Write-DscStatus "Updating to '$($updatepack.Name)'. Current State: $($state[$updatepack.State]) ($([int]$elapsedMin)m/$monitorDeadlineMin`m)"
             Start-Sleep -Seconds 60
             try {
                 $instance = Get-CimInstance -Class SMS_CM_UpdatePackDetailedMonitoring -Namespace root/SMS/site_$sitecode -Filter "PackageGuid='$($updatepack.PackageGuid)'" | Where-Object { $_.Progress -and $_.Progress -lt 100 }
