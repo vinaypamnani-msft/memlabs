@@ -1117,7 +1117,7 @@ function New-LinuxVirtualMachine {
         }
 
         if (-not (Test-Path $SourceDiskPath)) {
-            Write-Log "$VmName`: Source VHDX $SourceDiskPath not found. Run baseimagestaging\New-LinuxBaseImage.ps1 first." -Failure -OutputStream
+            Write-Log "$VmName`: Source VHDX $SourceDiskPath not found. It is downloaded from Azure storage via the file list -- ensure file download succeeded before deploying." -Failure -OutputStream
             return $false
         }
 

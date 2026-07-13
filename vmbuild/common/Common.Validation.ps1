@@ -811,6 +811,15 @@ function Test-ValidVmSupported {
         }
         else {
             Write-Log "[Test-ValidVmSupported] [$vmName] bypassing supported-OS check ($linuxReason)" -LogOnly
+            # A VM identified as Linux (role/osFamily/Test-VmIsLinux) MUST carry a
+            # Linux operatingSystem. Otherwise the Phase-1 download loop requests a
+            # Windows image (keyed on operatingSystem) and the Linux create path
+            # can't resolve its base VHDX -- observed on a LinuxClient whose
+            # operatingSystem was 'Windows 11': Ubuntu Desktop never downloaded and
+            # VM_Create failed with "Linux base image ... not found".
+            if (-not ($vmOsStr -like 'Ubuntu*' -or $vmOsStr -like 'Debian*' -or $vmOsStr -like 'Linux*')) {
+                Add-ValidationMessage -Message "VM Validation: [$vmName] is a Linux VM ($linuxReason) but its operatingSystem [$vmOsStr] is not a Linux OS. Linux VMs must use a Linux operatingSystem (e.g. 'Ubuntu Server 24.04 LTS' or 'Ubuntu Desktop 24.04 LTS')." -ReturnObject $ReturnObject -Failure
+            }
         }
     }
 

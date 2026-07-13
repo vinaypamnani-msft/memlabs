@@ -567,41 +567,25 @@ $global:VM_Create = {
 
             # Determine which OS image file to use for the VM
             if ($currentItem.role -notin "OSDClient") {
-                # Linux VMs (Proxy etc.) don't ship in the Azure storage
-                # catalog - the base VHDX is built locally by
-                # baseimagestaging\New-LinuxBaseImage.ps1 and lives at a
-                # well-known path. Resolve directly and skip the fileList
-                # lookup, otherwise this throws "Could not find Ubuntu
-                # Server 24.04 LTS in file list" on any environment whose
-                # _fileList.json doesn't carry the Ubuntu entry.
-                if (Test-VmIsLinux -Vm $currentItem) {
-                    # Pick the per-role base VHDX. LinuxClient uses the Desktop
-                    # variant (ubuntu-desktop-minimal + GDM3 + NetworkManager +
-                    # xrdp, built by baseimagestaging\New-LinuxBaseImage.ps1
-                    # -Desktop). Everything else Linux (Proxy, LinuxServer)
-                    # uses the smaller server cloud image.
-                    $linuxVhdxName = switch ($currentItem.role) {
-                        'LinuxClient' { 'UbuntuDesktop2404.vhdx' }
-                        default       { 'UbuntuServer2404.vhdx' }
-                    }
-                    $vhdxPath = Join-Path $Common.AzureImagePath $linuxVhdxName
-                    if (-not (Test-Path $vhdxPath)) {
-                        $buildHint = if ($linuxVhdxName -eq 'UbuntuDesktop2404.vhdx') {
-                            "baseimagestaging\New-LinuxBaseImage.ps1 -Desktop"
-                        } else {
-                            "baseimagestaging\New-LinuxBaseImage.ps1"
-                        }
-                        throw "Linux base image $vhdxPath not found. Run $buildHint first."
-                    }
+                # Resolve the base VHDX from the Azure file list by
+                # operatingSystem id -- for Windows and Linux alike. Ubuntu
+                # Server/Desktop 24.04 are regular file-list entries stored in
+                # Azure storage and downloaded like every other OS image, so the
+                # LinuxClient (Ubuntu Desktop) vs LinuxServer/Proxy (Ubuntu
+                # Server) distinction comes straight from operatingSystem -- no
+                # per-role filename mapping and no local build step required.
+                $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
+                if ($imageFile) {
+                    $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
                 }
-                else {
-                    $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
-                    if ($imageFile) {
-                        $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
-                    }
-                    if (-not $vhdxPath) {
-                        throw "Could not find $($currentItem.operatingSystem) in file list"
-                    }
+                if (-not $vhdxPath) {
+                    throw "Could not find $($currentItem.operatingSystem) in file list"
+                }
+                # Linux images ship as a downloaded VHDX; surface a clear,
+                # actionable error if the download didn't land instead of
+                # failing deep inside the create path.
+                if ((Test-VmIsLinux -Vm $currentItem) -and -not (Test-Path $vhdxPath)) {
+                    throw "Linux base image $vhdxPath not found. It is downloaded from Azure storage (file list id '$($currentItem.operatingSystem)') -- ensure file download succeeded before deploying."
                 }
             }
 

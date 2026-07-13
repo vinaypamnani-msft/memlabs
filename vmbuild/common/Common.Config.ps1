@@ -778,7 +778,10 @@ function Get-FilesForConfiguration {
     foreach ($file in $Common.AzureFileList.OS) {
 
         if ($file.id -eq "vmbuildadmin") { continue }
-        # Locally-built images (e.g. Ubuntu via New-LinuxBaseImage.ps1) aren't in Azure storage.
+        # Honor an explicit 'local' flag for images that genuinely aren't in
+        # Azure storage. NOTE: the Ubuntu images are NOT local -- they're regular
+        # file-list entries (with md5) and are downloaded from storage like any
+        # other OS image.
         if ($file.local) { continue }
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file.id) { continue }
         $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
