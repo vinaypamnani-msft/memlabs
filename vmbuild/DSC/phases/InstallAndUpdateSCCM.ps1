@@ -1682,17 +1682,22 @@ if ($UpdateRequired) {
             }
         }
         # Bounded, self-healing monitor loop. The OLD loop was UNBOUNDED and only
-        # exited on PREREQ_ERROR / INSTALL_FAILED / INSTALL_SUCCESS -- so a persistent
-        # INSTALL_WAITING_PARENT (196611) on a TOP-LEVEL site (a CAS / standalone
-        # primary has NO parent to wait for) spun forever (observed live on
-        # CT1-CS1SITE applying a same-version 2309 update). Add: an overall deadline,
-        # a WAITING_PARENT special-case (already-at-target => accept as done; else a
-        # one-shot SMS_EXECUTIVE self-heal so cmupdate/hman re-evaluate), and
-        # cmupdate.log / hman.log diagnostics on give-up.
+        # exited on PREREQ_ERROR / INSTALL_FAILED / INSTALL_SUCCESS -- so a wedged
+        # update on a TOP-LEVEL site (a CAS / standalone primary has NO parent) spun
+        # forever. Two live wedges seen on CT1-CS1SITE applying 2309: (a) a
+        # same-version update parking at INSTALL_WAITING_PARENT (196611) forever, and
+        # (b) a genuine 9106->9122 update sitting at INSTALL_IN_PROGRESS (196609) for
+        # 120 min while cmupdate.log idle-polled ("Waiting for changes ... 600s").
+        # Add: an overall deadline, a shared stuck-state self-heal for 196611 AND a
+        # prolonged 196609 (already-at-target => accept as done; else a one-shot
+        # SMS_EXECUTIVE bounce so cmupdate/hman re-evaluate), a last-chance
+        # build-based fast-accept at the deadline, and cmupdate/hman/dmpdownloader
+        # log tails on give-up.
         $monitorStart = Get-Date
         $monitorDeadlineMin = 120
-        $waitingParentSince = $null
         $smsExecSelfHealed = $false
+        $lastMonitorState = $null
+        $stateUnchangedSince = Get-Date
         while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {
             if ($updatepack.Flag -eq 1) {
                 Write-DscStatus "Update State: PREREQ_ONLY"
@@ -1710,13 +1715,33 @@ if ($UpdateRequired) {
 
             $elapsedMin = ((Get-Date) - $monitorStart).TotalMinutes
 
-            # INSTALL_WAITING_PARENT (196611) on a top-level site is anomalous: the
-            # site has no parent, so cmupdate can sit here indefinitely. Fast-accept
-            # when already at the target build; otherwise bounce SMS_EXECUTIVE once.
-            if ($updatepack.State -eq 196611) {
-                if (-not $waitingParentSince) { $waitingParentSince = Get-Date }
-                $wpMin = ((Get-Date) - $waitingParentSince).TotalMinutes
+            # Track how long we've sat on the SAME state. A healthy install walks
+            # THROUGH the detailed sub-states (196620-196629); a wedge sits on one
+            # state -- typically 196609 INSTALL_IN_PROGRESS or 196611
+            # INSTALL_WAITING_PARENT -- with cmupdate.log idle ("Waiting for changes
+            # ... updates will be polled in 600 seconds").
+            if ($updatepack.State -ne $lastMonitorState) {
+                $lastMonitorState = $updatepack.State
+                $stateUnchangedSince = Get-Date
+            }
+            $stateStuckMin = ((Get-Date) - $stateUnchangedSince).TotalMinutes
 
+            # A top-level site (a CAS / standalone primary has NO parent) can sit
+            # indefinitely once cmupdate goes idle -- both at INSTALL_WAITING_PARENT
+            # (196611, waiting on a parent that doesn't exist) and at a wedged
+            # INSTALL_IN_PROGRESS (196609, observed live on CT1-CS1SITE applying
+            # 2309: State stuck at 196609 for 120 min while cmupdate.log idle-polled).
+            # For either: (1) if the site's ACTUAL BuildNumber already reached the
+            # target build, the update effectively applied -- accept as done (the
+            # package State just never flipped to INSTALL_SUCCESS); otherwise
+            # (2) bounce SMS_EXECUTIVE once so CONFIGURATION_MANAGER_UPDATE / hman
+            # re-evaluate the cmupdate.box trigger. WAITING_PARENT is anomalous
+            # immediately (threshold 8m); IN_PROGRESS is a normal *active* state, so
+            # only treat it as wedged after a long stall on the SAME state (45m) to
+            # avoid disrupting a legitimate long-running install.
+            $stuckState = ($updatepack.State -eq 196611) -or ($updatepack.State -eq 196609)
+            $stuckThreshold = if ($updatepack.State -eq 196611) { 8 } else { 45 }
+            if ($stuckState -and $stateStuckMin -ge $stuckThreshold) {
                 $isTopLevel = $false
                 $curBuild = 0
                 try {
@@ -1726,22 +1751,19 @@ if ($UpdateRequired) {
                 }
                 catch {}
 
-                if ($isTopLevel -and $wpMin -ge 8) {
+                if ($isTopLevel) {
                     if ($targetBuild -and $curBuild -ge $targetBuild) {
-                        Write-DscStatus "'$($updatepack.Name)' stuck at INSTALL_WAITING_PARENT on top-level site $sitecode for $([int]$wpMin)m, but site is already at build $curBuild (>= $targetBuild). Treating as already-updated and continuing."
+                        Write-DscStatus "'$($updatepack.Name)' stuck at $($state[$updatepack.State]) on top-level site $sitecode for $([int]$stateStuckMin)m, but site is already at build $curBuild (>= $targetBuild). Treating as already-updated and continuing."
                         $updateCompleted = $true
                         break
                     }
                     if (-not $smsExecSelfHealed) {
-                        Write-DscStatus "'$($updatepack.Name)' stuck at INSTALL_WAITING_PARENT on top-level site $sitecode for $([int]$wpMin)m. Restarting SMS_EXECUTIVE once to force CONFIGURATION_MANAGER_UPDATE to re-evaluate. See cmupdate.log/hman.log."
+                        Write-DscStatus "'$($updatepack.Name)' stuck at $($state[$updatepack.State]) on top-level site $sitecode for $([int]$stateStuckMin)m. Restarting SMS_EXECUTIVE once to force CONFIGURATION_MANAGER_UPDATE to re-evaluate. See cmupdate.log/hman.log."
                         Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
                         $smsExecSelfHealed = $true
                         Start-Sleep -Seconds 120
                     }
                 }
-            }
-            else {
-                $waitingParentSince = $null
             }
 
             # Overall deadline: scrape cmupdate/hman/dmpdownloader tails and fail with
@@ -1751,17 +1773,56 @@ if ($UpdateRequired) {
                 try {
                     $cmInstallDir = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction SilentlyContinue).'Installation Directory'
                     if ($cmInstallDir) {
-                        foreach ($lg in @('cmupdate.log', 'hman.log', 'dmpdownloader.log')) {
+                        # cmupdate.log is the decisive one -- tail it deeper. The 2303->2309
+                        # in-console update hangs mid-install in a KNOWN product bug
+                        # (ADO #26532278 / #17508537): cmupdate's DCOM step wedges when the
+                        # HKLM\SOFTWARE\Microsoft\Ole MachineAccessRestriction /
+                        # MachineLaunchRestriction values are absent, leaving the package at
+                        # INSTALL_IN_PROGRESS while the monitor thread idle-polls cmupdate.box.
+                        $logTails = @{ 'cmupdate.log' = 60; 'hman.log' = 8; 'dmpdownloader.log' = 8 }
+                        foreach ($lg in $logTails.Keys) {
                             $lp = Join-Path $cmInstallDir "Logs\$lg"
                             if (Test-Path $lp) {
-                                $tail = (Get-Content -Path $lp -Tail 8 -ErrorAction SilentlyContinue) -join "`n"
+                                $tail = (Get-Content -Path $lp -Tail $logTails[$lg] -ErrorAction SilentlyContinue) -join "`n"
                                 if ($tail) { $diag += "`n--- $lg (tail) ---`n$tail" }
                             }
                         }
                     }
                 }
                 catch {}
-                Write-DscStatus "Update '$($updatepack.Name)' did not complete within $monitorDeadlineMin min (last state: $($state[$updatepack.State]) [$($updatepack.State)]). On a top-level site INSTALL_WAITING_PARENT never clears -- the site has no parent. See cmupdate.log/hman.log.$diag"
+
+                # Read-only probe of the DCOM/OLE machine restriction values behind the
+                # known 2303->2309 stuck-upgrade bug (ADO #26532278). If either value is
+                # missing, surface it -- that is the prime suspect for a wedged
+                # INSTALL_IN_PROGRESS on this hop (fixed in later builds; the RTM 2309
+                # in-console update still hits it).
+                try {
+                    $oleProps = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Ole' -ErrorAction SilentlyContinue
+                    $haveAccess = $oleProps -and $null -ne $oleProps.MachineAccessRestriction
+                    $haveLaunch = $oleProps -and $null -ne $oleProps.MachineLaunchRestriction
+                    if (-not $haveAccess -or -not $haveLaunch) {
+                        $diag += "`n--- DCOM/OLE restriction check ---`nMachineAccessRestriction present: $haveAccess; MachineLaunchRestriction present: $haveLaunch. MISSING value(s) match ADO #26532278 (2303->2309 upgrade hangs when these HKLM\SOFTWARE\Microsoft\Ole values are absent). Workaround: set default DCOM COM Security limits (dcomcnfg -> My Computer -> COM Security -> Edit Limits) to populate them, then reboot + rerun."
+                    }
+                    else {
+                        $diag += "`n--- DCOM/OLE restriction check ---`nMachineAccessRestriction + MachineLaunchRestriction both present (not the ADO #26532278 missing-value signature)."
+                    }
+                }
+                catch {}
+                # Last-chance fast-accept: if the site's actual BuildNumber reached
+                # the target build, the update applied even though the package State
+                # never flipped to INSTALL_SUCCESS -- accept it rather than failing.
+                $finalBuild = 0
+                try {
+                    $selfSiteF = Get-CMSite | Where-Object { $_.SiteCode -eq $sitecode }
+                    [int]::TryParse("$($selfSiteF.BuildNumber)", [ref]$finalBuild) | Out-Null
+                }
+                catch {}
+                if ($targetBuild -and $finalBuild -ge $targetBuild) {
+                    Write-DscStatus "Update '$($updatepack.Name)' did not reach INSTALL_SUCCESS within $monitorDeadlineMin min (last state: $($state[$updatepack.State]) [$($updatepack.State)]), but site $sitecode is at build $finalBuild (>= $targetBuild). Treating as already-updated.$diag"
+                    $updateCompleted = $true
+                    break
+                }
+                Write-DscStatus "Update '$($updatepack.Name)' did not complete within $monitorDeadlineMin min (last state: $($state[$updatepack.State]) [$($updatepack.State)]). cmupdate.log went idle without reaching INSTALL_SUCCESS. See cmupdate.log/hman.log.$diag"
                 $upgradingfailed = $true
                 $updateCompleted = $true
                 break
