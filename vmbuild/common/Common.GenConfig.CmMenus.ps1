@@ -1284,6 +1284,82 @@ Function Get-domainUser {
     }
 }
 
+Function Get-SqlAccountMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+
+    # Gather every account already created/referenced in the domain across the
+    # current config: SQL Service/Agent accounts and the client domainUser admin
+    # accounts. LocalSystem is a built-in (not a domain account), so it is offered
+    # as an explicit option below rather than being listed here.
+    $accounts = [System.Collections.Generic.List[string]]::new()
+    foreach ($vm in (get-list2 -DeployConfig $Global:Config)) {
+        foreach ($acct in @($vm.SqlServiceAccount, $vm.SqlAgentAccount, $vm.domainUser)) {
+            if (-not [string]::IsNullOrWhiteSpace($acct) -and $acct -ne "LocalSystem" -and (-not $accounts.Contains($acct))) {
+                $accounts.Add($acct)
+            }
+        }
+    }
+    $accounts = @($accounts | Sort-Object -Unique)
+
+    $valid = $false
+    while ($valid -eq $false) {
+        $additionalOptions = [ordered]@{
+            "L" = "LocalSystem (built-in account, no domain user created)"
+            "N" = "New Account"
+        }
+
+        $result = Get-Menu2 -MenuName "SQL Account Selection" -Prompt "Select Account" -OptionArray $($accounts) -CurrentValue $CurrentValue -Test:$false -additionalOptions $additionalOptions -return
+
+        if (-not $result -or $result -eq "ESCAPE") {
+            return
+        }
+        switch ($result.ToLowerInvariant()) {
+            "l" {
+                $result = "LocalSystem"
+            }
+            "n" {
+                $result = Read-Host2 -Prompt "Enter desired Account name"
+                if ([string]::IsNullOrWhiteSpace($result)) {
+                    continue
+                }
+            }
+
+            Default {
+                if ([string]::IsNullOrWhiteSpace($result)) {
+                    if (-not $CurrentValue) {
+                        $property.psobject.properties.remove($name)
+                    }
+                    else {
+                        $property | Add-Member -MemberType NoteProperty -Name $name -Value $CurrentValue -force
+                    }
+                    return
+                }
+            }
+        }
+        if ($null -ne $name) {
+            $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -force
+        }
+        if (Get-TestResult -SuccessOnWarning) {
+            return
+        }
+        else {
+            if ($null -ne $name) {
+                if ($property."$name" -eq $CurrentValue) {
+                    return
+                }
+            }
+        }
+    }
+}
+
 Function Get-CMVersionMenu {
     [CmdletBinding()]
     param (

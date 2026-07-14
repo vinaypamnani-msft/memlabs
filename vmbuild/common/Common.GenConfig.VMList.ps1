@@ -398,6 +398,14 @@ function Select-Options {
                 Continue MainLoop
                 #return "REFRESH"
             }
+            "SqlServiceAccount" {
+                Get-SqlAccountMenu -property $property -name $name -CurrentValue $value
+                Continue MainLoop
+            }
+            "SqlAgentAccount" {
+                Get-SqlAccountMenu -property $property -name $name -CurrentValue $value
+                Continue MainLoop
+            }
             "wsusDataBaseServer" {
                 Get-WsusDBName -property $property -name $name -CurrentValue $value
                 continue MainLoop
