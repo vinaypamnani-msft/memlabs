@@ -688,10 +688,17 @@ function Test-ValidUserName {
     if (-not $name) {
         return
     }
-    if ($name -in "Administrator", "vmBuildAdmin" , "default" , "cm_svc" , "guest") {
+    if ($name -in "Administrator", "vmBuildAdmin" , "default" , "cm_svc" , "guest", "krbtgt") {
         Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] cannot be a Reserved Name, as these accounts exist by default and cannot be added" -ReturnObject $return -Warning
     }
-    $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
+    # Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) cannot be
+    # used as an account/sam name, even with an extension (e.g. NUL.txt).
+    if ($name -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$') {
+        Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] is a reserved Windows device name and cannot be used." -ReturnObject $return -Failure
+    }
+    # Disallowed characters for a domain/sam account name. Includes $ (denotes a
+    # machine account) and % on top of the SAM-invalid set.
+    $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>$%') + '\]' + '\"'+'\s')]"
     if ($name -match $pattern) {
         Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] contains invalid characters. You must specify a valid domain username. For example: bob" -ReturnObject $return -Failure
     }
@@ -1904,6 +1911,17 @@ function Test-Configuration {
             }
 
             Test-ValidUserName -name $vm.domainUser -vmName $vm.vmName
+
+            # SQL service/agent accounts are created as domain users (unless set
+            # to the built-in LocalSystem), so hold them to the same naming rules
+            # as domainUser: reserved names, reserved device names, invalid chars,
+            # and length.
+            if ($vm.SqlServiceAccount -and $vm.SqlServiceAccount -ne "LocalSystem") {
+                Test-ValidUserName -name $vm.SqlServiceAccount -vmName $vm.vmName
+            }
+            if ($vm.SqlAgentAccount -and $vm.SqlAgentAccount -ne "LocalSystem") {
+                Test-ValidUserName -name $vm.SqlAgentAccount -vmName $vm.vmName
+            }
 
         }
 
