@@ -1811,6 +1811,16 @@ function Test-Configuration {
                     if ($vm.sqlport -ne 1433) {
                         Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] SQL Port must be 1433 on SQLAO due to issue SqlServerDSC #329" -ReturnObject $return -Failure
                     }
+                    # SQLAO requires domain service accounts: the WSFC cluster + AG
+                    # endpoints authenticate as the SQL service identity, so LocalSystem
+                    # is not usable. (The genconfig picker hides the LocalSystem option
+                    # for SQLAO; this catches a hand-edited config too.)
+                    if ($vm.SqlServiceAccount -eq "LocalSystem") {
+                        Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] SQLAO cannot use LocalSystem for SqlServiceAccount. A domain account is required for the cluster/Availability Group." -ReturnObject $return -Failure
+                    }
+                    if ($vm.SqlAgentAccount -eq "LocalSystem") {
+                        Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] SQLAO cannot use LocalSystem for SqlAgentAccount. A domain account is required for the cluster/Availability Group." -ReturnObject $return -Failure
+                    }
                     if ($vm.sqlVersion -match '201[0-6]') {
                         Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] SQLAO does not support $($vm.sqlVersion). Use SQL Server 2017 or later." -ReturnObject $return -Failure
                     }

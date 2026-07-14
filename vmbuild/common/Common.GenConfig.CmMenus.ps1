@@ -1309,12 +1309,19 @@ Function Get-SqlAccountMenu {
     }
     $accounts = @($accounts | Sort-Object -Unique)
 
+    # SQLAO (Always On Availability Groups) cannot run under LocalSystem -- the
+    # WSFC cluster + AG endpoints authenticate as the SQL service's domain
+    # identity, so a domain account is mandatory. Only offer the LocalSystem
+    # shortcut for standalone SQL roles.
+    $isSqlAO = ($property.Role -eq "SQLAO")
+
     $valid = $false
     while ($valid -eq $false) {
-        $additionalOptions = [ordered]@{
-            "L" = "LocalSystem (built-in account, no domain user created)"
-            "N" = "New Account"
+        $additionalOptions = [ordered]@{}
+        if (-not $isSqlAO) {
+            $additionalOptions["L"] = "LocalSystem (built-in account, no domain user created)"
         }
+        $additionalOptions["N"] = "New Account"
 
         $result = Get-Menu2 -MenuName "SQL Account Selection" -Prompt "Select Account" -OptionArray $($accounts) -CurrentValue $CurrentValue -Test:$false -additionalOptions $additionalOptions -return
 
@@ -1323,6 +1330,10 @@ Function Get-SqlAccountMenu {
         }
         switch ($result.ToLowerInvariant()) {
             "l" {
+                if ($isSqlAO) {
+                    # Defensive: L isn't offered for SQLAO, but never let it through.
+                    continue
+                }
                 $result = "LocalSystem"
             }
             "n" {
