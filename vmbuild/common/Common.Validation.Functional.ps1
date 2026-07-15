@@ -3284,7 +3284,41 @@ function Test-CMSiteFunctionality {
         param($sc)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        # --- Inline guest-side diagnostic helpers (root-cause capture) ---
+        # CM logs live under <Installation Directory>\Logs. Tails are
+        # CMTrace-unwrapped to "HH:mm:ss  message" so they read cleanly in the
+        # VMBuild log. All helpers are best-effort (never throw).
+        $smsInstallDir = $null
+        try { $smsInstallDir = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -ErrorAction Stop).'Installation Directory' } catch { }
+        $cmLogDir = $null
+        if ($smsInstallDir) { $cmLogDir = Join-Path $smsInstallDir 'Logs' }
+        function Get-CmLogTail {
+            param([string]$Dir, [string]$LogName, [int]$Lines)
+            if (-not $Dir) { return @() }
+            $p = Join-Path $Dir $LogName
+            if (-not (Test-Path $p)) { return @() }
+            $raw = $null
+            try { $raw = Get-Content -Path $p -Tail $Lines -ErrorAction Stop } catch { return @() }
+            $out = New-Object System.Collections.Generic.List[string]
+            foreach ($ln in $raw) {
+                if ($ln -match '\<\!\[LOG\[(.*?)\]LOG\]\!\>.*?time="([0-9:\.]+)"') { $out.Add("$($Matches[2])  $($Matches[1])") }
+                elseif ($ln.Trim()) { $out.Add($ln.Trim()) }
+            }
+            return $out
+        }
+        function Get-ScmCrashEvents {
+            param([string[]]$ServiceNames, [int]$Hours)
+            $ev = @()
+            try {
+                $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = (Get-Date).AddHours(-$Hours) } -ErrorAction SilentlyContinue |
+                        Where-Object { $m = $_.Message; @($ServiceNames | Where-Object { $m -match [regex]::Escape($_) }).Count -gt 0 } |
+                        Select-Object -First 12)
+            } catch { }
+            return $ev
+        }
+
         # Check critical CM services (with remediation for transient states)
+        $svcRecovered = $false
         foreach ($svc in @('SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER')) {
             $results.Details.Add("CMD: Get-Service -Name '$svc'")
             $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
@@ -3307,6 +3341,7 @@ function Test-CMSiteFunctionality {
                     if ($s -and $s.Status -eq 'Running') { $svcOk = $true; break }
                 }
                 if ($svcOk) {
+                    $svcRecovered = $true
                     $results.Details.Add("RECOVERED: Service '$svc' was stopped; Running after restart")
                 }
                 else {
@@ -3317,6 +3352,38 @@ function Test-CMSiteFunctionality {
             }
             else {
                 $results.Details.Add("OK: Service '$svc' is Running")
+            }
+        }
+
+        # If we had to restart a core CM service (or a service check failed),
+        # capture WHY it was down so a re-run has the root cause inline instead of
+        # just "RECOVERED". A core site service being stopped hours after install
+        # with no reboot points to a crash/dependency failure (e.g. a hierarchy
+        # key-exchange / DRS-init failure leaves the site degraded), not a
+        # transient -- these service facts, SCM crash events and log tails show it.
+        if ($svcRecovered -or -not $results.Passed) {
+            $coreSvc = @('SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER')
+            foreach ($csvc in $coreSvc) {
+                try {
+                    $w = Get-CimInstance -ClassName Win32_Service -Filter "Name='$csvc'" -ErrorAction Stop
+                    if ($w) { $results.Details.Add("DIAG: $csvc StartMode=$($w.StartMode) State=$($w.State) LogOn=$($w.StartName) ExitCode=$($w.ExitCode) PID=$($w.ProcessId)") }
+                }
+                catch { }
+            }
+            $exe = Get-Process -Name smsexec -ErrorAction SilentlyContinue
+            if ($exe) { $results.Details.Add("DIAG: smsexec.exe running (PID $($exe.Id), threads=$($exe.Threads.Count), startTime=$($exe.StartTime))") }
+            else { $results.Details.Add("DIAG: smsexec.exe process NOT running") }
+            $crash = Get-ScmCrashEvents -ServiceNames $coreSvc -Hours 8
+            if ($crash.Count -gt 0) {
+                $results.Details.Add("DIAG: $($crash.Count) Service Control Manager event(s) for core CM services in last 8h:")
+                foreach ($e in $crash) { $results.Details.Add("  SCM $($e.Id) ($($e.LevelDisplayName)) $($e.TimeCreated.ToString('HH:mm:ss')): $(((($e.Message) -split "`n")[0]).Trim())") }
+            }
+            foreach ($lg in @(@{ n = 'sitecomp.log'; c = 15 }, @{ n = 'hman.log'; c = 12 }, @{ n = 'rcmctrl.log'; c = 8 })) {
+                $tail = Get-CmLogTail -Dir $cmLogDir -LogName $lg.n -Lines $lg.c
+                if ($tail.Count -gt 0) {
+                    $results.Details.Add("DIAG: $($lg.n) (last $($tail.Count)):")
+                    foreach ($t in $tail) { $results.Details.Add("  $t") }
+                }
             }
         }
 
@@ -3452,17 +3519,41 @@ function Test-CMSiteFunctionality {
                 $availName = @{ 0='Online'; 3='Offline'; 4='Unknown' }
 
                 $unhealthyDetails = @()
+                $liveOverride = 0
                 foreach ($kv in $byName.GetEnumerator()) {
                     if (-not $kv.Value.Healthy) {
+                        # The SMS_ComponentSummarizer is status-message driven and LAGS
+                        # reality -- especially right after an SMS_EXECUTIVE restart, when
+                        # every component reports a stale "Stopped" until it next checks in.
+                        # Cross-check against the LIVE thread state SMS_EXECUTIVE writes to
+                        # the registry: if the thread is "Running" now, the component is
+                        # genuinely up and the summarizer simply hasn't caught up -- don't
+                        # count it as unhealthy. This only ever flips a summarizer-"Stopped"
+                        # to healthy when the OS-level thread is explicitly Running, so a
+                        # truly-down component is never masked.
+                        $liveState = $null
+                        try {
+                            $rk = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+                            $tk = $rk.OpenSubKey("SOFTWARE\Microsoft\SMS\Components\SMS_Executive\Threads\$($kv.Key)")
+                            if ($tk) { $liveState = [string]$tk.GetValue('Current State'); $tk.Close() }
+                            $rk.Close()
+                        }
+                        catch { }
+                        if ($liveState -eq 'Running') {
+                            $liveOverride++
+                            continue
+                        }
                         $sn = if ($stateName.ContainsKey([int]$kv.Value.State)) { $stateName[[int]$kv.Value.State] } else { "State=$($kv.Value.State)" }
                         $an = if ($availName.ContainsKey([int]$kv.Value.Avail)) { $availName[[int]$kv.Value.Avail] } else { "Avail=$($kv.Value.Avail)" }
-                        $unhealthyDetails += "$($kv.Key) ($sn/$an on $($kv.Value.Server))"
+                        $liveTag = if ($liveState) { $liveState } else { '<no thread key>' }
+                        $unhealthyDetails += "$($kv.Key) ($sn/$an on $($kv.Value.Server); live=$liveTag)"
                     }
                 }
                 $unhealthyCount = $unhealthyDetails.Count
 
                 if ($unhealthyCount -eq 0) {
                     $msg = "OK: All $($byName.Count) components are Started (attempt $attempt)"
+                    if ($liveOverride -gt 0) { $msg += " [$liveOverride via live SMS_Executive thread state; summarizer lagging]" }
                     if ($ignoredCount -gt 0) { $msg += " ($ignoredCount ignored: $($ignoredComponents -join ', '))" }
                     $results.Details.Add($msg)
                     break
@@ -3496,13 +3587,48 @@ function Test-CMSiteFunctionality {
             $results.Details.Add("FAIL: $unhealthyCount components not Started (exceeds threshold of 5): $names")
         }
 
+        # Component-health failure diagnostics. The summarizer FAIL above is
+        # status-message driven; capture the LIVE thread state for each failing
+        # component (authoritative), confirm smsexec is still alive (a crash loop
+        # shows as Running-then-gone), and tail the two logs that explain why
+        # components aren't Started, so a re-run has the root cause inline.
+        if (-not $results.Passed) {
+            $failNames = @()
+            foreach ($d in $unhealthyDetails) { if ($d -match '^([A-Z0-9_]+)') { $failNames += $Matches[1] } }
+            if ($failNames.Count -gt 0) {
+                $liveStates = @()
+                foreach ($fn in ($failNames | Select-Object -First 15)) {
+                    $ls = $null
+                    try {
+                        $rk = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+                        $tk = $rk.OpenSubKey("SOFTWARE\Microsoft\SMS\Components\SMS_Executive\Threads\$fn")
+                        if ($tk) { $ls = [string]$tk.GetValue('Current State'); $tk.Close() }
+                        $rk.Close()
+                    }
+                    catch { }
+                    $liveStates += "$fn=$(if ($ls) { $ls } else { '<no thread key>' })"
+                }
+                $results.Details.Add("DIAG: live SMS_Executive thread state for not-Started components: $($liveStates -join ', ')")
+            }
+            $exeNow = Get-Process -Name smsexec -ErrorAction SilentlyContinue
+            if ($exeNow) { $results.Details.Add("DIAG: smsexec.exe still running (PID $($exeNow.Id), threads=$($exeNow.Threads.Count))") }
+            else { $results.Details.Add("DIAG: smsexec.exe is NOT running at end of check -- SMS_EXECUTIVE crashed/stopped again (crash loop). Check crash.log and the SCM events above.") }
+            foreach ($lg in @(@{ n = 'statmgr.log'; c = 12 }, @{ n = 'sitecomp.log'; c = 12 })) {
+                $tail = Get-CmLogTail -Dir $cmLogDir -LogName $lg.n -Lines $lg.c
+                if ($tail.Count -gt 0) {
+                    $results.Details.Add("DIAG: $($lg.n) (last $($tail.Count)):")
+                    foreach ($t in $tail) { $results.Details.Add("  $t") }
+                }
+            }
+        }
+
         return $results
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $siteCode `
         -DisplayName "Phase11-CM-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 300
+        -AsJob -TimeoutSeconds 600
 
     $passed = Format-TestResult -VMName $VMName -RoleLabel $roleLabel -Result $result
 
@@ -4234,6 +4360,31 @@ function Test-SiteSystemFunctionality {
                 else {
                     $results.Passed = $false
                     $results.Details.Add("FAIL: IIS application 'SMS_MP' not found under Default Web Site")
+                    # Diagnostics: the SMS_MP IIS app is provisioned REMOTELY by
+                    # SMS_MP_CONTROL_MANAGER (runs under SMS_EXECUTIVE on the site
+                    # server). If the site server's SMS_EXECUTIVE is down/unhealthy,
+                    # this MP never gets provisioned here. Capture what IS present so a
+                    # re-run distinguishes "site server didn't provision" from a local
+                    # IIS problem.
+                    try {
+                        $apps = @(Get-WebApplication -Site 'Default Web Site' -ErrorAction SilentlyContinue | ForEach-Object { $_.Path })
+                        $results.Details.Add("DIAG: IIS apps under Default Web Site: $(if ($apps.Count -gt 0) { $apps -join ', ' } else { '<none>' })")
+                    }
+                    catch { }
+                    $mpReg = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\MP' -ErrorAction SilentlyContinue
+                    if ($mpReg) { $results.Details.Add("DIAG: HKLM\SOFTWARE\Microsoft\SMS\MP present (MP Control Manager began provisioning); IIS app not yet created -- likely still in progress") }
+                    else { $results.Details.Add("DIAG: HKLM\SOFTWARE\Microsoft\SMS\MP absent -- SMS_MP_CONTROL_MANAGER on the site server has not provisioned this MP. Verify SMS_EXECUTIVE + SMS_MP_CONTROL_MANAGER are Running on the site server (see its Phase 11 result) and check mpcontrol.log there.") }
+                    foreach ($mpLog in @("$env:windir\Temp\mpMSI.log", 'C:\mpMSI.log', "$env:windir\Temp\mpsetup.log")) {
+                        if (Test-Path $mpLog) {
+                            try {
+                                $mpTail = Get-Content -Path $mpLog -Tail 10 -ErrorAction Stop
+                                $results.Details.Add("DIAG: $(Split-Path $mpLog -Leaf) (last $($mpTail.Count)):")
+                                foreach ($t in $mpTail) { if ($t.Trim()) { $results.Details.Add("  $($t.Trim())") } }
+                            }
+                            catch { }
+                            break
+                        }
+                    }
                     return $results
                 }
 
