@@ -181,6 +181,23 @@ if ($allInstalled) {
 }
 
 if ($allInstalled) {
+    # Even when every DP/MP role is already registered (so the installs below are
+    # skipped), an HTTPS (PKI) MP still needs its IIS "Default Web Site" 443 SSL
+    # binding present with a valid WebServer cert. If it is missing, the server-side
+    # MP Control Manager MSI fails with "Error 25055 ... not correctly configured
+    # for SSL" and the SMS_MP IIS app is never created (Phase 11 then fails with
+    # "IIS application 'SMS_MP' not found"). Install-MP normally ensures this via
+    # Confirm-MPHttpsBinding, but it does NOT run on this skip path -- so a lab that
+    # was first registered as eHTTP (UsePKI=false) and later corrected to PKI would
+    # stay broken. Ensure the binding here for every HTTPS MP. Idempotent no-op when
+    # the binding is already correct.
+    if ($usePKI) {
+        foreach ($MP in $MPs) {
+            if ([string]::IsNullOrWhiteSpace($MP.ServerName)) { continue }
+            $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
+            Confirm-MPHttpsBinding -MPFQDN $MPFQDN
+        }
+    }
     Write-DscStatus "All DP/MP roles already installed. Skipping InstallDPMPClient."
     $Configuration.InstallDP.Status = 'Completed'
     $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
