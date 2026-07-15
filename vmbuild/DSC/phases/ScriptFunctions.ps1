@@ -918,9 +918,16 @@ function Confirm-MPHttpsBinding {
     try {
         $result = Invoke-Command -ComputerName $MPFQDN -ScriptBlock $sb -ErrorAction Stop
         foreach ($line in @($result)) { Write-DscStatus "  [$MPFQDN 443] $line" }
+        # Signal to the caller whether we actually created/updated the 443 binding
+        # (as opposed to finding it already correct or failing to obtain a cert).
+        # A newly-bound MP means the earlier server-side install failed at 25055, so
+        # the caller can force Site Component Manager to retry immediately.
+        $changed = @($result | Where-Object { $_ -match 'Bound WebServer cert' }).Count -gt 0
+        return $changed
     }
     catch {
         Write-DscStatus "WARNING: Could not verify/repair IIS 443 SSL binding on $MPFQDN`: $($_.Exception.Message). HTTPS MP install may fail with error 25055."
+        return $false
     }
 }
 
@@ -943,7 +950,7 @@ function Install-MP {
     # otherwise the remote MP MSI aborts with "Error 25055 ... not correctly
     # configured for SSL" and SMS_MP is never provisioned.
     if ($UsePKI) {
-        Confirm-MPHttpsBinding -MPFQDN $MPFQDN
+        $null = Confirm-MPHttpsBinding -MPFQDN $MPFQDN
     }
 
     do {

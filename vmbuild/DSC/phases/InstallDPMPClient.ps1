@@ -192,10 +192,24 @@ if ($allInstalled) {
     # stay broken. Ensure the binding here for every HTTPS MP. Idempotent no-op when
     # the binding is already correct.
     if ($usePKI) {
+        $mpBindingRepaired = $false
         foreach ($MP in $MPs) {
             if ([string]::IsNullOrWhiteSpace($MP.ServerName)) { continue }
             $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
-            Confirm-MPHttpsBinding -MPFQDN $MPFQDN
+            if (Confirm-MPHttpsBinding -MPFQDN $MPFQDN) { $mpBindingRepaired = $true }
+        }
+        # If we just created/repaired an MP's 443 binding, the server-side MP install
+        # had previously failed (error 25055) and Site Component Manager is now in a
+        # long retry backoff. Restart it on this site server to force an immediate
+        # retry so the SMS_MP IIS app is created without waiting for the next cycle.
+        if ($mpBindingRepaired) {
+            try {
+                Restart-Service -Name SMS_SITE_COMPONENT_MANAGER -Force -ErrorAction Stop
+                Write-DscStatus "Restarted SMS_SITE_COMPONENT_MANAGER to force MP install retry after repairing the IIS 443 binding."
+            }
+            catch {
+                Write-DscStatus "WARNING: Could not restart SMS_SITE_COMPONENT_MANAGER (MP install will retry on its own backoff cycle): $($_.Exception.Message)"
+            }
         }
     }
     Write-DscStatus "All DP/MP roles already installed. Skipping InstallDPMPClient."
