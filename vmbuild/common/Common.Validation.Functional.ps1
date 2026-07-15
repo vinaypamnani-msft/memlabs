@@ -238,13 +238,17 @@ function Test-VmFunctionality {
         $testsPassed = Test-CAFunctionality -VMName $VMName -Domain $domain
     }
 
-    # If the VM received PKI IIS/DP certs (UsePKI + CM role), validate cert health
-    $hasCaVM = @($DeployConfig.virtualMachines | Where-Object { $_.InstallCA }).Count -gt 0
+    # If the VM received PKI IIS/DP certs (UsePKI + CM role), validate cert health.
+    # Gate on UsePKI only -- NOT on a CA VM being built in THIS deploy. When adding a
+    # site system to an EXISTING PKI domain the Enterprise CA already lives in AD (no
+    # InstallCA VM here), yet the web-server cert + 443 binding still must exist or the
+    # HTTPS MP MSI fails 25055; requiring $hasCaVM here would skip that check/self-heal
+    # exactly when it is needed most (matches the Phase 8 $AddIISCert gate).
     $cmo = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
     $needsIISCert = $role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite') -or
                     $CurrentItem.InstallSUP -or $CurrentItem.InstallMP -or
                     $CurrentItem.InstallDP -or $CurrentItem.InstallRP
-    if ($testsPassed -and $hasCaVM -and $cmo.UsePKI -and $needsIISCert) {
+    if ($testsPassed -and $cmo.UsePKI -and $needsIISCert) {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying PKI certificates"
         $testsPassed = Test-PKICertificatesOnVM -VMName $VMName -Domain $domain -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }

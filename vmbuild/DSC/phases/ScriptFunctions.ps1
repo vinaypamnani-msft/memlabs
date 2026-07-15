@@ -811,6 +811,119 @@ function Install-PullDP {
     } until ($dpinstalled -or $installFailure)
 }
 
+function Confirm-MPHttpsBinding {
+    # An HTTPS (PKI) Management Point requires the MP box's IIS "Default Web Site"
+    # to have a 443 binding with a valid ServerAuth cert. If it is missing, the
+    # MP MSI aborts with "Error 25055. Internet Information Services Default Web
+    # Site is not correctly configured for SSL" and SMS_MP is never created.
+    #
+    # On a re-run the site-system's Phase 8 CertReq/AddCertificateToIIS can report
+    # InDesiredState even though the actual http.sys 443 SSL cert was lost, so we
+    # cannot rely on it. Verify + self-heal the binding on the MP box HERE, right
+    # before Add-CMManagementPoint -CommunicationType Https, so the MSI precheck
+    # always passes. Idempotent: a no-op when the binding is already correct.
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$MPFQDN
+    )
+
+    Write-DscStatus "Ensuring IIS Default Web Site SSL (443) binding on $MPFQDN before HTTPS MP install (prevents MP MSI error 25055)..."
+
+    $sb = {
+        $fn  = 'ConfigMgr WebServer Certificate'
+        $log = New-Object System.Collections.Generic.List[string]
+        $now = Get-Date
+        $fqdn = "$env:COMPUTERNAME.$env:USERDNSDOMAIN"
+        $srvAuthOid = '1.3.6.1.5.5.7.3.1'
+        $tplExtOid  = '1.3.6.1.4.1.311.21.7'
+
+        # 1. Locate a date-valid cert by the FriendlyName the binding expects.
+        $cert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+            Where-Object { $_.FriendlyName -eq $fn -and $_.NotBefore -lt $now -and $_.NotAfter -gt $now } |
+            Sort-Object NotBefore -Descending | Select-Object -First 1
+
+        # 2. Recover a WebServer-template cert (CA-issued, ServerAuth, this host's
+        #    FQDN, has the V2 template extension) that merely lost its FriendlyName.
+        if (-not $cert) {
+            $cand = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object {
+                ($_.EnhancedKeyUsageList.ObjectId -contains $srvAuthOid) -and
+                ($_.Subject -match [regex]::Escape($fqdn)) -and
+                ($_.Issuer -ne $_.Subject) -and
+                ($_.Extensions.Oid.Value -contains $tplExtOid) -and
+                ($_.NotBefore -lt $now -and $_.NotAfter -gt $now)
+            } | Sort-Object NotBefore -Descending | Select-Object -First 1
+            if ($cand) {
+                try {
+                    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+                    $store.Open('ReadWrite')
+                    $live = $store.Certificates | Where-Object { $_.Thumbprint -eq $cand.Thumbprint } | Select-Object -First 1
+                    if ($live) { $live.FriendlyName = $fn }
+                    $store.Close()
+                    $log.Add("Recovered CA-issued ServerAuth cert $($cand.Thumbprint.Substring(0,8)).. that had lost FriendlyName '$fn'; re-applied name")
+                    $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $fn } | Select-Object -Last 1
+                }
+                catch { $log.Add("WARN: could not re-apply FriendlyName to recovered cert: $($_.Exception.Message)") }
+            }
+        }
+
+        # 3. Nothing usable in the store -- re-enroll from the CA template.
+        if (-not $cert) {
+            try {
+                $enroll = Get-Certificate -Template 'ConfigMgrWebServerCertificate' -DnsName $fqdn -SubjectName "CN=$fqdn" -CertStoreLocation Cert:\LocalMachine\My -ErrorAction Stop
+                if ($enroll -and $enroll.Certificate) {
+                    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+                    $store.Open('ReadWrite')
+                    $live = $store.Certificates | Where-Object { $_.Thumbprint -eq $enroll.Certificate.Thumbprint } | Select-Object -First 1
+                    if ($live) { $live.FriendlyName = $fn }
+                    $store.Close()
+                    $cert = $enroll.Certificate
+                    $log.Add("Re-enrolled WebServer cert $($cert.Thumbprint.Substring(0,8)).. from ConfigMgrWebServerCertificate template")
+                }
+            }
+            catch { $log.Add("WARN: re-enroll from ConfigMgrWebServerCertificate template failed: $($_.Exception.Message)") }
+        }
+
+        if (-not $cert) {
+            $log.Add("FAIL: no valid WebServer cert found, recovered, or enrolled on this host. IIS 443 cannot be bound (MP HTTPS install will fail 25055). Verify the machine is in 'ConfigMgr IIS Servers' and the CA advertises 'ConfigMgrWebServerCertificate'.")
+            return $log
+        }
+
+        # 4. Ensure Default Web Site has a 443 https binding carrying this cert.
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+            $bound = netsh http show sslcert ipport=0.0.0.0:443 2>&1
+            if ($bound -match $cert.Thumbprint) {
+                $log.Add("OK: Default Web Site:443 already bound to WebServer cert $($cert.Thumbprint.Substring(0,8)).")
+            }
+            else {
+                $b = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+                if (-not $b) {
+                    New-WebBinding -Name 'Default Web Site' -IPAddress '*' -Port 443 -Protocol 'https' -ErrorAction Stop
+                    $b = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+                }
+                if ($b) {
+                    $b.AddSslCertificate($cert.Thumbprint, 'my')
+                    $log.Add("Bound WebServer cert $($cert.Thumbprint.Substring(0,8)).. to Default Web Site:443")
+                }
+                else {
+                    $log.Add("FAIL: could not create the 443 https binding on Default Web Site")
+                }
+            }
+        }
+        catch { $log.Add("WARN: IIS 443 binding step failed: $($_.Exception.Message)") }
+
+        return $log
+    }
+
+    try {
+        $result = Invoke-Command -ComputerName $MPFQDN -ScriptBlock $sb -ErrorAction Stop
+        foreach ($line in @($result)) { Write-DscStatus "  [$MPFQDN 443] $line" }
+    }
+    catch {
+        Write-DscStatus "WARNING: Could not verify/repair IIS 443 SSL binding on $MPFQDN`: $($_.Exception.Message). HTTPS MP install may fail with error 25055."
+    }
+}
+
 function Install-MP {
     param (
         [string]
@@ -824,6 +937,14 @@ function Install-MP {
     $i = 0
     $installFailure = $false
     $MPFQDN = $ServerFQDN
+
+    # For an HTTPS (PKI) MP, guarantee the MP box's IIS 443 SSL binding is in
+    # place before we ever call Add-CMManagementPoint -CommunicationType Https;
+    # otherwise the remote MP MSI aborts with "Error 25055 ... not correctly
+    # configured for SSL" and SMS_MP is never provisioned.
+    if ($UsePKI) {
+        Confirm-MPHttpsBinding -MPFQDN $MPFQDN
+    }
 
     do {
 

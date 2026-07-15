@@ -125,7 +125,11 @@
         if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
         if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
         if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
-        if (-not $caVMCert) { $AddIISCert = $false }
+        # $caVMCert only matches a CA VM built in THIS deploy. When adding a site system
+        # to an EXISTING PKI domain the Enterprise CA already lives in AD (no InstallCA VM
+        # here), so an empty $caVMCert must NOT suppress the web-server cert while UsePKI
+        # is set -- otherwise the HTTPS MP MSI fails with error 25055.
+        if (-not $caVMCert -and -not $cmoCert.UsePKI) { $AddIISCert = $false }
         if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
 
         $nextDepend = $null
@@ -409,7 +413,11 @@
         if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
         if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
         if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
-        if (-not $caVMCert) { $AddIISCert = $false }
+        # $caVMCert only matches a CA VM built in THIS deploy. When adding a site system
+        # to an EXISTING PKI domain the Enterprise CA already lives in AD (no InstallCA VM
+        # here), so an empty $caVMCert must NOT suppress the web-server cert while UsePKI
+        # is set -- otherwise the HTTPS MP MSI fails with error 25055.
+        if (-not $caVMCert -and -not $cmoCert.UsePKI) { $AddIISCert = $false }
         if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
 
         $nextDepend = $null
@@ -729,7 +737,11 @@
         if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
         if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
         if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
-        if (-not $caVMCert) { $AddIISCert = $false }
+        # $caVMCert only matches a CA VM built in THIS deploy. When adding a site system
+        # to an EXISTING PKI domain the Enterprise CA already lives in AD (no InstallCA VM
+        # here), so an empty $caVMCert must NOT suppress the web-server cert while UsePKI
+        # is set -- otherwise the HTTPS MP MSI fails with error 25055.
+        if (-not $caVMCert -and -not $cmoCert.UsePKI) { $AddIISCert = $false }
         if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
 
         $nextDepend = $null
@@ -929,7 +941,11 @@
         if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
         if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
         if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
-        if (-not $caVMCert) { $AddIISCert = $false }
+        # $caVMCert only matches a CA VM built in THIS deploy. When adding a site system
+        # to an EXISTING PKI domain the Enterprise CA already lives in AD (no InstallCA VM
+        # here), so an empty $caVMCert must NOT suppress the web-server cert while UsePKI
+        # is set -- otherwise the HTTPS MP MSI fails with error 25055.
+        if (-not $caVMCert -and -not $cmoCert.UsePKI) { $AddIISCert = $false }
         if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
 
         $nextDepend = $null
@@ -1209,7 +1225,11 @@
         if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
         if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
         if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
-        if (-not $caVMCert) { $AddIISCert = $false }
+        # $caVMCert only matches a CA VM built in THIS deploy. When adding a site system
+        # to an EXISTING PKI domain the Enterprise CA already lives in AD (no InstallCA VM
+        # here), so an empty $caVMCert must NOT suppress the web-server cert while UsePKI
+        # is set -- otherwise the HTTPS MP MSI fails with error 25055.
+        if (-not $caVMCert -and -not $cmoCert.UsePKI) { $AddIISCert = $false }
         if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
 
         $nextDepend = $null
