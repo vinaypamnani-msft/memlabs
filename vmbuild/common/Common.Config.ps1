@@ -62,6 +62,46 @@ function Get-ConfigCmOptions {
                 $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
             } | Select-Object -First 1
             if ($anySiteServerInDomain) {
+                # RECOVERY: the note has no cmOptions, but the site server keeps a timestamped
+                # backup of its deployConfig before every overwrite (C:\staging\DSC\deployConfig_*.json).
+                # The OLDEST backup is the ORIGINAL build's config, which DID carry cmOptions --
+                # including the authoritative UsePKI -- even in legacy builds that never persisted
+                # cmOptions to the VM note. Remote in, read it, stamp it onto the note (so future
+                # runs read it directly), and return it. This is far more reliable than inferring
+                # UsePKI from per-VM flags: legacy defaulted DC.InstallCA=$true even for NON-PKI
+                # labs, so InstallCA/derived pkiOptions.EnablePKI cannot distinguish PKI from eHTTP.
+                # Guarded to host context (needs PSDirect); silently falls through to synthesize.
+                if ($Common -and -not $Common.InJob) {
+                    try {
+                        $recoverCmScript = {
+                            try {
+                                $files = @(Get-ChildItem -Path 'C:\staging\DSC' -Filter 'deployConfig*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime)
+                                foreach ($f in $files) {
+                                    try { $o = Get-Content $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                                    if ($o.cmOptions) { return ($o.cmOptions | ConvertTo-Json -Depth 5 -Compress) }
+                                }
+                            }
+                            catch {}
+                            return ''
+                        }
+                        $recoverResult = Invoke-VmCommand -VmName $anySiteServerInDomain.vmName -VmDomainName $Config.vmOptions.domainName -ScriptBlock $recoverCmScript -SuppressLog
+                        if ($recoverResult -and $recoverResult.ScriptBlockOutput) {
+                            $recoveredCm = $recoverResult.ScriptBlockOutput | ConvertFrom-Json -ErrorAction SilentlyContinue
+                            if ($recoveredCm) {
+                                Write-Log "Get-ConfigCmOptions: Recovered cmOptions (UsePKI=$($recoveredCm.UsePKI)) from '$($anySiteServerInDomain.vmName)' deployConfig backup on disk; stamping onto its VM note." -Verbose
+                                try { Set-VMNote -vmName $anySiteServerInDomain.vmName -vmNote ([PSCustomObject]@{ cmOptions = $recoveredCm }) } catch {}
+                                return $recoveredCm
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Log "Get-ConfigCmOptions: cmOptions recovery from '$($anySiteServerInDomain.vmName)' deployConfig backup failed: $($_.Exception.Message). Falling back to synthesized defaults." -Verbose
+                    }
+                }
+
+                # CAS/Primary exists but has no cmOptions in its VM note (deployed
+                # before cmOptions was persisted). Synthesize from domainDefaults
+                # and safe defaults so validation passes and new VMs deploy.
                 $dcVM = $existingVMs | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
                 $inferredVersion = if ($dcVM -and $dcVM.domainDefaults -and $dcVM.domainDefaults.CMVersion) {
                     $dcVM.domainDefaults.CMVersion
