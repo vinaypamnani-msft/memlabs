@@ -937,6 +937,14 @@ function New-RDCManFileFromHyperV {
                 $isLinuxClient = $vm.Role -eq 'LinuxClient'
                 $hasRdp = $rdpOn -or $isLinuxClient
 
+                # RDCMan is an RDP-only client; it cannot connect over SSH. Skip
+                # SSH-only Linux VMs so we don't add a dead [Linux SSH] entry that
+                # can never connect. (These VMs still get an SSH entry in mRemoteNG.)
+                if (-not $hasRdp) {
+                    Write-Log "Skipping SSH-only Linux VM '$($vm.VmName)' in RDCMan (enableRDP not set; RDCMan has no SSH support)." -LogOnly -Verbose
+                    continue
+                }
+
                 # Resolve IP (Ubuntu doesn't respond to LLMNR).
                 # Prefer live IP from Hyper-V over cached LastKnownIP — DHCP
                 # leases can change and LastKnownIP goes stale.
@@ -948,12 +956,8 @@ function New-RDCManFileFromHyperV {
                 if ([string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp = $vm.LastKnownIP }
                 $linuxName = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
 
-                # Build display name (username suffix gated on ShowUser)
-                if ($hasRdp) {
-                    $linuxDisplay = "$($vm.VmName) [Linux RDP]"
-                } else {
-                    $linuxDisplay = "$($vm.VmName) [Linux SSH]"
-                }
+                # Build display name (RDP only; username suffix gated on ShowUser)
+                $linuxDisplay = "$($vm.VmName) [Linux RDP]"
                 if ($rdcSettings.ShowUser) { $linuxDisplay += " (vmbuildadmin)" }
                 if ($vm.SiteCode) { $linuxDisplay += " ($($vm.SiteCode))" }
 
