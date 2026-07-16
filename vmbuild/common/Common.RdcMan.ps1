@@ -633,7 +633,11 @@ function New-RDCManFileFromHyperV {
     # C:\tools\RDCMan.exe fails on hosts where RDCMan was launched from another
     # location (e.g. a dev repo), leaving it stopped-but-not-restarted.
     $rdcExePath = $null
-    try { $rdcExePath = (Get-Process -Name rdcman -ea Ignore | Select-Object -First 1).Path } catch {}
+    try {
+        $rdcRunning = @(Get-Process -Name rdcman -ea Ignore)
+        if ($rdcRunning.Count -gt 0) { $rdcExePath = ($rdcRunning | Select-Object -First 1).Path }
+        Write-Log "[RDCMan restart] Pre-kill scan: $($rdcRunning.Count) rdcman process(es) running; captured exe path = '$rdcExePath'" -LogOnly
+    } catch { Write-Log "[RDCMan restart] Pre-kill process scan failed: $($_.Exception.Message)" -LogOnly }
 
     # Bulk-fetch all VM network adapters in one WMI call so per-VM cache
     # lookups during Get-VMFromHyperV are instant instead of ~3s each.
@@ -642,10 +646,13 @@ function New-RDCManFileFromHyperV {
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
             Write-Log "Stopping RDCMan.exe, deleting $rdcmanfile, and regenerating a new MEMLabs.RDG."
-            $p = Get-Process -Name rdcman -ea Ignore
-            if ($p) {
+            $p = @(Get-Process -Name rdcman -ea Ignore)
+            Write-Log "[RDCMan restart] OverWrite path: found $($p.Count) rdcman process(es) to stop." -LogOnly
+            if ($p.Count -gt 0) {
+                if (-not $rdcExePath) { $rdcExePath = ($p | Select-Object -First 1).Path }
                 $p | Stop-Process -force
                 $killedAlready = $true
+                Write-Log "[RDCMan restart] Stopped rdcman (killedAlready=true); exe path now '$rdcExePath'." -LogOnly
             }
             Start-Sleep 1
             Remove-Item $rdcmanfile -ProgressAction SilentlyContinue| out-null
@@ -1241,6 +1248,8 @@ function New-RDCManFileFromHyperV {
             $proc = Get-Process -Name rdcman -ea Ignore | Select-Object -First 1
             if ($proc) {
                 $killed = $true
+                if (-not $rdcExePath) { $rdcExePath = $proc.Path }
+                Write-Log "[RDCMan restart] Save path: rdcman still/again running (PID $($proc.Id)); stopping it (killed=true)." -LogOnly
                 Get-Process -Name rdcman -ea Ignore | Stop-Process
             }
             Start-Sleep 1
@@ -1261,12 +1270,18 @@ function New-RDCManFileFromHyperV {
         if (-not ($rdcExePath -and (Test-Path $rdcExePath))) { $rdcExePath = "C:\tools\RDCMan.exe" }
         $rdcWorkDir = Split-Path $rdcExePath -Parent
         if (-not (Test-Path $rdcWorkDir)) { $rdcWorkDir = $env:TEMP }
+        Write-Log "[RDCMan restart] Gate OPEN (killed=$killed killedAlready=$killedAlready). Launching '$rdcExePath' /reconnect (workdir '$rdcWorkDir', exeExists=$(Test-Path $rdcExePath))." -LogOnly
         $rdcProc = $null
         if (Test-Path $rdcExePath) {
-            $rdcProc = Start-Process $rdcExePath -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory $rdcWorkDir -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -PassThru
+            try {
+                $rdcProc = Start-Process $rdcExePath -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory $rdcWorkDir -ErrorAction Stop -WarningAction SilentlyContinue -PassThru
+            }
+            catch {
+                Write-Log "[RDCMan restart] Start-Process FAILED for '$rdcExePath': $($_.Exception.Message)" -Warning
+            }
         }
         else {
-            Write-Log "Cannot restart RDCMan: RDCMan.exe not found at '$rdcExePath'." -Warning
+            Write-Log "[RDCMan restart] Cannot restart RDCMan: RDCMan.exe not found at '$rdcExePath'." -Warning
         }
         $i = 0
         while ($i -lt 3) {
@@ -1277,13 +1292,16 @@ function New-RDCManFileFromHyperV {
         Set-RdcManMin
 
         if ($rdcProc) {
+            Write-Log "[RDCMan restart] Restarted RDCMan (PID $($rdcProc.Id)) from '$rdcExePath'." -LogOnly
             Write-GreenCheck "Updated $rdcmanfile. Restarted RDCMan (PID $($rdcProc.Id))" -ForegroundColor ForestGreen
         }
         else {
+            Write-Log "[RDCMan restart] RDCMan was stopped but FAILED to restart (exe '$rdcExePath', workdir '$rdcWorkDir')." -Warning
             Write-GreenCheck "Updated $rdcmanfile. RDCMan was stopped but failed to restart" -ForegroundColor ForestGreen
         }
     }
     else {
+        Write-Log "[RDCMan restart] Gate CLOSED: RDCMan was not detected as running (killed=$killed killedAlready=$killedAlready); nothing to restart." -LogOnly
         Write-GreenCheck "Updated $rdcmanfile. RDCMan was not running" -ForegroundColor ForestGreen
     }
 }
