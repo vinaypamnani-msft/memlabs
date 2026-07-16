@@ -230,6 +230,7 @@ function Get-SortedProperties {
         'UsePKI'              = 'UsePKI'
         'OfflineSCP'          = 'OfflineSCP'
         'OfflineSUP'          = 'OfflineSUP'
+        'WsusImportBaseline'  = 'WsusImportBaseline'
         'PrePopulateObjects'  = 'PrePopulateObjects'
         'EnableBLM'           = 'EnableBLM'
     }

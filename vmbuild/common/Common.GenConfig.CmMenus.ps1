@@ -67,6 +67,7 @@ function Invoke-CMOptionsMenuForVM {
             EVALVersion               = $false
             OfflineSCP                = $false
             OfflineSUP                = $false
+            WsusImportBaseline        = $true
             UsePKI                    = $false
             EnableBLM                 = $false
         }

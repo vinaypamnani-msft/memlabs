@@ -50,6 +50,7 @@ function Get-GenericHelp {
         "UseOfflineRoot" { "Deploy a two-tier PKI: a Standalone Offline Root CA (workgroup, powered off after setup) issues a certificate for an Enterprise Subordinate CA. Configured via PKI Settings menu." }
         "OfflineSCP" { "Install the SCP role in Offline mode.  This will prevent CM from updating. Useful for offline repros" }
         "OfflineSUP" { "Install the SUP role in Offline mode.  This will prevent WSUS from talking to Microsoft Update to get patch information" }
+        "WsusImportBaseline" { "When True (default), pre-seed the WSUS category catalog by importing the shipped 'wsusutil export' baseline cab -- much faster than a first Microsoft Update sync. Set to False to skip the cab and perform a natural Microsoft Update sync instead. No effect on OfflineSUP configs or when no baseline cab is shipped." }
         "EnableBLM" { "Enable BitLocker Management. Configures GPO, enables the BLM site feature, and deploys a BitLocker policy to encrypt client OS drives via the MP recovery service." }
         "PrePopulateObjects" { "This setting will pre-populate a number of objects in the CM database, such as packages, scripts, OSD Task Sequences, Baselines, etc." }
 

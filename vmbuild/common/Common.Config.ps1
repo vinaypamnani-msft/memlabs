@@ -892,12 +892,16 @@ function Get-FilesForConfiguration {
     $siteServers = $config.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") }
 
     # WSUS categories baseline cab: lives in SupportFiles, but only downloaded
-    # when the config actually has a WSUS server and the import opt-in
-    # (cmOptions.WsusImportBaseline, default $true) hasn't been turned off.
+    # when the config actually has a ConfigMgr SUP (installSUP=true) and the
+    # import opt-in (cmOptions.WsusImportBaseline, default $true) hasn't been
+    # turned off. A PURE standalone WSUS (role=WSUS without installSUP) is NOT
+    # a ConfigMgr SUP -- it has no InstallRoles/Phase-8 import path, so it must
+    # always populate its catalog via a natural Microsoft Update sync; the cab
+    # is intentionally never downloaded/staged for it.
     # Pre-DSC (Common.ScriptBlocks.ps1) reads this from
     # azureFiles\tools\wsus\WsusCategoriesBaseline.cab; the SupportFiles
     # filename matches that relative path so Get-FileWithHash lands it there.
-    $wsusVms = $config.virtualMachines | Where-Object { $_.installSUP -eq $true -or $_.role -eq 'WSUS' }
+    $wsusVms = $config.virtualMachines | Where-Object { $_.installSUP -eq $true }
     $wsusImportEnabled = $true
     if ($cfgCmOptions -and $cfgCmOptions.PSObject.Properties['WsusImportBaseline'] -and $cfgCmOptions.WsusImportBaseline -eq $false) {
         $wsusImportEnabled = $false

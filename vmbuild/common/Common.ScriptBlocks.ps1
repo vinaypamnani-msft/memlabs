@@ -3079,25 +3079,29 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Download cache step failed (non-fatal): $($_.Exception.Message)" -LogOnly
         }
 
-        # WSUS categories baseline cab. Ship to EVERY SUP/WSUS VM (not just
-        # top-of-hierarchy) so InstallRoles (Phase 8) can run `wsusutil import`
-        # locally and pre-populate dbo.UpdateCategories before CM's first
-        # categories sync. Without the local cab a Primary-under-CAS SUP (or
-        # any downstream SUP) falls back to pulling the full ~13K-entry
-        # taxonomy from its upstream source -- whether that's MU or another
-        # WSUS -- which is the multi-hour path we want to avoid. The import
-        # is idempotent: Start-WsusBaselineImportBackground short-circuits
+        # WSUS categories baseline cab. Ship to EVERY ConfigMgr SUP VM
+        # (installSUP=true, not just top-of-hierarchy) so InstallRoles (Phase 8)
+        # can run `wsusutil import` locally and pre-populate dbo.UpdateCategories
+        # before CM's first categories sync. Without the local cab a
+        # Primary-under-CAS SUP (or any downstream SUP) falls back to pulling the
+        # full ~13K-entry taxonomy from its upstream source -- whether that's MU
+        # or another WSUS -- which is the multi-hour path we want to avoid. The
+        # import is idempotent: Start-WsusBaselineImportBackground short-circuits
         # with 'already-imported' once dbo.UpdateCategories is populated, so
         # re-running Phase <=7 on a healthy box is a fast no-op.
+        # A PURE standalone WSUS (role=WSUS without installSUP) is deliberately
+        # EXCLUDED: it has no InstallRoles/Phase-8 import path, so it always
+        # populates its catalog via a natural Microsoft Update sync (Phase 7
+        # WSUSSync) instead of the cab.
         # No-op when the cab is absent on host, the flag is off, the VM is
-        # not a SUP/WSUS, or the guest already has a matching cab on disk.
+        # not a ConfigMgr SUP, or the guest already has a matching cab on disk.
         if ($Phase -le 7) {
             $cmoForCab = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
             $cabEnabled = $true
             if ($cmoForCab -and $cmoForCab.PSObject.Properties['WsusImportBaseline'] -and $cmoForCab.WsusImportBaseline -eq $false) {
                 $cabEnabled = $false
             }
-            $isWsusVm = ($currentItem.installSUP -eq $true) -or ($currentItem.Role -eq 'WSUS')
+            $isWsusVm = ($currentItem.installSUP -eq $true)
             $hostCabPath = Join-Path $Common.AzureFilesPath "tools\wsus\WsusCategoriesBaseline.cab"
             if ($cabEnabled -and $isWsusVm -and (Test-Path $hostCabPath)) {
                 try {
