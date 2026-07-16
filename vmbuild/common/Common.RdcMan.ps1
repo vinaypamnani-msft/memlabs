@@ -628,6 +628,13 @@ function New-RDCManFileFromHyperV {
     # the interactive [R] regen and every automatic call site.
     $rdcSettings = Get-RDCSettings
 
+    # Capture the path of the currently-running RDCMan.exe (if any) BEFORE we
+    # stop it, so we can relaunch the exact same binary afterward. Hardcoding
+    # C:\tools\RDCMan.exe fails on hosts where RDCMan was launched from another
+    # location (e.g. a dev repo), leaving it stopped-but-not-restarted.
+    $rdcExePath = $null
+    try { $rdcExePath = (Get-Process -Name rdcman -ea Ignore | Select-Object -First 1).Path } catch {}
+
     # Bulk-fetch all VM network adapters in one WMI call so per-VM cache
     # lookups during Get-VMFromHyperV are instant instead of ~3s each.
     Invoke-VMNetworkBulkWarmup
@@ -934,12 +941,13 @@ function New-RDCManFileFromHyperV {
                 if ([string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp = $vm.LastKnownIP }
                 $linuxName = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
 
-                # Build display name
+                # Build display name (username suffix gated on ShowUser)
                 if ($hasRdp) {
-                    $linuxDisplay = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
+                    $linuxDisplay = "$($vm.VmName) [Linux RDP]"
                 } else {
-                    $linuxDisplay = "$($vm.VmName) [Linux SSH] (vmbuildadmin)"
+                    $linuxDisplay = "$($vm.VmName) [Linux SSH]"
                 }
+                if ($rdcSettings.ShowUser) { $linuxDisplay += " (vmbuildadmin)" }
                 if ($vm.SiteCode) { $linuxDisplay += " ($($vm.SiteCode))" }
 
                 $cLinux = [PsCustomObject]@{}
@@ -1247,7 +1255,19 @@ function New-RDCManFileFromHyperV {
     }
     if ($killed -or $killedAlready) {
 
-        $rdcProc = Start-Process "C:\tools\RDCMan.exe" -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -PassThru
+        # Prefer the path we captured before stopping RDCMan; fall back to the
+        # default install location. Use the exe's own folder as the working
+        # directory (C:\Temp may not exist on every host).
+        if (-not ($rdcExePath -and (Test-Path $rdcExePath))) { $rdcExePath = "C:\tools\RDCMan.exe" }
+        $rdcWorkDir = Split-Path $rdcExePath -Parent
+        if (-not (Test-Path $rdcWorkDir)) { $rdcWorkDir = $env:TEMP }
+        $rdcProc = $null
+        if (Test-Path $rdcExePath) {
+            $rdcProc = Start-Process $rdcExePath -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory $rdcWorkDir -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -PassThru
+        }
+        else {
+            Write-Log "Cannot restart RDCMan: RDCMan.exe not found at '$rdcExePath'." -Warning
+        }
         $i = 0
         while ($i -lt 3) {
             Set-RdcManMin

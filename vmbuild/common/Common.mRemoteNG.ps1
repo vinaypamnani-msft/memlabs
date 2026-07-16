@@ -1622,7 +1622,8 @@ function New-MRemoteNGFileFromHyperV {
                 $rdpOn = ($vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$vm.enableRDP
                 $isLinuxClient = $vm.Role -eq 'LinuxClient'
                 if ($rdpOn -or $isLinuxClient) {
-                    $rdpDisplayName = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
+                    $rdpDisplayName = "$($vm.VmName) [Linux RDP]"
+                    if ($rdcSettings.ShowUser) { $rdpDisplayName += " (vmbuildadmin)" }
                     if ($vm.SiteCode) { $rdpDisplayName += " ($($vm.SiteCode))" }
 
                     $linuxRdpTarget = if ($linuxGroup) { $linuxGroup } else { $container }
