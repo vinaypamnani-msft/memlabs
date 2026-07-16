@@ -997,6 +997,134 @@ Function Set-SiteServerRemoteSQL {
         }
     }
 }
+
+# ----------------------------------------------------------------------------
+# MP database replica helpers
+# ----------------------------------------------------------------------------
+# Add local SQL to an MP so it can host its own database replica. Captures the
+# MP's original sizing into markers first, then reuses Set-SiteServerLocalSql
+# (which bumps memory/procs and adds the E/F disks). Sets replicaSqlAutoAdded so
+# the change can be cleanly reverted. If the MP already had its own SQL (no
+# marker), it is left alone.
+Function Add-MPReplicaLocalSql {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "MP VM Object")]
+        [Object] $virtualMachine
+    )
+
+    # Already auto-added local SQL for the replica -> nothing to do.
+    if ($virtualMachine.replicaSqlAutoAdded) {
+        return
+    }
+    # MP already brought its own SQL -> leave it (and its sizing) alone.
+    if ($virtualMachine.sqlVersion) {
+        return
+    }
+
+    # Capture original sizing BEFORE Set-SiteServerLocalSql bumps it, so removal
+    # restores the exact originals (not a hardcoded value).
+    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'replicaSqlOrigMemory' -Value $virtualMachine.memory -Force
+    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'replicaSqlOrigVirtualProcs' -Value $virtualMachine.virtualProcs -Force
+    if ($null -ne $virtualMachine.dynamicMinRam) {
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'replicaSqlOrigDynamicMinRam' -Value $virtualMachine.dynamicMinRam -Force
+    }
+
+    Set-SiteServerLocalSql $virtualMachine
+
+    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'replicaSqlAutoAdded' -Value $true -Force
+}
+
+# Remove the local SQL that was auto-added for an MP database replica and restore
+# the MP's original sizing. No-op unless replicaSqlAutoAdded is set (so an MP that
+# brought its own SQL is never touched).
+Function Remove-MPReplicaLocalSql {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "MP VM Object")]
+        [Object] $virtualMachine
+    )
+
+    if (-not $virtualMachine.replicaSqlAutoAdded) {
+        return
+    }
+
+    foreach ($p in 'sqlVersion', 'sqlInstanceName', 'sqlInstanceDir', 'sqlPort', 'SqlServiceAccount', 'SqlAgentAccount') {
+        if ($null -ne $virtualMachine.$p) {
+            $virtualMachine.PsObject.Members.Remove($p)
+        }
+    }
+
+    if ($null -ne $virtualMachine.installSSMS) {
+        $virtualMachine.PsObject.Members.Remove('installSSMS')
+    }
+    if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -Force
+    }
+
+    # Restore captured sizing.
+    if ($virtualMachine.replicaSqlOrigMemory) {
+        $virtualMachine.memory = $virtualMachine.replicaSqlOrigMemory
+    }
+    if ($virtualMachine.replicaSqlOrigVirtualProcs) {
+        $virtualMachine.virtualProcs = $virtualMachine.replicaSqlOrigVirtualProcs
+    }
+    if ($virtualMachine.replicaSqlOrigDynamicMinRam) {
+        if ($null -ne $virtualMachine.dynamicMinRam) {
+            $virtualMachine.dynamicMinRam = $virtualMachine.replicaSqlOrigDynamicMinRam
+        }
+        else {
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $virtualMachine.replicaSqlOrigDynamicMinRam -Force
+        }
+    }
+
+    # Drop the auto-added F (SQL data) disk; leave E (shared data disk) intact.
+    if ($null -ne $virtualMachine.additionalDisks -and $null -ne $virtualMachine.additionalDisks.F) {
+        $virtualMachine.additionalDisks.PsObject.Members.Remove('F')
+    }
+
+    foreach ($m in 'replicaSqlAutoAdded', 'replicaSqlOrigMemory', 'replicaSqlOrigVirtualProcs', 'replicaSqlOrigDynamicMinRam') {
+        if ($null -ne $virtualMachine.$m) {
+            $virtualMachine.PsObject.Members.Remove($m)
+        }
+    }
+}
+
+# Menu handler for the replicaSqlServerVM property. Lets the user host the replica
+# DB on this MP (Local SQL) or repoint it to an existing, non-site SQL VM. Toggling
+# between Local and Remote adds/removes the auto-managed local SQL accordingly.
+Function Get-ReplicaSQLVM {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $false, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+
+    $result = select-ReplicaSQLMenu -ConfigToModify $global:config -CurrentVM $property -CurrentValue $CurrentValue
+    if (-not $result -or $result -eq "ESCAPE") {
+        return
+    }
+
+    switch ($result.ToLowerInvariant()) {
+        "l" {
+            Add-MPReplicaLocalSql $property
+            $property | Add-Member -MemberType NoteProperty -Name 'replicaSqlServerVM' -Value $property.vmName -Force
+        }
+        Default {
+            if ([string]::IsNullOrWhiteSpace($result)) {
+                return
+            }
+            Remove-MPReplicaLocalSql $property
+            $property | Add-Member -MemberType NoteProperty -Name 'replicaSqlServerVM' -Value $result -Force
+        }
+    }
+    Get-TestResult -SuccessOnWarning | Out-Null
+}
+
 Function Get-WsusDBName {
     [CmdletBinding()]
     param (

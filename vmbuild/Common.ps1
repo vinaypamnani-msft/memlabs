@@ -8640,7 +8640,7 @@ function Set-SupportedOptions {
         "LinuxClient"
     )
 
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy", "installOffice")
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy", "installOffice", "useDatabaseReplica", "replicaSqlServerVM", "replicaDbName")
     $propsToUpdate = $updatablePropList
     $propsToUpdate += "wsusContentDir"
 

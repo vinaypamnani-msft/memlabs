@@ -306,6 +306,18 @@ function Test-VmFunctionality {
         $testsPassed = Test-BLMFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
+    # MP database replica: verify each replica MP in this site flipped to its
+    # replica DB (v_BgbMP.DBID is a hash) and the site->replica BGB route exists.
+    # Fails the build on a missing hash or route (the two hard-FAIL conditions in
+    # Test-MPDatabaseReplicaHealth.ps1). Only meaningful on the Primary site server.
+    if ($testsPassed -and $role -eq 'Primary') {
+        $replicaMPsInSite = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' -and $_.installMP -and $_.useDatabaseReplica -and $_.siteCode -eq $CurrentItem.siteCode })
+        if ($replicaMPsInSite.Count -gt 0) {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying MP database replicas"
+            $testsPassed = Test-MPReplicaFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        }
+    }
+
     # Verify maintenance scheduled tasks are present (confirms Phase 10 ran correctly).
     # Windows-only: Test-MaintenanceTasks probes the guest over PSDirect for Windows
     # Scheduled Tasks, which Linux doesn't have (Phase 10 maintenance skips Linux VMs
@@ -4159,6 +4171,96 @@ function Test-BLMFunctionality {
         -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel "BLM" -Result $result)
+}
+
+function Test-MPReplicaFunctionality {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+    $siteCode = $CurrentItem.siteCode
+
+    $replicaMPs = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' -and $_.installMP -and $_.useDatabaseReplica -and $_.siteCode -eq $siteCode })
+    $mpFqdnCsv = ($replicaMPs | ForEach-Object { "$($_.vmName).$domain" }) -join ','
+
+    Write-Log "[Phase $Phase] $VMName [MPReplica]: verifying $($replicaMPs.Count) MP database replica(s) via v_BgbMP + sys.routes" -LogOnly
+
+    $scriptBlock = {
+        param($mpFqdnCsv, $sc)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $mpList = @($mpFqdnCsv -split ',' | Where-Object { $_ })
+
+        # Site DB from this server's registry (same detection ConfigMgr uses).
+        try {
+            $siteReg = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code').'Site Code'
+            $p = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server'
+            $server = $p.Server; $dbRaw = $p.'Database Name'
+            if ($dbRaw -match '\\') { $inst = "$server\$($dbRaw.Split('\')[0])"; $db = $dbRaw.Split('\')[1] } else { $inst = $server; $db = $dbRaw }
+            $results.Details.Add("OK: site DB $inst / $db (site $siteReg)")
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: could not read site SQL from registry: $($_.Exception.Message)")
+            return $results
+        }
+
+        if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
+            try { Import-Module SqlServer -ErrorAction Stop }
+            catch {
+                try { Import-Module SQLPS -DisableNameChecking -ErrorAction Stop }
+                catch { $results.Details.Add('WARN: Invoke-Sqlcmd unavailable; skipping replica route checks'); return $results }
+            }
+        }
+
+        try {
+            $bgb = Invoke-Sqlcmd -ServerInstance $inst -Database $db -Query "SELECT ServerName, DBID FROM v_BgbMP" -TrustServerCertificate -ErrorAction Stop
+            $routes = Invoke-Sqlcmd -ServerInstance $inst -Database $db -Query "SELECT remote_service_name FROM sys.routes WHERE remote_service_name LIKE 'ConfigMgrBGB%'" -TrustServerCertificate -ErrorAction Stop
+            $routeSvcs = @($routes | ForEach-Object { "$($_.remote_service_name)".ToLower() })
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: site DB query failed: $($_.Exception.Message)")
+            return $results
+        }
+
+        foreach ($mp in $mpList) {
+            $row = @($bgb | Where-Object { "$($_.ServerName)".ToLower() -eq $mp.ToLower() }) | Select-Object -First 1
+            if (-not $row) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: MP '$mp' not found in v_BgbMP")
+                continue
+            }
+            $dbid = "$($row.DBID)"
+            if ($dbid.ToLower().StartsWith('0x')) {
+                $results.Details.Add("OK: MP '$mp' DBID is a replica hash ($dbid)")
+                $wantSvc = "configmgrbgb_site$($dbid.ToLower())"
+                if ($routeSvcs -contains $wantSvc) {
+                    $results.Details.Add("OK: site route to replica service present for '$mp'")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: site missing route to service ConfigMgrBGB_Site$dbid (root cause of BGB 'Route is not defined')")
+                }
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: MP '$mp' DBID='$dbid' is NOT a replica hash -- MP still on the site DB (Set-CMManagementPoint did not apply)")
+            }
+        }
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $mpFqdnCsv, $siteCode `
+        -DisplayName "Phase11-MPReplica-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
+
+    return (Format-TestResult -VMName $VMName -RoleLabel "MPReplica" -Result $result)
 }
 
 function Test-SecondaryFunctionality {

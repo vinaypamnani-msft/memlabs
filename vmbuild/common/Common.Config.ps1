@@ -567,6 +567,24 @@ function Get-UserConfiguration {
                     if ($null -eq $vm.InstallSMSProv) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
                     }
+                    # MP database replica: only meaningful on a dedicated SiteSystem MP.
+                    # Default useDatabaseReplica=false so the property exists (editable).
+                    # replicaSqlServerVM/replicaDbName are only injected when enabled; the
+                    # default replica SQL host is the MP's own VM (local SQL), and the
+                    # default database name is CM_<SiteCode>.
+                    if ($vm.InstallMP) {
+                        if ($null -eq $vm.useDatabaseReplica) {
+                            $vm | Add-Member -MemberType NoteProperty -Name "useDatabaseReplica" -Value $false -Force
+                        }
+                        if ($vm.useDatabaseReplica) {
+                            if ([string]::IsNullOrWhiteSpace($vm.replicaSqlServerVM)) {
+                                $vm | Add-Member -MemberType NoteProperty -Name "replicaSqlServerVM" -Value $vm.vmName -Force
+                            }
+                            if ([string]::IsNullOrWhiteSpace($vm.replicaDbName)) {
+                                $vm | Add-Member -MemberType NoteProperty -Name "replicaDbName" -Value ("CM_" + [string]$vm.siteCode) -Force
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1062,6 +1080,10 @@ function New-DeployConfig {
 
             if ($item.remoteSQLVM -and -not $item.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
                 $item.remoteSQLVM = $configObject.vmOptions.prefix + $item.remoteSQLVM
+            }
+
+            if ($item.replicaSqlServerVM -and -not $item.replicaSqlServerVM.StartsWith($configObject.vmOptions.prefix)) {
+                $item.replicaSqlServerVM = $configObject.vmOptions.prefix + $item.replicaSqlServerVM
             }
 
             if ($item.wsusDataBaseServer -and -not $item.wsusDataBaseServer.StartsWith($configObject.vmOptions.prefix)) {

@@ -739,6 +739,11 @@ function Test-ValidVmSupported {
         Test-MachineNameExists $VM.remoteSQLVM -ReturnObject $ReturnObject -config $ConfigObject
     }
 
+    if ($VM.replicaSqlServerVM) {
+        Test-ValidMachineName $VM.replicaSqlServerVM -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.replicaSqlServerVM -ReturnObject $ReturnObject -config $ConfigObject
+    }
+
     if ($VM.wsusDataBaseServer) {
         if ($VM.wsusDataBaseServer -ne "WID") {
             Test-ValidMachineName $VM.wsusDataBaseServer -ReturnObject $ReturnObject
@@ -1144,6 +1149,12 @@ function Test-ValidRoleSiteServer {
     $vmName = $VM.vmName
     $vmRole = $VM.role
 
+    # MP database replica is only supported on dedicated SiteSystem MP VMs, never
+    # on the Primary/CAS site server itself (even when it hosts its own MP).
+    if ($VM.useDatabaseReplica) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] has useDatabaseReplica set, which is not supported on a $vmRole site server. The MP database replica is only supported on dedicated SiteSystem Management Point VMs." -ReturnObject $ReturnObject -Failure
+    }
+
     # Primary/CAS must contain SQL
     if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM -and $vmRole -in ("CAS", "Primary")) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
@@ -1408,6 +1419,51 @@ function Test-ValidRoleSiteSystem {
             Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] Pull DP source [$($source.vmName)] is itself a Pull DP. A Pull DP's source must be a standard (non-pull) DP." -ReturnObject $ReturnObject -Failure
         }
 
+    }
+
+    # MP database replica (SiteSystem MP only)
+    if ($VM.useDatabaseReplica) {
+        if (-not $VM.installMP) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] has useDatabaseReplica enabled but is not a Management Point (installMP). The database replica is only supported on an MP." -ReturnObject $ReturnObject -Failure
+        }
+
+        if ([string]::IsNullOrWhiteSpace($VM.replicaDbName)) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] has useDatabaseReplica enabled but replicaDbName is empty." -ReturnObject $ReturnObject -Failure
+        }
+
+        $replicaVMName = $VM.replicaSqlServerVM
+        if ([string]::IsNullOrWhiteSpace($replicaVMName)) {
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] has useDatabaseReplica enabled but replicaSqlServerVM is not set." -ReturnObject $ReturnObject -Failure
+        }
+        else {
+            $replicaSQLVM = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $replicaVMName }
+            if (-not $replicaSQLVM) {
+                $replicaSQLVM = Get-List -type VM -DomainName $ConfigObject.vmOptions.DomainName | Where-Object { $_.vmName -eq $replicaVMName }
+            }
+            if (-not $replicaSQLVM) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] replicaSqlServerVM [$replicaVMName] was not found in the configuration or domain." -ReturnObject $ReturnObject -Failure
+            }
+            elseif (-not $replicaSQLVM.sqlVersion) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] replicaSqlServerVM [$replicaVMName] does not contain SQL (sqlVersion). The replica host must be a SQL Server." -ReturnObject $ReturnObject -Failure
+            }
+            elseif (($replicaSQLVM.memory) -and (($replicaSQLVM.memory / 1) -lt 4GB)) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] replica SQL host [$replicaVMName] has less than 4GB memory; hosting a database replica may be slow." -ReturnObject $ReturnObject -Warning
+            }
+
+            # Replica DB must NOT be hosted on the site's own SQL server.
+            if ($VM.siteCode) {
+                $siteSql = $null
+                try {
+                    $siteSql = Get-SqlServerForSiteCode -deployConfig $ConfigObject -SiteCode $VM.siteCode -type Name -SmartUpdate:$false
+                }
+                catch {
+                    $siteSql = $null
+                }
+                if ($siteSql -and $siteSql -eq $replicaVMName) {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] replicaSqlServerVM [$replicaVMName] is the site database server. The MP replica must use a different SQL server." -ReturnObject $ReturnObject -Failure
+                }
+            }
+        }
     }
 
 }
@@ -2083,6 +2139,32 @@ function Test-Configuration {
             }
         }
 
+        # MP database replica: two replicas on the SAME SQL server must use SEPARATE
+        # instances. Group replica MPs by their replica SQL host and fail if any two
+        # resolve to the same server + instance.
+        $replicaMPs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and $_.installMP -and $_.useDatabaseReplica -and $_.replicaSqlServerVM })
+        foreach ($grp in ($replicaMPs | Group-Object -Property replicaSqlServerVM)) {
+            if ($grp.Count -lt 2) { continue }
+            $instanceMap = @{}
+            foreach ($mp in $grp.Group) {
+                $replicaSQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $mp.replicaSqlServerVM } | Select-Object -First 1
+                if (-not $replicaSQLVM) {
+                    $replicaSQLVM = Get-List -type VM -DomainName $deployConfig.vmOptions.DomainName | Where-Object { $_.vmName -eq $mp.replicaSqlServerVM } | Select-Object -First 1
+                }
+                $instance = "MSSQLSERVER"
+                if ($replicaSQLVM -and $replicaSQLVM.sqlInstanceName) {
+                    $instance = $replicaSQLVM.sqlInstanceName
+                }
+                $key = $instance.ToUpperInvariant()
+                if ($instanceMap.ContainsKey($key)) {
+                    Add-ValidationMessage -Message "Role Conflict: MPs [$($instanceMap[$key])] and [$($mp.vmName)] both host a database replica on SQL server [$($mp.replicaSqlServerVM)] instance [$instance]. Each replica on a shared SQL server must use a separate SQL instance." -ReturnObject $return -Failure
+                }
+                else {
+                    $instanceMap[$key] = $mp.vmName
+                }
+            }
+        }
+
         # Role Conflicts
         # ==============
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing Roles" -PercentComplete 65
@@ -2318,22 +2400,31 @@ function Test-Configuration {
             Add-ExistingVMsToDeployConfig -config $deployConfig
 
             # Guard: don't silently stack NEW VMs onto a domain whose core
-            # infrastructure never finished deploying + validating. The failed
-            # first deploy that leaves a half-built DC / site server (e.g. a
-            # Primary with no SQL installed) is exactly the state that produces
-            # confusing downstream failures when more VMs are added on top of
-            # it. Add-ExistingVMsToDeployConfig has just folded the existing
+            # infrastructure never finished DEPLOYING. The failed first deploy
+            # that leaves a half-built DC / site server (e.g. a Primary with no
+            # SQL installed) is exactly the state that produces confusing
+            # downstream failures when more VMs are added on top of it.
+            # Add-ExistingVMsToDeployConfig has just folded the existing
             # (hidden) VMs into the config, so their persisted lastPhaseComplete
-            # is available here. Phase 11 (validation) stamps lastPhaseComplete
-            # = 11, so a critical existing VM below 11 means it never completed.
-            # Scoped to DC / site servers (the backbone that reliably reaches 11
-            # -- powered-off / role-special VMs like OSDClient / StandaloneRootCA
-            # are intentionally excluded) and only when there are genuinely NEW
-            # (non-hidden) VMs being added. This is an INFORMATION advisory
-            # (non-blocking): it is surfaced to the operator but does not fail
-            # validation, so a deliberate "I know it's broken, extend anyway" /
-            # resume-and-add still works. Flip -Information to -Failure to make
-            # it a hard block (or -Warning to block with warning semantics).
+            # is available here.
+            #
+            # Phase 10 is the last DEPLOYMENT phase; Phase 11 is functional
+            # VALIDATION only (it stamps lastPhaseComplete=11). A critical VM at
+            # lastPhaseComplete=10 is therefore fully deployed -- only the
+            # post-deploy validation pass didn't finish/succeed. That is a
+            # legitimately fine base to extend (something the operator is willing
+            # to accept), so we do NOT flag it. Only a VM below 10 (deployment
+            # itself incomplete) is advised on.
+            #
+            # Scoped to DC / site servers (the backbone that reliably reaches
+            # phase 10 -- powered-off / role-special VMs like OSDClient /
+            # StandaloneRootCA are intentionally excluded) and only when there
+            # are genuinely NEW (non-hidden) VMs being added. This is an
+            # INFORMATION advisory (non-blocking): it is surfaced to the operator
+            # but does not fail validation, so a deliberate "I know it's broken,
+            # extend anyway" / resume-and-add still works. Flip -Information to
+            # -Failure to make it a hard block (or -Warning to block with warning
+            # semantics).
             try {
                 $newVMsBeingAdded = @($deployConfig.virtualMachines | Where-Object { -not $_.hidden })
                 if ($newVMsBeingAdded.Count -gt 0) {
@@ -2345,7 +2436,7 @@ function Test-Configuration {
                         if (-not $criticalNote) { continue }
                         # Don't flag LEGACY VMs. Phase 11 (validation) didn't exist
                         # in older MemLabs builds, so a VM deployed by an older build
-                        # could never reach lastPhaseComplete=11 and must not be
+                        # could never reach lastPhaseComplete=10/11 and must not be
                         # treated as "incomplete". Skip the check when the existing
                         # VM was last deployed by an OLDER build than the one running
                         # now. memLabsVersion is the completed-at stamp (set with
@@ -2361,10 +2452,13 @@ function Test-Configuration {
                             Write-Log "Add-VM completeness pre-check: skipping legacy $($criticalVM.role) '$($criticalVM.vmName)' (deployed by older build $criticalVer < current $currentBuildVersion; predates Phase 11)." -LogOnly
                             continue
                         }
+                        # Phase 10 = deployment complete (only Phase 11 validation
+                        # outstanding) is acceptable to extend, so only advise when
+                        # the deployment itself never finished (below phase 10).
                         $criticalPhase = if ($criticalNote.lastPhaseComplete) { [int]$criticalNote.lastPhaseComplete } else { 0 }
-                        if ($criticalPhase -lt 11) {
+                        if ($criticalPhase -lt 10) {
                             $newNames = ($newVMsBeingAdded | Select-Object -ExpandProperty vmName) -join ', '
-                            Add-ValidationMessage -Message "Existing $($criticalVM.role) '$($criticalVM.vmName)' never finished deployment + validation (lastPhaseComplete=$criticalPhase, expected 11). Adding new VM(s) [$newNames] on top of an incomplete domain is not recommended -- the underlying deployment failed and stacking more VMs onto it will likely fail too. Finish/repair the existing deployment first (re-run it to completion, or remove + redeploy '$($criticalVM.vmName)'), then add the new VMs." -ReturnObject $return -Information
+                            Add-ValidationMessage -Message "Existing $($criticalVM.role) '$($criticalVM.vmName)' never finished deploying (lastPhaseComplete=$criticalPhase; deployment completes at phase 10, validation at phase 11). Adding new VM(s) [$newNames] on top of an incomplete domain is not recommended -- the underlying deployment failed and stacking more VMs onto it will likely fail too. Finish/repair the existing deployment first (re-run it to completion, or remove + redeploy '$($criticalVM.vmName)'), then add the new VMs." -ReturnObject $return -Information
                         }
                     }
                 }

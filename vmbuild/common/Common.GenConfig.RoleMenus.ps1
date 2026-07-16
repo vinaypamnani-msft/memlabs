@@ -70,6 +70,54 @@ function select-RemoteSQLMenu {
     return $result
 }
 
+function select-ReplicaSQLMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "CurrentValue")]
+        [string] $CurrentValue = $null,
+        [Parameter(Mandatory = $true, HelpMessage = "MP VM the replica belongs to")]
+        [object] $CurrentVM
+    )
+
+    # Eligible replica SQL hosts = any SQL VM EXCEPT the site's own SQL server (the
+    # replica must not live on the site database) and EXCEPT this MP itself (hosting
+    # on this MP is offered as the separate "Local SQL" option).
+    $sqlList = @(Get-ListOfPossibleSQLServers -Config $ConfigToModify)
+
+    if ($CurrentVM -and $CurrentVM.siteCode) {
+        $siteSql = $null
+        try {
+            $siteSql = Get-SqlServerForSiteCode -deployConfig $ConfigToModify -SiteCode $CurrentVM.siteCode -type Name -SmartUpdate:$false
+        }
+        catch {
+            $siteSql = $null
+        }
+        if ($siteSql) {
+            $sqlList = @($sqlList | Where-Object { $_ -ne $siteSql })
+        }
+    }
+    if ($CurrentVM -and $CurrentVM.vmName) {
+        $sqlList = @($sqlList | Where-Object { $_ -ne $CurrentVM.vmName })
+    }
+
+    $additionalOptions = [ordered]@{
+        "L"  = "Local SQL (Replica DB hosted on this MP)"
+        "HL" = "Adds a SQL instance to this MP VM to host the replica database"
+    }
+
+    $result = $null
+    while ([string]::IsNullOrWhiteSpace($result)) {
+        Write-Log -Activity -NoNewLine "MP Replica SQL Server Selection"
+        $result = Get-Menu2 -MenuName "MP Replica SQL Server Selection" -prompt "Select SQL VM to host the replica database" -optionArray $sqlList -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
+    }
+    if ($result -eq "ESCAPE") {
+        return "ESCAPE"
+    }
+    return $result
+}
+
 function select-FileServerMenu {
     [CmdletBinding()]
     param (

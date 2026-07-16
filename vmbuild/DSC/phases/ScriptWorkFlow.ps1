@@ -213,6 +213,20 @@ if (Test-Path -Path $ConfigurationFile) {
             $Configuration.InstallSUP.StartTime = ''
             $Configuration.InstallSUP.EndTime = ''
         }
+        $needsReplica = @($newSiteSystemVMs | Where-Object { $_.installMP -and $_.useDatabaseReplica }).Count -gt 0
+        if ($needsReplica -and $Configuration.PSObject.Properties.Name -notcontains 'ConfigureMPReplica') {
+            # Add-to-existing: this ScriptWorkflow.json predates the MP replica
+            # feature. Add the step so the dot-source guard runs it.
+            Write-DscStatus "Adding ConfigureMPReplica step (new SiteSystem MPs with database replica found)"
+            $Configuration | Add-Member -NotePropertyName 'ConfigureMPReplica' -NotePropertyValue ([pscustomobject]@{ Status = 'NotStart'; StartTime = ''; EndTime = '' }) -Force
+            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        }
+        if ($needsReplica -and $Configuration.ConfigureMPReplica -and $Configuration.ConfigureMPReplica.Status -eq 'Completed') {
+            Write-DscStatus "Resetting ConfigureMPReplica status (new SiteSystem MPs with database replica found)"
+            $Configuration.ConfigureMPReplica.Status = 'NotStart'
+            $Configuration.ConfigureMPReplica.StartTime = ''
+            $Configuration.ConfigureMPReplica.EndTime = ''
+        }
     }
 }
 if (-not ($configuration.ScriptWorkflow)) {
@@ -237,6 +251,11 @@ if (-not $Configuration) {
                 EndTime   = ''
             }
             InstallMP      = @{
+                Status    = 'NotStart'
+                StartTime = ''
+                EndTime   = ''
+            }
+            ConfigureMPReplica = @{
                 Status    = 'NotStart'
                 StartTime = ''
                 EndTime   = ''
@@ -302,6 +321,11 @@ if (-not $Configuration) {
                     EndTime   = ''
                 }
                 InstallMP                    = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
+                ConfigureMPReplica           = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
@@ -471,6 +495,16 @@ if ($scenario -eq "Standalone") {
     Set-Location $LogPath
     Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
+    # Configure MP database replicas (SQL transactional replication + Service
+    # Broker). Runs after InstallRoles so the MP roles exist. Self-skips when no
+    # MP in this site uses a database replica.
+    if ($Configuration.ConfigureMPReplica -and $Configuration.ConfigureMPReplica.Status -ne "Completed") {
+        Write-DscStatus "$scenario Running ConfigureMPReplica.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureMPReplica.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    }
+
     # ConfigureCMProxy is cheap and idempotent; always run it so latched
     # Completed state from a deploy that ran before the Proxy was hydrated
     # into deployConfig can self-heal on the next pass. The script itself
@@ -583,6 +617,16 @@ if ($scenario -eq "Hierarchy") {
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
         Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+
+        # Configure MP database replicas (SQL transactional replication + Service
+        # Broker). Runs after InstallRoles so the MP roles exist. Self-skips when no
+        # MP in this site uses a database replica. Not run on CAS.
+        if ($Configuration.ConfigureMPReplica -and $Configuration.ConfigureMPReplica.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running ConfigureMPReplica.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureMPReplica.ps1"
+            Set-Location $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        }
 
         # ConfigureCMProxy is cheap and idempotent; always run.
         Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"

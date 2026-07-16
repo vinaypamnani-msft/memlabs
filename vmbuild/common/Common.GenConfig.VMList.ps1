@@ -393,6 +393,10 @@ function Select-Options {
                 Continue MainLoop
                 #return "REFRESH"
             }
+            "replicaSqlServerVM" {
+                Get-ReplicaSQLVM -property $property -name $name -CurrentValue $value
+                Continue MainLoop
+            }
             "domainUser" {
                 Get-domainUser -property $property -name $name -CurrentValue $value
                 Continue MainLoop

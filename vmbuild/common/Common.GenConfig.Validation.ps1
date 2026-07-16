@@ -568,7 +568,56 @@ function Get-AdditionalValidations {
                 Add-ErrorMessage -property $name -Warning "Cannot install an MP on a CAS or secondary site"
                 $property.installMP = $false
             }
+            if ($property.installMP) {
+                # Expose the MP database replica toggle on a dedicated SiteSystem MP
+                # attached to a Primary (standalone or child) site.
+                if ($property.Role -eq "SiteSystem") {
+                    $siteRole = get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode
+                    if ($siteRole -notin "CAS", "Secondary") {
+                        if ($null -eq $property.useDatabaseReplica) {
+                            $property | Add-Member -MemberType NoteProperty -Name "useDatabaseReplica" -Value $false -Force
+                        }
+                    }
+                }
+            }
+            else {
+                # MP removed -> tear down any database replica configuration.
+                Remove-MPReplicaLocalSql $property
+                $property.PsObject.Members.Remove("replicaSqlServerVM")
+                $property.PsObject.Members.Remove("replicaDbName")
+                $property.PsObject.Members.Remove("useDatabaseReplica")
+            }
             $newName = Rename-VirtualMachine -vm $property
+        }
+        "useDatabaseReplica" {
+            if ($value -eq $true) {
+                # Only valid on a dedicated SiteSystem MP attached to a Primary site.
+                if ($property.Role -ne "SiteSystem" -or -not $property.installMP) {
+                    Add-ErrorMessage -property $name -Warning "Database replica is only supported on a SiteSystem Management Point (installMP)."
+                    $property.useDatabaseReplica = $false
+                    return
+                }
+                $siteRole = get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode
+                if ($siteRole -in "CAS", "Secondary") {
+                    Add-ErrorMessage -property $name -Warning "Database replica is only supported for Management Points on a Primary site."
+                    $property.useDatabaseReplica = $false
+                    return
+                }
+                # Default: host the replica DB on local SQL added to this MP.
+                Add-MPReplicaLocalSql $property
+                if ([string]::IsNullOrWhiteSpace($property.replicaSqlServerVM)) {
+                    $property | Add-Member -MemberType NoteProperty -Name "replicaSqlServerVM" -Value $property.vmName -Force
+                }
+                if ([string]::IsNullOrWhiteSpace($property.replicaDbName)) {
+                    $property | Add-Member -MemberType NoteProperty -Name "replicaDbName" -Value ("CM_" + [string]$property.siteCode) -Force
+                }
+            }
+            else {
+                # Disable replica -> remove auto-added local SQL and replica props.
+                Remove-MPReplicaLocalSql $property
+                $property.PsObject.Members.Remove("replicaSqlServerVM")
+                $property.PsObject.Members.Remove("replicaDbName")
+            }
         }
         "enablePullDP" {
             if ($value -eq $true) {

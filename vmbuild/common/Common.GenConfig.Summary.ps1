@@ -218,6 +218,9 @@ function Get-SortedProperties {
         'installDP'           = 'InstallDP'
         'enablePullDP'        = 'EnablePullDP'
         'installMP'           = 'InstallMP'
+        'useDatabaseReplica'  = 'useDatabaseReplica'
+        'replicaSqlServerVM'  = 'replicaSqlServerVM'
+        'replicaDbName'       = 'replicaDbName'
         'installRP'           = 'InstallRP'
         'installSUP'          = 'InstallSUP'
         'installSMSProv'      = 'InstallSMSProv'
@@ -241,6 +244,10 @@ function Get-SortedProperties {
         '_autoAddedByProxy'
         'pushClientToDomainMembers'
         'osFamily'
+        'replicaSqlAutoAdded'
+        'replicaSqlOrigMemory'
+        'replicaSqlOrigVirtualProcs'
+        'replicaSqlOrigDynamicMinRam'
     )
 
     $memberNames = @($property | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name)
@@ -281,6 +288,9 @@ function Get-AdditionalInformationColor {
             $color = $Global:Common.Colors.GenConfigVMRole
         }
         "RemoteSQLVM" {
+            $color = $Global:Common.Colors.GenConfigVMRemoteServer
+        }
+        "replicaSqlServerVM" {
             $color = $Global:Common.Colors.GenConfigVMRemoteServer
         }
         "remoteContentLibVM" {
