@@ -236,28 +236,28 @@ function Select-RDCSettingsMenu {
     [CmdletBinding()]
     param()
 
-    # Property toggled by each menu key. Letters (not digits) so every option is
-    # a single, unambiguous keypress (the menu buffers digits for multi-digit
-    # list selections, which would make 1..9 require an Enter).
-    $keyMap = [ordered]@{
-        A = "DefaultGrouping"
-        B = "AllVMsGroup"
-        C = "RoleGroups"
-        E = "OSGroups"
-        F = "SubnetGroups"
-        G = "SiteCodeGroups"
-        I = "ShowRole"
-        J = "ShowOS"
-        K = "ShowCMVersion"
-        L = "ShowSiteRoles"
-        M = "ShowSiteCode"
-        N = "ShowUser"
-        O = "ShowSqlVersion"
+    # Each toggle is a multi-select checkbox: [OrderedSettingKey] -> label.
+    # Checkbox items get numeric itemNames (1..N) so Show-Menu renders the
+    # [√]/[ ] check mark and space/enter toggles them. [A]=all, [N]=none,
+    # [D]=Done (commit + exit), [R]=regenerate now. State lives in the passed
+    # menuItems ArrayList, so the live check marks (not just saved settings)
+    # drive both Done and Regenerate.
+    $groupingItems = [ordered]@{
+        DefaultGrouping = "Default grouping: Domain / MECM sites / Servers / Clients"
+        AllVMsGroup     = "'All VMs' group"
+        RoleGroups      = "Role groups: Clients/SiteServers/DPs/MPs/Sql/Wsus/Reporting"
+        OSGroups        = "OS groups (one folder per OS)"
+        SubnetGroups    = "Subnet groups (one folder per network)"
+        SiteCodeGroups  = "Site code groups (one folder per ConfigMgr site)"
     }
-
-    $onoff = {
-        param($b)
-        if ($b) { return "ON" } else { return "OFF" }
+    $displayItems = [ordered]@{
+        ShowRole       = "Show role tag (DC/PRI/CAS/...)"
+        ShowOS         = "Show OS tag (S22/W11/...)"
+        ShowCMVersion  = "Show ConfigMgr version (CM22)"
+        ShowSiteRoles  = "Show site system roles (MP/DP/SUP/RP/CA/Proxy)"
+        ShowSiteCode   = "Show site code (PS1->CAS)"
+        ShowUser       = "Show user, only if non-default (domain\user)"
+        ShowSqlVersion = "Show SQL version (SQL2019)"
     }
 
     while ($true) {
@@ -267,49 +267,68 @@ function Select-RDCSettingsMenu {
         $optColor = $Global:Common.Colors.GenConfigNonDefault
         $optNum = $Global:Common.Colors.GenConfigNonDefaultNumber
 
-        $customOptions = [ordered]@{}
-        $customOptions += [ordered]@{ "*BG" = ""; "*BREAKG" = "Grouping (folders created in RDCMan / mRemoteNG)%$headerColor" }
-        $customOptions += [ordered]@{ "A" = "Default grouping: Domain / MECM sites / Servers / Clients [$(& $onoff $settings.DefaultGrouping)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "B" = "'All VMs' group [$(& $onoff $settings.AllVMsGroup)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "C" = "Role groups: Clients/SiteServers/DPs/MPs/Sql/Wsus/Reporting [$(& $onoff $settings.RoleGroups)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "E" = "OS groups (one folder per OS) [$(& $onoff $settings.OSGroups)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "F" = "Subnet groups (one folder per network) [$(& $onoff $settings.SubnetGroups)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "G" = "Site code groups (one folder per ConfigMgr site) [$(& $onoff $settings.SiteCodeGroups)]%$optColor%$optNum" }
+        # Build the menu items by hand so section headers can sit between the
+        # checkbox groups (Get-MenuItems only allows headers before/after a
+        # single OptionArray block).
+        $menuItems = [System.Collections.ArrayList]@()
+        $textToKey = @{}
+        $num = 0
 
-        $customOptions += [ordered]@{ "*BD" = ""; "*BREAKD" = "Display Name Elements (all on = today's layout)%$headerColor" }
-        $customOptions += [ordered]@{ "I" = "Show role tag (DC/PRI/CAS/...) [$(& $onoff $settings.ShowRole)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "J" = "Show OS tag (S22/W11/...) [$(& $onoff $settings.ShowOS)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "K" = "Show ConfigMgr version (CM22) [$(& $onoff $settings.ShowCMVersion)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "L" = "Show site system roles (MP/DP/SUP/RP/CA/Proxy) [$(& $onoff $settings.ShowSiteRoles)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "M" = "Show site code (PS1->CAS) [$(& $onoff $settings.ShowSiteCode)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "N" = "Show user, only if non-default (domain\user) [$(& $onoff $settings.ShowUser)]%$optColor%$optNum" }
-        $customOptions += [ordered]@{ "O" = "Show SQL version (SQL2019) [$(& $onoff $settings.ShowSqlVersion)]%$optColor%$optNum" }
-
-        $customOptions += [ordered]@{ "*BR" = ""; "*BREAKR" = "Actions%$headerColor" }
-        $customOptions += [ordered]@{ "R" = "Regenerate connection files now (RDCMan / mRemoteNG)%$optColor%$optNum" }
-
-        $response = Get-Menu2 -MenuName "RDC / Remote Connection Settings" -Prompt "Toggle a setting (letter), or [R] to regenerate" -AdditionalOptions $customOptions -Test:$false -SplitEscapeFromGoBack
-
-        if ([string]::IsNullOrWhiteSpace($response)) { return }
-        $resp = "$response".ToUpperInvariant()
-        if ($resp -in "ESCAPE", "GOBACK", "X", "!") { return }
-
-        if ($keyMap.Contains($resp)) {
-            $prop = $keyMap[$resp]
-            $settings.$prop = -not [bool]$settings.$prop
-            Save-RDCSettings -Settings $settings
-            continue
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BREAKG" -text "Grouping (folders created in RDCMan / mRemoteNG)%$headerColor"
+        foreach ($key in $groupingItems.Keys) {
+            $num++
+            $label = $groupingItems[$key]
+            $textToKey[$label] = $key
+            $mi = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "$num" -text $label -color1 $optColor -color2 $optNum -selectable
+            $mi.MultiSelected = [bool]$settings.$key
         }
+
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BGAP1"
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BREAKD" -text "Display Name Elements (all on = today's layout)%$headerColor"
+        foreach ($key in $displayItems.Keys) {
+            $num++
+            $label = $displayItems[$key]
+            $textToKey[$label] = $key
+            $mi = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "$num" -text $label -color1 $optColor -color2 $optNum -selectable
+            $mi.MultiSelected = [bool]$settings.$key
+        }
+
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BGAP2"
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BREAKR" -text "Actions%$headerColor"
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "R" -text "Regenerate connection files now (RDCMan / mRemoteNG)" -color1 $optColor -color2 $optNum -selectable -helptext "Save the checked settings and rebuild memlabs.rdg + memlabs-mremoteng.xml"
+
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BGAP3"
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "A" -text "All Entries" -color1 $Global:Common.Colors.GenConfigTrue -color2 $Global:Common.Colors.GenConfigTrue -selectable -helptext "Check every setting"
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "N" -text "No Entries" -color1 $Global:Common.Colors.GenConfigFalse -color2 $Global:Common.Colors.GenConfigFalse -selectable -helptext "Uncheck every setting"
+        $doneItem = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "D" -text "Done - save settings" -color1 $Global:Common.Colors.GenConfigDefault -color2 $Global:Common.Colors.GenConfigDefaultNumber -selectable -helptext "Save the checked settings and return"
+        $doneItem.Selected = $true
+
+        $response = Get-Menu2 -MenuName "RDC / Remote Connection Settings" -Prompt "Space/Enter toggles a setting, [D] saves, [R] regenerates" -menuItems $menuItems -MultiSelect -Test:$false -SplitEscapeFromGoBack
+
+        $resp = "$response".ToUpperInvariant()
+
+        # ESC / go-back = cancel without saving.
+        if ($resp -in "ESCAPE", "GOBACK") { return }
+
+        # Read the live check-mark state back into the settings object. Works
+        # for Done (array / single label / NOITEMS) and for Regenerate alike.
+        foreach ($mi in $menuItems) {
+            if ($mi.Text -and $textToKey.ContainsKey($mi.Text)) {
+                $settings.($textToKey[$mi.Text]) = [bool]$mi.MultiSelected
+            }
+        }
+        Save-RDCSettings -Settings $settings
 
         if ($resp -eq "R") {
-            $confirm = Read-YesOrNoWithTimeout -Prompt "Regenerate memlabs.rdg and memlabs-mremoteng.xml now? (Y/n)" -HideHelp -Default "y" -timeout 10
-            if ($confirm -eq "y") {
-                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true
-                New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -OverWrite:$true
-                Restore-TerminalFocus
-            }
+            New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true
+            New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -OverWrite:$true
+            Restore-TerminalFocus
             continue
         }
+
+        # Any other response (Done via array / single label / NOITEMS / empty)
+        # means the user committed -- settings are saved above, so exit.
+        return
     }
 }
 
