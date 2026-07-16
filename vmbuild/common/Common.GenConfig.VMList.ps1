@@ -834,6 +834,16 @@ function Select-VirtualMachines {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
                         # NB: $IsLinux is a PowerShell 7 automatic constant -- use $vmIsLinux
                         $vmIsLinux = Test-VmIsLinux -Vm $virtualMachine
+                        # Expose the MP database replica toggle whenever the modify menu is
+                        # shown for a dedicated SiteSystem MP on a Primary site. installMP may
+                        # have been set by a role template/default (not the toggle handler), so
+                        # inject the property here so it always renders as an editable option.
+                        if ($virtualMachine.Role -eq "SiteSystem" -and $virtualMachine.installMP -and $null -eq $virtualMachine.useDatabaseReplica) {
+                            $siteRoleForReplica = get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $virtualMachine.siteCode
+                            if ($siteRoleForReplica -notin "CAS", "Secondary") {
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name "useDatabaseReplica" -Value $false -Force
+                            }
+                        }
                         $diskSummary = Get-DiskShortSummary -VirtualMachine $virtualMachine
                         $customOptions = [ordered]@{}
                         if (-not $vmIsLinux) {

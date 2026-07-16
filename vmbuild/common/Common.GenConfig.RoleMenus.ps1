@@ -106,6 +106,10 @@ function select-ReplicaSQLMenu {
         "L"  = "Local SQL (Replica DB hosted on this MP)"
         "HL" = "Adds a SQL instance to this MP VM to host the replica database"
     }
+    $additionalOptions += [ordered]@{
+        "N"  = "Create new Remote SQL Server"
+        "HN" = "Adds a new dedicated SQL VM to the configuration to host the replica database"
+    }
 
     $result = $null
     while ([string]::IsNullOrWhiteSpace($result)) {
@@ -114,6 +118,15 @@ function select-ReplicaSQLMenu {
     }
     if ($result -eq "ESCAPE") {
         return "ESCAPE"
+    }
+    switch ($result.ToLowerInvariant()) {
+        "n" {
+            # Create a new dedicated SQL VM in this domain to host the replica DB.
+            $result = Add-NewVMForRole -Role "SqlServer" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true
+            if ([string]::IsNullOrWhiteSpace($result)) {
+                return "ESCAPE"
+            }
+        }
     }
     return $result
 }
