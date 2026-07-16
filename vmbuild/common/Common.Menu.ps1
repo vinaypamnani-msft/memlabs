@@ -232,6 +232,87 @@ function Read-Single {
     return $response
 }
 
+function Select-RDCSettingsMenu {
+    [CmdletBinding()]
+    param()
+
+    # Property toggled by each menu key. Letters (not digits) so every option is
+    # a single, unambiguous keypress (the menu buffers digits for multi-digit
+    # list selections, which would make 1..9 require an Enter).
+    $keyMap = [ordered]@{
+        A = "DefaultGrouping"
+        B = "AllVMsGroup"
+        C = "RoleGroups"
+        E = "OSGroups"
+        F = "SubnetGroups"
+        G = "SiteCodeGroups"
+        I = "ShowRole"
+        J = "ShowOS"
+        K = "ShowCMVersion"
+        L = "ShowSiteRoles"
+        M = "ShowSiteCode"
+        N = "ShowUser"
+        O = "ShowSqlVersion"
+    }
+
+    $onoff = {
+        param($b)
+        if ($b) { return "ON" } else { return "OFF" }
+    }
+
+    while ($true) {
+        $settings = Get-RDCSettings
+
+        $headerColor = $Global:Common.Colors.GenConfigHeader
+        $optColor = $Global:Common.Colors.GenConfigNonDefault
+        $optNum = $Global:Common.Colors.GenConfigNonDefaultNumber
+
+        $customOptions = [ordered]@{}
+        $customOptions += [ordered]@{ "*BG" = ""; "*BREAKG" = "Grouping (folders created in RDCMan / mRemoteNG)%$headerColor" }
+        $customOptions += [ordered]@{ "A" = "Default grouping: Domain / MECM sites / Servers / Clients [$(& $onoff $settings.DefaultGrouping)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "B" = "'All VMs' group [$(& $onoff $settings.AllVMsGroup)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "C" = "Role groups: Clients/SiteServers/DPs/MPs/Sql/Wsus/Reporting [$(& $onoff $settings.RoleGroups)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "E" = "OS groups (one folder per OS) [$(& $onoff $settings.OSGroups)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "F" = "Subnet groups (one folder per network) [$(& $onoff $settings.SubnetGroups)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "G" = "Site code groups (one folder per ConfigMgr site) [$(& $onoff $settings.SiteCodeGroups)]%$optColor%$optNum" }
+
+        $customOptions += [ordered]@{ "*BD" = ""; "*BREAKD" = "Display Name Elements (all on = today's layout)%$headerColor" }
+        $customOptions += [ordered]@{ "I" = "Show role tag (DC/PRI/CAS/...) [$(& $onoff $settings.ShowRole)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "J" = "Show OS tag (S22/W11/...) [$(& $onoff $settings.ShowOS)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "K" = "Show ConfigMgr version (CM22) [$(& $onoff $settings.ShowCMVersion)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "L" = "Show site system roles (MP/DP/SUP/RP/CA/Proxy) [$(& $onoff $settings.ShowSiteRoles)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "M" = "Show site code (PS1->CAS) [$(& $onoff $settings.ShowSiteCode)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "N" = "Show user, only if non-default (domain\user) [$(& $onoff $settings.ShowUser)]%$optColor%$optNum" }
+        $customOptions += [ordered]@{ "O" = "Show SQL version (SQL2019) [$(& $onoff $settings.ShowSqlVersion)]%$optColor%$optNum" }
+
+        $customOptions += [ordered]@{ "*BR" = ""; "*BREAKR" = "Actions%$headerColor" }
+        $customOptions += [ordered]@{ "R" = "Regenerate connection files now (RDCMan / mRemoteNG)%$optColor%$optNum" }
+
+        $response = Get-Menu2 -MenuName "RDC / Remote Connection Settings" -Prompt "Toggle a setting (letter), or [R] to regenerate" -AdditionalOptions $customOptions -Test:$false -SplitEscapeFromGoBack
+
+        if ([string]::IsNullOrWhiteSpace($response)) { return }
+        $resp = "$response".ToUpperInvariant()
+        if ($resp -in "ESCAPE", "GOBACK", "X", "!") { return }
+
+        if ($keyMap.Contains($resp)) {
+            $prop = $keyMap[$resp]
+            $settings.$prop = -not [bool]$settings.$prop
+            Save-RDCSettings -Settings $settings
+            continue
+        }
+
+        if ($resp -eq "R") {
+            $confirm = Read-YesOrNoWithTimeout -Prompt "Regenerate memlabs.rdg and memlabs-mremoteng.xml now? (Y/n)" -HideHelp -Default "y" -timeout 10
+            if ($confirm -eq "y") {
+                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true
+                New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -OverWrite:$true
+                Restore-TerminalFocus
+            }
+            continue
+        }
+    }
+}
+
 function select-ChangeDynamicMemory {
     [CmdletBinding()]
     param (

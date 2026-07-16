@@ -222,12 +222,8 @@ function Select-ConfigMenu {
                 catch {}
             }
             "r" { 
-                $response = Read-YesOrNoWithTimeout -Prompt "This will delete your current memlabs.rdg and memlabs-mremoteng.xml and re-create them. Are you Sure? (Y/n)" -HideHelp -Default "y" -timeout 10
-                if ($response -eq "y") {
-                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true 
-                    New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -OverWrite:$true
-                    Restore-TerminalFocus
-                }               
+                Select-RDCSettingsMenu
+                Restore-TerminalFocus
             }
             "f" { Select-DeletePending; Clear-HealthStatsCache }
             "d" { 
@@ -379,8 +375,8 @@ function Build-ConfigMenuOptions {
     $customOptions += [ordered]@{"P" = "Show Passwords" }
     $customOptions += [ordered]@{ "HP" = "Show the default passwords for all accounts in all domains" }
     $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "Other%$($Global:Common.Colors.GenConfigHeader)" }
-    $customOptions += [ordered]@{"R" = "Regenerate Remote Connection files (RDCMan / mRemoteNG) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-    $customOptions += [ordered]@{ "HR" = "In case your memlabs.rdg file is broken, you can force it to get re-created" }
+    $customOptions += [ordered]@{"R" = "RDC Settings (grouping / display names) + regenerate connection files%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "HR" = "Configure how RDCMan / mRemoteNG group VMs and build display names, then regenerate the .rdg / .xml files" }
     if ($common.DevBranch) {
         $customOptions += [ordered]@{"#" = "Switch to Main branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "H#" = "You are currently on the develop branch. This will exit the script and change back to the official branch" }

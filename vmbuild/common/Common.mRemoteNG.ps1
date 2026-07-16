@@ -1013,6 +1013,37 @@ function Get-MRemoteNGContainerForDomain {
     return $container
 }
 
+# Ensure a nested container path exists under $Parent (creating folders as
+# needed) and return the innermost container. Used for the optional additive
+# grouping folders (By Role\MPs, By OS\Server 2022, ...). The container Id is
+# seeded from the full domain-qualified path so it never collides with the
+# default role-group containers or across domains.
+function Get-MRemoteNGNestedContainer {
+    param(
+        [xml]$Doc,
+        $Parent,
+        [string[]]$PathNames,
+        [string]$Username = "",
+        [string]$Domain = "",
+        [string]$Password = "",
+        [string]$SeedPrefix = "additive"
+    )
+    $cur = $Parent
+    $seed = "$SeedPrefix`:$Domain"
+    foreach ($n in $PathNames) {
+        $seed = "$seed/$n"
+        $child = $cur.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq $n } | Select-Object -First 1
+        if (-not $child) {
+            $child = New-MRemoteNGContainerNode -Doc $Doc -Name $n `
+                -Username $Username -Domain $Domain -Password $Password -Expanded $false
+            $child.SetAttribute("Id", (Get-MRemoteNGDeterministicGuid -Seed "container:$seed"))
+            [void]$cur.AppendChild($child)
+        }
+        $cur = $child
+    }
+    return $cur
+}
+
 function Add-MRemoteNGConnectionToContainer {
     param(
         [xml]$Doc,
@@ -1346,6 +1377,10 @@ function New-MRemoteNGFileFromHyperV {
         $encryptedPass = ""
     }
 
+    # Load persisted RDC settings (grouping + display-name toggles), shared with
+    # the RDCMan generator so both connection files stay consistent.
+    $rdcSettings = Get-RDCSettings
+
     $domainList = Get-List -Type UniqueDomain -SmartUpdate
     foreach ($domain in $domainList) {
         Write-Verbose "mRemoteNG: Processing domain $domain"
@@ -1374,6 +1409,16 @@ function New-MRemoteNGFileFromHyperV {
         # Prune removed VMs
         if (Remove-MissingConnectionsFromMRemoteNG -Container $container) {
             $shouldSave = $true
+        }
+
+        # Remove the optional additive-grouping parent containers so they are
+        # rebuilt fresh from current settings (mirrors the RDCMan behavior).
+        foreach ($parentName in @("All VMs", "By Role", "By OS", "By Subnet", "By Site")) {
+            $existingParent = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq $parentName } | Select-Object -First 1
+            if ($existingParent) {
+                [void]$container.RemoveChild($existingParent)
+                $shouldSave = $true
+            }
         }
 
         $vmListFull = Get-List -Type VM -domain $domain
@@ -1549,6 +1594,20 @@ function New-MRemoteNGFileFromHyperV {
                     $shouldSave = $true
                 }
 
+                # Optional additive grouping folders for the SSH entry
+                foreach ($fp in (Get-RDCGroupingFolders -vm $vm -settings $rdcSettings -vmListFull $vmListFull -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap)) {
+                    $addContainer = Get-MRemoteNGNestedContainer -Doc $doc -Parent $container -PathNames $fp `
+                        -Username "vmbuildadmin" -Domain "" -Password $encryptedPass
+                    if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $addContainer `
+                            -Name $vm.VmName -DisplayName $sshDisplayName -Hostname $sshHost `
+                            -Protocol "SSH2" -Port "22" -Description $sshComment `
+                            -Username "vmbuildadmin" -Domain "" -Password $encryptedPass `
+                            -GuidSeed "ssh:${domain}:$($vm.VmName):$($fp -join '/')" `
+                            -ForceOverwrite $true) {
+                        $shouldSave = $true
+                    }
+                }
+
                 # Link the "Proxy Admin (Edge)" external tool to Proxy SSH entries
                 if ($vm.Role -eq 'Proxy') {
                     $sshId = Get-MRemoteNGDeterministicGuid -Seed "ssh:${domain}:$($vm.VmName)"
@@ -1595,81 +1654,17 @@ function New-MRemoteNGFileFromHyperV {
                 }
             }
 
+            # When the default grouping is disabled, place VMs directly under the
+            # domain container (empty role-group containers are pruned at the end).
+            if (-not $rdcSettings.DefaultGrouping) { $targetContainer = $container }
+
             $comment = Format-MRemoteNGTooltip -Vm $vm -CmVersion $cmVersion -VmListFull $vmListFull
             $name = $vm.VmName
             $ForceOverwrite = $true
             $vmID = $null
 
-            # Build display name (same bracket-tag logic as RDCMan)
-            $roleTag = $null
-            switch ($vm.Role) {
-                "DC"               { $roleTag = "DC" }
-                "BDC"              { $roleTag = "BDC" }
-                "CAS"              { $roleTag = "CAS" }
-                "Primary"          { $roleTag = "PRI" }
-                "Secondary"        { $roleTag = "SEC" }
-                "PassiveSite"      { $roleTag = "Passive" }
-                "SQLAO"            { $roleTag = "SQLAO" }
-                "WSUS"             { $roleTag = "WSUS" }
-                "FileServer"       { $roleTag = "FS" }
-                "OSDClient"        { $roleTag = "OSD" }
-                "StandaloneRootCA" { $roleTag = "RootCA" }
-                "InternetClient"   { $roleTag = "Internet" }
-                "AADClient"        { $roleTag = "AAD" }
-                "WorkgroupMember"  { $roleTag = "WG" }
-                Default { }
-            }
-
-            $siteRolesTag = $null
-            if ($vm.Role -eq "SiteSystem") {
-                $sr = @()
-                if ($vm.installMP) { $sr += "MP" }
-                if ($vm.installDP) { $sr += "DP" }
-                if ($vm.installSUP -or $vm.InstallSUP) { $sr += "SUP" }
-                if ($vm.InstallRP) { $sr += "RP" }
-                if ($vm.InstallSMSProv) { $sr += "SMSProv" }
-                if ($sr.Count -gt 0) { $siteRolesTag = $sr -join ',' }
-            }
-
-            $caTag = $null
-            if ($vm.InstallCA -and $vm.Role -ne "StandaloneRootCA") { $caTag = "CA" }
-
-            $supTag = $null
-            if (($vm.installSUP -or $vm.InstallSUP) -and $vm.Role -ne "SiteSystem") { $supTag = "WSUS" }
-
-            $rpTag = $null
-            if ($vm.InstallRP -and $vm.Role -ne "SiteSystem") { $rpTag = "RP" }
-
-            $proxyTag = $null
-            if ($vm.useProxy) { $proxyTag = "Proxy" }
-
-            if ($roleTag -and $vm.VmName -match [regex]::Escape($roleTag)) { $roleTag = $null }
-
-            $tagParts = @()
-            if ($roleTag) { $tagParts += $roleTag }
-            if ($caTag) { $tagParts += $caTag }
-            if ($rpTag) { $tagParts += $rpTag }
-            if ($supTag) { $tagParts += $supTag }
-            if ($proxyTag) { $tagParts += $proxyTag }
-
-            $osShort = Get-RDCManOSShortName -deployedOS $vm.deployedOS
-            if ($osShort -and -not ($vm.VmName -match [regex]::Escape($osShort))) { $tagParts += $osShort }
-
-            if ($cmVersion -and $vm.Role -in "CAS", "Primary", "Secondary", "SiteSystem", "PassiveSite") {
-                $tagParts += $cmVersion
-            }
-            if ($siteRolesTag) { $tagParts += $siteRolesTag }
-
-            $displayName = $vm.VmName
-            if ($tagParts.Count -gt 0) { $displayName += " [$($tagParts -join ' ')]" }
-            if ($vm.SiteCode) {
-                $displayName += " ($($vm.SiteCode)"
-                if ($vm.ParentSiteCode) { $displayName += "->$($vm.ParentSiteCode)" }
-                $displayName += ")"
-            }
-            elseif ($clientPushSiteMap -and $clientPushSiteMap.ContainsKey($vm.vmName)) {
-                $displayName += " ($($clientPushSiteMap[$vm.vmName]))"
-            }
+            # Build display name via shared helper (honors ShowXxx toggles)
+            $displayName = Get-RDCManDisplayName -vm $vm -settings $rdcSettings -cmVersion $cmVersion -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap
 
             # IP-based hostname for AAD/Internet clients
             if ($vm.Role -eq "AADClient" -or $vm.Role -eq "InternetClient") {
@@ -1682,7 +1677,7 @@ function New-MRemoteNGFileFromHyperV {
                 }
             }
 
-            if ($vm.domainUser) { $displayName += " ($($vm.domainUser))" }
+            if ($rdcSettings.ShowUser -and $vm.domainUser) { $displayName += " ($($vm.domainUser))" }
 
             # OSD/AAD clients use Hyper-V console connection
             if ($vm.Role -in ("OSDClient", "AADClient")) {
@@ -1715,6 +1710,23 @@ function New-MRemoteNGFileFromHyperV {
                     -UseEnhancedMode $(if ($vmID) { $true } else { $false }) `
                     -ForceOverwrite $ForceOverwrite) {
                 $shouldSave = $true
+            }
+
+            # Optional additive grouping folders (By Role / By OS / By Subnet / By Site / All VMs).
+            # Each copy needs a distinct connection Id, so seed the GUID with the folder path.
+            foreach ($fp in (Get-RDCGroupingFolders -vm $vm -settings $rdcSettings -vmListFull $vmListFull -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap)) {
+                $addContainer = Get-MRemoteNGNestedContainer -Doc $doc -Parent $container -PathNames $fp `
+                    -Username $username -Domain $domain -Password $encryptedPass
+                if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $addContainer `
+                        -Name $name -DisplayName $displayName -Hostname $name `
+                        -Protocol "RDP" -Port "3389" -Description $comment `
+                        -Username $connUsername -Domain $connDomain -Password $connPassword `
+                        -GuidSeed "rdp:${domain}:$($vm.VmName):$($fp -join '/')" `
+                        -VmId $(if ($vmID) { $vmID } else { "" }) `
+                        -UseEnhancedMode $(if ($vmID) { $true } else { $false }) `
+                        -ForceOverwrite $ForceOverwrite) {
+                    $shouldSave = $true
+                }
             }
         }
 
@@ -1780,6 +1792,15 @@ function New-MRemoteNGFileFromHyperV {
                     -GuidSeed "hv:${domain}:$($vm.VmName)" `
                     -VmId $hvVmId -UseEnhancedMode $true `
                     -ForceOverwrite $true) {
+                $shouldSave = $true
+            }
+        }
+
+        # When default grouping is disabled the role-group / MECM site containers
+        # were scaffolded but left empty; prune them (also clears any empty
+        # additive folders). Recursion handles nested site sub-containers.
+        if (-not $rdcSettings.DefaultGrouping) {
+            if (Remove-MissingConnectionsFromMRemoteNG -Container $container) {
                 $shouldSave = $true
             }
         }

@@ -3,6 +3,276 @@
 ### RDCMan Functions ###
 ########################
 
+# Additive-grouping parent folder names. These optional folders are rebuilt on
+# every regeneration; the default (Domain Servers / MECM / Servers / Clients)
+# scheme is handled separately by the DefaultGrouping toggle.
+$script:RDCGroupingParents = @("All VMs", "By Role", "By OS", "By Subnet", "By Site")
+
+# Default RDC / Remote Connection settings. Grouping additions default OFF (the
+# default scheme reproduces today's layout); display-name elements default ON so
+# a fresh install matches the historical output (plus the newly requested SQL
+# version tag). Persisted as rdc-settings.json under $Common.CachePath and read
+# by BOTH the RDCMan and mRemoteNG generators (interactive and automatic).
+function Get-RDCSettingsDefaults {
+    return [ordered]@{
+        DefaultGrouping = $true    # Domain Servers / MECM (per-site) / Servers / Clients / Linux
+        AllVMsGroup     = $false   # single "All VMs" folder containing every VM
+        RoleGroups      = $false   # "By Role" -> Clients/SiteServers/DPs/MPs/Sql Servers/Wsus Servers/Reporting Servers
+        OSGroups        = $false   # "By OS" -> one folder per deployed OS
+        SubnetGroups    = $false   # "By Subnet" -> one folder per network
+        SiteCodeGroups  = $false   # "By Site" -> one folder per ConfigMgr site code
+        ShowRole        = $true    # [DC]/[PRI]/[CAS]/... role tag
+        ShowOS          = $true    # [S22]/[W11]/... OS tag
+        ShowCMVersion   = $true    # [CM22] on site-server roles
+        ShowSiteRoles   = $true    # MP/DP/SUP/RP/CA/Proxy feature tags
+        ShowSiteCode    = $true    # (PS1->CAS) / client-push site
+        ShowUser        = $true    # (domain\user) - only shown when non-default
+        ShowSqlVersion  = $true    # [SQL2019] tag (new)
+    }
+}
+
+function Get-RDCSettingsPath {
+    $cachePath = $Global:Common.CachePath
+    if ([string]::IsNullOrWhiteSpace($cachePath)) { $cachePath = Join-Path $PSScriptRoot "..\cache" }
+    return (Join-Path $cachePath "rdc-settings.json")
+}
+
+function Get-RDCSettings {
+    $defaults = Get-RDCSettingsDefaults
+    $result = [ordered]@{}
+    foreach ($k in $defaults.Keys) { $result[$k] = $defaults[$k] }
+
+    $path = Get-RDCSettingsPath
+    if (Test-Path $path) {
+        try {
+            $loaded = Get-Content $path -Raw -ErrorAction Stop | ConvertFrom-Json
+            foreach ($k in @($defaults.Keys)) {
+                if ($loaded.PSObject.Properties.Name -contains $k -and $null -ne $loaded.$k) {
+                    $result[$k] = [bool]$loaded.$k
+                }
+            }
+        }
+        catch {
+            Write-Log "Get-RDCSettings: failed to read $path : $($_.Exception.Message)" -LogOnly -Warning
+        }
+    }
+    return [PSCustomObject]$result
+}
+
+function Save-RDCSettings {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Settings
+    )
+    $path = Get-RDCSettingsPath
+    try {
+        $Settings | ConvertTo-Json | Set-Content -Path $path -Encoding UTF8 -Force -ErrorAction Stop
+        Write-Log "Save-RDCSettings: wrote $path" -LogOnly -Verbose
+    }
+    catch {
+        Write-Log "Save-RDCSettings: failed to write $path : $($_.Exception.Message)" -Warning
+    }
+}
+
+# Short SQL version tag, e.g. "SQL Server 2019" -> "SQL2019".
+function Get-RDCManSqlShortName {
+    param([string]$SqlVersion)
+    if ([string]::IsNullOrWhiteSpace($SqlVersion)) { return $null }
+    $m = [regex]::Match($SqlVersion, '(20\d\d)')
+    if ($m.Success) { return "SQL$($m.Groups[1].Value)" }
+    return "SQL"
+}
+
+# Which "By Role" category folders a VM belongs to (multi-membership: a single
+# SiteSystem with MP+DP appears under both MPs and DPs).
+function Get-RDCRoleCategories {
+    param(
+        [object]$vm,
+        [object[]]$vmListFull
+    )
+    $cats = @()
+    $isServerOS = $vm.deployedOS -and ($vm.deployedOS -match "Server")
+    if ($vm.Role -in "OSDClient", "AADClient", "InternetClient") { $cats += "Clients" }
+    elseif (($vm.Role -in "DomainMember", "WorkgroupMember") -and -not $isServerOS) { $cats += "Clients" }
+    if ($vm.Role -in "CAS", "Primary", "Secondary", "PassiveSite") { $cats += "SiteServers" }
+    if ($vm.installDP) { $cats += "DPs" }
+    if ($vm.installMP) { $cats += "MPs" }
+    $isRemoteSqlTarget = @($vmListFull | Where-Object { $_.remoteSQLVM -eq $vm.vmName }).Count -gt 0
+    if ($vm.Role -eq "SQLAO" -or $vm.SqlVersion -or $isRemoteSqlTarget) { $cats += "Sql Servers" }
+    if ($vm.Role -eq "WSUS" -or $vm.installSUP -or $vm.InstallSUP) { $cats += "Wsus Servers" }
+    if ($vm.InstallRP) { $cats += "Reporting Servers" }
+    return $cats
+}
+
+# The ConfigMgr site code a VM belongs to (for "By Site" grouping): explicit
+# hierarchy membership first, then client-push affinity, then its own SiteCode.
+function Get-RDCVmSiteCode {
+    param(
+        [object]$vm,
+        [object]$siteHierarchy,
+        [hashtable]$clientPushSiteMap
+    )
+    if ($siteHierarchy -and $siteHierarchy.VmSiteMap[$vm.vmName]) { return $siteHierarchy.VmSiteMap[$vm.vmName] }
+    if ($clientPushSiteMap -and $clientPushSiteMap.ContainsKey($vm.vmName)) { return $clientPushSiteMap[$vm.vmName] }
+    if ($vm.SiteCode) { return $vm.SiteCode }
+    return $null
+}
+
+# Returns the list of OPTIONAL additive folder paths a VM should also appear in,
+# based on the enabled grouping toggles. Each entry is an ordered string[] of
+# nested folder names (e.g. @("By Role","MPs")). The DefaultGrouping scheme is
+# handled by the caller's existing category-group logic, not here.
+function Get-RDCGroupingFolders {
+    param(
+        [object]$vm,
+        [object]$settings,
+        [object[]]$vmListFull,
+        [object]$siteHierarchy,
+        [hashtable]$clientPushSiteMap
+    )
+    $folders = @()
+    if ($settings.AllVMsGroup) { $folders += , @("All VMs") }
+    if ($settings.RoleGroups) {
+        foreach ($cat in (Get-RDCRoleCategories -vm $vm -vmListFull $vmListFull)) {
+            $folders += , @("By Role", $cat)
+        }
+    }
+    if ($settings.OSGroups) {
+        $os = if ($vm.deployedOS) { $vm.deployedOS } elseif ($vm.operatingSystem) { $vm.operatingSystem } else { "Unknown" }
+        $folders += , @("By OS", $os)
+    }
+    if ($settings.SubnetGroups) {
+        $net = if ($vm.network) { $vm.network } else { "Unknown" }
+        $folders += , @("By Subnet", $net)
+    }
+    if ($settings.SiteCodeGroups) {
+        $sc = Get-RDCVmSiteCode -vm $vm -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap
+        if ($sc) { $folders += , @("By Site", $sc) }
+    }
+    return , $folders
+}
+
+# Build the VM display name honoring the ShowXxx toggles. Returns "VmName [tags]
+# (siteCode)"; the caller appends protocol-specific extras (console prefix,
+# missing-IP marker) and the user tag (gated on ShowUser) so ordering matches
+# the historical output exactly.
+function Get-RDCManDisplayName {
+    param(
+        [object]$vm,
+        [object]$settings,
+        [string]$cmVersion,
+        [object]$siteHierarchy,
+        [hashtable]$clientPushSiteMap
+    )
+
+    $roleTag = $null
+    if ($settings.ShowRole) {
+        switch ($vm.Role) {
+            "DC"               { $roleTag = "DC" }
+            "BDC"              { $roleTag = "BDC" }
+            "CAS"              { $roleTag = "CAS" }
+            "Primary"          { $roleTag = "PRI" }
+            "Secondary"        { $roleTag = "SEC" }
+            "PassiveSite"      { $roleTag = "Passive" }
+            "SQLAO"            { $roleTag = "SQLAO" }
+            "WSUS"             { $roleTag = "WSUS" }
+            "FileServer"       { $roleTag = "FS" }
+            "OSDClient"        { $roleTag = "OSD" }
+            "StandaloneRootCA" { $roleTag = "RootCA" }
+            "InternetClient"   { $roleTag = "Internet" }
+            "AADClient"        { $roleTag = "AAD" }
+            "WorkgroupMember"  { $roleTag = "WG" }
+            Default { }
+        }
+        # Dedup: skip role tag if VM name already contains it
+        if ($roleTag -and $vm.VmName -match [regex]::Escape($roleTag)) { $roleTag = $null }
+    }
+
+    $siteRolesTag = $null
+    $caTag = $null
+    $supTag = $null
+    $rpTag = $null
+    $proxyTag = $null
+    if ($settings.ShowSiteRoles) {
+        if ($vm.Role -eq "SiteSystem") {
+            $sr = @()
+            if ($vm.installMP) { $sr += "MP" }
+            if ($vm.installDP) { $sr += "DP" }
+            if ($vm.installSUP -or $vm.InstallSUP) { $sr += "SUP" }
+            if ($vm.InstallRP) { $sr += "RP" }
+            if ($vm.InstallSMSProv) { $sr += "SMSProv" }
+            if ($sr.Count -gt 0) { $siteRolesTag = $sr -join ',' }
+        }
+        if ($vm.InstallCA -and $vm.Role -ne "StandaloneRootCA") { $caTag = "CA" }
+        if (($vm.installSUP -or $vm.InstallSUP) -and $vm.Role -ne "SiteSystem") { $supTag = "WSUS" }
+        if ($vm.InstallRP -and $vm.Role -ne "SiteSystem") { $rpTag = "RP" }
+        if ($vm.useProxy) { $proxyTag = "Proxy" }
+    }
+
+    $tagParts = @()
+    if ($roleTag) { $tagParts += $roleTag }
+    if ($caTag) { $tagParts += $caTag }
+    if ($rpTag) { $tagParts += $rpTag }
+    if ($supTag) { $tagParts += $supTag }
+    if ($proxyTag) { $tagParts += $proxyTag }
+
+    if ($settings.ShowOS) {
+        $osShort = Get-RDCManOSShortName -deployedOS $vm.deployedOS
+        if ($osShort -and -not ($vm.VmName -match [regex]::Escape($osShort))) { $tagParts += $osShort }
+    }
+
+    if ($settings.ShowSqlVersion -and $vm.SqlVersion) {
+        $sqlShort = Get-RDCManSqlShortName -SqlVersion $vm.SqlVersion
+        if ($sqlShort -and -not ($vm.VmName -match [regex]::Escape($sqlShort))) { $tagParts += $sqlShort }
+    }
+
+    if ($settings.ShowCMVersion -and $cmVersion -and $vm.Role -in "CAS", "Primary", "Secondary", "SiteSystem", "PassiveSite") {
+        $tagParts += $cmVersion
+    }
+
+    if ($siteRolesTag) { $tagParts += $siteRolesTag }
+
+    $displayName = $vm.VmName
+    if ($tagParts.Count -gt 0) { $displayName += " [$($tagParts -join ' ')]" }
+
+    if ($settings.ShowSiteCode) {
+        if ($vm.SiteCode) {
+            $displayName += " ($($vm.SiteCode)"
+            if ($vm.ParentSiteCode) { $displayName += "->$($vm.ParentSiteCode)" }
+            $displayName += ")"
+        }
+        elseif ($clientPushSiteMap -and $clientPushSiteMap.ContainsKey($vm.vmName)) {
+            $displayName += " ($($clientPushSiteMap[$vm.vmName]))"
+        }
+    }
+    return $displayName
+}
+
+# Ensure a nested RDG <group> path exists under $parent, creating folders as
+# needed, and return the innermost group element. Used to build the optional
+# additive grouping folders (By Role\MPs, By OS\Server 2022, ...).
+function Get-RDCManNestedGroup {
+    param(
+        [object]$parent,
+        [string[]]$pathNames,
+        [xml]$existing
+    )
+    $cur = $parent
+    foreach ($n in $pathNames) {
+        $child = $cur.SelectNodes('group') | Where-Object { $_.properties.name -eq $n } | Select-Object -First 1
+        if (-not $child) {
+            $escaped = [System.Security.SecurityElement]::Escape($n)
+            [xml]$gx = "<group><properties><expanded>False</expanded><name>$escaped</name></properties></group>"
+            $imported = $existing.ImportNode($gx.group, $true)
+            [void]$cur.AppendChild($imported)
+            $child = $cur.SelectNodes('group') | Where-Object { $_.properties.name -eq $n } | Select-Object -Last 1
+        }
+        $cur = $child
+    }
+    return $cur
+}
+
 
 function Install-RDCman {
     # ARM template installs sysinternals tools via choco
@@ -354,6 +624,10 @@ function New-RDCManFileFromHyperV {
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity:$Activity
 
+    # Load persisted RDC settings (grouping + display-name toggles). Drives both
+    # the interactive [R] regen and every automatic call site.
+    $rdcSettings = Get-RDCSettings
+
     # Bulk-fetch all VM network adapters in one WMI call so per-VM cache
     # lookups during Get-VMFromHyperV are instant instead of ~3s each.
     Invoke-VMNetworkBulkWarmup
@@ -531,6 +805,17 @@ function New-RDCManFileFromHyperV {
             $shouldSave = $true
         }
 
+        # Remove the optional additive-grouping parent folders so they are
+        # rebuilt fresh from current settings (handles toggles turning off and
+        # VMs changing category/OS/subnet/site between runs).
+        foreach ($parentName in $script:RDCGroupingParents) {
+            $existingParent = $findGroup.SelectNodes('group') | Where-Object { $_.properties.name -eq $parentName } | Select-Object -First 1
+            if ($existingParent) {
+                [void]$findGroup.RemoveChild($existingParent)
+                $shouldSave = $true
+            }
+        }
+
         # On re-runs, clear all servers from category groups so they get
         # re-placed into the correct group (handles role/category changes).
         foreach ($childGroup in @($findGroup.SelectNodes('group'))) {
@@ -680,13 +965,24 @@ function New-RDCManFileFromHyperV {
                 }
 
                 # RDP-capable and SSH-only VMs both go directly under Linux
-                $linuxTarget = $catGroups["Linux"]
+                $linuxTarget = if ($rdcSettings.DefaultGrouping) { $catGroups["Linux"] } else { $findGroup }
 
                 if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
                         -targetGroup $linuxTarget -groupfromtemplate $groupFromTemplate -existing $existing `
                         -comment $linuxComment -ForceOverwrite:$true `
                         -domain '' -username 'vmbuildadmin') -eq $True) {
                     $shouldSave = $true
+                }
+
+                # Optional additive grouping folders (By Role / By OS / By Subnet / By Site / All VMs)
+                foreach ($fp in (Get-RDCGroupingFolders -vm $vm -settings $rdcSettings -vmListFull $vmListFull -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap)) {
+                    $addGroup = Get-RDCManNestedGroup -parent $findGroup -pathNames $fp -existing $existing
+                    if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
+                            -targetGroup $addGroup -groupfromtemplate $groupFromTemplate -existing $existing `
+                            -comment $linuxComment -ForceOverwrite:$true `
+                            -domain '' -username 'vmbuildadmin') -eq $True) {
+                        $shouldSave = $true
+                    }
                 }
                 continue
             }
@@ -754,103 +1050,8 @@ function New-RDCManFileFromHyperV {
                 $name = $($vm.VmName)
             }            
             $ForceOverwrite = $false
-            $roleTag = $null
-            switch ($vm.Role) {
-                "DC"              { $roleTag = "DC" }
-                "BDC"             { $roleTag = "BDC" }
-                "CAS"             { $roleTag = "CAS" }
-                "Primary"         { $roleTag = "PRI" }
-                "Secondary"       { $roleTag = "SEC" }
-                "PassiveSite"     { $roleTag = "Passive" }
-                "SQLAO"           { $roleTag = "SQLAO" }
-                "WSUS"            { $roleTag = "WSUS" }
-                "FileServer"      { $roleTag = "FS" }
-                "OSDClient"       { $roleTag = "OSD" }
-                "StandaloneRootCA" { $roleTag = "RootCA" }
-                "InternetClient"  { $roleTag = "Internet"; $ForceOverwrite = $true }
-                "AADClient"       { $roleTag = "AAD"; $ForceOverwrite = $true }
-                "WorkgroupMember" { $roleTag = "WG" }
-                Default {}
-            }
+            $displayName = Get-RDCManDisplayName -vm $vm -settings $rdcSettings -cmVersion $cmVersion -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap
 
-            # SiteSystem: show actual installed roles instead of generic tag
-            $siteRolesTag = $null
-            if ($vm.Role -eq "SiteSystem") {
-                $sr = @()
-                if ($vm.installMP) { $sr += "MP" }
-                if ($vm.installDP) { $sr += "DP" }
-                if ($vm.installSUP -or $vm.InstallSUP) { $sr += "SUP" }
-                if ($vm.InstallRP) { $sr += "RP" }
-                if ($vm.InstallSMSProv) { $sr += "SMSProv" }
-                if ($sr.Count -gt 0) { $siteRolesTag = $sr -join ',' }
-            }
-
-            # Certificate Authority tag (Issuing CA via InstallCA property)
-            $caTag = $null
-            if ($vm.InstallCA -and $vm.Role -ne "StandaloneRootCA") {
-                $caTag = "CA"
-            }
-
-            # SUP/WSUS tag for non-SiteSystem VMs with installSUP
-            $supTag = $null
-            if (($vm.installSUP -or $vm.InstallSUP) -and $vm.Role -ne "SiteSystem") {
-                $supTag = "WSUS"
-            }
-
-            # Reporting Point tag for non-SiteSystem VMs with installRP
-            $rpTag = $null
-            if ($vm.InstallRP -and $vm.Role -ne "SiteSystem") {
-                $rpTag = "RP"
-            }
-
-            # Proxy-client tag: VM is opted in to route HTTP(S) through the
-            # Linux Squid proxy (per-VM useProxy=true, set from genconfig).
-            $proxyTag = $null
-            if ($vm.useProxy) {
-                $proxyTag = "Proxy"
-            }
-
-            # Dedup: skip role tag if VM name already contains it
-            if ($roleTag -and $vm.VmName -match [regex]::Escape($roleTag)) {
-                $roleTag = $null
-            }
-
-            # Build bracket tag: [ROLE OS CMver SiteRoles CA SUP Proxy]
-            $tagParts = @()
-            if ($roleTag) { $tagParts += $roleTag }
-            if ($caTag) { $tagParts += $caTag }
-            if ($rpTag) { $tagParts += $rpTag }
-            if ($supTag) { $tagParts += $supTag }
-            if ($proxyTag) { $tagParts += $proxyTag }
-
-            $osShort = Get-RDCManOSShortName -deployedOS $vm.deployedOS
-            # Dedup: skip OS tag if VM name already contains it
-            if ($osShort -and -not ($vm.VmName -match [regex]::Escape($osShort))) {
-                $tagParts += $osShort
-            }
-
-            # CM version for site server roles
-            if ($cmVersion -and $vm.Role -in "CAS", "Primary", "Secondary", "SiteSystem", "PassiveSite") {
-                $tagParts += $cmVersion
-            }
-
-            # Append site system role flags
-            if ($siteRolesTag) { $tagParts += $siteRolesTag }
-
-            $displayName = $vm.VmName
-            if ($tagParts.Count -gt 0) {
-                $displayName += " [$($tagParts -join ' ')]"
-            }
-            if ($vm.SiteCode) {
-                $displayName += " ($($vm.SiteCode)"
-                if ($vm.ParentSiteCode) {
-                    $displayName += "->$($vm.ParentSiteCode)"
-                }
-                $displayName += ")"
-            }
-            elseif ($clientPushSiteMap.ContainsKey($vm.vmName)) {
-                $displayName += " ($($clientPushSiteMap[$vm.vmName]))"
-            }
             if ($vm.Role -eq "AADClient" -or $vm.Role -eq "InternetClient") {
                 if (-not [string]::IsNullOrWhiteSpace($vm.LastKnownIP)) {
                     $name = $vm.LastKnownIP
@@ -865,7 +1066,7 @@ function New-RDCManFileFromHyperV {
                     }
                 }
             }
-            if ($vm.domainUser) {
+            if ($rdcSettings.ShowUser -and $vm.domainUser) {
                 $displayName = $displayName + " ($($vm.domainUser))"
             }
             $ForceOverwrite = $true
@@ -902,9 +1103,22 @@ function New-RDCManFileFromHyperV {
                 # Fallback: use Servers group
                 $targetGroup = $catGroups["Servers"]
             }
+            # When the default grouping is disabled, place VMs directly under the
+            # domain group (the now-empty category folders are pruned at the end).
+            if (-not $rdcSettings.DefaultGrouping) {
+                $targetGroup = $findGroup
+            }
 
             if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $targetGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser) -eq $True) {
                 $shouldSave = $true
+            }
+
+            # Optional additive grouping folders (By Role / By OS / By Subnet / By Site / All VMs)
+            foreach ($fp in (Get-RDCGroupingFolders -vm $vm -settings $rdcSettings -vmListFull $vmListFull -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap)) {
+                $addGroup = Get-RDCManNestedGroup -parent $findGroup -pathNames $fp -existing $existing
+                if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $addGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser) -eq $True) {
+                    $shouldSave = $true
+                }
             }
         }
 
