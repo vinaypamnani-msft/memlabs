@@ -395,7 +395,6 @@ try {
     # subscription is added. The publication is @immediate_sync = 0, so a snapshot
     # generated before any subscription exists has nothing to apply -- the initial
     # sync is driven per replica once its subscription is in place.
-    catch { Write-DscStatus "$Tag WARNING: could not start snapshot agent: $($_.Exception.Message)" }
 }
 catch {
     Write-DscStatus "$Tag Failed to publish the site database (spCreateMPReplicaPublication): $($_.Exception.Message)" -Failure
