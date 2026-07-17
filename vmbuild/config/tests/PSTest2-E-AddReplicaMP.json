@@ -1,0 +1,42 @@
+{
+  "vmOptions": {
+    "prefix": "PT2-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "pstest2.com",
+    "adminName": "admin",
+    "network": "192.168.120.0",
+    "timeZone": "Central Standard Time",
+    "domainNetBiosName": "pstest2",
+    "locale": "en-US"
+  },
+  "virtualMachines": [
+    {
+      "vmName": "REPLMP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "6GB",
+      "virtualProcs": 4,
+      "siteCode": "PRI",
+      "installMP": true,
+      "installDP": false,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "F:\\SQL",
+      "sqlPort": "1433",
+      "useDatabaseReplica": true,
+      "replicaSqlServerVM": "REPLMP1",
+      "replicaDbName": "CM_PRI",
+      "additionalDisks": {
+        "E": "250GB",
+        "F": "200GB"
+      },
+      "InstallRP": false,
+      "InstallSUP": false
+    }
+  ],
+  "cmOptions": {
+    "version": "current-branch",
+    "install": true,
+    "pushClientToDomainMembers": true
+  }
+}
