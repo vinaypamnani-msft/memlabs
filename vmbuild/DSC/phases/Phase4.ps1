@@ -284,6 +284,15 @@
                 $features = 'SQLENGINE,CONN,BC'
             }
 
+            # MP database replica uses SQL transactional replication, which requires
+            # the 'Replication' setup feature on BOTH the publisher/distributor (the
+            # site DB SQL) and every subscriber (replica SQL host). memlabs installs
+            # SQLENGINE only by default, so add Replication whenever this deployment
+            # has any MP database replica (superset; harmless on uninvolved SQL VMs).
+            if (@($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' -and $_.installMP -and $_.useDatabaseReplica }).Count -gt 0) {
+                $features = "$features,Replication"
+            }
+
             SqlSetup InstallSQL {
                 InstanceName        = $SQLInstanceName
                 InstanceDir         = $SQLInstanceDir
