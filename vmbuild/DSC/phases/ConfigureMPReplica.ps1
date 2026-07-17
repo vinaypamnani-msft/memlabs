@@ -201,6 +201,34 @@ function Invoke-ReplSql {
     }
 }
 
+# Collect an actionable diagnostic snapshot on failure (state that explains WHY the
+# replica isn't working) so it's captured in the DSC log without a manual health run.
+function Write-MPReplicaDiagnostics {
+    param([string]$SiteInstance, [string]$SiteDb, [object]$Targets)
+    Write-DscStatus "$Tag ===== MP replica failure diagnostics ====="
+    try {
+        $q = "SELECT broker = (SELECT is_broker_enabled FROM sys.databases WHERE name = DB_NAME()), pubs = (CASE WHEN OBJECT_ID('dbo.syspublications') IS NOT NULL THEN (SELECT COUNT(*) FROM dbo.syspublications WHERE name='ConfigMgr_MPReplica') ELSE 0 END), subs = (CASE WHEN OBJECT_ID('dbo.syssubscriptions') IS NOT NULL THEN (SELECT COUNT(DISTINCT srvid) FROM dbo.syssubscriptions) ELSE 0 END)"
+        $r = Invoke-ReplSql -Instance $SiteInstance -Database $SiteDb -Query $q
+        Write-DscStatus "$Tag [Diag][Site $SiteDb] broker_enabled=$($r.broker) publication=$($r.pubs) subscribers=$($r.subs)"
+    }
+    catch { Write-DscStatus "$Tag [Diag][Site] state query failed: $($_.Exception.Message)" }
+    try {
+        $tq = Invoke-ReplSql -Instance $SiteInstance -Database $SiteDb -Query "SELECT TOP 3 st = ISNULL(transmission_status,'') FROM sys.transmission_queue WHERE transmission_status <> '' ORDER BY enqueue_time DESC"
+        foreach ($row in @($tq)) { if ($row.st) { Write-DscStatus "$Tag [Diag][Site SSB] stuck transmission: $($row.st)" } }
+    }
+    catch { }
+    foreach ($t in @($Targets)) {
+        try {
+            $rb = Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT b = ISNULL((SELECT is_broker_enabled FROM sys.databases WHERE name = N'$($t.ReplicaDbName)'), -1)"
+            $sub = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL SELECT c = COUNT(*) FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica' ELSE SELECT c = 0"
+            $xc = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL SELECT c = COUNT(*) FROM dbo.XMLConfigStore WHERE Name = 'MPReplicaServiceBrokerConfiguration' ELSE SELECT c = 0"
+            Write-DscStatus "$Tag [Diag][Replica $($t.MPName)/$($t.ReplicaDbName)] broker_enabled=$($rb.b) pull_subscriptions=$($sub.c) replicated_XMLConfigStore=$($xc.c) (0 XMLConfigStore = initial snapshot not applied)"
+        }
+        catch { Write-DscStatus "$Tag [Diag][Replica $($t.MPName)] query failed: $($_.Exception.Message)" }
+    }
+    Write-DscStatus "$Tag ===== end diagnostics (run Test-MPDatabaseReplicaHealth.ps1 for the full report) ====="
+}
+
 $hardFailed = $false
 
 # ===========================================================================
@@ -598,6 +626,8 @@ if (-not $hardFailed) {
 }
 
 if ($hardFailed) {
+    try { Write-MPReplicaDiagnostics -SiteInstance $siteSqlConn -SiteDb $siteDbName -Targets $targets }
+    catch { Write-DscStatus "$Tag WARNING: diagnostics collection failed: $($_.Exception.Message)" }
     Write-DscStatus "$Tag Completed with failures. See ConfigMgrSetup / DSC logs and run Test-MPDatabaseReplicaHealth.ps1." -Failure
     Set-MPReplicaStatus -Status 'Failed'
     return

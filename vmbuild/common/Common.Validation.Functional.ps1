@@ -4228,6 +4228,32 @@ function Test-MPReplicaFunctionality {
             return $results
         }
 
+        # SQL replication must be ENABLED on the site DB (publisher). syspublications
+        # only exists once the DB is a publisher, so guard on OBJECT_ID. The number of
+        # distinct subscribers should cover the replica MPs.
+        try {
+            $pubRow = Invoke-Sqlcmd -ServerInstance $inst -Database $db -TrustServerCertificate -ErrorAction Stop -Query "IF OBJECT_ID('dbo.syspublications') IS NOT NULL SELECT COUNT(*) AS c FROM dbo.syspublications WHERE name = 'ConfigMgr_MPReplica' ELSE SELECT 0 AS c"
+            if ([int]$pubRow.c -gt 0) {
+                $results.Details.Add("OK: SQL replication enabled (publication ConfigMgr_MPReplica present on site DB)")
+                $subRow = Invoke-Sqlcmd -ServerInstance $inst -Database $db -TrustServerCertificate -ErrorAction Stop -Query "IF OBJECT_ID('dbo.syssubscriptions') IS NOT NULL SELECT COUNT(DISTINCT srvid) AS c FROM dbo.syssubscriptions ELSE SELECT 0 AS c"
+                $subCount = [int]$subRow.c
+                if ($subCount -ge $mpList.Count) {
+                    $results.Details.Add("OK: $subCount replication subscriber(s) registered (>= $($mpList.Count) replica MP(s))")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: only $subCount replication subscriber(s) registered for $($mpList.Count) replica MP(s) -- a replica DB is not subscribed to the publication")
+                }
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: publication ConfigMgr_MPReplica is missing -- SQL transactional replication is NOT enabled on the site DB (spCreateMPReplicaPublication did not run)")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: could not verify replication publication/subscriptions: $($_.Exception.Message)")
+        }
+
         foreach ($mp in $mpList) {
             $row = @($bgb | Where-Object { "$($_.ServerName)".ToLower() -eq $mp.ToLower() }) | Select-Object -First 1
             if (-not $row) {
