@@ -126,6 +126,10 @@ foreach ($mp in ($replicaMPs | Sort-Object vmName)) {
             ReplicaInstance = $replicaInstance
             ReplicaPort     = $replicaPort
             ReplicaConn     = (Get-SqlConnString -Server $replicaFqdn -Instance $replicaInstance -Port $replicaPort)
+            # Server[\instance] WITHOUT the port -- replication @subscriber/@publisher
+            # names must not embed a port (the agent resolves a named instance's port
+            # via SQL Browser). ReplicaConn (with port) is only for direct connections.
+            ReplicaSqlName  = (Get-SqlConnString -Server $replicaFqdn -Instance $replicaInstance -Port 1433)
             ReplicaDbName   = $replicaDbName
             IsLocalToMP     = ($replicaVMName -eq $mp.vmName)
             CertOrdinal     = 0
@@ -304,7 +308,7 @@ $shareUnc = "\\$($ThisMachineName).$DomainFullName\ConfigMgr_MPReplica"
 
 # 2c. Create the publication (the SP does distributor + distribution DB + articles).
 try {
-    $pubExists = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "SELECT COUNT(*) AS c FROM syspublications WHERE name = 'ConfigMgr_MPReplica'"
+    $pubExists = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "IF OBJECT_ID('dbo.syspublications') IS NOT NULL SELECT COUNT(*) AS c FROM dbo.syspublications WHERE name = 'ConfigMgr_MPReplica' ELSE SELECT 0 AS c"
     if ([int]$pubExists.c -gt 0) {
         Write-DscStatus "$Tag Publication ConfigMgr_MPReplica already exists on site DB."
     }
@@ -352,16 +356,42 @@ if (-not $hardFailed) {
             # TRUSTWORTHY ON (doc Step 2.3) now that the DB exists.
             Invoke-ReplSql -Instance $t.ReplicaConn -Query "ALTER DATABASE [$($t.ReplicaDbName)] SET TRUSTWORTHY ON;"
 
-            # Publisher side: register the pull subscriber (idempotent).
+            # Publisher side: register the pull subscriber. Per-subscriber: the guard
+            # must match THIS subscriber+destination, otherwise once the first replica
+            # subscribes the publication-wide check would skip all remaining replicas.
+            # sysservers.srvid maps to syssubscriptions.srvid; a subscriber isn't in
+            # sysservers until sp_addsubscription registers it, so a brand-new replica
+            # never matches and gets added. TRY/CATCH tolerates re-run duplicates.
             Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
-IF NOT EXISTS (SELECT 1 FROM syssubscriptions s JOIN syspublications p ON s.artid IN (SELECT artid FROM sysarticles WHERE pubid = p.pubid) WHERE p.name = 'ConfigMgr_MPReplica')
-BEGIN
-    EXEC sp_addsubscription @publication = N'ConfigMgr_MPReplica', @subscriber = N'$($t.ReplicaConn)', @destination_db = N'$($t.ReplicaDbName)', @subscription_type = N'pull', @sync_type = N'automatic', @article = N'all', @update_mode = N'read only', @subscriber_type = 0;
-END
+BEGIN TRY
+    IF NOT EXISTS (
+        SELECT 1
+        FROM syssubscriptions s
+        JOIN sysarticles a ON s.artid = a.artid
+        JOIN syspublications p ON a.pubid = p.pubid
+        LEFT JOIN master.sys.servers srv ON srv.server_id = s.srvid
+        WHERE p.name = 'ConfigMgr_MPReplica'
+          AND s.dest_db = N'$($t.ReplicaDbName)'
+          AND srv.name = N'$($t.ReplicaSqlName)'
+    )
+        EXEC sp_addsubscription @publication = N'ConfigMgr_MPReplica', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)', @subscription_type = N'pull', @sync_type = N'automatic', @article = N'all', @update_mode = N'read only', @subscriber_type = 0;
+END TRY
+BEGIN CATCH
+    IF ERROR_MESSAGE() NOT LIKE '%already%' THROW;
+END CATCH
 "@
             # Subscriber side: pull subscription + agent (idempotent).
             Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
-IF NOT EXISTS (SELECT 1 FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica')
+DECLARE @needSub bit = 0;
+-- MSreplication_subscriptions does not exist in a replica DB until the first
+-- pull subscription is added. Referencing a missing table inside an IF predicate
+-- fails to compile even when guarded, so gate on OBJECT_ID first (the table
+-- reference is only compiled in the ELSE IF branch, when it exists).
+IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NULL
+    SET @needSub = 1;
+ELSE IF NOT EXISTS (SELECT 1 FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica')
+    SET @needSub = 1;
+IF @needSub = 1
 BEGIN
     EXEC sp_addpullsubscription @publisher = N'$siteSqlServer', @publication = N'ConfigMgr_MPReplica', @publisher_db = N'$siteDbName', @independent_agent = N'True', @subscription_type = N'pull', @update_mode = N'read only', @immediate_sync = 0;
     EXEC sp_addpullsubscription_agent @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica', @distributor = N'$siteSqlServer', @job_login = NULL, @job_password = NULL, @distributor_security_mode = 1;
@@ -496,6 +526,26 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_role_members drm JOIN sys.database_pri
             $siteCert = "$shareUnc\site_$SiteCode.cer"
             $replicaSrvForHash = $t.ReplicaFqdn
 
+            # 5.0 Wait for the initial replication snapshot to populate the replica DB.
+            # sp_BgbConfigSSBForReplicaDB reads the 'MPReplicaServiceBrokerConfiguration'
+            # row from the REPLICATED XMLConfigStore table; until the snapshot applies,
+            # that table does not exist in the replica DB and the SP would silently
+            # create no SSB objects (its WHILE loops run 0 times on a NULL config).
+            $syncDeadline = (Get-Date).AddMinutes(30)
+            $replicaSynced = $false
+            while ((Get-Date) -lt $syncDeadline) {
+                try {
+                    $chk = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL SELECT COUNT(*) AS c FROM dbo.XMLConfigStore WHERE Name = N'MPReplicaServiceBrokerConfiguration' ELSE SELECT 0 AS c"
+                    if ([int]$chk.c -gt 0) { $replicaSynced = $true; break }
+                }
+                catch { }
+                Start-Sleep -Seconds 30
+            }
+            if (-not $replicaSynced) {
+                throw "Replica DB [$($t.ReplicaDbName)] did not receive the replicated XMLConfigStore ('MPReplicaServiceBrokerConfiguration') within 30 minutes; the initial replication snapshot has not applied. Service Broker cannot be configured."
+            }
+            Write-DscStatus "$Tag [$rlabel] replica DB initial replication synced (XMLConfigStore present)."
+
             # 5.1 Enable broker on the replica DB.
             Invoke-ReplSql -Instance $t.ReplicaConn -Query "ALTER DATABASE [$($t.ReplicaDbName)] SET ENABLE_BROKER, HONOR_BROKER_PRIORITY ON WITH ROLLBACK IMMEDIATE;"
 
@@ -532,7 +582,7 @@ if (-not $hardFailed) {
             $rlabel = "Replica[$($t.MPName)]"
             $instanceForCmdlet = if ($t.ReplicaInstance) { $t.ReplicaInstance } else { 'MSSQLSERVER' }
             try {
-                Set-CMManagementPoint -SiteSystemServerName $t.MPFqdn -SiteCode $SiteCode -UseSiteDatabase $false -SqlServerFqdn $t.ReplicaFqdn -SqlServerInstanceName $instanceForCmdlet -DatabaseName $t.ReplicaDbName -ErrorAction Stop
+                Set-CMManagementPoint -SiteSystemServerName $t.MPFqdn -SiteCode $SiteCode -UseSiteDatabase $false -SqlServerFqdnName $t.ReplicaFqdn -SqlServerInstanceName $instanceForCmdlet -DatabaseName $t.ReplicaDbName -ErrorAction Stop
                 Write-DscStatus "$Tag [$rlabel] MP repointed to replica DB $($t.ReplicaFqdn)\$instanceForCmdlet / $($t.ReplicaDbName)."
             }
             catch {
