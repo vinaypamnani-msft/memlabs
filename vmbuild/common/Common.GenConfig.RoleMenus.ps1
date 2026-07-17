@@ -84,7 +84,13 @@ function select-ReplicaSQLMenu {
     # Eligible replica SQL hosts = any SQL VM EXCEPT the site's own SQL server (the
     # replica must not live on the site database) and EXCEPT this MP itself (hosting
     # on this MP is offered as the separate "Local SQL" option).
-    $sqlList = @(Get-ListOfPossibleSQLServers -Config $ConfigToModify)
+    #
+    # Only SQL instances DEPLOYED BY THIS configuration are eligible: transactional
+    # replication needs the SQL 'Replication' feature, which memlabs only installs
+    # (Phase 4) for SQL VMs built in this deployment. Existing/already-deployed SQL
+    # (hidden VMs, or servers that only exist in the domain) are excluded here and
+    # rejected by validation.
+    $sqlList = @($ConfigToModify.virtualMachines | Where-Object { $_.sqlVersion -and -not $_.hidden } | Select-Object -ExpandProperty vmName)
 
     if ($CurrentVM -and $CurrentVM.siteCode) {
         $siteSql = $null
