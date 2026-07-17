@@ -24,7 +24,6 @@ if (-not $ConfigFilePath) {
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 $DomainFullName = $deployConfig.vmOptions.domainName
-$ThisMachineName = if ($deployConfig.parameters.ThisMachineName) { $deployConfig.parameters.ThisMachineName } else { $env:COMPUTERNAME }
 
 # Service Broker port (memlabs hardcodes 4022 during site setup).
 $SSBPort = "4022"
@@ -290,49 +289,67 @@ foreach ($t in $targets) {
 # ===========================================================================
 # STEP 2 - Publish the site DB (distributor + distribution DB + publication).
 # ===========================================================================
-# 2a. Local group ConfigMgr_MPReplicaAccess on the site server + replica machine accts.
-$replicaMachineAccts = @($targets | ForEach-Object { "$($_.ReplicaShort)`$" } | Sort-Object -Unique)
-try {
-    $grp = Get-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -ErrorAction SilentlyContinue
-    if (-not $grp) {
-        New-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -Description 'ConfigMgr MP database replica snapshot access' | Out-Null
-        Write-DscStatus "$Tag Created local group ConfigMgr_MPReplicaAccess."
-    }
-    foreach ($acct in $replicaMachineAccts) {
-        $member = "$env:USERDOMAIN\$acct"
-        $exists = Get-LocalGroupMember -Group 'ConfigMgr_MPReplicaAccess' -Member $member -ErrorAction SilentlyContinue
-        if (-not $exists) {
-            try { Add-LocalGroupMember -Group 'ConfigMgr_MPReplicaAccess' -Member $member -ErrorAction Stop; Write-DscStatus "$Tag Added $member to ConfigMgr_MPReplicaAccess." }
-            catch { Write-DscStatus "$Tag WARNING: could not add $member to ConfigMgr_MPReplicaAccess: $($_.Exception.Message)" }
+# The local group ConfigMgr_MPReplicaAccess and the snapshot share must live on
+# the SITE DB SQL SERVER (spCreateMPReplicaPublication builds the login name and
+# @SnapshotSharePath from SERVERPROPERTY('ComputerNamePhysicalNetBIOS'), i.e. the
+# machine running the SP). With a REMOTE site DB SQL that is NOT the site server,
+# so create them there (the site server's machine account is a local admin on its
+# SQL server, so Invoke-Command works). The share also backs SSB cert exchange, so
+# the site SQL machine account itself needs access for its own UNC cert backup.
+$siteSqlMachine = ($siteSqlServer -split '\\')[0]
+$siteSqlShort = ($siteSqlMachine -split '\.')[0]
+$siteSqlMachineFqdn = if ($siteSqlMachine -like '*.*') { $siteSqlMachine } else { "$siteSqlMachine.$DomainFullName" }
+$isSiteSqlLocal = ($siteSqlShort -ieq $env:COMPUTERNAME)
+$shareAccts = @(@($targets | ForEach-Object { "$($_.ReplicaShort)`$" }) + "$siteSqlShort`$" | Sort-Object -Unique)
+
+$shareSetupSb = {
+    param($accts, $domainNb)
+    $out = @()
+    try {
+        if (-not (Get-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -ErrorAction SilentlyContinue)) {
+            New-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -Description 'ConfigMgr MP database replica snapshot + SSB cert access' | Out-Null
+            $out += 'created local group ConfigMgr_MPReplicaAccess'
+        }
+        foreach ($acct in $accts) {
+            $member = "$domainNb\$acct"
+            if (-not (Get-LocalGroupMember -Group 'ConfigMgr_MPReplicaAccess' -Member $member -ErrorAction SilentlyContinue)) {
+                try { Add-LocalGroupMember -Group 'ConfigMgr_MPReplicaAccess' -Member $member -ErrorAction Stop; $out += "added $member" }
+                catch { $out += "WARN could not add ${member}: $($_.Exception.Message)" }
+            }
         }
     }
-}
-catch { Write-DscStatus "$Tag WARNING: local group setup failed: $($_.Exception.Message)" }
-
-# 2b. Snapshot share ConfigMgr_MPReplica on an existing data disk (prefer E:).
-$shareRoot = if (Test-Path 'E:\') { 'E:\ConfigMgr_MPReplica' } else { "$env:SystemDrive\ConfigMgr_MPReplica" }
-try {
-    if (-not (Test-Path $shareRoot)) { New-Item -Path $shareRoot -ItemType Directory -Force | Out-Null }
-    $share = Get-SmbShare -Name 'ConfigMgr_MPReplica' -ErrorAction SilentlyContinue
-    if (-not $share) {
-        # SYSTEM=Full (site SQL agent writes the snapshot); the replica machine
-        # accounts (group) get Change so the replica SQL can both read the
-        # snapshot for the pull subscription AND drop its SSB cert on the share.
-        New-SmbShare -Name 'ConfigMgr_MPReplica' -Path $shareRoot -FullAccess 'SYSTEM' -ChangeAccess 'ConfigMgr_MPReplicaAccess' -ErrorAction Stop | Out-Null
-        Write-DscStatus "$Tag Created share ConfigMgr_MPReplica -> $shareRoot."
+    catch { $out += "WARN group: $($_.Exception.Message)" }
+    $shareRoot = if (Test-Path 'E:\') { 'E:\ConfigMgr_MPReplica' } else { "$env:SystemDrive\ConfigMgr_MPReplica" }
+    try {
+        if (-not (Test-Path $shareRoot)) { New-Item -Path $shareRoot -ItemType Directory -Force | Out-Null }
+        if (-not (Get-SmbShare -Name 'ConfigMgr_MPReplica' -ErrorAction SilentlyContinue)) {
+            New-SmbShare -Name 'ConfigMgr_MPReplica' -Path $shareRoot -FullAccess 'SYSTEM' -ChangeAccess 'ConfigMgr_MPReplicaAccess' -ErrorAction Stop | Out-Null
+            $out += "created share ConfigMgr_MPReplica -> $shareRoot"
+        }
+        $acl = Get-Acl $shareRoot
+        $rules = @(
+            (New-Object System.Security.AccessControl.FileSystemAccessRule('SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')),
+            (New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\ConfigMgr_MPReplicaAccess", 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+        )
+        foreach ($r in $rules) { try { $acl.AddAccessRule($r) } catch {} }
+        try { Set-Acl -Path $shareRoot -AclObject $acl } catch { $out += "WARN NTFS ACL: $($_.Exception.Message)" }
     }
-    # NTFS: SYSTEM full + group modify.
-    $acl = Get-Acl $shareRoot
-    $rules = @(
-        (New-Object System.Security.AccessControl.FileSystemAccessRule('SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')),
-        (New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\ConfigMgr_MPReplicaAccess", 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-    )
-    foreach ($r in $rules) { try { $acl.AddAccessRule($r) } catch {} }
-    try { Set-Acl -Path $shareRoot -AclObject $acl } catch { Write-DscStatus "$Tag WARNING: NTFS ACL on $shareRoot`: $($_.Exception.Message)" }
+    catch { $out += "WARN share: $($_.Exception.Message)" }
+    return $out
 }
-catch { Write-DscStatus "$Tag WARNING: snapshot share setup failed: $($_.Exception.Message)" }
 
-$shareUnc = "\\$($ThisMachineName).$DomainFullName\ConfigMgr_MPReplica"
+try {
+    if ($isSiteSqlLocal) {
+        $shareMsgs = & $shareSetupSb $shareAccts $env:USERDOMAIN
+    }
+    else {
+        $shareMsgs = Invoke-Command -ComputerName $siteSqlMachineFqdn -ScriptBlock $shareSetupSb -ArgumentList $shareAccts, $env:USERDOMAIN -ErrorAction Stop
+    }
+    foreach ($m in @($shareMsgs)) { Write-DscStatus "$Tag [SiteSqlHost $siteSqlShort] $m" }
+}
+catch { Write-DscStatus "$Tag WARNING: snapshot/cert share setup on $siteSqlShort failed: $($_.Exception.Message)" }
+
+$shareUnc = "\\$siteSqlMachineFqdn\ConfigMgr_MPReplica"
 
 # 2c. Create the publication (the SP does distributor + distribution DB + articles).
 try {
