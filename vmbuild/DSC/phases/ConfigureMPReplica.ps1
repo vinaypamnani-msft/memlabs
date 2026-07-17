@@ -143,7 +143,12 @@ foreach ($grp in ($targets | Group-Object ReplicaVMName)) {
 
 # ---------------------------------------------------------------------------
 # Small SQL wrapper (integrated auth; the DSC run account is sysadmin on the lab
-# SQL servers). TrustServerCertificate for replicas serving Encrypt=True.
+# SQL servers). Uses System.Data.SqlClient directly rather than Invoke-Sqlcmd:
+# the SqlServer/SQLPS module is NOT present on a site server that uses remote SQL
+# (no SQL tooling installed locally), whereas System.Data.SqlClient always is.
+# Returns DataRow objects for result-set queries (so callers can read columns by
+# name, e.g. $r.c), or nothing for non-query batches. TrustServerCertificate for
+# replicas serving Encrypt=True.
 # ---------------------------------------------------------------------------
 function Invoke-ReplSql {
     param(
@@ -151,7 +156,45 @@ function Invoke-ReplSql {
         [Parameter(Mandatory)][string]$Query,
         [string]$Database = 'master'
     )
-    Invoke-Sqlcmd -ServerInstance $Instance -Database $Database -Query $Query -TrustServerCertificate -QueryTimeout 300 -ErrorAction Stop
+    $connStr = "Server=$Instance;Database=$Database;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=30;Application Name=MemLabs-MPReplica"
+    $conn = New-Object System.Data.SqlClient.SqlConnection $connStr
+    try {
+        $conn.Open()
+        $cmd = $conn.CreateCommand()
+        $cmd.CommandText = $Query
+        $cmd.CommandTimeout = 300
+        $reader = $cmd.ExecuteReader()
+        try {
+            # Read ONLY the first result set into a disconnected DataTable, then
+            # drain any remaining result sets. (Replication/BGB procs emit several
+            # result sets; DataTable.Load would try to merge them and can throw on
+            # schema mismatch.)
+            $table = New-Object System.Data.DataTable
+            if ($reader.FieldCount -gt 0) {
+                for ($i = 0; $i -lt $reader.FieldCount; $i++) {
+                    [void]$table.Columns.Add($reader.GetName($i), [object])
+                }
+                while ($reader.Read()) {
+                    $row = $table.NewRow()
+                    for ($i = 0; $i -lt $reader.FieldCount; $i++) {
+                        $row[$i] = $reader.GetValue($i)
+                    }
+                    [void]$table.Rows.Add($row)
+                }
+            }
+            while ($reader.NextResult()) { }
+        }
+        finally {
+            $reader.Dispose()
+        }
+        if ($table.Rows.Count -gt 0) {
+            # Return disconnected DataRow objects (fully materialized in memory).
+            return , $table.Rows
+        }
+    }
+    finally {
+        $conn.Dispose()
+    }
 }
 
 $hardFailed = $false

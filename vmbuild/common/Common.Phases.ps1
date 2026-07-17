@@ -2693,7 +2693,10 @@ function Get-Phase4ConfigurationData {
 
     $NumberOfNodesAdded = 0
     #foreach ($vm in $deployConfig.virtualMachines | Where-Object { ($_.SqlVersion -and -not ($_.Hidden)) -or $_.Role -eq "DC" }) {
-    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.SqlVersion -or $_.Role -eq "DC" }) {
+    # Include SQL VMs (they install SQL) plus site servers / site systems even when
+    # they use REMOTE SQL: Phase 4 installs the SqlServer PS module on them (module
+    # only, no SQL install) so Invoke-Sqlcmd is available for later phases/testing.
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.SqlVersion -or $_.Role -eq "DC" -or ($_.Role -in @("Primary", "CAS", "Secondary", "SiteSystem") -and -not $_.Hidden) }) {
 
         $global:preparePhasePercent++
 

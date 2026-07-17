@@ -48,15 +48,32 @@
 
         $backupSolutionURL = $ThisVM.thisParams.backupSolutionURL
         $SQLSysAdminAccounts = $ThisVM.thisParams.SQLSysAdminAccounts
-        WriteStatus SQLInstallStarted {
-            Status = "Preparing to Install SQL '$($ThisVM.sqlVersion)'"
-        }
 
+        # Install the SqlServer PowerShell module on every node in this phase. This
+        # includes site servers / site systems that use REMOTE SQL and therefore
+        # never run the SQL install below (they are added to this phase's node list
+        # by Get-Phase4ConfigurationData). Having Invoke-Sqlcmd / the SqlServer
+        # module available on those boxes is valuable for later phases (e.g.
+        # ConfigureMPReplica) and for testing.
         ModuleAdd SQLServerModule {
             Key             = 'Always'
             CheckModuleName = 'SqlServer'
         }
-        
+
+        # Nodes without local SQL (remote-SQL site servers, DP/MP site systems) get
+        # the module only, then complete -- skip the entire SQL install/config below.
+        if (-not $ThisVM.sqlVersion) {
+            WriteStatus Complete {
+                DependsOn = '[ModuleAdd]SQLServerModule'
+                Status    = 'Complete!'
+            }
+            return
+        }
+
+        WriteStatus SQLInstallStarted {
+            Status = "Preparing to Install SQL '$($ThisVM.sqlVersion)'"
+        }
+
         $nextDepend = '[WriteStatus]SQLInstallStarted'
         if (-not ($ThisVM.Hidden)) {
             RebootNow RebootNow {
