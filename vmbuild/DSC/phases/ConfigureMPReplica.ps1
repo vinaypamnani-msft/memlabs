@@ -234,7 +234,7 @@ $hardFailed = $false
 # STEP 1 - Prerequisites on the site + each replica SQL instance.
 # ===========================================================================
 function Set-InstancePrereqs {
-    param([string]$Instance, [bool]$IsReplica, [string]$Label, [string]$ReplicaHost)
+    param([string]$Instance, [bool]$IsReplica, [string]$Label, [string]$SqlHost)
 
     # max text repl size (B) = 2 GB on BOTH instances.
     try {
@@ -244,46 +244,56 @@ function Set-InstancePrereqs {
     catch { Write-DscStatus "$Tag WARNING [$Label] could not set 'max text repl size': $($_.Exception.Message)" }
 
     if ($IsReplica) {
-        # clr enabled = 1 on the replica.
+        # clr enabled = 1 on the replica (required by the replicated CM SPs).
         try {
             Invoke-ReplSql -Instance $Instance -Query "EXEC sp_configure 'clr enabled', 1; RECONFIGURE WITH OVERRIDE;"
             Write-DscStatus "$Tag [$Label] clr enabled set on replica."
         }
         catch { Write-DscStatus "$Tag WARNING [$Label] could not enable clr: $($_.Exception.Message)" }
+    }
 
-        # SQL Server Agent Automatic + running, and warn if engine is not System.
-        if ($ReplicaHost) {
-            try {
-                $svcResult = Invoke-Command -ComputerName $ReplicaHost -ArgumentList $Instance -ScriptBlock {
-                    param($inst)
-                    $instanceName = 'MSSQLSERVER'
-                    if ($inst -match '\\') { $instanceName = $inst.Split('\')[1].Split(',')[0] }
-                    if ($instanceName -eq 'MSSQLSERVER') { $agent = 'SQLSERVERAGENT'; $engine = 'MSSQLSERVER' }
-                    else { $agent = "SQLAgent`$$instanceName"; $engine = "MSSQL`$$instanceName" }
-                    $out = @{}
-                    $a = Get-Service -Name $agent -ErrorAction SilentlyContinue
-                    if ($a) {
-                        Set-Service -Name $agent -StartupType Automatic -ErrorAction SilentlyContinue
-                        if ($a.Status -ne 'Running') { Start-Service -Name $agent -ErrorAction SilentlyContinue }
-                        $out.Agent = (Get-Service -Name $agent).Status
-                    }
-                    $e = Get-CimInstance Win32_Service -Filter "Name='$engine'" -ErrorAction SilentlyContinue
-                    if ($e) { $out.EngineAccount = $e.StartName }
-                    return $out
-                } -ErrorAction Stop
-                Write-DscStatus "$Tag [$Label] SQL Agent status=$($svcResult.Agent) engineAcct=$($svcResult.EngineAccount)."
-                if ($svcResult.EngineAccount -and $svcResult.EngineAccount -notmatch '(?i)LocalSystem|NT AUTHORITY\\SYSTEM') {
-                    Write-DscStatus "$Tag WARNING [$Label] replica SQL engine runs as $($svcResult.EngineAccount), not System; share ACLs assume SYSTEM."
+    # SQL Server Agent Automatic + running on this SQL host. Required on BOTH the
+    # site (distributor: snapshot / log reader / distribution agents) AND each
+    # replica (pull subscription agent). Warn if the engine is not System.
+    if ($SqlHost) {
+        try {
+            $svcResult = Invoke-Command -ComputerName $SqlHost -ArgumentList $Instance -ScriptBlock {
+                param($inst)
+                $instanceName = 'MSSQLSERVER'
+                if ($inst -match '\\') { $instanceName = $inst.Split('\')[1].Split(',')[0] }
+                if ($instanceName -eq 'MSSQLSERVER') { $agent = 'SQLSERVERAGENT'; $engine = 'MSSQLSERVER' }
+                else { $agent = "SQLAgent`$$instanceName"; $engine = "MSSQL`$$instanceName" }
+                $out = @{}
+                $a = Get-Service -Name $agent -ErrorAction SilentlyContinue
+                if ($a) {
+                    Set-Service -Name $agent -StartupType Automatic -ErrorAction SilentlyContinue
+                    if ($a.Status -ne 'Running') { Start-Service -Name $agent -ErrorAction SilentlyContinue }
+                    $out.Agent = (Get-Service -Name $agent).Status
                 }
+                $e = Get-CimInstance Win32_Service -Filter "Name='$engine'" -ErrorAction SilentlyContinue
+                if ($e) { $out.EngineAccount = $e.StartName }
+                return $out
+            } -ErrorAction Stop
+            Write-DscStatus "$Tag [$Label] SQL Agent status=$($svcResult.Agent) engineAcct=$($svcResult.EngineAccount)."
+            if ($svcResult.EngineAccount -and $svcResult.EngineAccount -notmatch '(?i)LocalSystem|NT AUTHORITY\\SYSTEM') {
+                Write-DscStatus "$Tag WARNING [$Label] SQL engine runs as $($svcResult.EngineAccount), not System; share ACLs assume SYSTEM."
             }
-            catch { Write-DscStatus "$Tag WARNING [$Label] could not configure SQL Agent on $ReplicaHost`: $($_.Exception.Message)" }
         }
+        catch { Write-DscStatus "$Tag WARNING [$Label] could not configure SQL Agent on $SqlHost`: $($_.Exception.Message)" }
     }
 }
 
-Set-InstancePrereqs -Instance $siteSqlConn -IsReplica $false -Label 'Site' -ReplicaHost $null
+# Site DB SQL server machine (physical NetBIOS): used for STEP 1 (start SQL Agent
+# on the distributor), STEP 2 (the access group + share must be on the SQL server),
+# and $shareUnc.
+$siteSqlMachine = ($siteSqlServer -split '\\')[0]
+$siteSqlShort = ($siteSqlMachine -split '\.')[0]
+$siteSqlMachineFqdn = if ($siteSqlMachine -like '*.*') { $siteSqlMachine } else { "$siteSqlMachine.$DomainFullName" }
+$isSiteSqlLocal = ($siteSqlShort -ieq $env:COMPUTERNAME)
+
+Set-InstancePrereqs -Instance $siteSqlConn -IsReplica $false -Label 'Site' -SqlHost $siteSqlMachineFqdn
 foreach ($t in $targets) {
-    Set-InstancePrereqs -Instance $t.ReplicaConn -IsReplica $true -Label "Replica[$($t.MPName)]" -ReplicaHost $t.ReplicaShort
+    Set-InstancePrereqs -Instance $t.ReplicaConn -IsReplica $true -Label "Replica[$($t.MPName)]" -SqlHost $t.ReplicaShort
 }
 
 # ===========================================================================
@@ -296,10 +306,8 @@ foreach ($t in $targets) {
 # so create them there (the site server's machine account is a local admin on its
 # SQL server, so Invoke-Command works). The share also backs SSB cert exchange, so
 # the site SQL machine account itself needs access for its own UNC cert backup.
-$siteSqlMachine = ($siteSqlServer -split '\\')[0]
-$siteSqlShort = ($siteSqlMachine -split '\.')[0]
-$siteSqlMachineFqdn = if ($siteSqlMachine -like '*.*') { $siteSqlMachine } else { "$siteSqlMachine.$DomainFullName" }
-$isSiteSqlLocal = ($siteSqlShort -ieq $env:COMPUTERNAME)
+# ($siteSqlMachine / $siteSqlShort / $siteSqlMachineFqdn / $isSiteSqlLocal computed
+# above, before STEP 1.)
 $shareAccts = @(@($targets | ForEach-Object { "$($_.ReplicaShort)`$" }) + "$siteSqlShort`$" | Sort-Object -Unique)
 
 $shareSetupSb = {
@@ -307,7 +315,7 @@ $shareSetupSb = {
     $out = @()
     try {
         if (-not (Get-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -ErrorAction SilentlyContinue)) {
-            New-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -Description 'ConfigMgr MP database replica snapshot + SSB cert access' | Out-Null
+            New-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -Description 'ConfigMgr MP replica snapshot/cert access' | Out-Null
             $out += 'created local group ConfigMgr_MPReplicaAccess'
         }
         foreach ($acct in $accts) {
@@ -353,9 +361,21 @@ $shareUnc = "\\$siteSqlMachineFqdn\ConfigMgr_MPReplica"
 
 # 2c. Create the publication (the SP does distributor + distribution DB + articles).
 try {
-    $pubExists = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "IF OBJECT_ID('dbo.syspublications') IS NOT NULL SELECT COUNT(*) AS c FROM dbo.syspublications WHERE name = 'ConfigMgr_MPReplica' ELSE SELECT 0 AS c"
-    if ([int]$pubExists.c -gt 0) {
-        Write-DscStatus "$Tag Publication ConfigMgr_MPReplica already exists on site DB."
+    $pubState = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "IF OBJECT_ID('dbo.syspublications') IS NOT NULL SELECT pubs = (SELECT COUNT(*) FROM dbo.syspublications WHERE name='ConfigMgr_MPReplica'), arts = (SELECT COUNT(*) FROM dbo.sysarticles a JOIN dbo.syspublications p ON a.pubid = p.pubid WHERE p.name='ConfigMgr_MPReplica') ELSE SELECT pubs = 0, arts = 0"
+    $pubCount = [int]$pubState.pubs
+    $artCount = [int]$pubState.arts
+    if ($pubCount -gt 0 -and $artCount -eq 0) {
+        # A prior run created the publication but failed before adding articles.
+        # Drop the incomplete publication so it is rebuilt cleanly (no subscriptions
+        # exist yet at this point). Otherwise sp_addsubscription later fails with
+        # 'A publication must have at least one article before a subscription...'.
+        Write-DscStatus "$Tag Publication ConfigMgr_MPReplica exists but has 0 articles (incomplete prior run); dropping to recreate."
+        try { Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_droppublication @publication = N'ConfigMgr_MPReplica'" }
+        catch { Write-DscStatus "$Tag WARNING: sp_droppublication failed: $($_.Exception.Message)" }
+        $pubCount = 0
+    }
+    if ($pubCount -gt 0) {
+        Write-DscStatus "$Tag Publication ConfigMgr_MPReplica already exists on site DB ($artCount articles)."
     }
     else {
         Write-DscStatus "$Tag Creating publication via spCreateMPReplicaPublication..."
