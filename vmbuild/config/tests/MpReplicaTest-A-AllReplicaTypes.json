@@ -1,0 +1,173 @@
+{
+  "cmOptions": {
+    "version": "current-branch",
+    "install": true,
+    "pushClientToDomainMembers": false,
+    "EVALVersion": false,
+    "UsePKI": false
+  },
+  "vmOptions": {
+    "prefix": "MR1-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "mpreplica.com",
+    "adminName": "admin",
+    "network": "192.168.130.0",
+    "timeZone": "Eastern Standard Time",
+    "domainNetBiosName": "mpreplica",
+    "locale": "en-US"
+  },
+  "virtualMachines": [
+    {
+      "vmName": "DC1",
+      "role": "DC",
+      "operatingSystem": "Server 2022",
+      "memory": "2GB",
+      "virtualProcs": 4
+    },
+    {
+      "vmName": "PS1SITE",
+      "role": "Primary",
+      "siteCode": "PS1",
+      "parentSiteCode": "",
+      "operatingSystem": "Server 2022",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "remoteSQLVM": "PS1SQL",
+      "InstallRP": false,
+      "InstallSUP": false
+    },
+    {
+      "vmName": "PS1SQL",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2022",
+      "memory": "8GB",
+      "virtualProcs": 8,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "InstallRP": false,
+      "InstallSMSProv": false
+    },
+    {
+      "vmName": "MPLOCAL",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "6GB",
+      "virtualProcs": 4,
+      "siteCode": "PS1",
+      "installMP": true,
+      "installDP": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "F:\\SQL",
+      "sqlPort": "1433",
+      "useDatabaseReplica": true,
+      "replicaSqlServerVM": "MPLOCAL",
+      "replicaDbName": "CM_PS1",
+      "additionalDisks": {
+        "E": "250GB",
+        "F": "200GB"
+      },
+      "InstallRP": false,
+      "InstallSUP": false
+    },
+    {
+      "vmName": "MPREMOTE",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "siteCode": "PS1",
+      "installMP": true,
+      "installDP": false,
+      "useDatabaseReplica": true,
+      "replicaSqlServerVM": "REPLSQL1",
+      "replicaDbName": "CM_PS1",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "InstallRP": false,
+      "InstallSUP": false
+    },
+    {
+      "vmName": "REPLSQL1",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2022",
+      "memory": "6GB",
+      "virtualProcs": 8,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "InstallRP": false,
+      "InstallSMSProv": false
+    },
+    {
+      "vmName": "MPNAMED",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "siteCode": "PS1",
+      "installMP": true,
+      "installDP": false,
+      "useDatabaseReplica": true,
+      "replicaSqlServerVM": "REPLSQL2",
+      "replicaDbName": "CM_PS1",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "InstallRP": false,
+      "InstallSUP": false
+    },
+    {
+      "vmName": "REPLSQL2",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2022",
+      "memory": "6GB",
+      "virtualProcs": 8,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "REPLICA",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "2433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "InstallRP": false,
+      "InstallSMSProv": false
+    },
+    {
+      "vmName": "MPPLAIN",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "siteCode": "PS1",
+      "installMP": true,
+      "installDP": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "InstallRP": false,
+      "InstallSUP": false
+    },
+    {
+      "vmName": "W11Client1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 Latest",
+      "memory": "2GB",
+      "virtualProcs": 2
+    }
+  ]
+}

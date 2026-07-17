@@ -1150,8 +1150,11 @@ function Test-ValidRoleSiteServer {
     $vmRole = $VM.role
 
     # MP database replica is only supported on dedicated SiteSystem MP VMs, never
-    # on the Primary/CAS site server itself (even when it hosts its own MP).
-    if ($VM.useDatabaseReplica) {
+    # on the Primary/CAS/Secondary site server itself (even when it hosts its own MP).
+    # This function runs for every VM with a SiteCode (including SiteSystem MPs), so
+    # only flag the actual site-server roles; SiteSystem MPs are validated separately
+    # in Test-ValidRoleSiteSystem.
+    if ($VM.useDatabaseReplica -and $vmRole -in ("CAS", "Primary", "Secondary")) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] has useDatabaseReplica set, which is not supported on a $vmRole site server. The MP database replica is only supported on dedicated SiteSystem Management Point VMs." -ReturnObject $ReturnObject -Failure
     }
 
@@ -1448,6 +1451,20 @@ function Test-ValidRoleSiteSystem {
             }
             elseif (($replicaSQLVM.memory) -and (($replicaSQLVM.memory / 1) -lt 4GB)) {
                 Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] replica SQL host [$replicaVMName] has less than 4GB memory; hosting a database replica may be slow." -ReturnObject $ReturnObject -Warning
+            }
+
+            # The replica SQL instance MUST run as LocalSystem. MP replica setup relies on
+            # the machine account for cross-server transactional replication and Service
+            # Broker authentication; a domain SQL service/agent account breaks that trust.
+            # An absent account defaults to LocalSystem, so only a non-LocalSystem value
+            # (e.g. a SQLAO domain account) is a failure.
+            if ($replicaSQLVM -and $replicaSQLVM.sqlVersion) {
+                if ($replicaSQLVM.SqlServiceAccount -and $replicaSQLVM.SqlServiceAccount -ne "LocalSystem") {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] replica SQL host [$replicaVMName] runs the SQL Server service as [$($replicaSQLVM.SqlServiceAccount)]. A replica SQL instance must run as LocalSystem so the machine account can authenticate replication and Service Broker." -ReturnObject $ReturnObject -Failure
+                }
+                if ($replicaSQLVM.SqlAgentAccount -and $replicaSQLVM.SqlAgentAccount -ne "LocalSystem") {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] replica SQL host [$replicaVMName] runs the SQL Server Agent service as [$($replicaSQLVM.SqlAgentAccount)]. A replica SQL instance must run SQL Agent as LocalSystem so the machine account can authenticate the replication agents." -ReturnObject $ReturnObject -Failure
+                }
             }
 
             # Replica DB must NOT be hosted on the site's own SQL server.

@@ -21,14 +21,22 @@
       "vmName": "PS1DPMP1",
       "role": "SiteSystem",
       "operatingSystem": "Server 2022",
-      "memory": "3GB",
+      "memory": "6GB",
       "virtualProcs": 4,
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "200GB"
       },
       "installDP": true,
       "installMP": true,
       "siteCode": "PS1",
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "F:\\SQL",
+      "sqlPort": "1433",
+      "useDatabaseReplica": true,
+      "replicaSqlServerVM": "PS1DPMP1",
+      "replicaDbName": "CM_PS1",
       "InstallRP": false,
       "InstallSUP": false
     },
