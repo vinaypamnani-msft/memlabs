@@ -219,10 +219,35 @@ function Get-SqlIsoPathForVm {
 # already mounted (e.g. a -StartPhase 4 retry after a failed run left it
 # attached), the VM is skipped. The single DVD drive is free by Phase 4 because
 # the create-time CM/OSD copies (Common.ScriptBlocks.ps1) eject when done.
+
+# Returns the set (case-insensitive) of SQL VM names that must have the SQL
+# 'Replication' feature for an MP database replica: every replica SQL host, plus
+# the site DB SQL (publisher/distributor) of any site that has a replica MP. Used
+# to also mount the SQL ISO on EXISTING (hidden) SQL VMs so Phase 4 can add the
+# feature (transactional replication requires it; see Phase4.ps1 EnsureSqlReplication).
+function Get-SqlVMNamesNeedingReplication {
+    param([object]$deployConfig)
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $replicaMPs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' -and $_.installMP -and $_.useDatabaseReplica })
+    foreach ($mp in $replicaMPs) {
+        if ($mp.replicaSqlServerVM) { [void]$set.Add([string]$mp.replicaSqlServerVM) }
+        # Publisher = the site DB SQL for the MP's site (the site server's own SQL, or its remote SQL VM).
+        $ss = $deployConfig.virtualMachines | Where-Object { $_.role -in @('Primary', 'CAS') -and $_.siteCode -eq $mp.siteCode } | Select-Object -First 1
+        if ($ss) {
+            if ($ss.sqlVersion) { [void]$set.Add([string]$ss.vmName) }
+            elseif ($ss.remoteSQLVM) { [void]$set.Add([string]$ss.remoteSQLVM) }
+        }
+    }
+    return $set
+}
+
 function Mount-SqlIsoForPhase {
     param([object]$deployConfig)
 
-    $sqlVMs = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion -and -not $_.hidden }
+    # New SQL installs (non-hidden) always need the media. ALSO mount for existing
+    # (hidden) SQL VMs that must gain the 'Replication' feature for an MP replica.
+    $replNeeded = Get-SqlVMNamesNeedingReplication -deployConfig $deployConfig
+    $sqlVMs = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion -and (-not $_.hidden -or $replNeeded.Contains([string]$_.vmName)) }
     foreach ($vm in $sqlVMs) {
         $sqlIsoPath = Get-SqlIsoPathForVm -VirtualMachine $vm
         if (-not $sqlIsoPath) {
@@ -246,7 +271,8 @@ function Mount-SqlIsoForPhase {
 function Dismount-SqlIsoForPhase {
     param([object]$deployConfig)
 
-    $sqlVMs = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion -and -not $_.hidden }
+    $replNeeded = Get-SqlVMNamesNeedingReplication -deployConfig $deployConfig
+    $sqlVMs = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion -and (-not $_.hidden -or $replNeeded.Contains([string]$_.vmName)) }
     foreach ($vm in $sqlVMs) {
         $sqlIsoPath = Get-SqlIsoPathForVm -VirtualMachine $vm
         if ($sqlIsoPath) {

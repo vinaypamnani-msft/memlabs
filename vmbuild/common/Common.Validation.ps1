@@ -1453,7 +1453,7 @@ function Test-ValidRoleSiteSystem {
                 Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] replica SQL host [$replicaVMName] has less than 4GB memory; hosting a database replica may be slow." -ReturnObject $ReturnObject -Warning
             }
 
-            # The replica SQL instance MUST run as LocalSystem. MP replica setup relies on
+            # The replica SQL instance must run as LocalSystem. MP replica setup relies on
             # the machine account for cross-server transactional replication and Service
             # Broker authentication; a domain SQL service/agent account breaks that trust.
             # An absent account defaults to LocalSystem, so only a non-LocalSystem value
@@ -1467,16 +1467,11 @@ function Test-ValidRoleSiteSystem {
                 }
             }
 
-            # The replica SQL instance must be deployed by THIS configuration (a new SQL
-            # VM, or local SQL on the MP). Transactional replication requires the SQL
-            # 'Replication' setup feature, which memlabs only installs during Phase 4 for
-            # SQL instances built in this deployment. An existing/already-deployed SQL
-            # server (referenced from the domain, or a Hidden VM) is never reinstalled, so
-            # it lacks Replication and the publication fails with 'ERROR 21028'.
-            $replicaInThisDeployment = @($ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $replicaVMName -and -not $_.hidden })
-            if ($replicaSQLVM -and $replicaInThisDeployment.Count -eq 0) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] replicaSqlServerVM [$replicaVMName] is an existing/already-deployed SQL server. An MP database replica must use a SQL instance deployed by this configuration (Local SQL on the MP, or a new SQL server) so the required SQL 'Replication' feature is installed. Existing SQL servers are not reinstalled and will lack Replication." -ReturnObject $ReturnObject -Failure
-            }
+            # NOTE: an existing/already-deployed SQL server (Hidden VM, or one only in
+            # the domain) is supported as a replica host. Phase 4 mounts the SQL ISO on
+            # it and adds the required SQL 'Replication' feature (Phase4.ps1
+            # EnsureSqlReplication); the existing site DB SQL publisher is handled the
+            # same way.
 
             # Replica DB must NOT be hosted on the site's own SQL server.
             if ($VM.siteCode) {

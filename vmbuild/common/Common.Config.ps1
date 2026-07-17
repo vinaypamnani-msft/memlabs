@@ -1336,6 +1336,15 @@ function Add-ExistingVMsToDeployConfig {
         if ($system.RemoteSQLVM) {
             Add-RemoteSQLVMToDeployConfig -vmName $system.RemoteSQLVM -configToModify $config
         }
+        # MP database replica hosted on an EXISTING SQL server: pull it in as hidden
+        # so Phase 4 reaches it and can add the SQL 'Replication' feature. New (in
+        # this config, non-hidden) replica SQL is already present, so skip it.
+        if ($system.replicaSqlServerVM) {
+            $replicaAlreadyInConfig = $config.virtualMachines | Where-Object { $_.vmName -eq $system.replicaSqlServerVM -and -not $_.hidden }
+            if (-not $replicaAlreadyInConfig) {
+                Add-RemoteSQLVMToDeployConfig -vmName $system.replicaSqlServerVM -configToModify $config
+            }
+        }
         if ($system.wsusDataBaseServer) {
             if ($system.wsusDataBaseServer -ne "WID") {
                 Add-RemoteSQLVMToDeployConfig -vmName $system.wsusDataBaseServer -configToModify $config

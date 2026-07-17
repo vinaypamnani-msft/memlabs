@@ -60,6 +60,56 @@
             CheckModuleName = 'SqlServer'
         }
 
+        # MP database replica: an EXISTING (Hidden) SQL server that hosts a replica
+        # DB, or is the site DB (publisher) for a site with a replica MP, needs the
+        # SQL 'Replication' feature -- but its SQL install block below is skipped
+        # (Hidden), so it never got Replication. Detect the authoritative registry
+        # key and, if missing, add the feature from the SQL media the host mounted
+        # for this VM. (New/non-Hidden SQL gets Replication via the Features list in
+        # SqlSetup below, so this only runs for Hidden replica-involved SQL.)
+        $thisNeedsReplication = $false
+        foreach ($mpRepl in @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' -and $_.installMP -and $_.useDatabaseReplica })) {
+            if ($mpRepl.replicaSqlServerVM -and $mpRepl.replicaSqlServerVM -eq $ThisVM.vmName) { $thisNeedsReplication = $true; break }
+            $replSite = $deployConfig.virtualMachines | Where-Object { $_.role -in @('Primary', 'CAS') -and $_.siteCode -eq $mpRepl.siteCode } | Select-Object -First 1
+            if ($replSite) {
+                if ($replSite.sqlVersion -and $replSite.vmName -eq $ThisVM.vmName) { $thisNeedsReplication = $true; break }
+                if (-not $replSite.sqlVersion -and $replSite.remoteSQLVM -and $replSite.remoteSQLVM -eq $ThisVM.vmName) { $thisNeedsReplication = $true; break }
+            }
+        }
+        if ($ThisVM.Hidden -and $thisNeedsReplication) {
+            $replTestScript = (@'
+$inst = '__INST__'
+$instId = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction SilentlyContinue).$inst
+if (-not $instId) { return $false }
+$replPath = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instId\Replication"
+$isInstalled = (Get-ItemProperty -Path $replPath -Name 'IsInstalled' -ErrorAction SilentlyContinue).IsInstalled
+return ($isInstalled -eq 1)
+'@) -replace '__INST__', $SQLInstanceName
+            $replSetScript = (@'
+$inst = '__INST__'
+$drive = $null
+foreach ($vol in (Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue)) {
+    if ($vol.DriveLetter -and (Test-Path (Join-Path "$($vol.DriveLetter)\" 'setup.exe'))) { $drive = $vol.DriveLetter; break }
+}
+if (-not $drive) { throw 'SQL setup media not found on any CD-ROM drive; the host should have mounted the SQL ISO for this replica-enabled SQL VM.' }
+$setup = Join-Path "$drive\" 'setup.exe'
+$sqlArgs = @('/Action=Install','/Quiet','/IAcceptSQLServerLicenseTerms','/ENU','/FEATURES=Replication',"/INSTANCENAME=$inst")
+$p = Start-Process -FilePath $setup -ArgumentList $sqlArgs -Wait -PassThru -NoNewWindow
+if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the Replication feature failed with exit code $($p.ExitCode). See the SQL Setup Bootstrap Summary.txt log." }
+'@) -replace '__INST__', $SQLInstanceName
+
+            WriteStatus EnsureSqlReplication {
+                DependsOn = '[ModuleAdd]SQLServerModule'
+                Status    = "Ensuring SQL 'Replication' feature is installed (MP database replica)"
+            }
+            Script EnsureSqlReplication {
+                DependsOn  = '[WriteStatus]EnsureSqlReplication'
+                GetScript  = 'return @{ Result = "N/A" }'
+                TestScript = $replTestScript
+                SetScript  = $replSetScript
+            }
+        }
+
         # Nodes without local SQL (remote-SQL site servers, DP/MP site systems) get
         # the module only, then complete -- skip the entire SQL install/config below.
         if (-not $ThisVM.sqlVersion) {
