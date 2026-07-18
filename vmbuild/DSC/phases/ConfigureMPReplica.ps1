@@ -789,7 +789,33 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_role_members drm JOIN sys.database_pri
             Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_BgbCreateAndBackupSQLCert N'$siteCert'"
 
             # 5.5 Replica imports the site cert + builds route replica -> site.
-            Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "EXEC sp_BgbConfigSSBForRemoteService N'$SiteCode', N'$SSBPort', N'$siteCert'"
+            # sp_BgbConfigSSBForRemoteService runs CREATE CERTIFICATE ... FROM FILE on the
+            # REPLICA, reading the site cert. Reading it over the UNC share depends on the
+            # replica's SQL service machine account having SMB read to the site share --
+            # which is fragile (it failed on a remote named-instance replica with
+            # "certificate file ... does not exist; or you do not have permissions").
+            # Stage the cert to a LOCAL path on the replica first (the DSC account is a
+            # domain admin on both boxes, so it transfers the bytes site->replica) and
+            # import from local disk, which the SQL service can always read.
+            $siteCertForImport = $siteCert
+            $siteCertLocal = "C:\Windows\Temp\mpreplica_site_$SiteCode.cer"
+            try {
+                $certB64 = Invoke-Command -ComputerName $siteSqlMachineFqdn -ArgumentList 'ConfigMgr_MPReplica', "site_$SiteCode.cer" -ScriptBlock {
+                    param($shareName, $fn)
+                    $local = (Get-SmbShare -Name $shareName -ErrorAction Stop).Path
+                    [Convert]::ToBase64String([System.IO.File]::ReadAllBytes((Join-Path $local $fn)))
+                } -ErrorAction Stop
+                Invoke-Command -ComputerName $t.ReplicaShort -ArgumentList $siteCertLocal, $certB64 -ScriptBlock {
+                    param($path, $b64)
+                    [System.IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($b64))
+                } -ErrorAction Stop
+                $siteCertForImport = $siteCertLocal
+            }
+            catch { Write-DscStatus "$Tag WARNING [$rlabel] could not stage site cert locally on $($t.ReplicaShort); importing from UNC: $($_.Exception.Message)" }
+            Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "EXEC sp_BgbConfigSSBForRemoteService N'$SiteCode', N'$SSBPort', N'$siteCertForImport'"
+            if ($siteCertForImport -eq $siteCertLocal) {
+                try { Invoke-Command -ComputerName $t.ReplicaShort -ArgumentList $siteCertLocal -ScriptBlock { param($p) Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } -ErrorAction SilentlyContinue } catch { }
+            }
 
             Write-DscStatus "$Tag [$rlabel] Service Broker wired (routes both directions)."
         }
