@@ -494,11 +494,11 @@ if (-not $hardFailed) {
     # does NOT correspond to a CURRENT v_BgbMP replica hash, so 5.3 can import cleanly.
     try {
         Invoke-ReplSql -Instance $siteSqlConn -Database 'master' -Query @"
-DECLARE @c SYSNAME = (SELECT TOP 1 c.name FROM sys.certificates c WHERE c.name LIKE 'ConfigMgrEndPointCert0x%' AND c.certificate_id NOT IN (SELECT certificate_id FROM sys.service_broker_endpoints WHERE certificate_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM [$siteDbName].dbo.v_BgbMP m WHERE 'ConfigMgrEndPointCert' + m.DBID = c.name));
+DECLARE @c SYSNAME = (SELECT TOP 1 c.name FROM sys.certificates c WHERE c.name COLLATE Latin1_General_CI_AS LIKE 'ConfigMgrEndPointCert0x%' AND c.certificate_id NOT IN (SELECT certificate_id FROM sys.service_broker_endpoints WHERE certificate_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM [$siteDbName].dbo.v_BgbMP m WHERE (N'ConfigMgrEndPointCert' + m.DBID) COLLATE Latin1_General_CI_AS = c.name COLLATE Latin1_General_CI_AS));
 WHILE @c IS NOT NULL
 BEGIN
     EXEC('DROP CERTIFICATE [' + @c + ']');
-    SET @c = (SELECT TOP 1 c.name FROM sys.certificates c WHERE c.name LIKE 'ConfigMgrEndPointCert0x%' AND c.certificate_id NOT IN (SELECT certificate_id FROM sys.service_broker_endpoints WHERE certificate_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM [$siteDbName].dbo.v_BgbMP m WHERE 'ConfigMgrEndPointCert' + m.DBID = c.name));
+    SET @c = (SELECT TOP 1 c.name FROM sys.certificates c WHERE c.name COLLATE Latin1_General_CI_AS LIKE 'ConfigMgrEndPointCert0x%' AND c.certificate_id NOT IN (SELECT certificate_id FROM sys.service_broker_endpoints WHERE certificate_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM [$siteDbName].dbo.v_BgbMP m WHERE (N'ConfigMgrEndPointCert' + m.DBID) COLLATE Latin1_General_CI_AS = c.name COLLATE Latin1_General_CI_AS));
 END
 "@
     }
@@ -914,11 +914,11 @@ if (-not $hardFailed) {
 if (-not $hardFailed) {
     try {
         Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
-DECLARE @rt SYSNAME = (SELECT TOP 1 r.name FROM sys.routes r WHERE r.remote_service_name LIKE 'ConfigMgrBGB[_]Site0x%' AND NOT EXISTS (SELECT 1 FROM v_BgbMP m WHERE 'ConfigMgrBGB_Site' + m.DBID = r.remote_service_name));
+DECLARE @rt SYSNAME = (SELECT TOP 1 r.name FROM sys.routes r WHERE r.remote_service_name COLLATE Latin1_General_CI_AS LIKE 'ConfigMgrBGB[_]Site0x%' AND NOT EXISTS (SELECT 1 FROM v_BgbMP m WHERE (N'ConfigMgrBGB_Site' + m.DBID) COLLATE Latin1_General_CI_AS = r.remote_service_name COLLATE Latin1_General_CI_AS));
 WHILE @rt IS NOT NULL
 BEGIN
     EXEC('DROP ROUTE [' + @rt + ']');
-    SET @rt = (SELECT TOP 1 r.name FROM sys.routes r WHERE r.remote_service_name LIKE 'ConfigMgrBGB[_]Site0x%' AND NOT EXISTS (SELECT 1 FROM v_BgbMP m WHERE 'ConfigMgrBGB_Site' + m.DBID = r.remote_service_name));
+    SET @rt = (SELECT TOP 1 r.name FROM sys.routes r WHERE r.remote_service_name COLLATE Latin1_General_CI_AS LIKE 'ConfigMgrBGB[_]Site0x%' AND NOT EXISTS (SELECT 1 FROM v_BgbMP m WHERE (N'ConfigMgrBGB_Site' + m.DBID) COLLATE Latin1_General_CI_AS = r.remote_service_name COLLATE Latin1_General_CI_AS));
 END
 "@
         Write-DscStatus "$Tag Cleaned up any stale (orphaned-hash) replica BGB routes on the site DB."
