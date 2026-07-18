@@ -196,6 +196,12 @@ $diag = {
     catch { Item 'SQL Agent running' "query failed: $($_.Exception.Message)" }
 
     try {
+        $spn = Invoke-ReplSql -Instance $siteSqlConn -Query "SELECT n = @@SERVERNAME"
+        Item 'Publisher @@SERVERNAME' "$($spn.n)  (replication SP names / registered subscribers must match THIS, not the FQDN)"
+    }
+    catch { Item 'Publisher @@SERVERNAME' "query failed: $($_.Exception.Message)" }
+
+    try {
         $pub = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
 IF OBJECT_ID('dbo.syspublications') IS NOT NULL
     SELECT name, immediate_sync, allow_pull, status, snap_default = snapshot_in_defaultfolder, alt_snap = ISNULL(alt_snapshot_folder,''),
@@ -261,6 +267,9 @@ ORDER BY h.[time] DESC
         Section "REPLICA  $($t.MPName)  ($($t.ReplicaConn) / $($t.ReplicaDbName))"
         try { [void](Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT 1 AS c"); Item 'Reachable' 'YES' }
         catch { Item 'Reachable' "NO: $($_.Exception.Message)"; continue }
+
+        try { $rn = Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT n = @@SERVERNAME"; Item 'Subscriber @@SERVERNAME' "$($rn.n)  (must match the publisher's registered subscriber name)" }
+        catch { Item 'Subscriber @@SERVERNAME' "query failed: $($_.Exception.Message)" }
 
         try {
             $ra = Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT status = CONVERT(int, ISNULL((SELECT 1 FROM sys.dm_server_services WHERE servicename LIKE 'SQL Server Agent%' AND status = 4), 0))"

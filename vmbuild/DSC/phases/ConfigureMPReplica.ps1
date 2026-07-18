@@ -423,6 +423,19 @@ catch {
 # STEP 3..6 - per replica MP.
 # ===========================================================================
 if (-not $hardFailed) {
+    # Replication SPs identify the publisher/distributor and each subscriber by the
+    # server's OWN @@SERVERNAME (how SQL registered them), NOT the FQDN used for direct
+    # connections. Passing the FQDN makes the pull Distribution Agent fail to validate
+    # the publisher (agent message 14080: "the remote server ... does not exist, or has
+    # not been designated as a valid Publisher"), so the snapshot never applies. Resolve
+    # the publisher's real name once.
+    $sitePublisherName = $siteSqlServer
+    try {
+        $spn = Invoke-ReplSql -Instance $siteSqlConn -Query "SELECT n = @@SERVERNAME"
+        if ($spn -and $spn.n) { $sitePublisherName = [string]$spn.n }
+    }
+    catch { Write-DscStatus "$Tag WARNING: could not read site @@SERVERNAME; using $siteSqlServer for replication names." }
+
     foreach ($t in $targets) {
         $rlabel = "Replica[$($t.MPName)]"
         Write-DscStatus "$Tag ===== $($t.MPName) -> $($t.ReplicaConn) / $($t.ReplicaDbName) (ordinal $($t.CertOrdinal)) ====="
@@ -438,6 +451,17 @@ if (-not $hardFailed) {
             }
             # TRUSTWORTHY ON (doc Step 2.3) now that the DB exists.
             Invoke-ReplSql -Instance $t.ReplicaConn -Query "ALTER DATABASE [$($t.ReplicaDbName)] SET TRUSTWORTHY ON;"
+
+            # The subscriber identifies itself to the distributor by its own @@SERVERNAME
+            # (e.g. MR1-MPLOCAL, or MR1-REPLSQL2\REPLICA for a named instance), not the
+            # FQDN. Use that as the @subscriber name so the publisher's registered
+            # subscription matches the name the pull Distribution Agent reports.
+            $replicaServerName = $t.ReplicaSqlName
+            try {
+                $rsn = Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT n = @@SERVERNAME"
+                if ($rsn -and $rsn.n) { $replicaServerName = [string]$rsn.n }
+            }
+            catch { }
 
             # -------------------------------------------------------------------
             # Subscription: SELF-HEALING (not just "create if missing"). A replica that
@@ -458,42 +482,42 @@ if (-not $hardFailed) {
             }
             else {
                 # Drop any leftover pull subscription on the subscriber (also removes its
-                # Distribution Agent job) so we can re-add a clean, pending one.
+                # Distribution Agent job) so we can re-add a clean, pending one. Try both
+                # the @@SERVERNAME and the legacy FQDN publisher name so a subscription
+                # left by an older build (which used the FQDN) is also cleaned up.
                 Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
 IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica')
 BEGIN
+    BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$sitePublisherName', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY
+    BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
     BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY
     BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
 END
 "@
-                # Drop any leftover subscription entry on the publisher (per-subscriber:
-                # sysservers.srvid maps to syssubscriptions.srvid; matched on dest_db +
-                # subscriber name so other replicas' subscriptions are left alone).
+                # Drop any leftover publisher-side subscription for this replica, under
+                # either the @@SERVERNAME or the legacy FQDN subscriber name.
                 Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
-IF OBJECT_ID('dbo.syspublications') IS NOT NULL AND EXISTS (
-    SELECT 1 FROM syssubscriptions s
-    JOIN sysarticles a ON s.artid = a.artid
-    JOIN syspublications p ON a.pubid = p.pubid
-    LEFT JOIN master.sys.servers srv ON srv.server_id = s.srvid
-    WHERE p.name = 'ConfigMgr_MPReplica' AND s.dest_db = N'$($t.ReplicaDbName)' AND srv.name = N'$($t.ReplicaSqlName)')
+IF OBJECT_ID('dbo.syspublications') IS NOT NULL
 BEGIN
+    BEGIN TRY EXEC sp_dropsubscription @publication = N'ConfigMgr_MPReplica', @article = N'all', @subscriber = N'$replicaServerName', @destination_db = N'$($t.ReplicaDbName)'; END TRY
+    BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
     BEGIN TRY EXEC sp_dropsubscription @publication = N'ConfigMgr_MPReplica', @article = N'all', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)'; END TRY
-    BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' THROW; END CATCH
+    BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
 END
 "@
-                # Add fresh subscription on the publisher (pending initialization).
-                Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_addsubscription @publication = N'ConfigMgr_MPReplica', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)', @subscription_type = N'pull', @sync_type = N'automatic', @article = N'all', @update_mode = N'read only', @subscriber_type = 0;"
-                # Add fresh pull subscription + Distribution Agent on the subscriber.
-                # The Distribution Agent is scheduled to run every 5 minutes with no end
-                # date (frequency_type=4 daily, frequency_subday=4 minutes, interval=5),
-                # exactly as the documented New Subscription Wizard configures it. The
-                # default (@frequency_type=64) only runs the agent once at SQL Agent
-                # startup, so with @immediate_sync=0 it would run once before the snapshot
-                # is ready, find nothing to apply, and never retry -- leaving the replica
-                # empty (Distribution Agent history stuck at "subscription added").
+                # Add fresh subscription on the publisher (pending initialization). Use the
+                # subscriber's @@SERVERNAME so it matches the name the pull agent reports.
+                Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_addsubscription @publication = N'ConfigMgr_MPReplica', @subscriber = N'$replicaServerName', @destination_db = N'$($t.ReplicaDbName)', @subscription_type = N'pull', @sync_type = N'automatic', @article = N'all', @update_mode = N'read only', @subscriber_type = 0;"
+                # Add fresh pull subscription + Distribution Agent on the subscriber. The
+                # @publisher/@distributor MUST be the publisher's @@SERVERNAME (not the
+                # FQDN) or the agent fails with 14080 "not a valid Publisher". Scheduled
+                # every 5 minutes with no end date (frequency_type=4 daily, subday=4
+                # minutes, interval=5), as the documented New Subscription Wizard does; the
+                # default (@frequency_type=64) runs once at SQL Agent startup, so with
+                # @immediate_sync=0 it would run before the snapshot is ready and never retry.
                 Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
-EXEC sp_addpullsubscription @publisher = N'$siteSqlServer', @publication = N'ConfigMgr_MPReplica', @publisher_db = N'$siteDbName', @independent_agent = N'True', @subscription_type = N'pull', @update_mode = N'read only', @immediate_sync = 0;
-EXEC sp_addpullsubscription_agent @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica', @distributor = N'$siteSqlServer', @job_login = NULL, @job_password = NULL, @distributor_security_mode = 1, @frequency_type = 4, @frequency_interval = 1, @frequency_relative_interval = 0, @frequency_recurrence_factor = 0, @frequency_subday = 4, @frequency_subday_interval = 5, @active_start_time_of_day = 0, @active_end_time_of_day = 235959;
+EXEC sp_addpullsubscription @publisher = N'$sitePublisherName', @publication = N'ConfigMgr_MPReplica', @publisher_db = N'$siteDbName', @independent_agent = N'True', @subscription_type = N'pull', @update_mode = N'read only', @immediate_sync = 0;
+EXEC sp_addpullsubscription_agent @publisher = N'$sitePublisherName', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica', @distributor = N'$sitePublisherName', @job_login = NULL, @job_password = NULL, @distributor_security_mode = 1, @frequency_type = 4, @frequency_interval = 1, @frequency_relative_interval = 0, @frequency_recurrence_factor = 0, @frequency_subday = 4, @frequency_subday_interval = 5, @active_start_time_of_day = 0, @active_end_time_of_day = 235959;
 "@
                 Write-DscStatus "$Tag [$rlabel] pull subscription (re)created clean."
 
