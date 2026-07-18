@@ -98,6 +98,8 @@ $diag = {
     function Emit { param($s) [void]$out.Add([string]$s) }
     function Section { param($t) Emit ''; Emit ('=' * 78); Emit $t; Emit ('=' * 78) }
     function Item { param($l, $v) Emit ('  {0,-30} {1}' -f $l, $v) }
+    $siteSqlVMShort = ''
+    $replicaVMs = @()
 
     function Get-SqlConnString {
         param([string]$Server, [string]$Instance, [object]$Port)
@@ -144,7 +146,7 @@ $diag = {
     }
     catch {
         Emit "FATAL: could not read ConfigMgr registry (is this the site server?): $($_.Exception.Message)"
-        return , $out.ToArray()
+        return @{ Report = $out.ToArray(); SiteSqlVM = $siteSqlVMShort; Domain = ''; Replicas = $replicaVMs }
     }
     if ($siteDbRaw -match '\\') {
         $siteSqlConn = "$siteSqlServer\$($siteDbRaw.Split('\')[0])"
@@ -157,7 +159,7 @@ $diag = {
 
     if (-not (Test-Path $DeployConfigPath)) {
         Emit "FATAL: deployConfig not found at $DeployConfigPath on the guest."
-        return , $out.ToArray()
+        return @{ Report = $out.ToArray(); SiteSqlVM = $siteSqlVMShort; Domain = ''; Replicas = $replicaVMs }
     }
     $deployConfig = Get-Content $DeployConfigPath | ConvertFrom-Json
     $DomainFullName = $deployConfig.vmOptions.domainName
@@ -184,6 +186,8 @@ $diag = {
                 IsLocalToMP     = ($replicaVMName -eq $mp.vmName)
             })
     }
+    $replicaVMs = @($targets | ForEach-Object { $_.ReplicaVMName } | Select-Object -Unique)
+    $siteSqlVMShort = (($siteSqlServer -split '\\')[0] -split '\.')[0]
 
     Section "SITE / PUBLISHER  ($siteSqlConn / $siteDbName, site $SiteCode)"
     Item 'Replica MPs discovered' "$($targets.Count)"
@@ -351,7 +355,7 @@ SELECT tables = (SELECT COUNT(*) FROM sys.tables),
     Emit ''
     Emit 'Key signal: each replica''s "Dist Agent job history" message reveals WHY the snapshot'
     Emit 'is not applying (login/permission/snapshot-share/connectivity to the distributor).'
-    return , $out.ToArray()
+    return @{ Report = $out.ToArray(); SiteSqlVM = $siteSqlVMShort; Domain = $DomainFullName; Replicas = $replicaVMs }
 }
 
 $result = Invoke-VmCommand -VmName $SiteServer -VmDomainName $DomainName -ScriptBlock $diag -ArgumentList $DeployConfigPath -DisplayName "MP replica replication diagnostic" -SuppressLog
@@ -360,4 +364,50 @@ if (-not $result -or $result.ScriptBlockFailed) {
     Write-Host "Invoke-VmCommand failed against ${SiteServer}: $($result.ScriptBlockOutput)" -ForegroundColor Red
     return
 }
-foreach ($line in @($result.ScriptBlockOutput)) { Write-Host $line }
+$so = $result.ScriptBlockOutput
+$report = if ($null -ne $so.Report) { $so.Report } else { $so }
+foreach ($line in @($report)) { Write-Host $line }
+
+# ---------------------------------------------------------------------------
+# OS-level: the snapshot + SSB cert exchange all go through the ConfigMgr_MPReplica
+# share on the site SQL host. Dump the local group membership + share/NTFS ACLs so
+# we can see whether the replica machine accounts are members AND whether the .cer
+# files created by BACKUP CERTIFICATE actually inherit the group's Read ACE (a
+# missing/broken inherit is why a replica's SQL service can't read the site cert).
+# Run directly against the SQL host from the HOST (single-hop PSDirect) to avoid the
+# site-server -> SQL-host double hop.
+# ---------------------------------------------------------------------------
+$siteSqlVM = $so.SiteSqlVM
+$dom = if ($so.Domain) { $so.Domain } else { $DomainName }
+if ($siteSqlVM) {
+    Write-Host ''
+    Write-Host ('=' * 78) -ForegroundColor Cyan
+    Write-Host "SHARE / GROUP ACLs on the site SQL host ($siteSqlVM)" -ForegroundColor Cyan
+    Write-Host ('=' * 78) -ForegroundColor Cyan
+    $aclSb = {
+        $o = New-Object System.Collections.Generic.List[string]
+        try {
+            $g = Get-LocalGroupMember -Group 'ConfigMgr_MPReplicaAccess' -ErrorAction Stop
+            $o.Add('  Local group ConfigMgr_MPReplicaAccess members:')
+            foreach ($m in $g) { $o.Add("      $($m.Name)  [$($m.ObjectClass)]") }
+        }
+        catch { $o.Add("  Local group ConfigMgr_MPReplicaAccess: $($_.Exception.Message)") }
+        try {
+            $share = Get-SmbShare -Name 'ConfigMgr_MPReplica' -ErrorAction Stop
+            $o.Add("  Share ConfigMgr_MPReplica -> $($share.Path)")
+            $o.Add('  Share-level access (Get-SmbShareAccess):')
+            foreach ($a in (Get-SmbShareAccess -Name 'ConfigMgr_MPReplica')) { $o.Add("      $($a.AccountName)  $($a.AccessRight)  $($a.AccessControlType)") }
+            $o.Add('  NTFS ACL on the share folder:')
+            foreach ($ace in (Get-Acl -Path $share.Path).Access) { $o.Add("      $($ace.IdentityReference)  $($ace.FileSystemRights)  $($ace.AccessControlType)  inherited=$($ace.IsInherited)") }
+            foreach ($cf in @(Get-ChildItem -Path (Join-Path $share.Path '*.cer') -ErrorAction SilentlyContinue)) {
+                $o.Add("  NTFS ACL on $($cf.Name):")
+                foreach ($ace in (Get-Acl -Path $cf.FullName).Access) { $o.Add("      $($ace.IdentityReference)  $($ace.FileSystemRights)  $($ace.AccessControlType)  inherited=$($ace.IsInherited)") }
+            }
+        }
+        catch { $o.Add("  Share ConfigMgr_MPReplica: $($_.Exception.Message)") }
+        return , $o.ToArray()
+    }
+    $aclRes = Invoke-VmCommand -VmName $siteSqlVM -VmDomainName $dom -ScriptBlock $aclSb -DisplayName "MP replica ACL dump" -SuppressLog
+    if ($aclRes -and -not $aclRes.ScriptBlockFailed) { foreach ($line in @($aclRes.ScriptBlockOutput)) { Write-Host $line } }
+    else { Write-Host "  (ACL dump failed against ${siteSqlVM}: $($aclRes.ScriptBlockOutput))" -ForegroundColor Yellow }
+}
