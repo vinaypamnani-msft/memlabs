@@ -198,11 +198,15 @@ $diag = {
     try {
         $pub = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
 IF OBJECT_ID('dbo.syspublications') IS NOT NULL
-    SELECT name, immediate_sync, allow_pull, status, arts = (SELECT COUNT(*) FROM dbo.sysarticles a WHERE a.pubid = p.pubid)
+    SELECT name, immediate_sync, allow_pull, status, snap_default = snapshot_in_defaultfolder, alt_snap = ISNULL(alt_snapshot_folder,''),
+           arts = (SELECT COUNT(*) FROM dbo.sysarticles a WHERE a.pubid = p.pubid)
     FROM dbo.syspublications p WHERE p.name = 'ConfigMgr_MPReplica'
-ELSE SELECT name = CAST(NULL AS sysname), immediate_sync = 0, allow_pull = 0, status = 0, arts = 0
+ELSE SELECT name = CAST(NULL AS sysname), immediate_sync = 0, allow_pull = 0, status = 0, snap_default = 0, alt_snap = '', arts = 0
 "@
-        if ($pub -and $pub.name) { Item 'Publication' "ConfigMgr_MPReplica  status=$($pub.status)  articles=$($pub.arts)  immediate_sync=$($pub.immediate_sync)  allow_pull=$($pub.allow_pull)" }
+        if ($pub -and $pub.name) {
+            Item 'Publication' "ConfigMgr_MPReplica  status=$($pub.status)  articles=$($pub.arts)  immediate_sync=$($pub.immediate_sync)  allow_pull=$($pub.allow_pull)"
+            Item 'Snapshot folder' "snapshot_in_defaultfolder=$($pub.snap_default)  alt_snapshot_folder=$($pub.alt_snap)  (pull agents need the snapshot in the UNC share)"
+        }
         else { Item 'Publication' 'NOT PRESENT' }
     }
     catch { Item 'Publication' "query failed: $($_.Exception.Message)" }
@@ -277,13 +281,13 @@ SELECT present = CONVERT(int, ISNULL((SELECT 1 FROM sys.databases WHERE name = N
         try {
             $sub = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
 IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL
-    SELECT publisher, publisher_db, subscription_type, status, last_updated, immediate_sync
+    SELECT publisher, publisher_db, subscription_type, update_mode, immediate_sync, last_sync = [time]
     FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica'
-ELSE SELECT publisher = CAST(NULL AS sysname), publisher_db = CAST(NULL AS sysname), subscription_type = 0, status = -1, last_updated = CAST(NULL AS datetime), immediate_sync = 0
+ELSE SELECT publisher = CAST(NULL AS sysname), publisher_db = CAST(NULL AS sysname), subscription_type = 0, update_mode = 0, immediate_sync = 0, last_sync = CAST(NULL AS datetime)
 "@
-            Emit '  MSreplication_subscriptions (status: 0=Inactive 1=Subscribed 2=Active):'
+            Emit '  MSreplication_subscriptions (subscriber-side config):'
             $anySub = $false
-            foreach ($row in @($sub)) { if ($null -ne $row.publisher) { $anySub = $true; Emit "      publisher=$($row.publisher) db=$($row.publisher_db) status=$($row.status) last_updated=$($row.last_updated) immediate_sync=$($row.immediate_sync)" } }
+            foreach ($row in @($sub)) { if ($null -ne $row.publisher) { $anySub = $true; Emit "      publisher=$($row.publisher) db=$($row.publisher_db) sub_type=$($row.subscription_type) update_mode=$($row.update_mode) immediate_sync=$($row.immediate_sync) last_sync=$($row.last_sync)" } }
             if (-not $anySub) { Emit '      (no subscription row)' }
         }
         catch { Item 'Subscription' "query failed: $($_.Exception.Message)" }
@@ -308,7 +312,7 @@ WHERE st.subsystem = 'Distribution' AND st.command LIKE '%ConfigMgr_MPReplica%'
 
         try {
             $jh = Invoke-ReplSql -Instance $t.ReplicaConn -Query @"
-SELECT TOP 8 h.run_status, rd = h.run_date, rt = h.run_time, msg = LEFT(ISNULL(h.[message],''),400)
+SELECT TOP 10 h.run_status, rd = h.run_date, rt = h.run_time, msg = LEFT(ISNULL(h.[message],''),2500)
 FROM msdb.dbo.sysjobhistory h
 JOIN msdb.dbo.sysjobsteps st ON st.job_id = h.job_id AND st.step_id = h.step_id
 WHERE st.subsystem = 'Distribution' AND st.command LIKE '%ConfigMgr_MPReplica%' AND h.step_id > 0
@@ -316,16 +320,18 @@ ORDER BY h.run_date DESC, h.run_time DESC
 "@
             Emit '  Dist Agent job history (run_status: 0=Fail 1=Succeed 2=Retry 3=Cancel 4=InProgress):'
             $anyH = $false
-            foreach ($row in @($jh)) { $anyH = $true; Emit "      [$($row.rd) $($row.rt)] run_status=$($row.run_status): $($row.msg)" }
+            foreach ($row in @($jh)) { $anyH = $true; Emit "      --- [$($row.rd) $($row.rt)] run_status=$($row.run_status) ---"; Emit "      $($row.msg)" }
             if (-not $anyH) { Emit '      (no job-history rows -- the Distribution Agent has never actually run)' }
         }
         catch { Item 'Dist Agent history' "query failed: $($_.Exception.Message)" }
 
         try {
             $tabs = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
+DECLARE @xmlr int = 0;
+IF OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL SET @xmlr = (SELECT COUNT(*) FROM dbo.XMLConfigStore WHERE Name = 'MPReplicaServiceBrokerConfiguration');
 SELECT tables = (SELECT COUNT(*) FROM sys.tables),
        xml_present = CONVERT(int, CASE WHEN OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL THEN 1 ELSE 0 END),
-       xml_rows = CONVERT(int, ISNULL((SELECT COUNT(*) FROM dbo.XMLConfigStore WHERE Name = 'MPReplicaServiceBrokerConfiguration'), 0))
+       xml_rows = @xmlr
 "@
             Item 'Replicated tables' "$($tabs.tables)  (a full CM DB has ~1000s; a low number = snapshot only partly applied)"
             Item 'XMLConfigStore' "table_present=$($tabs.xml_present)  MPReplicaServiceBrokerConfiguration_rows=$($tabs.xml_rows)"
