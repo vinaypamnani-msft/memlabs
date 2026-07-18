@@ -724,6 +724,16 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_role_members drm JOIN sys.database_pri
             $replicaCert = "$shareUnc\replica_$($t.MPShort).cer"
             $siteCert = "$shareUnc\site_$SiteCode.cer"
             $replicaSrvForHash = $t.ReplicaFqdn
+            # The BGB SSB service/route name is ConfigMgrBGB_Site<DBID>, where DBID (from
+            # v_BgbMP) = fn_varbintohexstr(HASHBYTES('MD5', UPPER(DatabaseName + '.' +
+            # CAST(SQLServerName AS NCHAR(256))))). CM stores DatabaseName INSTANCE-QUALIFIED
+            # ('<Instance>\<DB>', e.g. MSSQLSERVER\CM_PS1 even for the DEFAULT instance --
+            # Set-CMManagementPoint always prefixes the instance). So the @DBName fed to
+            # sp_BgbConfigSSBForReplicaDB (5.2) and sp_BgbConfigSSBForRemoteService (5.3) MUST
+            # be that same instance-qualified name, or the route hash won't match v_BgbMP and
+            # BGB throws "Route is not defined for ConfigMgrBGB_Site<hash>". @ServerName stays
+            # the FQDN with NO instance (the hash excludes the instance from the server part).
+            $replicaDbForHash = "$($t.ReplicaInstance)\$($t.ReplicaDbName)"
 
             # 5.0 Wait for the initial replication snapshot to populate the replica DB.
             # sp_BgbConfigSSBForReplicaDB reads the 'MPReplicaServiceBrokerConfiguration'
@@ -780,10 +790,10 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_role_members drm JOIN sys.database_pri
             catch { Write-DscStatus "$Tag WARNING [$rlabel] could not pre-clear cert export files: $($_.Exception.Message)" }
 
             # 5.2 Build replica SSB objects + back up the replica transport cert.
-            Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "EXEC sp_BgbConfigSSBForReplicaDB N'$replicaSrvForHash', N'$($t.ReplicaDbName)', N'$replicaCert'"
+            Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "EXEC sp_BgbConfigSSBForReplicaDB N'$replicaSrvForHash', N'$replicaDbForHash', N'$replicaCert'"
 
             # 5.3 Site imports the replica cert + builds route site -> replica.
-            Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_BgbConfigSSBForRemoteService N'REPLICA', N'$SSBPort', N'$replicaCert', N'$replicaSrvForHash', N'$($t.ReplicaDbName)'"
+            Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_BgbConfigSSBForRemoteService N'REPLICA', N'$SSBPort', N'$replicaCert', N'$replicaSrvForHash', N'$replicaDbForHash'"
 
             # 5.4 Back up the site transport cert.
             Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_BgbCreateAndBackupSQLCert N'$siteCert'"
