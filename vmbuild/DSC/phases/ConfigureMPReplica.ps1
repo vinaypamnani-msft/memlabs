@@ -759,6 +759,26 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_role_members drm JOIN sys.database_pri
             # 5.1 Enable broker on the replica DB.
             Invoke-ReplSql -Instance $t.ReplicaConn -Query "ALTER DATABASE [$($t.ReplicaDbName)] SET ENABLE_BROKER, HONOR_BROKER_PRIORITY ON WITH ROLLBACK IMMEDIATE;"
 
+            # BACKUP CERTIFICATE (used by both sp_BgbConfigSSBForReplicaDB and
+            # sp_BgbCreateAndBackupSQLCert) REFUSES to overwrite an existing file. The
+            # site cert file name (site_<code>.cer) is shared across replicas, so the
+            # 2nd+ replica collides with the file the 1st wrote ("Cannot write into file
+            # ... site_PS1.cer"); a re-run collides on the per-replica file too. Delete
+            # both target files on the share host (its SYSTEM/local-admin owns them) so
+            # BACKUP writes them fresh.
+            $certFilesToClear = @("replica_$($t.MPShort).cer", "site_$SiteCode.cer")
+            $clearCertsSb = {
+                param($shareName, $files)
+                $local = $null
+                try { $local = (Get-SmbShare -Name $shareName -ErrorAction Stop).Path } catch { }
+                if ($local) { foreach ($fn in $files) { Remove-Item -LiteralPath (Join-Path $local $fn) -Force -ErrorAction SilentlyContinue } }
+            }
+            try {
+                if ($isSiteSqlLocal) { & $clearCertsSb 'ConfigMgr_MPReplica' $certFilesToClear }
+                else { Invoke-Command -ComputerName $siteSqlMachineFqdn -ScriptBlock $clearCertsSb -ArgumentList 'ConfigMgr_MPReplica', $certFilesToClear -ErrorAction Stop }
+            }
+            catch { Write-DscStatus "$Tag WARNING [$rlabel] could not pre-clear cert export files: $($_.Exception.Message)" }
+
             # 5.2 Build replica SSB objects + back up the replica transport cert.
             Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "EXEC sp_BgbConfigSSBForReplicaDB N'$replicaSrvForHash', N'$($t.ReplicaDbName)', N'$replicaCert'"
 
