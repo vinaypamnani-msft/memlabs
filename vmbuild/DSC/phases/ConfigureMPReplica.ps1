@@ -668,11 +668,12 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
         # -------------------------------------------------------------------
         # STEP 4 - SQL identity certificate on the replica (per instance).
         # -------------------------------------------------------------------
+        $certResult = $null
         try {
             $friendly = 'ConfigMgr SQL Server Identification Certificate'
             if ($t.CertOrdinal -gt 0) { $friendly = "ConfigMgr SQL Server Identification Certificate$($t.CertOrdinal)" }
             $skipDelete = ($t.CertOrdinal -gt 0)
-            Invoke-Command -ComputerName $t.ReplicaShort -ArgumentList $t.ReplicaInstance, $friendly, $skipDelete -ScriptBlock {
+            $certResult = Invoke-Command -ComputerName $t.ReplicaShort -ArgumentList $t.ReplicaInstance, $friendly, $skipDelete -ScriptBlock {
                 param($SQLInstance, $FriendlyName, $SkipDelete)
                 $sqlServerName = [System.Net.Dns]::GetHostByName("localhost").HostName
                 $sqlInstanceName = 'MSSQLSERVER'
@@ -743,10 +744,55 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
                     Set-ItemProperty -Path $realPath -Name 'Certificate' -Type String -Value $thumb
                     Restart-Service $SQLServiceName -Force
                 }
+                # Return the public (DER) cert so remote MPs can be made to trust it.
+                $pubCert = (Get-CertStore 'My').Certificates | Where-Object { $_.FriendlyName -eq $FriendlyName } | Select-Object -First 1
+                if ($pubCert) { @{ PublicB64 = [Convert]::ToBase64String($pubCert.Export('Cert')) } }
             } -ErrorAction Stop
             Write-DscStatus "$Tag [$rlabel] SQL identity cert '$friendly' ensured on $($t.ReplicaShort)."
         }
         catch { Write-DscStatus "$Tag WARNING [$rlabel] SQL identity cert step failed: $($_.Exception.Message)" }
+
+        # Doc Step 4 (remote MPs): trust the replica's SQL Server Identification
+        # Certificate on the MP (its LocalMachine\TrustedPeople). The MP's encrypted
+        # SQL client connection to the replica validates this server cert. It is
+        # auto-available when the MP runs ON the replica server (same LocalMachine
+        # store), so only push it to REMOTE MPs.
+        if (-not $t.IsLocalToMP -and $certResult -and $certResult.PublicB64) {
+            try {
+                Invoke-Command -ComputerName $t.MPFqdn -ArgumentList $certResult.PublicB64 -ScriptBlock {
+                    param($b64)
+                    $bytes = [Convert]::FromBase64String($b64)
+                    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(, $bytes)
+                    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('TrustedPeople', 'LocalMachine')
+                    $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+                    if (-not ($store.Certificates | Where-Object { $_.Thumbprint -eq $cert.Thumbprint })) { $store.Add($cert) }
+                    $store.Close()
+                } -ErrorAction Stop
+                Write-DscStatus "$Tag [$rlabel] replica SQL identity cert trusted on remote MP $($t.MPShort)."
+            }
+            catch { Write-DscStatus "$Tag WARNING [$rlabel] could not trust SQL identity cert on $($t.MPShort): $($_.Exception.Message)" }
+        }
+
+        # Doc Step 3: enable Windows Authentication in IIS on the MP (the website the
+        # MP uses = Default Web Site). Needed so user-targeted policy works against a
+        # replica MP. Best-effort: ensure the IIS Windows-Auth feature, then enable it.
+        try {
+            $waResult = Invoke-Command -ComputerName $t.MPFqdn -ScriptBlock {
+                try {
+                    $feat = Get-WindowsFeature -Name Web-Windows-Auth -ErrorAction SilentlyContinue
+                    if ($feat -and -not $feat.Installed) { Install-WindowsFeature -Name Web-Windows-Auth -ErrorAction SilentlyContinue | Out-Null }
+                }
+                catch { }
+                Import-Module WebAdministration -ErrorAction SilentlyContinue
+                try {
+                    Set-WebConfigurationProperty -Filter '/system.webServer/security/authentication/windowsAuthentication' -Name enabled -Value $true -PSPath 'IIS:\' -Location 'Default Web Site' -ErrorAction Stop
+                    return 'enabled'
+                }
+                catch { return "err: $($_.Exception.Message)" }
+            } -ErrorAction Stop
+            Write-DscStatus "$Tag [$rlabel] IIS Windows Authentication on $($t.MPShort): $waResult."
+        }
+        catch { Write-DscStatus "$Tag WARNING [$rlabel] could not enable IIS Windows Authentication on $($t.MPShort): $($_.Exception.Message)" }
 
         # -------------------------------------------------------------------
         # STEP 5 - Service Broker wiring + directional routes.
