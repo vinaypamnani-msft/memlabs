@@ -131,6 +131,7 @@ foreach ($mp in ($replicaMPs | Sort-Object vmName)) {
             ReplicaSqlName  = (Get-SqlConnString -Server $replicaFqdn -Instance $replicaInstance -Port 1433)
             ReplicaDbName   = $replicaDbName
             IsLocalToMP     = ($replicaVMName -eq $mp.vmName)
+            NotReady        = $false
             CertOrdinal     = 0
         })
 }
@@ -162,7 +163,18 @@ function Invoke-ReplSql {
     $connStr = "Server=$Instance;Database=$Database;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=30;Application Name=MemLabs-MPReplica"
     $conn = New-Object System.Data.SqlClient.SqlConnection $connStr
     try {
-        $conn.Open()
+        # Retry the connection OPEN a few times -- it is idempotent (nothing has run
+        # yet) and this rides out transient blips: a replica SQL still coming up, or
+        # the SQL service restart that STEP 4 performs after applying the identity cert.
+        $openTry = 0
+        while ($true) {
+            try { $conn.Open(); break }
+            catch {
+                $openTry++
+                if ($openTry -ge 3) { throw }
+                Start-Sleep -Seconds 4
+            }
+        }
         $cmd = $conn.CreateCommand()
         $cmd.CommandText = $Query
         $cmd.CommandTimeout = 300
@@ -260,6 +272,37 @@ $hardFailed = $false
 # ===========================================================================
 # STEP 1 - Prerequisites on the site + each replica SQL instance.
 # ===========================================================================
+# A replica SQL host may still be booting when this step runs (its VM was just
+# started/restored), so wait for BOTH its SQL Engine (a bare connection) and WinRM
+# (Set-InstancePrereqs / STEP 3-4 use Invoke-Command) before configuring it.
+function Wait-ReplicaReady {
+    param([string]$Instance, [string]$Computer, [string]$Label, [int]$TimeoutSec = 300)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $sqlOk = $false
+    $winrmOk = $false
+    $announced = $false
+    while ($true) {
+        if (-not $sqlOk) {
+            $c = $null
+            try {
+                $c = New-Object System.Data.SqlClient.SqlConnection "Server=$Instance;Database=master;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=5"
+                $c.Open()
+                $sqlOk = $true
+            }
+            catch { }
+            finally { if ($c) { $c.Dispose() } }
+        }
+        if (-not $winrmOk) {
+            try { [void](Test-WSMan -ComputerName $Computer -ErrorAction Stop); $winrmOk = $true }
+            catch { }
+        }
+        if ($sqlOk -and $winrmOk) { return $true }
+        if ((Get-Date) -ge $deadline) { return $false }
+        if (-not $announced) { Write-DscStatus "$Tag [$Label] waiting up to $([int]($TimeoutSec/60)) min for replica to become ready (SQL=$sqlOk WinRM=$winrmOk)..."; $announced = $true }
+        Start-Sleep -Seconds 15
+    }
+}
+
 function Set-InstancePrereqs {
     param([string]$Instance, [bool]$IsReplica, [string]$Label, [string]$SqlHost)
 
@@ -320,7 +363,13 @@ $isSiteSqlLocal = ($siteSqlShort -ieq $env:COMPUTERNAME)
 
 Set-InstancePrereqs -Instance $siteSqlConn -IsReplica $false -Label 'Site' -SqlHost $siteSqlMachineFqdn
 foreach ($t in $targets) {
-    Set-InstancePrereqs -Instance $t.ReplicaConn -IsReplica $true -Label "Replica[$($t.MPName)]" -SqlHost $t.ReplicaShort
+    $rl = "Replica[$($t.MPName)]"
+    if (-not (Wait-ReplicaReady -Instance $t.ReplicaConn -Computer $t.ReplicaShort -Label $rl)) {
+        Write-DscStatus "$Tag WARNING [$rl] replica SQL/WinRM not reachable after waiting; skipping this replica (bring $($t.ReplicaShort) online and re-run)."
+        $t.NotReady = $true
+        continue
+    }
+    Set-InstancePrereqs -Instance $t.ReplicaConn -IsReplica $true -Label $rl -SqlHost $t.ReplicaShort
 }
 
 # ===========================================================================
@@ -438,6 +487,11 @@ if (-not $hardFailed) {
 
     foreach ($t in $targets) {
         $rlabel = "Replica[$($t.MPName)]"
+        if ($t.NotReady) {
+            Write-DscStatus "$Tag [$rlabel] skipped -- replica SQL host was not reachable in STEP 1 (bring $($t.ReplicaShort) online and re-run)." -Failure
+            $hardFailed = $true
+            continue
+        }
         Write-DscStatus "$Tag ===== $($t.MPName) -> $($t.ReplicaConn) / $($t.ReplicaDbName) (ordinal $($t.CertOrdinal)) ====="
 
         # -------------------------------------------------------------------
