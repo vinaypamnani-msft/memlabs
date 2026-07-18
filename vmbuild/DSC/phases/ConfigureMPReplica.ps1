@@ -485,6 +485,25 @@ if (-not $hardFailed) {
     }
     catch { Write-DscStatus "$Tag WARNING: could not read site @@SERVERNAME; using $siteSqlServer for replication names." }
 
+    # Re-run safety (site side): STEP 5.3 imports each replica's SSB cert as
+    # master certificate ConfigMgrEndPointCert<DBhash> (CREATE CERTIFICATE ... FROM FILE).
+    # The replica reuses its SSB cert across runs (sp_BgbConfigSSBForReplicaDB creates it
+    # IF NOT EXISTS), so an old-hash cert on the site holds the SAME content the new-hash
+    # import would add -> "this certificate already has been added to the database". Drop
+    # any ConfigMgrEndPointCert0x% cert (in master) that is NOT the SSB endpoint cert and
+    # does NOT correspond to a CURRENT v_BgbMP replica hash, so 5.3 can import cleanly.
+    try {
+        Invoke-ReplSql -Instance $siteSqlConn -Database 'master' -Query @"
+DECLARE @c SYSNAME = (SELECT TOP 1 c.name FROM sys.certificates c WHERE c.name LIKE 'ConfigMgrEndPointCert0x%' AND c.certificate_id NOT IN (SELECT certificate_id FROM sys.service_broker_endpoints WHERE certificate_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM [$siteDbName].dbo.v_BgbMP m WHERE 'ConfigMgrEndPointCert' + m.DBID = c.name));
+WHILE @c IS NOT NULL
+BEGIN
+    EXEC('DROP CERTIFICATE [' + @c + ']');
+    SET @c = (SELECT TOP 1 c.name FROM sys.certificates c WHERE c.name LIKE 'ConfigMgrEndPointCert0x%' AND c.certificate_id NOT IN (SELECT certificate_id FROM sys.service_broker_endpoints WHERE certificate_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM [$siteDbName].dbo.v_BgbMP m WHERE 'ConfigMgrEndPointCert' + m.DBID = c.name));
+END
+"@
+    }
+    catch { Write-DscStatus "$Tag WARNING: stale endpoint-cert cleanup failed: $($_.Exception.Message)" }
+
     foreach ($t in $targets) {
         $rlabel = "Replica[$($t.MPName)]"
         if ($t.NotReady) {
