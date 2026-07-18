@@ -856,8 +856,13 @@ function Repair-VmCimServer {
     )
 
     # Step 1: restart the WMI service inside the guest via PSDirect.
+    # MUST run -AsJob: Invoke-VmCommand only honors -TimeoutSeconds on the -AsJob
+    # path. A guest whose WMI is truly wedged makes 'Restart-Service Winmgmt -Force'
+    # (it stops/starts dependent services too) block indefinitely, and a SYNCHRONOUS
+    # Invoke-Command over PSDirect has no timeout -- it would hang this whole repair
+    # (and the caller's Phase 11 job) forever. -AsJob lets the 120s Wait-Job reap it.
     Write-Log "[Phase $Phase]: ${VmName}: Guest WMI/CIM server unresponsive. Restarting winmgmt in-guest..." -Warning
-    $restart = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -DisplayName "Restart guest WMI (winmgmt)" -TimeoutSeconds 120 -ScriptBlock {
+    $restart = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -AsJob -DisplayName "Restart guest WMI (winmgmt)" -TimeoutSeconds 120 -ScriptBlock {
         try {
             # -Force also restarts winmgmt's dependent services.
             Restart-Service -Name Winmgmt -Force -ErrorAction Stop
@@ -896,8 +901,9 @@ function Repair-VmCimServer {
         return $false
     }
 
-    # Probe CIM again after the reboot.
-    $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -DisplayName "Probe guest CIM after reboot" -TimeoutSeconds 120 -ScriptBlock {
+    # Probe CIM again after the reboot. -AsJob so the 120s timeout is enforced
+    # (a still-wedged guest must not hang this synchronous probe indefinitely).
+    $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -AsJob -DisplayName "Probe guest CIM after reboot" -TimeoutSeconds 120 -ScriptBlock {
         try {
             $null = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
             return $true
