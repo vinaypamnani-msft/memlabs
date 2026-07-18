@@ -421,80 +421,72 @@ if (-not $hardFailed) {
             # TRUSTWORTHY ON (doc Step 2.3) now that the DB exists.
             Invoke-ReplSql -Instance $t.ReplicaConn -Query "ALTER DATABASE [$($t.ReplicaDbName)] SET TRUSTWORTHY ON;"
 
-            # Publisher side: register the pull subscriber. Per-subscriber: the guard
-            # must match THIS subscriber+destination, otherwise once the first replica
-            # subscribes the publication-wide check would skip all remaining replicas.
-            # sysservers.srvid maps to syssubscriptions.srvid; a subscriber isn't in
-            # sysservers until sp_addsubscription registers it, so a brand-new replica
-            # never matches and gets added. TRY/CATCH tolerates re-run duplicates.
-            Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
-BEGIN TRY
-    IF NOT EXISTS (
-        SELECT 1
-        FROM syssubscriptions s
-        JOIN sysarticles a ON s.artid = a.artid
-        JOIN syspublications p ON a.pubid = p.pubid
-        LEFT JOIN master.sys.servers srv ON srv.server_id = s.srvid
-        WHERE p.name = 'ConfigMgr_MPReplica'
-          AND s.dest_db = N'$($t.ReplicaDbName)'
-          AND srv.name = N'$($t.ReplicaSqlName)'
-    )
-        EXEC sp_addsubscription @publication = N'ConfigMgr_MPReplica', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)', @subscription_type = N'pull', @sync_type = N'automatic', @article = N'all', @update_mode = N'read only', @subscriber_type = 0;
-END TRY
-BEGIN CATCH
-    IF ERROR_MESSAGE() NOT LIKE '%already%' THROW;
-END CATCH
-"@
-            # Subscriber side: pull subscription + agent (idempotent).
-            Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
-DECLARE @needSub bit = 0;
--- MSreplication_subscriptions does not exist in a replica DB until the first
--- pull subscription is added. Referencing a missing table inside an IF predicate
--- fails to compile even when guarded, so gate on OBJECT_ID first (the table
--- reference is only compiled in the ELSE IF branch, when it exists).
-IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NULL
-    SET @needSub = 1;
-ELSE IF NOT EXISTS (SELECT 1 FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica')
-    SET @needSub = 1;
-IF @needSub = 1
+            # -------------------------------------------------------------------
+            # Subscription: SELF-HEALING (not just "create if missing"). A replica that
+            # has already synced (XMLConfigStore replicated) is left completely untouched
+            # -> idempotent no-op on re-run. Otherwise the subscription is rebuilt from
+            # clean: any leftover pull subscription (subscriber) and publisher entry from
+            # a prior/failed run are dropped, then re-added FRESH. This is deliberate --
+            # a subscription left half-initialized by a prior run gets marked "initialized"
+            # WITHOUT data, so the Snapshot Agent reports "no subscriptions needed
+            # initialization" and the replica stays empty forever. A freshly added
+            # @sync_type='automatic' subscription is always PENDING initialization, so the
+            # Snapshot Agent generates a snapshot for it. Re-running the phase therefore
+            # repairs a stuck replica instead of skipping over the broken state.
+            # -------------------------------------------------------------------
+            $alreadySynced = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL SELECT c = COUNT(*) FROM dbo.XMLConfigStore WHERE Name = N'MPReplicaServiceBrokerConfiguration' ELSE SELECT c = 0"
+            if ([int]$alreadySynced.c -gt 0) {
+                Write-DscStatus "$Tag [$rlabel] replica already synced (XMLConfigStore present); leaving subscription untouched."
+            }
+            else {
+                # Drop any leftover pull subscription on the subscriber (also removes its
+                # Distribution Agent job) so we can re-add a clean, pending one.
+                Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
+IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica')
 BEGIN
-    EXEC sp_addpullsubscription @publisher = N'$siteSqlServer', @publication = N'ConfigMgr_MPReplica', @publisher_db = N'$siteDbName', @independent_agent = N'True', @subscription_type = N'pull', @update_mode = N'read only', @immediate_sync = 0;
-    EXEC sp_addpullsubscription_agent @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica', @distributor = N'$siteSqlServer', @job_login = NULL, @job_password = NULL, @distributor_security_mode = 1;
+    BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY
+    BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
 END
 "@
-            Write-DscStatus "$Tag [$rlabel] pull subscription ensured."
+                # Drop any leftover subscription entry on the publisher (per-subscriber:
+                # sysservers.srvid maps to syssubscriptions.srvid; matched on dest_db +
+                # subscriber name so other replicas' subscriptions are left alone).
+                Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
+IF OBJECT_ID('dbo.syspublications') IS NOT NULL AND EXISTS (
+    SELECT 1 FROM syssubscriptions s
+    JOIN sysarticles a ON s.artid = a.artid
+    JOIN syspublications p ON a.pubid = p.pubid
+    LEFT JOIN master.sys.servers srv ON srv.server_id = s.srvid
+    WHERE p.name = 'ConfigMgr_MPReplica' AND s.dest_db = N'$($t.ReplicaDbName)' AND srv.name = N'$($t.ReplicaSqlName)')
+BEGIN
+    BEGIN TRY EXEC sp_dropsubscription @publication = N'ConfigMgr_MPReplica', @article = N'all', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)'; END TRY
+    BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' THROW; END CATCH
+END
+"@
+                # Add fresh subscription on the publisher (pending initialization).
+                Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_addsubscription @publication = N'ConfigMgr_MPReplica', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)', @subscription_type = N'pull', @sync_type = N'automatic', @article = N'all', @update_mode = N'read only', @subscriber_type = 0;"
+                # Add fresh pull subscription + Distribution Agent on the subscriber.
+                Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
+EXEC sp_addpullsubscription @publisher = N'$siteSqlServer', @publication = N'ConfigMgr_MPReplica', @publisher_db = N'$siteDbName', @independent_agent = N'True', @subscription_type = N'pull', @update_mode = N'read only', @immediate_sync = 0;
+EXEC sp_addpullsubscription_agent @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica', @distributor = N'$siteSqlServer', @job_login = NULL, @job_password = NULL, @distributor_security_mode = 1;
+"@
+                Write-DscStatus "$Tag [$rlabel] pull subscription (re)created clean."
 
-            # immediate_sync=0: the Snapshot Agent only generates a snapshot for
-            # subscriptions that are PENDING initialization. A subscription left over
-            # from a prior run can be marked initialized WITHOUT data ("A snapshot was
-            # not generated because no subscriptions needed initialization"), so the
-            # replica never receives anything. When the replica DB is not yet synced,
-            # mark the subscription for reinitialization (so the Snapshot Agent has
-            # something to generate), then start the Snapshot Agent (distributor) and the
-            # pull Distribution Agent (replica; created stopped -> runs at SQL Agent
-            # startup, so it must be started explicitly).
-            try {
-                $alreadySynced = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL SELECT c = COUNT(*) FROM dbo.XMLConfigStore WHERE Name = N'MPReplicaServiceBrokerConfiguration' ELSE SELECT c = 0"
-                if ([int]$alreadySynced.c -gt 0) {
-                    Write-DscStatus "$Tag [$rlabel] replica already synced (XMLConfigStore present); skipping re-init."
-                }
-                else {
-                    try { Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_reinitsubscription @publication = N'ConfigMgr_MPReplica', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)'" }
-                    catch { Write-DscStatus "$Tag WARNING [$rlabel] sp_reinitsubscription: $($_.Exception.Message)" }
-                    Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
+                # Start the Snapshot Agent (distributor) to generate the snapshot for the
+                # now-pending subscription, then start the pull Distribution Agent (replica;
+                # created stopped -> only runs at SQL Agent startup) to apply it.
+                Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
 DECLARE @job SYSNAME;
 SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Snapshot' AND s.command LIKE '%ConfigMgr_MPReplica%';
 IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; END TRY BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%already running%' THROW; END CATCH END
 "@
-                    Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
+                Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
 DECLARE @job SYSNAME;
 SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Distribution' AND s.command LIKE '%ConfigMgr_MPReplica%';
 IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; END TRY BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%already running%' THROW; END CATCH END
 "@
-                    Write-DscStatus "$Tag [$rlabel] subscription re-initialized; snapshot + distribution agents started."
-                }
+                Write-DscStatus "$Tag [$rlabel] snapshot + distribution agents started."
             }
-            catch { Write-DscStatus "$Tag WARNING [$rlabel] could not drive replication init: $($_.Exception.Message)" }
 
             # MP machine account: login + db_datareader on the replica DB.
             $mpLogin = $t.MPAccount
