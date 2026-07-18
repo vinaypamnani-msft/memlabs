@@ -227,12 +227,30 @@ function Write-MPReplicaDiagnostics {
     catch { Write-DscStatus "$Tag [Diag] agent-history query failed: $($_.Exception.Message)" }
     foreach ($t in @($Targets)) {
         try {
-            $rb = Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT b = ISNULL((SELECT is_broker_enabled FROM sys.databases WHERE name = N'$($t.ReplicaDbName)'), -1)"
+            $rb = Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT b = ISNULL((SELECT CONVERT(int, is_broker_enabled) FROM sys.databases WHERE name = N'$($t.ReplicaDbName)'), -1)"
             $sub = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL SELECT c = COUNT(*) FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica' ELSE SELECT c = 0"
             $xc = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL SELECT c = COUNT(*) FROM dbo.XMLConfigStore WHERE Name = 'MPReplicaServiceBrokerConfiguration' ELSE SELECT c = 0"
             Write-DscStatus "$Tag [Diag][Replica $($t.MPName)/$($t.ReplicaDbName)] broker_enabled=$($rb.b) pull_subscriptions=$($sub.c) replicated_XMLConfigStore=$($xc.c) (0 XMLConfigStore = initial snapshot not applied)"
         }
-        catch { Write-DscStatus "$Tag [Diag][Replica $($t.MPName)] query failed: $($_.Exception.Message)" }
+        catch { Write-DscStatus "$Tag [Diag][Replica $($t.MPName)] state query failed: $($_.Exception.Message)" }
+        # Subscriber-side SQL Agent job history for the pull Distribution Agent. This is
+        # the ONLY place the real failure shows up: a pull agent that cannot connect to
+        # the distributor (login/PAL/snapshot-share) fails on the subscriber and never
+        # writes to the distributor's MSdistribution_history (which then stays at the
+        # initial "subscription added" row). run_status 0=Fail 1=Succeed 2=Retry 3=Cancel.
+        try {
+            $jh = Invoke-ReplSql -Instance $t.ReplicaConn -Query @"
+SELECT TOP 4 st = h.run_status, msg = LEFT(ISNULL(h.[message],''),350)
+FROM msdb.dbo.sysjobhistory h
+JOIN msdb.dbo.sysjobsteps s ON s.job_id = h.job_id AND s.step_id = h.step_id
+WHERE s.subsystem = 'Distribution' AND s.command LIKE '%ConfigMgr_MPReplica%' AND h.step_id > 0
+ORDER BY h.run_date DESC, h.run_time DESC
+"@
+            $any = $false
+            foreach ($row in @($jh)) { $any = $true; Write-DscStatus "$Tag [Diag][Replica $($t.MPName)][DistAgentJob] run_status=$($row.st): $($row.msg)" }
+            if (-not $any) { Write-DscStatus "$Tag [Diag][Replica $($t.MPName)][DistAgentJob] no job-history rows (Distribution Agent has not run yet)." }
+        }
+        catch { Write-DscStatus "$Tag [Diag][Replica $($t.MPName)] job-history query failed: $($_.Exception.Message)" }
     }
     Write-DscStatus "$Tag ===== end diagnostics (run Test-MPDatabaseReplicaHealth.ps1 for the full report) ====="
 }
@@ -466,9 +484,16 @@ END
                 # Add fresh subscription on the publisher (pending initialization).
                 Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_addsubscription @publication = N'ConfigMgr_MPReplica', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)', @subscription_type = N'pull', @sync_type = N'automatic', @article = N'all', @update_mode = N'read only', @subscriber_type = 0;"
                 # Add fresh pull subscription + Distribution Agent on the subscriber.
+                # The Distribution Agent is scheduled to run every 5 minutes with no end
+                # date (frequency_type=4 daily, frequency_subday=4 minutes, interval=5),
+                # exactly as the documented New Subscription Wizard configures it. The
+                # default (@frequency_type=64) only runs the agent once at SQL Agent
+                # startup, so with @immediate_sync=0 it would run once before the snapshot
+                # is ready, find nothing to apply, and never retry -- leaving the replica
+                # empty (Distribution Agent history stuck at "subscription added").
                 Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
 EXEC sp_addpullsubscription @publisher = N'$siteSqlServer', @publication = N'ConfigMgr_MPReplica', @publisher_db = N'$siteDbName', @independent_agent = N'True', @subscription_type = N'pull', @update_mode = N'read only', @immediate_sync = 0;
-EXEC sp_addpullsubscription_agent @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica', @distributor = N'$siteSqlServer', @job_login = NULL, @job_password = NULL, @distributor_security_mode = 1;
+EXEC sp_addpullsubscription_agent @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica', @distributor = N'$siteSqlServer', @job_login = NULL, @job_password = NULL, @distributor_security_mode = 1, @frequency_type = 4, @frequency_interval = 1, @frequency_relative_interval = 0, @frequency_recurrence_factor = 0, @frequency_subday = 4, @frequency_subday_interval = 5, @active_start_time_of_day = 0, @active_end_time_of_day = 235959;
 "@
                 Write-DscStatus "$Tag [$rlabel] pull subscription (re)created clean."
 
