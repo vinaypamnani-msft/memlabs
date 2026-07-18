@@ -886,6 +886,27 @@ if (-not $hardFailed) {
     }
 }
 
+# Self-clean the site DB: drop leftover replica BGB routes whose remote service no
+# longer matches a CURRENT v_BgbMP replica DBID (orphans from an older build that used
+# a different DB-hash). The hash is deterministic now, so a live replica's route is the
+# same name every run and gets reused in place -- this only removes orphans, and never
+# touches the LOCAL route or any current replica's route (filtered to 'ConfigMgrBGB_Site0x%'
+# services that have no matching v_BgbMP row). Prevents stale routes from accumulating.
+if (-not $hardFailed) {
+    try {
+        Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
+DECLARE @rt SYSNAME = (SELECT TOP 1 r.name FROM sys.routes r WHERE r.remote_service_name LIKE 'ConfigMgrBGB[_]Site0x%' AND NOT EXISTS (SELECT 1 FROM v_BgbMP m WHERE 'ConfigMgrBGB_Site' + m.DBID = r.remote_service_name));
+WHILE @rt IS NOT NULL
+BEGIN
+    EXEC('DROP ROUTE [' + @rt + ']');
+    SET @rt = (SELECT TOP 1 r.name FROM sys.routes r WHERE r.remote_service_name LIKE 'ConfigMgrBGB[_]Site0x%' AND NOT EXISTS (SELECT 1 FROM v_BgbMP m WHERE 'ConfigMgrBGB_Site' + m.DBID = r.remote_service_name));
+END
+"@
+        Write-DscStatus "$Tag Cleaned up any stale (orphaned-hash) replica BGB routes on the site DB."
+    }
+    catch { Write-DscStatus "$Tag WARNING: stale-route cleanup failed: $($_.Exception.Message)" }
+}
+
 if ($hardFailed) {
     try { Write-MPReplicaDiagnostics -SiteInstance $siteSqlConn -SiteDb $siteDbName -Targets $targets }
     catch { Write-DscStatus "$Tag WARNING: diagnostics collection failed: $($_.Exception.Message)" }
