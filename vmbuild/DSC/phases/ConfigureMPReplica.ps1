@@ -485,13 +485,20 @@ if (-not $hardFailed) {
                 # Distribution Agent job) so we can re-add a clean, pending one. Try both
                 # the @@SERVERNAME and the legacy FQDN publisher name so a subscription
                 # left by an older build (which used the FQDN) is also cleaned up.
+                # NOTE: nested IF -- a freshly CREATEd replica DB has no
+                # MSreplication_subscriptions table; referencing it in the same predicate
+                # as the OBJECT_ID guard fails to compile ("Invalid object name"), so the
+                # EXISTS must live inside the outer IF block (deferred compilation).
                 Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
-IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica')
+IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL
 BEGIN
-    BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$sitePublisherName', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY
-    BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
-    BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY
-    BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
+    IF EXISTS (SELECT 1 FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica')
+    BEGIN
+        BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$sitePublisherName', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY
+        BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
+        BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY
+        BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
+    END
 END
 "@
                 # Drop any leftover publisher-side subscription for this replica, under
