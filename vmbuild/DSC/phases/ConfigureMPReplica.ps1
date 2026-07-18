@@ -617,19 +617,33 @@ IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job;
                 Write-DscStatus "$Tag [$rlabel] snapshot + distribution agents started."
             }
 
-            # MP machine account: login + db_datareader on the replica DB.
+            # MP machine account: sysadmin on the replica instance.
+            #
+            # The MP's IIS ISAPI connects to the replica DB AS THIS COMPUTER ACCOUNT and
+            # must EXECUTE the MP_* stored procedures (MPLIST, machine/user policy,
+            # content location). Those procs are granted to the smsdbrole_MP role in the
+            # SITE DB, but that role's EXECUTE grants do NOT survive transactional
+            # replication to the subscriber -- so on the replica the MP account can only
+            # do what we grant it directly. db_datareader gives SELECT only (never
+            # EXECUTE), so the MP gets permission-denied on every proc call and serves
+            # HTTP 500 on .sms_aut?MPLIST.
+            #
+            # The MP-replica docs pair "db_datareader" (Step 3) with "add the MP computer
+            # account to the local Administrators group on the replica server" (Step 2.6),
+            # which is SQL-sysadmin-equivalent -- that admin/sysadmin membership, not
+            # db_datareader, is what actually lets the MP run the procs. We grant sysadmin
+            # to the MP login directly here: it is the deterministic form of "admin on
+            # SQL" and works regardless of whether BUILTIN\Administrators is mapped to
+            # sysadmin on the (plain, pre-provisioned) replica SQL instance. A sysadmin
+            # login maps to dbo in the replica DB, so no separate db user/role is needed.
             $mpLogin = $t.MPAccount
             Invoke-ReplSql -Instance $t.ReplicaConn -Query @"
 IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'$mpLogin')
     CREATE LOGIN [$mpLogin] FROM WINDOWS;
+IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
+    ALTER SERVER ROLE sysadmin ADD MEMBER [$mpLogin];
 "@
-            Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$mpLogin')
-    CREATE USER [$mpLogin] FOR LOGIN [$mpLogin];
-IF NOT EXISTS (SELECT 1 FROM sys.database_role_members drm JOIN sys.database_principals r ON r.principal_id = drm.role_principal_id JOIN sys.database_principals m ON m.principal_id = drm.member_principal_id WHERE r.name = 'db_datareader' AND m.name = N'$mpLogin')
-    ALTER ROLE db_datareader ADD MEMBER [$mpLogin];
-"@
-            Write-DscStatus "$Tag [$rlabel] MP account $mpLogin granted db_datareader."
+            Write-DscStatus "$Tag [$rlabel] MP account $mpLogin granted sysadmin on the replica instance."
 
             # MP machine account -> local Administrators on the replica server (skip if MP == replica).
             if (-not $t.IsLocalToMP) {
