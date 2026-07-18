@@ -4228,6 +4228,24 @@ function Test-MPReplicaFunctionality {
             return $results
         }
 
+        # Per-MP stored SQL server + database (RoleTypeID 6 = MP; Value2 holds the
+        # SQLServerName / DatabaseName the MP actually connects to). Used to verify the
+        # stored DatabaseName is CONNECTABLE (not MSSQLSERVER-qualified) and to reach each
+        # replica DB for the BGB queue check. Matches Test-MPDatabaseReplicaHealth.ps1.
+        $mpProps = @()
+        try {
+            $mpProps = @(Invoke-Sqlcmd -ServerInstance $inst -Database $db -TrustServerCertificate -ErrorAction Stop -Query @"
+SELECT ServerName = dbo.fnGetSiteSystemName(sys_res.NALPath),
+       SQLServerName = MAX(CASE WHEN prop.Name = N'SQLServerName' THEN prop.Value2 END),
+       DatabaseName  = MAX(CASE WHEN prop.Name = N'DatabaseName'  THEN prop.Value2 END)
+FROM SC_SysResUse sys_res
+JOIN SC_SysResUse_Property prop ON prop.SysResUseID = sys_res.ID
+WHERE sys_res.RoleTypeID = 6
+GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
+"@)
+        }
+        catch { $results.Details.Add("WARN: could not read MP role SQL/DB properties: $($_.Exception.Message)") }
+
         # SQL replication must be ENABLED on the site DB (publisher). syspublications
         # only exists once the DB is a publisher, so guard on OBJECT_ID. The number of
         # distinct subscribers should cover the replica MPs.
@@ -4271,6 +4289,45 @@ function Test-MPReplicaFunctionality {
                 else {
                     $results.Passed = $false
                     $results.Details.Add("FAIL: site missing route to service ConfigMgrBGB_Site$dbid (root cause of BGB 'Route is not defined')")
+                }
+
+                # Stored SQL server + DB for this MP (what the MP connects to).
+                $prop = @($mpProps | Where-Object { "$($_.ServerName)".ToLower() -eq $mp.ToLower() }) | Select-Object -First 1
+                $storedSql = if ($prop) { "$($prop.SQLServerName)".Trim() } else { '' }
+                $storedDb = if ($prop) { "$($prop.DatabaseName)".Trim() } else { '' }
+
+                # NOTE 1: the stored DatabaseName must be CONNECTABLE. A DEFAULT instance
+                # must be the BARE db name; 'MSSQLSERVER\<db>' makes the MP build an invalid
+                # 'server\MSSQLSERVER' connection string -> MPLIST HTTP 500 (SqlException
+                # error 25 / Win32 87). Only a real NAMED instance may carry an 'inst\' prefix.
+                if ($storedDb -like 'MSSQLSERVER\*') {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: MP '$mp' stored DatabaseName is '$storedDb' -- a DEFAULT instance must NOT be qualified with MSSQLSERVER; the MP builds an invalid 'server\MSSQLSERVER' connection string (MPLIST HTTP 500). Expected the bare DB name.")
+                }
+                elseif ($storedDb) {
+                    $results.Details.Add("OK: MP '$mp' stored DatabaseName '$storedDb' is connectable (SQLServerName '$storedSql')")
+                }
+                else {
+                    $results.Details.Add("WARN: MP '$mp' stored SQLServerName/DatabaseName not found in SC_SysResUse")
+                }
+
+                # NOTE 2: the replica DB must have the BGB Service Broker queue
+                # 'ConfigMgrBGBQueue', or the MP's BgbServer logs 'The queue for BGB server
+                # doesn't exist' and client notification is broken. Connect to the replica
+                # DB (parse instance from the stored DatabaseName) and confirm it.
+                if ($storedSql -and $storedDb) {
+                    if ($storedDb -match '\\') { $rInst = "$storedSql\$($storedDb.Split('\')[0])"; $rDb = $storedDb.Split('\')[1] } else { $rInst = $storedSql; $rDb = $storedDb }
+                    try {
+                        $qRow = Invoke-Sqlcmd -ServerInstance $rInst -Database $rDb -TrustServerCertificate -ErrorAction Stop -Query "SELECT c = COUNT(*) FROM sys.service_queues WHERE name = 'ConfigMgrBGBQueue'"
+                        if ([int]$qRow.c -gt 0) {
+                            $results.Details.Add("OK: replica DB '$rDb' on '$rInst' has the BGB queue ConfigMgrBGBQueue (client notification wired)")
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: replica DB '$rDb' on '$rInst' is MISSING the BGB queue ConfigMgrBGBQueue -- BgbServer logs 'The queue for BGB server doesn't exist' and client notification won't work (sp_BgbConfigSSBForReplicaDB did not complete on this replica)")
+                        }
+                    }
+                    catch { $results.Details.Add("WARN: could not check BGB queue on replica '$rInst' / '$rDb': $($_.Exception.Message)") }
                 }
             }
             else {
