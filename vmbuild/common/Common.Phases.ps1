@@ -3205,7 +3205,7 @@ function Get-GuestTimingStats {
         if (-not $vmObj -or $vmObj.State -ne 'Running') { continue }
 
         try {
-            $json = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -TimeoutSeconds 30 -ScriptBlock {
+            $json = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -AsJob -TimeoutSeconds 30 -ScriptBlock {
                 $path = "C:\staging\DSC\ScriptWorkflow.json"
                 if (Test-Path $path) { Get-Content $path -Raw } else { $null }
             }

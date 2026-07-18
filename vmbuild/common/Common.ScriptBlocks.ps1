@@ -4739,7 +4739,7 @@ $global:VM_Config = {
                         $null = Start-DscConfiguration -Path $dscConfigPath -Force -Verbose
                         return "STARTED"
                     }
-                    $recoveryResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_RecoverLocal -ArgumentList $DscFolder -DisplayName "DSC: Local Recovery" -TimeoutSeconds 300
+                    $recoveryResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_RecoverLocal -ArgumentList $DscFolder -DisplayName "DSC: Local Recovery" -AsJob -TimeoutSeconds 300
                     $recoveryOutput = if ($recoveryResult.ScriptBlockOutput) { $recoveryResult.ScriptBlockOutput } else { "no output" }
                     if ($recoveryResult.ScriptBlockFailed) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC local recovery failed: $recoveryOutput" -Warning

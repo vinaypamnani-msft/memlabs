@@ -149,7 +149,7 @@ Write-Log "[Baseline] Upload:       $($Upload.IsPresent)"
 # re-run the generator against an already-synced VM without rebuilding it.
 if ($Reset.IsPresent) {
     Write-Log "[Baseline] -Reset specified: stopping WSUS, dropping SUSDB, clearing content, re-running postinstall..." -Warning
-    $resetResult = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Baseline: reset WSUS" -ScriptBlock {
+    $resetResult = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -AsJob -TimeoutSeconds 1800 -DisplayName "Baseline: reset WSUS" -ScriptBlock {
         try {
             # Read WSUS configuration from registry. ContentDir + SqlServerName
             # tell us where SUSDB lives (WID vs local/remote SQL).
@@ -415,7 +415,7 @@ if ($Upload.IsPresent) {
 
     # Run wsusutil import. Same invocation Start-WsusBaselineImportBackground uses.
     Write-Log "[Baseline] Running wsusutil import on $VmName (may take several minutes)..."
-    $import = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Upload: wsusutil import" -ScriptBlock {
+    $import = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -AsJob -TimeoutSeconds 1800 -DisplayName "Upload: wsusutil import" -ScriptBlock {
         param($cab, $log)
         try {
             $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
@@ -549,7 +549,7 @@ if ($Resume.IsPresent) {
 }
 else {
 Write-Log "[Baseline] Hardening WsusPool and kicking minimal-scope categories sync..."
-$kick = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 300 -DisplayName "Baseline: start categories sync" -ScriptBlock {
+$kick = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -AsJob -TimeoutSeconds 300 -DisplayName "Baseline: start categories sync" -ScriptBlock {
     try {
         $wsus = Get-WsusServer -ErrorAction Stop
         $sub = $wsus.GetSubscription()
@@ -595,7 +595,7 @@ while ((Get-Date) -lt $pollDeadline) {
         Start-Sleep -Seconds 60
     }
     $pollIdx++
-    $poll = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 120 -DisplayName "Baseline: poll #$pollIdx" -SuppressLog -ScriptBlock {
+    $poll = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -AsJob -TimeoutSeconds 120 -DisplayName "Baseline: poll #$pollIdx" -SuppressLog -ScriptBlock {
         try {
             $wsus = Get-WsusServer -ErrorAction Stop
             $sub = $wsus.GetSubscription()
@@ -651,7 +651,7 @@ Write-Log "[Baseline] Sync complete. Status=$($syncResult.Status), TaxonomyCats=
 $exportGuestPath = "C:\staging\wsus_export\WsusCategoriesBaseline.cab"
 $exportGuestLog = "C:\staging\wsus_export\WsusCategoriesBaseline.export.log"
 Write-Log "[Baseline] Cleaning subscriptions and running wsusutil export..."
-$export = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Baseline: wsusutil export" -ScriptBlock {
+$export = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -AsJob -TimeoutSeconds 1800 -DisplayName "Baseline: wsusutil export" -ScriptBlock {
     param($cabPath, $logPath)
     try {
         $wsus = Get-WsusServer -ErrorAction Stop
