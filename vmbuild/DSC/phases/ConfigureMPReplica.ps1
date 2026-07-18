@@ -805,14 +805,19 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
             $replicaSrvForHash = $t.ReplicaFqdn
             # The BGB SSB service/route name is ConfigMgrBGB_Site<DBID>, where DBID (from
             # v_BgbMP) = fn_varbintohexstr(HASHBYTES('MD5', UPPER(DatabaseName + '.' +
-            # CAST(SQLServerName AS NCHAR(256))))). CM stores DatabaseName INSTANCE-QUALIFIED
-            # ('<Instance>\<DB>', e.g. MSSQLSERVER\CM_PS1 even for the DEFAULT instance --
-            # Set-CMManagementPoint always prefixes the instance). So the @DBName fed to
-            # sp_BgbConfigSSBForReplicaDB (5.2) and sp_BgbConfigSSBForRemoteService (5.3) MUST
-            # be that same instance-qualified name, or the route hash won't match v_BgbMP and
-            # BGB throws "Route is not defined for ConfigMgrBGB_Site<hash>". @ServerName stays
-            # the FQDN with NO instance (the hash excludes the instance from the server part).
-            $replicaDbForHash = "$($t.ReplicaInstance)\$($t.ReplicaDbName)"
+            # CAST(SQLServerName AS NCHAR(256))))). DatabaseName is stored the way
+            # Set-CMManagementPoint records it (STEP 6): a NAMED instance is qualified
+            # '<Instance>\<DB>' (e.g. REPLICA\CM_PS1); the DEFAULT instance is the BARE db
+            # name 'CM_PS1' -- NEVER 'MSSQLSERVER\CM_PS1'. CM treats MSSQLSERVER as "no
+            # instance" (see ConfigMgr DatabaseProxy.cs, which strips 'MSSQLSERVER' to ''),
+            # and a literal 'MSSQLSERVER\' makes the MP build an invalid 'server\MSSQLSERVER'
+            # connection string that fails with "Connection string is not valid / parameter
+            # is incorrect" (SqlException error 25 / Win32 87) -> MPLIST HTTP 500. So @DBName
+            # fed to sp_BgbConfigSSBForReplicaDB (5.2) and sp_BgbConfigSSBForRemoteService
+            # (5.3) must match what STEP 6 stores: bare db for default, instance-qualified
+            # for named -- or the route hash won't match v_BgbMP and BGB throws "Route is
+            # not defined". @ServerName stays the FQDN with NO instance.
+            $replicaDbForHash = if ($t.ReplicaInstance -and $t.ReplicaInstance -ne 'MSSQLSERVER') { "$($t.ReplicaInstance)\$($t.ReplicaDbName)" } else { $t.ReplicaDbName }
 
             # 5.0 Wait for the initial replication snapshot to populate the replica DB.
             # sp_BgbConfigSSBForReplicaDB reads the 'MPReplicaServiceBrokerConfiguration'
@@ -948,10 +953,27 @@ if (-not $hardFailed) {
         . $PSScriptRoot\Connect-CMSite.ps1 -Tag $Tag
         foreach ($t in $targets) {
             $rlabel = "Replica[$($t.MPName)]"
-            $instanceForCmdlet = if ($t.ReplicaInstance) { $t.ReplicaInstance } else { 'MSSQLSERVER' }
+            # A NAMED instance must be passed to Set-CMManagementPoint; the DEFAULT instance
+            # must NOT be. Passing 'MSSQLSERVER' makes CM store DatabaseName as
+            # 'MSSQLSERVER\CM_PS1', and the MP then builds an invalid 'server\MSSQLSERVER'
+            # connection string -> MPLIST 500 / BgbServer "Connection string is not valid,
+            # the parameter is incorrect". Omit the instance for default so CM stores the
+            # bare 'CM_PS1' and the MP connects to the default instance as just 'server'
+            # (matches ConfigMgr DatabaseProxy.cs, which strips 'MSSQLSERVER' to '').
+            $isNamedInstance = ($t.ReplicaInstance -and $t.ReplicaInstance -ne 'MSSQLSERVER')
+            $mpParams = @{
+                SiteSystemServerName = $t.MPFqdn
+                SiteCode             = $SiteCode
+                UseSiteDatabase      = $false
+                SqlServerFqdnName    = $t.ReplicaFqdn
+                DatabaseName         = $t.ReplicaDbName
+                ErrorAction          = 'Stop'
+            }
+            if ($isNamedInstance) { $mpParams['SqlServerInstanceName'] = $t.ReplicaInstance }
+            $instanceLabel = if ($isNamedInstance) { $t.ReplicaInstance } else { '(default)' }
             try {
-                Set-CMManagementPoint -SiteSystemServerName $t.MPFqdn -SiteCode $SiteCode -UseSiteDatabase $false -SqlServerFqdnName $t.ReplicaFqdn -SqlServerInstanceName $instanceForCmdlet -DatabaseName $t.ReplicaDbName -ErrorAction Stop
-                Write-DscStatus "$Tag [$rlabel] MP repointed to replica DB $($t.ReplicaFqdn)\$instanceForCmdlet / $($t.ReplicaDbName)."
+                Set-CMManagementPoint @mpParams
+                Write-DscStatus "$Tag [$rlabel] MP repointed to replica DB $($t.ReplicaFqdn)\$instanceLabel / $($t.ReplicaDbName)."
             }
             catch {
                 Write-DscStatus "$Tag [$rlabel] Set-CMManagementPoint to replica failed: $($_.Exception.Message)" -Failure
