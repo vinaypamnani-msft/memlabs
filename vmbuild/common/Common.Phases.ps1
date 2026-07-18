@@ -1238,6 +1238,40 @@ function Start-PhaseJobs {
             }
         }
 
+        # MP database-replica SQL hosts: the replicaSqlServerVM of each SiteSystem MP
+        # that uses a database replica is (typically) a HIDDEN VM, so it is NOT a Phase 8
+        # DSC node -- Invoke-SmartStartVMs never starts it, and the loop above only covers
+        # site servers' remoteSQLVM. ConfigureMPReplica.ps1 runs on the site server and
+        # connects to these hosts over SQL + WinRM, so bring them Running + reachable first
+        # (otherwise every replica setup fails with "server was not found" / "WinRM cannot
+        # complete the operation"). Best-effort: a host that never comes up is left to
+        # ConfigureMPReplica's own readiness gate (it waits, then skips + reports), so this
+        # does NOT add to $preflightFailures / abort Phase 8.
+        $replicaSqlVMs = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'SiteSystem' -and $_.installMP -and $_.useDatabaseReplica -and $_.replicaSqlServerVM
+            } | ForEach-Object { $_.replicaSqlServerVM } | Where-Object { $_ } | Select-Object -Unique)
+        foreach ($replicaSqlVM in $replicaSqlVMs) {
+            $rvm = Get-VM2 -Name $replicaSqlVM -ErrorAction SilentlyContinue
+            if (-not $rvm) {
+                Write-Log "[Phase 8] MP replica SQL host $replicaSqlVM not found on this Hyper-V host; ConfigureMPReplica will skip its replica(s)." -Warning
+                continue
+            }
+            if ($rvm.State -ne 'Running') {
+                Write-Log "[Phase 8] MP replica SQL host $replicaSqlVM is $($rvm.State); starting it for the MP database-replica setup." -Activity
+                try { Start-VM2 -Name $replicaSqlVM -ErrorAction Stop } catch {
+                    Write-Log "[Phase 8] $replicaSqlVM`: Start-VM2 threw: $($_.Exception.Message)" -Warning
+                }
+                $ready = Wait-ForVm -VmName $replicaSqlVM -PathToVerify 'C:\Users' -VmDomainName $domain -TimeoutMinutes 3 -SkipDiskTest -Quiet
+                if (-not $ready) {
+                    $postState = (Get-VM2 -Name $replicaSqlVM -ErrorAction SilentlyContinue).State
+                    Write-Log "[Phase 8] MP replica SQL host $replicaSqlVM did not become reachable within 3 minutes (state=$postState); ConfigureMPReplica will wait for it and may skip it." -Warning
+                }
+                else {
+                    Write-Log "[Phase 8] MP replica SQL host $replicaSqlVM is Running and reachable." -LogOnly
+                }
+            }
+        }
+
         if ($preflightFailures.Count -gt 0) {
             Write-Log "[Phase 8] Preflight FAILED: $($preflightFailures.Count) site-server/SQL-host pair(s) could not be remediated. Aborting Phase 8 BEFORE dispatching CM Setup jobs -- otherwise dependent nodes (Primary waiting on CAS, secondary waiting on Primary) would block on multi-hour internal timeouts." -Failure
             foreach ($f in $preflightFailures) {
