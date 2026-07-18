@@ -485,20 +485,22 @@ if (-not $hardFailed) {
     }
     catch { Write-DscStatus "$Tag WARNING: could not read site @@SERVERNAME; using $siteSqlServer for replication names." }
 
-    # Re-run safety (site side): STEP 5.3 imports each replica's SSB cert as
-    # master certificate ConfigMgrEndPointCert<DBhash> (CREATE CERTIFICATE ... FROM FILE).
-    # The replica reuses its SSB cert across runs (sp_BgbConfigSSBForReplicaDB creates it
-    # IF NOT EXISTS), so an old-hash cert on the site holds the SAME content the new-hash
-    # import would add -> "this certificate already has been added to the database". Drop
-    # any ConfigMgrEndPointCert0x% cert (in master) that is NOT the SSB endpoint cert and
-    # does NOT correspond to a CURRENT v_BgbMP replica hash, so 5.3 can import cleanly.
+    # Re-run safety (site side): STEP 5.3 imports each replica's SSB cert as master
+    # certificate ConfigMgrEndPointCert<DBhash> via an UNGUARDED CREATE CERTIFICATE ...
+    # FROM FILE. On EVERY re-run that cert already exists (from the prior run's import) ->
+    # "A certificate with name ... already exists / already has been added to the
+    # database", failing 5.3. Since 5.3 re-imports each replica's cert fresh in this same
+    # run, drop ALL imported ConfigMgrEndPointCert0x% certs (in master) that are NOT the
+    # SSB endpoint's own bound transport cert -- including current-hash ones -- so every
+    # replica's 5.3 import succeeds. (An earlier version preserved certs matching a current
+    # v_BgbMP hash, which is exactly the one that collides on a same-hash re-run.)
     try {
         Invoke-ReplSql -Instance $siteSqlConn -Database 'master' -Query @"
-DECLARE @c SYSNAME = (SELECT TOP 1 c.name FROM sys.certificates c WHERE c.name COLLATE Latin1_General_CI_AS LIKE 'ConfigMgrEndPointCert0x%' AND c.certificate_id NOT IN (SELECT certificate_id FROM sys.service_broker_endpoints WHERE certificate_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM [$siteDbName].dbo.v_BgbMP m WHERE (N'ConfigMgrEndPointCert' + m.DBID) COLLATE Latin1_General_CI_AS = c.name COLLATE Latin1_General_CI_AS));
+DECLARE @c SYSNAME = (SELECT TOP 1 c.name FROM sys.certificates c WHERE c.name COLLATE Latin1_General_CI_AS LIKE 'ConfigMgrEndPointCert0x%' AND c.certificate_id NOT IN (SELECT certificate_id FROM sys.service_broker_endpoints WHERE certificate_id IS NOT NULL));
 WHILE @c IS NOT NULL
 BEGIN
     EXEC('DROP CERTIFICATE [' + @c + ']');
-    SET @c = (SELECT TOP 1 c.name FROM sys.certificates c WHERE c.name COLLATE Latin1_General_CI_AS LIKE 'ConfigMgrEndPointCert0x%' AND c.certificate_id NOT IN (SELECT certificate_id FROM sys.service_broker_endpoints WHERE certificate_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM [$siteDbName].dbo.v_BgbMP m WHERE (N'ConfigMgrEndPointCert' + m.DBID) COLLATE Latin1_General_CI_AS = c.name COLLATE Latin1_General_CI_AS));
+    SET @c = (SELECT TOP 1 c.name FROM sys.certificates c WHERE c.name COLLATE Latin1_General_CI_AS LIKE 'ConfigMgrEndPointCert0x%' AND c.certificate_id NOT IN (SELECT certificate_id FROM sys.service_broker_endpoints WHERE certificate_id IS NOT NULL));
 END
 "@
     }
