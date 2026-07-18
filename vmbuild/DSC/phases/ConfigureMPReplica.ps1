@@ -464,25 +464,37 @@ END
 "@
             Write-DscStatus "$Tag [$rlabel] pull subscription ensured."
 
-            # immediate_sync=0: (re)generate the snapshot now that this subscription
-            # exists, then start its pull Distribution Agent (created stopped -- it is
-            # scheduled to run at SQL Agent startup, so it would otherwise never run).
-            # This is what actually drives the initial sync that replicates the tables
-            # (including XMLConfigStore, which STEP 5 needs).
+            # immediate_sync=0: the Snapshot Agent only generates a snapshot for
+            # subscriptions that are PENDING initialization. A subscription left over
+            # from a prior run can be marked initialized WITHOUT data ("A snapshot was
+            # not generated because no subscriptions needed initialization"), so the
+            # replica never receives anything. When the replica DB is not yet synced,
+            # mark the subscription for reinitialization (so the Snapshot Agent has
+            # something to generate), then start the Snapshot Agent (distributor) and the
+            # pull Distribution Agent (replica; created stopped -> runs at SQL Agent
+            # startup, so it must be started explicitly).
             try {
-                Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
+                $alreadySynced = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL SELECT c = COUNT(*) FROM dbo.XMLConfigStore WHERE Name = N'MPReplicaServiceBrokerConfiguration' ELSE SELECT c = 0"
+                if ([int]$alreadySynced.c -gt 0) {
+                    Write-DscStatus "$Tag [$rlabel] replica already synced (XMLConfigStore present); skipping re-init."
+                }
+                else {
+                    try { Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC sp_reinitsubscription @publication = N'ConfigMgr_MPReplica', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)'" }
+                    catch { Write-DscStatus "$Tag WARNING [$rlabel] sp_reinitsubscription: $($_.Exception.Message)" }
+                    Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
 DECLARE @job SYSNAME;
 SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Snapshot' AND s.command LIKE '%ConfigMgr_MPReplica%';
 IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; END TRY BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%already running%' THROW; END CATCH END
 "@
-                Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
+                    Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
 DECLARE @job SYSNAME;
 SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Distribution' AND s.command LIKE '%ConfigMgr_MPReplica%';
 IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; END TRY BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%already running%' THROW; END CATCH END
 "@
-                Write-DscStatus "$Tag [$rlabel] snapshot + distribution agents started."
+                    Write-DscStatus "$Tag [$rlabel] subscription re-initialized; snapshot + distribution agents started."
+                }
             }
-            catch { Write-DscStatus "$Tag WARNING [$rlabel] could not start replication agents: $($_.Exception.Message)" }
+            catch { Write-DscStatus "$Tag WARNING [$rlabel] could not drive replication init: $($_.Exception.Message)" }
 
             # MP machine account: login + db_datareader on the replica DB.
             $mpLogin = $t.MPAccount
