@@ -4296,13 +4296,16 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
                 $storedSql = if ($prop) { "$($prop.SQLServerName)".Trim() } else { '' }
                 $storedDb = if ($prop) { "$($prop.DatabaseName)".Trim() } else { '' }
 
-                # NOTE 1: the stored DatabaseName must be CONNECTABLE. A DEFAULT instance
-                # must be the BARE db name; 'MSSQLSERVER\<db>' makes the MP build an invalid
+                # NOTE 1: the stored DatabaseName must be CONNECTABLE. The MP builds its
+                # connection as 'server\<instance>' from the stored '<instance>\<db>'. A
+                # DEFAULT instance must be the BARE db name -- an instance part that is empty
+                # ('\<db>') or 'MSSQLSERVER' makes the MP build an invalid 'server\' /
                 # 'server\MSSQLSERVER' connection string -> MPLIST HTTP 500 (SqlException
                 # error 25 / Win32 87). Only a real NAMED instance may carry an 'inst\' prefix.
-                if ($storedDb -like 'MSSQLSERVER\*') {
+                $dbInstPart = if ($storedDb -match '\\') { $storedDb.Split('\')[0] } else { $null }
+                if ($null -ne $dbInstPart -and ($dbInstPart -eq '' -or $dbInstPart -ieq 'MSSQLSERVER')) {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: MP '$mp' stored DatabaseName is '$storedDb' -- a DEFAULT instance must NOT be qualified with MSSQLSERVER; the MP builds an invalid 'server\MSSQLSERVER' connection string (MPLIST HTTP 500). Expected the bare DB name.")
+                    $results.Details.Add("FAIL: MP '$mp' stored DatabaseName is '$storedDb' -- its instance part '$dbInstPart' is empty/MSSQLSERVER, so the MP builds an invalid 'server\$dbInstPart' connection string (MPLIST HTTP 500). A default instance must be stored as the BARE DB name (no backslash).")
                 }
                 elseif ($storedDb) {
                     $results.Details.Add("OK: MP '$mp' stored DatabaseName '$storedDb' is connectable (SQLServerName '$storedSql')")

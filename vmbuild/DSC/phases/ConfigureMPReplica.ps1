@@ -955,13 +955,6 @@ if (-not $hardFailed) {
         . $PSScriptRoot\Connect-CMSite.ps1 -Tag $Tag
         foreach ($t in $targets) {
             $rlabel = "Replica[$($t.MPName)]"
-            # A NAMED instance must be passed to Set-CMManagementPoint; the DEFAULT instance
-            # must NOT be. Passing 'MSSQLSERVER' makes CM store DatabaseName as
-            # 'MSSQLSERVER\CM_PS1', and the MP then builds an invalid 'server\MSSQLSERVER'
-            # connection string -> MPLIST 500 / BgbServer "Connection string is not valid,
-            # the parameter is incorrect". Omit the instance for default so CM stores the
-            # bare 'CM_PS1' and the MP connects to the default instance as just 'server'
-            # (matches ConfigMgr DatabaseProxy.cs, which strips 'MSSQLSERVER' to '').
             $isNamedInstance = ($t.ReplicaInstance -and $t.ReplicaInstance -ne 'MSSQLSERVER')
             $mpParams = @{
                 SiteSystemServerName = $t.MPFqdn
@@ -971,11 +964,38 @@ if (-not $hardFailed) {
                 DatabaseName         = $t.ReplicaDbName
                 ErrorAction          = 'Stop'
             }
-            if ($isNamedInstance) { $mpParams['SqlServerInstanceName'] = $t.ReplicaInstance }
+            if ($isNamedInstance) {
+                $mpParams['SqlServerInstanceName'] = $t.ReplicaInstance
+            }
+            else {
+                # DEFAULT instance: CM must store the BARE DB name 'CM_PS1'. It builds the MP's
+                # connection as 'server\<instance>', so a stored 'MSSQLSERVER\CM_PS1' (or an
+                # empty-instance '\CM_PS1') yields an invalid data source -> MPLIST HTTP 500
+                # (BgbServer.log SqlException error 25 'Connection string is not valid'). v_BgbMP
+                # strips the instance for its DBID hash (so routing still matches STEP 5's bare
+                # hash), but the MP's live connection uses the RAW stored value, so it must be
+                # bare. OMITTING -SqlServerInstanceName leaves whatever a prior run stored (the
+                # stale 'MSSQLSERVER\...'). Reset to the site DB first to CLEAR the stored
+                # SQLServerName/DatabaseName, then re-point with an EMPTY instance so CM records
+                # the bare DB name.
+                try { Set-CMManagementPoint -SiteSystemServerName $t.MPFqdn -SiteCode $SiteCode -UseSiteDatabase $true -ErrorAction Stop }
+                catch { Write-DscStatus "$Tag [$rlabel] pre-reset to site DB failed (continuing): $($_.Exception.Message)" }
+                $mpParams['SqlServerInstanceName'] = ''
+            }
             $instanceLabel = if ($isNamedInstance) { $t.ReplicaInstance } else { '(default)' }
             try {
                 Set-CMManagementPoint @mpParams
                 Write-DscStatus "$Tag [$rlabel] MP repointed to replica DB $($t.ReplicaFqdn)\$instanceLabel / $($t.ReplicaDbName)."
+                # Verify what CM actually stored (the value the MP connects with). Bare DB name =
+                # connectable; an instance part that is empty or MSSQLSERVER = broken for the MP.
+                try {
+                    $sd = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "SELECT DatabaseName = MAX(CASE WHEN prop.Name = N'DatabaseName' THEN prop.Value2 END) FROM SC_SysResUse sys_res JOIN SC_SysResUse_Property prop ON prop.SysResUseID = sys_res.ID WHERE sys_res.RoleTypeID = 6 AND dbo.fnGetSiteSystemName(sys_res.NALPath) = N'$($t.MPFqdn)' GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)"
+                    $storedDb = if ($sd) { "$($sd.DatabaseName)" } else { '' }
+                    $instPart = if ($storedDb -match '\\') { $storedDb.Split('\')[0] } else { '' }
+                    $verdict = if ($storedDb -match '\\' -and ($instPart -eq '' -or $instPart -ieq 'MSSQLSERVER')) { 'BROKEN - MP cannot connect' } else { 'connectable' }
+                    Write-DscStatus "$Tag [$rlabel] stored DatabaseName = '$storedDb' ($verdict)."
+                }
+                catch { Write-DscStatus "$Tag [$rlabel] could not read back stored DatabaseName: $($_.Exception.Message)" }
             }
             catch {
                 Write-DscStatus "$Tag [$rlabel] Set-CMManagementPoint to replica failed: $($_.Exception.Message)" -Failure
