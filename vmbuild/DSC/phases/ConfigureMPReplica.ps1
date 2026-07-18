@@ -789,6 +789,29 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_role_members drm JOIN sys.database_pri
             }
             catch { Write-DscStatus "$Tag WARNING [$rlabel] could not pre-clear cert export files: $($_.Exception.Message)" }
 
+            # Re-run safety: sp_BgbConfigSSBForReplicaDB drops the FIXED-name queue
+            # ConfigMgrBGBQueue after dropping only the CURRENT-hash service. A stale
+            # service left by a prior run under a DIFFERENT DB-hash (e.g. before the
+            # instance-qualified hash fix) stays bound to that queue and blocks the drop
+            # ("The queue 'ConfigMgrBGBQueue' cannot be dropped because it is bound to one
+            # or more service"). End any conversations and drop ALL ConfigMgrBGB SSB
+            # services on the replica first; the SP then recreates the correct one.
+            Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
+DECLARE @ch UNIQUEIDENTIFIER;
+DECLARE @svc SYSNAME = (SELECT TOP 1 name FROM sys.services WHERE name LIKE 'ConfigMgrBGB%');
+WHILE @svc IS NOT NULL
+BEGIN
+    WHILE EXISTS (SELECT 1 FROM sys.conversation_endpoints ce JOIN sys.services s ON s.service_id = ce.service_id WHERE s.name = @svc)
+    BEGIN
+        SET @ch = (SELECT TOP 1 ce.conversation_handle FROM sys.conversation_endpoints ce JOIN sys.services s ON s.service_id = ce.service_id WHERE s.name = @svc);
+        IF @ch IS NULL BREAK;
+        BEGIN TRY END CONVERSATION @ch WITH CLEANUP; END TRY BEGIN CATCH BREAK; END CATCH
+    END
+    EXEC('DROP SERVICE [' + @svc + ']');
+    SET @svc = (SELECT TOP 1 name FROM sys.services WHERE name LIKE 'ConfigMgrBGB%');
+END
+"@
+
             # 5.2 Build replica SSB objects + back up the replica transport cert.
             Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "EXEC sp_BgbConfigSSBForReplicaDB N'$replicaSrvForHash', N'$replicaDbForHash', N'$replicaCert'"
 
