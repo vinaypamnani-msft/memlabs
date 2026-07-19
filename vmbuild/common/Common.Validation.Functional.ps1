@@ -4499,6 +4499,81 @@ function Test-SecondaryFunctionality {
         return $results
     }
 
+    # Secondary site installation is ASYNCHRONOUS: the parent's DSC (and the
+    # secondary's own DSC) report "Complete!" as soon as the site is *added* to the
+    # hierarchy (right after "Creating compressed package"), but the secondary then
+    # bootstraps on-box for another 20-40 min -- installing SQL Express
+    # ($sqlInstanceName) and registering SMS_EXECUTIVE. Running the functional check
+    # immediately yields a false failure (no SQL, no SMS_EXECUTIVE). So first WAIT
+    # for the install to actually land: poll the secondary for SMS_EXECUTIVE + the
+    # SQL service, treating an actively-progressing bootstrap (ConfigMgrSetup.log
+    # freshly written) as "keep waiting", and only stop early if the box shows no
+    # install activity for several minutes (genuinely stalled/failed -> let the full
+    # check below fail with diagnostics).
+    $waitBlock = {
+        param($instanceName)
+        $svcName = if ($instanceName -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { "MSSQL`$$instanceName" }
+        $smsExec = [bool](Get-Service -Name 'SMS_EXECUTIVE' -ErrorAction SilentlyContinue)
+        $sqlSvc = [bool](Get-Service -Name $svcName -ErrorAction SilentlyContinue)
+        # "Install still progressing" signals (any one is enough). The secondary
+        # bootstrap has a quiet gap between the parent "Creating compressed package"
+        # and the on-box setup actually starting, so we accept several markers, not
+        # just a freshly-written log:
+        #   - C:\ConfigMgrSetup.log written in the last 25 min, OR it merely EXISTS
+        #     (the bootstrap creates it and keeps appending), OR
+        #   - a setup/bootstrap process is running, OR
+        #   - the CM install dir / its Logs folder exists (install has begun) while
+        #     SMS_EXECUTIVE isn't registered yet.
+        $setupActive = $false
+        try {
+            $log = 'C:\ConfigMgrSetup.log'
+            if (Test-Path $log) {
+                $setupActive = $true
+            }
+            if (-not $setupActive) {
+                $setupActive = [bool](Get-Process -Name 'ConfigMgrSetup', 'setup', 'setupwpf', 'bootstrap' -ErrorAction SilentlyContinue)
+            }
+            if (-not $setupActive) {
+                foreach ($d in @('C:\Program Files\Microsoft Configuration Manager\Logs', 'C:\Program Files\Microsoft Configuration Manager')) {
+                    if (Test-Path $d) { $setupActive = $true; break }
+                }
+            }
+        }
+        catch { }
+        return @{ Installed = ($smsExec -and $sqlSvc); SmsExec = $smsExec; Sql = $sqlSvc; SetupActive = $setupActive }
+    }
+
+    $waitDeadline = (Get-Date).AddMinutes(50)
+    $stallPolls = 0
+    $maxStallPolls = 10
+    $installedNow = $false
+    while ((Get-Date) -lt $waitDeadline) {
+        $w = Invoke-VmCommand -VmName $VMName -VmDomainName $domain -ScriptBlock $waitBlock `
+            -ArgumentList $sqlInstanceName -SuppressLog -AsJob -TimeoutSeconds 120
+        $ws = $w.ScriptBlockOutput
+        if ($ws -is [hashtable] -and $ws.Installed) {
+            $installedNow = $true
+            Write-Log "[Phase $Phase] $VMName [Secondary]: secondary install landed (SMS_EXECUTIVE + SQL '$sqlInstanceName' present); validating." -LogOnly
+            break
+        }
+        if ($ws -is [hashtable] -and $ws.SetupActive) {
+            $stallPolls = 0
+            Write-Log "[Phase $Phase] $VMName [Secondary]: secondary still bootstrapping (SMS_EXECUTIVE=$($ws.SmsExec) SQL=$($ws.Sql)); waiting..." -LogOnly
+        }
+        else {
+            $stallPolls++
+            Write-Log "[Phase $Phase] $VMName [Secondary]: no secondary install activity detected (SMS_EXECUTIVE=$(if($ws -is [hashtable]){$ws.SmsExec}) SQL=$(if($ws -is [hashtable]){$ws.Sql}); stall $stallPolls/$maxStallPolls)." -LogOnly
+            if ($stallPolls -ge $maxStallPolls) {
+                Write-Log "[Phase $Phase] $VMName [Secondary]: no bootstrap progress for ~$maxStallPolls min; proceeding to the functional check (which will report the missing components)." -Warning
+                break
+            }
+        }
+        Start-Sleep -Seconds 60
+    }
+    if (-not $installedNow -and (Get-Date) -ge $waitDeadline) {
+        Write-Log "[Phase $Phase] $VMName [Secondary]: secondary install did not complete within the wait window; running the functional check for a definitive verdict." -Warning
+    }
+
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $sqlInstanceName, $secSiteCode `
         -DisplayName "Phase11-Secondary-Test" -SuppressLog `
