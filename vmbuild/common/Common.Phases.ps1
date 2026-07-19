@@ -414,6 +414,25 @@ function Set-CmMediaMountAndShare {
     $shareName = $Target.ShareName
     $domain = if ($vm.Domain) { $vm.Domain } else { $deployConfig.vmOptions.domainName }
 
+    # If the CM ISO is ALREADY attached to this VM's DVD (e.g. a -startPhase 8
+    # retry left it in the drive across the guest's reboot), Hyper-V does not
+    # re-raise a media-insertion event to the guest on boot, so the guest never
+    # surfaces the optical volume -- no CD-ROM appears at all (not even
+    # letterless), and the in-guest probe below would burn its full timeout for
+    # nothing. Force a fresh insertion by ejecting first; Mount-IsoOnVm then
+    # re-adds it, which reliably fires a guest media-arrival event. On a fresh
+    # run (ISO not yet attached) this is a no-op and the plain add below fires
+    # the arrival event on its own.
+    try {
+        $alreadyMounted = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath })
+    }
+    catch { $alreadyMounted = $false }
+    if ($alreadyMounted) {
+        Write-Log "[Phase $Phase]: $($vmName): CM ISO already attached; re-presenting (eject+remount) so the guest raises a fresh media-arrival event." -LogOnly
+        Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
+        Start-Sleep -Seconds 3
+    }
+
     # Mount the CM ISO on its own drive (idempotent, per-drive, multi-drive-safe).
     if (-not (Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase)) {
         Write-Log "[Phase $Phase]: $($vmName): Failed mounting CM ISO $isoPath as a DVD drive" -Failure -OutputStream
