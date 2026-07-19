@@ -261,7 +261,10 @@ function Mount-SqlIsoForPhase {
         # Idempotent, per-drive, multi-drive-safe (see Mount-IsoOnVm): a re-run is a
         # no-op, and it never evicts another disc that may be co-mounted. The guest
         # picks the SQL disc by content (Phase4 AssignSqlIsoDriveLetter -> S:).
-        if (-not (Mount-IsoOnVm -VmName $vm.vmName -IsoPath $sqlIsoPath -Context "SQL" -Phase 4)) {
+        # -RepresentIfAttached: if a prior (killed) run left the SQL ISO inserted
+        # across the guest's reboot, re-present it so the guest raises a fresh
+        # media-arrival event and the Phase 4 DSC can see the disc.
+        if (-not (Mount-IsoOnVm -VmName $vm.vmName -IsoPath $sqlIsoPath -Context "SQL" -Phase 4 -RepresentIfAttached)) {
             Write-Log "[Phase 4]: $($vm.vmName): Failed mounting SQL ISO $sqlIsoPath as a DVD drive" -Failure -OutputStream
         }
     }
@@ -481,10 +484,12 @@ function Set-CmMediaMountAndShare {
 
     # ---- Host-driven diagnose -> repair loop. The host owns the DVD at the
     # hypervisor and re-presents the disc between guest probes. Each pass: ensure
-    # (and verify) the host attach, toggle the media when needed to raise a fresh
-    # guest media-arrival event, probe the guest, and on a miss log the guest's
-    # optical inventory before repairing and retrying.
-    $maxAttempts = 4
+    # (and verify) the host attach, escalate the repair to raise a fresh guest
+    # arrival event, probe the guest, and on a miss log the guest's optical
+    # inventory before repairing and retrying. The escalation ends in a guest
+    # reboot, which is guaranteed to enumerate an attached disc -- so the media is
+    # effectively always made available.
+    $maxAttempts = 5
     $mediaRoot = $null
     for ($attempt = 1; $attempt -le $maxAttempts -and -not $mediaRoot; $attempt++) {
         # Diagnose the host side first: the ISO file must exist on disk.
@@ -493,16 +498,50 @@ function Set-CmMediaMountAndShare {
             Start-Sleep -Seconds 5
             continue
         }
-        # Repair: re-present the disc (eject+remount) to raise a fresh guest
-        # media-arrival event when it was already attached at boot or on any retry.
+        # Repair, escalating per attempt to force the guest to enumerate the disc:
+        #   attempt 1: ensure attached; media-toggle only if it was already inserted
+        #              at entry (reboot-persist case -- a plain boot raises no event).
+        #   attempt 2: media-toggle (eject+remount on the same drive) -> media-arrival.
+        #   attempt 3-4: REMOVE the whole DVD drive and ADD a fresh one -> the guest
+        #              sees a brand-new device (device-arrival), the strongest
+        #              re-enumeration short of a reboot.
+        #   attempt 5: REBOOT the guest. The ISO stays attached across the reboot,
+        #              and an optical disc present at boot is ALWAYS enumerated by
+        #              Windows -- the one repair that cannot fail. Costly + disruptive,
+        #              so only after every non-disruptive repair has been exhausted.
         $attached = $false
         try { $attached = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath }) } catch { }
-        if ($attached -and ($attempt -gt 1 -or $alreadyMountedAtEntry)) {
+        $mountOk = $true
+        if ($attempt -ge 5) {
+            Write-Log "[Phase $Phase]: $($vmName): CM media still not visible after host repairs; rebooting the guest so the attached disc is enumerated at boot [attempt $attempt/$maxAttempts]." -Warning
+            if (-not $attached) { $null = Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase }
+            try {
+                Restart-VM -Name $vmName -Force -ErrorAction Stop
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($vmName): graceful Restart-VM failed ($($_.Exception.Message)); hard power-cycling." -Warning
+                try { Stop-VM -Name $vmName -TurnOff -Force -ErrorAction SilentlyContinue } catch { }
+                Start-Sleep -Seconds 5
+                try { Start-VM -Name $vmName -ErrorAction SilentlyContinue } catch { }
+            }
+            # Wait for the guest to come back before probing (a path that always
+            # exists once Windows is up).
+            $null = Wait-ForVm -VmName $vmName -VmDomainName $domain -PathToVerify "C:\Windows\System32\cmd.exe" -TimeoutMinutes 10 -Quiet
+        }
+        elseif ($attempt -ge 3) {
+            Write-Log "[Phase $Phase]: $($vmName): full CM DVD drive reset (remove+re-add) to force guest device re-enumeration [attempt $attempt/$maxAttempts]." -LogOnly
+            $mountOk = Reset-IsoDriveOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
+        }
+        elseif ($attached -and ($attempt -eq 2 -or $alreadyMountedAtEntry)) {
             Write-Log "[Phase $Phase]: $($vmName): re-presenting CM DVD (eject+remount) to raise a fresh guest media-arrival event [attempt $attempt/$maxAttempts]." -LogOnly
             Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
             Start-Sleep -Seconds 3
+            $mountOk = Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
         }
-        if (-not (Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase)) {
+        else {
+            $mountOk = Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
+        }
+        if (-not $mountOk) {
             Write-Log "[Phase $Phase]: $($vmName): host could not attach CM ISO $isoPath [attempt $attempt/$maxAttempts]; retrying." -Warning
             Start-Sleep -Seconds 5
             continue
@@ -513,7 +552,7 @@ function Set-CmMediaMountAndShare {
             Write-Log "[Phase $Phase]: $($vmName): CM ISO not attached at hypervisor after mount [attempt $attempt/$maxAttempts]; retrying." -Warning
             continue
         }
-        $probeSeconds = if ($attempt -eq 1) { 90 } else { 45 }
+        $probeSeconds = if ($attempt -eq 1) { 90 } elseif ($attempt -ge 5) { 120 } else { 45 }
         $probe = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $probeScript -ArgumentList @($probeSeconds) -SuppressLog -DisplayName "Locate CM media ($attempt)"
         $out = $probe.ScriptBlockOutput
         if ($out -is [hashtable] -and $out.Found) {
@@ -532,7 +571,7 @@ function Set-CmMediaMountAndShare {
     }
 
     if (-not $mediaRoot) {
-        Write-Log "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $maxAttempts host repair attempts; the CMCB share (DC schema extension depends on it) cannot be created." -Failure -OutputStream
+        Write-Log "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $maxAttempts host repair attempts (media toggle, drive re-add, and a guest reboot); the CMCB share (DC schema extension depends on it) cannot be created." -Failure -OutputStream
         return
     }
 

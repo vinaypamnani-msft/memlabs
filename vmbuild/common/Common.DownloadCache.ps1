@@ -439,11 +439,18 @@ function Mount-IsoOnVm {
     # Gen2 (SCSI) supports hot-add of a new DVD drive while running. Gen1 (IDE)
     # cannot hot-add while running -- Add-VMDvdDrive then throws, is caught, and the
     # function returns $false (opportunistic callers like the cache simply yield).
+    #
+    # -RepresentIfAttached: when the ISO is ALREADY attached, eject+remount it so the
+    # guest raises a fresh media-arrival event. A disc left inserted across a guest
+    # reboot (e.g. a -startPhase retry) is not re-announced by Hyper-V on boot, so the
+    # guest never surfaces the optical volume; re-presenting fixes that. Off by default
+    # (case 1 stays a cheap no-op) so opportunistic callers pay nothing.
     param(
         [Parameter(Mandatory)][string]$VmName,
         [Parameter(Mandatory)][string]$IsoPath,
         [string]$Context = "ISO",
-        [int]$Phase = 0
+        [int]$Phase = 0,
+        [switch]$RepresentIfAttached
     )
     if (-not $IsoPath -or -not (Test-Path $IsoPath)) {
         Write-Log "$($VmName): $Context ISO mount skipped -- path missing: $IsoPath" -LogOnly
@@ -451,6 +458,21 @@ function Mount-IsoOnVm {
     }
     $tag = ""
     if ($Phase -gt 0) { $tag = "[Phase $Phase]: " }
+    # Re-present an already-attached disc so the guest gets a fresh media-arrival
+    # event (see -RepresentIfAttached). Eject here; the loop below re-adds it.
+    if ($RepresentIfAttached) {
+        try {
+            $existing = @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $IsoPath }
+            if ($existing) {
+                foreach ($d in $existing) {
+                    Set-VMDvdDrive -VMName $VmName -ControllerNumber $d.ControllerNumber -ControllerLocation $d.ControllerLocation -Path $null -ErrorAction SilentlyContinue
+                }
+                Write-Log "$tag$($VmName): re-presenting $Context ISO (eject+remount) for a fresh guest media-arrival event" -LogOnly
+                Start-Sleep -Seconds 3
+            }
+        }
+        catch { }
+    }
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
             $dvds = @(Get-VMDvdDrive -VMName $VmName -ErrorAction Stop)
@@ -504,6 +526,42 @@ function Dismount-IsoFromVm {
     catch {
         Write-Log "$tag$($VmName): $Context ISO eject failed: $($_.Exception.Message)" -LogOnly
     }
+}
+
+function Reset-IsoDriveOnVm {
+    # Strongest guest re-enumeration short of a reboot: REMOVE the DVD drive that
+    # holds this exact ISO and ADD a brand-new one back. The guest then sees a
+    # device-arrival (a whole new optical device), not merely a media-arrival, so
+    # it reliably surfaces a disc that a plain media toggle (eject+remount on the
+    # same drive) failed to -- e.g. an ISO left inserted across a guest reboot,
+    # where Hyper-V never re-raises any arrival event. Touches ONLY the drive(s)
+    # whose media is this exact ISO path; every other DVD drive / ISO is left
+    # alone. Requires a Gen2 (SCSI) VM to hot-add while running (Gen1/IDE can't --
+    # Mount-IsoOnVm catches that and returns $false). Returns $true only after
+    # verifying the ISO is attached again; never throws.
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$IsoPath,
+        [string]$Context = "ISO",
+        [int]$Phase = 0
+    )
+    $tag = ""
+    if ($Phase -gt 0) { $tag = "[Phase $Phase]: " }
+    try {
+        foreach ($d in @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue)) {
+            if ($d.Path -and $d.Path -eq $IsoPath) {
+                Remove-VMDvdDrive -VMName $VmName -ControllerNumber $d.ControllerNumber -ControllerLocation $d.ControllerLocation -ErrorAction SilentlyContinue
+                Write-Log "$tag$($VmName): Removed $Context DVD drive (held $IsoPath) for a fresh device re-add" -LogOnly
+            }
+        }
+    }
+    catch {
+        Write-Log "$tag$($VmName): $Context DVD drive remove failed: $($_.Exception.Message)" -LogOnly
+    }
+    Start-Sleep -Seconds 3
+    # Add a fresh DVD drive back with the ISO (Mount-IsoOnVm case 3: all drives
+    # busy / none present -> Add-VMDvdDrive), which fires the device-arrival event.
+    return (Mount-IsoOnVm -VmName $VmName -IsoPath $IsoPath -Context $Context -Phase $Phase)
 }
 
 function Dismount-IsoFromAllVMs {
