@@ -425,30 +425,50 @@ function Set-CmMediaMountAndShare {
     # the CD-ROM volume that carries the CM media.
     $shareScript = {
         param($ShareName)
-        # Wait for the guest to surface the freshly hot-added CM DVD as a lettered
-        # CD-ROM volume. When the CM ISO is hot-added back-to-back with the cache
-        # ISO on a running VM, the guest can take well over a minute to enumerate
-        # the new optical volume -- a 60s wait lost that race and left the CMCB
-        # share uncreated, which then hung the DC's schema extension (it waits on
-        # \\<server>\CMCB\...\extadsch.exe forever). Wait longer AND actively nudge
-        # a device rescan each pass so the volume surfaces promptly.
+        # Wait for the guest to surface the CM DVD as a CD-ROM volume carrying the
+        # CM media, then create the share off it. Two failure modes are handled:
+        #  1. Freshly hot-added disc not yet enumerated (back-to-back with the
+        #     cache ISO) -- wait + nudge a device rescan each pass.
+        #  2. Disc present but with NO drive letter -- happens when the ISO stayed
+        #     attached across a guest reboot (e.g. a -startPhase 8 retry): the
+        #     optical volume comes up letterless, which the DriveLetter filter
+        #     would exclude forever (diskpart/pnputil rescans never assign a
+        #     letter to optical media). So assign a free letter to any letterless
+        #     CD-ROM volume before probing its content.
         $deadline = (Get-Date).AddSeconds(240)
         $cd = $null
-        $scanned = $false
+        $nudged = $false
         while (-not $cd -and (Get-Date) -lt $deadline) {
+            # Give any letterless CD-ROM volume a drive letter so it becomes
+            # visible to the content probe below.
+            try {
+                $letterless = @(Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue | Where-Object { -not $_.DriveLetter })
+                if ($letterless.Count -gt 0) {
+                    $free = @()
+                    foreach ($n in 70..90) { $l = [char]$n; if (-not (Test-Path "${l}:\")) { $free += $l } }
+                    $i = 0
+                    foreach ($vol in $letterless) {
+                        if ($i -ge $free.Count) { break }
+                        Set-CimInstance -InputObject $vol -Property @{ DriveLetter = "$($free[$i]):" } -ErrorAction SilentlyContinue
+                        $i++
+                    }
+                }
+            }
+            catch { }
+
             $cd = Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | Where-Object {
                 Test-Path ("$($_.DriveLetter):\SMSSETUP\BIN\X64\Setup.exe")
             } | Select-Object -First 1
             if (-not $cd) {
-                # Nudge the PnP/storage subsystem to enumerate the new optical
-                # device (idempotent, harmless if already present).
+                # Nudge the PnP/storage subsystem to enumerate the optical device
+                # (idempotent, harmless if already present).
                 try { & pnputil.exe /scan-devices *>$null } catch { }
                 try { "rescan" | & diskpart.exe *>$null } catch { }
-                $scanned = $true
+                $nudged = $true
                 Start-Sleep -Seconds 5
             }
         }
-        if (-not $cd) { throw "CM media DVD not visible after 240s (no CD-ROM with SMSSETUP\BIN\X64\Setup.exe; rescan attempted=$scanned)" }
+        if (-not $cd) { throw "CM media DVD not visible after 240s (no CD-ROM with SMSSETUP\BIN\X64\Setup.exe; rescan+letter-assign attempted=$nudged)" }
         $root = "$($cd.DriveLetter):\"
         New-Item -Path "C:\$ShareName\REdist" -ItemType Directory -Force | Out-Null
 
@@ -488,12 +508,17 @@ function Set-CmMediaMountAndShare {
     }
     $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName) -DisplayName "Share CM media ($shareName)"
     if ($res.ScriptBlockFailed) {
-        # One retry: the mount is idempotent and the in-guest probe already waited
-        # for the disc to surface, but a fresh session gives the guest another
-        # window to enumerate the optical volume. The DC's schema extension hard-
-        # depends on this share (\\<server>\CMCB\...\extadsch.exe), so a genuine
-        # failure here is logged as a failure, not a soft warning.
-        Write-Log "[Phase $Phase]: $($vmName): CM media share '$shareName' not created on first attempt ($($res.ScriptBlockOutput)); retrying." -Warning
+        # Force the guest to re-enumerate the disc: eject then re-mount the CM ISO.
+        # On a -startPhase retry the ISO can still be attached at the hypervisor
+        # from a prior run but the guest surfaced it letterless / not at all; a
+        # clean eject+remount re-triggers PnP enumeration so the next in-guest
+        # attempt (which also assigns a letter to a letterless disc) can find it.
+        # The DC's schema extension hard-depends on this share
+        # (\\<server>\CMCB\...\extadsch.exe), so a genuine failure here is logged
+        # as a failure, not a soft warning.
+        Write-Log "[Phase $Phase]: $($vmName): CM media share '$shareName' not created on first attempt ($($res.ScriptBlockOutput)); re-presenting the CM DVD and retrying." -Warning
+        Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
+        Start-Sleep -Seconds 3
         if (Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase) {
             $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName) -DisplayName "Share CM media ($shareName) retry"
         }
