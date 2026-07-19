@@ -425,15 +425,30 @@ function Set-CmMediaMountAndShare {
     # the CD-ROM volume that carries the CM media.
     $shareScript = {
         param($ShareName)
-        $deadline = (Get-Date).AddSeconds(60)
+        # Wait for the guest to surface the freshly hot-added CM DVD as a lettered
+        # CD-ROM volume. When the CM ISO is hot-added back-to-back with the cache
+        # ISO on a running VM, the guest can take well over a minute to enumerate
+        # the new optical volume -- a 60s wait lost that race and left the CMCB
+        # share uncreated, which then hung the DC's schema extension (it waits on
+        # \\<server>\CMCB\...\extadsch.exe forever). Wait longer AND actively nudge
+        # a device rescan each pass so the volume surfaces promptly.
+        $deadline = (Get-Date).AddSeconds(240)
         $cd = $null
+        $scanned = $false
         while (-not $cd -and (Get-Date) -lt $deadline) {
-            $cd = Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | Where-Object {
+            $cd = Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | Where-Object {
                 Test-Path ("$($_.DriveLetter):\SMSSETUP\BIN\X64\Setup.exe")
             } | Select-Object -First 1
-            if (-not $cd) { Start-Sleep -Seconds 3 }
+            if (-not $cd) {
+                # Nudge the PnP/storage subsystem to enumerate the new optical
+                # device (idempotent, harmless if already present).
+                try { & pnputil.exe /scan-devices *>$null } catch { }
+                try { "rescan" | & diskpart.exe *>$null } catch { }
+                $scanned = $true
+                Start-Sleep -Seconds 5
+            }
         }
-        if (-not $cd) { throw "CM media DVD not visible (no CD-ROM with SMSSETUP\BIN\X64\Setup.exe)" }
+        if (-not $cd) { throw "CM media DVD not visible after 240s (no CD-ROM with SMSSETUP\BIN\X64\Setup.exe; rescan attempted=$scanned)" }
         $root = "$($cd.DriveLetter):\"
         New-Item -Path "C:\$ShareName\REdist" -ItemType Directory -Force | Out-Null
 
@@ -473,7 +488,18 @@ function Set-CmMediaMountAndShare {
     }
     $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName) -DisplayName "Share CM media ($shareName)"
     if ($res.ScriptBlockFailed) {
-        Write-Log "[Phase $Phase]: $($vmName): Failed to create CM media share '$shareName'. $($res.ScriptBlockOutput)" -Warning
+        # One retry: the mount is idempotent and the in-guest probe already waited
+        # for the disc to surface, but a fresh session gives the guest another
+        # window to enumerate the optical volume. The DC's schema extension hard-
+        # depends on this share (\\<server>\CMCB\...\extadsch.exe), so a genuine
+        # failure here is logged as a failure, not a soft warning.
+        Write-Log "[Phase $Phase]: $($vmName): CM media share '$shareName' not created on first attempt ($($res.ScriptBlockOutput)); retrying." -Warning
+        if (Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase) {
+            $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName) -DisplayName "Share CM media ($shareName) retry"
+        }
+    }
+    if ($res.ScriptBlockFailed) {
+        Write-Log "[Phase $Phase]: $($vmName): Failed to create CM media share '$shareName' (DC schema extension depends on it). $($res.ScriptBlockOutput)" -Failure -OutputStream
     }
     else {
         Write-Log "[Phase $Phase]: $($vmName): CM media share ready ($($res.ScriptBlockOutput))" -LogOnly

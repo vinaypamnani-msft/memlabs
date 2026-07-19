@@ -5715,12 +5715,40 @@ function Test-MaintenanceTasks {
             $results.Details.Add("OK: Workstation OS detected; Disable-IEESC not applicable")
         }
 
+        # On a freshly-built Win11 box (e.g. build 26200) the Schedule service /
+        # its ScheduledTasks CIM provider can be transiently not-ready, so a
+        # single Get-ScheduledTask returns $null (with -EA SilentlyContinue) even
+        # though the task exists -- producing a false "not found". Fix-EnableLogMachine
+        # guards its own registration with a service warm-up + retries; mirror that
+        # here: ensure the Schedule service is up, retry the CIM query a few times,
+        # and fall back to schtasks.exe (a different code path) before failing.
+        try {
+            $svc = Get-Service -Name 'Schedule' -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -ne 'Running') { Start-Service -Name 'Schedule' -ErrorAction SilentlyContinue }
+        }
+        catch { }
+
         foreach ($taskName in $requiredTasks) {
             $results.Details.Add("CMD: Get-ScheduledTask -TaskName '$taskName'")
-            $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            $task = $null
+            for ($attempt = 1; $attempt -le 3 -and (-not $task); $attempt++) {
+                $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+                if (-not $task -and $attempt -lt 3) { Start-Sleep -Seconds 3 }
+            }
+            # Fallback: schtasks.exe uses the Task Scheduler COM/RPC path rather
+            # than the CIM provider, so it still finds the task when the provider
+            # is flaky. A 0 exit code means the task exists.
+            $schtasksFound = $false
             if (-not $task) {
+                $null = & schtasks.exe /query /tn $taskName 2>$null
+                if ($LASTEXITCODE -eq 0) { $schtasksFound = $true }
+            }
+            if (-not $task -and -not $schtasksFound) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: Scheduled task '$taskName' not found (Phase 10 maintenance may not have run)")
+            }
+            elseif (-not $task -and $schtasksFound) {
+                $results.Details.Add("OK: Scheduled task '$taskName' exists (found via schtasks.exe; CIM provider was transiently unavailable)")
             }
             else {
                 $results.Details.Add("OK: Scheduled task '$taskName' exists (State: $($task.State))")
