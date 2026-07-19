@@ -414,52 +414,31 @@ function Set-CmMediaMountAndShare {
     $shareName = $Target.ShareName
     $domain = if ($vm.Domain) { $vm.Domain } else { $deployConfig.vmOptions.domainName }
 
-    # If the CM ISO is ALREADY attached to this VM's DVD (e.g. a -startPhase 8
-    # retry left it in the drive across the guest's reboot), Hyper-V does not
-    # re-raise a media-insertion event to the guest on boot, so the guest never
-    # surfaces the optical volume -- no CD-ROM appears at all (not even
-    # letterless), and the in-guest probe below would burn its full timeout for
-    # nothing. Force a fresh insertion by ejecting first; Mount-IsoOnVm then
-    # re-adds it, which reliably fires a guest media-arrival event. On a fresh
-    # run (ISO not yet attached) this is a no-op and the plain add below fires
-    # the arrival event on its own.
+    # Was the CM ISO already attached at entry (e.g. a -startPhase 8 retry left it
+    # in the drive across the guest's reboot)? Hyper-V does not re-raise a
+    # media-arrival event to the guest for a disc that was already inserted at
+    # boot, so the guest never surfaces the optical volume until the host toggles
+    # (eject+remount) the media. The host loop below re-presents on attempt 1 when
+    # this is true, and on every retry regardless.
     try {
-        $alreadyMounted = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath })
+        $alreadyMountedAtEntry = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath })
     }
-    catch { $alreadyMounted = $false }
-    if ($alreadyMounted) {
-        Write-Log "[Phase $Phase]: $($vmName): CM ISO already attached; re-presenting (eject+remount) so the guest raises a fresh media-arrival event." -LogOnly
-        Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
-        Start-Sleep -Seconds 3
-    }
+    catch { $alreadyMountedAtEntry = $false }
 
-    # Mount the CM ISO on its own drive (idempotent, per-drive, multi-drive-safe).
-    if (-not (Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase)) {
-        Write-Log "[Phase $Phase]: $($vmName): Failed mounting CM ISO $isoPath as a DVD drive" -Failure -OutputStream
-        return
-    }
-
-    # In-guest: point the CMCB share at the CM DVD (read-only) and ensure the
-    # local writable REdist folder exists. Waits briefly for the guest to surface
-    # the CD-ROM volume that carries the CM media.
-    $shareScript = {
-        param($ShareName)
-        # Wait for the guest to surface the CM DVD as a CD-ROM volume carrying the
-        # CM media, then create the share off it. Two failure modes are handled:
-        #  1. Freshly hot-added disc not yet enumerated (back-to-back with the
-        #     cache ISO) -- wait + nudge a device rescan each pass.
-        #  2. Disc present but with NO drive letter -- happens when the ISO stayed
-        #     attached across a guest reboot (e.g. a -startPhase 8 retry): the
-        #     optical volume comes up letterless, which the DriveLetter filter
-        #     would exclude forever (diskpart/pnputil rescans never assign a
-        #     letter to optical media). So assign a free letter to any letterless
-        #     CD-ROM volume before probing its content.
-        $deadline = (Get-Date).AddSeconds(240)
+    # ---- Guest probe: locate the CM media DVD, returning structured diagnostics.
+    # This is the "signal back to the host": a short, self-contained in-guest check
+    # that (a) assigns a drive letter to any letterless optical volume, (b) nudges
+    # a device rescan, (c) looks for a CD-ROM carrying the CM media, and (d) ALWAYS
+    # returns the guest's optical inventory so the host can diagnose a miss and
+    # decide whether to repair (re-present the disc) and retry.
+    $probeScript = {
+        param($ProbeSeconds)
+        $diag = [System.Collections.Generic.List[string]]::new()
+        $deadline = (Get-Date).AddSeconds([int]$ProbeSeconds)
         $cd = $null
-        $nudged = $false
         while (-not $cd -and (Get-Date) -lt $deadline) {
-            # Give any letterless CD-ROM volume a drive letter so it becomes
-            # visible to the content probe below.
+            # Give any letterless CD-ROM volume a drive letter so the content probe
+            # can see it (diskpart/pnputil rescans never letter optical media).
             try {
                 $letterless = @(Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue | Where-Object { -not $_.DriveLetter })
                 if ($letterless.Count -gt 0) {
@@ -474,46 +453,114 @@ function Set-CmMediaMountAndShare {
                 }
             }
             catch { }
-
             $cd = Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | Where-Object {
                 Test-Path ("$($_.DriveLetter):\SMSSETUP\BIN\X64\Setup.exe")
             } | Select-Object -First 1
             if (-not $cd) {
-                # Nudge the PnP/storage subsystem to enumerate the optical device
-                # (idempotent, harmless if already present).
                 try { & pnputil.exe /scan-devices *>$null } catch { }
                 try { "rescan" | & diskpart.exe *>$null } catch { }
-                $nudged = $true
                 Start-Sleep -Seconds 5
             }
         }
-        if (-not $cd) { throw "CM media DVD not visible after 240s (no CD-ROM with SMSSETUP\BIN\X64\Setup.exe; rescan+letter-assign attempted=$nudged)" }
-        $root = "$($cd.DriveLetter):\"
-        New-Item -Path "C:\$ShareName\REdist" -ItemType Directory -Force | Out-Null
+        # Always snapshot the guest's optical state for the host log.
+        try {
+            $cdVols = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 'CD-ROM' })
+            if ($cdVols.Count -eq 0) { $diag.Add("guest sees NO CD-ROM volumes") }
+            foreach ($v in $cdVols) {
+                $lbl = if ($v.DriveLetter) { "$($v.DriveLetter):" } else { "(no letter)" }
+                $hasCm = $false
+                if ($v.DriveLetter) { $hasCm = Test-Path ("$($v.DriveLetter):\SMSSETUP\BIN\X64\Setup.exe") }
+                $diag.Add("CD-ROM $lbl size=$([math]::Round(($v.Size / 1MB)))MB cmMedia=$hasCm")
+            }
+            $drv = @(Get-CimInstance -ClassName Win32_CDROMDrive -ErrorAction SilentlyContinue)
+            $diag.Add("Win32_CDROMDrive=$($drv.Count): " + (($drv | ForEach-Object { "$($_.Drive)|MediaLoaded=$($_.MediaLoaded)" }) -join '; '))
+        }
+        catch { $diag.Add("diag error: $($_.Exception.Message)") }
+        return @{ Found = [bool]$cd; Root = $(if ($cd) { "$($cd.DriveLetter):\" } else { $null }); Diag = $diag }
+    }
 
-        # Preferred: share the CM DVD directly (true zero-copy) so the schema
-        # extension reads \\<server>\CMCB\SMSSETUP\BIN\X64\extadsch.exe off the
-        # media. If a host won't share a read-only optical volume, fall back to
-        # staging just extadsch.exe (a few MB -- all the schema step needs over
-        # SMB) into C:\<CM>\SMSSETUP\BIN\X64 and sharing that local folder.
-        # Setup.exe installs directly from the DVD either way, and setupdl still
-        # writes REdist locally to C:\<CM>\REdist regardless of the share.
+    # ---- Host-driven diagnose -> repair loop. The host owns the DVD at the
+    # hypervisor and re-presents the disc between guest probes. Each pass: ensure
+    # (and verify) the host attach, toggle the media when needed to raise a fresh
+    # guest media-arrival event, probe the guest, and on a miss log the guest's
+    # optical inventory before repairing and retrying.
+    $maxAttempts = 4
+    $mediaRoot = $null
+    for ($attempt = 1; $attempt -le $maxAttempts -and -not $mediaRoot; $attempt++) {
+        # Diagnose the host side first: the ISO file must exist on disk.
+        if (-not (Test-Path $isoPath)) {
+            Write-Log "[Phase $Phase]: $($vmName): CM ISO path missing on host: $isoPath [attempt $attempt/$maxAttempts]." -Warning
+            Start-Sleep -Seconds 5
+            continue
+        }
+        # Repair: re-present the disc (eject+remount) to raise a fresh guest
+        # media-arrival event when it was already attached at boot or on any retry.
+        $attached = $false
+        try { $attached = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath }) } catch { }
+        if ($attached -and ($attempt -gt 1 -or $alreadyMountedAtEntry)) {
+            Write-Log "[Phase $Phase]: $($vmName): re-presenting CM DVD (eject+remount) to raise a fresh guest media-arrival event [attempt $attempt/$maxAttempts]." -LogOnly
+            Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
+            Start-Sleep -Seconds 3
+        }
+        if (-not (Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase)) {
+            Write-Log "[Phase $Phase]: $($vmName): host could not attach CM ISO $isoPath [attempt $attempt/$maxAttempts]; retrying." -Warning
+            Start-Sleep -Seconds 5
+            continue
+        }
+        # Verify the attach actually landed at the hypervisor before probing.
+        try { $attached = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath }) } catch { $attached = $false }
+        if (-not $attached) {
+            Write-Log "[Phase $Phase]: $($vmName): CM ISO not attached at hypervisor after mount [attempt $attempt/$maxAttempts]; retrying." -Warning
+            continue
+        }
+        $probeSeconds = if ($attempt -eq 1) { 90 } else { 45 }
+        $probe = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $probeScript -ArgumentList @($probeSeconds) -SuppressLog -DisplayName "Locate CM media ($attempt)"
+        $out = $probe.ScriptBlockOutput
+        if ($out -is [hashtable] -and $out.Found) {
+            $mediaRoot = [string]$out.Root
+            Write-Log "[Phase $Phase]: $($vmName): CM media visible at $mediaRoot [attempt $attempt/$maxAttempts]." -LogOnly
+            break
+        }
+        # Signal back to host: log the guest's optical inventory so a miss is diagnosable.
+        if ($out -is [hashtable] -and $out.Diag) {
+            foreach ($d in $out.Diag) { Write-Log "[Phase $Phase]: $($vmName): [CM media diag] $d" -LogOnly }
+        }
+        elseif ($probe.ScriptBlockFailed) {
+            Write-Log "[Phase $Phase]: $($vmName): CM media probe errored [attempt $attempt/$maxAttempts]: $($probe.ScriptBlockOutput)" -Warning
+        }
+        Write-Log "[Phase $Phase]: $($vmName): CM media not visible to guest [attempt $attempt/$maxAttempts]; will re-present and retry." -Warning
+    }
+
+    if (-not $mediaRoot) {
+        Write-Log "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $maxAttempts host repair attempts; the CMCB share (DC schema extension depends on it) cannot be created." -Failure -OutputStream
+        return
+    }
+
+    # ---- Create the CMCB share off the resolved media root. Preferred: share the
+    # CM DVD directly (zero-copy) so the schema extension reads
+    # \\<server>\CMCB\SMSSETUP\BIN\X64\extadsch.exe off the media. If a host won't
+    # share a read-only optical volume, fall back to staging just extadsch.exe (a
+    # few MB) into a local folder and sharing that. Setup.exe installs directly
+    # from the DVD either way; setupdl writes REdist locally to C:\<CM>\REdist.
+    $shareScript = {
+        param($ShareName, $Root)
+        New-Item -Path "C:\$ShareName\REdist" -ItemType Directory -Force | Out-Null
         try {
             $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
-            if ($share -and $share.Path -ne $root) {
+            if ($share -and $share.Path -ne $Root) {
                 Remove-SmbShare -Name $ShareName -Force -ErrorAction SilentlyContinue
                 $share = $null
             }
             if (-not $share) {
-                New-SmbShare -Name $ShareName -Path $root -ReadAccess "Everyone" -ErrorAction Stop | Out-Null
+                New-SmbShare -Name $ShareName -Path $Root -ReadAccess "Everyone" -ErrorAction Stop | Out-Null
             }
-            return "OK: $ShareName -> $root"
+            return "OK: $ShareName -> $Root"
         }
         catch {
             $localRoot = "C:\$ShareName"
             $localBin = Join-Path $localRoot "SMSSETUP\BIN\X64"
             New-Item -Path $localBin -ItemType Directory -Force | Out-Null
-            Copy-Item -Path (Join-Path $root "SMSSETUP\BIN\X64\extadsch.exe") -Destination $localBin -Force -ErrorAction SilentlyContinue
+            Copy-Item -Path (Join-Path $Root "SMSSETUP\BIN\X64\extadsch.exe") -Destination $localBin -Force -ErrorAction SilentlyContinue
             $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
             if ($share -and $share.Path -ne $localRoot) {
                 Remove-SmbShare -Name $ShareName -Force -ErrorAction SilentlyContinue
@@ -525,23 +572,7 @@ function Set-CmMediaMountAndShare {
             return "OK(local extadsch fallback): $ShareName -> $localRoot"
         }
     }
-    $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName) -DisplayName "Share CM media ($shareName)"
-    if ($res.ScriptBlockFailed) {
-        # Force the guest to re-enumerate the disc: eject then re-mount the CM ISO.
-        # On a -startPhase retry the ISO can still be attached at the hypervisor
-        # from a prior run but the guest surfaced it letterless / not at all; a
-        # clean eject+remount re-triggers PnP enumeration so the next in-guest
-        # attempt (which also assigns a letter to a letterless disc) can find it.
-        # The DC's schema extension hard-depends on this share
-        # (\\<server>\CMCB\...\extadsch.exe), so a genuine failure here is logged
-        # as a failure, not a soft warning.
-        Write-Log "[Phase $Phase]: $($vmName): CM media share '$shareName' not created on first attempt ($($res.ScriptBlockOutput)); re-presenting the CM DVD and retrying." -Warning
-        Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
-        Start-Sleep -Seconds 3
-        if (Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase) {
-            $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName) -DisplayName "Share CM media ($shareName) retry"
-        }
-    }
+    $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName, $mediaRoot) -DisplayName "Share CM media ($shareName)"
     if ($res.ScriptBlockFailed) {
         Write-Log "[Phase $Phase]: $($vmName): Failed to create CM media share '$shareName' (DC schema extension depends on it). $($res.ScriptBlockOutput)" -Failure -OutputStream
     }
