@@ -238,7 +238,11 @@ function Get-SqlVMNamesNeedingReplication {
             elseif ($ss.remoteSQLVM) { [void]$set.Add([string]$ss.remoteSQLVM) }
         }
     }
-    return $set
+    # Return with the unary comma so PowerShell does NOT unroll the HashSet into
+    # the pipeline. Plain 'return $set' enumerates it: an empty set yields $null
+    # and a single-element set yields a bare string, so callers' $replNeeded.Contains()
+    # then threw "You cannot call a method on a null-valued expression."
+    return , $set
 }
 
 function Mount-SqlIsoForPhase {
