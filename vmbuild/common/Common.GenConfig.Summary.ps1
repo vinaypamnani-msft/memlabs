@@ -582,7 +582,16 @@ function get-VMString {
         $sqlVM = $allVMs | Where-Object { $_.vmName -eq $virtualMachine.remoteSQLVM }
         if ($sqlVM.OtherNode) { $name += "  SQL AO [$($sqlVM.vmName),$($sqlVM.OtherNode)]" }
         else { $name += "  Remote SQL [$($virtualMachine.remoteSQLVM)]" }
-    }    if ($virtualMachine.sqlVersion -and -not $virtualMachine.sqlInstanceDir) {
+    }
+
+    # MP database replica: surface the replica SQL server VM the MP reads from
+    # (Set-CMManagementPoint -UseSiteDatabase 0), so the summary shows where the
+    # MP's database lives instead of leaving the SQL column blank.
+    if ($virtualMachine.useDatabaseReplica -and $virtualMachine.replicaSqlServerVM) {
+        $name += "  Replica DB [-> $($virtualMachine.replicaSqlServerVM)]"
+    }
+
+    if ($virtualMachine.sqlVersion -and -not $virtualMachine.sqlInstanceDir) {
         $name += "  SQL [$($virtualMachine.sqlVersion)]"
     }
 
