@@ -388,8 +388,10 @@ function New-LinuxSeedIso {
     .DESCRIPTION
         Generates meta-data + user-data files configuring:
           - hostname/fqdn
-          - vmbuildadmin user with sudo NOPASSWD and the memlabs host ed25519
-            public key authorized for SSH (no password login)
+          - vmbuildadmin user (deployment/automation account) with sudo NOPASSWD
+            and the memlabs host ed25519 public key authorized for SSH
+          - optional -LocalAdminUser account (workgroup human logon, e.g. 'admin')
+            with sudo NOPASSWD + the lab password; omitted for domain-joined VMs
           - openssh-server + qemu-guest-agent installed and enabled
           - first-boot reboot after cloud-init applies
 
@@ -427,7 +429,17 @@ function New-LinuxSeedIso {
         [string]$Gateway,
 
         [Parameter(Mandatory = $false)]
-        [int]$Prefix = 24
+        [int]$Prefix = 24,
+
+        # Workgroup (non-domain-joined) Linux VMs get a second LOCAL account named
+        # after vmOptions.adminName (default 'admin'), mirroring the Windows
+        # workgroup model (Phase2WorkgroupMember creates both vmbuildadmin and the
+        # adminName local account). This is the human logon for a standalone box;
+        # vmbuildadmin stays the deployment/automation account. Domain-joined VMs
+        # omit this (adminName is a domain account there, and a local one would
+        # shadow it via NSS files-before-sss).
+        [Parameter(Mandatory = $false)]
+        [string]$LocalAdminUser
     )
 
     # oscdimg is preferred when available (faster, more deterministic), but
@@ -437,6 +449,14 @@ function New-LinuxSeedIso {
     $sshKey = Get-LinuxAdminSshKeyPair
     $instanceId = "memlabs-$VmName-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
     $fqdn = "$VmName.$Domain".ToLower()
+
+    # Normalize the optional workgroup local-admin account name. Ignore it if it
+    # collides with the deployment account (vmbuildadmin) so we never emit a
+    # duplicate users: entry.
+    $localAdminUser = $null
+    if ($LocalAdminUser -and $LocalAdminUser.Trim() -and $LocalAdminUser.Trim().ToLower() -ne 'vmbuildadmin') {
+        $localAdminUser = $LocalAdminUser.Trim()
+    }
 
     # vmbuildadmin gets the same password as the Windows LocalAdmin so the user
     # can log in at the Hyper-V console (vmconnect) for diagnostics. SSH still
@@ -450,6 +470,16 @@ function New-LinuxSeedIso {
         $lockPasswdYaml = 'false'
         # YAML single-quote escape: ' -> ''
         $pwQuoted = "'" + ($consolePassword -replace "'", "''") + "'"
+        # Optional third chpasswd entry for the workgroup local-admin account.
+        $localAdminChpasswd = ''
+        if ($localAdminUser) {
+            $localAdminChpasswd = @"
+
+    - name: $localAdminUser
+      password: $pwQuoted
+      type: text
+"@
+        }
         $chpasswdBlock = @"
 
 chpasswd:
@@ -460,12 +490,31 @@ chpasswd:
       type: text
     - name: root
       password: $pwQuoted
-      type: text
+      type: text$localAdminChpasswd
 "@
     }
     else {
         $lockPasswdYaml = 'true'
         $chpasswdBlock = ''
+    }
+
+    # Optional second LOCAL account for workgroup Linux VMs: the human logon
+    # (adminName, e.g. 'admin'), sudo NOPASSWD, same lab password + host key as
+    # vmbuildadmin. vmbuildadmin stays the deployment account. Empty for
+    # domain-joined VMs (adminName is a domain account there).
+    $localAdminUserYaml = ''
+    if ($localAdminUser) {
+        $localAdminUserYaml = @"
+
+  - name: $localAdminUser
+    gecos: memlabs local admin
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: sudo
+    shell: /bin/bash
+    lock_passwd: $lockPasswdYaml
+    ssh_authorized_keys:
+      - $($sshKey.PublicKey)
+"@
     }
 
     # linux-tools-virtual / linux-cloud-tools-virtual provide hv_kvp_daemon and
@@ -561,6 +610,10 @@ chpasswd:
     if ($consolePassword) {
         $escapedPw = $consolePassword -replace "'", "'\''"
         $runcmd += "printf '$escapedPw\n$escapedPw\n' | smbpasswd -a -s vmbuildadmin"
+        # Same for the workgroup local-admin account (human logon) when present.
+        if ($localAdminUser) {
+            $runcmd += "printf '$escapedPw\n$escapedPw\n' | smbpasswd -a -s $localAdminUser"
+        }
     }
 
     $runcmd = $runcmd + $ExtraRunCmd
@@ -659,7 +712,7 @@ users:
     shell: /bin/bash
     lock_passwd: $lockPasswdYaml
     ssh_authorized_keys:
-      - $($sshKey.PublicKey)
+      - $($sshKey.PublicKey)$localAdminUserYaml
 
 ssh_pwauth: true
 disable_root: false
@@ -1302,6 +1355,16 @@ function New-LinuxVirtualMachine {
         }
         if ($DeployConfig) {
             $thisVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+
+            # Workgroup (non-domain-joined) Linux VMs get a local human-logon
+            # account named after adminName (default 'admin'), mirroring the
+            # Windows workgroup model. Domain-joined VMs use domain accounts
+            # (adminName/domainUser are in AD), so skip the local one there to
+            # avoid shadowing the domain account via NSS (files before sss).
+            $vmJoinsDomain = $thisVm -and ($thisVm.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$thisVm.joinDomain
+            if (-not $vmJoinsDomain -and $DeployConfig.vmOptions.adminName) {
+                $seedArgs.LocalAdminUser = $DeployConfig.vmOptions.adminName
+            }
 
             # Use pre-allocated AssignedIP as static cloud-init IP for all
             # Linux VMs. This means the VM boots with its reserved IP from

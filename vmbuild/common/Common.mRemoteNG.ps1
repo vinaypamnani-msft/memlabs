@@ -1563,14 +1563,18 @@ function New-MRemoteNGFileFromHyperV {
         foreach ($vm in $vmListFull) {
             # --- Linux VMs: SSH entry for all, optional RDP entry ---
             if (Test-VmIsLinux -Vm $vm) {
-                # Default login: mirror the Windows client model -- a domain-joined
-                # Linux VM with an assigned domainUser logs in as that AD user
-                # (NOPASSWD sudo on the box). Otherwise the local key/console
-                # account vmbuildadmin. The password is the shared lab password
-                # either way, so the container-level default stays vmbuildadmin
-                # and only the per-connection username changes.
+                # Default login mirrors the Windows model. vmbuildadmin is the
+                # deployment account only; the human logon is:
+                #   domain-joined + domainUser -> that AD user (NOPASSWD sudo)
+                #   domain-joined, no domainUser -> the domain admin (adminName)
+                #   workgroup -> the local adminName account (default 'admin')
+                # Domain stays empty: SSSD/xrdp use short names
+                # (use_fully_qualified_names=False), and mRemoteNG SSH ignores the
+                # Domain field anyway. The password is the shared lab password, so
+                # container-level default creds (vmbuildadmin) still resolve.
                 $linuxJoinOn = ($vm.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$vm.joinDomain
-                $linuxUser = if ($linuxJoinOn -and $vm.domainUser) { $vm.domainUser } else { 'vmbuildadmin' }
+                $linuxAdmin = if ($vm.adminName) { $vm.adminName } else { 'admin' }
+                $linuxUser = if ($linuxJoinOn -and $vm.domainUser) { $vm.domainUser } else { $linuxAdmin }
 
                 # Always create SSH entry (no enableRDP gate)
                 if (-not $linuxContainer -and $linuxGroup) {

@@ -967,12 +967,17 @@ function New-RDCManFileFromHyperV {
                 if ([string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp = $vm.LastKnownIP }
                 $linuxName = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
 
-                # Default login: mirror the Windows client model -- a domain-joined
-                # Linux VM with an assigned domainUser logs in as that AD user (it
-                # has NOPASSWD sudo on the box). Otherwise fall back to the local
-                # key/console account vmbuildadmin.
+                # Default login mirrors the Windows model. vmbuildadmin is the
+                # deployment account only; the human logon is:
+                #   domain-joined + domainUser -> that AD user (NOPASSWD sudo)
+                #   domain-joined, no domainUser -> the domain admin (adminName)
+                #   workgroup -> the local adminName account (default 'admin')
+                # Domain stays empty: SSSD/xrdp use short names
+                # (use_fully_qualified_names=False), so a domain-qualified login
+                # would fail to authenticate.
                 $linuxJoinOn = ($vm.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$vm.joinDomain
-                $linuxUser = if ($linuxJoinOn -and $vm.domainUser) { $vm.domainUser } else { 'vmbuildadmin' }
+                $linuxAdmin = if ($vm.adminName) { $vm.adminName } else { 'admin' }
+                $linuxUser = if ($linuxJoinOn -and $vm.domainUser) { $vm.domainUser } else { $linuxAdmin }
 
                 # Build display name (RDP only; username suffix gated on ShowUser)
                 $linuxDisplay = "$($vm.VmName) [Linux RDP]"
