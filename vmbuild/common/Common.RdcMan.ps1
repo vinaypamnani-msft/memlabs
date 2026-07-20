@@ -633,6 +633,12 @@ function New-RDCManFileFromHyperV {
     # the interactive [R] regen and every automatic call site.
     $rdcSettings = Get-RDCSettings
 
+    # Any additive folder grouping (All VMs / By Role / By OS / By Subnet / By
+    # Site) enabled? When grouping is on but the default scheme is off, VMs live
+    # ONLY in the additive folders -- not also flat under the domain group (which
+    # is what made them show up twice).
+    $anyAdditiveGrouping = [bool]($rdcSettings.AllVMsGroup -or $rdcSettings.RoleGroups -or $rdcSettings.OSGroups -or $rdcSettings.SubnetGroups -or $rdcSettings.SiteCodeGroups)
+
     # Capture the path of the currently-running RDCMan.exe (if any) BEFORE we
     # stop it, so we can relaunch the exact same binary afterward. Hardcoding
     # C:\tools\RDCMan.exe fails on hosts where RDCMan was launched from another
@@ -991,11 +997,16 @@ function New-RDCManFileFromHyperV {
                 # RDP-capable and SSH-only VMs both go directly under Linux
                 $linuxTarget = if ($rdcSettings.DefaultGrouping) { $catGroups["Linux"] } else { $findGroup }
 
-                if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
-                        -targetGroup $linuxTarget -groupfromtemplate $groupFromTemplate -existing $existing `
-                        -comment $linuxComment -ForceOverwrite:$true `
-                        -domain '' -username 'vmbuildadmin') -eq $True) {
-                    $shouldSave = $true
+                # Skip the flat/default placement when additive grouping is on but
+                # the default scheme is off -- the VM then lives only in the
+                # additive folders below (avoids the duplicate under the domain).
+                if ($rdcSettings.DefaultGrouping -or -not $anyAdditiveGrouping) {
+                    if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
+                            -targetGroup $linuxTarget -groupfromtemplate $groupFromTemplate -existing $existing `
+                            -comment $linuxComment -ForceOverwrite:$true `
+                            -domain '' -username 'vmbuildadmin') -eq $True) {
+                        $shouldSave = $true
+                    }
                 }
 
                 # Optional additive grouping folders (By Role / By OS / By Subnet / By Site / All VMs)
@@ -1133,8 +1144,13 @@ function New-RDCManFileFromHyperV {
                 $targetGroup = $findGroup
             }
 
-            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $targetGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser) -eq $True) {
-                $shouldSave = $true
+            # Skip the flat/default placement when additive grouping is on but the
+            # default scheme is off -- the VM then lives only in the additive
+            # folders below (avoids the duplicate under the domain group).
+            if ($rdcSettings.DefaultGrouping -or -not $anyAdditiveGrouping) {
+                if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $targetGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser) -eq $True) {
+                    $shouldSave = $true
+                }
             }
 
             # Optional additive grouping folders (By Role / By OS / By Subnet / By Site / All VMs)

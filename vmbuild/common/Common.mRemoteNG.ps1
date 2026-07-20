@@ -1381,6 +1381,11 @@ function New-MRemoteNGFileFromHyperV {
     # the RDCMan generator so both connection files stay consistent.
     $rdcSettings = Get-RDCSettings
 
+    # Any additive folder grouping enabled? When grouping is on but the default
+    # scheme is off, VMs live ONLY in the additive folders -- not also flat under
+    # the domain container (which made them show up twice).
+    $anyAdditiveGrouping = [bool]($rdcSettings.AllVMsGroup -or $rdcSettings.RoleGroups -or $rdcSettings.OSGroups -or $rdcSettings.SubnetGroups -or $rdcSettings.SiteCodeGroups)
+
     $domainList = Get-List -Type UniqueDomain -SmartUpdate
     foreach ($domain in $domainList) {
         Write-Verbose "mRemoteNG: Processing domain $domain"
@@ -1702,15 +1707,20 @@ function New-MRemoteNGFileFromHyperV {
                 $connPassword = $encryptedPass
             }
 
-            if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $targetContainer `
-                    -Name $name -DisplayName $displayName -Hostname $name `
-                    -Protocol "RDP" -Port "3389" -Description $comment `
-                    -Username $connUsername -Domain $connDomain -Password $connPassword `
-                    -GuidSeed "rdp:${domain}:$($vm.VmName)" `
-                    -VmId $(if ($vmID) { $vmID } else { "" }) `
-                    -UseEnhancedMode $(if ($vmID) { $true } else { $false }) `
-                    -ForceOverwrite $ForceOverwrite) {
-                $shouldSave = $true
+            # Skip the flat/default placement when additive grouping is on but the
+            # default scheme is off -- the VM then lives only in the additive
+            # folders below (avoids the duplicate under the domain container).
+            if ($rdcSettings.DefaultGrouping -or -not $anyAdditiveGrouping) {
+                if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $targetContainer `
+                        -Name $name -DisplayName $displayName -Hostname $name `
+                        -Protocol "RDP" -Port "3389" -Description $comment `
+                        -Username $connUsername -Domain $connDomain -Password $connPassword `
+                        -GuidSeed "rdp:${domain}:$($vm.VmName)" `
+                        -VmId $(if ($vmID) { $vmID } else { "" }) `
+                        -UseEnhancedMode $(if ($vmID) { $true } else { $false }) `
+                        -ForceOverwrite $ForceOverwrite) {
+                    $shouldSave = $true
+                }
             }
 
             # Optional additive grouping folders (By Role / By OS / By Subnet / By Site / All VMs).
