@@ -919,7 +919,12 @@ function Select-VirtualMachines {
                             }
                         }
                         else {
-                            if ($virtualMachine.Role -eq "DomainMember") {
+                            # Domain User (add/remove/rename) menu. Windows: any
+                            # DomainMember. Linux: any domain-joined VM (joinDomain).
+                            # Same U/HU options + handler + Get-DomainUser picker,
+                            # so Linux mirrors the Windows domain-user workflow.
+                            $showDomainUserMenu = ($virtualMachine.Role -eq "DomainMember") -or ($vmIsLinux -and $virtualMachine.joinDomain)
+                            if ($showDomainUserMenu) {
                                 if (-not $virtualMachine.domainUser) {
                                     $customOptions += [ordered]@{
                                         "*U"   = ""
