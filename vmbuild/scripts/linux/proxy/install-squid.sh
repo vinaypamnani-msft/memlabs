@@ -58,6 +58,21 @@ if [ "$FAST_PATH" = "0" ]; then
     echo "[install-squid] Running apt-get update..."
     wait_for_apt_lock
     apt_retry apt-get update -y
+
+    # Bring the packaging tooling current FIRST, in an isolated transaction.
+    # On a stale base image, 'apt-get install squid' drags in an upgrade of
+    # debconf/apt-utils/dpkg/apt as a side effect. Upgrading debconf inside a
+    # large mixed transaction is the fragile operation that wedges here:
+    #   E: Cannot get debconf version. Is debconf installed?
+    #   debconf: apt-extracttemplates failed: 25600
+    # (apt-extracttemplates, from apt-utils, queries the debconf version during
+    # pre-configuration; while debconf itself is mid-upgrade that query fails).
+    # Doing it alone keeps the transaction tiny, lets recover_dpkg heal any
+    # wedge, and leaves debconf/apt-utils current so the squid install below no
+    # longer upgrades them.
+    echo "[install-squid] Bringing packaging tooling current (debconf/apt-utils/dpkg)..."
+    apt_retry apt-get install -y --only-upgrade debconf debconf-i18n apt apt-utils dpkg
+
     echo "[install-squid] Installing squid, ufw, python3-flask..."
     apt_retry apt-get install -y squid ufw python3-flask
     echo "[install-squid] Packages installed"

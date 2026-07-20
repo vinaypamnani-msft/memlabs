@@ -13,6 +13,9 @@ systemctl disable unattended-upgrades.service 2>/dev/null || true
 systemctl mask unattended-upgrades.service 2>/dev/null || true
 systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
 systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+# Mask the timers too (disable alone still lets a dependency pull them in).
+systemctl mask apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
 # Clean cloud-init state so next boot re-runs with the deploy seed
 cloud-init clean --logs --seed --machine-id || true
 truncate -s 0 /etc/machine-id
