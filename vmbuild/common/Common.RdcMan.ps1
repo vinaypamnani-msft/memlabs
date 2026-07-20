@@ -92,6 +92,11 @@ function Get-RDCRoleCategories {
         [object[]]$vmListFull
     )
     $cats = @()
+    # Linux VMs don't map to any Windows role bucket (LinuxClient/LinuxServer/
+    # Proxy). Group them under a single "Linux" category so the "By Role" scheme
+    # mirrors the default grouping's dedicated Linux folder instead of dropping
+    # them entirely.
+    if (Test-VmIsLinux -Vm $vm) { return @("Linux") }
     $isServerOS = $vm.deployedOS -and ($vm.deployedOS -match "Server")
     if ($vm.Role -in "OSDClient", "AADClient", "InternetClient") { $cats += "Clients" }
     elseif (($vm.Role -in "DomainMember", "WorkgroupMember") -and -not $isServerOS) { $cats += "Clients" }
