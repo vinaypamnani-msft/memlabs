@@ -3291,6 +3291,55 @@ function Get-LinuxRealmJoinBashScript {
     return (Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -IncludeSetDcDns -Variables $vars)
 }
 
+function Get-LinuxProxyClientBashScript {
+    <#
+    .SYNOPSIS
+        Bash body that points a Linux VM at the lab Squid proxy (env vars,
+        apt proxy, profile.d, snap proxy). Linux analog of Set-WindowsClientProxy.
+
+    .DESCRIPTION
+        Builds the http://<host>:<port> proxy URL and a no_proxy list that
+        keeps intra-lab traffic direct (localhost, the AD domain suffix, the
+        proxy host itself, the VM's own /24, and the DC). Injects them into
+        the shared roles/proxy-client.sh script.
+
+    .PARAMETER ProxyHost
+        IP (preferred) or FQDN of the Linux Proxy VM running Squid.
+
+    .PARAMETER ProxyPort
+        Squid listener port. Defaults to 3128.
+
+    .PARAMETER Domain
+        AD domain DNS suffix, added to no_proxy as ".<domain>".
+
+    .PARAMETER BypassNetwork
+        Optional /24 network base (e.g. 10.0.1.0). Adds "<base>.0/24" and the
+        DC ("<base>.1") to no_proxy so intra-subnet traffic stays direct.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$ProxyHost,
+        [Parameter(Mandatory = $false)][int]$ProxyPort = 3128,
+        [Parameter(Mandatory = $true)][string]$Domain,
+        [Parameter(Mandatory = $false)][string]$BypassNetwork
+    )
+
+    $proxyUrl = "http://${ProxyHost}:$ProxyPort"
+
+    $noProxyEntries = @('localhost', '127.0.0.1', '::1', ".$Domain", $ProxyHost)
+    if ($BypassNetwork) {
+        $base = $BypassNetwork
+        if ($base -match '^(\d+\.\d+\.\d+)\.\d+$') { $base = $Matches[1] }
+        if ($base -match '^\d+\.\d+\.\d+$') {
+            $noProxyEntries += "$base.0/24"
+            $noProxyEntries += "$base.1"   # DC (memlabs convention)
+        }
+    }
+    $noProxy = ($noProxyEntries | Where-Object { $_ } | Select-Object -Unique) -join ','
+
+    return (Get-LinuxScript -Name 'roles/proxy-client' -Variables @{ PROXY_URL = $proxyUrl; NO_PROXY = $noProxy })
+}
+
 function Invoke-LinuxRoleConfiguration {
     <#
     .SYNOPSIS
@@ -3323,6 +3372,40 @@ function Invoke-LinuxRoleConfiguration {
     # (human-readable, surfaced in Phase 3 row), Script (bash), TimeoutSec,
     # Tag (short DisplayName for the SSH wrapper / guest log).
     $ops = New-Object System.Collections.Generic.List[object]
+
+    # Proxy client config MUST run first: it points apt/env at Squid so the
+    # later apt-heavy modules (xrdp/gnome/realm-join) succeed once the deny-ACL
+    # is stamped (post-Phase-11). No-op for VMs that didn't opt into useProxy.
+    if (Test-VmUsesProxy -Vm $Vm -DeployConfig $DeployConfig) {
+        $proxyHost = $null
+        $proxyVm = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+        if ($proxyVm) {
+            $proxyHost = Get-LinuxVmExpectedStaticIP -VmObject $proxyVm -DeployConfig $DeployConfig
+            if (-not $proxyHost) { $proxyHost = Get-LinuxVmIPAddress -VmName $proxyVm.vmName }
+            if (-not $proxyHost) { $proxyHost = "$($proxyVm.vmName).$($DeployConfig.vmOptions.domainName)" }
+        }
+        else {
+            $existingProxyName = Get-ExistingForDomain -DomainName $DeployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+            if ($existingProxyName) {
+                $proxyHost = Get-LinuxVmIPAddress -VmName $existingProxyName
+                if (-not $proxyHost) { $proxyHost = "$existingProxyName.$($DeployConfig.vmOptions.domainName)" }
+            }
+        }
+
+        if ($proxyHost) {
+            $bypassNet = if ($Vm.network) { $Vm.network } else { $DeployConfig.vmOptions.network }
+            $ops.Add([pscustomobject]@{
+                Name       = 'proxyClient'
+                Label      = "Configuring proxy client ($proxyHost`:3128)"
+                Script     = (Get-LinuxProxyClientBashScript -ProxyHost $proxyHost -Domain $DeployConfig.vmOptions.domainName -BypassNetwork $bypassNet)
+                TimeoutSec = 120
+                Tag        = 'memlabs-proxy-client'
+            })
+        }
+        else {
+            Write-Log "[LinuxConfig] $vmName`: useProxy=true but no Proxy VM in config or domain; skipping proxy client config" -Warning
+        }
+    }
 
     if ($Vm.PSObject.Properties.Name -contains 'enableRDP' -and [bool]$Vm.enableRDP) {
         $ops.Add([pscustomobject]@{
@@ -3594,9 +3677,13 @@ function Test-VmUsesProxy {
         default at all -- the default doesn't override explicit per-VM
         state.
 
-        Returns $false for the Proxy VM itself and for any Linux VM
-        (proxy clients are Windows-only). The $DeployConfig parameter is
-        kept for source compatibility with callers but is no longer read.
+        Returns $false for the Proxy VM itself (it IS the proxy, so it must
+        never route through itself) and for the DNS-anchor roles (DC/BDC/
+        StandaloneRootCA). Both Windows and Linux VMs can opt in: Windows
+        clients are configured via Set-WindowsClientProxy over PSDirect;
+        Linux clients via the roles/proxy-client bash module over SSH in
+        Phase 3. The $DeployConfig parameter is kept for source
+        compatibility with callers but is no longer read.
     #>
     [CmdletBinding()]
     param (
@@ -3609,7 +3696,6 @@ function Test-VmUsesProxy {
     if (-not $Vm) { return $false }
     $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
     if ($Vm.role -in $hardExclude) { return $false }
-    if (Test-VmIsLinux -Vm $Vm) { return $false }
 
     if ($Vm.PSObject.Properties.Name -contains 'useProxy') {
         return [bool]$Vm.useProxy

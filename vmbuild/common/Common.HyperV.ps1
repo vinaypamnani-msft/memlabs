@@ -1801,7 +1801,14 @@ function Set-VmProxyEnforcementForConfig {
     )
 
     $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
-    $clients = @($deployConfig.virtualMachines | Where-Object { Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig })
+    # Linux clients are intentionally EXCLUDED here: their proxy env/apt
+    # config is applied in Phase 3 (roles/proxy-client), which runs AFTER
+    # this Phase 2 post-hook. Stamping the deny-ACL now would block the
+    # Phase 3 apt installs (xrdp/gnome/realm-join hit public archive.ubuntu.com
+    # on 80/443) before the guest knows to route through Squid. Linux VM ACLs
+    # are stamped later by Set-VmProxyEnforcementForAllLabs (post-Phase-11),
+    # by which time the Phase 3 proxy config is in place.
+    $clients = @($deployConfig.virtualMachines | Where-Object { (Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig) -and -not (Test-VmIsLinux -Vm $_) })
 
     if (-not $clients) { return $true }
     if (-not $proxyVm) {
@@ -1865,19 +1872,18 @@ function Set-VmProxyEnforcementForAllLabs {
         return $true
     }
 
-    # Hard-exclude roles (mirrors Test-VmUsesProxy). Linux Proxy VM excluded
-    # via the Proxy role itself; other Linux VMs are not Windows-NAT'd so
-    # have no extended ACLs to manage.
+    # Hard-exclude roles (mirrors Test-VmUsesProxy). The Linux Proxy VM is
+    # excluded via the Proxy role itself. Other Linux VMs DO participate:
+    # the extended-ACL set is OS-agnostic (it operates on the Hyper-V vNIC),
+    # and Linux clients that opted into useProxy have their guest-side proxy
+    # config applied in Phase 3, so stamping their deny-ACL here (post-Phase-11)
+    # is safe and enforces the "must use proxy" policy the same way as Windows.
     $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
 
     $applied = 0; $cleared = 0; $skipped = 0; $failed = 0
     foreach ($vm in $allVms) {
         if (-not $vm.vmName) { continue }
         if ($vm.role -in $hardExclude) { $skipped++; continue }
-        # OperatingSystem comes from deployedOS in VM Note; Linux distros contain "Linux" / "Ubuntu".
-        if ($vm.OperatingSystem -and ($vm.OperatingSystem -match 'Linux|Ubuntu|Debian|CentOS|RHEL|Fedora')) {
-            $skipped++; continue
-        }
 
         $optedIn = $false
         if ($vm.PSObject.Properties.Name -contains 'useProxy') {
@@ -1914,7 +1920,7 @@ function Set-VmProxyEnforcementForAllLabs {
         }
     }
 
-    Write-Log "[Proxy] Reconcile complete: $applied applied, $cleared cleared, $skipped skipped (excluded/Linux), $failed failed"
+    Write-Log "[Proxy] Reconcile complete: $applied applied, $cleared cleared, $skipped skipped (excluded roles), $failed failed"
     return ($failed -eq 0)
 }
 # endregion Proxy enforcement ---------------------------------------------
