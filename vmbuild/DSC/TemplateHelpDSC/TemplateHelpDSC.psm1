@@ -5851,6 +5851,40 @@ class ConfigureWSUS {
             Write-Status "Configuring HTTPS for WSUS"
             $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
             if (-not $cert) {
+                # The friendly-named WebServer cert is missing. This happens when
+                # Phase 3 CertReq's subject-only Test skipped stamping it (a
+                # subject-colliding cert already existed at enrollment time),
+                # leaving a CA-issued ServerAuth template cert for this host with
+                # no/other FriendlyName. Recover it by re-stamping the name
+                # instead of failing the whole phase (mirrors AddCertificateToIIS).
+                # Filter to a CA-issued (Issuer != Subject) cert from an AD
+                # template (has the V2 template extension) with ServerAuth EKU and
+                # this host's FQDN in the subject -- that excludes SQL's
+                # self-signed CN=FQDN ServerAuth cert.
+                $fqdn = "$env:COMPUTERNAME.$env:USERDNSDOMAIN"
+                $srvAuthOid = '1.3.6.1.5.5.7.3.1'
+                $candidate = Get-ChildItem Cert:\LocalMachine\My | Where-Object {
+                    ($_.EnhancedKeyUsageList.ObjectId -contains $srvAuthOid) -and
+                    ($_.Subject -match [regex]::Escape($fqdn)) -and
+                    ($_.Issuer -ne $_.Subject) -and
+                    ($_.Extensions.Oid.Value -contains '1.3.6.1.4.1.311.21.7')
+                } | Sort-Object NotBefore -Descending | Select-Object -First 1
+                if ($candidate) {
+                    try {
+                        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+                        $store.Open('ReadWrite')
+                        $live = $store.Certificates | Where-Object { $_.Thumbprint -eq $candidate.Thumbprint } | Select-Object -First 1
+                        if ($live) { $live.FriendlyName = $_FriendlyName }
+                        $store.Close()
+                        Write-Status "Recovered CA-issued ServerAuth cert (thumbprint $($candidate.Thumbprint.Substring(0,8))...) that had lost FriendlyName '$_FriendlyName'; re-applied name"
+                    }
+                    catch {
+                        Write-Status "Failed to re-apply FriendlyName to recovered cert: $_"
+                    }
+                    $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+                }
+            }
+            if (-not $cert) {
                 Write-Status "Could not find cert with friendly Name $_FriendlyName"
                 throw "Could not find cert with friendly Name $_FriendlyName"
             }
@@ -6005,11 +6039,35 @@ class ConfigureWSUS {
 
         try {
             $wsus = get-WsusServer
-            if ($wsus) {
-                return $true
+            if (-not $wsus) {
+                return $false
             }
 
-            return $false
+            # If HTTPS was requested, WSUS is NOT in desired state until the
+            # friendly-named WebServer cert exists AND it's bound to the WSUS
+            # Administration https:8531 binding. get-WsusServer succeeds as soon
+            # as postinstall completes -- if Set() then threw at the HTTPS step
+            # (e.g. the WebServer cert was missing), a plain get-WsusServer Test
+            # would report InDesiredState=True and a resume would SKIP Set(),
+            # silently leaving WSUS SSL unconfigured. Re-check the HTTPS bits so
+            # a resume actually re-runs Set() (which now self-heals the cert).
+            if ($this.HTTPSUrl) {
+                $fn = $this.TemplateName
+                $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $fn } | Select-Object -Last 1
+                if (-not $cert -or [string]::IsNullOrEmpty($cert.Thumbprint)) {
+                    Write-Verbose "WSUS HTTPS requested but cert '$fn' is not present; Set() needs to run."
+                    return $false
+                }
+                $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+                try { Import-Module WebAdministration -ErrorAction SilentlyContinue } finally { $global:VerbosePreference = $savedVP }
+                $binding = Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https" -ErrorAction SilentlyContinue
+                if (-not $binding -or [string]::IsNullOrEmpty($binding.certificateHash)) {
+                    Write-Verbose "WSUS https:8531 binding is missing or has no cert; Set() needs to run."
+                    return $false
+                }
+            }
+
+            return $true
         }
         catch {
             Write-Verbose "Failed to Find WSUS Server"
