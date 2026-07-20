@@ -1036,12 +1036,17 @@ function Get-LinuxDomainJoinSeedArgs {
     # base64-encode it and emit a single runcmd line:
     #   echo <b64> | base64 -d > /root/join.sh && bash /root/join.sh
     # Uses the same realm-join.sh file as Phase 3 — single source of truth.
-    $joinScript = Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -IncludeSetDcDns -Variables @{
+    $joinVars = @{
         DOMAIN     = $domainLower
         DC_IP      = $dcIp
         ADMIN_USER = $adminUser
         ADMIN_PWD  = $pwBashSingle
     }
+    # Optional per-VM domain user -> NOPASSWD sudo on the box (Windows parity).
+    if ($ThisVm.PSObject.Properties.Name -contains 'domainUser' -and $ThisVm.domainUser) {
+        $joinVars['DOMAIN_USER'] = $ThisVm.domainUser
+    }
+    $joinScript = Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -IncludeSetDcDns -Variables $joinVars
 
     # Base64-encode the script (UTF-8 LF line endings) so it survives the
     # YAML/bash quoting layers untouched.
@@ -3203,18 +3208,24 @@ function Get-LinuxRealmJoinBashScript {
         [Parameter(Mandatory = $true)][string]$Domain,
         [Parameter(Mandatory = $true)][string]$DcIp,
         [Parameter(Mandatory = $true)][string]$AdminUser,
-        [Parameter(Mandatory = $true)][string]$AdminPassword
+        [Parameter(Mandatory = $true)][string]$AdminPassword,
+        [Parameter(Mandatory = $false)][string]$DomainUser
     )
 
     $pwBashSingle = $AdminPassword -replace "'", "'\''"
     $domainLower = $Domain.ToLower()
 
-    return (Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -IncludeSetDcDns -Variables @{
+    $vars = @{
         DOMAIN    = $domainLower
         DC_IP     = $DcIp
         ADMIN_USER = $AdminUser
         ADMIN_PWD  = $pwBashSingle
-    })
+    }
+    # Optional: per-VM domain user granted NOPASSWD sudo on the box (mirrors the
+    # Windows domainUser=local-admin model). Omitted -> Domain-Admins-only sudo.
+    if ($DomainUser) { $vars['DOMAIN_USER'] = $DomainUser }
+
+    return (Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -IncludeSetDcDns -Variables $vars)
 }
 
 function Invoke-LinuxRoleConfiguration {
@@ -3304,10 +3315,15 @@ function Invoke-LinuxRoleConfiguration {
         }
         else {
             $dcIp = "$($Matches[1]).1"
+            # Per-VM domain user (already prefix-normalized at config load) gets
+            # NOPASSWD sudo on the box and becomes the default SSH/RDP login,
+            # mirroring the Windows client domainUser=local-admin model.
+            $domainUser = $null
+            if ($Vm.PSObject.Properties.Name -contains 'domainUser') { $domainUser = $Vm.domainUser }
             $ops.Add([pscustomobject]@{
                 Name       = 'joinDomain'
                 Label      = "Joining AD domain $domain"
-                Script     = (Get-LinuxRealmJoinBashScript -Domain $domain -DcIp $dcIp -AdminUser $adminUser -AdminPassword $adminPwd)
+                Script     = (Get-LinuxRealmJoinBashScript -Domain $domain -DcIp $dcIp -AdminUser $adminUser -AdminPassword $adminPwd -DomainUser $domainUser)
                 TimeoutSec = 1800
                 Tag        = 'memlabs-realm-join'
             })

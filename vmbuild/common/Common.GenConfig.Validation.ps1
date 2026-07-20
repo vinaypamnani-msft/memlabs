@@ -229,6 +229,42 @@ function Get-AdditionalValidations {
                 }
             }
         }
+        "joinDomain" {
+            # Mirror the Windows client model for domain-joined Linux VMs: assign
+            # a dedicated AD 'user<N>' account when the VM joins the domain. That
+            # account is created in AD for free (Common.GenConfig.ps1 aggregates
+            # every vm.domainUser into DomainAccountsUPN), granted sudo on the box
+            # (realm-join.sh), and used as the default RDCMan/mRemoteNG login.
+            # joinDomain only exists on Linux VMs (Windows uses role-based join),
+            # so this cascade never touches a Windows VM.
+            if ($value -eq $true) {
+                if (-not $property.domainUser) {
+                    $existingUsers = @(get-list2 -DeployConfig $Global:Config | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique)
+                    $userPrefix = ($Global:Config.vmOptions.prefix).ToLower() + "user"
+                    $userNoPrefix = "user"
+                    [int]$i = 1
+                    while ($true) {
+                        $preferredUserName = $userPrefix + $i
+                        $noPrefixUserName = $userNoPrefix + $i
+                        if ($existingUsers -contains $preferredUserName -or $existingUsers -contains $noPrefixUserName) {
+                            $i++
+                        }
+                        else {
+                            $property | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $noPrefixUserName -Force
+                            Add-ErrorMessage -property $name -Warning "Assigned domain user '$noPrefixUserName' (sudo on the VM; default SSH/RDP login)."
+                            break
+                        }
+                    }
+                }
+            }
+            else {
+                # joinDomain turned off: drop the auto-assigned domainUser so the
+                # standalone Linux VM doesn't carry an unused AD account/login.
+                if ($property.PSObject.Properties.Name -contains 'domainUser') {
+                    $property.PSObject.Properties.Remove('domainUser')
+                }
+            }
+        }
         "vmGeneration" {
             if ($value -notin ("1", "2")) {
                 $property.$name = "2"

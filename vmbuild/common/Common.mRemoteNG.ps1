@@ -1563,6 +1563,15 @@ function New-MRemoteNGFileFromHyperV {
         foreach ($vm in $vmListFull) {
             # --- Linux VMs: SSH entry for all, optional RDP entry ---
             if (Test-VmIsLinux -Vm $vm) {
+                # Default login: mirror the Windows client model -- a domain-joined
+                # Linux VM with an assigned domainUser logs in as that AD user
+                # (NOPASSWD sudo on the box). Otherwise the local key/console
+                # account vmbuildadmin. The password is the shared lab password
+                # either way, so the container-level default stays vmbuildadmin
+                # and only the per-connection username changes.
+                $linuxJoinOn = ($vm.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$vm.joinDomain
+                $linuxUser = if ($linuxJoinOn -and $vm.domainUser) { $vm.domainUser } else { 'vmbuildadmin' }
+
                 # Always create SSH entry (no enableRDP gate)
                 if (-not $linuxContainer -and $linuxGroup) {
                     $linuxContainer = $linuxGroup.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "SSH" } | Select-Object -First 1
@@ -1593,7 +1602,7 @@ function New-MRemoteNGFileFromHyperV {
                 if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $linuxContainer `
                         -Name $vm.VmName -DisplayName $sshDisplayName -Hostname $sshHost `
                         -Protocol "SSH2" -Port "22" -Description $sshComment `
-                        -Username "vmbuildadmin" -Domain "" -Password $encryptedPass `
+                        -Username $linuxUser -Domain "" -Password $encryptedPass `
                         -GuidSeed "ssh:${domain}:$($vm.VmName)" `
                         -ForceOverwrite $true) {
                     $shouldSave = $true
@@ -1606,7 +1615,7 @@ function New-MRemoteNGFileFromHyperV {
                     if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $addContainer `
                             -Name $vm.VmName -DisplayName $sshDisplayName -Hostname $sshHost `
                             -Protocol "SSH2" -Port "22" -Description $sshComment `
-                            -Username "vmbuildadmin" -Domain "" -Password $encryptedPass `
+                            -Username $linuxUser -Domain "" -Password $encryptedPass `
                             -GuidSeed "ssh:${domain}:$($vm.VmName):$($fp -join '/')" `
                             -ForceOverwrite $true) {
                         $shouldSave = $true
@@ -1628,14 +1637,14 @@ function New-MRemoteNGFileFromHyperV {
                 $isLinuxClient = $vm.Role -eq 'LinuxClient'
                 if ($rdpOn -or $isLinuxClient) {
                     $rdpDisplayName = "$($vm.VmName) [Linux RDP]"
-                    if ($rdcSettings.ShowUser) { $rdpDisplayName += " (vmbuildadmin)" }
+                    if ($rdcSettings.ShowUser) { $rdpDisplayName += " ($linuxUser)" }
                     if ($vm.SiteCode) { $rdpDisplayName += " ($($vm.SiteCode))" }
 
                     $linuxRdpTarget = if ($linuxGroup) { $linuxGroup } else { $container }
                     if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $linuxRdpTarget `
                             -Name $vm.VmName -DisplayName $rdpDisplayName -Hostname $sshHost `
                             -Protocol "RDP" -Port "3389" -Description $sshComment `
-                            -Username "vmbuildadmin" -Domain "" -Password $encryptedPass `
+                            -Username $linuxUser -Domain "" -Password $encryptedPass `
                             -GuidSeed "rdp:${domain}:$($vm.VmName)" `
                             -ForceOverwrite $true) {
                         $shouldSave = $true

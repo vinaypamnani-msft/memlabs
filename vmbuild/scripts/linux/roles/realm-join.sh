@@ -7,6 +7,10 @@
 #   ADMIN_USER — AD admin username for realm join
 #   ADMIN_PWD  — AD admin password (single-quote-safe)
 #
+# Optional variables:
+#   DOMAIN_USER — per-VM AD user granted NOPASSWD sudo on this box (mirrors the
+#                 Windows client model). Leave unset for Domain-Admins-only sudo.
+#
 # Used by both cloud-init seed (Phase 1) and Phase 3 role config.
 set -euo pipefail
 echo "[memlabs-realm-join] start: $(date -Is)"
@@ -19,9 +23,26 @@ export DEBIAN_FRONTEND=noninteractive
 # the join, the stale-account delete, and the adcli-join diagnostic below).
 ADMIN_USER="$(printf '%s' "$ADMIN_USER" | tr '[:upper:]' '[:lower:]')"
 
+# Grant the per-VM domain user NOPASSWD sudo (mirrors the Windows client model
+# where the assigned domainUser is a local admin on its machine). SSSD
+# normalizes AD usernames to lowercase (use_fully_qualified_names=False +
+# case-insensitive AD provider), so write the sudoers principal lowercased to
+# guarantee the match. No-op when DOMAIN_USER is unset. Defined here so it runs
+# on BOTH the idempotent already-joined skip path and the normal join path.
+grant_domain_user_sudo() {
+    if [ -n "${DOMAIN_USER:-}" ]; then
+        local du_lc
+        du_lc="$(printf '%s' "$DOMAIN_USER" | tr '[:upper:]' '[:lower:]')"
+        echo "$du_lc ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/memlabs-domainuser
+        chmod 0440 /etc/sudoers.d/memlabs-domainuser
+        echo "[memlabs-realm-join] granted NOPASSWD sudo to domain user '$du_lc'"
+    fi
+}
+
 # Idempotency: skip if already joined to the target domain.
 if command -v realm >/dev/null 2>&1 && realm list 2>/dev/null | grep -qi "$DOMAIN"; then
     echo "[memlabs-realm-join] already joined to $DOMAIN; skipping."
+    grant_domain_user_sudo
     exit 0
 fi
 
@@ -126,5 +147,9 @@ systemctl restart sssd || true
 # Domain Admins -> sudo NOPASSWD.
 echo '%domain\ admins ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/memlabs-domain-admins
 chmod 0440 /etc/sudoers.d/memlabs-domain-admins
+
+# Per-VM domain user -> sudo NOPASSWD (mirrors the Windows client model where
+# the assigned domainUser is a local admin on its machine).
+grant_domain_user_sudo
 
 echo "[memlabs-realm-join] done: $(date -Is)"

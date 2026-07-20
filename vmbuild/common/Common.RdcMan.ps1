@@ -967,9 +967,16 @@ function New-RDCManFileFromHyperV {
                 if ([string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp = $vm.LastKnownIP }
                 $linuxName = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
 
+                # Default login: mirror the Windows client model -- a domain-joined
+                # Linux VM with an assigned domainUser logs in as that AD user (it
+                # has NOPASSWD sudo on the box). Otherwise fall back to the local
+                # key/console account vmbuildadmin.
+                $linuxJoinOn = ($vm.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$vm.joinDomain
+                $linuxUser = if ($linuxJoinOn -and $vm.domainUser) { $vm.domainUser } else { 'vmbuildadmin' }
+
                 # Build display name (RDP only; username suffix gated on ShowUser)
                 $linuxDisplay = "$($vm.VmName) [Linux RDP]"
-                if ($rdcSettings.ShowUser) { $linuxDisplay += " (vmbuildadmin)" }
+                if ($rdcSettings.ShowUser) { $linuxDisplay += " ($linuxUser)" }
                 if ($vm.SiteCode) { $linuxDisplay += " ($($vm.SiteCode))" }
 
                 $cLinux = [PsCustomObject]@{}
@@ -1004,7 +1011,7 @@ function New-RDCManFileFromHyperV {
                     if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
                             -targetGroup $linuxTarget -groupfromtemplate $groupFromTemplate -existing $existing `
                             -comment $linuxComment -ForceOverwrite:$true `
-                            -domain '' -username 'vmbuildadmin') -eq $True) {
+                            -domain '' -username $linuxUser) -eq $True) {
                         $shouldSave = $true
                     }
                 }
@@ -1015,7 +1022,7 @@ function New-RDCManFileFromHyperV {
                     if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
                             -targetGroup $addGroup -groupfromtemplate $groupFromTemplate -existing $existing `
                             -comment $linuxComment -ForceOverwrite:$true `
-                            -domain '' -username 'vmbuildadmin') -eq $True) {
+                            -domain '' -username $linuxUser) -eq $True) {
                         $shouldSave = $true
                     }
                 }
