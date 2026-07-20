@@ -1563,18 +1563,22 @@ function New-MRemoteNGFileFromHyperV {
         foreach ($vm in $vmListFull) {
             # --- Linux VMs: SSH entry for all, optional RDP entry ---
             if (Test-VmIsLinux -Vm $vm) {
-                # Default login mirrors the Windows model. vmbuildadmin is the
-                # deployment account only; the human logon is:
-                #   domain-joined + domainUser -> that AD user (NOPASSWD sudo)
-                #   domain-joined, no domainUser -> the domain admin (adminName)
-                #   workgroup -> the local adminName account (default 'admin')
-                # Domain stays empty: SSSD/xrdp use short names
-                # (use_fully_qualified_names=False), and mRemoteNG SSH ignores the
-                # Domain field anyway. The password is the shared lab password, so
-                # container-level default creds (vmbuildadmin) still resolve.
+                # SSH login account:
+                #   domain-joined + domainUser -> that AD user (SSSD, NOPASSWD sudo)
+                #   everything else            -> vmbuildadmin
+                # vmbuildadmin is the deployment account baked into EVERY Linux
+                # image with the lab password + host key, and is exactly what
+                # memlabs' own SSH automation authenticates as -- so it is
+                # guaranteed to exist and log in. The local 'adminName' account
+                # (e.g. 'admin') is only created at first boot by cloud-init, so
+                # on a VM whose first boot didn't fully complete it may be absent
+                # or unusable ("account does not have access to login"); it is
+                # therefore not used as the SSH target. Domain stays empty: SSSD
+                # uses short names (use_fully_qualified_names=False) and mRemoteNG
+                # SSH ignores the Domain field anyway. Password is the shared lab
+                # password, matching the container-level vmbuildadmin default.
                 $linuxJoinOn = ($vm.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$vm.joinDomain
-                $linuxAdmin = if ($vm.adminName) { $vm.adminName } else { 'admin' }
-                $linuxUser = if ($linuxJoinOn -and $vm.domainUser) { $vm.domainUser } else { $linuxAdmin }
+                $linuxUser = if ($linuxJoinOn -and $vm.domainUser) { $vm.domainUser } else { 'vmbuildadmin' }
 
                 # Default-scheme SSH target:
                 #   DefaultGrouping on      -> the Linux > SSH sub-container
