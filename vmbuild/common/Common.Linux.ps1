@@ -3047,6 +3047,7 @@ echo "DNS=$DNS_OK HTTP=$HTTP_OK"
 '@
     $netOk = $false
     for ($netAttempt = 1; $netAttempt -le 6; $netAttempt++) {
+        write-progress2 "Proxy Setup" -Status "$vmName`: verifying internet access (attempt $netAttempt/6)..." -force
         $netResult = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $netCheckBash `
             -Sudo -TimeoutSeconds 30 -SuppressLog -DisplayName "Network check"
         if ($netResult -and -not $netResult.ScriptBlockFailed -and $netResult.ScriptBlockOutput -match 'DNS=1 HTTP=1') {
@@ -3109,6 +3110,7 @@ coredump_dir /var/spool/squid
 
     $bash = Get-LinuxScript -Name 'proxy/install-squid' -Variables @{ CONF_B64 = $confB64 } -IncludeAptRetry
 
+    write-progress2 "Proxy Setup" -Status "$vmName`: installing Squid proxy (apt update + packages; this can take several minutes)..." -force
     $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 900 -DisplayName "Install Squid"
 
     # ── Resilient retry logic ──
@@ -3195,6 +3197,7 @@ echo "APT_CLEANUP_DONE"
                 }
             }
 
+            write-progress2 "Proxy Setup" -Status "$vmName`: retrying Squid install (this can take several minutes)..." -force
             $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 900 -DisplayName "Install Squid (retry)"
         }
     }
@@ -3224,6 +3227,7 @@ echo "APT_CLEANUP_DONE"
 
     $webUiBash = Get-LinuxScript -Name 'proxy/deploy-webui' -Variables @{ APP_B64 = $appB64; SVC_B64 = $svcB64 }
 
+    write-progress2 "Proxy Setup" -Status "$vmName`: Squid ready; installing Proxy Admin web UI..." -force
     $result2 = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $webUiBash -Sudo -TimeoutSeconds 120 -DisplayName "Install Proxy Admin UI"
     if ($result2.ScriptBlockFailed -or $result2.ExitCode -ne 0) {
         Write-Log "[Proxy] $vmName`: Proxy Admin web UI install failed (ExitCode=$($result2.ExitCode))`n$($result2.ScriptBlockOutput)" -Warning
