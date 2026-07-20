@@ -400,20 +400,28 @@ function Test-VmFunctionality {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Proxy Admin web UI"
         $testsPassed = Test-ProxyAdminWebUI -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
-    # 2) For any opted-in Windows client/CM-role VM: verify it's pointed at the proxy,
-    #    that direct Internet is blocked by host ACLs, and (CM site roles only) that
-    #    Get-CMSiteSystemServer reports UseProxy=$true.
+    # 2) For any opted-in client/CM-role VM: verify it's pointed at the proxy.
+    #    Windows: WinHTTP/IE proxy config + direct-Internet blocked + (CM roles)
+    #    Get-CMSiteSystemServer UseProxy=$true. Linux: guest env/apt proxy config
+    #    (the deny-ACL is stamped post-Phase-11, so egress-blocked isn't tested here).
     if ($testsPassed -and (Test-VmUsesProxy -Vm $CurrentItem -DeployConfig $DeployConfig)) {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying proxy configuration"
-        if (-not (Test-WindowsProxyConfig -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
-            $testsPassed = $false
-        }
-        if ($testsPassed -and -not (Test-InternetBlocked -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
-            $testsPassed = $false
-        }
-        if ($testsPassed -and $role -in @('CAS', 'Primary', 'SiteSystem')) {
-            if (-not (Test-CMSiteRoleProxy -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
+        if ($vmIsLinux) {
+            if (-not (Test-LinuxProxyConfig -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
                 $testsPassed = $false
+            }
+        }
+        else {
+            if (-not (Test-WindowsProxyConfig -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
+                $testsPassed = $false
+            }
+            if ($testsPassed -and -not (Test-InternetBlocked -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
+                $testsPassed = $false
+            }
+            if ($testsPassed -and $role -in @('CAS', 'Primary', 'SiteSystem')) {
+                if (-not (Test-CMSiteRoleProxy -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
+                    $testsPassed = $false
+                }
             }
         }
     }
@@ -9199,6 +9207,105 @@ function Test-ProxyAdminWebUI {
     Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - no listener on :8443 (ss output: '$output')" -Failure -LogOnly
     $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Proxy Admin web UI not listening on TCP 8443"; Level = 'Failure' })
     return $false
+}
+
+function Test-LinuxProxyConfig {
+    <#
+    .SYNOPSIS
+        Phase 11 test for an opted-in Linux VM: verifies the guest is pointed
+        at the lab Squid proxy.
+    .DESCRIPTION
+        Linux analog of Test-WindowsProxyConfig. Over SSH, checks that the
+        roles/proxy-client.sh config landed:
+          - /etc/environment has an http_proxy=...:3128 entry (hard FAIL)
+          - /etc/apt/apt.conf.d/00-memlabs-proxy sets Acquire::http::Proxy (hard FAIL)
+        and, as an end-to-end soft check (INFO only), curls archive.ubuntu.com
+        THROUGH the proxy and reports the HTTP status.
+
+        NOTE: direct-Internet-blocked is intentionally NOT tested for Linux --
+        the Linux deny-ACL is stamped post-Phase-11 by
+        Set-VmProxyEnforcementForAllLabs, so egress is still open during Phase 11.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $RoleLabel = 'ProxyClient'
+
+    $proxyVm = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    if (-not $proxyVm) {
+        # Add-to-existing case: Proxy may live in the existing hierarchy.
+        $existingProxyName = $null
+        if (Get-Command Get-ExistingForDomain -ErrorAction SilentlyContinue) {
+            $existingProxyName = Get-ExistingForDomain -DomainName $DeployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+        }
+        if (-not $existingProxyName) {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - useProxy=true but no Proxy VM in config; skipping client config test" -Warning -LogOnly
+            return $true
+        }
+    }
+
+    if (-not (Get-Command Invoke-LinuxVmCommand -ErrorAction SilentlyContinue)) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Invoke-LinuxVmCommand not loaded" -Failure -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Invoke-LinuxVmCommand not loaded"; Level = 'Failure' })
+        return $false
+    }
+
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Testing Linux proxy client config (env + apt -> :3128)" -LogOnly
+
+    $bash = @'
+rc=0
+# 1) /etc/environment http_proxy points at a :3128 listener
+if grep -qiE '^http_proxy=.*:3128' /etc/environment 2>/dev/null; then
+    echo "OK: /etc/environment http_proxy -> $(grep -iE '^http_proxy=' /etc/environment | head -1)"
+else
+    echo "FAIL: /etc/environment has no http_proxy :3128 entry"
+    rc=1
+fi
+# 2) apt Acquire proxy
+if grep -qiE 'Acquire::http(s)?::Proxy.*:3128' /etc/apt/apt.conf.d/00-memlabs-proxy 2>/dev/null; then
+    echo "OK: apt Acquire proxy configured"
+else
+    echo "FAIL: /etc/apt/apt.conf.d/00-memlabs-proxy missing or has no :3128 proxy"
+    rc=1
+fi
+# 3) End-to-end (soft): curl archive.ubuntu.com THROUGH the proxy.
+PROXY_URL=$(grep -oE 'http://[^"]+:3128' /etc/environment 2>/dev/null | head -1)
+if [ -n "$PROXY_URL" ]; then
+    CODE=$(curl --max-time 25 -s -o /dev/null -w '%{http_code}' -x "$PROXY_URL" http://archive.ubuntu.com/ubuntu/dists/ 2>/dev/null || echo 000)
+    echo "INFO: curl via $PROXY_URL -> http_code=$CODE"
+fi
+exit $rc
+'@
+
+    $result = Invoke-LinuxVmCommand -VmName $VMName -BashCommand $bash -Sudo -TimeoutSeconds 60 -SuppressLog -DisplayName "Phase11-LinuxProxyClient-Test"
+
+    $output = if ($result) { ($result.ScriptBlockOutput | Out-String).Trim() } else { '' }
+    foreach ($line in ($output -split "`n")) {
+        $line = $line.Trim()
+        if (-not $line) { continue }
+        if ($line -like 'FAIL:*') {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Failure -LogOnly
+        }
+        else {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -LogOnly
+        }
+    }
+
+    if (-not $result -or $result.ScriptBlockFailed -or $result.ExitCode -ne 0) {
+        $detail = if ($output) { (($output -split "`n" | Where-Object { $_ -like 'FAIL:*' }) -join '; ') } else { 'SSH failed' }
+        if (-not $detail) { $detail = "exit=$(if ($result) { $result.ExitCode } else { 'n/a' })" }
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - proxy client config not applied: $detail" -Failure -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - proxy client config not applied ($detail)"; Level = 'Failure' })
+        return $false
+    }
+
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Linux proxy client config verified" -LogOnly
+    return $true
 }
 
 function Test-WindowsProxyConfig {
