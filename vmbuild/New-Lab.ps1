@@ -93,7 +93,8 @@ try {
     [System.IO.File]::WriteAllBytes($shortcutLocation, $bytes)
 }
 catch {
-    write-log -Verbose "Could not Set Shortcut $_" -logonly
+    # Common.ps1 isn't dot-sourced yet, so Write-Log doesn't exist here.
+    Write-Host "  Could not set desktop shortcut: $_"
 }
 
 # Tell common to re-init
