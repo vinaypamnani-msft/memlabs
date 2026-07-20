@@ -1624,6 +1624,68 @@ function Get-LinuxVmIPAddress {
     return $null
 }
 
+function Wait-LinuxCloudInitComplete {
+    <#
+    .SYNOPSIS
+        After SSH is up, block until cloud-init reaches a terminal state so we
+        never run apt while cloud-init's first-boot 'packages:' step is still
+        going.
+
+    .DESCRIPTION
+        Wait-LinuxVmReady returns the instant sshd answers, but on first boot
+        cloud-init is often still running its package install AND has a
+        'power_state: reboot (delay: now)' queued for when its modules finish.
+        If we start Phase-2 apt in that window, cloud-init's reboot fires
+        mid-apt and the in-flight dpkg write is lost (ext4 delayed allocation:
+        /var/lib/dpkg/status keeps its size but its data blocks are never
+        flushed), leaving the DB all-NUL -> "parsing file '.../status' near
+        line 0: end of file" and the debconf/apt cascade. This gates apt on
+        cloud-init being done.
+
+        Polls 'cloud-init status' over short SSH commands so a power_state
+        reboot mid-wait is tolerated (SSH drops -> we keep polling until it's
+        back and reports done). Proceeds (with a warning) on error/degraded or
+        on timeout -- cloud-init trouble shouldn't hard-block the deploy, and
+        the apt path has its own recovery.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][string]$IPAddress,
+        [int]$TimeoutSeconds = 600
+    )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastState = $null
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $r = Invoke-LinuxVmCommand -VmName $VmName -IPAddress $IPAddress -SuppressLog `
+            -Sudo -TimeoutSeconds 20 -DisplayName "cloud-init status" `
+            -BashCommand 'cloud-init status 2>/dev/null || echo "status: unknown"'
+        $state = ""
+        if ($r -and -not $r.ScriptBlockFailed -and $r.ScriptBlockOutput -match 'status:\s*(\S+)') {
+            $state = $Matches[1].Trim().ToLower()
+        }
+        if ($state -in @('done', 'error', 'degraded', 'disabled')) {
+            $elapsed = [int]$sw.Elapsed.TotalSeconds
+            if ($state -eq 'done') {
+                Write-Log "$VmName`: cloud-init done (waited ${elapsed}s)" -LogOnly
+            }
+            else {
+                Write-Log "$VmName`: cloud-init finished with status '$state' (waited ${elapsed}s); proceeding" -Warning
+            }
+            return $true
+        }
+        if ($state -ne $lastState) {
+            $lastState = $state
+            $elapsed = [int]$sw.Elapsed.TotalSeconds
+            $disp = if ($state) { $state } else { "unreachable (rebooting?)" }
+            write-progress2 "Wait for Linux VM" -Status "$VmName`: waiting for cloud-init to finish (status: $disp, ${elapsed}s)" -force
+        }
+        Start-Sleep -Seconds 8
+    }
+    Write-Log "$VmName`: cloud-init still not done after ${TimeoutSeconds}s; proceeding anyway" -Warning
+    return $false
+}
+
 function Wait-LinuxVmReady {
     <#
     .SYNOPSIS
@@ -1779,6 +1841,12 @@ function Wait-LinuxVmReady {
             $sshErr = & $sshExe @sshArgs 2>&1
             if ($LASTEXITCODE -eq 0) {
                 Write-Log "$VmName`: SSH ready at $ip" -LogOnly
+                write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH ready at $ip" -force
+                # SSH is up, but on first boot cloud-init may still be running its
+                # 'packages:' step with a queued power_state reboot. Don't return
+                # (and let the caller start apt) until cloud-init is done -- its
+                # reboot firing mid-apt is what zeroes the dpkg status DB.
+                $null = Wait-LinuxCloudInitComplete -VmName $VmName -IPAddress $ip -TimeoutSeconds ([Math]::Min(600, $TimeoutSeconds))
                 write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH ready at $ip" -force -Completed
                 return $ip
             }
