@@ -617,6 +617,14 @@ chpasswd:
     }
 
     $runcmd = $runcmd + $ExtraRunCmd
+    # Flush all filesystem writes to disk as the final runcmd item, before
+    # cloud-init's power_state reboot runs. The 'packages:' module above
+    # writes the dpkg status DB; on ext4 with delayed allocation a reboot on a
+    # heavily-loaded host can otherwise leave /var/lib/dpkg/status zero-length
+    # ("dpkg: error: parsing file '/var/lib/dpkg/status' near line 0: end of
+    # file"), which makes dpkg think nothing is installed and breaks every
+    # later apt operation. An explicit sync closes that writeback window.
+    $runcmd += 'sync'
     # Emit each runcmd item as a YAML double-quoted scalar.
     #
     # Why: plain (unquoted) YAML scalars are parsed greedily. A runcmd line
@@ -2808,9 +2816,12 @@ fi
 
     Write-Log "$VmName`: Rebooting VM for retry..."
     # Try graceful SSH reboot first; if SSH is broken, fall back to Hyper-V.
+    # 'sync' first so any freshly-written dpkg status DB is flushed to disk
+    # before the reboot — a non-graceful reboot on a busy host can otherwise
+    # truncate /var/lib/dpkg/status (ext4 delayed allocation).
     if ($IPAddress) {
         $null = Invoke-LinuxVmCommand -VmName $VmName -IPAddress $IPAddress `
-            -BashCommand 'nohup bash -c "sleep 2 && reboot" &>/dev/null &' `
+            -BashCommand 'sync; nohup bash -c "sleep 2 && sync && reboot" &>/dev/null &' `
             -Sudo -TimeoutSeconds 10 -SuppressLog
     }
     Start-Sleep -Seconds 10

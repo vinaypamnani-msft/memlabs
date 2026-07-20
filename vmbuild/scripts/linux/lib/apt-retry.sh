@@ -9,6 +9,49 @@
 # Inlined into scripts by Get-LinuxScript -IncludeAptRetry.
 
 # ---------------------------------------------------------------------------
+# repair_dpkg_status
+#   Detects and repairs a corrupt/truncated dpkg package database. On ext4 a
+#   non-graceful reboot (host stress, unflushed writeback) can leave
+#   /var/lib/dpkg/status zero-length, which surfaces as:
+#       dpkg: error: parsing file '/var/lib/dpkg/status' near line 0:
+#       end of file after field name ''
+#   and makes dpkg think NOTHING is installed (apt then tries to reinstall the
+#   entire base system). dpkg keeps the previous good copy as status-old and
+#   the packaging cron keeps dated copies under /var/backups; restore the
+#   first candidate that parses. Returns 0 if the DB is (now) readable.
+# ---------------------------------------------------------------------------
+repair_dpkg_status() {
+    if dpkg-query -W >/dev/null 2>&1; then
+        return 0    # status DB is readable — nothing to do (fast path)
+    fi
+    echo "[repair_dpkg_status] dpkg status DB is unreadable/corrupt; restoring from backup..." >&2
+    local ts cand
+    ts=$(date +%s)
+    [ -f /var/lib/dpkg/status ] && \
+        cp -a /var/lib/dpkg/status "/var/lib/dpkg/status.broken.$ts" 2>/dev/null || true
+    # Prefer dpkg's own previous copy, then the dated backups (newest first).
+    for cand in /var/lib/dpkg/status-old \
+                $(ls -1t /var/backups/dpkg.status /var/backups/dpkg.status.0 2>/dev/null); do
+        [ -s "$cand" ] || continue
+        if cp -a "$cand" /var/lib/dpkg/status 2>/dev/null && dpkg-query -W >/dev/null 2>&1; then
+            echo "[repair_dpkg_status] restored dpkg status from $cand" >&2
+            sync
+            return 0
+        fi
+    done
+    # gzip'd dated backups (dpkg.status.1.gz, ...), newest first.
+    for cand in $(ls -1t /var/backups/dpkg.status.*.gz 2>/dev/null); do
+        if zcat "$cand" > /var/lib/dpkg/status 2>/dev/null && dpkg-query -W >/dev/null 2>&1; then
+            echo "[repair_dpkg_status] restored dpkg status from $cand" >&2
+            sync
+            return 0
+        fi
+    done
+    echo "[repair_dpkg_status] WARNING: no parseable dpkg status backup found" >&2
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # recover_dpkg
 #   Recovers an interrupted or wedged dpkg/debconf state so a subsequent
 #   apt-get can succeed.  A plain 'dpkg --configure -a' only fixes a cleanly
@@ -26,6 +69,10 @@ recover_dpkg() {
     pkill -9 -x unattended-upgr 2>/dev/null || true
     rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
           /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
+
+    # Step 0: repair a corrupt/truncated dpkg status DB before anything else —
+    # every dpkg/apt command below fails to parse if status is zero-length.
+    repair_dpkg_status || true
 
     # Step 1: recover any cleanly-interrupted configure. On a healthy system
     # with nothing pending this returns 0 immediately (fast path).
