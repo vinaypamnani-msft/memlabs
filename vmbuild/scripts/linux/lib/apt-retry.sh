@@ -9,6 +9,52 @@
 # Inlined into scripts by Get-LinuxScript -IncludeAptRetry.
 
 # ---------------------------------------------------------------------------
+# recover_dpkg
+#   Recovers an interrupted or wedged dpkg/debconf state so a subsequent
+#   apt-get can succeed.  A plain 'dpkg --configure -a' only fixes a cleanly
+#   interrupted configure; it (and a reboot) cannot fix a corrupt debconf
+#   database, whose signature is:
+#       E: Cannot get debconf version. Is debconf installed?
+#       debconf: apt-extracttemplates failed: 25600
+#       E: Sub-process /usr/bin/dpkg returned an error code (2)
+#   Returns 0 on the fast path (nothing to recover) so it is cheap to call
+#   before every apt operation.
+# ---------------------------------------------------------------------------
+recover_dpkg() {
+    # Free anything holding the dpkg/apt locks.
+    systemctl stop unattended-upgrades.service 2>/dev/null || true
+    pkill -9 -x unattended-upgr 2>/dev/null || true
+    rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
+          /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
+
+    # Step 1: recover any cleanly-interrupted configure. On a healthy system
+    # with nothing pending this returns 0 immediately (fast path).
+    if DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confold 2>&1; then
+        return 0
+    fi
+
+    # Step 2: dpkg still failing. Probe debconf — if its database is wedged
+    # (apt-extracttemplates / "Cannot get debconf version"), debconf-communicate
+    # cannot start and exits non-zero. Reset the cache DB; debconf regenerates
+    # config.dat/templates.dat from package templates on the next configure, so
+    # this loses only stored answers (harmless on a non-interactive lab VM).
+    if ! printf 'VERSION\n' | debconf-communicate >/dev/null 2>&1; then
+        echo "[recover_dpkg] debconf database is wedged; resetting it..." >&2
+        local ts; ts=$(date +%s)
+        for f in config.dat templates.dat passwords.dat; do
+            [ -f "/var/cache/debconf/$f" ] && \
+                mv -f "/var/cache/debconf/$f" "/var/cache/debconf/$f.broken.$ts" 2>/dev/null || true
+        done
+    fi
+
+    # Step 3: fix broken deps and reinstall the preconfigure tooling
+    # (apt-extracttemplates lives in apt-utils), then configure again.
+    NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive apt-get install -f -y 2>&1 || true
+    NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y debconf apt-utils 2>&1 || true
+    NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confold 2>&1 || true
+}
+
+# ---------------------------------------------------------------------------
 # wait_for_apt_lock [max_seconds]
 #   Waits up to max_seconds (default 300) for dpkg/apt locks to be released.
 #   Runs dpkg --configure -a afterwards to recover interrupted state.
@@ -32,8 +78,8 @@ wait_for_apt_lock() {
         sleep 5
         waited=$((waited + 5))
     done
-    # Recover from any interrupted dpkg state before proceeding
-    dpkg --configure -a 2>/dev/null || true
+    # Recover from any interrupted/wedged dpkg+debconf state before proceeding
+    recover_dpkg || true
 }
 
 # ---------------------------------------------------------------------------
@@ -54,8 +100,8 @@ apt_retry() {
         rc=$?
         echo "[apt_retry] attempt $attempt/$max failed (rc=$rc), waiting $((attempt * 10))s..." >&2
         sleep $((attempt * 10))
-        # Recover interrupted dpkg between retries
-        dpkg --configure -a 2>/dev/null || true
+        # Recover interrupted/wedged dpkg+debconf state between retries
+        recover_dpkg || true
     done
     echo "[apt_retry] all $max attempts failed for: $*" >&2
     return $rc
