@@ -29,6 +29,17 @@ $Fix_EnableLogMachine = {
             if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
                 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop | Out-Null
             }
+            else {
+                # Clear a stale/ORPHANED task file that has no registry registration:
+                # the definition file C:\Windows\System32\Tasks\<name> exists but
+                # Get-ScheduledTask sees nothing (confirmed on Win11 26200: TaskCache
+                # Tree key gone, file kept -- a hard power-off dropped the lazily-
+                # flushed TaskCache registry write while the file survived).
+                # Register-ScheduledTask can throw 0x80041321 "task image is corrupt"
+                # against such an orphan, so remove the file before (re)registering.
+                $orphan = Join-Path $env:windir "System32\Tasks\$taskName"
+                if (Test-Path $orphan) { Remove-Item -Path $orphan -Force -ErrorAction SilentlyContinue }
+            }
 
             $action     = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs -ErrorAction Stop
             $trigger    = New-ScheduledTaskTrigger -AtLogOn -ErrorAction Stop
