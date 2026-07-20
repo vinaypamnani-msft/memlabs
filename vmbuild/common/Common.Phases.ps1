@@ -456,16 +456,26 @@ function Set-CmMediaMountAndShare {
                 }
             }
             catch { }
-            $cd = Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | Where-Object {
-                Test-Path ("$($_.DriveLetter):\SMSSETUP\BIN\X64\Setup.exe")
-            } | Select-Object -First 1
+            # Detect the CM media by scanning EVERY drive letter (C..Z) for the
+            # setup binary, NOT by filtering Get-Volume on DriveType -eq 'CD-ROM'.
+            # The DriveType filter proved unreliable: when the disc is busy (the
+            # site's own setup reads it concurrently) or enumerated in a different
+            # session, Get-Volume can omit the very CD-ROM the guest is actively
+            # using (observed: setup ran from G:\ while Get-Volume returned only the
+            # cache disc D:). A direct Test-Path on each letter finds the media
+            # wherever it landed, regardless of volume-type classification.
+            $cd = $null
+            foreach ($n in 67..90) {
+                $dl = [char]$n
+                if (Test-Path ("${dl}:\SMSSETUP\BIN\X64\Setup.exe")) { $cd = "${dl}:"; break }
+            }
             if (-not $cd) {
                 try { & pnputil.exe /scan-devices *>$null } catch { }
                 try { "rescan" | & diskpart.exe *>$null } catch { }
                 Start-Sleep -Seconds 5
             }
         }
-        # Always snapshot the guest's optical state for the host log.
+        # Always snapshot the guest's optical + drive-scan state for the host log.
         try {
             $cdVols = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 'CD-ROM' })
             if ($cdVols.Count -eq 0) { $diag.Add("guest sees NO CD-ROM volumes") }
@@ -475,11 +485,16 @@ function Set-CmMediaMountAndShare {
                 if ($v.DriveLetter) { $hasCm = Test-Path ("$($v.DriveLetter):\SMSSETUP\BIN\X64\Setup.exe") }
                 $diag.Add("CD-ROM $lbl size=$([math]::Round(($v.Size / 1MB)))MB cmMedia=$hasCm")
             }
+            # Also report which lettered drives (any type) carry the CM setup, since
+            # the media can surface on a letter Get-Volume doesn't call 'CD-ROM'.
+            $cmLetters = @()
+            foreach ($n in 67..90) { $dl = [char]$n; if (Test-Path ("${dl}:\SMSSETUP\BIN\X64\Setup.exe")) { $cmLetters += "${dl}:" } }
+            $diag.Add("Drives with CM setup (any type): $(if ($cmLetters.Count) { $cmLetters -join ', ' } else { '<none>' })")
             $drv = @(Get-CimInstance -ClassName Win32_CDROMDrive -ErrorAction SilentlyContinue)
             $diag.Add("Win32_CDROMDrive=$($drv.Count): " + (($drv | ForEach-Object { "$($_.Drive)|MediaLoaded=$($_.MediaLoaded)" }) -join '; '))
         }
         catch { $diag.Add("diag error: $($_.Exception.Message)") }
-        return @{ Found = [bool]$cd; Root = $(if ($cd) { "$($cd.DriveLetter):\" } else { $null }); Diag = $diag }
+        return @{ Found = [bool]$cd; Root = $(if ($cd) { "$cd\" } else { $null }); Diag = $diag }
     }
 
     # ---- Host-driven diagnose -> repair loop. The host owns the DVD at the
