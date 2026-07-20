@@ -1576,14 +1576,26 @@ function New-MRemoteNGFileFromHyperV {
                 $linuxAdmin = if ($vm.adminName) { $vm.adminName } else { 'admin' }
                 $linuxUser = if ($linuxJoinOn -and $vm.domainUser) { $vm.domainUser } else { $linuxAdmin }
 
-                # Always create SSH entry (no enableRDP gate)
-                if (-not $linuxContainer -and $linuxGroup) {
-                    $linuxContainer = $linuxGroup.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "SSH" } | Select-Object -First 1
-                    if (-not $linuxContainer) {
-                        $linuxContainer = New-MRemoteNGContainerNode -Doc $doc -Name "SSH" `
-                            -Username "vmbuildadmin" -Domain "" -Password $encryptedPass -Protocol "SSH2" -Port "22" -Expanded $false
-                        [void]$linuxGroup.AppendChild($linuxContainer)
+                # Default-scheme SSH target:
+                #   DefaultGrouping on      -> the Linux > SSH sub-container
+                #   no grouping at all      -> flat under the domain container
+                #   additive grouping only  -> none (SSH lives only in the folders
+                #                              below, so no constant "Linux" group
+                #                              is created)
+                $sshDefaultTarget = $null
+                if ($rdcSettings.DefaultGrouping) {
+                    if (-not $linuxContainer -and $linuxGroup) {
+                        $linuxContainer = $linuxGroup.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "SSH" } | Select-Object -First 1
+                        if (-not $linuxContainer) {
+                            $linuxContainer = New-MRemoteNGContainerNode -Doc $doc -Name "SSH" `
+                                -Username "vmbuildadmin" -Domain "" -Password $encryptedPass -Protocol "SSH2" -Port "22" -Expanded $false
+                            [void]$linuxGroup.AppendChild($linuxContainer)
+                        }
                     }
+                    $sshDefaultTarget = $linuxContainer
+                }
+                elseif (-not $anyAdditiveGrouping) {
+                    $sshDefaultTarget = $container
                 }
 
                 # Resolve IP (same LLMNR fallback as RDCMan).
@@ -1603,40 +1615,53 @@ function New-MRemoteNGFileFromHyperV {
 
                 $sshComment = Format-MRemoteNGTooltip -Vm $vm -ResolvedIp $sshHost
 
-                if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $linuxContainer `
-                        -Name $vm.VmName -DisplayName $sshDisplayName -Hostname $sshHost `
-                        -Protocol "SSH2" -Port "22" -Description $sshComment `
-                        -Username $linuxUser -Domain "" -Password $encryptedPass `
-                        -GuidSeed "ssh:${domain}:$($vm.VmName)" `
-                        -ForceOverwrite $true) {
-                    $shouldSave = $true
+                if ($sshDefaultTarget) {
+                    if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $sshDefaultTarget `
+                            -Name $vm.VmName -DisplayName $sshDisplayName -Hostname $sshHost `
+                            -Protocol "SSH2" -Port "22" -Description $sshComment `
+                            -Username $linuxUser -Domain "" -Password $encryptedPass `
+                            -GuidSeed "ssh:${domain}:$($vm.VmName)" `
+                            -ForceOverwrite $true) {
+                        $shouldSave = $true
+                    }
+                    # Link the "Proxy Admin (Edge)" external tool to the Proxy SSH entry
+                    if ($vm.Role -eq 'Proxy') {
+                        $sshId = Get-MRemoteNGDeterministicGuid -Seed "ssh:${domain}:$($vm.VmName)"
+                        $proxyNode = $sshDefaultTarget.SelectSingleNode("Node[@Id='$sshId']")
+                        if ($proxyNode -and $proxyNode.GetAttribute("ExtApp") -ne "Proxy Admin (Edge)") {
+                            $proxyNode.SetAttribute("ExtApp", "Proxy Admin (Edge)")
+                            $shouldSave = $true
+                        }
+                    }
                 }
 
                 # Optional additive grouping folders for the SSH entry
                 foreach ($fp in (Get-RDCGroupingFolders -vm $vm -settings $rdcSettings -vmListFull $vmListFull -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap)) {
                     $addContainer = Get-MRemoteNGNestedContainer -Doc $doc -Parent $container -PathNames $fp `
                         -Username "vmbuildadmin" -Domain "" -Password $encryptedPass
+                    $addSshSeed = "ssh:${domain}:$($vm.VmName):$($fp -join '/')"
                     if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $addContainer `
                             -Name $vm.VmName -DisplayName $sshDisplayName -Hostname $sshHost `
                             -Protocol "SSH2" -Port "22" -Description $sshComment `
                             -Username $linuxUser -Domain "" -Password $encryptedPass `
-                            -GuidSeed "ssh:${domain}:$($vm.VmName):$($fp -join '/')" `
+                            -GuidSeed $addSshSeed `
                             -ForceOverwrite $true) {
                         $shouldSave = $true
                     }
-                }
-
-                # Link the "Proxy Admin (Edge)" external tool to Proxy SSH entries
-                if ($vm.Role -eq 'Proxy') {
-                    $sshId = Get-MRemoteNGDeterministicGuid -Seed "ssh:${domain}:$($vm.VmName)"
-                    $proxyNode = $linuxContainer.SelectSingleNode("Node[@Id='$sshId']")
-                    if ($proxyNode -and $proxyNode.GetAttribute("ExtApp") -ne "Proxy Admin (Edge)") {
-                        $proxyNode.SetAttribute("ExtApp", "Proxy Admin (Edge)")
-                        $shouldSave = $true
+                    if ($vm.Role -eq 'Proxy') {
+                        $addSshId = Get-MRemoteNGDeterministicGuid -Seed $addSshSeed
+                        $addProxyNode = $addContainer.SelectSingleNode("Node[@Id='$addSshId']")
+                        if ($addProxyNode -and $addProxyNode.GetAttribute("ExtApp") -ne "Proxy Admin (Edge)") {
+                            $addProxyNode.SetAttribute("ExtApp", "Proxy Admin (Edge)")
+                            $shouldSave = $true
+                        }
                     }
                 }
 
-                # If enableRDP, also add an RDP entry in the Linux group container
+                # If enableRDP, also add an RDP entry. Follows the same grouping
+                # rules as everything else: default Linux group when DefaultGrouping
+                # is on, flat under the domain when nothing is grouped, and/or the
+                # additive folders.
                 $rdpOn = ($vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$vm.enableRDP
                 $isLinuxClient = $vm.Role -eq 'LinuxClient'
                 if ($rdpOn -or $isLinuxClient) {
@@ -1644,14 +1669,33 @@ function New-MRemoteNGFileFromHyperV {
                     if ($rdcSettings.ShowUser) { $rdpDisplayName += " ($linuxUser)" }
                     if ($vm.SiteCode) { $rdpDisplayName += " ($($vm.SiteCode))" }
 
-                    $linuxRdpTarget = if ($linuxGroup) { $linuxGroup } else { $container }
-                    if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $linuxRdpTarget `
-                            -Name $vm.VmName -DisplayName $rdpDisplayName -Hostname $sshHost `
-                            -Protocol "RDP" -Port "3389" -Description $sshComment `
-                            -Username $linuxUser -Domain "" -Password $encryptedPass `
-                            -GuidSeed "rdp:${domain}:$($vm.VmName)" `
-                            -ForceOverwrite $true) {
-                        $shouldSave = $true
+                    $rdpDefaultTarget = $null
+                    if ($rdcSettings.DefaultGrouping) { $rdpDefaultTarget = if ($linuxGroup) { $linuxGroup } else { $container } }
+                    elseif (-not $anyAdditiveGrouping) { $rdpDefaultTarget = $container }
+
+                    if ($rdpDefaultTarget) {
+                        if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $rdpDefaultTarget `
+                                -Name $vm.VmName -DisplayName $rdpDisplayName -Hostname $sshHost `
+                                -Protocol "RDP" -Port "3389" -Description $sshComment `
+                                -Username $linuxUser -Domain "" -Password $encryptedPass `
+                                -GuidSeed "rdp:${domain}:$($vm.VmName)" `
+                                -ForceOverwrite $true) {
+                            $shouldSave = $true
+                        }
+                    }
+
+                    # Additive grouping folders for the RDP entry (parity with SSH)
+                    foreach ($fp in (Get-RDCGroupingFolders -vm $vm -settings $rdcSettings -vmListFull $vmListFull -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap)) {
+                        $addRdpContainer = Get-MRemoteNGNestedContainer -Doc $doc -Parent $container -PathNames $fp `
+                            -Username "vmbuildadmin" -Domain "" -Password $encryptedPass
+                        if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $addRdpContainer `
+                                -Name $vm.VmName -DisplayName $rdpDisplayName -Hostname $sshHost `
+                                -Protocol "RDP" -Port "3389" -Description $sshComment `
+                                -Username $linuxUser -Domain "" -Password $encryptedPass `
+                                -GuidSeed "rdp:${domain}:$($vm.VmName):$($fp -join '/')" `
+                                -ForceOverwrite $true) {
+                            $shouldSave = $true
+                        }
                     }
                 }
                 continue
