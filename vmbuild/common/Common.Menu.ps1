@@ -295,11 +295,9 @@ function Select-RDCSettingsMenu {
 
         $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BGAP2"
         $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BREAKR" -text "Actions%$headerColor"
-        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "R" -text "Regenerate connection files now (RDCMan / mRemoteNG)" -color1 $optColor -color2 $optNum -selectable -helptext "Save the checked settings and rebuild memlabs.rdg + memlabs-mremoteng.xml"
-
-        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BGAP3"
         $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "A" -text "All Entries" -color1 $Global:Common.Colors.GenConfigTrue -color2 $Global:Common.Colors.GenConfigTrue -selectable -helptext "Check every setting"
         $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "N" -text "No Entries" -color1 $Global:Common.Colors.GenConfigFalse -color2 $Global:Common.Colors.GenConfigFalse -selectable -helptext "Uncheck every setting"
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "R" -text "Regenerate connection files now (RDCMan / mRemoteNG)" -color1 $optColor -color2 $optNum -selectable -helptext "Save the checked settings and rebuild memlabs.rdg + memlabs-mremoteng.xml"
         $doneItem = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "D" -text "Done - save settings" -color1 $Global:Common.Colors.GenConfigDefault -color2 $Global:Common.Colors.GenConfigDefaultNumber -selectable -helptext "Save the checked settings and return"
         $doneItem.Selected = $true
 
