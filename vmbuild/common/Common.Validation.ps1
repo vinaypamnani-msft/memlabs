@@ -913,6 +913,23 @@ function Test-ValidVmMemory {
                 }
             }
         }
+
+        # Windows 11 memory floor: 4GB. A 2GB Win11 client exhausts commit under the
+        # deploy load (CM client + DSC + first-boot servicing) and trips a known
+        # Windows kernel bug -- a critical DcomLaunch svchost dies when a thread stack
+        # can't grow at the commit limit (0xEF CRITICAL_PROCESS_DIED / STATUS_STACK_OVERFLOW,
+        # microsoft/OS bug 56918928), BSOD'ing the VM mid-build. genconfig already
+        # defaults Win11 to 4GB, but hand-authored configs can specify less. Detect and
+        # REPAIR in place (raise to 4GB) with a Warning so the config self-heals.
+        if ($vmMemory -is [string] -and ($vmMemory.ToUpperInvariant().EndsWith("MB") -or $vmMemory.ToUpperInvariant().EndsWith("GB")) `
+                -and $VM.operatingSystem -like "Windows 11*" -and $VM.role -notin @("DC", "BDC")) {
+            $memBytes = 0
+            try { $memBytes = [int64]($vmMemory / 1) } catch { $memBytes = 0 }
+            if ($memBytes -gt 0 -and $memBytes -lt 4GB) {
+                $VM.memory = "4GB"
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] Windows 11 memory [$vmMemory] raised to 4GB. A 2GB Win11 client exhausts commit under the deploy load and can BSOD (0xEF, Windows OS bug 56918928); 4GB is the safe floor." -ReturnObject $ReturnObject -Warning
+            }
+        }
     }
 
 }

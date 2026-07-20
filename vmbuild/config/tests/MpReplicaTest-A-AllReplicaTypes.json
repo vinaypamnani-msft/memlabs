@@ -166,7 +166,7 @@
       "vmName": "W11Client1",
       "role": "DomainMember",
       "operatingSystem": "Windows 11 Latest",
-      "memory": "2GB",
+      "memory": "4GB",
       "virtualProcs": 2
     }
   ]

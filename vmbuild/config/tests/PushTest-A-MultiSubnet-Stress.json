@@ -365,7 +365,7 @@
       "vmName": "CHALLAH",
       "role": "InternetClient",
       "operatingSystem": "Windows 11 24H2",
-      "memory": "2GB",
+      "memory": "4GB",
       "virtualProcs": 2,
       "tpmEnabled": true,
       "vmGeneration": "2",
