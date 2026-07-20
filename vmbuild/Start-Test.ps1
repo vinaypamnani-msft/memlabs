@@ -314,99 +314,87 @@ function Run-Test {
     $Test = $Test.ToLowerInvariant()
     $Tests = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name } | Where-Object { $_.Name.ToLowerInvariant().StartsWith($Test) }
 
-    foreach ($testjson in $Tests) {
-        # Always pull the latest code before each test so every run picks up the
-        # newest New-Lab.ps1 / Common.ps1 / DSC / phase scripts without restarting
-        # the runner. --rebase --autostash keeps any local edits and never creates a
-        # merge commit; a pull failure is non-fatal (continue with the current tree).
-        try {
-            Write-Host "git pull (before $(Split-Path $testjson -Leaf))..." -ForegroundColor Cyan
-            $pullOutput = & git -C $PSScriptRoot pull --rebase --autostash 2>&1
-            $pullExit = $LASTEXITCODE
-            $pullOutput | ForEach-Object { Write-Host "  $_" }
-            if ($pullExit -ne 0) {
-                Write-Host "  git pull returned $pullExit; continuing with the current tree." -ForegroundColor Yellow
+    # Run the entire prefix group twice before the domain is torn down: pass 1 deploys
+    # every matching config in order, then pass 2 starts over at the first config and
+    # re-runs the whole cycle (add/repair against the existing VMs) to prove a re-deploy
+    # of the full sequence works. A failure in either pass fails the whole group
+    # (returns $false), leaving the domain(s) intact for investigation.
+    $totalPasses = 2
+    for ($pass = 1; $pass -le $totalPasses; $pass++) {
+        $passLabel = if ($pass -eq 1) { "deploy" } else { "re-deploy" }
+        Write-Host "===== $Test pass $pass of $totalPasses ($passLabel) =====" -ForegroundColor Magenta
+
+        foreach ($testjson in $Tests) {
+            # Always pull the latest code before each test so every run picks up the
+            # newest New-Lab.ps1 / Common.ps1 / DSC / phase scripts without restarting
+            # the runner. --rebase --autostash keeps any local edits and never creates a
+            # merge commit; a pull failure is non-fatal (continue with the current tree).
+            try {
+                Write-Host "git pull (before $(Split-Path $testjson -Leaf))..." -ForegroundColor Cyan
+                $pullOutput = & git -C $PSScriptRoot pull --rebase --autostash 2>&1
+                $pullExit = $LASTEXITCODE
+                $pullOutput | ForEach-Object { Write-Host "  $_" }
+                if ($pullExit -ne 0) {
+                    Write-Host "  git pull returned $pullExit; continuing with the current tree." -ForegroundColor Yellow
+                }
             }
-        }
-        catch {
-            Write-Host "  git pull failed: $($_.Exception.Message); continuing with the current tree." -ForegroundColor Yellow
-        }
-        $outputFile = Split-Path $testjson -leaf
-        $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
-        $config = Get-Content $testjson -Force | ConvertFrom-Json
-        if ($cmVersion -and $config.cmOptions.version) {
-            if ($config.cmOptions.version -ne $cmVersion) {
-                $config.cmOptions.version = $cmVersion
-                write-host "updating cmVersion to $cmVersion"
-            } 
-            if ($DoNotInstallCM -and $config.cmOptions.Install)  {
-                $config.cmOptions.Install = $false
+            catch {
+                Write-Host "  git pull failed: $($_.Exception.Message); continuing with the current tree." -ForegroundColor Yellow
             }
-        }
+            $outputFile = Split-Path $testjson -leaf
+            $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
+            $config = Get-Content $testjson -Force | ConvertFrom-Json
+            if ($cmVersion -and $config.cmOptions.version) {
+                if ($config.cmOptions.version -ne $cmVersion) {
+                    $config.cmOptions.version = $cmVersion
+                    write-host "updating cmVersion to $cmVersion"
+                } 
+                if ($DoNotInstallCM -and $config.cmOptions.Install)  {
+                    $config.cmOptions.Install = $false
+                }
+            }
         
-        if ($dynamicMemory) {
-            foreach ($vm in $config.virtualMachines) {
-                write-host "updating dynamicMinRam to 1GB on $($vm.VmName)"
-                $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value "1GB" -Force
-            }       
-        }
-        if ($serverVersion) {
-            foreach ($vm in $config.virtualMachines) {
-                if ($vm.operatingSystem -like "*server*") {
-                    $vm.operatingSystem = $serverVersion
-                }
-            }    
-        }
-        Set-FeatureOverrides -Config $config -ConfigName $outputFile
-        $domainName = $config.vmOptions.domainName
-        $global:removedomains += $domainName
-        $global:removedomains = @($global:removedomains | Select-Object -Unique)
+            if ($dynamicMemory) {
+                foreach ($vm in $config.virtualMachines) {
+                    write-host "updating dynamicMinRam to 1GB on $($vm.VmName)"
+                    $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value "1GB" -Force
+                }       
+            }
+            if ($serverVersion) {
+                foreach ($vm in $config.virtualMachines) {
+                    if ($vm.operatingSystem -like "*server*") {
+                        $vm.operatingSystem = $serverVersion
+                    }
+                }    
+            }
+            Set-FeatureOverrides -Config $config -ConfigName $outputFile
+            $domainName = $config.vmOptions.domainName
+            $global:removedomains += $domainName
+            $global:removedomains = @($global:removedomains | Select-Object -Unique)
 
-        $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
-        Write-Host "Starting test for $testjson.  Adding $domainName to $($global:removeddomains -join ',')"
-        $redeployRan = $false
-        try {
-            & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
-            if ($LASTEXITCODE -eq 55) {
+            $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
+            Write-Host "Starting test ($passLabel) for $testjson.  Adding $domainName to $($global:removeddomains -join ',')"
+            try {
                 & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
-            }
-            Write-Host "$LASTEXITCODE was returned from $testjson"
-            if ($LASTEXITCODE -ne 0) {
-                return $false
-            }
-
-            # Initial deploy succeeded. Before the domain gets torn down, re-run the
-            # same config against the freshly-built lab to make sure a re-deploy
-            # (add/repair against existing VMs) also works. A re-deploy failure fails
-            # the test just like an initial-deploy failure.
-            $redeployRan = $true
-            Write-Host "$testjson deployed OK; re-deploying same config to verify re-deploy works..." -ForegroundColor Cyan
-            & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
-            if ($LASTEXITCODE -eq 55) {
-                & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
-            }
-            Write-Host "$LASTEXITCODE was returned from $testjson re-deploy"
-            if ($LASTEXITCODE -ne 0) {
-                return $false
-            }
-        }
-        finally {
-            if ($LASTEXITCODE -ne 0) {
-                write-host "$testjson Failed"
-                if ($redeployRan) {
-                    $global:history += "$testjson Failed (re-deploy)"
-                    Write-Host "Re-deploy failed for $testjson copied to $ModifiedtestFile"
+                if ($LASTEXITCODE -eq 55) {
+                    & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
                 }
-                else {
-                    $global:history += "$testjson Failed"
+                Write-Host "$LASTEXITCODE was returned from $testjson ($passLabel)"
+                if ($LASTEXITCODE -ne 0) {
+                    return $false
+                }
+            }
+            finally {
+                if ($LASTEXITCODE -ne 0) {
+                    write-host "$testjson Failed ($passLabel)"
+                    $global:history += "$testjson Failed ($passLabel)"
                     Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
+                }   
+                else {
+                    write-host "$testjson Completed Successfully ($passLabel)"
+                    $global:history += "$testjson Completed Successfully ($passLabel)"
                 }
-            }   
-            else {
-                write-host "$testjson Completed Successfully (deploy + re-deploy)"
-                $global:history += "$testjson Completed Successfully (deploy + re-deploy)"
             }
-        
         }
     }
     
