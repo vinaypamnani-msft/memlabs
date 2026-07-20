@@ -20,6 +20,9 @@
 preflight_apt_state() {
     echo "[preflight] ===== apt/dpkg state before install ====="
     echo "[preflight] uptime: $(cut -d' ' -f1 /proc/uptime 2>/dev/null)s"
+    # Disk first — ENOSPC (guest or host-backed) truncates the status DB, and
+    # this must be captured even if the process list below is truncated.
+    echo "[preflight] disk: $(df -h / /var 2>/dev/null | awk 'NR>1{printf "%s %s used %s avail; ",$6,$5,$4}')"
     local st=/var/lib/dpkg/status
     echo "[preflight] status size: $(stat -c%s "$st" 2>/dev/null || echo '?')B; status-old: $(stat -c%s "${st}-old" 2>/dev/null || echo 'none')B"
     if dpkg-query -W >/dev/null 2>&1; then
@@ -30,16 +33,17 @@ preflight_apt_state() {
     local audit
     audit=$(dpkg --audit 2>/dev/null | head -20 || true)
     if [ -n "$audit" ]; then echo "[preflight] dpkg --audit (broken/half-configured):"; echo "$audit"; else echo "[preflight] dpkg --audit: clean"; fi
-    echo "[preflight] apt/dpkg/unattended/cloud-init processes:"
-    ps -eo pid,ppid,etimes,cmd 2>/dev/null | grep -E 'apt-get|aptitude|dpkg|unattended-upgr|packagekit|cloud-init' | grep -v grep || echo "  (none running)"
+    if command -v cloud-init >/dev/null 2>&1; then
+        echo "[preflight] cloud-init status: $(cloud-init status 2>/dev/null | tr '\n' ' ' || echo '?')"
+    fi
     if command -v fuser >/dev/null 2>&1; then
         local holder; holder=$(fuser /var/lib/dpkg/lock-frontend 2>/dev/null || true)
         if [ -n "$holder" ]; then echo "[preflight] dpkg lock-frontend held by PID(s):$holder"; else echo "[preflight] dpkg lock-frontend: free"; fi
     fi
-    if command -v cloud-init >/dev/null 2>&1; then
-        echo "[preflight] cloud-init status: $(cloud-init status 2>/dev/null | tr '\n' ' ' || echo '?')"
-    fi
-    echo "[preflight] disk: $(df -h / /var 2>/dev/null | awk 'NR>1{printf "%s %s used %s avail; ",$6,$5,$4}')"
+    # Process list LAST — it can be multi-line and is the most likely to be
+    # truncated in captured output, so keep the single-line facts above it.
+    echo "[preflight] apt/dpkg/unattended/cloud-init processes:"
+    ps -eo pid,ppid,etimes,cmd 2>/dev/null | grep -E 'apt-get|aptitude|dpkg|unattended-upgr|packagekit|cloud-init' | grep -v grep | head -8 || echo "  (none running)"
     echo "[preflight] =========================================="
     return 0
 }

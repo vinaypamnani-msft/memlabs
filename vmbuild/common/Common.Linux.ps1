@@ -2915,6 +2915,65 @@ fi
 }
 
 
+function Write-LinuxHostStorageDiag {
+    <#
+    .SYNOPSIS
+        Log HOST-side storage state for a VM (free space on the volume backing
+        its VHDXs, disk sizes, and recent host disk/storage errors).
+
+    .DESCRIPTION
+        A zeroed guest file that keeps its size (e.g. /var/lib/dpkg/status full
+        of NUL) with a KNOWN-GOOD base image points at the host failing to
+        persist writes -- typically the volume backing the VM's dynamic VHDX
+        running out of space, or a disk/storvsp fault. This captures that
+        signal into the log at failure time. Purely diagnostic; never throws.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [string]$Context = ""
+    )
+    try {
+        $lines = New-Object System.Collections.Generic.List[string]
+        $qualifiers = @{}
+        $disks = Get-VMHardDiskDrive -VMName $VmName -ErrorAction SilentlyContinue
+        foreach ($d in $disks) {
+            if ($d.Path) {
+                $sz = if (Test-Path $d.Path) { "$([math]::Round((Get-Item $d.Path).Length / 1GB, 2))GB" } else { "missing" }
+                $lines.Add("  vhdx: $($d.Path) ($sz)")
+                $q = (Split-Path $d.Path -Qualifier)
+                if ($q) { $qualifiers[$q] = $true }
+            }
+        }
+        foreach ($q in $qualifiers.Keys) {
+            $vol = Get-Volume -DriveLetter ($q.TrimEnd(':')) -ErrorAction SilentlyContinue
+            if ($vol) {
+                $freeGB = [math]::Round($vol.SizeRemaining / 1GB, 2)
+                $totGB = [math]::Round($vol.Size / 1GB, 2)
+                $pctFree = if ($vol.Size) { [math]::Round(100 * $vol.SizeRemaining / $vol.Size, 1) } else { 0 }
+                $lines.Add("  volume ${q} free=${freeGB}GB / ${totGB}GB (${pctFree}% free)")
+            }
+        }
+        # Recent host storage faults (disk/NTFS/VHD/storvsp) — the smoking gun
+        # for silent write loss into a guest VHDX.
+        try {
+            $since = (Get-Date).AddHours(-2)
+            $evts = Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $since; Level = 1, 2, 3 } -ErrorAction SilentlyContinue |
+                Where-Object { $_.ProviderName -match 'disk|Ntfs|vhdmp|storvsp|volmgr|volsnap|Vhd' } | Select-Object -First 8
+            foreach ($e in $evts) {
+                $firstLine = (($e.Message -split "`n") | Select-Object -First 1).Trim()
+                $lines.Add("  evt [$($e.ProviderName)/$($e.Id)] $($e.TimeCreated): $firstLine")
+            }
+        }
+        catch {}
+        if ($lines.Count -eq 0) { $lines.Add("  (no host storage info available)") }
+        Write-Log "[HostStorageDiag] $VmName $Context`n$($lines -join "`n")" -LogOnly -OutputStream
+    }
+    catch {
+        Write-Log "[HostStorageDiag] $VmName`: diag failed: $_" -LogOnly
+    }
+}
+
+
 function Install-LinuxProxyServer {
     <#
     .SYNOPSIS
@@ -3142,10 +3201,12 @@ echo "APT_CLEANUP_DONE"
 
     if ($result.ScriptBlockFailed -or $result.ExitCode -ne 0) {
         Write-Log "[Proxy] $vmName`: Squid install failed (ExitCode=$($result.ExitCode))`n$($result.ScriptBlockOutput)" -Failure
+        Write-LinuxHostStorageDiag -VmName $vmName -Context "(after Squid install failed)"
         return $false
     }
     if ($result.ScriptBlockOutput -notmatch 'PROXY_READY') {
         Write-Log "[Proxy] $vmName`: Squid install did not report ready`n$($result.ScriptBlockOutput)" -Failure
+        Write-LinuxHostStorageDiag -VmName $vmName -Context "(Squid not ready)"
         return $false
     }
 
