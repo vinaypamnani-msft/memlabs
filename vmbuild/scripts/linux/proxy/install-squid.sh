@@ -21,6 +21,12 @@ fi
 echo "[install-squid] Starting (FAST_PATH=$FAST_PATH)"
 
 if [ "$FAST_PATH" = "0" ]; then
+    # Snapshot packaging state up front so any failure below can be
+    # root-caused from the log: dpkg DB already corrupt on arrival? another
+    # apt/dpkg/unattended-upgrades run or cloud-init first-boot install still
+    # in progress? disk full? (Diagnostic only — never fails the install.)
+    preflight_apt_state || true
+
     # Verify DNS + network before apt operations.  apt-get hangs indefinitely
     # if DNS is broken (systemd-resolved misconfigured, no upstream forwarder).
     echo "[install-squid] Checking DNS and network connectivity..."

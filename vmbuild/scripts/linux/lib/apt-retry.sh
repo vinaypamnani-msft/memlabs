@@ -9,6 +9,42 @@
 # Inlined into scripts by Get-LinuxScript -IncludeAptRetry.
 
 # ---------------------------------------------------------------------------
+# preflight_apt_state
+#   Snapshot the packaging state BEFORE an install so failures can be
+#   root-caused from the captured output: is the dpkg DB already corrupt on
+#   arrival? Is another apt/dpkg/unattended-upgrades run (or cloud-init's
+#   first-boot package install) still in progress and holding the lock? Is the
+#   disk full (ENOSPC truncates the status DB)? Purely diagnostic — never
+#   fails the caller.
+# ---------------------------------------------------------------------------
+preflight_apt_state() {
+    echo "[preflight] ===== apt/dpkg state before install ====="
+    echo "[preflight] uptime: $(cut -d' ' -f1 /proc/uptime 2>/dev/null)s"
+    local st=/var/lib/dpkg/status
+    echo "[preflight] status size: $(stat -c%s "$st" 2>/dev/null || echo '?')B; status-old: $(stat -c%s "${st}-old" 2>/dev/null || echo 'none')B"
+    if dpkg-query -W >/dev/null 2>&1; then
+        echo "[preflight] dpkg DB: OK ($(dpkg-query -f '${Package}\n' -W 2>/dev/null | wc -l) pkgs installed)"
+    else
+        echo "[preflight] dpkg DB: UNREADABLE/CORRUPT (would need repair_dpkg_status)"
+    fi
+    local audit
+    audit=$(dpkg --audit 2>/dev/null | head -20 || true)
+    if [ -n "$audit" ]; then echo "[preflight] dpkg --audit (broken/half-configured):"; echo "$audit"; else echo "[preflight] dpkg --audit: clean"; fi
+    echo "[preflight] apt/dpkg/unattended/cloud-init processes:"
+    ps -eo pid,ppid,etimes,cmd 2>/dev/null | grep -E 'apt-get|aptitude|dpkg|unattended-upgr|packagekit|cloud-init' | grep -v grep || echo "  (none running)"
+    if command -v fuser >/dev/null 2>&1; then
+        local holder; holder=$(fuser /var/lib/dpkg/lock-frontend 2>/dev/null || true)
+        if [ -n "$holder" ]; then echo "[preflight] dpkg lock-frontend held by PID(s):$holder"; else echo "[preflight] dpkg lock-frontend: free"; fi
+    fi
+    if command -v cloud-init >/dev/null 2>&1; then
+        echo "[preflight] cloud-init status: $(cloud-init status 2>/dev/null | tr '\n' ' ' || echo '?')"
+    fi
+    echo "[preflight] disk: $(df -h / /var 2>/dev/null | awk 'NR>1{printf "%s %s used %s avail; ",$6,$5,$4}')"
+    echo "[preflight] =========================================="
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # repair_dpkg_status
 #   Detects and repairs a corrupt/truncated dpkg package database. On ext4 a
 #   non-graceful reboot (host stress, unflushed writeback) can leave
