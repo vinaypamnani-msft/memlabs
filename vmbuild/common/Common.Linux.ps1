@@ -1678,8 +1678,14 @@ function Wait-LinuxCloudInitComplete {
             $lastState = $state
             $elapsed = [int]$sw.Elapsed.TotalSeconds
             $disp = if ($state) { $state } else { "unreachable (rebooting?)" }
-            write-progress2 "Wait for Linux VM" -Status "$VmName`: waiting for cloud-init to finish (status: $disp, ${elapsed}s)" -force
+            Write-Log "$VmName`: cloud-init status: $disp (${elapsed}s)" -LogOnly
         }
+        # Update the phase progress line every poll so it visibly ticks while we
+        # wait (cloud-init sits in 'running' for minutes; a state-change-only
+        # update would look frozen).
+        $elapsedNow = [int]$sw.Elapsed.TotalSeconds
+        $dispNow = if ($state) { $state } else { "unreachable (rebooting?)" }
+        write-progress2 "Wait for Linux VM" -Status "$VmName`: waiting for cloud-init to finish (status: $dispNow, ${elapsedNow}s / ${TimeoutSeconds}s)" -force
         Start-Sleep -Seconds 8
     }
     Write-Log "$VmName`: cloud-init still not done after ${TimeoutSeconds}s; proceeding anyway" -Warning
