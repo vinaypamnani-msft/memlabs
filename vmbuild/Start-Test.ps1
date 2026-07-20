@@ -364,6 +364,7 @@ function Run-Test {
 
         $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
         Write-Host "Starting test for $testjson.  Adding $domainName to $($global:removeddomains -join ',')"
+        $redeployRan = $false
         try {
             & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
             if ($LASTEXITCODE -eq 55) {
@@ -372,18 +373,38 @@ function Run-Test {
             Write-Host "$LASTEXITCODE was returned from $testjson"
             if ($LASTEXITCODE -ne 0) {
                 return $false
-            }            
+            }
+
+            # Initial deploy succeeded. Before the domain gets torn down, re-run the
+            # same config against the freshly-built lab to make sure a re-deploy
+            # (add/repair against existing VMs) also works. A re-deploy failure fails
+            # the test just like an initial-deploy failure.
+            $redeployRan = $true
+            Write-Host "$testjson deployed OK; re-deploying same config to verify re-deploy works..." -ForegroundColor Cyan
+            & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
+            if ($LASTEXITCODE -eq 55) {
+                & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
+            }
+            Write-Host "$LASTEXITCODE was returned from $testjson re-deploy"
+            if ($LASTEXITCODE -ne 0) {
+                return $false
+            }
         }
         finally {
             if ($LASTEXITCODE -ne 0) {
                 write-host "$testjson Failed"
-                $global:history += "$testjson Failed"
-                Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
-            
+                if ($redeployRan) {
+                    $global:history += "$testjson Failed (re-deploy)"
+                    Write-Host "Re-deploy failed for $testjson copied to $ModifiedtestFile"
+                }
+                else {
+                    $global:history += "$testjson Failed"
+                    Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
+                }
             }   
             else {
-                write-host "$testjson Completed Successfully"
-                $global:history += "$testjson Completed Successfully"
+                write-host "$testjson Completed Successfully (deploy + re-deploy)"
+                $global:history += "$testjson Completed Successfully (deploy + re-deploy)"
             }
         
         }
