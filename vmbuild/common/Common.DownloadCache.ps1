@@ -564,6 +564,56 @@ function Reset-IsoDriveOnVm {
     return (Mount-IsoOnVm -VmName $VmName -IsoPath $IsoPath -Context $Context -Phase $Phase)
 }
 
+function Reset-AllDvdDrivesOnVm {
+    # De-churn a VM's optical layout by rebuilding it from scratch, preserving
+    # every disc that should be mounted. Repeated per-disc add/eject/remove churn
+    # (e.g. an escalating "make the guest see it" loop) leaves a Gen2 guest with
+    # orphan empty drives and discs pushed to high, climbing SCSI controller
+    # locations, which WEDGES the guest's storvsc/optical enumeration -- it then
+    # shows a stale/phantom disc and can't see the real media (observed: host had
+    # the CM ISO at SCSI 0:5 + an empty drive at 0:1, guest saw only a phantom
+    # 700MB disc). The clean fix, verified by hand, is to remove EVERY DVD drive
+    # (clearing orphans + the climbing locations) and re-add each wanted ISO fresh
+    # at a low location. This preserves co-mounts (cache + SQL + CM can all be
+    # present at once -- multiple DVDs are fine; the churn, not the count, is what
+    # wedges the guest). Returns $true only after verifying $RequiredIsoPath is
+    # attached again. Gen2/SCSI only (hot remove/add while running). Never throws.
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$RequiredIsoPath,
+        [string]$Context = "ISO",
+        [int]$Phase = 0
+    )
+    $tag = ""
+    if ($Phase -gt 0) { $tag = "[Phase $Phase]: " }
+    try {
+        # Capture the ISOs currently mounted (drop empty/orphan drives), and make
+        # sure the required ISO is in the set to re-add.
+        $wanted = @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -ExpandProperty Path)
+        $wanted = @($wanted + $RequiredIsoPath | Where-Object { $_ } | Select-Object -Unique)
+
+        # Remove EVERY DVD drive (orphan empties included) for a clean slate.
+        foreach ($d in @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue)) {
+            Remove-VMDvdDrive -VMName $VmName -ControllerNumber $d.ControllerNumber -ControllerLocation $d.ControllerLocation -ErrorAction SilentlyContinue
+        }
+        Write-Log "$tag$($VmName): $Context DVD reset -- removed all DVD drives; re-adding $($wanted.Count) disc(s) cleanly." -LogOnly
+        Start-Sleep -Seconds 3
+
+        # Re-add each wanted ISO fresh, one at a time with a short settle so the
+        # guest gets a clean device-arrival per disc at a low controller location.
+        foreach ($iso in $wanted) {
+            if (Test-Path $iso) {
+                try { Add-VMDvdDrive -VMName $VmName -Path $iso -ErrorAction Stop } catch { Write-Log "$tag$($VmName): re-add of '$iso' failed: $($_.Exception.Message)" -LogOnly }
+                Start-Sleep -Seconds 2
+            }
+        }
+    }
+    catch {
+        Write-Log "$tag$($VmName): $Context DVD reset failed: $($_.Exception.Message)" -LogOnly
+    }
+    return ([bool](@(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $RequiredIsoPath }))
+}
+
 function Dismount-IsoFromAllVMs {
     # Host-wide safety gate: eject a specific ISO (by full path) from EVERY VM's DVD
     # drive BEFORE the host deletes / re-downloads that ISO on disk. A VM that still

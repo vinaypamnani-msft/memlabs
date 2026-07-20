@@ -417,17 +417,6 @@ function Set-CmMediaMountAndShare {
     $shareName = $Target.ShareName
     $domain = if ($vm.Domain) { $vm.Domain } else { $deployConfig.vmOptions.domainName }
 
-    # Was the CM ISO already attached at entry (e.g. a -startPhase 8 retry left it
-    # in the drive across the guest's reboot)? Hyper-V does not re-raise a
-    # media-arrival event to the guest for a disc that was already inserted at
-    # boot, so the guest never surfaces the optical volume until the host toggles
-    # (eject+remount) the media. The host loop below re-presents on attempt 1 when
-    # this is true, and on every retry regardless.
-    try {
-        $alreadyMountedAtEntry = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath })
-    }
-    catch { $alreadyMountedAtEntry = $false }
-
     # ---- Guest probe: locate the CM media DVD, returning structured diagnostics.
     # This is the "signal back to the host": a short, self-contained in-guest check
     # that (a) assigns a drive letter to any letterless optical volume, (b) nudges
@@ -498,13 +487,16 @@ function Set-CmMediaMountAndShare {
     }
 
     # ---- Host-driven diagnose -> repair loop. The host owns the DVD at the
-    # hypervisor and re-presents the disc between guest probes. Each pass: ensure
-    # (and verify) the host attach, escalate the repair to raise a fresh guest
-    # arrival event, probe the guest, and on a miss log the guest's optical
-    # inventory before repairing and retrying. The escalation ends in a guest
-    # reboot, which is guaranteed to enumerate an attached disc -- so the media is
-    # effectively always made available.
-    $maxAttempts = 5
+    # hypervisor and re-presents the disc between guest probes. Key lesson learned
+    # the hard way: DO NOT churn the DVDs (repeated eject/remount/remove/re-add).
+    # That leaves orphan empty drives and pushes discs to high, climbing SCSI
+    # controller locations, which WEDGES a Gen2 guest's optical enumeration (it
+    # then shows a stale/phantom disc and can't see the real media). Instead, on a
+    # miss, REBUILD the optical layout cleanly in one shot (remove all DVD drives,
+    # re-add every wanted disc fresh at low locations -- Reset-AllDvdDrivesOnVm),
+    # which preserves co-mounts (cache + SQL + CM can all be present at once) and
+    # de-churns. Reboot is the final tier, taken only from the clean topology.
+    $maxAttempts = 4
     $mediaRoot = $null
     for ($attempt = 1; $attempt -le $maxAttempts -and -not $mediaRoot; $attempt++) {
         # Diagnose the host side first: the ISO file must exist on disk.
@@ -513,23 +505,20 @@ function Set-CmMediaMountAndShare {
             Start-Sleep -Seconds 5
             continue
         }
-        # Repair, escalating per attempt to force the guest to enumerate the disc:
-        #   attempt 1: ensure attached; media-toggle only if it was already inserted
-        #              at entry (reboot-persist case -- a plain boot raises no event).
-        #   attempt 2: media-toggle (eject+remount on the same drive) -> media-arrival.
-        #   attempt 3-4: REMOVE the whole DVD drive and ADD a fresh one -> the guest
-        #              sees a brand-new device (device-arrival), the strongest
-        #              re-enumeration short of a reboot.
-        #   attempt 5: REBOOT the guest. The ISO stays attached across the reboot,
-        #              and an optical disc present at boot is ALWAYS enumerated by
-        #              Windows -- the one repair that cannot fail. Costly + disruptive,
-        #              so only after every non-disruptive repair has been exhausted.
+        # Repair, escalating per attempt WITHOUT churning the DVDs:
+        #   attempt 1: ensure the CM ISO is attached (idempotent add). No churn.
+        #   attempt 2-3: clean DVD reset -- remove ALL drives (clears orphan empties
+        #              + climbing locations) and re-add every wanted disc fresh at a
+        #              low location. Preserves co-mounted cache/SQL discs; the fresh
+        #              device-arrival un-wedges guest enumeration.
+        #   attempt 4: REBOOT from the clean topology. A disc present at boot is
+        #              always enumerated by Windows -- the repair that cannot fail.
         $attached = $false
         try { $attached = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath }) } catch { }
         $mountOk = $true
-        if ($attempt -ge 5) {
-            Write-Log "[Phase $Phase]: $($vmName): CM media still not visible after host repairs; rebooting the guest so the attached disc is enumerated at boot [attempt $attempt/$maxAttempts]." -Warning
-            if (-not $attached) { $null = Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase }
+        if ($attempt -ge 4) {
+            Write-Log "[Phase $Phase]: $($vmName): CM media still not visible after clean DVD resets; rebooting the guest from the clean topology so the attached disc is enumerated at boot [attempt $attempt/$maxAttempts]." -Warning
+            $null = Reset-AllDvdDrivesOnVm -VmName $vmName -RequiredIsoPath $isoPath -Context "CM" -Phase $Phase
             try {
                 Restart-VM -Name $vmName -Force -ErrorAction Stop
             }
@@ -543,15 +532,9 @@ function Set-CmMediaMountAndShare {
             # exists once Windows is up).
             $null = Wait-ForVm -VmName $vmName -VmDomainName $domain -PathToVerify "C:\Windows\System32\cmd.exe" -TimeoutMinutes 10 -Quiet
         }
-        elseif ($attempt -ge 3) {
-            Write-Log "[Phase $Phase]: $($vmName): full CM DVD drive reset (remove+re-add) to force guest device re-enumeration [attempt $attempt/$maxAttempts]." -LogOnly
-            $mountOk = Reset-IsoDriveOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
-        }
-        elseif ($attached -and ($attempt -eq 2 -or $alreadyMountedAtEntry)) {
-            Write-Log "[Phase $Phase]: $($vmName): re-presenting CM DVD (eject+remount) to raise a fresh guest media-arrival event [attempt $attempt/$maxAttempts]." -LogOnly
-            Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
-            Start-Sleep -Seconds 3
-            $mountOk = Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
+        elseif ($attempt -ge 2) {
+            Write-Log "[Phase $Phase]: $($vmName): clean CM DVD reset (remove all + re-add discs cleanly) to un-wedge guest enumeration [attempt $attempt/$maxAttempts]." -LogOnly
+            $mountOk = Reset-AllDvdDrivesOnVm -VmName $vmName -RequiredIsoPath $isoPath -Context "CM" -Phase $Phase
         }
         else {
             $mountOk = Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
@@ -567,7 +550,7 @@ function Set-CmMediaMountAndShare {
             Write-Log "[Phase $Phase]: $($vmName): CM ISO not attached at hypervisor after mount [attempt $attempt/$maxAttempts]; retrying." -Warning
             continue
         }
-        $probeSeconds = if ($attempt -eq 1) { 90 } elseif ($attempt -ge 5) { 120 } else { 45 }
+        $probeSeconds = if ($attempt -eq 1) { 90 } elseif ($attempt -ge 4) { 120 } else { 60 }
         $probe = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $probeScript -ArgumentList @($probeSeconds) -SuppressLog -DisplayName "Locate CM media ($attempt)"
         $out = $probe.ScriptBlockOutput
         if ($out -is [hashtable] -and $out.Found) {
@@ -586,7 +569,7 @@ function Set-CmMediaMountAndShare {
     }
 
     if (-not $mediaRoot) {
-        Write-Log "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $maxAttempts host repair attempts (media toggle, drive re-add, and a guest reboot); the CMCB share (DC schema extension depends on it) cannot be created." -Failure -OutputStream
+        Write-Log "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $maxAttempts host repair attempts (clean DVD resets and a guest reboot); the CMCB share (DC schema extension depends on it) cannot be created." -Failure -OutputStream
         return
     }
 
