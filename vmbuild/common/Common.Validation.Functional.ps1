@@ -9851,14 +9851,38 @@ function Test-LinuxSmbAccess {
         return $true  # non-fatal: IP may not be available yet
     }
 
-    # 1) TCP 445 reachability
+    # 1) TCP 445 reachability. smbd is enabled --now at cloud-init, but on a
+    # heavily loaded host the busiest Linux VM (the Proxy: squid + webui + apt
+    # churn) can have smbd fail to come up, or die on a first-boot apt/samba
+    # install race, leaving 445 closed while SSH and ping stay healthy. Since
+    # the health cascade that runs before this test has already confirmed SSH
+    # is up, self-heal instead of hard-failing the whole lab for a backup
+    # file-access channel: SSH in, (re)start smbd, then re-probe 445.
     $tcp = Test-NetConnection -ComputerName $vmIp -Port 445 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     if (-not $tcp.TcpTestSucceeded) {
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - TCP 445 not reachable on $vmIp" -Failure -LogOnly
-        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Samba TCP 445 not reachable"; Level = 'Failure' })
-        return $false
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - TCP 445 closed on $vmIp; attempting smbd self-heal over SSH" -Warning -LogOnly
+        $heal = Invoke-LinuxVmCommand -VmName $VMName -IPAddress $vmIp -Sudo -SuppressLog -TimeoutSeconds 90 `
+            -DisplayName 'restart smbd' `
+            -BashCommand 'systemctl reset-failed smbd 2>/dev/null; systemctl enable --now smbd 2>&1; systemctl restart smbd 2>&1; ss -ltn "sport = :445" 2>/dev/null | grep -q ":445" && echo SMBD_LISTENING || echo SMBD_DOWN'
+        if ($heal -and $heal.ScriptBlockOutput -match 'SMBD_LISTENING') {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: smbd restarted and now listening on :445; re-probing TCP 445" -LogOnly
+        }
+        else {
+            $healOut = if ($heal) { $heal.ScriptBlockOutput } else { '(no SSH result)' }
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: smbd self-heal did not confirm a listener. Output: $healOut" -LogOnly
+        }
+        # Re-probe 445 from the host after the self-heal attempt.
+        $tcp = Test-NetConnection -ComputerName $vmIp -Port 445 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+        if (-not $tcp.TcpTestSucceeded) {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - TCP 445 not reachable on $vmIp (after smbd self-heal)" -Failure -LogOnly
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Samba TCP 445 not reachable"; Level = 'Failure' })
+            return $false
+        }
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - TCP 445 reachable on $vmIp after smbd self-heal" -LogOnly
     }
-    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - TCP 445 reachable on $vmIp" -LogOnly
+    else {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - TCP 445 reachable on $vmIp" -LogOnly
+    }
 
     # 2) Verify shares are listed via net view (runs as host, no auth needed for listing)
     $netViewOutput = & net view "\\$vmIp" /all 2>&1
