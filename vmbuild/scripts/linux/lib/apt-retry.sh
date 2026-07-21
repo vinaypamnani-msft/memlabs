@@ -69,8 +69,10 @@ repair_dpkg_status() {
     ts=$(date +%s)
     [ -f /var/lib/dpkg/status ] && \
         cp -a /var/lib/dpkg/status "/var/lib/dpkg/status.broken.$ts" 2>/dev/null || true
-    # Prefer dpkg's own previous copy, then the dated backups (newest first).
-    for cand in /var/lib/dpkg/status-old \
+    # Prefer memlabs' known-good snapshot, then dpkg's own previous copy, then
+    # the dated backups (newest first).
+    for cand in "${MEMLABS_DPKG_GOOD:-/var/backups/memlabs-dpkg-status.good}" \
+                /var/lib/dpkg/status-old \
                 $(ls -1t /var/backups/dpkg.status /var/backups/dpkg.status.0 2>/dev/null); do
         [ -s "$cand" ] || continue
         if cp -a "$cand" /var/lib/dpkg/status 2>/dev/null && dpkg-query -W >/dev/null 2>&1; then
@@ -170,18 +172,119 @@ wait_for_apt_lock() {
 }
 
 # ---------------------------------------------------------------------------
+# dpkg status DB consistency guard + known-good snapshot
+#   These lab VMs are hard-powered-off without warning (nightly ~02:00), which
+#   truncates /var/lib/dpkg/status. Keep a trusted, PARSEABLE copy at
+#   /var/backups/memlabs-dpkg-status.good and refresh it after every consistent
+#   apt op. apt_retry checks the DB BEFORE and AFTER each op, logs the facts to
+#   /var/log/memlabs-dpkg-guard.log for diagnosis, and restores from the
+#   known-good copy (or dpkg's status-old / /var/backups) if it is corrupt.
+# ---------------------------------------------------------------------------
+MEMLABS_DPKG_GOOD=${MEMLABS_DPKG_GOOD:-/var/backups/memlabs-dpkg-status.good}
+MEMLABS_DPKG_GUARD_LOG=${MEMLABS_DPKG_GUARD_LOG:-/var/log/memlabs-dpkg-guard.log}
+
+_dpkg_guard_log() {
+    local msg="[dpkg-guard $(date -Is 2>/dev/null)] $*"
+    echo "$msg" >&2
+    { echo "$msg" >> "$MEMLABS_DPKG_GUARD_LOG"; } 2>/dev/null || true
+}
+
+# 0 if the status DB parses (dpkg-query can read it), non-zero if corrupt.
+dpkg_status_ok() {
+    dpkg-query -W >/dev/null 2>&1
+}
+
+# One-line snapshot of the DB state for the diagnosis log.
+dpkg_status_facts() {
+    local st=/var/lib/dpkg/status sz cnt good
+    sz=$(stat -c%s "$st" 2>/dev/null || echo '?')
+    if dpkg-query -W >/dev/null 2>&1; then cnt=$(dpkg-query -f '.\n' -W 2>/dev/null | wc -l); else cnt='UNREADABLE'; fi
+    good=$([ -s "$MEMLABS_DPKG_GOOD" ] && stat -c%s "$MEMLABS_DPKG_GOOD" 2>/dev/null || echo none)
+    echo "status=${sz}B pkgs=${cnt} status-old=$(stat -c%s /var/lib/dpkg/status-old 2>/dev/null || echo none)B known-good=${good}B"
+}
+
+# Snapshot the current status as known-good ONLY when it parses. Atomic write +
+# sync so the snapshot itself survives a hard power-off. Creates it if absent.
+dpkg_save_known_good() {
+    if dpkg_status_ok; then
+        if cp -a /var/lib/dpkg/status "${MEMLABS_DPKG_GOOD}.tmp" 2>/dev/null \
+           && mv -f "${MEMLABS_DPKG_GOOD}.tmp" "$MEMLABS_DPKG_GOOD" 2>/dev/null; then
+            sync 2>/dev/null || true
+            return 0
+        fi
+        rm -f "${MEMLABS_DPKG_GOOD}.tmp" 2>/dev/null || true
+    fi
+    return 1
+}
+
+# Restore status from the most-trusted parseable source, best first: our
+# known-good snapshot, then dpkg's status-old, then dated /var/backups copies.
+# Verifies each candidate parses before keeping it.
+dpkg_restore_known_good() {
+    local cand
+    for cand in "$MEMLABS_DPKG_GOOD" /var/lib/dpkg/status-old \
+                $(ls -1t /var/backups/dpkg.status /var/backups/dpkg.status.0 2>/dev/null); do
+        [ -s "$cand" ] || continue
+        cp -a /var/lib/dpkg/status "/var/lib/dpkg/status.broken.$(date +%s 2>/dev/null)" 2>/dev/null || true
+        if cp -a "$cand" /var/lib/dpkg/status 2>/dev/null && dpkg-query -W >/dev/null 2>&1; then
+            sync 2>/dev/null || true
+            _dpkg_guard_log "restored status DB from $cand ($(stat -c%s "$cand" 2>/dev/null)B)"
+            return 0
+        fi
+    done
+    for cand in $(ls -1t /var/backups/dpkg.status.*.gz 2>/dev/null); do
+        if zcat "$cand" > /var/lib/dpkg/status 2>/dev/null && dpkg-query -W >/dev/null 2>&1; then
+            sync 2>/dev/null || true
+            _dpkg_guard_log "restored status DB from $cand"
+            return 0
+        fi
+    done
+    _dpkg_guard_log "ERROR: no parseable status backup (known-good/status-old/var-backups all bad)"
+    return 1
+}
+
+# Check DB consistency; log facts; restore + refresh known-good as needed.
+#   $1 = phase label (PRE/POST/...), $2 = command description
+dpkg_guard_check() {
+    local phase="${1:-CHECK}" desc="${2:-}"
+    if dpkg_status_ok; then
+        _dpkg_guard_log "${phase} OK ${desc}: $(dpkg_status_facts)"
+        dpkg_save_known_good
+        return 0
+    fi
+    _dpkg_guard_log "${phase} CORRUPT ${desc}: $(dpkg_status_facts) -- restoring"
+    dpkg_restore_known_good || repair_dpkg_status || true
+    if dpkg_status_ok; then
+        _dpkg_guard_log "${phase} RECOVERED ${desc}: $(dpkg_status_facts)"
+        dpkg_save_known_good
+        return 0
+    fi
+    _dpkg_guard_log "${phase} STILL-CORRUPT ${desc}: $(dpkg_status_facts)"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # apt_retry <command> [args...]
 #   Retries up to 3 times with exponential backoff (10/20/30s).
 #   Runs dpkg --configure -a between retries to recover from
 #   interrupted dpkg state. Sets NEEDRESTART_SUSPEND=1 to prevent
 #   the Ubuntu needrestart dpkg hook from querying D-Bus (which
 #   fails over SSH and causes false exit codes).
+#   Guards the dpkg status DB BEFORE and AFTER the operation: checks
+#   consistency, logs facts for diagnosis, and restores from the known-good
+#   snapshot if a hard power-off truncated it.
 # ---------------------------------------------------------------------------
 apt_retry() {
     local max=3 attempt=0 rc=0
+    # PRE: verify/repair the DB and refresh (or create) the known-good snapshot
+    # from the current good state before we touch it. '|| true' so a still-bad
+    # DB never aborts a caller running under 'set -e'.
+    dpkg_guard_check "PRE" "$*" || true
     while [ $attempt -lt $max ]; do
         attempt=$((attempt + 1))
         if NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive "$@"; then
+            # POST: verify the DB survived the op; restore + refresh if needed.
+            dpkg_guard_check "POST" "$* (attempt $attempt)" || true
             return 0
         fi
         rc=$?
@@ -190,6 +293,8 @@ apt_retry() {
         # Recover interrupted/wedged dpkg+debconf state between retries
         recover_dpkg || true
     done
+    # Failure path: still verify the DB so a truncated one gets restored.
+    dpkg_guard_check "POST-FAIL" "$*" || true
     echo "[apt_retry] all $max attempts failed for: $*" >&2
     return $rc
 }

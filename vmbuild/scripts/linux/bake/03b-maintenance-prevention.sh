@@ -14,6 +14,31 @@ if ! grep -q 'fsck.repair=yes' "$GRUB_FILE"; then
     update-grub
 fi
 
+# Full DATA journaling on the root fs (data=journal): an unannounced hard
+# power-off then leaves file DATA crash-consistent (old-or-new complete, never
+# truncated) -- not just metadata. This is the strong fix for the routine
+# nightly hard shutoffs that were truncating /var/lib/dpkg/status.
+#
+# Set via rootflags= on the kernel cmdline (GRUB_CMDLINE_LINUX, always applied)
+# because the root data= mode can ONLY be chosen at the initial mount -- a
+# later fstab remount cannot change it. Safe on a fast_commit-enabled fs: the
+# kernel simply does not use fast_commit under data=journal (no feature-bit
+# clearing / initramfs hook needed, so no unattended-boot brick risk). commit=1
+# flushes the journal every 1s. Tradeoff (per kernel docs): data=journal
+# disables delayed allocation + O_DIRECT and roughly doubles write traffic --
+# acceptable on the few small Linux lab VMs; the win is surviving the nightly
+# plug-pulls. To revert: remove 'rootflags=data=journal,commit=1' from
+# /etc/default/grub and run update-grub.
+if ! grep -q 'rootflags=data=journal' "$GRUB_FILE"; then
+    if grep -q '^GRUB_CMDLINE_LINUX=' "$GRUB_FILE"; then
+        sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 rootflags=data=journal,commit=1"/' "$GRUB_FILE"
+    else
+        echo 'GRUB_CMDLINE_LINUX="rootflags=data=journal,commit=1"' >> "$GRUB_FILE"
+    fi
+    update-grub
+    echo "root fs: enabled data=journal,commit=1 via rootflags (full data journaling)"
+fi
+
 # Tell systemd to never drop to emergency/rescue on failure — just reboot
 mkdir -p /etc/systemd/system.conf.d
 cat > /etc/systemd/system.conf.d/no-emergency.conf << 'EOF'
