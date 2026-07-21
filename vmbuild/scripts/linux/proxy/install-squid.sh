@@ -82,6 +82,12 @@ if [ "$FAST_PATH" = "0" ]; then
     echo "[install-squid] Installing squid, ufw, python3-flask..."
     apt_retry apt-get install -y squid ufw python3-flask
     echo "[install-squid] Packages installed"
+    # Flush the freshly-written dpkg status DB to the VHDX now. dpkg keeps the
+    # previous good copy as status-old; syncing here guarantees BOTH the new
+    # status and status-old are durably on disk, so if the VM is later hard-
+    # reset (bake/last-resort TurnOff) repair_dpkg_status has a parseable backup
+    # to restore -- the exact recovery that failed when neither copy was flushed.
+    sync || true
 fi
 
 install -d -m 0755 /etc/squid

@@ -32,6 +32,9 @@ else
     if ! apt_retry apt-get install -y samba; then
         echo "[ensure-samba] ERROR: samba install failed even after dpkg recovery" >&2
     fi
+    # Flush the freshly-written dpkg status DB (and its status-old backup) to
+    # the VHDX so a later hard reset leaves a recoverable dpkg database.
+    sync || true
 fi
 
 # Enable + (re)start smbd regardless of the install path above.
