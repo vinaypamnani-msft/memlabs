@@ -7523,10 +7523,21 @@ class DisableClusterNicDnsRegistration {
         # = 'Continue' session-wide, and module manifest processing respects
         # the preference variable, not the cmdlet switch. Temporarily override
         # the preference variable during imports.
+        # Only import what isn't already loaded so re-runs (Test() is always
+        # $false) and the second stage in the same LCM process don't re-pay the
+        # ~10s import cost. DnsServer is intentionally NOT imported here -- its
+        # cmdlets (Get/Remove-DnsServerResourceRecord) are only ever called inside
+        # Invoke-WithTimeoutJob scriptblocks, which run in their own runspaces and
+        # import it there. FailoverClusters is loaded lazily in the ClusterOps
+        # block below (only the PostCluster stage needs it).
         $savedVerbose = $global:VerbosePreference
         $global:VerbosePreference = 'SilentlyContinue'
         try {
-            Import-Module NetAdapter, NetTCPIP, DnsClient, DnsServer, FailoverClusters, NetSecurity -ErrorAction SilentlyContinue
+            $needed = @('NetAdapter', 'NetTCPIP', 'DnsClient', 'NetSecurity') |
+                Where-Object { -not (Get-Module -Name $_ -ErrorAction SilentlyContinue) }
+            if ($needed) {
+                Import-Module $needed -ErrorAction SilentlyContinue
+            }
         }
         finally {
             $global:VerbosePreference = $savedVerbose
@@ -7749,6 +7760,13 @@ class DisableClusterNicDnsRegistration {
         $_clusterName = $this.ClusterName
         if ($_clusterName) {
             try {
+                # Load FailoverClusters on demand (skipped in the eager import above).
+                if (-not (Get-Module -Name FailoverClusters -ErrorAction SilentlyContinue)) {
+                    $savedVerbose = $global:VerbosePreference
+                    $global:VerbosePreference = 'SilentlyContinue'
+                    try { Import-Module FailoverClusters -ErrorAction SilentlyContinue }
+                    finally { $global:VerbosePreference = $savedVerbose }
+                }
                 $clusNameRes = Get-ClusterResource -Cluster $_clusterName -Name 'Cluster Name' -ErrorAction Stop
                 $regAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction SilentlyContinue).Value
                 if ($regAll -ne 0) {
@@ -7766,7 +7784,8 @@ class DisableClusterNicDnsRegistration {
         }
         $blockTimes['ClusterOps'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1)
         $__bt = ($blockTimes.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)s" }) -join ' '
-        Write-Status "DisableClusterNicDnsRegistration [$($this.Stage)] block timing: $__bt"
+        # Write-Status auto-prepends the resource name; don't repeat it here.
+        Write-Status "[$($this.Stage)] block timing: $__bt"
     }
 
     [bool] Test() {
