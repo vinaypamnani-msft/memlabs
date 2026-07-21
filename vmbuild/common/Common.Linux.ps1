@@ -521,12 +521,17 @@ chpasswd:
     # hv_vss_daemon. Without them Get-VMNetworkAdapter.IPAddresses stays empty
     # on the host even after the guest has a working DHCP lease, and we have no
     # way to discover the VM's IP.
+    #
+    # NOTE: samba is intentionally NOT in this list. It is installed by a
+    # detect-and-install runcmd below instead of the cloud-init 'packages:'
+    # module. The packages module has no retry, so a first-boot apt hiccup on a
+    # contended host (worst on the Proxy) silently left smbd absent and TCP 445
+    # down. See the samba runcmd block for the idempotent install.
     $packages = @(
         'openssh-server',
         'qemu-guest-agent',
         'linux-tools-virtual',
-        'linux-cloud-tools-virtual',
-        'samba'
+        'linux-cloud-tools-virtual'
     ) + $ExtraPackages | Select-Object -Unique
     $packagesYaml = ($packages | ForEach-Object { "  - $_" }) -join "`n"
 
@@ -598,9 +603,18 @@ chpasswd:
         # Install sshd watchdog cron job: every 5 minutes, check tcp/22
         # and restart sshd if it's not listening.
         '(crontab -l 2>/dev/null | grep -v memlabs-sshd-watchdog; echo "*/5 * * * * /usr/local/sbin/memlabs-sshd-watchdog") | crontab -',
-        # Enable Samba and set vmbuildadmin's SMB password (same as console).
-        # Allow SMB through the firewall. The share gives file access to
-        # /var/log and /home/vmbuildadmin when SSH is down.
+        # Ensure Samba is installed, then enable it and set vmbuildadmin's SMB
+        # password (same as console). The share gives file access to /var/log
+        # and /home/vmbuildadmin when SSH is down.
+        #
+        # Detect-and-install: if samba is already present (a future baked image,
+        # or a previous run) skip the apt install; otherwise install it here.
+        # Baking samba into the base image is deferred to a future image
+        # version -- for now it's installed outside the base image at first
+        # boot. Retry the install because the cloud-init 'packages:' module has
+        # no retry and a contended first boot can transiently fail apt.
+        'if dpkg -s samba >/dev/null 2>&1 || command -v smbd >/dev/null 2>&1; then echo "memlabs: samba already present; skipping install"; else echo "memlabs: samba not installed; installing"; for i in 1 2 3 4 5; do DEBIAN_FRONTEND=noninteractive apt-get install -y samba && break; echo "memlabs: samba install attempt $i failed; retry in 20s"; sleep 20; apt-get update || true; done; fi',
+        # Allow SMB through the firewall.
         'ufw allow Samba || true',
         'systemctl enable --now smbd || true'
     )

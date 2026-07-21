@@ -3,12 +3,10 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 wait_for_apt_lock
-# samba is baked (not left to cloud-init's first-boot 'packages:' install) so
-# smbd is guaranteed present on every deployed Linux VM. First-boot apt on a
-# heavily contended host (esp. the Proxy: Ubuntu Server + squid/webui apt churn)
-# could otherwise leave the first-boot samba install racing/failing, and
-# cloud-init's 'systemctl enable --now smbd || true' swallows it -- stranding
-# TCP 445 down. Baking it here mirrors how openssh/qemu-guest-agent are made
-# reliable; cloud-init still writes smb.conf + sets smbpasswd + enables smbd.
+# samba is baked so smbd is guaranteed present on every deployed Linux VM once
+# this image is rebuilt. Until then, the deploy path installs it at first boot
+# (New-LinuxCloudInit's detect-and-install runcmd), which auto-skips when a
+# baked image already ships it. Baking mirrors how openssh/qemu-guest-agent are
+# made reliable and avoids the first-boot apt race that left TCP 445 down.
 apt_retry apt-get install -y linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server samba
 echo "=== Base packages installed ==="
