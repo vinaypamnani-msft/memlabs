@@ -8553,16 +8553,12 @@ function Test-CMSiteWideFunctionality {
                             if ($installed.Count -ge 1 -and $failed.Count -eq 0 -and $inProgress.Count -eq 0) {
                                 $results.Details.Add("OK: Boot image '$biName' distributed to $($installed.Count) DP(s)")
                             }
-                            elseif ($failed.Count -ge 1 -and $inProgress.Count -ge 1) {
-                                # A DP reports a failed/retry sub-state WHILE another is still
-                                # actively distributing -- the normal async convergence pattern,
-                                # esp. Pull/Secondary DPs downloading from the source DP. DistMgr
-                                # retries and this typically clears. Still WARN (so a genuinely
-                                # stuck DP isn't hidden), but phrase it as in-progress, not failed.
-                                $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) still converging: $($failed.Count) DP(s) in a failed/retry sub-state, $($inProgress.Count) in progress, $($installed.Count) installed -- re-run Phase 11 to confirm")
-                            }
                             elseif ($failed.Count -ge 1) {
-                                $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) distribution failed on $($failed.Count) DP(s) [Installed=$($installed.Count); no DP in progress -- likely stuck]")
+                                # State 3/6/8 (InstallFailed/RemovalFailed/ContentValidationFailed)
+                                # is a real failure -- a concurrent InProgress DP does NOT make it
+                                # "converging" (a stuck distribution can sit failed+in-progress for
+                                # hours/days). Keep it a hard WARN and point at the diagnosis.
+                                $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) distribution FAILED on $($failed.Count) DP(s) [Installed=$($installed.Count), InProgress=$($inProgress.Count)] -- check distmgr.log/PkgXferMgr.log on the site server (and DataTransferService.log/smsdpprov.log on the DP); run Fixes\Test-ContentDistribution.ps1 for per-DP state + error")
                             }
                             elseif ($inProgress.Count -ge 1) {
                                 # Pending/Retrying/Validating -- distribution is actively being processed.
