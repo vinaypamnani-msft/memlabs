@@ -759,6 +759,19 @@ write_files:
     content: |
       [Resolve]
       FallbackDNS=1.1.1.1 8.8.8.8
+  # Durability under unannounced hard power-off: these lab VMs can be hard
+  # shut off without warning (nightly host maintenance ~02:00). Shrink the
+  # dirty-page writeback window so a plug-pull loses at most ~1-2s of unflushed
+  # data instead of the ~30s default -- the cheap, no-boot-risk resilience lever
+  # (vs data=journal's write amplification). Applied on the post-cloud-init
+  # reboot; also baked in via bake/03b for future images.
+  - path: /etc/sysctl.d/90-memlabs-durability.conf
+    permissions: '0644'
+    content: |
+      vm.dirty_writeback_centisecs = 100
+      vm.dirty_expire_centisecs = 200
+      vm.dirty_background_ratio = 5
+      vm.dirty_ratio = 20
   # Helper: once the DC is online and serving DNS for the AD domain,
   # invoke this to route AD-domain resolution to the DC. Usage (run as root):
   #   memlabs-set-dns 192.168.6.1 [adatum.com]

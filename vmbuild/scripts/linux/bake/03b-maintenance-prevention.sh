@@ -33,32 +33,53 @@ EOF
 systemctl daemon-reload
 
 # ── Root filesystem durability tuning ────────────────────────────────────
-# Context: a hard power-off (Stop-VM -TurnOff) of a VM mid apt/dpkg write can
-# truncate /var/lib/dpkg/status ("end of file after field name ''"). The real
-# fix is host-side (don't plug-pull a live guest). Here we only apply the cheap,
-# safe guest-side hardening:
+# Context: these lab VMs can be hard-powered-off WITHOUT WARNING (e.g. nightly
+# host maintenance around 02:00). A plug-pull mid apt/dpkg write can truncate
+# /var/lib/dpkg/status ("end of file after field name ''"). Since the hard
+# resets are routine and unavoidable here, harden the guest to lose as little
+# as possible. Cheap, no-boot-risk levers only:
 #
-#  * noatime -- stop writing an access-time stamp on every file read. Fewer
-#    metadata writes => a narrower dirty-writeback window on a busy host. This
-#    is a write-churn/perf tweak, NOT the corruption fix, but it's free.
+#  * noatime -- no access-time write on every read (less metadata churn).
+#  * commit=1 -- flush the ext4 journal every 1s instead of the 5s default, so
+#    a reset loses at most ~1s of journalled metadata.
+#  * Write barriers stay ON (ext4 default barrier=1 -- what makes the journal
+#    commit durable across a reset). We deliberately do NOT add
+#    nobarrier/barrier=0 -- that would DEFEAT durability. Documented so nobody
+#    "optimizes" it away.
 #
-#  * Write barriers stay ON. ext4 mounts barrier=1 by default, which is what
-#    makes the journal commit durable across a reset. We deliberately do NOT
-#    add nobarrier/barrier=0 anywhere -- that would DEFEAT durability. (Left as
-#    the default; documented here so nobody "optimizes" it away.)
-#
-# We intentionally do NOT switch data=journal (heavy write amplification, and
-# incompatible with fast_commit) or disable the fast_commit feature (can't be
-# toggled on a mounted root fs; needs an offline tune2fs/initramfs hook, and on
-# 24.04's 6.8 kernel fast_commit is mature) -- see the SMB/dpkg design notes.
+# We intentionally do NOT switch data=journal (2x write amplification, needs
+# fast_commit off + a rootflags/initramfs change with unattended-boot risk) or
+# disable fast_commit -- the dirty-writeback sysctls below give most of the
+# resilience for none of that risk. See the SMB/dpkg design notes.
 if [ -f /etc/fstab ]; then
     cp -a /etc/fstab /etc/fstab.memlabs.bak 2>/dev/null || true
-    # Idempotent: add ',noatime' to the ext4 root ('/') mount options only if
-    # it isn't already there. Only the matched line is rewritten.
-    awk 'BEGIN{OFS="\t"} ($2=="/" && $3=="ext4" && $4 !~ /(^|,)noatime(,|$)/){$4=$4",noatime"} {print}' \
-        /etc/fstab > /etc/fstab.new 2>/dev/null && mv /etc/fstab.new /etc/fstab || rm -f /etc/fstab.new
-    mount -o remount,noatime / 2>/dev/null || true
-    echo "root fs: ensured noatime (barriers left ON by default)"
+    # Idempotent: for the ext4 root ('/') add noatime and commit=1 only if not
+    # already present. Only the matched line is rewritten.
+    awk 'BEGIN{OFS="\t"}
+         ($2=="/" && $3=="ext4"){
+             opts=$4
+             if(opts !~ /(^|,)noatime(,|$)/) opts=opts",noatime"
+             if(opts !~ /(^|,)commit=/)      opts=opts",commit=1"
+             $4=opts
+         }
+         {print}' /etc/fstab > /etc/fstab.new 2>/dev/null && mv /etc/fstab.new /etc/fstab || rm -f /etc/fstab.new
+    mount -o remount / 2>/dev/null || true
+    echo "root fs: ensured noatime,commit=1 (barriers left ON by default)"
 fi
+
+# Shrink the dirty-page writeback window so an unannounced hard power-off loses
+# far less unflushed data: flush dirty pages to the VHDX within ~1-2s instead of
+# the ~30s default, and start background writeback earlier. This is the cheap,
+# no-boot-risk resilience lever (vs data=journal's write amplification). Also
+# written by cloud-init so already-deployed VMs get it without a rebake.
+cat > /etc/sysctl.d/90-memlabs-durability.conf << 'EOF'
+# Flush dirty data quickly so an unannounced hard power-off loses little.
+vm.dirty_writeback_centisecs = 100
+vm.dirty_expire_centisecs = 200
+vm.dirty_background_ratio = 5
+vm.dirty_ratio = 20
+EOF
+sysctl -p /etc/sysctl.d/90-memlabs-durability.conf 2>/dev/null || true
+echo "durability sysctls applied (fast dirty-page writeback)"
 
 echo "=== Maintenance-mode prevention configured ==="
