@@ -9165,7 +9165,33 @@ function Test-ProxyListening {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Squid listening on :3128 ($($output -replace '\s+', ' '))" -LogOnly
         return $true
     }
-    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - no listener on :3128 (ss output: '$output')" -Failure -LogOnly
+
+    # No listener. Self-heal like the SMB check does: (re)run the idempotent
+    # Squid installer over SSH. Install-LinuxProxyServer uses the dpkg-guard-
+    # backed apt_retry, so it also recovers a Proxy whose ORIGINAL Phase-2
+    # install-squid was aborted by a corrupt dpkg DB (squid never got installed)
+    # -- a Phase-11-only re-run otherwise never reinstalls it. Then re-probe
+    # :3128 before failing.
+    if (Get-Command Install-LinuxProxyServer -ErrorAction SilentlyContinue) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - no listener on :3128; attempting Squid (re)install self-heal" -Warning -LogOnly
+        $healed = $false
+        try {
+            $healed = Install-LinuxProxyServer -deployConfig $DeployConfig -ProxyVM $CurrentItem
+        }
+        catch {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Squid self-heal threw: $($_.Exception.Message)" -LogOnly
+        }
+        if ($healed) {
+            $reprobe = Invoke-LinuxVmCommand -VmName $VMName -BashCommand $bash -Sudo -TimeoutSeconds 30 -SuppressLog -DisplayName "Phase11-Proxy-Listen-reprobe"
+            $output = if ($reprobe -and -not $reprobe.ScriptBlockFailed) { ($reprobe.ScriptBlockOutput | Out-String).Trim() } else { '' }
+            if ($output -match ':3128') {
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Squid listening on :3128 after self-heal ($($output -replace '\s+', ' '))" -LogOnly
+                return $true
+            }
+        }
+    }
+
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - no listener on :3128 after self-heal (ss output: '$output')" -Failure -LogOnly
     $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - no listener on TCP 3128"; Level = 'Failure' })
     return $false
 }
