@@ -68,7 +68,10 @@ param(
     [switch]$All,
     # When run from the memlabs HOST, the site server VM to query over PowerShell
     # Direct. Auto-detected (Primary, else CAS) from Get-List when omitted.
-    [string]$VmName
+    [string]$VmName,
+    # By default, when run from the host against a stuck DP, this reaches into the
+    # DP VM and dumps the relevant PullDP.log / DataTransferService.log tail.
+    [switch]$SkipLogCollection
 )
 
 $ErrorActionPreference = 'Stop'
@@ -238,14 +241,62 @@ foreach ($grp in ($result.Rows | Group-Object PackageID)) {
     }
 }
 
+# -- Auto-collect the stuck DP's pull logs (host runs only) ------------------
+# For each DP that is not Installed, reach into the DP VM over PowerShell Direct
+# and dump the relevant PullDP.log / DataTransferService.log tail. These live in
+# the CM CLIENT log dir (resolved from the registry, e.g. E:\SMS_CCM\Logs) -- NOT
+# under SMS_DP$. A pull DP downloads content via the client's Data Transfer
+# Service, so an InstallFailed shows up here as a BITS 'HTTP status 4xx' error.
+if ($anyStuck -and -not $SkipLogCollection -and (Get-Command Invoke-VmCommand -ErrorAction SilentlyContinue)) {
+    $logBlock = {
+        param($pkgCsv)
+        $pkgs = @($pkgCsv -split ',' | Where-Object { $_ })
+        $ccm = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\CCM\Logging\@GLOBAL' -ErrorAction SilentlyContinue).LogDirectory
+        if (-not $ccm) { $ccm = "$env:WINDIR\CCM\Logs" }
+        $out = New-Object System.Collections.Generic.List[string]
+        $out.Add("CCM log dir: $ccm")
+        foreach ($n in 'PullDP.log', 'DataTransferService.log') {
+            $p = Join-Path $ccm $n
+            if (-not (Test-Path $p)) { $out.Add("(missing: $p)"); continue }
+            $lines = @(Get-Content $p -Tail 500 -ErrorAction SilentlyContinue)
+            $hits = @($lines | Where-Object {
+                    $l = $_
+                    ($pkgs | Where-Object { $l -like "*$_*" }) -or ($l -match 'HTTP status \d|JobError|HandleDownloadError|has failed|unable to reach|ProtType')
+                } | Select-Object -Last 10)
+            $out.Add("== $p (last $($hits.Count) relevant) ==")
+            foreach ($h in $hits) { $out.Add((($h -replace '\r?\n', ' ' -replace '\s+', ' ').Trim())) }
+        }
+        return $out.ToArray()
+    }
+    $vmsForLogs = @(Get-List -Type VM)
+    foreach ($g in ($result.Rows | Where-Object { $_.State -gt 0 } | Group-Object DP)) {
+        $dpVmName = ("$($g.Name)" -split '\.')[0]
+        $dpVm = $vmsForLogs | Where-Object { $_.vmName -eq $dpVmName } | Select-Object -First 1
+        Write-Head "Pull logs from stuck DP $dpVmName"
+        if (-not $dpVm) { Write-Host "  (no Get-List VM match for '$($g.Name)' -- skipping)" -ForegroundColor DarkGray; continue }
+        $pkgCsv = (@($g.Group.PackageID | Select-Object -Unique)) -join ','
+        $li = Invoke-VmCommand -VmName $dpVm.vmName -VmDomainName $dpVm.domain `
+            -ScriptBlock $logBlock -ArgumentList @($pkgCsv) -DisplayName 'collect pull DP logs' -SuppressLog
+        if ($li -and -not $li.ScriptBlockFailed -and $li.ScriptBlockOutput) {
+            foreach ($line in $li.ScriptBlockOutput) { Write-Host "  $line" -ForegroundColor DarkGray }
+        }
+        else {
+            Write-Host "  (could not collect logs from $dpVmName`: $($li.ErrorDetails))" -ForegroundColor DarkGray
+        }
+    }
+}
+
 # -- Guidance ---------------------------------------------------------------
 if ($anyStuck) {
     Write-Head "Where to look next (per stuck DP)"
     Write-Host "  Site server:             distmgr.log, PkgXferMgr.log  (grep the PackageID)" -ForegroundColor Gray
-    Write-Host "  Pull DP:                 DataTransferService.log, smsdpprov.log  (content pull from source DP)" -ForegroundColor Gray
+    Write-Host "  Pull DP (CM client logs, e.g. E:\SMS_CCM\Logs):  PullDP.log + DataTransferService.log" -ForegroundColor Gray
+    Write-Host "                           (BITS pull from source DP; look for 'HTTP status 404' / ProtType)" -ForegroundColor Gray
+    Write-Host "  Pull DP (under SMS_DP`$\sms\logs): smsdpprov.log  (DP content-library provisioning)" -ForegroundColor Gray
     Write-Host "  Secondary-site DP:       on the Secondary: despool.log / distmgr.log; on the Primary: sender.log" -ForegroundColor Gray
-    Write-Host "  Common cross-subnet/PKI causes: DP cert/trust (UsePKI), the DP's IIS/WebDAV/BITS not serving," -ForegroundColor Gray
-    Write-Host "  no route from DP to source DP:8080/443, or the source DP missing the content." -ForegroundColor Gray
+    Write-Host "  A 404 from the source DP over HTTP with the source showing 'Installed' often means the" -ForegroundColor Gray
+    Write-Host "  source's content library was relocated (remote content library / HA) -- the pull source" -ForegroundColor Gray
+    Write-Host "  must be a DP with a LOCAL content library, not an HA site server (remoteContentLibVM)." -ForegroundColor Gray
     Write-Host ""
     Write-Host "RESULT: at least one DP is NOT 'Installed' -- see the red/yellow rows above." -ForegroundColor Yellow
 }

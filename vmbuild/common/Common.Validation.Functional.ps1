@@ -8584,14 +8584,14 @@ function Test-CMSiteWideFunctionality {
                                         "$(& $dpNameOf $_.ServerNALPath) [$(if ($stateNamesLocal.ContainsKey([int]$_.State)) { $stateNamesLocal[[int]$_.State] } else { "State=$($_.State)" })]"
                                     })
                                 $results.Passed = $false
-                                $results.Details.Add("FAIL: Boot image '$biName' ($($bi.PackageID)) distribution FAILED on $($failed.Count) DP(s): $($failedDpNames -join ', ') [Installed=$($installed.Count), InProgress=$($inProgress.Count)]. Run Fixes\Test-ContentDistribution.ps1 for per-DP state.")
+                                $results.Details.Add("FAIL: Boot image '$biName' ($($bi.PackageID)) distribution FAILED on $($failed.Count) DP(s): $($failedDpNames -join ', ') [Installed=$($installed.Count), InProgress=$($inProgress.Count)]. Run Fixes\Test-ContentDistribution.ps1 for per-DP state + auto-collected pull logs. For a Pull DP, the real error is in the CM CLIENT log dir (e.g. E:\SMS_CCM\Logs): PullDP.log + DataTransferService.log (BITS 'HTTP status 4xx'). A 404 with the source showing 'Installed' usually means the source DP's content library was relocated for HA (remoteContentLibVM) -- a pull source must be a DP with a LOCAL content library.")
 
                                 # DIAG: collect the site-server-local content-transfer / distmgr
                                 # log tails for this PackageID so the root cause is captured in the
                                 # Phase 11 output (mirrors the DNS DIAG pattern). PkgXferMgr.log is
                                 # the site side of the pull-DP content job; distmgr.log is the
-                                # distribution-manager decisions. The Pull DP's own
-                                # DataTransferService.log lives on the DP (see the FAIL line).
+                                # distribution-manager decisions. The Pull DP's own PullDP.log /
+                                # DataTransferService.log live in the DP's CM client log dir.
                                 try {
                                     $smsDir = $null
                                     foreach ($k in 'HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup') {
