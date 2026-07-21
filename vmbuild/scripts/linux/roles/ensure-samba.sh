@@ -29,8 +29,20 @@ else
     # smbd.service never gets created.
     recover_dpkg || true
     apt_retry apt-get update -y || true
-    if ! apt_retry apt-get install -y samba; then
-        echo "[ensure-samba] ERROR: samba install failed even after dpkg recovery" >&2
+    # A last-resort rebuild_dpkg_status (fired by the guard when no parseable
+    # backup exists) reconstructs an APPROXIMATE status DB -- versions/states
+    # come from the apt lists, not the lost status -- so apt's dependency solver
+    # can see pre-existing "broken" deps and refuse to install anything new
+    # ("... but it is not going to be installed"). Reconcile with a fix-broken
+    # pass, then install samba with --fix-broken so apt is allowed to pull and
+    # repair whatever the rebuild left inconsistent. On a healthy box the
+    # fix-broken pass is a no-op.
+    apt_retry apt-get install -f -y || true
+    if ! apt_retry apt-get install -y --fix-broken samba; then
+        echo "[ensure-samba] samba install failed; one more fix-broken pass + retry" >&2
+        apt_retry apt-get install -f -y || true
+        apt_retry apt-get install -y --fix-broken samba \
+            || echo "[ensure-samba] ERROR: samba install failed even after dpkg recovery + fix-broken" >&2
     fi
     # Flush the freshly-written dpkg status DB (and its status-old backup) to
     # the VHDX so a later hard reset leaves a recoverable dpkg database.
