@@ -2423,21 +2423,40 @@ function Test-Configuration {
         # "prefix+vmName -notin existingVMs.vmName" => new), treated as a RE-DEPLOY /
         # reuse of that existing VM -- which is legitimate and must NOT be blocked
         # (that would break every re-deploy of a saved config, where all VMs already
-        # exist). The genuine hazard is repurposing that name to a DIFFERENT role:
-        # deploying it would overwrite/clobber the existing VM (e.g. turn an existing
-        # DC into an OSDClient, or a DomainMember into a WSUS). Flag ONLY that role
-        # mismatch as a failure; a same-role match is a normal re-deploy.
+        # exist). Two things ARE genuine conflicts, though:
+        #   1. A name owned by a VM in a DIFFERENT domain. Hyper-V VM names are unique
+        #      host-wide, so e.g. deploying CO-DC1 (contoso) when AD-DC1... no -- more
+        #      concretely, two labs whose prefixes collide would both resolve a VM to
+        #      the same host name (e.g. contoso and adatum both producing DC1). The
+        #      second deploy can't create it; it belongs to the other lab. Hard-fail.
+        #   2. A same-domain name match whose ROLE differs -- repurposing the name would
+        #      overwrite/clobber the existing VM (e.g. an existing DC re-defined as an
+        #      OSDClient, or a DomainMember re-defined as WSUS). Hard-fail.
+        # A same-domain, same-role match is a normal re-deploy and is NOT flagged.
         if ($vmInDeployment) {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 85
-            $existingInDomain = @(Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName -SmartUpdate)
+            $configDomain = $deployConfig.vmOptions.domainName
+            $allExisting = @(Get-List -Type VM -SmartUpdate)
             foreach ($newVM in $virtualMachinesNoExisting) {
                 if (-not $newVM.vmName) { continue }
-                $matchVM = $existingInDomain | Where-Object { $_.vmName -eq $newVM.vmName } | Select-Object -First 1
-                if (-not $matchVM) { continue }
-                $existingRole = "$($matchVM.role)".Trim()
-                $newRole = "$($newVM.role)".Trim()
-                if ($existingRole -and $newRole -and ($existingRole -ne $newRole)) {
-                    Add-ValidationMessage -Message "Name Conflict: VM [$($newVM.vmName)] already exists in Hyper-V as role [$existingRole], but this deployment defines it as role [$newRole]. Deploying would overwrite the existing VM. Rename the new VM, or remove the existing one first." -ReturnObject $return -Failure
+                $nameMatches = @($allExisting | Where-Object { $_.vmName -eq $newVM.vmName })
+                if ($nameMatches.Count -eq 0) { continue }
+
+                # 1. Cross-domain host-wide name collision.
+                $otherDomainMatch = $nameMatches | Where-Object { $_.domain -and $configDomain -and ($_.domain -ne $configDomain) } | Select-Object -First 1
+                if ($otherDomainMatch) {
+                    Add-ValidationMessage -Message "Name Conflict: VM [$($newVM.vmName)] already exists in Hyper-V in a different domain [$($otherDomainMatch.domain)]. Hyper-V VM names must be unique on the host; use a different prefix or name for this deployment." -ReturnObject $return -Failure
+                    continue
+                }
+
+                # 2. Same-domain reuse with a different role => overwrite.
+                $sameDomainMatch = $nameMatches | Where-Object { -not $_.domain -or -not $configDomain -or ($_.domain -eq $configDomain) } | Select-Object -First 1
+                if ($sameDomainMatch) {
+                    $existingRole = "$($sameDomainMatch.role)".Trim()
+                    $newRole = "$($newVM.role)".Trim()
+                    if ($existingRole -and $newRole -and ($existingRole -ne $newRole)) {
+                        Add-ValidationMessage -Message "Name Conflict: VM [$($newVM.vmName)] already exists in Hyper-V as role [$existingRole], but this deployment defines it as role [$newRole]. Deploying would overwrite the existing VM. Rename the new VM, or remove the existing one first." -ReturnObject $return -Failure
+                    }
                 }
             }
         }
