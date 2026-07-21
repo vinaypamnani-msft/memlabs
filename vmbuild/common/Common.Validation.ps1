@@ -1874,9 +1874,15 @@ function Test-Configuration {
                     # Include existing VMs so an existing DP in the site satisfies the remote contentlib
                     # requirement when adding a new Passive to an existing Primary.
                     $list2ForDP = Get-List2 -deployConfig $deployConfig
-                    $DPsForSiteCode = $list2ForDP | Where-Object { $_.Role -eq "SiteSystem" -and $_.siteCode -eq $vm.SiteCode -and $_.installDP -eq $true }
+                    # A pull DP does NOT count: it has no local content of its own (it
+                    # pulls from a source DP), so it can't be the site's content source.
+                    # An HA site (remote content library, site server can't be a DP) must
+                    # have at least one REAL DP -- a non-pull SiteSystem DP with a LOCAL
+                    # content library -- or nothing can serve content (and any pull DP in
+                    # the site has nothing to pull from).
+                    $DPsForSiteCode = $list2ForDP | Where-Object { $_.Role -eq "SiteSystem" -and $_.siteCode -eq $vm.SiteCode -and $_.installDP -eq $true -and (-not $_.enablePullDP) }
                     if (-not $DPsForSiteCode) {
-                        Add-ValidationMessage -Message "Passive Validation: [$($vm.vmName)] SiteCode $($vm.SiteCode) does not contain a DP which is needed with remote contentlib." -ReturnObject $return -Failure
+                        Add-ValidationMessage -Message "Passive Validation: [$($vm.vmName)] SiteCode $($vm.SiteCode) does not contain a real (non-pull) DP with a local content library, which is required with a remote content library. A pull DP does not count -- it has no content of its own to serve; add a dedicated SiteSystem DP (installDP, not a pull DP)." -ReturnObject $return -Failure
                     }
                     else {
                         write-log -verbose "Passive Site has DP $($DPsForSiteCode.vmName)"
