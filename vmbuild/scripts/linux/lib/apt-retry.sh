@@ -243,6 +243,79 @@ dpkg_restore_known_good() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# rebuild_dpkg_status
+#   LAST-RESORT recovery when /var/lib/dpkg/status is corrupt AND no parseable
+#   backup exists anywhere (known-good / status-old / /var/backups all bad) --
+#   exactly the dead-end a VM hits if it's truncated before any known-good was
+#   ever saved. Reconstructs a USABLE status DB from on-disk metadata:
+#     * installed package names come from /var/lib/dpkg/info/*.list
+#     * each package's control stanza is recovered from the apt Packages lists
+#       (/var/lib/apt/lists/*_Packages), repo-only fields stripped and stamped
+#       'Status: install ok installed'; packages not in any list get a minimal
+#       synthetic stanza.
+#   Not byte-perfect, but produces a PARSEABLE status apt/dpkg can use so
+#   subsequent installs (e.g. samba) proceed. Never leaves status worse than
+#   found (restores the pre-rebuild copy if the reconstruction doesn't parse).
+#   Returns 0 if the rebuilt DB parses.
+# ---------------------------------------------------------------------------
+rebuild_dpkg_status() {
+    _dpkg_guard_log "rebuild_dpkg_status: reconstructing status from on-disk metadata"
+    local infodir=/var/lib/dpkg/info wanted new arch lists p cnt
+    wanted=$(mktemp) || return 1
+    new=$(mktemp) || { rm -f "$wanted"; return 1; }
+    # Installed package base names (drop directory, .list suffix, and :arch).
+    ls "$infodir"/*.list 2>/dev/null | sed 's#.*/##; s/\.list$//; s/:.*//' | sort -u > "$wanted"
+    if [ ! -s "$wanted" ]; then
+        _dpkg_guard_log "rebuild_dpkg_status: no /var/lib/dpkg/info/*.list found -- cannot rebuild"
+        rm -f "$wanted" "$new"; return 1
+    fi
+    arch=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+    lists=$(ls /var/lib/apt/lists/*_Packages 2>/dev/null)
+    # Single pass over the apt Packages lists: emit a status stanza for each
+    # wanted package (strip repo-only fields, force 'Status: install ok installed').
+    if [ -n "$lists" ]; then
+        awk -v wf="$wanted" '
+            BEGIN{ while((getline n < wf)>0) want[n]=1; RS=""; FS="\n" }
+            {
+                pkg=""
+                for(i=1;i<=NF;i++){ if($i ~ /^Package: /){ pkg=substr($i,10); break } }
+                if(pkg=="" || !(pkg in want) || seen[pkg]) next
+                seen[pkg]=1
+                for(i=1;i<=NF;i++){
+                    if($i ~ /^(Filename|Size|MD5sum|SHA1|SHA256|SHA512|Description-md5|Task|Supported):/) continue
+                    print $i
+                }
+                print "Status: install ok installed"
+                print ""
+            }
+        ' $lists >> "$new" 2>/dev/null
+    fi
+    # Wanted packages NOT found in any Packages list -> minimal synthetic stanza.
+    awk 'BEGIN{RS="";FS="\n"} { for(i=1;i<=NF;i++) if($i ~ /^Package: /){ print substr($i,10); break } }' "$new" 2>/dev/null | sort -u > "${new}.got"
+    comm -23 "$wanted" "${new}.got" 2>/dev/null | while read -r p; do
+        [ -n "$p" ] || continue
+        printf 'Package: %s\nStatus: install ok installed\nPriority: optional\nSection: misc\nArchitecture: %s\nVersion: 0\nMaintainer: memlabs\nDescription: recovered by memlabs rebuild_dpkg_status\n\n' "$p" "$arch" >> "$new"
+    done
+    rm -f "${new}.got"
+    # Swap in the rebuild and verify it parses; restore the pre-rebuild copy if
+    # it doesn't (so we're never worse off than the corrupt DB we started with).
+    cp -a /var/lib/dpkg/status "/var/lib/dpkg/status.prerebuild.$$" 2>/dev/null || true
+    if cp -f "$new" /var/lib/dpkg/status 2>/dev/null && dpkg-query -W >/dev/null 2>&1; then
+        sync 2>/dev/null || true
+        cnt=$(dpkg-query -f '.\n' -W 2>/dev/null | wc -l)
+        _dpkg_guard_log "rebuild_dpkg_status: OK -- rebuilt status with ${cnt} packages"
+        DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confold >/dev/null 2>&1 || true
+        dpkg_save_known_good
+        rm -f "$wanted" "$new" "/var/lib/dpkg/status.prerebuild.$$"
+        return 0
+    fi
+    cp -f "/var/lib/dpkg/status.prerebuild.$$" /var/lib/dpkg/status 2>/dev/null || true
+    rm -f "$wanted" "$new" "/var/lib/dpkg/status.prerebuild.$$"
+    _dpkg_guard_log "rebuild_dpkg_status: reconstruction did NOT parse -- left status unchanged"
+    return 1
+}
+
 # Check DB consistency; log facts; restore + refresh known-good as needed.
 #   $1 = phase label (PRE/POST/...), $2 = command description
 dpkg_guard_check() {
@@ -253,7 +326,9 @@ dpkg_guard_check() {
         return 0
     fi
     _dpkg_guard_log "${phase} CORRUPT ${desc}: $(dpkg_status_facts) -- restoring"
-    dpkg_restore_known_good || repair_dpkg_status || true
+    # Restore order: trusted backups first, then reconstruct from on-disk
+    # metadata as a last resort when no parseable backup exists.
+    dpkg_restore_known_good || repair_dpkg_status || rebuild_dpkg_status || true
     if dpkg_status_ok; then
         _dpkg_guard_log "${phase} RECOVERED ${desc}: $(dpkg_status_facts)"
         dpkg_save_known_good
