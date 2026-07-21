@@ -4836,6 +4836,48 @@ function Test-SiteSystemFunctionality {
                 }
             }
 
+            # DP content-library LOCATION -- a distribution point MUST serve from a
+            # LOCAL content library. If the site's content library was relocated to a
+            # remote share for HA (passive site server remoteContentLibVM ->
+            # Move-CMContentLibrary) and a DP was (re-)added to this site server anyway
+            # (e.g. the pull-DP-source logic auto-enabling installDP), the DP's
+            # ContentLibraryPath is a UNC path while its SMS_DP_SMSPKG$ IIS app still
+            # serves from the now-empty local SCCMContentLib -- so every HTTP content
+            # request (pull DPs, PXE, direct download) returns 404. This DP looks
+            # "Installed" in the site DB yet serves nothing. Assert the library is local.
+            try {
+                $dpReg = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -ErrorAction SilentlyContinue
+                $clp = if ($dpReg) { "$($dpReg.ContentLibraryPath)" } else { '' }
+                if ($clp) {
+                    if ($clp -match '^\\\\') {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: DP content library is REMOTE ($clp). A DP must serve from a LOCAL content library -- HTTP content requests will 404 (pull DPs fail, PXE/content download break). This site server's content library was relocated for HA; it must NOT host a DP (use a dedicated SiteSystem DP instead).")
+                    }
+                    else {
+                        $results.Details.Add("OK: DP content library is local ($clp)")
+                    }
+                }
+                # Cross-check the IIS content-download app against the library location:
+                # if the SMS_DP_SMSPKG$ app's physical path is a local SCCMContentLib but
+                # the content library is remote, that is the exact serve-empty-path 404.
+                try {
+                    Import-Module WebAdministration -ErrorAction Stop
+                    $pkgApp = Get-WebApplication -Site 'Default Web Site' -ErrorAction SilentlyContinue |
+                        Where-Object { $_.path -eq '/SMS_DP_SMSPKG$' } | Select-Object -First 1
+                    if ($pkgApp) {
+                        $pkgPath = $pkgApp.PhysicalPath
+                        if ($clp -and $clp -match '^\\\\' -and $pkgPath -notmatch '^\\\\') {
+                            $results.Details.Add("DIAG: SMS_DP_SMSPKG`$ serves local '$pkgPath' but content library is remote '$clp' -- content is not where IIS looks (404 source).")
+                        }
+                        else {
+                            $results.Details.Add("OK: SMS_DP_SMSPKG`$ physical path '$pkgPath'")
+                        }
+                    }
+                }
+                catch {}
+            }
+            catch {}
+
             # WDS service for PXE -- optional. memlabs DPs may be created
             # with -EnablePxe or with NoWDS PXE, and PXE config can be
             # toggled per-DP. Absence is informational only.
