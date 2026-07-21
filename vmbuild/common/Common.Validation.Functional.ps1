@@ -8553,8 +8553,16 @@ function Test-CMSiteWideFunctionality {
                             if ($installed.Count -ge 1 -and $failed.Count -eq 0 -and $inProgress.Count -eq 0) {
                                 $results.Details.Add("OK: Boot image '$biName' distributed to $($installed.Count) DP(s)")
                             }
+                            elseif ($failed.Count -ge 1 -and $inProgress.Count -ge 1) {
+                                # A DP reports a failed/retry sub-state WHILE another is still
+                                # actively distributing -- the normal async convergence pattern,
+                                # esp. Pull/Secondary DPs downloading from the source DP. DistMgr
+                                # retries and this typically clears. Still WARN (so a genuinely
+                                # stuck DP isn't hidden), but phrase it as in-progress, not failed.
+                                $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) still converging: $($failed.Count) DP(s) in a failed/retry sub-state, $($inProgress.Count) in progress, $($installed.Count) installed -- re-run Phase 11 to confirm")
+                            }
                             elseif ($failed.Count -ge 1) {
-                                $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) distribution failed on $($failed.Count) DP(s) [Installed=$($installed.Count), InProgress=$($inProgress.Count)]")
+                                $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) distribution failed on $($failed.Count) DP(s) [Installed=$($installed.Count); no DP in progress -- likely stuck]")
                             }
                             elseif ($inProgress.Count -ge 1) {
                                 # Pending/Retrying/Validating -- distribution is actively being processed.
@@ -9922,13 +9930,20 @@ function Test-LinuxSmbAccess {
     $netViewOutput = & net view "\\$vmIp" /all 2>&1
     $netViewString = ($netViewOutput | Out-String).Trim()
     $hasShares = $netViewString -match 'logs' -and $netViewString -match 'home'
-    if (-not $hasShares) {
-        # net view may fail without credentials — fall back to just the TCP check
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - net view did not list expected shares (may need auth); TCP 445 is open" -Warning -LogOnly
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: net view output: $netViewString" -LogOnly
+    if ($hasShares) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Samba shares 'logs' and 'home' visible via net view" -LogOnly
+    }
+    elseif ($netViewString -match 'System error 5|Access is denied') {
+        # NOT a warning: an unauthenticated 'net view' being DENIED means Samba
+        # is up and enforcing auth (smb.conf security=user, map to guest=never).
+        # The meaningful check (TCP 445 reachable) already passed, so this is the
+        # expected, healthy result -- log it as OK, not a WARN.
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Samba up and enforcing auth (net view denied without creds; TCP 445 open)" -LogOnly
     }
     else {
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Samba shares 'logs' and 'home' visible via net view" -LogOnly
+        # Genuinely unexpected net view output (not shares, not access-denied).
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - net view returned unexpected output (TCP 445 is open)" -Warning -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: net view output: $netViewString" -LogOnly
     }
 
     $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: OK - Samba accessible on $vmIp:445"; Level = 'Success' })
