@@ -1881,6 +1881,19 @@ function Test-Configuration {
                     else {
                         write-log -verbose "Passive Site has DP $($DPsForSiteCode.vmName)"
                     }
+
+                    # An HA site server cannot host a DP. HA relocates the site's content
+                    # library to a remote share (passive server's remoteContentLibVM ->
+                    # Move-CMContentLibrary) and InstallPassiveSiteServer.ps1 removes the
+                    # site server's DP before the move -- a site server with a remote content
+                    # library can't serve content. If a DP is (re-)added to it anyway (e.g. the
+                    # pull-DP-source logic auto-enables installDP on a pull source), it serves
+                    # HTTP content from the now-empty local SCCMContentLib and every pull-DP
+                    # download gets HTTP 404. So the site server's own DP must stay off; the
+                    # site's DP has to be a dedicated SiteSystem DP (checked above).
+                    if ($vm.installDP -eq $true) {
+                        Add-ValidationMessage -Message "Passive Validation: [$($vm.vmName)] is an HA site server (passive [$($passiveSite.vmName)]) whose content library is relocated to a remote share, so it cannot host a Distribution Point (HA removes the site server's DP; any DP re-added to it serves content from the empty local library -> HTTP 404). Set installDP=false on [$($vm.vmName)] and use a dedicated SiteSystem DP for the site." -ReturnObject $return -Failure
+                    }
                 }
             }
 
