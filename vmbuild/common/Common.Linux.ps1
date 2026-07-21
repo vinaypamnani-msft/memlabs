@@ -1942,20 +1942,55 @@ function Wait-LinuxVmReady {
         # it once and use the remaining ~7 minutes for the retry.
         if (-not $restartAttempted -and $elapsed -ge $restartAfterSec) {
             $restartAttempted = $true
-            if ($sawSignOfLife) {
-                # sshd has accepted TCP/22 at least once, so the guest is
-                # alive and booting — just slow (heavy host I/O contention).
-                # Restarting would throw away that progress. Keep waiting.
-                Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s, but sshd has accepted TCP/22 at least once — guest is alive but slow; NOT restarting, continuing to wait." -Warning
+            # Decide whether the guest is ALIVE before touching power. A hard
+            # -TurnOff is a plug-pull: if the guest is alive but busy (classic
+            # case: first-boot cloud-init mid 'packages:' apt install, or the
+            # Proxy's 188-package squid install), pulling the plug while dpkg is
+            # writing /var/lib/dpkg/status truncates it ("end of file after
+            # field name ''") and permanently breaks apt on the VM -- the proven
+            # root cause of the recurring Proxy samba/dpkg failures.
+            #
+            # sshd being seen (sawSignOfLife) proves alive, but sshd comes up
+            # LATE (after cloud-init installs packages). The Hyper-V heartbeat IC
+            # comes up as soon as the kernel + hv_utils load -- well before a big
+            # first-boot apt finishes -- so also treat a healthy heartbeat as
+            # "alive but slow" and DO NOT restart. A clean timeout failure is far
+            # better than silently corrupting the dpkg DB.
+            $guestAlive = $sawSignOfLife
+            $hb = $null
+            if (-not $guestAlive) {
+                try { $hb = (Get-VM -Name $VmName -ErrorAction SilentlyContinue).Heartbeat } catch { }
+                if ("$hb" -like 'Ok*') { $guestAlive = $true }
+            }
+            if ($guestAlive) {
+                # sshd seen or heartbeat healthy -> guest is alive, just slow
+                # (heavy host I/O contention). Restarting would throw away boot
+                # progress AND risk truncating the dpkg DB. Keep waiting.
+                $aliveWhy = $(if ($sawSignOfLife) { 'sshd accepted TCP/22' } else { "heartbeat='$hb'" })
+                Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s, but guest is alive ($aliveWhy) — NOT restarting (a hard reset mid first-boot apt would corrupt the dpkg DB); continuing to wait." -Warning
             }
             else {
-                Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s — restarting VM and retrying" -Warning
+                Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s and no sign of life (heartbeat='$hb') — power-cycling and retrying" -Warning
                 write-progress2 "Wait for Linux VM" -Status "$VmName`: restarting VM (no SSH after ${restartAfterSec}s)..." -force
                 try {
-                    Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop
+                    # Try a GRACEFUL shutdown first (systemd stops apt/dpkg
+                    # cleanly and flushes the filesystem to the VHDX). Only fall
+                    # back to a hard -TurnOff if the guest won't stop within 60s
+                    # (truly wedged), so we never plug-pull a guest that could
+                    # still be flushing a pending dpkg write.
+                    $stopped = $false
+                    try { Stop-VM -Name $VmName -Force -ErrorAction Stop -WarningAction SilentlyContinue } catch { }
+                    for ($si = 0; $si -lt 30; $si++) {
+                        if ((Get-VM -Name $VmName -ErrorAction SilentlyContinue).State -eq 'Off') { $stopped = $true; break }
+                        Start-Sleep -Seconds 2
+                    }
+                    if (-not $stopped) {
+                        Write-Log "$VmName`: graceful shutdown didn't complete in 60s; forcing TurnOff (guest wedged)" -Warning
+                        Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop
+                    }
                     Start-Sleep -Seconds 3
                     Start-VM -Name $VmName -ErrorAction Stop
-                    Write-Log "$VmName`: VM restarted; resuming SSH poll with $([int](($deadline - (Get-Date)).TotalSeconds))s remaining"
+                    Write-Log "$VmName`: VM restarted (graceful=$stopped); resuming SSH poll with $([int](($deadline - (Get-Date)).TotalSeconds))s remaining"
                 }
                 catch {
                     Write-Log "$VmName`: VM restart failed: $($_.Exception.Message)" -Warning
