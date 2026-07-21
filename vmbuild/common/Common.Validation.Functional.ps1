@@ -8545,21 +8545,80 @@ function Test-CMSiteWideFunctionality {
                         # SMS_DistributionPoint to see whether the package has been *targeted*
                         # to any DP at all — distinguishes "no targeting" from "in progress".
                         try {
+                            # Parse a DP server name out of a ServerNALPath like
+                            # ["Display=\\PL-PATTYDP.dom\"]MSWNET:...\\PL-PATTYDP.dom\
+                            $dpNameOf = {
+                                param($nal)
+                                if ($nal -match '\\\\([^\\"\]]+)') { return $Matches[1] } else { return "$nal" }
+                            }
                             $allDp = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
                                 -Filter "PackageID='$($bi.PackageID)'" -ErrorAction Stop)
                             $installed = @($allDp | Where-Object { $_.State -eq 0 })
                             $inProgress = @($allDp | Where-Object { $_.State -in 1, 2, 7 })
                             $failed = @($allDp | Where-Object { $_.State -in 3, 6, 8 })
+                            # Convergence re-check: a DP can briefly post InstallFailed (3) then
+                            # auto-retry to success, so don't fail on the first sighting. Re-query
+                            # a few times; only a failure that PERSISTS (and isn't advancing to
+                            # in-progress/installed) is a genuine stuck distribution. On this
+                            # box the boot image sat InstallFailed for 12h, so it fails here.
+                            if ($failed.Count -ge 1) {
+                                for ($dpTry = 1; $dpTry -le 3 -and $failed.Count -ge 1; $dpTry++) {
+                                    Start-Sleep -Seconds 30
+                                    $allDp = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                                        -Filter "PackageID='$($bi.PackageID)'" -ErrorAction SilentlyContinue)
+                                    $installed = @($allDp | Where-Object { $_.State -eq 0 })
+                                    $inProgress = @($allDp | Where-Object { $_.State -in 1, 2, 7 })
+                                    $failed = @($allDp | Where-Object { $_.State -in 3, 6, 8 })
+                                }
+                            }
                             if ($installed.Count -ge 1 -and $failed.Count -eq 0 -and $inProgress.Count -eq 0) {
                                 $results.Details.Add("OK: Boot image '$biName' distributed to $($installed.Count) DP(s)")
                             }
                             elseif ($failed.Count -ge 1) {
                                 # State 3/6/8 (InstallFailed/RemovalFailed/ContentValidationFailed)
-                                # is a real failure -- a concurrent InProgress DP does NOT make it
-                                # "converging" (a stuck distribution can sit failed+in-progress for
-                                # hours/days). Keep it a hard WARN and point at the diagnosis.
-                                $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) distribution FAILED on $($failed.Count) DP(s) [Installed=$($installed.Count), InProgress=$($inProgress.Count)] -- check distmgr.log/PkgXferMgr.log on the site server (and DataTransferService.log/smsdpprov.log on the DP); run Fixes\Test-ContentDistribution.ps1 for per-DP state + error")
+                                # that survived the convergence re-check is a REAL failure. Fail the
+                                # phase (a concurrent InProgress DP does NOT make it "converging" --
+                                # a stuck distribution can sit failed+in-progress for hours/days).
+                                $stateNamesLocal = @{ 3 = 'InstallFailed'; 6 = 'RemovalFailed'; 8 = 'ContentValidationFailed' }
+                                $failedDpNames = @($failed | ForEach-Object {
+                                        "$(& $dpNameOf $_.ServerNALPath) [$(if ($stateNamesLocal.ContainsKey([int]$_.State)) { $stateNamesLocal[[int]$_.State] } else { "State=$($_.State)" })]"
+                                    })
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: Boot image '$biName' ($($bi.PackageID)) distribution FAILED on $($failed.Count) DP(s): $($failedDpNames -join ', ') [Installed=$($installed.Count), InProgress=$($inProgress.Count)]. Run Fixes\Test-ContentDistribution.ps1 for per-DP state.")
+
+                                # DIAG: collect the site-server-local content-transfer / distmgr
+                                # log tails for this PackageID so the root cause is captured in the
+                                # Phase 11 output (mirrors the DNS DIAG pattern). PkgXferMgr.log is
+                                # the site side of the pull-DP content job; distmgr.log is the
+                                # distribution-manager decisions. The Pull DP's own
+                                # DataTransferService.log lives on the DP (see the FAIL line).
+                                try {
+                                    $smsDir = $null
+                                    foreach ($k in 'HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup') {
+                                        try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+                                        if ($smsDir) { break }
+                                    }
+                                    if ($smsDir) {
+                                        foreach ($logName in 'PkgXferMgr.log', 'distmgr.log') {
+                                            $logPath = Join-Path $smsDir "Logs\$logName"
+                                            if (Test-Path $logPath) {
+                                                $hits = @(Select-String -Path $logPath -Pattern $bi.PackageID -SimpleMatch -ErrorAction SilentlyContinue |
+                                                    Select-Object -Last 6)
+                                                if ($hits) {
+                                                    $results.Details.Add("DIAG: $logName (last $($hits.Count) line(s) mentioning $($bi.PackageID)):")
+                                                    foreach ($h in $hits) {
+                                                        $line = ($h.Line -replace '\r?\n', ' ' -replace '\s+', ' ').Trim()
+                                                        if ($line.Length -gt 240) { $line = $line.Substring(0, 240) + '...' }
+                                                        $results.Details.Add("  $line")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch {}
                             }
+
                             elseif ($inProgress.Count -ge 1) {
                                 # Pending/Retrying/Validating -- distribution is actively being processed.
                                 $results.Details.Add("OK: Boot image '$biName' distribution in progress on $($inProgress.Count) DP(s) [Installed=$($installed.Count)]")
