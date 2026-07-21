@@ -2418,16 +2418,21 @@ function Test-Configuration {
             }
         }
 
-        if ($compare) {
-            # Names in domain
+        # Names in domain: every NEW (non-existing) VM name in the deployment must
+        # not collide with a VM that already exists in Hyper-V. This is INDEPENDENT
+        # of the in-deployment duplicate check above -- gating it on $compare (which
+        # is only set when the deployment itself has internal duplicates) made this
+        # dead code, so a new VM named e.g. PS1-DC1 that collides with the existing
+        # DC PS1-DC1 was never flagged.
+        if ($vmInDeployment) {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 85
             $allVMs = Get-List -Type VM -SmartUpdate | Select-Object -Expand VmName
-            $all = $allVMs + $vmInDeployment
+            $all = @($allVMs) + @($vmInDeployment)
             $unique2 = $all | Select-Object -Unique
             if (($null -ne $unique2) -and ($null -ne $all)) {
                 $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
-                if (-not $compare -and $compare2) {
-                    $duplicates = $compare2.InputObject -join ","
+                if ($compare2) {
+                    $duplicates = ($compare2.InputObject | Select-Object -Unique) -join ","
                     Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
                     Get-List -type VM -SmartUpdate | Out-Null
                 }
