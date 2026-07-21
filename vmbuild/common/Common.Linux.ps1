@@ -535,6 +535,14 @@ chpasswd:
     ) + $ExtraPackages | Select-Object -Unique
     $packagesYaml = ($packages | ForEach-Object { "  - $_" }) -join "`n"
 
+    # Build the shared Samba-ensure script (with the apt-retry/dpkg-recovery
+    # helpers inlined) and base64-encode it for a single runcmd line. The same
+    # script runs at Phase 11 (Test-LinuxSmbAccess self-heal), so first boot and
+    # self-heal share identical detect-skip + dpkg-recovery + install logic.
+    $ensureSambaScript = Get-LinuxScript -Name 'roles/ensure-samba' -IncludeAptRetry
+    $ensureSambaLf = $ensureSambaScript -replace "`r`n", "`n"
+    $ensureSambaB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($ensureSambaLf))
+
     $runcmd = @(
         'systemctl enable --now qemu-guest-agent || true',
         'systemctl enable --now ssh || true',
@@ -603,20 +611,20 @@ chpasswd:
         # Install sshd watchdog cron job: every 5 minutes, check tcp/22
         # and restart sshd if it's not listening.
         '(crontab -l 2>/dev/null | grep -v memlabs-sshd-watchdog; echo "*/5 * * * * /usr/local/sbin/memlabs-sshd-watchdog") | crontab -',
-        # Ensure Samba is installed, then enable it and set vmbuildadmin's SMB
-        # password (same as console). The share gives file access to /var/log
-        # and /home/vmbuildadmin when SSH is down.
+        # Ensure Samba is installed + smbd enabled/listening, then set
+        # vmbuildadmin's SMB password (same as console). The share gives file
+        # access to /var/log and /home/vmbuildadmin when SSH is down.
         #
-        # Detect-and-install: if samba is already present (a future baked image,
-        # or a previous run) skip the apt install; otherwise install it here.
-        # Baking samba into the base image is deferred to a future image
-        # version -- for now it's installed outside the base image at first
-        # boot. Retry the install because the cloud-init 'packages:' module has
-        # no retry and a contended first boot can transiently fail apt.
-        'if dpkg -s samba >/dev/null 2>&1 || command -v smbd >/dev/null 2>&1; then echo "memlabs: samba already present; skipping install"; else echo "memlabs: samba not installed; installing"; for i in 1 2 3 4 5; do DEBIAN_FRONTEND=noninteractive apt-get install -y samba && break; echo "memlabs: samba install attempt $i failed; retry in 20s"; sleep 20; apt-get update || true; done; fi',
+        # Runs the shared roles/ensure-samba.sh: detect-and-skip if samba is
+        # already present (a future baked image), otherwise HEAL a corrupt
+        # dpkg DB (recover_dpkg/repair_dpkg_status) and install with retries.
+        # The plain cloud-init 'packages:' module (and a naive apt-get) abort
+        # with "end of file after field name ''" when an ungraceful reboot has
+        # truncated /var/lib/dpkg/status -- exactly the Proxy failure mode --
+        # so the dpkg recovery must run before the install.
+        "bash -c 'echo $ensureSambaB64 | base64 -d > /root/memlabs-ensure-samba.sh && chmod 0700 /root/memlabs-ensure-samba.sh && /root/memlabs-ensure-samba.sh; rm -f /root/memlabs-ensure-samba.sh' || true",
         # Allow SMB through the firewall.
-        'ufw allow Samba || true',
-        'systemctl enable --now smbd || true'
+        'ufw allow Samba || true'
     )
 
     # Set vmbuildadmin's Samba password if we have the console password.

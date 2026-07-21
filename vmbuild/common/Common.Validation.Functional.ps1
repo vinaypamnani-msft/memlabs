@@ -9861,15 +9861,19 @@ function Test-LinuxSmbAccess {
     $tcp = Test-NetConnection -ComputerName $vmIp -Port 445 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     if (-not $tcp.TcpTestSucceeded) {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - TCP 445 closed on $vmIp; attempting smbd self-heal over SSH" -Warning -LogOnly
-        # If samba was never installed (a raced cloud-init first-boot 'packages:'
-        # install on a contended host -- the pre-bake failure mode), apt-install
-        # it before starting smbd. Baked images already have it, so the install
-        # is a no-op there.
-        $heal = Invoke-LinuxVmCommand -VmName $VMName -IPAddress $vmIp -Sudo -SuppressLog -TimeoutSeconds 180 `
-            -DisplayName 'ensure+restart smbd' `
-            -BashCommand 'dpkg -s samba >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y samba 2>&1 | tail -2; systemctl reset-failed smbd 2>/dev/null; systemctl enable --now smbd 2>&1; systemctl restart smbd 2>&1; sleep 2; ss -ltn "sport = :445" 2>/dev/null | grep -q ":445" && echo SMBD_LISTENING || { echo SMBD_DOWN; systemctl --no-pager status smbd 2>&1 | tail -12; }'
+        # Run the same shared ensure-samba.sh used at first boot: detect-skip if
+        # smbd already present, else HEAL a corrupt/truncated dpkg DB
+        # (recover_dpkg/repair_dpkg_status) and install samba with retries, then
+        # enable+start smbd and confirm the :445 listener. The corrupt dpkg DB
+        # ("end of file after field name ''") is the actual Proxy failure mode,
+        # so a plain 'apt-get install samba' is not enough -- the recovery must
+        # run first.
+        $ensureSambaBody = Get-LinuxScript -Name 'roles/ensure-samba' -IncludeAptRetry
+        $heal = Invoke-LinuxVmCommand -VmName $VMName -IPAddress $vmIp -Sudo -SuppressLog -TimeoutSeconds 420 `
+            -DisplayName 'ensure-samba (heal dpkg + smbd)' `
+            -BashCommand $ensureSambaBody
         if ($heal -and $heal.ScriptBlockOutput -match 'SMBD_LISTENING') {
-            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: smbd restarted and now listening on :445; re-probing TCP 445" -LogOnly
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: smbd installed/restarted and now listening on :445; re-probing TCP 445" -LogOnly
         }
         else {
             $healOut = if ($heal) { $heal.ScriptBlockOutput } else { '(no SSH result)' }
