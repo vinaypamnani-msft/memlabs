@@ -2418,29 +2418,26 @@ function Test-Configuration {
             }
         }
 
-        # Names in domain: every NEW (non-existing) VM name in the deployment must
-        # not collide with a VM that already exists in Hyper-V. This is INDEPENDENT
-        # of the in-deployment duplicate check above -- gating it on $compare (which
-        # is only set when the deployment itself has internal duplicates) made this
-        # dead code, so a new VM named e.g. PS1-DC1 that collides with the existing
-        # DC PS1-DC1 was never flagged.
-        #
-        # This is a FAILURE, not a warning: deploying a VM whose name already exists
-        # in Hyper-V either clobbers or duplicates the existing VM, so it must hard-
-        # block. A warning also risks being visually lost among -Failure messages in
-        # the error banner; a failure keeps the collision on equal footing (e.g. when
-        # an unrelated per-VM failure like the WID/WSUS memory check is also present).
+        # Names in domain: a NEW (non-existing) config VM whose name matches a VM that
+        # already exists in Hyper-V is, by MemLabs' own new-vs-existing rule (New-Lab:
+        # "prefix+vmName -notin existingVMs.vmName" => new), treated as a RE-DEPLOY /
+        # reuse of that existing VM -- which is legitimate and must NOT be blocked
+        # (that would break every re-deploy of a saved config, where all VMs already
+        # exist). The genuine hazard is repurposing that name to a DIFFERENT role:
+        # deploying it would overwrite/clobber the existing VM (e.g. turn an existing
+        # DC into an OSDClient, or a DomainMember into a WSUS). Flag ONLY that role
+        # mismatch as a failure; a same-role match is a normal re-deploy.
         if ($vmInDeployment) {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 85
-            $allVMs = Get-List -Type VM -SmartUpdate | Select-Object -Expand VmName
-            $all = @($allVMs) + @($vmInDeployment)
-            $unique2 = $all | Select-Object -Unique
-            if (($null -ne $unique2) -and ($null -ne $all)) {
-                $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
-                if ($compare2) {
-                    $duplicates = ($compare2.InputObject | Select-Object -Unique) -join ","
-                    Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Failure
-                    Get-List -type VM -SmartUpdate | Out-Null
+            $existingInDomain = @(Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName -SmartUpdate)
+            foreach ($newVM in $virtualMachinesNoExisting) {
+                if (-not $newVM.vmName) { continue }
+                $matchVM = $existingInDomain | Where-Object { $_.vmName -eq $newVM.vmName } | Select-Object -First 1
+                if (-not $matchVM) { continue }
+                $existingRole = "$($matchVM.role)".Trim()
+                $newRole = "$($newVM.role)".Trim()
+                if ($existingRole -and $newRole -and ($existingRole -ne $newRole)) {
+                    Add-ValidationMessage -Message "Name Conflict: VM [$($newVM.vmName)] already exists in Hyper-V as role [$existingRole], but this deployment defines it as role [$newRole]. Deploying would overwrite the existing VM. Rename the new VM, or remove the existing one first." -ReturnObject $return -Failure
                 }
             }
         }
