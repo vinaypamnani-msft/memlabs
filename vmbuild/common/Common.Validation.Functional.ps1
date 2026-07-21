@@ -9861,9 +9861,13 @@ function Test-LinuxSmbAccess {
     $tcp = Test-NetConnection -ComputerName $vmIp -Port 445 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     if (-not $tcp.TcpTestSucceeded) {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - TCP 445 closed on $vmIp; attempting smbd self-heal over SSH" -Warning -LogOnly
-        $heal = Invoke-LinuxVmCommand -VmName $VMName -IPAddress $vmIp -Sudo -SuppressLog -TimeoutSeconds 90 `
-            -DisplayName 'restart smbd' `
-            -BashCommand 'systemctl reset-failed smbd 2>/dev/null; systemctl enable --now smbd 2>&1; systemctl restart smbd 2>&1; ss -ltn "sport = :445" 2>/dev/null | grep -q ":445" && echo SMBD_LISTENING || echo SMBD_DOWN'
+        # If samba was never installed (a raced cloud-init first-boot 'packages:'
+        # install on a contended host -- the pre-bake failure mode), apt-install
+        # it before starting smbd. Baked images already have it, so the install
+        # is a no-op there.
+        $heal = Invoke-LinuxVmCommand -VmName $VMName -IPAddress $vmIp -Sudo -SuppressLog -TimeoutSeconds 180 `
+            -DisplayName 'ensure+restart smbd' `
+            -BashCommand 'dpkg -s samba >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y samba 2>&1 | tail -2; systemctl reset-failed smbd 2>/dev/null; systemctl enable --now smbd 2>&1; systemctl restart smbd 2>&1; sleep 2; ss -ltn "sport = :445" 2>/dev/null | grep -q ":445" && echo SMBD_LISTENING || { echo SMBD_DOWN; systemctl --no-pager status smbd 2>&1 | tail -12; }'
         if ($heal -and $heal.ScriptBlockOutput -match 'SMBD_LISTENING') {
             Write-Log "[Phase $Phase] $VMName [$RoleLabel]: smbd restarted and now listening on :445; re-probing TCP 445" -LogOnly
         }
