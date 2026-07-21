@@ -348,7 +348,13 @@ function Add-NewVMForRole {
     $NewFSServer = $null
     switch ($Role) {
         "WSUS" {
-            $virtualMachine.Memory = "6GB"
+            # Default to 8GB: a standalone WSUS uses the Windows Internal Database (WID)
+            # co-located with the WsusPool app pool, and the first full catalog sync can
+            # push their combined working set past 4-5GB. Below 8GB the pool hits its
+            # memory-recycle cap mid-sync and the sync is OOM/recycle-killed (503),
+            # which the WID+WSUS memory validation flags as a hard failure. Default to
+            # 8GB so a freshly-added WSUS passes validation out of the box.
+            $virtualMachine.Memory = "8GB"
             #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $true
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS" -force

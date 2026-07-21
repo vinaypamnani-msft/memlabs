@@ -2414,7 +2414,7 @@ function Test-Configuration {
             $compare = Compare-Object -ReferenceObject $vmInDeployment -DifferenceObject $unique1
             if ($compare) {
                 $duplicates = $compare.InputObject -join ","
-                Add-ValidationMessage -Message "Name Conflict: Deployment contains duplicate VM names [$duplicates]" -ReturnObject $return -Warning
+                Add-ValidationMessage -Message "Name Conflict: Deployment contains duplicate VM names [$duplicates]" -ReturnObject $return -Failure
             }
         }
 
@@ -2424,6 +2424,12 @@ function Test-Configuration {
         # is only set when the deployment itself has internal duplicates) made this
         # dead code, so a new VM named e.g. PS1-DC1 that collides with the existing
         # DC PS1-DC1 was never flagged.
+        #
+        # This is a FAILURE, not a warning: deploying a VM whose name already exists
+        # in Hyper-V either clobbers or duplicates the existing VM, so it must hard-
+        # block. A warning also risks being visually lost among -Failure messages in
+        # the error banner; a failure keeps the collision on equal footing (e.g. when
+        # an unrelated per-VM failure like the WID/WSUS memory check is also present).
         if ($vmInDeployment) {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Unique Names" -PercentComplete 85
             $allVMs = Get-List -Type VM -SmartUpdate | Select-Object -Expand VmName
@@ -2433,7 +2439,7 @@ function Test-Configuration {
                 $compare2 = Compare-Object -ReferenceObject $all -DifferenceObject $unique2
                 if ($compare2) {
                     $duplicates = ($compare2.InputObject | Select-Object -Unique) -join ","
-                    Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Warning
+                    Add-ValidationMessage -Message "Name Conflict: Deployment contains VM names [$duplicates] that are already in Hyper-V. You must add new machines with different names." -ReturnObject $return -Failure
                     Get-List -type VM -SmartUpdate | Out-Null
                 }
             }
