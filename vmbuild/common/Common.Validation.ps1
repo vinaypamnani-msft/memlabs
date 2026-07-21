@@ -1438,6 +1438,24 @@ function Test-ValidRoleSiteSystem {
         elseif ($source.enablePullDP) {
             Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] Pull DP source [$($source.vmName)] is itself a Pull DP. A Pull DP's source must be a standard (non-pull) DP." -ReturnObject $ReturnObject -Failure
         }
+        elseif ($source.role -in 'Primary', 'CAS') {
+            # A pull DP's source must be a DP with a LOCAL content library. When a
+            # site is made HA (a passive site server with remoteContentLibVM), the
+            # site's content library is relocated to a remote share and the site
+            # server's DP is REMOVED (InstallPassiveSiteServer.ps1 Remove-CMDistributionPoint
+            # before Move-CMContentLibrary) -- a site server with a remote content
+            # library cannot host a working DP. If the pull-source-ordering logic then
+            # re-adds a DP to that site server, it serves HTTP content from the now-empty
+            # local SCCMContentLib and every pull-DP download gets HTTP 404. So a pull DP
+            # must NOT source from the site server of an HA site; point it at a dedicated
+            # DP (SiteSystem/installDP) that keeps its own local content library instead.
+            $haVMs = @($ConfigObject.virtualMachines)
+            $haVMs += @(Get-List -type VM -DomainName $ConfigObject.vmOptions.DomainName)
+            $haCompanion = $haVMs | Where-Object { $_.remoteContentLibVM -and $_.siteCode -eq $source.siteCode } | Select-Object -First 1
+            if ($haCompanion) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] Pull DP source [$($source.vmName)] is the site server of an HA site whose content library is relocated to a remote share (passive site [$($haCompanion.vmName)] remoteContentLibVM [$($haCompanion.remoteContentLibVM)]). Such a site server cannot host a working DP, so a pull DP sourced from it gets HTTP 404 on all content. Point pullDPSourceDP at a dedicated DP with a LOCAL content library instead." -ReturnObject $ReturnObject -Failure
+            }
+        }
 
     }
 
