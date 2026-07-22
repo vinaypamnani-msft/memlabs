@@ -72,6 +72,7 @@ $ensureClientPkgCoverage = {
     $PackageID = $pkg.PackageID
     $ns = "root\SMS\site_$SiteCode"
     $fqdnOf = { param($nal) if ("$nal" -match '\\([^\\"\]]+)') { $Matches[1] } else { $null } }
+    $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
 
     $bgDpFqdns = @()
     try {
@@ -81,8 +82,14 @@ $ensureClientPkgCoverage = {
     catch { Write-DscStatus "Client pkg coverage: could not enumerate boundary-group site systems: $($_.Exception.Message)"; return }
     if ($bgDpFqdns.Count -eq 0) { return }
 
-    $handled = @{}
-    $maxTries = 20
+    # Escalation ladder per DP -- a plain redistribute does NOT clear a Secondary DP
+    # wedged at ContentValidating (its distmgr may be idle on a 3600s sleep cycle),
+    # so escalate: (0) redistribute -> (1) remove + re-add content (force a clean
+    # copy through the wedge) -> (2) restart SMS_EXECUTIVE on the DP to wake its
+    # distmgr. The client package is small, so each step should settle in a minute
+    # or two when it is going to work.
+    $escalation = @{}   # DP-upper -> highest escalation level already applied
+    $maxTries = 24
     for ($try = 1; $try -le $maxTries; $try++) {
         $state = @{}
         foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
@@ -95,30 +102,91 @@ $ensureClientPkgCoverage = {
         }
         foreach ($dp in $notInstalled) {
             $u = $dp.ToUpper()
-            if ($handled.ContainsKey($u)) { continue }
             $hasRow = $state.ContainsKey($u)
             $st = if ($hasRow) { $state[$u] } else { -1 }
+            $stName = if ($stateName.ContainsKey("$st")) { $stateName["$st"] } else { "State$st" }
             # Let actively-progressing distributions (InstallPending=1 / Retrying=2)
-            # finish on their own; only (re)distribute for no-row / stuck
-            # ContentValidating=7 / failed 3,6,8 states.
+            # finish on their own.
             if ($st -in 1, 2) { continue }
+            $level = if ($escalation.ContainsKey($u)) { $escalation[$u] } else { -1 }
             try {
-                if (-not $hasRow) {
-                    Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
-                    Write-DscStatus "Distributed client package to DP '$dp' (no prior distribution)"
+                if ($level -lt 0) {
+                    # Level 0: gentle (re)distribute.
+                    if (-not $hasRow) {
+                        Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
+                        Write-DscStatus "Client pkg coverage: DP '$dp' had no distribution -> distributed [esc.0, try $try]"
+                    }
+                    else {
+                        try { Update-CMDistributionPoint -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop }
+                        catch { Update-CMDistributionPoint -PackageName 'Configuration Manager Client Package' -DistributionPointName $dp -ErrorAction Stop }
+                        Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed [esc.0, try $try]"
+                    }
+                    $escalation[$u] = 0
                 }
-                else {
-                    try { Update-CMDistributionPoint -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop }
-                    catch { Update-CMDistributionPoint -PackageName 'Configuration Manager Client Package' -DistributionPointName $dp -ErrorAction Stop }
-                    Write-DscStatus "Redistributed client package to DP '$dp' (state $st)"
+                elseif ($level -eq 0 -and $try -ge 4) {
+                    # Level 1: remove + re-add content (clean copy through the wedge).
+                    try { Remove-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -Force -ErrorAction Stop } catch {}
+                    Start-Sleep -Seconds 10
+                    Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
+                    Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> removed + re-added content [esc.1, try $try]"
+                    $escalation[$u] = 1
+                }
+                elseif ($level -eq 1 -and $try -ge 8) {
+                    # Level 2: wake the DP's distmgr (it may be idle on a 3600s sleep).
+                    $dpHost = ("$dp" -split '\.')[0]
+                    try {
+                        $svc = Get-Service -ComputerName $dpHost -Name 'SMS_EXECUTIVE' -ErrorAction Stop
+                        Restart-Service -InputObject $svc -Force -ErrorAction Stop
+                        Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> restarted SMS_EXECUTIVE on '$dpHost' to wake distmgr [esc.2, try $try]"
+                    }
+                    catch { Write-DscStatus "Client pkg coverage: could not restart SMS_EXECUTIVE on '$dpHost' (WinRM/RPC?): $($_.Exception.Message)" }
+                    $escalation[$u] = 2
                 }
             }
-            catch { Write-DscStatus "Client pkg (re)distribution to DP '$dp' failed: $($_.Exception.Message)" }
-            $handled[$u] = $true
+            catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
         }
-        Write-DscStatus "Waiting for client package on boundary-group DP(s): $($notInstalled -join ', ') [$try/$maxTries]"
+        Write-DscStatus "Client pkg coverage: waiting for client package on: $($notInstalled -join ', ') [$try/$maxTries]"
         Start-Sleep -Seconds 30
     }
+
+    # Final state + rich DP-side diagnostics if anything is still not Installed --
+    # so a genuine wedge (content never replicated, distmgr stuck, PFX decrypt) is
+    # captured in the phase log instead of just failing later in Phase 11.
+    $state = @{}
+    foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
+        $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpper()] = [int]$r.State }
+    }
+    $stillBad = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
+    if ($stillBad.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: STILL not Installed after $maxTries tries on: $($stillBad -join ', '). Capturing DP-side diagnostics..." -Warning
+        foreach ($dp in $stillBad) {
+            $dpHost = ("$dp" -split '\.')[0]
+            try {
+                $diag = Invoke-Command -ComputerName $dpHost -ArgumentList $PackageID -ErrorAction Stop -ScriptBlock {
+                    param($pkgId)
+                    $o = [ordered]@{ PkgLib = ''; Distmgr = '' }
+                    foreach ($cl in @('E:\SCCMContentLib', 'D:\SCCMContentLib', 'F:\SCCMContentLib', 'C:\SCCMContentLib')) {
+                        $pl = Join-Path $cl 'PkgLib'
+                        if (Test-Path $pl) { $o.PkgLib = (@(Get-ChildItem $pl -Filter "$pkgId*.INI" -ErrorAction SilentlyContinue).Name) -join ','; break }
+                    }
+                    $smsDir = $null
+                    foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+                        try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+                        if ($smsDir) { break }
+                    }
+                    if ($smsDir) {
+                        $lp = Join-Path $smsDir 'Logs\distmgr.log'
+                        if (Test-Path $lp) { $o.Distmgr = (@(Get-Content $lp -Tail 4 -ErrorAction SilentlyContinue | ForEach-Object { [regex]::Match($_, '<!\[LOG\[(.*?)\]LOG\]!>').Groups[1].Value }) -join ' | ') }
+                    }
+                    return $o
+                }
+                $pkgLibNote = if ($diag.PkgLib) { "PkgLib HAS [$($diag.PkgLib)]" } else { "PkgLib MISSING $PackageID -> content never arrived on this DP" }
+                Write-DscStatus "Client pkg coverage diag [$dp]: $pkgLibNote ; distmgr: $($diag.Distmgr)" -Warning
+            }
+            catch { Write-DscStatus "Client pkg coverage diag [$dp]: remote query failed (WinRM?): $($_.Exception.Message)" -Warning }
+        }
+    }
+
     Invoke-CMSystemDiscovery
     Invoke-CMDeviceCollectionUpdate -Name "All Systems"
 }
