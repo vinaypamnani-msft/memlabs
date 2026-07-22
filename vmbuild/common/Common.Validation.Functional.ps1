@@ -8350,16 +8350,6 @@ function Test-CMClientPackageDistribution {
         }
 
         $failingDps = New-Object System.Collections.Generic.List[string]
-        # Current per-DP state map (FQDN-upper -> State int) for a package.
-        $getState = {
-            param($pkgId)
-            $m = @{}
-            foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction SilentlyContinue)) {
-                $f = & $dpNameOf $r.ServerNALPath
-                if ($f) { $m[$f.ToUpper()] = [int]$r.State }
-            }
-            return $m
-        }
 
         # --- ConfigMgr client package(s): the critical client-install content ---
         try {
@@ -8372,76 +8362,6 @@ function Test-CMClientPackageDistribution {
         }
         if ($clientPkgs.Count -eq 0) {
             $results.Details.Add("WARN: no 'Configuration Manager Client%' package found in site $sc -- cannot verify client package distribution")
-        }
-
-        # --- Self-heal (detect AND repair, don't just fail) --------------------
-        # If any client-serving (boundary-group) DP lacks the client package, load
-        # the CM module and (re)distribute to it, then wait for it to install --
-        # consistent with the other Phase 11 self-heals. This is what fixes a
-        # Secondary DP stuck at ContentValidating (State 7) that leaves its
-        # boundary group's clients looping in ccmsetup GetDPLocations. The CM-module
-        # cost is only paid when a repair is actually needed, so the healthy path
-        # stays fast.
-        $bgDpFqdns = @()
-        try {
-            $bgDpFqdns = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop |
-                    ForEach-Object { & $dpNameOf $_.ServerNALPath } | Where-Object { $_ } | Select-Object -Unique)
-        }
-        catch { $results.Details.Add("WARN: could not enumerate boundary-group site systems for repair: $($_.Exception.Message)") }
-
-        if ($bgDpFqdns.Count -gt 0 -and $clientPkgs.Count -gt 0) {
-            $needsRepair = $false
-            foreach ($pkg in $clientPkgs) {
-                $st0 = & $getState $pkg.PackageID
-                if (@($bgDpFqdns | Where-Object { -not ($st0.ContainsKey($_.ToUpper()) -and $st0[$_.ToUpper()] -eq 0) }).Count -gt 0) { $needsRepair = $true; break }
-            }
-            if ($needsRepair) {
-                $cmReady = $false
-                try {
-                    $rk = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-                    $uiPath = $rk.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup").GetValue("UI Installation Directory")
-                    Import-Module (Join-Path $uiPath "bin\ConfigurationManager.psd1") -ErrorAction Stop
-                    $prov = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
-                    $null = New-PSDrive -Name $sc -PSProvider CMSite -Root $prov -ErrorAction SilentlyContinue
-                    Push-Location "${sc}:\"
-                    $cmReady = $true
-                }
-                catch { $results.Details.Add("WARN: CM module load failed; reporting only (no auto-redistribute): $($_.Exception.Message)") }
-
-                if ($cmReady) {
-                    foreach ($pkg in $clientPkgs) {
-                        $pkgId = $pkg.PackageID
-                        $repaired = @{}
-                        for ($try = 1; $try -le 10; $try++) {
-                            $state = & $getState $pkgId
-                            $notInstalled = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
-                            if ($notInstalled.Count -eq 0) { break }
-                            foreach ($dp in $notInstalled) {
-                                $u = $dp.ToUpper()
-                                if ($repaired.ContainsKey($u)) { continue }
-                                $hasRow = $state.ContainsKey($u)
-                                $st = if ($hasRow) { $state[$u] } else { -1 }
-                                if ($st -in 1, 2) { continue }  # actively progressing -> let it finish
-                                try {
-                                    if (-not $hasRow) {
-                                        Start-CMContentDistribution -PackageId $pkgId -DistributionPointName $dp -ErrorAction Stop
-                                        $results.Details.Add("RECOVERED: distributed client package '$($pkg.Name)' to DP '$dp' (no prior distribution)")
-                                    }
-                                    else {
-                                        try { Update-CMDistributionPoint -PackageId $pkgId -DistributionPointName $dp -ErrorAction Stop }
-                                        catch { Update-CMDistributionPoint -PackageName $pkg.Name -DistributionPointName $dp -ErrorAction Stop }
-                                        $results.Details.Add("RECOVERED: redistributed client package '$($pkg.Name)' to DP '$dp' (was $($stateName["$st"]))")
-                                    }
-                                }
-                                catch { $results.Details.Add("  redistribute to DP '$dp' failed: $($_.Exception.Message)") }
-                                $repaired[$u] = $true
-                            }
-                            Start-Sleep -Seconds 30
-                        }
-                    }
-                    try { Pop-Location } catch {}
-                }
-            }
         }
 
         foreach ($pkg in $clientPkgs) {
@@ -8536,7 +8456,7 @@ function Test-CMClientPackageDistribution {
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $siteCode `
         -DisplayName "Phase11-ClientPkg-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 1200
+        -AsJob -TimeoutSeconds 300
 
     # On a distribution failure, auto-collect the site server's distmgr.log +
     # PkgXferMgr.log (they name the failing DP + reason, e.g. a pull-DP 404) into
