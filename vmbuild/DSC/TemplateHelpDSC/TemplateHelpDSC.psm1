@@ -5885,10 +5885,43 @@ class ConfigureWSUS {
                 }
             }
             if (-not $cert) {
+                # Still no cert to re-stamp -- it was never enrolled. The WebServer
+                # cert is enrolled by CertReq PkiWebCert in PHASE 8, but ConfigureWSUS
+                # runs in PHASE 6, two phases earlier, so on a clean deploy the cert
+                # genuinely does not exist yet. The CA is available by Phase 6 and this
+                # machine is in the 'ConfigMgr IIS Servers' AD group (Enroll granted),
+                # so enroll it here (same template/subject/SAN as CertReq PkiWebCert)
+                # instead of looping until the phase times out.
+                $fqdn = "$env:COMPUTERNAME.$env:USERDNSDOMAIN"
+                Write-Status "WebServer cert '$_FriendlyName' not present; enrolling ConfigMgrWebServerCertificate for $fqdn"
+                try {
+                    # Trigger autoenrollment + drop the template-cache timestamp so the
+                    # template resolves (mirrors Phase 8 PkiRefreshTemplateCache).
+                    try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                    foreach ($hive in @('HKLM', 'HKCU')) {
+                        Remove-ItemProperty -Path "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache" -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+                    }
+                    $enrolled = Get-Certificate -Template 'ConfigMgrWebServerCertificate' -SubjectName "CN=$fqdn" `
+                        -DnsName $fqdn, $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My -ErrorAction Stop
+                    $newCert = if ($enrolled -and $enrolled.Certificate) { $enrolled.Certificate } else { $null }
+                    if ($newCert) {
+                        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+                        $store.Open('ReadWrite')
+                        $live = $store.Certificates | Where-Object { $_.Thumbprint -eq $newCert.Thumbprint } | Select-Object -First 1
+                        if ($live) { $live.FriendlyName = $_FriendlyName }
+                        $store.Close()
+                        Write-Status "Enrolled ConfigMgr WebServer Certificate (thumbprint $($newCert.Thumbprint.Substring(0,8))...) and stamped FriendlyName '$_FriendlyName'"
+                    }
+                    $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+                }
+                catch {
+                    Write-Status "Failed to enroll WebServer cert (template ConfigMgrWebServerCertificate): $_"
+                }
+            }
+            if (-not $cert) {
                 Write-Status "Could not find cert with friendly Name $_FriendlyName"
                 throw "Could not find cert with friendly Name $_FriendlyName"
             }
-
             Write-Status "Removing web binding for port 8531"
             (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https") | Remove-WebBinding
 
