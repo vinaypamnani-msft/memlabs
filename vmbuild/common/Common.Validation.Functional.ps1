@@ -7151,6 +7151,14 @@ function Test-DomainMemberFunctionality {
             $stillRunning = Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue
             if ($stillRunning) {
                 $results.Details.Add("WARN: ccmsetup is still running (install in progress); not interrupting -- re-run Phase 11 to re-check once it finishes")
+                # Surface what ccmsetup is currently doing so a 'still running' that
+                # persists across multiple runs can be told apart from a genuine slow
+                # install (content download / MP retry) vs a stuck loop (e.g. repeated
+                # GetDPLocations / failed download). The last meaningful log line names
+                # the current activity without interrupting the in-flight install.
+                if (Test-Path 'C:\Windows\ccmsetup\Logs\ccmsetup.log') {
+                    foreach ($d in (& $grabCcmDiag 'C:\Windows\ccmsetup\Logs\ccmsetup.log')) { $results.Details.Add("  ccmsetup.log: $d") }
+                }
             }
             elseif (Test-Path 'C:\Windows\ccmsetup\Logs\ccmsetup.log') {
                 $logTail = Get-Content 'C:\Windows\ccmsetup\Logs\ccmsetup.log' -Tail 50 -ErrorAction SilentlyContinue
