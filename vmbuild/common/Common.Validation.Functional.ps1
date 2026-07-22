@@ -164,6 +164,11 @@ function Test-VmFunctionality {
                 Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying ConfigMgr site"
                 $testsPassed = Test-CMSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
+            # Always verify client-package distribution (collects diagnostics +
+            # pulls distmgr/PkgXferMgr logs on failure) and fold the result in.
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying client package distribution"
+            $pkgOk = Test-CMClientPackageDistribution -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+            $testsPassed = $testsPassed -and $pkgOk
         }
         'Primary' {
             if (-not $CurrentItem.remoteSQLVM) {
@@ -177,6 +182,11 @@ function Test-VmFunctionality {
                 Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying ConfigMgr site"
                 $testsPassed = Test-CMSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
+            # Always verify client-package distribution (collects diagnostics +
+            # pulls distmgr/PkgXferMgr logs on failure) and fold the result in.
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying client package distribution"
+            $pkgOk = Test-CMClientPackageDistribution -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+            $testsPassed = $testsPassed -and $pkgOk
         }
         'Secondary' {
             Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Secondary site"
@@ -6721,6 +6731,109 @@ function Save-CcmSetupLog {
     }
 }
 
+function Save-Phase11GuestLogs {
+    <#
+    .SYNOPSIS
+        Pull guest log files to the host log directory for offline triage.
+    .DESCRIPTION
+        Generalizes Save-CcmSetupLog: runs a self-contained collector scriptblock
+        IN the guest that returns a hashtable of @{ '<logname>' = '<tail content>' },
+        then writes each to the host log dir (same folder as the build log) as
+            <VmName>-Phase11-<timestamp>-<logname>
+        so the operator can review PullDP/DataTransferService/distmgr/PkgXferMgr
+        logs without hand-running commands against the VM. Best-effort and
+        non-fatal. Returns the List of host paths written (may be empty).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$DomainName,
+        [Parameter(Mandatory)][string]$RoleLabel,
+        [Parameter(Mandatory)][scriptblock]$Collector,
+        [int]$TimeoutSeconds = 150
+    )
+
+    $Phase = 11
+    $saved = New-Object System.Collections.Generic.List[string]
+    $logDir = $null
+    if ($Common -and $Common.LogPath) { $logDir = Split-Path $Common.LogPath -Parent }
+    if (-not $logDir -or -not (Test-Path $logDir)) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: log capture: host log dir not resolvable ($logDir)" -Warning -LogOnly
+        return $saved
+    }
+
+    try {
+        $res = Invoke-VmCommand -VmName $VMName -VmDomainName $DomainName -ScriptBlock $Collector `
+            -SuppressLog -AsJob -TimeoutSeconds $TimeoutSeconds -DisplayName "Pull $RoleLabel logs"
+    }
+    catch {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: log capture PSDirect call threw: $($_.Exception.Message)" -Warning -LogOnly
+        return $saved
+    }
+    if (-not $res -or $res.ScriptBlockFailed -or -not ($res.ScriptBlockOutput -is [hashtable]) -or $res.ScriptBlockOutput.Count -eq 0) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: log capture: no logs returned from VM" -Warning -LogOnly
+        return $saved
+    }
+
+    $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
+    foreach ($name in $res.ScriptBlockOutput.Keys) {
+        $content = $res.ScriptBlockOutput[$name]
+        if (-not $content) { continue }
+        $safeName = ($name -replace '[^\w.\-]', '_')
+        $dest = Join-Path $logDir "$VMName-Phase$Phase-$stamp-$safeName"
+        try {
+            Set-Content -LiteralPath $dest -Value $content -Encoding UTF8 -ErrorAction Stop
+            $kb = [math]::Round(([System.Text.Encoding]::UTF8.GetByteCount($content)) / 1KB, 1)
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Pulled $name (${kb}KB tail) -> $dest" -OutputStream
+            $saved.Add($dest)
+        }
+        catch {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: log capture: failed to write ${name}: $_" -Warning -LogOnly
+        }
+    }
+    return $saved
+}
+
+# Collector scriptblocks used by the DP / pull-DP diagnostics below. Each is
+# self-contained (runs IN the guest), resolves its log directory from the
+# authoritative registry key, and tails the named logs into a hashtable.
+$Phase11CcmClientLogCollector = {
+    # PullDP.log + DataTransferService.log (BITS) live in the CCM client log dir.
+    $out = @{}
+    $dir = $null
+    try { $dir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\CCM\Logging\@GLOBAL' -Name 'LogDirectory' -ErrorAction Stop).LogDirectory } catch {}
+    if (-not $dir -or -not (Test-Path $dir)) {
+        foreach ($c in @('E:\SMS_CCM\Logs', 'D:\SMS_CCM\Logs', 'F:\SMS_CCM\Logs', 'C:\Windows\CCM\Logs', 'C:\SMS_CCM\Logs')) {
+            if (Test-Path $c) { $dir = $c; break }
+        }
+    }
+    if (-not $dir -or -not (Test-Path $dir)) { return $out }
+    foreach ($pat in @('PullDP.log', 'PullDP-*.log', 'DataTransferService.log', 'DataTransferService-*.log')) {
+        foreach ($f in @(Get-ChildItem -Path (Join-Path $dir $pat) -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 2)) {
+            try { $c = Get-Content -LiteralPath $f.FullName -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$f.Name] = ($c -join "`r`n") } } catch {}
+        }
+    }
+    return $out
+}
+
+$Phase11SmsSiteLogCollector = {
+    # distmgr.log + PkgXferMgr.log live under <SMS install>\Logs on a site server.
+    $out = @{}
+    $smsDir = $null
+    foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+        try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+        if ($smsDir) { break }
+    }
+    if (-not $smsDir -or -not (Test-Path $smsDir)) { return $out }
+    foreach ($n in @('distmgr.log', 'PkgXferMgr.log')) {
+        $p = Join-Path $smsDir "Logs\$n"
+        if (Test-Path $p) {
+            try { $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$n] = ($c -join "`r`n") } } catch {}
+        }
+    }
+    return $out
+}
+
 function Test-DomainMemberFunctionality {
     <#
     .SYNOPSIS
@@ -8120,6 +8233,39 @@ function Test-PullDPConfiguration {
             return $results
         }
 
+        # --- Content-arrival check ----------------------------------------
+        # A DP can be flagged IsPullDP=true yet hold NO / stale content when its
+        # pull from the source is failing or behind -- the exact cause of clients
+        # looping in ccmsetup GetDPLocations with empty <LocationRecords/> (error
+        # 0x87d00215). Verify every package targeted to this DP is Installed
+        # (State=0). Anything else (pending/retrying/failed) means the pull is
+        # incomplete, so the DP can't hand content to clients.
+        try {
+            $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '4' = 'RemovalPending'; '5' = 'RemovalRetrying'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
+            $pkgStatus = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_PackageStatusDistPointsSummarizer `
+                    -Filter "ServerNALPath LIKE '%$dpName%'" -ErrorAction Stop)
+            if ($pkgStatus.Count -eq 0) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: DP '$dpName' has NO package distribution rows (SMS_PackageStatusDistPointsSummarizer) -- no content has been targeted/pulled to this pull DP yet; clients get empty DP locations and loop in ccmsetup")
+            }
+            else {
+                $installedCount = @($pkgStatus | Where-Object { $_.State -eq 0 }).Count
+                $notInstalled = @($pkgStatus | Where-Object { $_.State -ne 0 })
+                $results.Details.Add("OK: DP '$dpName' has $($pkgStatus.Count) package row(s), $installedCount Installed")
+                if ($notInstalled.Count -gt 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: DP '$dpName' has $($notInstalled.Count) package(s) NOT Installed -- pull incomplete/behind; internet/PKI clients will loop in ccmsetup GetDPLocations (empty LocationRecords / 0x87d00215):")
+                    foreach ($ps in $notInstalled | Select-Object -First 15) {
+                        $sn = $stateName["$([int]$ps.State)"]; if (-not $sn) { $sn = "State$($ps.State)" }
+                        $results.Details.Add("  PackageID=$($ps.PackageID) State=$sn SourceVersion=$($ps.SourceVersion) LastCopied=$($ps.LastCopied)")
+                    }
+                }
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: pull-DP content-status query failed: $($_.Exception.Message)")
+        }
+
         # Source DP list lives in SMS_DistributionPoint property arrays.
         # Best-effort: look it up via CM module if available.
         if ($expectedSrc) {
@@ -8153,7 +8299,133 @@ function Test-PullDPConfiguration {
         -DisplayName "Phase11-PullDP-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 
+    # If the pull-DP config/content check failed, auto-collect the DP's own
+    # content-transfer logs (PullDP.log + DataTransferService.log from the CCM
+    # client log dir) and the source site server's distmgr/PkgXferMgr logs into
+    # the host logs folder, so the pull failure can be triaged offline without
+    # hand-running commands against the VMs.
+    if (($result.ScriptBlockOutput -is [hashtable]) -and ($result.ScriptBlockOutput.Passed -eq $false)) {
+        Write-Log "[Phase $Phase] $VMName [PullDP]: content/config check failed -- collecting pull-DP + source logs into the logs folder" -OutputStream
+        $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'PullDP' -Collector $Phase11CcmClientLogCollector
+        $null = Save-Phase11GuestLogs -VMName $parentVM.vmName -DomainName $domain -RoleLabel 'PullDP-Source' -Collector $Phase11SmsSiteLogCollector
+    }
+
     return (Format-TestResult -VMName $VMName -RoleLabel 'PullDP' -Result $result)
+}
+
+function Test-CMClientPackageDistribution {
+    <#
+    .SYNOPSIS
+        Verifies the ConfigMgr client package(s) are distributed to their DPs and
+        that no package is in a terminal distribution-failed state site-wide.
+    .DESCRIPTION
+        Runs against the Primary/CAS itself (the site DB is authoritative for
+        distribution status). The ConfigMgr Client Package + Client Upgrade
+        Package must be Installed on the DPs clients reach, or ccmsetup loops in
+        GetDPLocations with empty <LocationRecords/> (0x87d00215) -- the exact
+        failure seen on internet/PKI clients when a pull DP is behind. On failure
+        it auto-collects the site server's distmgr.log + PkgXferMgr.log into the
+        host logs folder for offline triage.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+    $siteCode = $CurrentItem.siteCode
+    Write-Log "[Phase $Phase] $VMName [ClientPkg]: Verifying client package distribution for site '$siteCode'" -LogOnly
+
+    $scriptBlock = {
+        param($sc)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $ns = "root\SMS\site_$sc"
+        $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '4' = 'RemovalPending'; '5' = 'RemovalRetrying'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
+        $dpNameOf = {
+            param($nal)
+            if ("$nal" -match '\\\\([^\\"\]]+)') { return $Matches[1] } else { return "$nal" }
+        }
+
+        # --- ConfigMgr client package(s): the critical client-install content ---
+        try {
+            $clientPkgs = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "Name LIKE 'Configuration Manager Client%'" -ErrorAction Stop)
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: could not query SMS_Package for the client package: $($_.Exception.Message)")
+            return $results
+        }
+        if ($clientPkgs.Count -eq 0) {
+            $results.Details.Add("WARN: no 'Configuration Manager Client%' package found in site $sc -- cannot verify client package distribution")
+        }
+        foreach ($pkg in $clientPkgs) {
+            $pkgId = $pkg.PackageID
+            $dpRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction SilentlyContinue)
+            # Convergence: allow in-progress (1/2/7) to settle before judging.
+            for ($t = 1; $t -le 3; $t++) {
+                $pending = @($dpRows | Where-Object { $_.State -in 1, 2, 7 })
+                if ($pending.Count -eq 0) { break }
+                Start-Sleep -Seconds 30
+                $dpRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction SilentlyContinue)
+            }
+            if ($dpRows.Count -eq 0) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) is NOT distributed to ANY DP -- clients can't get client content (ccmsetup loops on GetDPLocations / 0x87d00215). Distribute it to a DP in the clients' boundary group.")
+                continue
+            }
+            $bad = @($dpRows | Where-Object { $_.State -ne 0 })
+            if ($bad.Count -eq 0) {
+                $results.Details.Add("OK: client package '$($pkg.Name)' ($pkgId) Installed on all $($dpRows.Count) DP(s)")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s):")
+                foreach ($b in $bad | Select-Object -First 15) {
+                    $sn = $stateName["$([int]$b.State)"]; if (-not $sn) { $sn = "State$($b.State)" }
+                    $results.Details.Add("  DP=$(& $dpNameOf $b.ServerNALPath) State=$sn SourceVersion=$($b.SourceVersion) LastCopied=$($b.LastCopied)")
+                }
+            }
+        }
+
+        # --- Site-wide sweep: any package stuck in a TERMINAL failed state -----
+        try {
+            $failedRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "State = 3 OR State = 6 OR State = 8" -ErrorAction Stop)
+            if ($failedRows.Count -eq 0) {
+                $results.Details.Add("OK: no packages in a terminal distribution-failed state (3/6/8) site-wide")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: $($failedRows.Count) package/DP distribution(s) in a terminal failed state (3/6/8):")
+                foreach ($r in $failedRows | Select-Object -First 20) {
+                    $sn = $stateName["$([int]$r.State)"]; if (-not $sn) { $sn = "State$($r.State)" }
+                    $results.Details.Add("  PackageID=$($r.PackageID) DP=$(& $dpNameOf $r.ServerNALPath) State=$sn")
+                }
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: site-wide distribution sweep failed: $($_.Exception.Message)")
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode `
+        -DisplayName "Phase11-ClientPkg-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
+
+    # On a distribution failure, auto-collect the site server's distmgr.log +
+    # PkgXferMgr.log (they name the failing DP + reason, e.g. a pull-DP 404) into
+    # the host logs folder so it can be triaged without hand-running commands.
+    if (($result.ScriptBlockOutput -is [hashtable]) -and ($result.ScriptBlockOutput.Passed -eq $false)) {
+        Write-Log "[Phase $Phase] $VMName [ClientPkg]: distribution check failed -- collecting distmgr/PkgXferMgr logs into the logs folder" -OutputStream
+        $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'ClientPkg' -Collector $Phase11SmsSiteLogCollector
+    }
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'ClientPkg' -Result $result)
 }
 
 function Test-AdditionalDisks {
