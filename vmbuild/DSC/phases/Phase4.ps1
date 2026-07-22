@@ -10,7 +10,7 @@
 
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc', 'SqlServerDsc', 'ActiveDirectoryDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc', 'SqlServerDsc', 'ActiveDirectoryDsc', 'CertificateDsc'
 
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -110,18 +110,112 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
             }
         }
 
+        # --- PKI IIS web-server certificate (enrolled early, in Phase 4) --------
+        # WSUS (Phase 6 ConfigureWSUS) and PBIRS (Phase 7 InstallPBIRS) both need
+        # the 'ConfigMgr WebServer Certificate' for their HTTPS/SSL bindings, but
+        # the CertReq that enrolls it historically lived in Phase 8 (CM install) --
+        # two phases too late, so those phases had to self-heal a missing cert. The
+        # Enterprise CA + templates are published by the post-Phase-3 PKI
+        # orchestrator (New-Lab) and Phase 3 installs IIS + reboots (refreshing the
+        # 'ConfigMgr IIS Servers' group token), so by Phase 4 everything the
+        # enrollment needs is present. Enroll here so every early consumer finds the
+        # cert already present. Phase 8 keeps its own idempotent CertReq for
+        # PassiveSite (not a Phase 4 node) and as a backstop. Same gate + logic as
+        # the Phase 8 block. Runs BEFORE the no-local-SQL short-circuit below so it
+        # also reaches remote-SQL site servers.
+        $cmoCert = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        $caVMCert = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
+        $AddIISCert = $false
+        if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") { $AddIISCert = $true }
+        if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") { $AddIISCert = $true }
+        if ($ThisVM.installRP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installMP -eq $true) { $AddIISCert = $true }
+        if ($ThisVM.installDP -eq $true) { $AddIISCert = $true }
+        # When adding a site system to an EXISTING PKI domain the Enterprise CA
+        # already lives in AD (no InstallCA VM in this deploy), so an empty
+        # $caVMCert must NOT suppress the cert while UsePKI is set.
+        if (-not $caVMCert -and -not $cmoCert.UsePKI) { $AddIISCert = $false }
+        if (-not $cmoCert.UsePKI) { $AddIISCert = $false }
+
+        $certDepend = '[ModuleAdd]SQLServerModule'
+        if ($AddIISCert) {
+
+            WriteStatus PkiRequestCerts {
+                Status    = "Requesting IIS Certificate for PKI"
+                DependsOn = '[ModuleAdd]SQLServerModule'
+            }
+
+            # Refresh the machine Kerberos ticket so its PAC carries the
+            # 'ConfigMgr IIS Servers' AD group SID (grants Enroll on the CM cert
+            # templates) WITHOUT a reboot: the DC adds this computer account to that
+            # group in Phase 2 and Phase 3 already reboots after the group exists,
+            # so purging the machine (0x3e7 = SYSTEM LUID) Kerberos ticket cache
+            # forces a fresh TGT on the CMC enrollment call to the CA.
+            Script PkiRefreshGroupToken {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+                    try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
+                }
+                DependsOn  = "[WriteStatus]PkiRequestCerts"
+            }
+
+            # Refresh the local certificate template cache before CertReq so its
+            # Test() resolves the template OID to its name (otherwise it re-creates
+            # the cert on every run).
+            Script PkiRefreshTemplateCache {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                    foreach ($hive in @('HKLM', 'HKCU')) {
+                        $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                DependsOn  = "[Script]PkiRefreshGroupToken"
+            }
+
+            $subjectCert = $ThisVM.vmName + "." + $DomainName
+            CertReq PkiWebCert {
+                Subject             = $subjectCert
+                SubjectAltName      = "DNS=" + $subjectCert + "&DNS=" + $($ThisVM.VmName)
+                KeyLength           = '2048'
+                Exportable          = $false
+                ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
+                CertificateTemplate = 'ConfigMgrWebServerCertificate'
+                AutoRenew           = $true
+                FriendlyName        = 'ConfigMgr WebServer Certificate'
+                KeyType             = 'RSA'
+                RequestType         = 'CMC'
+                DependsOn           = "[Script]PkiRefreshTemplateCache"
+            }
+
+            WriteStatus PkiAddCerts {
+                Status    = "Adding IIS Certificate for PKI"
+                DependsOn = "[CertReq]PkiWebCert"
+            }
+            AddCertificateToIIS PkiAddCert {
+                FriendlyName = 'ConfigMgr WebServer Certificate'
+                DependsOn    = "[WriteStatus]PkiAddCerts"
+            }
+            $certDepend = "[AddCertificateToIIS]PkiAddCert"
+        }
+
         # Nodes without local SQL (remote-SQL site servers, DP/MP site systems) get
         # the module only, then complete -- skip the entire SQL install/config below.
         if (-not $ThisVM.sqlVersion) {
             WriteStatus Complete {
-                DependsOn = '[ModuleAdd]SQLServerModule'
+                DependsOn = $certDepend
                 Status    = 'Complete!'
             }
             return
         }
 
         WriteStatus SQLInstallStarted {
-            Status = "Preparing to Install SQL '$($ThisVM.sqlVersion)'"
+            DependsOn = $certDepend
+            Status    = "Preparing to Install SQL '$($ThisVM.sqlVersion)'"
         }
 
         $nextDepend = '[WriteStatus]SQLInstallStarted'
