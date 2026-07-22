@@ -2061,10 +2061,33 @@ function Test-SQLAOFunctionality {
                     }
 
                     # Verify RPC connectivity to cluster name. Hard-timeout TCP probe
-                    # (Test-TcpPort) instead of Test-NetConnection, which can hang on DNS
-                    # reverse lookups / ICMP fallbacks well past its own timeout.
-                    $results.Details.Add("CMD: Test-TcpPort '$clusterName' -Port 135")
-                    if (Test-TcpPort -ComputerName $clusterName -Port 135 -TimeoutMs 3000 -Retries 2 -RetryDelayMs 1000) {
+                    # instead of Test-NetConnection, which can hang on DNS reverse
+                    # lookups / ICMP fallbacks well past its own timeout. This block runs
+                    # in the GUEST runspace, where the host's Test-TcpPort helper is NOT
+                    # available -- inline the same BeginConnect + WaitHandle logic here.
+                    $results.Details.Add("CMD: TCP probe '$clusterName':135")
+                    $rpcReachable = $false
+                    foreach ($rpcAttempt in 1..2) {
+                        $tcpClient = $null
+                        try {
+                            $tcpClient = [System.Net.Sockets.TcpClient]::new()
+                            $iar = $tcpClient.BeginConnect($clusterName, 135, $null, $null)
+                            if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) {
+                                try {
+                                    $tcpClient.EndConnect($iar)
+                                    if ($tcpClient.Connected) { $rpcReachable = $true }
+                                }
+                                catch { }
+                            }
+                        }
+                        catch { }
+                        finally {
+                            if ($tcpClient) { try { $tcpClient.Close() } catch { } }
+                        }
+                        if ($rpcReachable) { break }
+                        if ($rpcAttempt -lt 2) { Start-Sleep -Milliseconds 1000 }
+                    }
+                    if ($rpcReachable) {
                         $results.Details.Add("OK: RPC port 135 reachable on '$clusterName'")
                     }
                     else {
