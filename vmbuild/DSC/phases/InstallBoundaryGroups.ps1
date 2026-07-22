@@ -191,6 +191,28 @@ $ensureClientPkgCoverage = {
     Invoke-CMDeviceCollectionUpdate -Name "All Systems"
 }
 
+# Ensure every CHILD (secondary) boundary group also lists the parent primary's
+# DP(s) as fallback content sources, so a child BG never depends on a single --
+# possibly slow or wedged -- secondary DP (clients transparently use the parent DP
+# when the local one can't serve content, instead of looping in ccmsetup
+# GetDPLocations). Runs on BOTH paths (the "BGs already exist" early-return AND the
+# fresh client-push path) so a re-run adds them to already-existing child BGs too.
+$ensureChildBgFallbackDps = {
+    try {
+        $parentDps = @((Get-CMDistributionPoint -SiteCode $SiteCode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", "" | Where-Object { $_ -and $_.Trim() })
+        if ($parentDps.Count -eq 0) { return }
+        foreach ($childSite in ($bgs.SiteCode | Select-Object -Unique | Where-Object { $_ -and $_ -ne $SiteCode })) {
+            if (-not (Get-CMBoundaryGroup -Name $childSite -ErrorAction SilentlyContinue)) { continue }
+            try {
+                Set-CMBoundaryGroup -Name $childSite -AddSiteSystemServerName $parentDps -ErrorAction SilentlyContinue
+                Write-DscStatus "Ensured parent DP(s) $($parentDps -join ',') are fallback content sources in child Boundary Group '$childSite'"
+            }
+            catch { Write-DscStatus "Could not add parent DP(s) to child BG '$childSite': $($_.Exception.Message)" }
+        }
+    }
+    catch { Write-DscStatus "Child-BG fallback-DP ensure failed: $($_.Exception.Message)" }
+}
+
 
 $ValidSiteCodes = @($SiteCode)
 $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
@@ -237,6 +259,7 @@ if ($allBGsExist) {
         # skip the coverage repair further down, so a DP stuck at ContentValidating
         # never self-healed on a Phase 8 re-run.
         if ($pushClients -and -not $ThisVm.thisParams.PassiveNode) {
+            & $ensureChildBgFallbackDps
             & $ensureClientPkgCoverage
         }
         # Still handle client push path
@@ -446,6 +469,7 @@ if ($ClientNames) {
     # Ensure the client package is present on every client-serving DP (see the
     # $ensureClientPkgCoverage definition near the top). Runs on the fresh-deploy
     # path; the "BGs already exist" early-return above calls the same scriptblock.
+    & $ensureChildBgFallbackDps
     & $ensureClientPkgCoverage
 }
 else {
