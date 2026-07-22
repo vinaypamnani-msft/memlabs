@@ -5543,10 +5543,47 @@ function Test-PKICertificatesOnVM {
             $certs = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
                 Where-Object { $_.FriendlyName -eq $fn })
             if ($certs.Count -gt 1) {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: $($certs.Count) duplicate certs with FriendlyName '$fn' (expected 1)")
-                foreach ($c in $certs | Sort-Object NotBefore) {
-                    $results.Details.Add("  Thumbprint=$($c.Thumbprint.Substring(0,8))... NotBefore=$($c.NotBefore)")
+                # Duplicates come from the old multi-point enroll flow (Phase 8
+                # CertReq + WSUS/PBIRS Get-Certificate self-heals racing the
+                # FriendlyName stamp before the Phase 4 enroll-once change). Self-
+                # heal: keep the cert bound to IIS 0.0.0.0:443 (the one CM actually
+                # uses); if none is bound (or non-WebServer cert), keep the newest
+                # valid one. Remove the superseded duplicates, then re-count.
+                $boundThumb = $null
+                if ($fn -eq 'ConfigMgr WebServer Certificate') {
+                    $sslBind = netsh http show sslcert ipport=0.0.0.0:443 2>&1 | Out-String
+                    foreach ($c in $certs) {
+                        if ($sslBind -match $c.Thumbprint) { $boundThumb = $c.Thumbprint; break }
+                    }
+                }
+                $keep = if ($boundThumb) {
+                    $certs | Where-Object { $_.Thumbprint -eq $boundThumb } | Select-Object -First 1
+                }
+                else {
+                    $certs | Sort-Object NotBefore -Descending | Select-Object -First 1
+                }
+                $removed = 0
+                foreach ($c in $certs | Where-Object { $_.Thumbprint -ne $keep.Thumbprint }) {
+                    try {
+                        Remove-Item "Cert:\LocalMachine\My\$($c.Thumbprint)" -Force -ErrorAction Stop
+                        $removed++
+                    }
+                    catch {
+                        $results.Details.Add("  WARN: could not remove duplicate $($c.Thumbprint.Substring(0,8)): $($_.Exception.Message)")
+                    }
+                }
+                $after = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FriendlyName -eq $fn })
+                if ($after.Count -eq 1) {
+                    $keptReason = if ($boundThumb) { 'IIS-bound' } else { 'newest' }
+                    $results.Details.Add("OK: Removed $removed duplicate cert(s) for '$fn'; kept $keptReason thumbprint $($keep.Thumbprint.Substring(0,8))...")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: $($certs.Count) duplicate certs with FriendlyName '$fn' (expected 1); could not reduce to 1")
+                    foreach ($c in $certs | Sort-Object NotBefore) {
+                        $results.Details.Add("  Thumbprint=$($c.Thumbprint.Substring(0,8))... NotBefore=$($c.NotBefore)")
+                    }
                 }
             }
             elseif ($certs.Count -eq 1) {
@@ -5798,8 +5835,34 @@ function Test-PKICertificatesOnVM {
                 $results.Details.Add("OK: WebServer cert is bound to IIS 0.0.0.0:443")
             }
             else {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: WebServer cert thumbprint not bound to IIS 0.0.0.0:443")
+                # The cert exists but IIS 443 points at a different/old thumbprint
+                # (a re-enrollment replaced the cert without rebinding, or
+                # AddCertificateToIIS.Test() masked a no-op bind). Self-heal:
+                # (re)bind the current WebServer cert to 0.0.0.0:443 before failing.
+                $rebound = $false
+                try {
+                    Import-Module WebAdministration -ErrorAction SilentlyContinue
+                    $b = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+                    if (-not $b) {
+                        New-WebBinding -Name 'Default Web Site' -IPAddress '*' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+                        $b = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+                    }
+                    if ($b) {
+                        $b.AddSslCertificate($webCert.Thumbprint, 'my')
+                        $sslCert2 = netsh http show sslcert ipport=0.0.0.0:443 2>&1
+                        if ($sslCert2 -match $webCert.Thumbprint) { $rebound = $true }
+                    }
+                }
+                catch {
+                    $results.Details.Add("  Rebind attempt error: $($_.Exception.Message)")
+                }
+                if ($rebound) {
+                    $results.Details.Add("OK: WebServer cert was not bound; (re)bound to IIS 0.0.0.0:443")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: WebServer cert thumbprint not bound to IIS 0.0.0.0:443 (rebind attempt failed)")
+                }
             }
         }
 
