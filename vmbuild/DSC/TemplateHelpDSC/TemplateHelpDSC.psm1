@@ -6513,6 +6513,38 @@ class InstallPBIRS {
                 $rsConfig.ReserveURL("ReportServerWebService", "https://$($_dnsName):$httpsPort", $lcid)
                 $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
                 if (-not $cert) {
+                    # The WebServer cert (CertReq PkiWebCert) is enrolled in PHASE 8, but
+                    # PBIRS runs in PHASE 7 and needs it for the Report Server HTTPS SSL
+                    # binding. When this VM also has installSUP, Phase 6 ConfigureWSUS
+                    # already enrolled it; but an installRP-only VM never ran that, so the
+                    # cert can be genuinely absent here. The CA is up and this machine is in
+                    # the 'ConfigMgr IIS Servers' AD group (Enroll granted), so enroll it
+                    # (same template/subject/SAN as CertReq PkiWebCert) instead of failing.
+                    $_certFqdn = "$env:COMPUTERNAME.$env:USERDNSDOMAIN"
+                    Write-Status "WebServer cert '$_FriendlyName' not present; enrolling ConfigMgrWebServerCertificate for $_certFqdn"
+                    try {
+                        try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                        foreach ($hive in @('HKLM', 'HKCU')) {
+                            Remove-ItemProperty -Path "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache" -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+                        }
+                        $enrolled = Get-Certificate -Template 'ConfigMgrWebServerCertificate' -SubjectName "CN=$_certFqdn" `
+                            -DnsName $_certFqdn, $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My -ErrorAction Stop
+                        $newCert = if ($enrolled -and $enrolled.Certificate) { $enrolled.Certificate } else { $null }
+                        if ($newCert) {
+                            $store = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+                            $store.Open('ReadWrite')
+                            $live = $store.Certificates | Where-Object { $_.Thumbprint -eq $newCert.Thumbprint } | Select-Object -First 1
+                            if ($live) { $live.FriendlyName = $_FriendlyName }
+                            $store.Close()
+                            Write-Status "Enrolled ConfigMgr WebServer Certificate (thumbprint $($newCert.Thumbprint.Substring(0,8))...) and stamped FriendlyName '$_FriendlyName'"
+                        }
+                        $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
+                    }
+                    catch {
+                        Write-Status "Failed to enroll WebServer cert (template ConfigMgrWebServerCertificate): $_"
+                    }
+                }
+                if (-not $cert) {
                     throw "Could not find cert with friendly Name $_FriendlyName"
                 }
 
