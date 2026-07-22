@@ -5678,11 +5678,11 @@ function Test-PKICertificatesOnVM {
                             Import-Module WebAdministration -ErrorAction SilentlyContinue
                             $b = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
                             if (-not $b) {
-                                New-WebBinding -Name 'Default Web Site' -IPAddress '*' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+                                New-WebBinding -Name 'Default Web Site' -IPAddress '*' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue | Out-Null
                                 $b = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
                             }
                             if ($b) {
-                                $b.AddSslCertificate($wc.Thumbprint, 'my')
+                                $null = $b.AddSslCertificate($wc.Thumbprint, 'my')
                                 $results.Details.Add("OK: Bound recovered WebServer cert to IIS 0.0.0.0:443")
                             }
                         }
@@ -5844,11 +5844,11 @@ function Test-PKICertificatesOnVM {
                     Import-Module WebAdministration -ErrorAction SilentlyContinue
                     $b = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
                     if (-not $b) {
-                        New-WebBinding -Name 'Default Web Site' -IPAddress '*' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+                        New-WebBinding -Name 'Default Web Site' -IPAddress '*' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue | Out-Null
                         $b = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
                     }
                     if ($b) {
-                        $b.AddSslCertificate($webCert.Thumbprint, 'my')
+                        $null = $b.AddSslCertificate($webCert.Thumbprint, 'my')
                         $sslCert2 = netsh http show sslcert ipport=0.0.0.0:443 2>&1
                         if ($sslCert2 -match $webCert.Thumbprint) { $rebound = $true }
                     }
@@ -10329,6 +10329,21 @@ function Format-TestResult {
     }
 
     $output = $Result.ScriptBlockOutput
+    # A test scriptblock that leaks stray pipeline output (e.g. an IIS cmdlet or
+    # method that emits) makes ScriptBlockOutput an ARRAY (leaked objects + the
+    # returned $results hashtable) instead of a single hashtable. Member access
+    # then enumerates the array and, if any element is $null, ContainsKey() below
+    # throws "You cannot call a method on a null-valued expression". Pick the real
+    # result hashtable out of the array so a leak can't crash the whole phase.
+    if ($output -is [System.Collections.IEnumerable] -and
+        $output -isnot [System.Collections.IDictionary] -and
+        $output -isnot [string]) {
+        $picked = $null
+        foreach ($item in $output) {
+            if ($item -is [System.Collections.IDictionary] -and $item.Contains('Passed')) { $picked = $item }
+        }
+        if ($picked) { $output = $picked }
+    }
     if (-not $output -or -not $output.ContainsKey('Passed')) {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Test script returned unexpected output" -Failure -LogOnly
         if ($output) {
