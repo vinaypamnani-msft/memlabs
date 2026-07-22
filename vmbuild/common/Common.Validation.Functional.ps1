@@ -8349,6 +8349,8 @@ function Test-CMClientPackageDistribution {
             if ("$nal" -match '\\\\([^\\"\]]+)') { return $Matches[1] } else { return "$nal" }
         }
 
+        $failingDps = New-Object System.Collections.Generic.List[string]
+
         # --- ConfigMgr client package(s): the critical client-install content ---
         try {
             $clientPkgs = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "Name LIKE 'Configuration Manager Client%'" -ErrorAction Stop)
@@ -8385,9 +8387,46 @@ function Test-CMClientPackageDistribution {
                 $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s):")
                 foreach ($b in $bad | Select-Object -First 15) {
                     $sn = $stateName["$([int]$b.State)"]; if (-not $sn) { $sn = "State$($b.State)" }
-                    $results.Details.Add("  DP=$(& $dpNameOf $b.ServerNALPath) State=$sn SourceVersion=$($b.SourceVersion) LastCopied=$($b.LastCopied)")
+                    $dpn = & $dpNameOf $b.ServerNALPath
+                    [void]$failingDps.Add(("$dpn" -split '\.')[0])
+                    $results.Details.Add("  DP=$dpn State=$sn SourceVersion=$($b.SourceVersion) LastCopied=$($b.LastCopied)")
                 }
             }
+        }
+
+        # --- Boundary-group coverage --------------------------------------
+        # Every boundary group that has DP(s) must have at least ONE DP with the
+        # client package Installed (State 0). A BG whose only DP is still
+        # validating/pending (e.g. a Secondary's DP stuck at State 7) leaves
+        # clients in that BG with empty DP locations -> the ccmsetup GetDPLocations
+        # loop -- even though OTHER boundary groups' DPs have the content. This is
+        # the check that maps directly to the client symptom.
+        try {
+            $bgs = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop)
+            $bgLinks = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction SilentlyContinue)
+            foreach ($pkg in $clientPkgs) {
+                $dpState = @{}
+                foreach ($row in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($pkg.PackageID)'" -ErrorAction SilentlyContinue)) {
+                    $dpState[(& $dpNameOf $row.ServerNALPath).ToUpper()] = [int]$row.State
+                }
+                foreach ($bg in $bgs) {
+                    $bgDps = @($bgLinks | Where-Object { $_.GroupID -eq $bg.GroupID } | ForEach-Object { (& $dpNameOf $_.ServerNALPath).ToUpper() } | Select-Object -Unique)
+                    if ($bgDps.Count -eq 0) { continue }
+                    $installedInBg = @($bgDps | Where-Object { $dpState.ContainsKey($_) -and $dpState[$_] -eq 0 })
+                    if ($installedInBg.Count -eq 0) {
+                        $results.Passed = $false
+                        $stateList = ($bgDps | ForEach-Object { $s = if ($dpState.ContainsKey($_)) { $stateName["$($dpState[$_])"] } else { 'no-row' }; "$_=$s" }) -join ', '
+                        $results.Details.Add("FAIL: boundary group '$($bg.Name)' ($($bg.GroupID)) has NO DP with client package '$($pkg.Name)' Installed -- clients in this BG loop in ccmsetup GetDPLocations (empty LocationRecords). DP states: $stateList")
+                        foreach ($d in $bgDps) { if (-not ($dpState.ContainsKey($d) -and $dpState[$d] -eq 0)) { [void]$failingDps.Add(("$d" -split '\.')[0]) } }
+                    }
+                    else {
+                        $results.Details.Add("OK: boundary group '$($bg.Name)' ($($bg.GroupID)) served by $(($installedInBg | ForEach-Object { ("$_" -split '\.')[0] }) -join ', ') for '$($pkg.Name)'")
+                    }
+                }
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: boundary-group coverage check failed: $($_.Exception.Message)")
         }
 
         # --- Site-wide sweep: any package stuck in a TERMINAL failed state -----
@@ -8409,6 +8448,7 @@ function Test-CMClientPackageDistribution {
             $results.Details.Add("WARN: site-wide distribution sweep failed: $($_.Exception.Message)")
         }
 
+        $results.FailingDPs = @($failingDps | Select-Object -Unique)
         return $results
     }
 
@@ -8423,6 +8463,18 @@ function Test-CMClientPackageDistribution {
     if (($result.ScriptBlockOutput -is [hashtable]) -and ($result.ScriptBlockOutput.Passed -eq $false)) {
         Write-Log "[Phase $Phase] $VMName [ClientPkg]: distribution check failed -- collecting distmgr/PkgXferMgr logs into the logs folder" -OutputStream
         $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'ClientPkg' -Collector $Phase11SmsSiteLogCollector
+        # Also pull logs from each DP that lacks the client package (content
+        # validation stuck, pull behind, etc.) so the reason is captured on the DP
+        # itself -- e.g. a Secondary's DP stuck at ContentValidating (State 7).
+        $failing = @()
+        if ($result.ScriptBlockOutput.ContainsKey('FailingDPs')) { $failing = @($result.ScriptBlockOutput.FailingDPs) }
+        foreach ($dpShort in ($failing | Where-Object { $_ } | Select-Object -Unique)) {
+            $dpVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$dpShort".ToUpper()) } | Select-Object -First 1
+            if (-not $dpVm) { continue }
+            Write-Log "[Phase $Phase] $VMName [ClientPkg]: collecting DP logs from failing DP '$($dpVm.vmName)'" -OutputStream
+            $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11CcmClientLogCollector
+            $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11SmsSiteLogCollector
+        }
     }
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'ClientPkg' -Result $result)
