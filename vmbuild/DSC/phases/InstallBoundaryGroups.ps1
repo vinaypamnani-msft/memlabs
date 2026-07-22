@@ -305,34 +305,76 @@ if (-not $pushClients) {
 if ($ClientNames) {
 
     $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-    $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
-    if ($PackageSuccess -eq 0) {
-        $CollectionName = "All Systems"
-        Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+    $CollectionName = "All Systems"
+
+    # Ensure the client package is Installed (State 0) on EVERY DP that serves a
+    # client boundary group -- not just "at least one" DP. A client whose boundary
+    # group's only DP is still validating/pending/failed (e.g. a Secondary DP stuck
+    # at ContentValidating) can't get client content and loops forever in ccmsetup
+    # GetDPLocations (empty <LocationRecords/> / 0x87d00215). This replaces the old
+    # "NumberSuccess -eq 0" guard, which only fired when ZERO DPs had the package and
+    # so left a per-boundary-group coverage hole. (Re)distribute to any covering DP
+    # that isn't Installed, then poll (bounded) until every boundary-group DP has it.
+    if ($PackageID) {
+        $ns = "root\SMS\site_$SiteCode"
+        $fqdnOf = { param($nal) if ("$nal" -match '\\\\([^\\"\]]+)') { $Matches[1] } else { $null } }
+
+        # DPs that serve a client boundary group = the DPs clients actually use.
+        $bgDpFqdns = @()
+        try {
+            $bgDpFqdns = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop |
+                    ForEach-Object { & $fqdnOf $_.ServerNALPath } | Where-Object { $_ } | Select-Object -Unique)
+        }
+        catch { Write-DscStatus "Client pkg coverage: could not enumerate boundary-group site systems: $($_.Exception.Message)" }
+
+        $handled = @{}
+        $maxTries = 20
+        for ($try = 1; $try -le $maxTries; $try++) {
+            $rows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)
+            $state = @{}
+            foreach ($r in $rows) { $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpper()] = [int]$r.State } }
+
+            # Target DPs = boundary-group DPs (fall back to all package DPs if the BG
+            # list couldn't be read).
+            $targets = if ($bgDpFqdns.Count -gt 0) { $bgDpFqdns } else { @($state.Keys) }
+            $notInstalled = @($targets | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
+
+            if ($notInstalled.Count -eq 0) {
+                Write-DscStatus "Client package is Installed on all $($targets.Count) boundary-group DP(s)."
+                break
+            }
+
+            foreach ($dp in $notInstalled) {
+                if ($handled.ContainsKey($dp.ToUpper())) { continue }
+                $hasRow = $state.ContainsKey($dp.ToUpper())
+                $st = if ($hasRow) { $state[$dp.ToUpper()] } else { -1 }
+                # Let actively-progressing distributions (InstallPending=1 /
+                # Retrying=2) finish on their own; only (re)distribute for no-row /
+                # stuck ContentValidating=7 / failed 3,6,8 states.
+                if ($st -in 1, 2) { continue }
+                try {
+                    if (-not $hasRow) {
+                        Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
+                        Write-DscStatus "Distributed client package to DP '$dp' (no prior distribution)"
+                    }
+                    else {
+                        try { Update-CMDistributionPoint -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop }
+                        catch { Update-CMDistributionPoint -PackageName 'Configuration Manager Client Package' -DistributionPointName $dp -ErrorAction Stop }
+                        Write-DscStatus "Redistributed client package to DP '$dp' (state $st)"
+                    }
+                }
+                catch {
+                    Write-DscStatus "Client pkg (re)distribution to DP '$dp' failed: $($_.Exception.Message)"
+                }
+                $handled[$dp.ToUpper()] = $true
+            }
+
+            Write-DscStatus "Waiting for client package on boundary-group DP(s): $($notInstalled -join ', ') [$try/$maxTries]"
+            Start-Sleep -Seconds 30
+        }
+
         Invoke-CMSystemDiscovery
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
-
-
-        if ($false) {
-            #Let PushClients.ps1 handle this later.
-            $failCount = 0
-            $success = $false
-            while (-not $success) {
-   
-                $failCount++
-                Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 15"
-                $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-                Start-Sleep -Seconds 30
-                $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
-                $success = $PackageSuccess -ge 1
-
-                if ($failCount -ge 15) {
-                    $success = $true   
-                }
-    
-            }
-            Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
-        }
     }
 }
 else {
