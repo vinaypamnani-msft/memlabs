@@ -750,7 +750,17 @@ Write-DscStatus "$Tag Starting perfloading"
         Write-DscStatus "$Tag WARNING: Failed to create OS image packages: $_"
     }
 
-    # Get all Task Sequences with names starting with the specified prefix
+    # Get all Task Sequences with names starting with the specified prefix.
+    # New-CMTaskSequence can hit a transient SQL deadlock (a SMS_PackageContentServerInfo
+    # query, error "waiting for query to return" / SQLStatus 1205) mid-block. Because
+    # every create shares one try/catch, a single deadlock abandons the WHOLE block and
+    # leaves zero MEMLABS task sequences -- Phase 11 then warns "No MEMLABS-* task
+    # sequences found". Retry the block on a transient deadlock, removing any partially
+    # created MEMLABS TSes first so the retry stays idempotent.
+    $tsAttempt = 0
+    $tsMaxAttempts = 3
+    while ($true) {
+    $tsAttempt++
     $taskSequences = Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" }
 
     if (!$taskSequences) {
@@ -964,13 +974,25 @@ Write-DscStatus "$Tag Starting perfloading"
 
     }
     catch {
+        $tsErr = "$_"
+        $tsTransient = ($tsErr -match 'deadlock') -or ($tsErr -match 'Error waiting for query to return') -or ($tsErr -match '\b1205\b')
+        if ($tsTransient -and $tsAttempt -lt $tsMaxAttempts) {
+            Write-DscStatus "$Tag WARNING: Transient deadlock creating task sequences (attempt $tsAttempt of $tsMaxAttempts); cleaning up partial TSes and retrying in 30s: $_"
+            try { Get-CMTaskSequence -Fast | Where-Object { $_.Name -like 'MEMLABS-*' } | ForEach-Object { Remove-CMTaskSequence -TaskSequencePackageId $_.PackageID -Force -ErrorAction SilentlyContinue } } catch {}
+            Start-Sleep -Seconds 30
+            continue
+        }
         Write-DscStatus "$Tag WARNING: Failed to create task sequences: $_"
+        break
     }
+    break
     }
     else {
 
         Write-DscStatus "$Tag Task sequences were already created, skipping the duplicate creation"
+        break
 
+    }
     }
 
     } # end hasOsdMedia
