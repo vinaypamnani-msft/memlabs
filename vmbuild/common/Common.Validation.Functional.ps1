@@ -8253,11 +8253,27 @@ function Test-PullDPConfiguration {
                 $notInstalled = @($pkgStatus | Where-Object { $_.State -ne 0 })
                 $results.Details.Add("OK: DP '$dpName' has $($pkgStatus.Count) package row(s), $installedCount Installed")
                 if ($notInstalled.Count -gt 0) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: DP '$dpName' has $($notInstalled.Count) package(s) NOT Installed -- pull incomplete/behind; internet/PKI clients will loop in ccmsetup GetDPLocations (empty LocationRecords / 0x87d00215):")
-                    foreach ($ps in $notInstalled | Select-Object -First 15) {
-                        $sn = $stateName["$([int]$ps.State)"]; if (-not $sn) { $sn = "State$($ps.State)" }
-                        $results.Details.Add("  PackageID=$($ps.PackageID) State=$sn SourceVersion=$($ps.SourceVersion) LastCopied=$($ps.LastCopied)")
+                    # Split severity so the pull DP missing content is ALWAYS surfaced
+                    # (never masked by a fallback DP), but a DP that is still pulling
+                    # doesn't hard-fail the build: a package the pull DP is still
+                    # pulling (InstallPending/Retrying/ContentValidating = 1/2/7) is a
+                    # WARN; a terminal-failed package (3/6/8) is a FAIL.
+                    $termBad = @($notInstalled | Where-Object { $_.State -in 3, 6, 8 })
+                    $inProg = @($notInstalled | Where-Object { $_.State -notin 3, 6, 8 })
+                    if ($termBad.Count -gt 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: DP '$dpName' has $($termBad.Count) package(s) in a TERMINAL failed state (3/6/8) -- content genuinely broken on this pull DP:")
+                        foreach ($ps in $termBad | Select-Object -First 15) {
+                            $sn = $stateName["$([int]$ps.State)"]; if (-not $sn) { $sn = "State$($ps.State)" }
+                            $results.Details.Add("  PackageID=$($ps.PackageID) State=$sn SourceVersion=$($ps.SourceVersion) LastCopied=$($ps.LastCopied)")
+                        }
+                    }
+                    if ($inProg.Count -gt 0) {
+                        $results.Details.Add("WARN: DP '$dpName' has $($inProg.Count) package(s) not yet Installed (pull incomplete/behind) -- a fallback DP may serve clients meanwhile, but internet/PKI clients that rely on THIS DP would loop in ccmsetup GetDPLocations until it completes:")
+                        foreach ($ps in $inProg | Select-Object -First 15) {
+                            $sn = $stateName["$([int]$ps.State)"]; if (-not $sn) { $sn = "State$($ps.State)" }
+                            $results.Details.Add("  PackageID=$($ps.PackageID) State=$sn SourceVersion=$($ps.SourceVersion) LastCopied=$($ps.LastCopied)")
+                        }
                     }
                 }
             }
@@ -8384,8 +8400,13 @@ function Test-CMClientPackageDistribution {
                 $results.Details.Add("OK: client package '$($pkg.Name)' ($pkgId) Installed on all $($dpRows.Count) DP(s)")
             }
             else {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s):")
+                # A DP missing the content is ALWAYS surfaced (so the fallback DPs
+                # can't silently hide a broken/pull DP), but only as a WARN here --
+                # whether any clients are actually BLOCKED is decided by the
+                # boundary-group coverage check below (FAILs a BG with no Installed
+                # DP) and the terminal-state sweep (FAILs 3/6/8). So: broken-but-
+                # covered-by-a-fallback-DP -> WARN; blocking or terminal -> FAIL.
+                $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s) -- a fallback DP may still serve clients; see the boundary-group check for whether any clients are blocked:")
                 foreach ($b in $bad | Select-Object -First 15) {
                     $sn = $stateName["$([int]$b.State)"]; if (-not $sn) { $sn = "State$($b.State)" }
                     $dpn = & $dpNameOf $b.ServerNALPath
