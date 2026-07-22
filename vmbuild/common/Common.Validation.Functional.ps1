@@ -7194,28 +7194,43 @@ function Test-DomainMemberFunctionality {
             $stillRunning = Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue
             if ($stillRunning) {
                 # How long has ccmsetup been running? A few minutes = a genuine slow
-                # install; tens of minutes / hours = a stuck retry loop. Surface the
-                # elapsed time so 'still running' is actionable, not ambiguous.
+                # install; tens of minutes / hours = a stuck retry loop.
                 $elapsedMin = $null
                 try {
                     $st = ($stillRunning | Sort-Object StartTime | Select-Object -First 1).StartTime
                     if ($st) { $elapsedMin = [int]((Get-Date) - $st).TotalMinutes }
                 }
                 catch {}
-                if ($null -ne $elapsedMin -and $elapsedMin -ge 30) {
-                    $results.Details.Add("WARN: ccmsetup still running after ${elapsedMin}m -- >=30 min means STUCK in a retry loop, not a slow install; see ccmsetup.log below")
+                $elapsedTxt = if ($null -ne $elapsedMin) { "${elapsedMin}m" } else { 'unknown time' }
+
+                # Is ccmsetup wedged in a GetDPLocations retry? That means the MP
+                # returned NO DP location records for the CM client package (empty
+                # <LocationRecords/>, error 0x87d00215) -- the client package isn't on
+                # a DP reachable by this client's boundary group at the expected
+                # version -- and with AllowFallbackToUnprotectedDP=0 the client loops
+                # every 30 min forever. That is a genuine content-distribution FAILURE,
+                # not a slow install, so FAIL it and name the cause (a 'Retrying in N
+                # minutes' as the current activity means it is parked, not progressing).
+                $ccmTail = Get-Content 'C:\Windows\ccmsetup\Logs\ccmsetup.log' -Tail 60 -ErrorAction SilentlyContinue
+                $dpStuck = $ccmTail | Where-Object { $_ -match "didn't return DP locations|Failed to get DP locations|Retrying in \d+ minute|0x87d00215" } | Select-Object -Last 1
+
+                if ($dpStuck) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt in a GetDPLocations retry loop -- the MP returned NO DP locations for the CM client package (empty LocationRecords / 0x87d00215). The Configuration Manager client package is not on a DP in this client's boundary group at the expected version, and fallback to unprotected DP is disabled, so it retries every 30 min indefinitely. Fix: distribute the client package to a reachable DP (or ensure the pull DP has finished pulling it).")
                 }
-                elseif ($null -ne $elapsedMin) {
-                    $results.Details.Add("WARN: ccmsetup is still running (running ${elapsedMin}m); not interrupting -- re-run Phase 11 to re-check once it finishes")
+                elseif ($null -ne $elapsedMin -and $elapsedMin -ge 45) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: ccmsetup still running after ${elapsedMin}m with no completion -- treating as STUCK (see ccmsetup.log below), not a slow install.")
+                }
+                elseif ($null -ne $elapsedMin -and $elapsedMin -ge 15) {
+                    $results.Details.Add("WARN: ccmsetup is still running (running ${elapsedMin}m); slow install -- re-run Phase 11 to re-check once it finishes")
                 }
                 else {
-                    $results.Details.Add("WARN: ccmsetup is still running; not interrupting -- re-run Phase 11 to re-check once it finishes")
+                    $runTxt = if ($null -ne $elapsedMin) { " (running ${elapsedMin}m)" } else { '' }
+                    $results.Details.Add("WARN: ccmsetup is still running$runTxt; not interrupting -- re-run Phase 11 to re-check once it finishes")
                 }
-                # Surface what ccmsetup is currently doing so a 'still running' that
-                # persists across multiple runs can be told apart from a genuine slow
-                # install (content download / MP retry) vs a stuck loop (e.g. repeated
-                # GetDPLocations / failed download). grabCcmDiag now always emits the
-                # last lines (pattern hits or raw tail), so this is never blank.
+                # Always surface the last ccmsetup.log lines so the current activity
+                # (DP retry / download / prereq) is visible without hand-pulling the log.
                 foreach ($d in (& $grabCcmDiag 'C:\Windows\ccmsetup\Logs\ccmsetup.log')) { $results.Details.Add("  ccmsetup.log: $d") }
             }
             elseif (Test-Path 'C:\Windows\ccmsetup\Logs\ccmsetup.log') {
