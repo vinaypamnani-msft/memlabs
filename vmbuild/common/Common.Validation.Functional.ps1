@@ -6800,12 +6800,32 @@ function Test-DomainMemberFunctionality {
             param($logFile)
             $diag = New-Object System.Collections.Generic.List[string]
             if (Test-Path $logFile) {
+                # Unwrap the CMTrace <![LOG[msg]LOG]!> envelope + collapse whitespace
+                # so each entry is a readable one-liner.
+                $unwrap = {
+                    param($raw)
+                    $mm = [regex]::Match([string]$raw, '<!\[LOG\[(.*?)\]LOG\]!>')
+                    $msg = if ($mm.Success) { $mm.Groups[1].Value } else { [string]$raw }
+                    ($msg -replace '\s+', ' ').Trim()
+                }
                 $tail = Get-Content $logFile -Tail 150 -ErrorAction SilentlyContinue
+                # Prefer lines that name a known stuck/interesting activity...
                 $hits = $tail | Where-Object {
-                    $_ -match 'GetDPLocations|Failed to find DP locations|Unable to find any Certificate|no (client )?certificate|Sending location (services )?request|status code|MP_LocationManager|boundary'
+                    $_ -match 'GetDPLocations|Failed to find DP locations|Unable to find any Certificate|no (client )?certificate|Sending location (services )?request|status code|MP_LocationManager|boundary|retry|error|fail|download|prereq|reboot|pending|waiting|timed? ?out'
                 } | Select-Object -Last 5
-                foreach ($h in $hits) { if ($h) { $diag.Add(("$h").Trim()) } }
+                # ...but ALWAYS fall back to the raw tail when nothing matched, so a
+                # ccmsetup stuck on something OUTSIDE the known patterns (which is
+                # exactly the "running for hours" case) is never invisible.
+                if (-not $hits) { $hits = $tail | Where-Object { $_ } | Select-Object -Last 5 }
+                foreach ($h in $hits) {
+                    $line = & $unwrap $h
+                    if ($line) {
+                        if ($line.Length -gt 200) { $line = $line.Substring(0, 200) + '...' }
+                        $diag.Add($line)
+                    }
+                }
             }
+            if ($diag.Count -eq 0) { $diag.Add('(ccmsetup.log missing or unreadable)') }
             return $diag
         }
         # Returns the last meaningful ccmsetup.log line (message unwrapped from the
@@ -7173,15 +7193,30 @@ function Test-DomainMemberFunctionality {
             # NOT relaunch a competing instance: let the in-flight install finish.
             $stillRunning = Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue
             if ($stillRunning) {
-                $results.Details.Add("WARN: ccmsetup is still running (install in progress); not interrupting -- re-run Phase 11 to re-check once it finishes")
+                # How long has ccmsetup been running? A few minutes = a genuine slow
+                # install; tens of minutes / hours = a stuck retry loop. Surface the
+                # elapsed time so 'still running' is actionable, not ambiguous.
+                $elapsedMin = $null
+                try {
+                    $st = ($stillRunning | Sort-Object StartTime | Select-Object -First 1).StartTime
+                    if ($st) { $elapsedMin = [int]((Get-Date) - $st).TotalMinutes }
+                }
+                catch {}
+                if ($null -ne $elapsedMin -and $elapsedMin -ge 30) {
+                    $results.Details.Add("WARN: ccmsetup still running after ${elapsedMin}m -- >=30 min means STUCK in a retry loop, not a slow install; see ccmsetup.log below")
+                }
+                elseif ($null -ne $elapsedMin) {
+                    $results.Details.Add("WARN: ccmsetup is still running (running ${elapsedMin}m); not interrupting -- re-run Phase 11 to re-check once it finishes")
+                }
+                else {
+                    $results.Details.Add("WARN: ccmsetup is still running; not interrupting -- re-run Phase 11 to re-check once it finishes")
+                }
                 # Surface what ccmsetup is currently doing so a 'still running' that
                 # persists across multiple runs can be told apart from a genuine slow
                 # install (content download / MP retry) vs a stuck loop (e.g. repeated
-                # GetDPLocations / failed download). The last meaningful log line names
-                # the current activity without interrupting the in-flight install.
-                if (Test-Path 'C:\Windows\ccmsetup\Logs\ccmsetup.log') {
-                    foreach ($d in (& $grabCcmDiag 'C:\Windows\ccmsetup\Logs\ccmsetup.log')) { $results.Details.Add("  ccmsetup.log: $d") }
-                }
+                # GetDPLocations / failed download). grabCcmDiag now always emits the
+                # last lines (pattern hits or raw tail), so this is never blank.
+                foreach ($d in (& $grabCcmDiag 'C:\Windows\ccmsetup\Logs\ccmsetup.log')) { $results.Details.Add("  ccmsetup.log: $d") }
             }
             elseif (Test-Path 'C:\Windows\ccmsetup\Logs\ccmsetup.log') {
                 $logTail = Get-Content 'C:\Windows\ccmsetup\Logs\ccmsetup.log' -Tail 50 -ErrorAction SilentlyContinue
