@@ -854,8 +854,10 @@ $global:VM_Create = {
 
             # Check if RDP is enabled on DC. We saw an issue where RDP was enabled on DC, but didn't take effect until reboot.
             if ($currentItem.role -eq "DC") {
-                $testNet = Test-NetConnection -ComputerName $currentItem.vmName -Port 3389
-                if (-not $testNet.TcpTestSucceeded) {
+                # Hard-timeout TCP probe (Test-TcpPort); Test-NetConnection can hang on
+                # DNS reverse lookups / ICMP fallbacks well past its own timeout.
+                $rdpOk = Test-TcpPort -ComputerName $currentItem.vmName -Port 3389 -TimeoutMs 3000 -Retries 2 -RetryDelayMs 1000
+                if (-not $rdpOk) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if RDP is enabled. Restarting the computer." -OutputStream -Warning
                     Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
                     Start-Sleep -Seconds 10

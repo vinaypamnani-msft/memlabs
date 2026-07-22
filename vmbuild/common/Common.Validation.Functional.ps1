@@ -2060,15 +2060,16 @@ function Test-SQLAOFunctionality {
                         $results.Details.Add("INFO: Could not verify cluster name '$clusterName' via DNS zone query against '$dnsServer' ($clusterDnsErr); cluster IP resources are Online and listener connectivity is validated in Step 6 -- treating explicit zone probe as informational only")
                     }
 
-                    # Verify RPC connectivity to cluster name
-                    $results.Details.Add("CMD: Test-NetConnection '$clusterName' -Port 135")
-                    $rpc = Test-NetConnection -ComputerName $clusterName -Port 135 -WarningAction SilentlyContinue
-                    if ($rpc.TcpTestSucceeded) {
-                        $results.Details.Add("OK: RPC port 135 reachable on '$clusterName' ($($rpc.RemoteAddress))")
+                    # Verify RPC connectivity to cluster name. Hard-timeout TCP probe
+                    # (Test-TcpPort) instead of Test-NetConnection, which can hang on DNS
+                    # reverse lookups / ICMP fallbacks well past its own timeout.
+                    $results.Details.Add("CMD: Test-TcpPort '$clusterName' -Port 135")
+                    if (Test-TcpPort -ComputerName $clusterName -Port 135 -TimeoutMs 3000 -Retries 2 -RetryDelayMs 1000) {
+                        $results.Details.Add("OK: RPC port 135 reachable on '$clusterName'")
                     }
                     else {
                         $results.Passed = $false
-                        $results.Details.Add("FAIL: RPC port 135 not reachable on '$clusterName' ($($rpc.RemoteAddress)) - cluster management will fail")
+                        $results.Details.Add("FAIL: RPC port 135 not reachable on '$clusterName' - cluster management will fail")
                     }
                 }
             }
@@ -9659,7 +9660,7 @@ function Test-InternetBlocked {
         Verifies the host's port-ACL deny rules actually block direct
         Internet egress from an opted-in VM.
     .DESCRIPTION
-        From inside the guest, runs Test-NetConnection to 8.8.8.8:443 with a
+        From inside the guest, opens a TCP connection to 8.8.8.8:443 with a
         short timeout. Pass = connection FAILS (deny rule working). If the
         connect succeeds, the ACLs aren't enforced and the VM is bypassing
         the proxy -- which is the whole thing this feature exists to prevent.
@@ -9678,11 +9679,17 @@ function Test-InternetBlocked {
 
     $scriptBlock = {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-        $results.Details.Add("CMD: Test-NetConnection 8.8.8.8 -Port 443 -InformationLevel Quiet")
+        $results.Details.Add("CMD: TCP connect 8.8.8.8:443 (hard 3s timeout)")
         try {
-            # Suppress the progress UI; -WarningAction silences the "TCP connect failed" warning.
-            $ProgressPreference = 'SilentlyContinue'
-            $ok = Test-NetConnection -ComputerName 8.8.8.8 -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            # Hard-timeout TcpClient probe instead of Test-NetConnection, which can
+            # hang well past its own timeout (DNS reverse lookups / ICMP fallbacks).
+            $ok = $false
+            $tcpClient = [System.Net.Sockets.TcpClient]::new()
+            $iar = $tcpClient.BeginConnect('8.8.8.8', 443, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) {
+                try { $tcpClient.EndConnect($iar); $ok = $tcpClient.Connected } catch { $ok = $false }
+            }
+            try { $tcpClient.Close() } catch { }
             if ($ok) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: Direct TCP 443 to 8.8.8.8 SUCCEEDED -- host port ACLs are NOT enforcing proxy-only egress")
@@ -9693,7 +9700,7 @@ function Test-InternetBlocked {
         }
         catch {
             # An exception here also counts as 'blocked' -- the connect didn't complete.
-            $results.Details.Add("OK: Test-NetConnection threw (treated as blocked): $($_.Exception.Message)")
+            $results.Details.Add("OK: TCP connect threw (treated as blocked): $($_.Exception.Message)")
         }
         return $results
     }
@@ -9918,8 +9925,10 @@ function Test-LinuxVmHealth {
 
     # 3) SSH is down — probe SMB (TCP 445) to determine severity.
     Write-Log "[Phase $Phase] $VMName [$RoleLabel]: SSH unresponsive on $vmIp — probing SMB as fallback..." -Warning -LogOnly
-    $smbTcp = Test-NetConnection -ComputerName $vmIp -Port 445 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-    $smbUp = $smbTcp -and $smbTcp.TcpTestSucceeded
+    # Hard-timeout TCP probe (Test-TcpPort); Test-NetConnection can hang on a
+    # filtered/closed 445 (e.g. a Linux box with SMB down), which is exactly the
+    # state this fallback probes.
+    $smbUp = Test-TcpPort -ComputerName $vmIp -Port 445 -TimeoutMs 3000 -Retries 2 -RetryDelayMs 1000
 
     if (-not $smbUp) {
         # Both SSH and SMB are down — the VM is in a bad state.
@@ -10022,7 +10031,7 @@ function Test-LinuxSmbAccess {
     .DESCRIPTION
         Tests SMB connectivity from the host to the Linux VM without using SSH.
         1) Resolves the VM's IPv4 via Hyper-V KVP (Get-LinuxVmIPAddress).
-        2) Verifies TCP 445 is reachable (Test-NetConnection).
+        2) Verifies TCP 445 is reachable (hard-timeout TCP probe).
         3) Lists shares via net view to confirm smb.conf is loaded.
         This validates the backup file-access channel that works when SSH is down.
     #>
@@ -10052,8 +10061,8 @@ function Test-LinuxSmbAccess {
     # the health cascade that runs before this test has already confirmed SSH
     # is up, self-heal instead of hard-failing the whole lab for a backup
     # file-access channel: SSH in, (re)start smbd, then re-probe 445.
-    $tcp = Test-NetConnection -ComputerName $vmIp -Port 445 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-    if (-not $tcp.TcpTestSucceeded) {
+    $tcpOk = Test-TcpPort -ComputerName $vmIp -Port 445 -TimeoutMs 3000 -Retries 2 -RetryDelayMs 1000
+    if (-not $tcpOk) {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - TCP 445 closed on $vmIp; attempting smbd self-heal over SSH" -Warning -LogOnly
         # Run the same shared ensure-samba.sh used at first boot: detect-skip if
         # smbd already present, else HEAL a corrupt/truncated dpkg DB
@@ -10074,8 +10083,8 @@ function Test-LinuxSmbAccess {
             Write-Log "[Phase $Phase] $VMName [$RoleLabel]: smbd self-heal did not confirm a listener. Output: $healOut" -LogOnly
         }
         # Re-probe 445 from the host after the self-heal attempt.
-        $tcp = Test-NetConnection -ComputerName $vmIp -Port 445 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-        if (-not $tcp.TcpTestSucceeded) {
+        $tcpOk = Test-TcpPort -ComputerName $vmIp -Port 445 -TimeoutMs 3000 -Retries 2 -RetryDelayMs 1000
+        if (-not $tcpOk) {
             Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - TCP 445 not reachable on $vmIp (after smbd self-heal)" -Failure -LogOnly
             $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Samba TCP 445 not reachable"; Level = 'Failure' })
             return $false
