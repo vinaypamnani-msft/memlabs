@@ -483,7 +483,7 @@ function Install-SingleTierPKI {
     Write-Log "[SingleTierPKI] Step 1: Installing Enterprise Root CA on $caVMName..." -NoIndent
 
     $singleTierScript = {
-        param($CAName, $DomainName, $WebURL, $WebFolderPath, $FastFail)
+        param($CAName, $DomainName, $WebURL, $WebFolderPath)
 
         $ErrorActionPreference = 'Stop'
         $report = [System.Collections.Generic.List[string]]::new()
@@ -881,25 +881,15 @@ LoadDefaultTemplates=0
                 _Log "Installing ADCS role..."
                 Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
 
-                # Gate on AD readiness before publishing the Enterprise CA.
-                if ($FastFail) {
-                    # EXPERIMENT fast-fail pass: do NOT wait for writability -- attempt
-                    # immediately so a still-settling directory fails fast and the HOST
-                    # can reboot on the first RANGE_CONSTRAINT. (Reachable-only check.)
-                    _Log "Verifying AD DS / PKI container reachable (fast-fail experiment pass; NOT waiting for writability)..."
-                    if (-not (Wait-AdDsReady -TimeoutSec 60)) {
-                        _Log "WARNING: AD DS / PKI container not confirmed reachable after 60s - proceeding (fast-fail)."
-                    }
+                # Gate on AD readiness before publishing the Enterprise CA: wait for the
+                # directory to ACCEPT a Config-NC WRITE (not just be reachable). Matches two-tier.
+                _Log "Verifying AD DS will ACCEPT a Configuration-NC write before CA config (post-boot readiness probe)..."
+                _Progress "waiting for AD DS to accept a Configuration-NC write..."
+                if (-not (Wait-AdDsReady -TimeoutSec 600 -RequireWritable)) {
+                    _Log "WARNING: AD DS Configuration-NC write not confirmed ready after 600s - proceeding; the retry loop will remediate transient publish errors"
                 }
                 else {
-                    _Log "Verifying AD DS will ACCEPT a Configuration-NC write before CA config (post-boot readiness probe)..."
-                    _Progress "waiting for AD DS to accept a Configuration-NC write..."
-                    if (-not (Wait-AdDsReady -TimeoutSec 600 -RequireWritable)) {
-                        _Log "WARNING: AD DS Configuration-NC write not confirmed ready after 600s - proceeding; the retry loop will remediate transient publish errors"
-                    }
-                    else {
-                        _Log "AD DS accepted a Configuration-NC probe write - directory is ready for the Enterprise CA publish."
-                    }
+                    _Log "AD DS accepted a Configuration-NC probe write - directory is ready for the Enterprise CA publish."
                 }
 
                 # Install Enterprise Root CA with retry + remediation. The AD
@@ -923,16 +913,13 @@ LoadDefaultTemplates=0
                 $caConfigured = $false
                 $caLastErr = $null
                 $maxCaTries = 18
-                # EXPERIMENT fast-fail pass: only a few attempts so the scriptblock
-                # returns the failure to the host quickly (the host then reboots).
-                if ($FastFail) { $maxCaTries = 3 }
                 $feEnabled = $false
                 $feLevelPrior = $null
                 $caLoopStart = Get-Date
                 # In-flight diagnostics + no-reboot escalation ladder (mirrors two-tier).
-                # Fires only at thresholds so the happy path / timing-window case is
-                # never disturbed. The single-tier HOST reboot path is the separate
-                # FastFail experiment above, so this loop does not itself reboot.
+                # Fires only at thresholds so the happy path / timing-window case is never
+                # disturbed. On exhaustion this returns NeedsHostReboot so the HOST can do the
+                # cheap session-refresh (fresh PAC) then reboot tier -- same as two-tier.
                 $escDiagAt = 3
                 $escTier1At = 8
                 $escTier2At = 13
@@ -1020,9 +1007,21 @@ LoadDefaultTemplates=0
                     }
                 }
                 if (-not $caConfigured) {
+                    # Final in-flight capture + reboot recommendation (mirrors two-tier). When
+                    # the failure is a token/rights class (SettlingToken / TokenNoEA /
+                    # AccessDenied / Structural) rather than the transient RangeConstraint
+                    # window, the host session-refresh (fresh PAC) / reboot tier is the lever.
                     $dFinal = Invoke-PkiPublishDiagnostics -Since $caLoopStart -Reason "final failure after $maxCaTries attempts"
-                    _Log "[PKI-ESC] Final classification '$($dFinal.Class)'. (Single-tier host reboot is handled by the FastFail experiment path.)"
-                    throw "Enterprise Root CA configuration failed after $maxCaTries attempts. Last error: $caLastErr"
+                    $caLastClass = $dFinal.Class
+                    $caNeedsHostReboot = $false
+                    if ($caLastClass -eq 'SettlingToken' -or $caLastClass -eq 'Structural' -or $caLastClass -eq 'AccessDenied' -or $caLastClass -eq 'TokenNoEA') {
+                        $caNeedsHostReboot = $true
+                        _Log "[PKI-ESC] Recommending a HOST-side session refresh (fresh Kerberos PAC), then reboot if needed: failure classified '$caLastClass' (not the transient RangeConstraint window). A token minted before the GC could expand Enterprise Admins is fixed by a NEW session/PAC."
+                    }
+                    else {
+                        _Log "[PKI-ESC] NOT recommending a reboot: failure classified '$caLastClass' (reboot only resets the post-dcpromo settle clock)."
+                    }
+                    return @{ Success = $false; Log = $report.ToArray(); Error = "Enterprise Root CA configuration failed after $maxCaTries attempts. Last error: $caLastErr"; NeedsHostReboot = $caNeedsHostReboot; FailClass = $caLastClass }
                 }
 
                 _Log "Waiting for CA service to become ready..."
@@ -1120,62 +1119,61 @@ LoadDefaultTemplates=0
 
     Flush-LogBuffer -All
 
-    # EXPERIMENT (2026-06-23): on the FIRST CA-publish RANGE_CONSTRAINT failure, reboot
-    # the CA/DC VM ONCE from the host and retry, to test whether a reboot clears the
-    # post-dcpromo settling window faster than waiting it out. The host (this function)
-    # detects the error and initiates the reboot; the in-guest job can't reboot itself.
-    # Our data says the cure is elapsed-time-since-NTDS-start and a reboot RESETS that
-    # clock, so this is EXPECTED TO NOT HELP -- but it's gated + reversible: set this to
-    # $false (or delete this block + the FastFail plumbing) to disable.
-    $rebootOnRangeConstraintExperiment = $true
-
-    # -AsJob -PollProgress: forward the guest's Write-Progress heartbeats LIVE to
-    # the console so the (now up to ~45 min) post-dcpromo CA retry loop shows a
-    # counting-down status instead of appearing hung. -TimeoutSeconds here is a
-    # STALL timeout (resets on every guest heartbeat, ~5s during backoff), NOT an
-    # absolute deadline; the inner absolute ceiling (max(TimeoutSeconds*6,1800)s
-    # = 60 min) hard-bounds a CA install that never settles -- it must EXCEED the
-    # widened ~45-min retry budget or it would kill the job mid-wait.
-    $rebootedForExperiment = $false
-    # First pass fails fast (when the experiment is on) so we can reboot on the first
-    # RANGE_CONSTRAINT; if the experiment is off this is $false = the robust path.
-    $fastFail = $rebootOnRangeConstraintExperiment
+    # CA install with an evidence-gated HOST escalation, identical in shape to the
+    # two-tier Step 2 path. The in-guest loop runs its own diagnostics + no-reboot
+    # ladder and, on exhaustion, returns NeedsHostReboot=$true ONLY for a token/rights
+    # class (SettlingToken / TokenNoEA / AccessDenied / Structural), NOT the transient
+    # RangeConstraint window. ROOT-CAUSE (settling-token race): the whole in-guest loop
+    # runs in ONE cached PSDirect session whose Kerberos token is minted once; if minted
+    # before the freshly promoted first DC's GC could expand the UNIVERSAL Enterprise
+    # Admins membership, the token lacks the EA SID and every attempt rides it. So the
+    # FIRST host lever is CHEAP: drop the cached session (Remove-VmSessionFromCache) so
+    # the next call mints a FRESH token that now carries EA -- no reboot. Only if that
+    # still fails do we reboot (also yields a fresh PAC).
+    #
+    # -AsJob -PollProgress: forward the guest's Write-Progress heartbeats LIVE to the
+    # console so the (up to ~45 min) post-dcpromo CA retry loop shows a counting-down
+    # status instead of appearing hung. -TimeoutSeconds is a STALL timeout (resets on
+    # every guest heartbeat), NOT an absolute deadline; the inner absolute ceiling
+    # (max(TimeoutSeconds*6,1800)s = 60 min) hard-bounds a CA that never settles.
+    $refreshedSessionForCA = $false
+    $rebootedForCA = $false
     $result = $null
     while ($true) {
         $result = Invoke-VmCommand -VmName $caVMName -VmDomainName $domainName `
             -ScriptBlock $singleTierScript `
-            -ArgumentList $caName, $domainName, $webURL, $webFolderPath, $fastFail `
+            -ArgumentList $caName, $domainName, $webURL, $webFolderPath `
             -DisplayName "SingleTierPKI: Install Enterprise Root CA" `
             -AsJob -PollProgress -TimeoutSeconds 600
 
         $sbOut = $null
         if ($result -and $result.ScriptBlockOutput) { $sbOut = $result.ScriptBlockOutput } else { $sbOut = $result }
-        $caSucceeded = ($sbOut -and $sbOut.Success)
-        $caErrText = ""
-        if ($sbOut -and $sbOut.Error) { $caErrText = "$($sbOut.Error)" }
-        $isRange = $caErrText -match '0x80072082|ERROR_DS_RANGE_CONSTRAINT|acceptable range'
+        if ($sbOut -and $sbOut.Success) { break }
 
-        if ($caSucceeded) { break }
-
-        if ($rebootOnRangeConstraintExperiment -and $isRange -and (-not $rebootedForExperiment)) {
-            Write-Log "[SingleTierPKI] EXPERIMENT: first CA-publish attempt failed with ERROR_DS_RANGE_CONSTRAINT. Rebooting $caVMName ONCE from the host to test whether a reboot clears the post-dcpromo window (our data predicts it will NOT, since a reboot resets the settle clock)..." -Warning
+        # Tier A (cheap, no reboot): fresh session => fresh Kerberos PAC that now carries
+        # Enterprise Admins once the GC has settled.
+        if ($sbOut -and $sbOut.NeedsHostReboot -and (-not $refreshedSessionForCA)) {
+            Write-Log "[SingleTierPKI] CA install exhausted the in-guest ladder (class=$($sbOut.FailClass)). Dropping the cached PSDirect session so the retry mints a FRESH logon token (settling-token fix), then retrying (no reboot)..." -Warning
+            try { Remove-VmSessionFromCache -VmName $caVMName } catch { Write-Log "[SingleTierPKI] session eviction note: $($_.Exception.Message)" }
+            $refreshedSessionForCA = $true
+            continue
+        }
+        # Tier B (reboot): only if the fresh session also failed.
+        if ($sbOut -and $sbOut.NeedsHostReboot -and (-not $rebootedForCA)) {
+            Write-Log "[SingleTierPKI] Fresh session did not clear it (class=$($sbOut.FailClass)). Rebooting the CA/DC $caVMName ONCE from the host for a fresh session/Kerberos PAC, then retrying..." -Warning
             try {
-                $rebooted = Restart-VM2Smart -Name $caVMName -AllowTurnOff -Reason "PKI RANGE_CONSTRAINT reboot experiment"
-                Write-Log "[SingleTierPKI] EXPERIMENT: $caVMName restart issued (restarted=$rebooted); waiting for it to come back ready for PSDirect/AD..."
+                $rebooted = Restart-VM2Smart -Name $caVMName -AllowTurnOff -Reason "PKI Enterprise Root CA structural failure ($($sbOut.FailClass)) - host reboot tier"
+                Write-Log "[SingleTierPKI] $caVMName restart issued (restarted=$rebooted); waiting for it to come back ready for PSDirect/AD..."
                 $null = Wait-ForVm -VmName $caVMName -PathToVerify "C:\Users" -VmDomainName $domainName -TimeoutMinutes 15
             }
             catch {
-                Write-Log "[SingleTierPKI] EXPERIMENT: reboot/wait of $caVMName errored: $($_.Exception.Message) - falling through to the robust retry path." -Warning
+                Write-Log "[SingleTierPKI] reboot/wait of $caVMName errored: $($_.Exception.Message) - not retrying further." -Warning
+                break
             }
-            $rebootedForExperiment = $true
-            # After the reboot, run the ROBUST path (write-probe gate + full ~45-min
-            # budget) so the CA installs regardless of whether the reboot helped.
-            $fastFail = $false
+            try { Remove-VmSessionFromCache -VmName $caVMName } catch {}
+            $rebootedForCA = $true
             continue
         }
-
-        # Experiment off, not a RANGE_CONSTRAINT, or we already rebooted once:
-        # stop looping and let Test-PKIStepResult report the final result below.
         break
     }
 
