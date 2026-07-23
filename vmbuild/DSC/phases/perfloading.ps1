@@ -98,7 +98,16 @@ Write-DscStatus "$Tag Starting perfloading"
         }
 
         $nameList = ($OfficeTargetVMs | ForEach-Object { "'$($_.vmName)'" }) -join ","
-        $desiredQuery = "select SMS_R_System.ResourceID from SMS_R_System where SMS_R_System.Name in ($nameList)"
+        # Gate membership on Client=1 so a VM only joins the collection ONCE its CM
+        # client is installed. This eliminates the app-policy projection race: if a
+        # device is added while it is still a non-client, policypv snapshots it as
+        # non-client and never retroactively projects the Office assignment when it
+        # later becomes a client (a plain membership refresh does not re-drive the
+        # per-resource app policy -- the MP then answers 'No new assignments'
+        # forever). By requiring Client=1, the device becomes a BRAND-NEW member at
+        # the moment it becomes a client, and new-member adds are the path policypv
+        # projects app-deployment policy for reliably.
+        $desiredQuery = "select SMS_R_System.ResourceID from SMS_R_System where SMS_R_System.Client = 1 and SMS_R_System.Name in ($nameList)"
         $ruleName = "Office Install Targets Rule"
 
         # Remove any stale direct-membership rules left behind by older builds.
@@ -141,32 +150,37 @@ Write-DscStatus "$Tag Starting perfloading"
 
         Invoke-CMCollectionUpdate -CollectionId $col.CollectionID -ErrorAction SilentlyContinue
 
-        # Wait (bounded) for the membership eval to actually land so callers that
-        # immediately author a deployment against this collection see a populated
-        # target. Without this wait the site's first policy projection for the
-        # deployment is computed against 0 members; a member added later (when
-        # eval finally completes) never gets the assignment retroactively
-        # projected until something else touches the deployment.
-        #
-        # Poll Get-CMCollectionMember (live row count) instead of the collection's
-        # MemberCount property. The property is a cached header value the site
-        # bumps on its own schedule and can read correct (e.g. "1") while
-        # v_FullCollectionMembership has not yet been materialized -- which is
-        # exactly the state observed in the field where MemberCount=1 but
-        # Get-CMCollectionMember returned no rows until a second manual
-        # Invoke-CMCollectionUpdate ran.
+        # Enable incremental (delta) membership updates so a VM is added WITHIN
+        # MINUTES of its CM client coming online (Client=1 flipping to match the
+        # rule), instead of waiting for the periodic full-eval schedule. Paired
+        # with the Client=1 gate above, the device is a fresh member the instant it
+        # becomes a client, which is exactly when policypv will project the Office
+        # deployment to it.
+        try {
+            Set-CMCollection -CollectionId $col.CollectionID -RefreshType Both -ErrorAction Stop
+            Write-DscStatus "$Tag Enabled incremental membership updates on $colName"
+        }
+        catch { Write-DscStatus "$Tag WARNING: could not enable incremental updates on ${colName}: $($_.Exception.Message)" }
+
+        # With the Client=1 gate, a target VM only becomes a member once its CM
+        # client is installed. During setup some Office targets may not be clients
+        # yet (client install still in flight), so 0/partial membership here is
+        # EXPECTED, not an error -- incremental updates add each one the moment it
+        # becomes a client and policypv projects the deployment to it then (as a
+        # new member). Do a short best-effort wait only to catch the common case
+        # where the target clients are already up.
         $expected = ($OfficeTargetVMs | Measure-Object).Count
-        $deadline = (Get-Date).AddSeconds(120)
+        $deadline = (Get-Date).AddSeconds(60)
         $live = 0
         do {
             Start-Sleep -Seconds 5
             $live = @(Get-CMCollectionMember -CollectionId $col.CollectionID -ErrorAction SilentlyContinue).Count
         } while ($live -lt $expected -and (Get-Date) -lt $deadline)
         if ($live -ge $expected) {
-            Write-DscStatus "$Tag Collection '$colName' eval complete: live members=$live"
+            Write-DscStatus "$Tag Collection '$colName' eval complete: live members=$live/$expected (all Office targets are clients)"
         }
         else {
-            Write-DscStatus "$Tag WARNING: Collection '$colName' eval did not reach expected $expected within 120s (live=$live)"
+            Write-DscStatus "$Tag Collection '$colName' has $live/$expected client member(s) so far; remaining Office target(s) will be added + projected automatically once their CM client is installed (Client=1 gate + incremental updates)"
         }
         return $col
     }
