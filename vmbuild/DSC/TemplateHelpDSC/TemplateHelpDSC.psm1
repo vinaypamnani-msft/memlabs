@@ -4152,10 +4152,17 @@ class InstallFeatureForSCCM {
     [DscProperty(Mandatory)]
     [string[]] $Role
 
-    # Optional extra features the caller wants installed alongside the role's
-    # baseline set (e.g. PKI CA VMs pre-installing Web-Server + Adcs-Cert-Authority).
+    # PKI CA flags. When set, GetRequiredFeatures lays down the CA role BINARIES here
+    # -- during Phase 2/3 DSC, which runs in PARALLEL across VMs, under lighter load,
+    # and with DSC's native reboot handling -- so the post-Phase2 PKI orchestrator
+    # (Install-PKI) only has to CONFIGURE the CA instead of running a ServerManager
+    # servicing install inside its serial, fragile, heavily-loaded window (where it
+    # wedged on "Collecting data...").
     [DscProperty()]
-    [string[]] $AdditionalFeatures
+    [bool] $InstallCA
+
+    [DscProperty()]
+    [bool] $IsOfflineRootCA
 
     [DscProperty(NotConfigurable)]
     [string] $Version = "8"
@@ -4332,14 +4339,18 @@ class InstallFeatureForSCCM {
             }
         }
 
-        # Extra features requested by the caller. PKI CA VMs pass Web-Server +
-        # Adcs-Cert-Authority here so the role BINARIES are laid down during Phase 2/3
-        # DSC -- under lighter load and with DSC's native reboot handling -- leaving the
-        # post-Phase2 PKI orchestrator (Install-PKI) to only CONFIGURE the CA instead of
-        # running a ServerManager servicing install inside its fragile, heavily-loaded
-        # window (where it wedged on "Collecting data...").
-        foreach ($f in @($this.AdditionalFeatures)) {
-            if ($f) { [void]$features.Add($f) }
+        # PKI Certification Authority role binaries. Laid down here (parallel Phase 2/3
+        # DSC) so the serial post-Phase2 PKI orchestrator only CONFIGURES the CA.
+        if ($this.IsOfflineRootCA) {
+            # Offline Standalone Root CA: ADCS role only -- no IIS. CRL/AIA for the
+            # root are hosted on the online issuing CA, not on the offline root.
+            [void]$features.Add("Adcs-Cert-Authority")
+        }
+        elseif ($this.InstallCA) {
+            # Enterprise / issuing / subordinate CA: ADCS role + IIS (CRL virtual
+            # directory / web enrollment served from this box).
+            [void]$features.Add("Web-Server")
+            [void]$features.Add("Adcs-Cert-Authority")
         }
 
         return @($features)

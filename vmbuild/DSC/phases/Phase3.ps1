@@ -148,10 +148,10 @@
         }
 
         InstallFeatureForSCCM InstallFeature {
-            Name               = "DummyName"
-            Role               = $featureRoles
-            AdditionalFeatures = @(if ($ThisVM.InstallCA) { 'Web-Server'; 'Adcs-Cert-Authority' })
-            DependsOn          = "[WriteStatus]InstallFeature"
+            Name      = "DummyName"
+            Role      = $featureRoles
+            InstallCA = [bool]$ThisVM.InstallCA
+            DependsOn = "[WriteStatus]InstallFeature"
         }
 
         WriteStatus InstallDotNet {
