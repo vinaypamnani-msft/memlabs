@@ -318,6 +318,31 @@ $diagScript = {
         foreach ($ln in ($whoami -split "`r?`n")) { if ($ln.Trim()) { _R "  $ln" } }
     }
     catch { _R "whoami error: $($_.Exception.Message)" }
+    # AD-TRUTH vs LOGON-TOKEN: does the DIRECTORY currently place Enterprise Admins in
+    # this account's token set? EA is a UNIVERSAL group expanded by the GC; a token
+    # minted before the freshly promoted first DC's GC could expand it LACKS the EA SID
+    # even though the account IS an EA. AD tokenGroups=EA-true + logon-token EA-false
+    # (above) == the SETTLING/STALE-TOKEN race (a fresh session / re-run fixes it), NOT
+    # a genuine non-EA account (closed OS bugs 61015649 / 61015662).
+    try {
+        $rdse = [ADSI]"LDAP://RootDSE"
+        $mySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $us = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($rdse.defaultNamingContext)", "(objectSid=$mySid)")
+        $ur = $us.FindOne()
+        $adHasEA = $null
+        if ($ur) {
+            $ue = $ur.GetDirectoryEntry()
+            $ue.RefreshCache(@('tokenGroups'))
+            $adHasEA = $false
+            foreach ($tg in $ue.Properties['tokenGroups']) {
+                $sidv = (New-Object System.Security.Principal.SecurityIdentifier([byte[]]$tg, 0)).Value
+                if ($sidv -like '*-519') { $adHasEA = $true }
+            }
+        }
+        _R "AD tokenGroups says Enterprise Admins: $adHasEA   (AD=true & token=false => SETTLING/STALE-TOKEN race; fresh session fixes it)"
+        _R "GlobalCatalogReady: $($rdse.isGlobalCatalogReady)   (EA is Universal -> expanded via the GC)"
+    }
+    catch { _R "AD tokenGroups check error: $($_.Exception.Message)" }
 
     _H "SERVICES"
     foreach ($svc in 'NTDS', 'Netlogon', 'certsvc', 'DNS', 'kdc') {

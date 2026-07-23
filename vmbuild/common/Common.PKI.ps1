@@ -733,8 +733,33 @@ function Install-SingleTierPKI {
                 $evts2 = Get-WinEvent -FilterHashtable @{ LogName = 'Directory Service'; StartTime = $Since } -ErrorAction SilentlyContinue | Sort-Object TimeCreated | Select-Object -First 25
                 foreach ($e in $evts2) { $f = ($e.Message -replace '\s+', ' '); _Log ("[PKI-DIAG] DS Id={0} {1} {2}" -f $e.Id, $e.LevelDisplayName, $f.Substring(0, [Math]::Min(240, $f.Length))) }
             } catch {}
+            # AD-TRUTH vs LOGON-TOKEN (the settling-token race test). Enterprise Admins is a
+            # UNIVERSAL group expanded into a token by the GC; a token minted before the
+            # freshly promoted first DC's GC can expand it LACKS the EA SID even though the
+            # account IS an EA in AD. If AD tokenGroups=EA-true but the logon token=EA-false,
+            # that's the stale/settling-token cause (a FRESH session / re-run fixes it) --
+            # NOT a genuine non-EA account (the closed OS bugs 61015649/61015662).
+            $adHasEA = $null
+            try {
+                $rdse = [ADSI]"LDAP://RootDSE"
+                $mySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                $us = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($rdse.defaultNamingContext)", "(objectSid=$mySid)")
+                $ur = $us.FindOne()
+                if ($ur) {
+                    $ue = $ur.GetDirectoryEntry()
+                    $ue.RefreshCache(@('tokenGroups'))
+                    $adHasEA = $false
+                    foreach ($tg in $ue.Properties['tokenGroups']) {
+                        $sidv = (New-Object System.Security.Principal.SecurityIdentifier([byte[]]$tg, 0)).Value
+                        if ($sidv -like '*-519') { $adHasEA = $true }
+                    }
+                }
+                _Log "[PKI-DIAG] AD tokenGroups EnterpriseAdmins=$adHasEA  (vs logon-token EA=$hasEA; AD=true & token=false => SETTLING/STALE-TOKEN race -> fresh session fixes it)"
+                _Log "[PKI-DIAG] GlobalCatalogReady=$($rdse.isGlobalCatalogReady) (EA is Universal -> expanded via the GC)"
+            } catch { _Log "[PKI-DIAG] AD tokenGroups check error: $($_.Exception.Message)" }
             $class = 'Unknown'
-            if ($writeReady -eq $false -and $hasEA -eq $false) { $class = 'Structural' }
+            if ($hasEA -eq $false -and $adHasEA -eq $true) { $class = 'SettlingToken' }
+            elseif ($writeReady -eq $false -and $hasEA -eq $false) { $class = 'Structural' }
             elseif ($hasEA -eq $false) { $class = 'TokenNoEA' }
             elseif ($writeReady -eq $false) { $class = 'AccessDenied' }
             elseif ($writeReady -eq $true) { $class = 'RangeConstraint' }
@@ -1760,8 +1785,33 @@ Empty=True
                 $evts = Get-WinEvent -FilterHashtable @{ LogName = 'Directory Service'; StartTime = $Since } -ErrorAction SilentlyContinue | Sort-Object TimeCreated | Select-Object -First 25
                 foreach ($e in $evts) { $f = ($e.Message -replace '\s+', ' '); _Log ("[PKI-DIAG] DS Id={0} {1} {2}" -f $e.Id, $e.LevelDisplayName, $f.Substring(0, [Math]::Min(240, $f.Length))) }
             } catch {}
+            # AD-TRUTH vs LOGON-TOKEN (the settling-token race test). Enterprise Admins is a
+            # UNIVERSAL group expanded into a token by the GC; a token minted before the
+            # freshly promoted first DC's GC can expand it LACKS the EA SID even though the
+            # account IS an EA in AD. If AD tokenGroups=EA-true but the logon token=EA-false,
+            # that's the stale/settling-token cause (a FRESH session / re-run fixes it) --
+            # NOT a genuine non-EA account (the closed OS bugs 61015649/61015662).
+            $adHasEA = $null
+            try {
+                $rdse = [ADSI]"LDAP://RootDSE"
+                $mySid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                $us = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($rdse.defaultNamingContext)", "(objectSid=$mySid)")
+                $ur = $us.FindOne()
+                if ($ur) {
+                    $ue = $ur.GetDirectoryEntry()
+                    $ue.RefreshCache(@('tokenGroups'))
+                    $adHasEA = $false
+                    foreach ($tg in $ue.Properties['tokenGroups']) {
+                        $sidv = (New-Object System.Security.Principal.SecurityIdentifier([byte[]]$tg, 0)).Value
+                        if ($sidv -like '*-519') { $adHasEA = $true }
+                    }
+                }
+                _Log "[PKI-DIAG] AD tokenGroups EnterpriseAdmins=$adHasEA  (vs logon-token EA=$hasEA; AD=true & token=false => SETTLING/STALE-TOKEN race -> fresh session fixes it)"
+                _Log "[PKI-DIAG] GlobalCatalogReady=$($rdse.isGlobalCatalogReady) (EA is Universal -> expanded via the GC)"
+            } catch { _Log "[PKI-DIAG] AD tokenGroups check error: $($_.Exception.Message)" }
             $class = 'Unknown'
-            if ($writeReady -eq $false -and $hasEA -eq $false) { $class = 'Structural' }
+            if ($hasEA -eq $false -and $adHasEA -eq $true) { $class = 'SettlingToken' }
+            elseif ($writeReady -eq $false -and $hasEA -eq $false) { $class = 'Structural' }
             elseif ($hasEA -eq $false) { $class = 'TokenNoEA' }
             elseif ($writeReady -eq $false) { $class = 'AccessDenied' }
             elseif ($writeReady -eq $true) { $class = 'RangeConstraint' }
@@ -2125,9 +2175,9 @@ CertificateTemplate = SubCA
                     # NOT flagged: reboot only RESETS the settle clock and makes it worse.
                     $dFinal = Invoke-PkiPublishDiagnostics -Since $subLoopStart -Reason "final failure after $maxSubTries attempts"
                     $subLastClass = $dFinal.Class
-                    if ($subLastClass -eq 'Structural' -or $subLastClass -eq 'AccessDenied' -or $subLastClass -eq 'TokenNoEA') {
+                    if ($subLastClass -eq 'SettlingToken' -or $subLastClass -eq 'Structural' -or $subLastClass -eq 'AccessDenied' -or $subLastClass -eq 'TokenNoEA') {
                         $subNeedsHostReboot = $true
-                        _Log "[PKI-ESC] Recommending a HOST reboot of the CA/DC: failure classified '$subLastClass' (not the transient timing window). A fresh session/PAC after reboot is the next lever."
+                        _Log "[PKI-ESC] Recommending a HOST-side session refresh (fresh Kerberos PAC), then reboot if needed: failure classified '$subLastClass' (not the transient RangeConstraint window). A token minted before the GC could expand Enterprise Admins is fixed by a NEW session/PAC."
                     }
                     else {
                         _Log "[PKI-ESC] NOT recommending a reboot: failure classified '$subLastClass' (reboot only resets the post-dcpromo settle clock)."
@@ -2151,14 +2201,22 @@ CertificateTemplate = SubCA
     }
 
     Flush-LogBuffer -All
-    # Step 2 with an evidence-gated HOST reboot tier. The in-guest loop runs its
-    # own diagnostics + no-reboot escalation ladder (token/AD refresh, role
-    # reinstall) and, on exhaustion, returns NeedsHostReboot=$true ONLY when the
-    # failure is structural (Config-NC write refused / running id not an Enterprise
-    # Admin) rather than the transient timing window. In that case the CA IS the
-    # sole DC, so only the host can reboot it -- a reboot yields a fresh
-    # session/Kerberos PAC on the next pass. We reboot at most ONCE.
+    # Step 2 with an evidence-gated HOST escalation. The in-guest loop runs its own
+    # diagnostics + no-reboot ladder and, on exhaustion, returns NeedsHostReboot=$true
+    # ONLY when the failure is a token/rights class (SettlingToken / TokenNoEA /
+    # AccessDenied / Structural) rather than the transient RangeConstraint window.
+    #
+    # ROOT-CAUSE INSIGHT (settling-token race): the whole in-guest loop runs in ONE
+    # cached PSDirect session whose Kerberos token is minted ONCE. Enterprise Admins
+    # is a UNIVERSAL group expanded by the GC; a token minted before the freshly
+    # promoted first DC's GC could expand it LACKS the EA SID even though the account
+    # IS an EA -- so every in-guest attempt rides the same EA-less token and can NEVER
+    # self-heal, which is why only a re-run (new logon/PAC) fixed it historically.
+    # So the FIRST host lever is CHEAP: drop the cached session (Remove-VmSessionFromCache)
+    # so the next Invoke-VmCommand mints a FRESH logon token that now carries EA -- no
+    # reboot. Only if a fresh session STILL fails do we reboot (also yields a fresh PAC).
     $step2Args = $intCAName, $intCAServer, $domainName, $webURL, $webFolderPath, $rootCAName, $rootCAFilesPath, $intCAFilesPath
+    $refreshedSessionForStep2 = $false
     $rebootedForStep2 = $false
     while ($true) {
         $result2 = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName `
@@ -2172,8 +2230,19 @@ CertificateTemplate = SubCA
 
         $sb2 = $null
         if ($result2 -and $result2.ScriptBlockOutput) { $sb2 = $result2.ScriptBlockOutput } else { $sb2 = $result2 }
+
+        # Tier A (cheap, no reboot): fresh session => fresh Kerberos PAC that now
+        # carries Enterprise Admins once the GC has settled.
+        if ($sb2 -and $sb2.NeedsHostReboot -and (-not $refreshedSessionForStep2)) {
+            Write-Log "[TwoTierPKI] Step 2 exhausted the in-guest ladder (class=$($sb2.FailClass)). Dropping the cached PSDirect session so the retry mints a FRESH logon token (settling-token fix), then retrying Step 2 (no reboot)..." -Warning
+            try { Remove-VmSessionFromCache -VmName $issuingCAVMName } catch { Write-Log "[TwoTierPKI] session eviction note: $($_.Exception.Message)" }
+            $refreshedSessionForStep2 = $true
+            continue
+        }
+
+        # Tier B (reboot): only if the fresh session also failed.
         if ($sb2 -and $sb2.NeedsHostReboot -and (-not $rebootedForStep2)) {
-            Write-Log "[TwoTierPKI] Step 2 exhausted the in-guest ladder with a STRUCTURAL failure (class=$($sb2.FailClass)). Rebooting the CA/DC $issuingCAVMName ONCE from the host to get a fresh session/Kerberos PAC, then retrying Step 2..." -Warning
+            Write-Log "[TwoTierPKI] Fresh session did not clear it (class=$($sb2.FailClass)). Rebooting the CA/DC $issuingCAVMName ONCE from the host for a fresh session/Kerberos PAC, then retrying Step 2..." -Warning
             try {
                 $rebooted = Restart-VM2Smart -Name $issuingCAVMName -AllowTurnOff -Reason "PKI subordinate CA structural failure ($($sb2.FailClass)) - host reboot tier"
                 Write-Log "[TwoTierPKI] $issuingCAVMName restart issued (restarted=$rebooted); waiting for it to come back ready for PSDirect/AD..."
@@ -2183,6 +2252,7 @@ CertificateTemplate = SubCA
                 Write-Log "[TwoTierPKI] reboot/wait of $issuingCAVMName errored: $($_.Exception.Message) - not retrying further." -Warning
                 return $false
             }
+            try { Remove-VmSessionFromCache -VmName $issuingCAVMName } catch {}
             $rebootedForStep2 = $true
             continue
         }
