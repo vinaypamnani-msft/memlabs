@@ -8602,6 +8602,21 @@ function Test-AdditionalDisks {
                 }
                 $results.Details.Add("RECOVERED: Volume '$letter`:' recovered (was missing; disk onlined / drive letter reassigned)")
             }
+            # Duplicate / colliding disk detection: more than one volume or partition
+            # claiming the SAME drive letter is a disk-signature collision (e.g. a
+            # cloned/duplicated data VHDX attached twice). Both disks fight over the
+            # letter, so it is INTERMITTENTLY unavailable -- the likely cause of a
+            # transient "not present" failure even though SQL is running now. Surface
+            # it loudly (host-side fix: remove the duplicate disk / uniquify the disk
+            # signature); do NOT auto-remediate (offlining the wrong disk breaks SQL).
+            $dupParts = @(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue)
+            $dupVols = @(Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue)
+            if ($dupParts.Count -gt 1 -or $dupVols.Count -gt 1) {
+                $n = [Math]::Max($dupParts.Count, $dupVols.Count)
+                $results.Details.Add("WARN: $n disks/partitions claim drive letter '$letter`:' -- DUPLICATE / colliding disk (disk-signature collision, e.g. a data VHDX attached twice). '$letter`:' is intermittently unavailable until the duplicate disk is removed on the host. DIAG:")
+                foreach ($dp in $dupParts) { $results.Details.Add("  DIAG dup partition: Disk#$($dp.DiskNumber)/Part#$($dp.PartitionNumber) '$letter`:' $([math]::Round($dp.Size / 1GB, 1))GB") }
+                foreach ($dd in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) { $results.Details.Add("  DIAG Disk#$($dd.Number): $([math]::Round($dd.Size / 1GB, 1))GB Sig=$($dd.Signature) Guid=$($dd.Guid) Offline=$($dd.IsOffline)") }
+            }
             if ($vol.FileSystem -ne 'NTFS') {
                 $results.Details.Add("WARN: Volume '$letter`:' filesystem is '$($vol.FileSystem)' (expected NTFS)")
             }
