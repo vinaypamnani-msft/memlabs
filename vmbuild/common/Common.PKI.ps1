@@ -1652,7 +1652,19 @@ Empty=True
         $report = [System.Collections.Generic.List[string]]::new()
         function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
 
-        # --- Post-dcpromo AD-readiness hardening (ported from the single-tier CA path) ---
+        # Live heartbeat to the host. _Log is BUFFERED and only returns when the whole
+        # scriptblock finishes, so step2 looks frozen in real time. _Progress emits a
+        # Write-Progress record that Invoke-VmCommand -PollProgress forwards LIVE to the
+        # console AND resets the stall timeout, so a genuine wedge is caught fast while a
+        # slow-but-working step is not killed. Mirrors the single-tier CA path.
+        $step2ProgressStart = Get-Date
+        function _Progress($status) {
+            try {
+                $el = [int]((Get-Date) - $step2ProgressStart).TotalSeconds
+                Write-Progress -Activity "Subordinate CA '$IntCAName'" -Status "$status (elapsed ${el}s)"
+            } catch {}
+        }
+
         # The Enterprise Subordinate CA install PUBLISHES to the Configuration NC
         # (Enrollment Services / NTAuth / adds the machine to Cert Publishers) even
         # when it only outputs a CSR. On a freshly promoted forest that publish is
@@ -2142,6 +2154,7 @@ Critical=Yes
                 # attempt 1 waits out the window instead of burning a destructive
                 # install/uninstall cycle. Happy path: probe write succeeds in ~1s.
                 _Log "Verifying AD DS will ACCEPT a Configuration-NC write before subordinate CA config (post-boot readiness probe)..."
+                _Progress "waiting for AD DS to accept a Configuration-NC write (pre-install gate)..."
                 if (Wait-AdDsReady -TimeoutSec 120 -RequireWritable) {
                     _Log "AD DS accepted a Configuration-NC probe write - directory is ready for the subordinate CA publish."
                 } else {
@@ -2173,6 +2186,7 @@ Critical=Yes
                     for ($subTry = 1; $subTry -le $maxSubTries; $subTry++) {
                         try {
                             _Log "Installing Enterprise Subordinate CA '$IntCAName' (attempt $subTry/$maxSubTries)..."
+                            _Progress "installing subordinate CA (attempt $subTry/$maxSubTries)..."
                             Install-AdcsCertificationAuthority -CAType EnterpriseSubordinateCa `
                                 -CACommonName $IntCAName `
                                 -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
@@ -2247,22 +2261,31 @@ CertificateTemplate = SubCA
                             # These fire only at thresholds, so a normal timing-window
                             # deploy (which clears within the budget) is never disturbed.
                             if ($subTry -eq $escDiagAt) {
+                                _Progress "attempt $subTry failed; running advanced diagnostics..."
                                 $d = Invoke-PkiPublishDiagnostics -Since $subLoopStart -Reason "attempt $subTry still failing"
                                 $subLastClass = $d.Class
                             }
                             if ($subTry -eq $escTier1At) {
+                                _Progress "escalation Tier1: token + AD refresh..."
                                 Invoke-PkiTokenAdRefresh
                                 $d = Invoke-PkiPublishDiagnostics -Since $subLoopStart -Reason "post-Tier1"
                                 $subLastClass = $d.Class
                             }
                             if ($subTry -eq $escTier2At) {
+                                _Progress "escalation Tier2: hard-reset CA config..."
                                 Invoke-PkiRoleReinstall
                                 # role reinstall drops the CSR path expectation; nothing else to reset.
                             }
+                            _Progress "attempt $subTry failed; waiting for AD DS write-readiness..."
                             Wait-AdDsReady -TimeoutSec 180 -RequireWritable | Out-Null
                             $backoffSec = [Math]::Min(45, 15 * $subTry)
                             _Log "Attempt $subTry/$maxSubTries failed (post-dcpromo AD settling); waiting ${backoffSec}s before retry..."
-                            Start-Sleep -Seconds $backoffSec
+                            $boDeadline = (Get-Date).AddSeconds($backoffSec)
+                            while ((Get-Date) -lt $boDeadline) {
+                                $rem = [int]($boDeadline - (Get-Date)).TotalSeconds
+                                _Progress "attempt $subTry/$maxSubTries failed; next retry in ${rem}s"
+                                Start-Sleep -Seconds 5
+                            }
                         }
                     }
                 }
@@ -2336,7 +2359,7 @@ CertificateTemplate = SubCA
             -ScriptBlock $step2Script `
             -ArgumentList $step2Args `
             -DisplayName "TwoTierPKI Step 2: Prepare Intermediate CA" `
-            -AsJob -TimeoutSeconds 1200
+            -AsJob -PollProgress -TimeoutSeconds 300
 
         $step2Ok = Test-PKIStepResult -Result $result2 -StepName "Step 2" -LogPrefix "TwoTierPKI" -LogSource "CA" -LogOnly
         if ($step2Ok) { break }
