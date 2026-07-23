@@ -815,20 +815,27 @@ function Install-SingleTierPKI {
 
         # ── ESCALATION Tier 1: forced token + AD refresh (no reboot) ──────────
         function Invoke-PkiTokenAdRefresh {
-            _Log "[PKI-ESC] Tier1: forcing token + AD refresh (gpupdate, klist purge, certutil -pulse, schema reload)."
-            try { & gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+            _Log "[PKI-ESC] Tier1: token + AD refresh (klist purge, certutil -pulse, schema reload; bounded gpupdate)."
+            # gpupdate can BLOCK for many minutes on a settling/loaded DC -> bound it so it
+            # can never wedge the buffered in-guest step (which has no live timeout).
+            try {
+                $gp = Start-Process -FilePath gpupdate.exe -ArgumentList '/target:computer', '/force' -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+                if ($gp -and -not $gp.WaitForExit(90000)) { try { $gp.Kill() } catch {}; _Log "[PKI-ESC] gpupdate exceeded 90s -- killed (non-blocking)." }
+            } catch {}
             try { & klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
             try { & klist.exe purge 2>&1 | Out-Null } catch {}
             try { & certutil.exe -pulse 2>&1 | Out-Null } catch {}
             Invoke-SchemaCacheReload | Out-Null
         }
 
-        # ── ESCALATION Tier 2: full ADCS role reinstall (no reboot) ───────────
+        # ── ESCALATION Tier 2: hard-reset the CA config (no reboot) ───────────
         function Invoke-PkiRoleReinstall {
-            _Log "[PKI-ESC] Tier2: reinstalling the ADCS role feature (uninstall config + remove/add Adcs-Cert-Authority)."
+            # Only tear down the CA CONFIG. Do NOT Remove/Add the Adcs-Cert-Authority ROLE
+            # FEATURE: that can require a reboot and BLOCK indefinitely, and it can't fix the
+            # settling-token cause anyway (only a fresh host session/PAC does). Real
+            # remediation is the host session-refresh + reboot tiers.
+            _Log "[PKI-ESC] Tier2: hard-reset CA config (Uninstall-AdcsCertificationAuthority; role feature left installed)."
             try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
-            try { Remove-WindowsFeature Adcs-Cert-Authority -ErrorAction SilentlyContinue | Out-Null } catch { _Log "[PKI-ESC] role remove note: $($_.Exception.Message)" }
-            try { Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools -ErrorAction SilentlyContinue | Out-Null } catch { _Log "[PKI-ESC] role add note: $($_.Exception.Message)" }
         }
 
         try {
@@ -885,7 +892,7 @@ LoadDefaultTemplates=0
                 # directory to ACCEPT a Config-NC WRITE (not just be reachable). Matches two-tier.
                 _Log "Verifying AD DS will ACCEPT a Configuration-NC write before CA config (post-boot readiness probe)..."
                 _Progress "waiting for AD DS to accept a Configuration-NC write..."
-                if (-not (Wait-AdDsReady -TimeoutSec 600 -RequireWritable)) {
+                if (-not (Wait-AdDsReady -TimeoutSec 120 -RequireWritable)) {
                     _Log "WARNING: AD DS Configuration-NC write not confirmed ready after 600s - proceeding; the retry loop will remediate transient publish errors"
                 }
                 else {
@@ -912,17 +919,17 @@ LoadDefaultTemplates=0
                 # (which is rare -- most promotes are ready by the time PKI runs).
                 $caConfigured = $false
                 $caLastErr = $null
-                $maxCaTries = 18
+                $maxCaTries = 6
                 $feEnabled = $false
                 $feLevelPrior = $null
                 $caLoopStart = Get-Date
-                # In-flight diagnostics + no-reboot escalation ladder (mirrors two-tier).
-                # Fires only at thresholds so the happy path / timing-window case is never
-                # disturbed. On exhaustion this returns NeedsHostReboot so the HOST can do the
-                # cheap session-refresh (fresh PAC) then reboot tier -- same as two-tier.
-                $escDiagAt = 3
-                $escTier1At = 8
-                $escTier2At = 13
+                # SHORT in-guest budget: fail FAST and hand control back to the host, which
+                # does the cheap session-refresh (fresh Kerberos PAC = the real settling-token
+                # fix) then reboot. A long in-guest retry loop can't fix the token race and
+                # just wastes time; a re-run (DC older) works anyway. Diag + ladder fire early.
+                $escDiagAt = 2
+                $escTier1At = 4
+                $escTier2At = 5
                 $caLastClass = 'Unknown'
                 try {
                     for ($caTry = 1; $caTry -le $maxCaTries; $caTry++) {
@@ -987,7 +994,7 @@ LoadDefaultTemplates=0
                             Wait-AdDsReady -TimeoutSec 180 | Out-Null
                             # Backoff with a ~5s heartbeat so the wait is visibly counting
                             # down (not 'hung') and -PollProgress's stall timer keeps resetting.
-                            $backoffSec = [Math]::Min(180, 30 * $caTry)
+                            $backoffSec = [Math]::Min(45, 15 * $caTry)
                             $backoffDeadline = (Get-Date).AddSeconds($backoffSec)
                             while ((Get-Date) -lt $backoffDeadline) {
                                 $remain = [int]($backoffDeadline - (Get-Date)).TotalSeconds
@@ -1918,22 +1925,27 @@ Empty=True
         # For an ACCESS_DENIED / stale-PAC style failure: refresh the machine and
         # user Kerberos context and nudge the directory before the next attempt.
         function Invoke-PkiTokenAdRefresh {
-            _Log "[PKI-ESC] Tier1: forcing token + AD refresh (gpupdate, klist purge, certutil -pulse, schema reload)."
-            try { & gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+            _Log "[PKI-ESC] Tier1: token + AD refresh (klist purge, certutil -pulse, schema reload; bounded gpupdate)."
+            # gpupdate can BLOCK for many minutes on a settling/loaded DC -> bound it so it
+            # can never wedge the buffered in-guest step (which has no live timeout).
+            try {
+                $gp = Start-Process -FilePath gpupdate.exe -ArgumentList '/target:computer', '/force' -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+                if ($gp -and -not $gp.WaitForExit(90000)) { try { $gp.Kill() } catch {}; _Log "[PKI-ESC] gpupdate exceeded 90s -- killed (non-blocking)." }
+            } catch {}
             try { & klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
             try { & klist.exe purge 2>&1 | Out-Null } catch {}
             try { & certutil.exe -pulse 2>&1 | Out-Null } catch {}
             Invoke-SchemaCacheReload | Out-Null
         }
 
-        # ── ESCALATION Tier 2: full ADCS role reinstall (no reboot) ───────────
-        # For a stuck component: tear down the CA config AND the role feature, then
-        # re-add it, in case the ADCS install state itself is corrupt.
+        # ── ESCALATION Tier 2: hard-reset the CA config (no reboot) ───────────
         function Invoke-PkiRoleReinstall {
-            _Log "[PKI-ESC] Tier2: reinstalling the ADCS role feature (uninstall config + remove/add Adcs-Cert-Authority)."
+            # Only tear down the CA CONFIG. Do NOT Remove/Add the Adcs-Cert-Authority ROLE
+            # FEATURE: that can require a reboot and BLOCK indefinitely, and it can't fix the
+            # settling-token cause anyway (only a fresh host session/PAC does). Real
+            # remediation is the host session-refresh + reboot tiers.
+            _Log "[PKI-ESC] Tier2: hard-reset CA config (Uninstall-AdcsCertificationAuthority; role feature left installed)."
             try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
-            try { Remove-WindowsFeature Adcs-Cert-Authority -ErrorAction SilentlyContinue | Out-Null } catch { _Log "[PKI-ESC] role remove note: $($_.Exception.Message)" }
-            try { Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools -ErrorAction SilentlyContinue | Out-Null } catch { _Log "[PKI-ESC] role add note: $($_.Exception.Message)" }
         }
 
         try {
@@ -2035,7 +2047,7 @@ Empty=True
                 # in the post-dcpromo window. Wait for the directory to ACCEPT a
                 # Config-NC write before publishing (happy path: ~1s, zero delay).
                 _Log "  Verifying AD DS will ACCEPT a Configuration-NC write before dspublish (post-boot readiness probe)..."
-                if (Wait-AdDsReady -TimeoutSec 600 -RequireWritable) {
+                if (Wait-AdDsReady -TimeoutSec 120 -RequireWritable) {
                     _Log "  AD DS accepted a Configuration-NC probe write - proceeding with dspublish."
                 } else {
                     _Log "  WARNING: AD DS Configuration-NC write not confirmed ready after 600s - proceeding; dspublish retries will remediate."
@@ -2130,7 +2142,7 @@ Critical=Yes
                 # attempt 1 waits out the window instead of burning a destructive
                 # install/uninstall cycle. Happy path: probe write succeeds in ~1s.
                 _Log "Verifying AD DS will ACCEPT a Configuration-NC write before subordinate CA config (post-boot readiness probe)..."
-                if (Wait-AdDsReady -TimeoutSec 600 -RequireWritable) {
+                if (Wait-AdDsReady -TimeoutSec 120 -RequireWritable) {
                     _Log "AD DS accepted a Configuration-NC probe write - directory is ready for the subordinate CA publish."
                 } else {
                     _Log "WARNING: AD DS Configuration-NC write not confirmed ready after 600s - proceeding; the retry loop will remediate transient publish errors."
@@ -2146,17 +2158,15 @@ Critical=Yes
                 _Log "Installing Enterprise Subordinate CA '$IntCAName' (offline enrollment)..."
                 $subConfigured = $false
                 $subLastErr = $null
-                $maxSubTries = 18
+                $maxSubTries = 6
                 $feEnabled = $false
                 $feLevelPrior = $null
                 $subLoopStart = Get-Date
-                # Escalation thresholds (attempt numbers). Diagnostics run automatically
-                # in-flight; the ladder only fires late so the happy path / normal
-                # timing-window case (which clears on its own within the budget) is
-                # never disturbed by a destructive action.
-                $escDiagAt = 3       # first auto-diagnostic snapshot
-                $escTier1At = 8      # token + AD refresh (no reboot)
-                $escTier2At = 13     # ADCS role reinstall (no reboot)
+                # SHORT in-guest budget: fail FAST and hand back to the host (cheap session-
+                # refresh = the real settling-token fix, then reboot). Diag + ladder fire early.
+                $escDiagAt = 2       # first auto-diagnostic snapshot
+                $escTier1At = 4      # token + AD refresh (bounded, no reboot)
+                $escTier2At = 5      # hard-reset CA config (no reboot)
                 $subLastClass = 'Unknown'
                 $subNeedsHostReboot = $false
                 try {
@@ -2250,7 +2260,7 @@ CertificateTemplate = SubCA
                                 # role reinstall drops the CSR path expectation; nothing else to reset.
                             }
                             Wait-AdDsReady -TimeoutSec 180 -RequireWritable | Out-Null
-                            $backoffSec = [Math]::Min(180, 30 * $subTry)
+                            $backoffSec = [Math]::Min(45, 15 * $subTry)
                             _Log "Attempt $subTry/$maxSubTries failed (post-dcpromo AD settling); waiting ${backoffSec}s before retry..."
                             Start-Sleep -Seconds $backoffSec
                         }
@@ -2319,11 +2329,14 @@ CertificateTemplate = SubCA
     $refreshedSessionForStep2 = $false
     $rebootedForStep2 = $false
     while ($true) {
+        # -AsJob is REQUIRED for -TimeoutSeconds to be enforced (Invoke-VmCommand ignores
+        # the timeout on the synchronous path -> a wedged in-guest command hangs the host
+        # forever). Absolute ceiling large enough for the ~45-min ladder + diagnostics.
         $result2 = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName `
             -ScriptBlock $step2Script `
             -ArgumentList $step2Args `
             -DisplayName "TwoTierPKI Step 2: Prepare Intermediate CA" `
-            -TimeoutSeconds 3600
+            -AsJob -TimeoutSeconds 1200
 
         $step2Ok = Test-PKIStepResult -Result $result2 -StepName "Step 2" -LogPrefix "TwoTierPKI" -LogSource "CA" -LogOnly
         if ($step2Ok) { break }
