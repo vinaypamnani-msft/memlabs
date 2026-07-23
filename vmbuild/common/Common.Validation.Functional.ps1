@@ -7771,20 +7771,28 @@ function Test-DomainMemberFunctionality {
                     }
                     catch { $ass = $null }
                     if ($ass) {
-                        $d.Add("DIAG: Assignment '$($ass.AssignmentName)' AssignmentID=$($ass.AssignmentID) Enabled=$($ass.AssignmentEnabled) LastModified=$($ass.LastModificationTime)")
+                        $d.Add("DIAG: Assignment '$($ass.AssignmentName)' AssignmentID=$($ass.AssignmentID) LastModified=$($ass.LastModificationTime)")
+                        # Compliance/projection from SMS_DeploymentSummary -- the correct,
+                        # always-available source (SMS_CIAssignmentTargetedMachines is not
+                        # exposed by the SMS Provider on all builds -> "Invalid class").
+                        # NumberTargeted = collection membership size; NumberUnknown with
+                        # 0 Success/InProgress/Errors means the targeted clients have never
+                        # received/evaluated the assignment -- the app-policy projection
+                        # race (targets added to the collection while still non-clients, so
+                        # policypv never projected the assignment to them).
                         try {
-                            $tm = @(Get-WmiObject -Namespace $ns -Class SMS_CIAssignmentTargetedMachines -Filter "AssignmentID=$($ass.AssignmentID)" -ErrorAction Stop)
-                            $d.Add("DIAG: assignment projected to $($tm.Count) machine(s) (SMS_CIAssignmentTargetedMachines)")
-                            if ($rid) {
-                                if (@($tm | Where-Object { $_.ResourceID -eq $rid }).Count -gt 0) {
-                                    $d.Add("DIAG: assignment IS projected to $clientName (ResourceID=$rid) -> server-side policy EXISTS; the gap is client-side (policy download / policy reset needed on the client)")
-                                }
-                                else {
-                                    $d.Add("DIAG: assignment is NOT projected to $clientName (ResourceID=$rid) -> SERVER-SIDE projection gap (IsClient / policypv not writing the CCM_ApplicationCIAssignment)")
+                            $ds = @(Get-WmiObject -Namespace $ns -Class SMS_DeploymentSummary -Filter "CollectionID='$cid' AND SoftwareName LIKE 'MEMLABS-Microsoft365Apps%'" -ErrorAction Stop) | Select-Object -First 1
+                            if ($ds) {
+                                $d.Add("DIAG: deployment summary Targeted=$($ds.NumberTargeted) Success=$($ds.NumberSuccess) InProgress=$($ds.NumberInProgress) Errors=$($ds.NumberErrors) Unknown=$($ds.NumberUnknown)")
+                                if ([int]$ds.NumberTargeted -gt 0 -and [int]$ds.NumberSuccess -eq 0 -and [int]$ds.NumberInProgress -eq 0 -and [int]$ds.NumberErrors -eq 0) {
+                                    $d.Add("DIAG: >>> ROOT CAUSE: all $($ds.NumberTargeted) targeted client(s) are Unknown -- the MP serves 'No new assignments' to the client's policy request. This is the app-policy projection race: the target(s) were added to the collection while still NON-clients, so policypv never projected the assignment. Remedy: FULL collection eval (Invoke-CMCollectionUpdate) + re-create the deployment; durable fix is the Client=1 membership gate in perfloading.")
                                 }
                             }
+                            else {
+                                $d.Add("DIAG: no SMS_DeploymentSummary row for collection $cid / MEMLABS-Microsoft365Apps (deployment not summarized yet)")
+                            }
                         }
-                        catch { $d.Add("DIAG: SMS_CIAssignmentTargetedMachines query failed: $($_.Exception.Message)") }
+                        catch { $d.Add("DIAG: SMS_DeploymentSummary query failed: $($_.Exception.Message)") }
                     }
                     else {
                         $d.Add("DIAG: no SMS_ApplicationAssignment targets $cid")
