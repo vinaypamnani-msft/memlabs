@@ -1408,9 +1408,18 @@ Empty=True
 "@
                 Set-Content -Path "C:\Windows\CAPolicy.inf" -Value $caPolicyContent -Force
 
-                # Install ADCS role
-                _Log "Installing ADCS role..."
-                Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
+                # ADCS role BINARIES are pre-staged by Phase 2 DSC (Phase2WorkgroupMember
+                # -> InstallFeatureForSCCM IsOfflineRootCA -> Adcs-Cert-Authority). Do NOT
+                # call Install-WindowsFeature here: ServerManager's 'Collecting data' WMI
+                # provider can hang INDEFINITELY even on an idle box. Verify via the local
+                # CertSvc service (registered at feature install, before CA config); if
+                # genuinely missing, fail fast with a clear message.
+                if (Get-Service -Name CertSvc -ErrorAction SilentlyContinue) {
+                    _Log "ADCS role present (service CertSvc); pre-staged by Phase 2 DSC. Skipping Install-WindowsFeature."
+                }
+                else {
+                    throw "Adcs-Cert-Authority is NOT installed (service CertSvc absent) on the offline Root CA. It must be pre-staged by Phase 2 DSC (InstallFeatureForSCCM IsOfflineRootCA); PKI will not run Install-WindowsFeature inside its window."
+                }
 
                 # Install Standalone Root CA
                 _Log "Installing Standalone Root CA '$RootCAName'..."
