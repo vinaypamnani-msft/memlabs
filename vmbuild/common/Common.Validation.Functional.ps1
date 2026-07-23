@@ -7790,6 +7790,30 @@ function Test-DomainMemberFunctionality {
                         $d.Add("DIAG: no SMS_ApplicationAssignment targets $cid")
                     }
 
+                    # Office APPLICATION health -- the usual root cause of "policy
+                    # received but no Office assignment in it": the app has NO usable
+                    # deployment type (Add-CMScriptDeploymentType silently failed during
+                    # perfloading) or is disabled, so the projected policy carries no
+                    # actionable content and the client App agent discards the assignment.
+                    try {
+                        $officeApp = @(Get-WmiObject -Namespace $ns -Class SMS_Application -Filter "LocalizedDisplayName LIKE 'MEMLABS-Microsoft365Apps%' AND IsLatest='true'" -ErrorAction Stop) | Select-Object -First 1
+                        if ($officeApp) {
+                            try { $officeApp.Get() } catch {}
+                            $dtCount = [int]$officeApp.NumberOfDeploymentTypes
+                            $d.Add("DIAG: Office app '$($officeApp.LocalizedDisplayName)' CI_ID=$($officeApp.CI_ID) DeploymentTypes=$dtCount IsEnabled=$($officeApp.IsEnabled) IsDeployed=$($officeApp.IsDeployed)")
+                            if ($dtCount -eq 0) {
+                                $d.Add("DIAG: >>> ROOT CAUSE: Office application has ZERO deployment types -- Add-CMScriptDeploymentType failed during perfloading, so the deployment carries no actionable content and clients discard the assignment. Remedy: recreate the ODT script deployment type + redistribute content, then run Machine Policy Retrieval on the clients.")
+                            }
+                            elseif (-not $officeApp.IsEnabled) {
+                                $d.Add("DIAG: >>> ROOT CAUSE: Office application is DISABLED (IsEnabled=False) -- clients won't receive the assignment until the app is enabled.")
+                            }
+                        }
+                        else {
+                            $d.Add("DIAG: >>> Office application 'MEMLABS-Microsoft365Apps*' NOT FOUND (IsLatest) -- application creation failed during perfloading (ODT download or New-CMApplication).")
+                        }
+                    }
+                    catch { $d.Add("DIAG: Office application query failed: $($_.Exception.Message)") }
+
                     try {
                         $cdr = Get-WmiObject -Namespace $ns -Class SMS_CombinedDeviceResources -Filter "Name='$clientName'" -ErrorAction Stop | Select-Object -First 1
                         if ($cdr) { $d.Add("DIAG: SMS_CombinedDeviceResources[$clientName] LastPolicyRequest=$($cdr.LastPolicyRequest) LastActiveTime=$($cdr.LastActiveTime) ClientState=$($cdr.ClientState) IsActive=$($cdr.IsActive)") }
