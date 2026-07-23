@@ -514,26 +514,81 @@ $diagScript = {
 }
 
 # --- Run it ------------------------------------------------------------------
-$modeMsg = if ($doRepro) { "READ + REPRO (re-runs the failing install)" } else { "READ-ONLY collection" }
-Write-Host "Invoking in-guest collector on $CaVMName [$modeMsg]..." -ForegroundColor Cyan
-$result = Invoke-VmCommand -VmName $CaVMName -VmDomainName $Domain `
-    -ScriptBlock $diagScript `
-    -ArgumentList $CaName, $Domain, $doRepro `
-    -DisplayName "PKI Subordinate DS diagnostic" `
-    -TimeoutSeconds 900
+# A log is ALWAYS written from here on, no matter what fails, so a fast/empty run
+# still leaves evidence. Do NOT let $ErrorActionPreference='Stop' abort silently.
+$ErrorActionPreference = 'Continue'
 
-$out = $null
-if ($result -and $result.ScriptBlockOutput) { $out = $result.ScriptBlockOutput } else { $out = $result }
+$modeMsg = if ($doRepro) { "READ + REPRO (re-runs the failing install)" } else { "READ-ONLY collection" }
+$diag = New-Object System.Collections.Generic.List[string]
+function Log-Line { param([string]$m, [string]$c = 'Gray') Write-Host $m -ForegroundColor $c; $diag.Add($m) }
 
 $header = @(
     "Two-Tier PKI Subordinate RANGE_CONSTRAINT / dspublish ACCESS_DENIED diagnostic",
     "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
-    "Domain=$Domain  CaVM=$CaVMName  RootCaVM=$RootCaVMName  SubCaName=$CaName  Repro=$doRepro",
+    "Domain=$Domain  CaVM=$CaVMName  RootCaVM=$RootCaVMName  SubCaName=$CaName  Repro=$doRepro  Mode=$modeMsg",
     "============================================================================"
 )
 $header | Set-Content -Path $logFile -Encoding UTF8
 
+# --- Preflight: does the VM exist and is it running? -------------------------
+$vm = $null
+try { $vm = Get-VM -Name $CaVMName -ErrorAction SilentlyContinue } catch {}
+if (-not $vm) {
+    Log-Line "PREFLIGHT FAIL: Hyper-V VM '$CaVMName' not found on this host." 'Red'
+    Log-Line "  Running lab VMs:" 'Yellow'
+    try { Get-VM | Where-Object { $_.State -eq 'Running' } | Select-Object -ExpandProperty Name | Sort-Object | ForEach-Object { Log-Line "    $_" } } catch { Log-Line "    (Get-VM failed: $($_.Exception.Message))" }
+    Log-Line "  -> Pass the correct -CaVMName (with prefix, e.g. PL-HOAGIE) or -ConfigPath." 'Yellow'
+    $diag | Add-Content -Path $logFile -Encoding UTF8
+    Write-Host ""; Write-Host "Log written to: $logFile" -ForegroundColor Green
+    return
+}
+Log-Line "Preflight: VM '$CaVMName' State=$($vm.State)  Uptime=$($vm.Uptime)"
+if ($vm.State -ne 'Running') {
+    Log-Line "PREFLIGHT FAIL: VM '$CaVMName' is not Running (State=$($vm.State)). Start it, then re-run." 'Red'
+    $diag | Add-Content -Path $logFile -Encoding UTF8
+    Write-Host ""; Write-Host "Log written to: $logFile" -ForegroundColor Green
+    return
+}
+
+# --- Establish a session and sanity-check it (proven host-tool pattern) -------
+$session = $null
+try {
+    $session = Get-VmSession -VmName $CaVMName -VmDomainName $Domain
+}
+catch {
+    Log-Line "Get-VmSession threw: $($_.Exception.Message)" 'Red'
+}
+if (-not $session) {
+    Log-Line "SESSION FAIL: Get-VmSession returned null for $CaVMName / $Domain (domain-cred PSDirect path failed)." 'Red'
+    Log-Line "  The DC/CA may be mid-reboot, the domain creds may be wrong, or the guest may be unreachable." 'Yellow'
+    $diag | Add-Content -Path $logFile -Encoding UTF8
+    Write-Host ""; Write-Host "Log written to: $logFile" -ForegroundColor Green
+    return
+}
+try {
+    $ping = Invoke-Command -Session $session -ScriptBlock { "$env:COMPUTERNAME|$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" } -ErrorAction Stop
+    Log-Line "Session OK: guest replied '$ping'"
+}
+catch {
+    Log-Line "SESSION SANITY FAIL: Invoke-Command on the session threw: $($_.Exception.Message)" 'Red'
+    $diag | Add-Content -Path $logFile -Encoding UTF8
+    Write-Host ""; Write-Host "Log written to: $logFile" -ForegroundColor Green
+    return
+}
+
+# --- Run the collector directly on the session (returns the hashtable) --------
+Write-Host "Invoking in-guest collector on $CaVMName [$modeMsg]..." -ForegroundColor Cyan
+$out = $null
+try {
+    $out = Invoke-Command -Session $session -ScriptBlock $diagScript -ArgumentList $CaName, $Domain, $doRepro -ErrorAction Stop
+}
+catch {
+    Log-Line "COLLECTOR THREW: $($_.Exception.Message)" 'Red'
+    if ($_.ScriptStackTrace) { Log-Line "  $($_.ScriptStackTrace -replace '\s+', ' ')" }
+}
+
 if ($out -and $out.Report) {
+    $diag | Add-Content -Path $logFile -Encoding UTF8
     $out.Report | Add-Content -Path $logFile -Encoding UTF8
     Write-Host ""
     Write-Host "Diagnostic complete. Repro-CA-configured=$($out.Success)" -ForegroundColor Green
@@ -546,8 +601,9 @@ if ($out -and $out.Report) {
     Write-Host "  - CERTUTIL -DSPUBLISH REPRO          (the ACCESS_DENIED call, live)"
 }
 else {
-    "NO REPORT RETURNED. Raw result follows:" | Add-Content -Path $logFile -Encoding UTF8
-    ($result | Format-List * | Out-String) | Add-Content -Path $logFile -Encoding UTF8
+    Log-Line "NO REPORT RETURNED. Raw result type: $(if ($null -ne $out) { $out.GetType().FullName } else { '<null>' })" 'Yellow'
+    if ($null -ne $out) { Log-Line (($out | Format-List * | Out-String)) }
+    $diag | Add-Content -Path $logFile -Encoding UTF8
     Write-Host ""
-    Write-Host "WARNING: in-guest collector returned no report. See $logFile for the raw result." -ForegroundColor Yellow
+    Write-Host "WARNING: in-guest collector returned no report. See $logFile for the captured detail." -ForegroundColor Yellow
 }
