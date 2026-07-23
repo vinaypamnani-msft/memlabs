@@ -8603,19 +8603,26 @@ function Test-AdditionalDisks {
                 $results.Details.Add("RECOVERED: Volume '$letter`:' recovered (was missing; disk onlined / drive letter reassigned)")
             }
             # Duplicate / colliding disk detection: more than one volume or partition
-            # claiming the SAME drive letter is a disk-signature collision (e.g. a
-            # cloned/duplicated data VHDX attached twice). Both disks fight over the
-            # letter, so it is INTERMITTENTLY unavailable -- the likely cause of a
-            # transient "not present" failure even though SQL is running now. Surface
-            # it loudly (host-side fix: remove the duplicate disk / uniquify the disk
-            # signature); do NOT auto-remediate (offlining the wrong disk breaks SQL).
-            $dupParts = @(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue)
-            $dupVols = @(Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue)
-            if ($dupParts.Count -gt 1 -or $dupVols.Count -gt 1) {
-                $n = [Math]::Max($dupParts.Count, $dupVols.Count)
-                $results.Details.Add("WARN: $n disks/partitions claim drive letter '$letter`:' -- DUPLICATE / colliding disk (disk-signature collision, e.g. a data VHDX attached twice). '$letter`:' is intermittently unavailable until the duplicate disk is removed on the host. DIAG:")
-                foreach ($dp in $dupParts) { $results.Details.Add("  DIAG dup partition: Disk#$($dp.DiskNumber)/Part#$($dp.PartitionNumber) '$letter`:' $([math]::Round($dp.Size / 1GB, 1))GB") }
-                foreach ($dd in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) { $results.Details.Add("  DIAG Disk#$($dd.Number): $([math]::Round($dd.Size / 1GB, 1))GB Sig=$($dd.Signature) Guid=$($dd.Guid) Offline=$($dd.IsOffline)") }
+            # claiming the SAME drive letter is a disk-signature collision. The common
+            # cause is a GUEST PHANTOM/ghost disk -- the host has only one data VHDX
+            # attached, but a surprise disk remove/re-add or a checkpoint apply left a
+            # stale disk object in the guest (Server 2025 storvsc is prone to this), so
+            # two disks fight over the letter and it is intermittently unavailable.
+            # First try a non-disruptive storage rescan (drops most ghosts); only WARN
+            # if it persists. Never auto-offline a disk (could break SQL).
+            $preDupN = [Math]::Max(@(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue).Count, @(Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue).Count)
+            if ($preDupN -gt 1) {
+                try { Update-HostStorageCache -ErrorAction SilentlyContinue } catch {}
+                Start-Sleep -Seconds 3
+                $postDupN = [Math]::Max(@(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue).Count, @(Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue).Count)
+                if ($postDupN -le 1) {
+                    $results.Details.Add("RECOVERED: '$letter`:' was claimed by $preDupN disks (phantom/ghost); a storage rescan cleared it (now $postDupN)")
+                }
+                else {
+                    $results.Details.Add("WARN: $postDupN disks/partitions claim drive letter '$letter`:' after a storage rescan -- disk-signature COLLISION making '$letter`:' intermittently unavailable. If the host has only ONE data disk attached (Get-VMHardDiskDrive), this is a GUEST PHANTOM/ghost disk -> reboot the VM to clear it; if TWO are attached, remove the duplicate VHDX on the host. DIAG:")
+                    foreach ($dp in @(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue)) { $results.Details.Add("  DIAG dup partition: Disk#$($dp.DiskNumber)/Part#$($dp.PartitionNumber) $([math]::Round($dp.Size / 1GB, 1))GB") }
+                    foreach ($dd in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) { $results.Details.Add("  DIAG Disk#$($dd.Number): $([math]::Round($dd.Size / 1GB, 1))GB Sig=$($dd.Signature) Guid=$($dd.Guid) Offline=$($dd.IsOffline)") }
+                }
             }
             if ($vol.FileSystem -ne 'NTFS') {
                 $results.Details.Add("WARN: Volume '$letter`:' filesystem is '$($vol.FileSystem)' (expected NTFS)")
