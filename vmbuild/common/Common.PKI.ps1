@@ -604,7 +604,8 @@ function Install-SingleTierPKI {
 
         function Wait-AdDsReady {
             param([int]$TimeoutSec = 300, [switch]$RequireWritable)
-            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            $waitStart = Get-Date
+            $deadline = $waitStart.AddSeconds($TimeoutSec)
             while ((Get-Date) -lt $deadline) {
                 try {
                     $ntds = Get-Service -Name NTDS -ErrorAction SilentlyContinue
@@ -621,10 +622,12 @@ function Install-SingleTierPKI {
                             # rejecting the write; a non-transient probe error
                             # (schema/rights) shouldn't block the real install.
                             if (-not $probe.Transient) { return $true }
-                            try { _Progress "AD DS not yet accepting Configuration-NC writes; waiting..." } catch {}
                         }
                     }
                 } catch {}
+                # Live heartbeat so the gate visibly advances (it polls every 10s and
+                # can wait out the whole settling window) instead of looking frozen.
+                try { _Progress "waiting for AD DS to accept a Configuration-NC write ($([int]((Get-Date) - $waitStart).TotalSeconds)s / ${TimeoutSec}s)..." } catch {}
                 Start-Sleep -Seconds 10
             }
             return $false
@@ -1765,7 +1768,8 @@ Empty=True
         }
         function Wait-AdDsReady {
             param([int]$TimeoutSec = 300, [switch]$RequireWritable)
-            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            $waitStart = Get-Date
+            $deadline = $waitStart.AddSeconds($TimeoutSec)
             while ((Get-Date) -lt $deadline) {
                 try {
                     $ntds = Get-Service -Name NTDS -ErrorAction SilentlyContinue
@@ -1785,6 +1789,9 @@ Empty=True
                         }
                     }
                 } catch {}
+                # Live heartbeat so the gate visibly advances (it polls every 10s and
+                # can wait out the whole settling window) instead of looking frozen.
+                try { _Progress "waiting for AD DS to accept a Configuration-NC write ($([int]((Get-Date) - $waitStart).TotalSeconds)s / ${TimeoutSec}s)..." } catch {}
                 Start-Sleep -Seconds 10
             }
             return $false
@@ -2231,7 +2238,7 @@ Critical=Yes
                 if (Wait-AdDsReady -TimeoutSec 120 -RequireWritable) {
                     _Log "AD DS accepted a Configuration-NC probe write - directory is ready for the subordinate CA publish."
                 } else {
-                    _Log "WARNING: AD DS Configuration-NC write not confirmed ready after 600s - proceeding; the retry loop will remediate transient publish errors."
+                    _Log "WARNING: AD DS Configuration-NC write not confirmed ready after 120s - proceeding; the retry loop will remediate transient publish errors."
                 }
 
                 # Install Enterprise Subordinate CA with offline request file, with
