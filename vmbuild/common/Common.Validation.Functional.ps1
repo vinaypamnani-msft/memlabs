@@ -8233,51 +8233,63 @@ function Test-PullDPConfiguration {
             return $results
         }
 
-        # --- Content-arrival check ----------------------------------------
-        # A DP can be flagged IsPullDP=true yet hold NO / stale content when its
-        # pull from the source is failing or behind -- the exact cause of clients
-        # looping in ccmsetup GetDPLocations with empty <LocationRecords/> (error
-        # 0x87d00215). Verify every package targeted to this DP is Installed
-        # (State=0). Anything else (pending/retrying/failed) means the pull is
-        # incomplete, so the DP can't hand content to clients.
+        # --- Content-arrival check (CLIENT-CRITICAL content only) -------------
+        # What matters for a pull DP SERVING CLIENTS is the ConfigMgr client package
+        # (ccmsetup content) -- NOT perfloading OSD images (Windows install.wim) or
+        # app content, which are multi-GB, legitimately slow, and which clients never
+        # consume. So verify the CLIENT PACKAGE specifically; report other content as
+        # INFO, and only FAIL on a genuinely TERMINAL-failed package (3/6/8 = real
+        # corruption). This is the content whose absence makes clients loop in
+        # ccmsetup GetDPLocations (empty <LocationRecords/> / 0x87d00215).
         try {
             $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '4' = 'RemovalPending'; '5' = 'RemovalRetrying'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
+            $clientPkgIds = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_Package -Filter "Name LIKE 'Configuration Manager Client%'" -ErrorAction SilentlyContinue | ForEach-Object { $_.PackageID })
             $pkgStatus = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_PackageStatusDistPointsSummarizer `
                     -Filter "ServerNALPath LIKE '%$dpName%'" -ErrorAction Stop)
             if ($pkgStatus.Count -eq 0) {
                 $results.Passed = $false
                 $results.CollectLogs = $true
-                $results.Details.Add("FAIL: DP '$dpName' has NO package distribution rows (SMS_PackageStatusDistPointsSummarizer) -- no content has been targeted/pulled to this pull DP yet; clients get empty DP locations and loop in ccmsetup")
+                $results.Details.Add("FAIL: DP '$dpName' has NO package distribution rows -- no content has been targeted/pulled to this pull DP yet")
             }
             else {
-                $installedCount = @($pkgStatus | Where-Object { $_.State -eq 0 }).Count
-                $notInstalled = @($pkgStatus | Where-Object { $_.State -ne 0 })
-                $results.Details.Add("OK: DP '$dpName' has $($pkgStatus.Count) package row(s), $installedCount Installed")
-                if ($notInstalled.Count -gt 0) {
-                    # Collect the pull DP's transfer logs whenever content is behind
-                    # (even a WARN), so we can see WHY it is stuck without a hard FAIL.
+                # 1) The client package -- the only client-blocking content.
+                $clientRows = @($pkgStatus | Where-Object { $clientPkgIds -contains $_.PackageID })
+                $clientBad = @($clientRows | Where-Object { $_.State -ne 0 })
+                if ($clientRows.Count -eq 0) {
+                    $results.Details.Add("INFO: client package not yet targeted to DP '$dpName' (no summarizer row)")
+                }
+                elseif ($clientBad.Count -eq 0) {
+                    $results.Details.Add("OK: DP '$dpName' has the ConfigMgr client package Installed")
+                }
+                else {
                     $results.CollectLogs = $true
-                    # Split severity so the pull DP missing content is ALWAYS surfaced
-                    # (never masked by a fallback DP), but a DP that is still pulling
-                    # doesn't hard-fail the build: a package the pull DP is still
-                    # pulling (InstallPending/Retrying/ContentValidating = 1/2/7) is a
-                    # WARN; a terminal-failed package (3/6/8) is a FAIL.
-                    $termBad = @($notInstalled | Where-Object { $_.State -in 3, 6, 8 })
-                    $inProg = @($notInstalled | Where-Object { $_.State -notin 3, 6, 8 })
-                    if ($termBad.Count -gt 0) {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: DP '$dpName' has $($termBad.Count) package(s) in a TERMINAL failed state (3/6/8) -- content genuinely broken on this pull DP:")
-                        foreach ($ps in $termBad | Select-Object -First 15) {
-                            $sn = $stateName["$([int]$ps.State)"]; if (-not $sn) { $sn = "State$($ps.State)" }
-                            $results.Details.Add("  PackageID=$($ps.PackageID) State=$sn SourceVersion=$($ps.SourceVersion) LastCopied=$($ps.LastCopied)")
+                    foreach ($cb in $clientBad) {
+                        $sn = $stateName["$([int]$cb.State)"]; if (-not $sn) { $sn = "State$($cb.State)" }
+                        if ($cb.State -in 3, 6, 8) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: DP '$dpName' CLIENT package ($($cb.PackageID)) in TERMINAL failed state $sn -- clients relying on this DP loop in ccmsetup GetDPLocations")
+                        }
+                        else {
+                            $results.Details.Add("WARN: DP '$dpName' CLIENT package ($($cb.PackageID)) not yet Installed (State=$sn) -- clients relying on this DP loop in ccmsetup until it completes")
                         }
                     }
-                    if ($inProg.Count -gt 0) {
-                        $results.Details.Add("WARN: DP '$dpName' has $($inProg.Count) package(s) not yet Installed (pull incomplete/behind) -- a fallback DP may serve clients meanwhile, but internet/PKI clients that rely on THIS DP would loop in ccmsetup GetDPLocations until it completes:")
-                        foreach ($ps in $inProg | Select-Object -First 15) {
-                            $sn = $stateName["$([int]$ps.State)"]; if (-not $sn) { $sn = "State$($ps.State)" }
-                            $results.Details.Add("  PackageID=$($ps.PackageID) State=$sn SourceVersion=$($ps.SourceVersion) LastCopied=$($ps.LastCopied)")
-                        }
+                }
+
+                # 2) Everything else (OSD images, apps, packages) = INFORMATIONAL.
+                # These are large/non-client-critical; only a TERMINAL failure (real
+                # content corruption) is worth a FAIL.
+                $otherRows = @($pkgStatus | Where-Object { $clientPkgIds -notcontains $_.PackageID })
+                $otherInstalled = @($otherRows | Where-Object { $_.State -eq 0 }).Count
+                $otherInProg = @($otherRows | Where-Object { $_.State -notin 0, 3, 6, 8 })
+                $otherTerminal = @($otherRows | Where-Object { $_.State -in 3, 6, 8 })
+                $results.Details.Add("INFO: DP '$dpName' other content: $otherInstalled/$($otherRows.Count) Installed, $($otherInProg.Count) still distributing (OSD/app content -- not client-critical)")
+                if ($otherTerminal.Count -gt 0) {
+                    $results.Passed = $false
+                    $results.CollectLogs = $true
+                    $results.Details.Add("FAIL: DP '$dpName' has $($otherTerminal.Count) non-client package(s) in a TERMINAL failed state (3/6/8):")
+                    foreach ($ot in $otherTerminal | Select-Object -First 10) {
+                        $sn = $stateName["$([int]$ot.State)"]; if (-not $sn) { $sn = "State$($ot.State)" }
+                        $results.Details.Add("  PackageID=$($ot.PackageID) State=$sn")
                     }
                 }
             }
