@@ -102,14 +102,26 @@ if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq
 }
 
 # Initialize storage so $Common.LocalAdmin (vmbuildadmin credential) is populated
-# from the cached vmbuildadmin.txt. Do NOT use -InJob here: it skips storage init,
-# leaving $Common.LocalAdmin null so Get-VmSession fails with "password is null".
-# Skip the slow maintenance/cache/host-prep work we don't need for a diagnostic.
-. $commonPath -SkipMaintenanceRefresh -SkipVmCacheRefresh -SkipEnvironmentDetection -SkipHostPreparation
+# from the cached vmbuildadmin.txt. Get-VmSession needs $Common.LocalAdmin.Password
+# to build the domain credential.
+#   - If this session is ALREADY initialized (you dot-sourced Common.ps1 yourself),
+#     reuse it as-is -- re-running init cold with an expired/offline token can drop
+#     the credential.
+#   - Otherwise try a fast init.
+# Do NOT use -InJob: it skips storage init and leaves $Common.LocalAdmin null.
+if ($global:Common -and $global:Common.LocalAdmin -and $global:Common.LocalAdmin.Password) {
+    Write-Host "Using already-initialized session (Common.LocalAdmin present)." -ForegroundColor DarkGray
+}
+else {
+    . $commonPath -FastInit
+}
 
 if (-not $Common.LocalAdmin -or -not $Common.LocalAdmin.Password) {
-    Write-Host "ERROR: local admin (vmbuildadmin) credential not loaded. Expected cache at $(Join-Path $vmbuildRoot 'cache\vmbuildadmin.txt')." -ForegroundColor Red
-    Write-Host "  Run this from an initialized vmbuild session (or refresh your storage token) so Get-VmSession has a password." -ForegroundColor Yellow
+    Write-Host "ERROR: local admin (vmbuildadmin) credential not loaded (expected cache at $(Join-Path $vmbuildRoot 'cache\vmbuildadmin.txt'))." -ForegroundColor Red
+    Write-Host "  Initialize this session first, then re-run the tool:" -ForegroundColor Yellow
+    Write-Host "      . .\Common.ps1 -FastInit" -ForegroundColor Cyan
+    Write-Host "      .\tools\Diag-PKISubordinateConstraint.ps1 -Repro" -ForegroundColor Cyan
+    Write-Host "  (If it still fails, your storage token has expired -- refresh it and retry.)" -ForegroundColor Yellow
     exit 1
 }
 
