@@ -502,45 +502,25 @@ function Install-SingleTierPKI {
             } catch {}
         }
 
-        # Install-WindowsFeature streams a ServerManager "Collecting data..." progress
-        # record. Under -PollProgress the host forwards that progress and RESETS the
-        # stall timeout on every update -- a WEDGED ServerManager keeps re-emitting it,
-        # so the host never detects the hang and the build appears stuck on "Collecting
-        # data" forever. Run the feature install in a CHILD JOB (its progress stays in
-        # the job and never reaches the parent runspace, so it can't reset the host
-        # stall timer), emit our OWN _Progress heartbeat while waiting, and bound it so a
-        # genuine servicing wedge fails fast -> the host reboots and recovers.
+        # Feature BINARIES (IIS Web-Server on the issuing/sub CA, ADCS on every CA) are
+        # pre-staged by Phase 2/3 DSC (InstallFeatureForSCCM InstallCA/IsOfflineRootCA).
+        # We DELIBERATELY DO NOT call Install-WindowsFeature here: on some DCs the
+        # ServerManager 'Collecting data' WMI provider hangs INDEFINITELY even when the
+        # box is IDLE and the feature is already installed (PROVEN on pushlab: guest
+        # responsive, W3SVC Running, CertSvc present, yet step2 wedged on the no-op ADCS
+        # install). Verify presence with a fast LOCAL service check; if genuinely missing,
+        # FAIL FAST with a clear message (fix = ensure Phase 2/3 staged it) instead of a
+        # fragile servicing install inside the PKI window.
         function Install-FeatureBounded {
-            param([string]$Name, [string]$Label, [int]$TimeoutSec = 600)
-            # Fast local pre-check: if the role binaries are already present (pre-staged
-            # by Phase 2/3 DSC), skip Install-WindowsFeature ENTIRELY -- even a no-op
-            # install runs the ServerManager "Collecting data" inventory that can wedge.
-            # W3SVC is registered by the Web-Server role; CertSvc by Adcs-Cert-Authority
-            # (at feature install, before CA config) -- their presence proves the feature.
+            param([string]$Name, [string]$Label)
             $svcName = switch ($Name) { 'Web-Server' { 'W3SVC' } 'Adcs-Cert-Authority' { 'CertSvc' } default { $null } }
-            if ($svcName -and (Get-Service -Name $svcName -ErrorAction SilentlyContinue)) {
-                _Log "$Label -- $Name already installed (service $svcName present, pre-staged by DSC); skipping Install-WindowsFeature."
-                _Progress "$Label -- already present (pre-staged by DSC); skipping install"
+            if (-not $svcName) { return }
+            if (Get-Service -Name $svcName -ErrorAction SilentlyContinue) {
+                _Log "$Label -- $Name present (service $svcName); pre-staged by Phase 2/3 DSC."
+                _Progress "$Label -- already present (pre-staged); skipping install"
                 return
             }
-            $fj = Start-Job -ScriptBlock {
-                param($n)
-                Import-Module ServerManager -ErrorAction Stop
-                Install-WindowsFeature $n -IncludeManagementTools
-            } -ArgumentList $Name
-            $fsw = [System.Diagnostics.Stopwatch]::StartNew()
-            while ($fj.State -eq 'Running') {
-                _Progress "$Label (Install-WindowsFeature $Name)"
-                Start-Sleep -Seconds 5
-                if ($fsw.Elapsed.TotalSeconds -ge $TimeoutSec) {
-                    Stop-Job $fj -ErrorAction SilentlyContinue
-                    Remove-Job $fj -Force -ErrorAction SilentlyContinue
-                    throw "Install-WindowsFeature $Name wedged in ServerManager 'Collecting data' for > ${TimeoutSec}s -- needs host reboot"
-                }
-            }
-            $fr = Receive-Job $fj -ErrorAction SilentlyContinue
-            Remove-Job $fj -Force -ErrorAction SilentlyContinue
-            return $fr
+            throw "$Name is NOT installed (service $svcName absent). It must be pre-staged by Phase 2/3 DSC (InstallFeatureForSCCM InstallCA/IsOfflineRootCA); PKI will not run Install-WindowsFeature inside its window."
         }
 
         function Wait-CertSvcReady {
@@ -1732,45 +1712,25 @@ Empty=True
             } catch {}
         }
 
-        # Install-WindowsFeature streams a ServerManager "Collecting data..." progress
-        # record. Under -PollProgress the host forwards that progress and RESETS the
-        # stall timeout on every update -- a WEDGED ServerManager keeps re-emitting it,
-        # so the host never detects the hang and step2 appears stuck on "Collecting
-        # data" forever. Run the feature install in a CHILD JOB (its progress stays in
-        # the job and never reaches the parent runspace, so it can't reset the host
-        # stall timer), emit our OWN _Progress heartbeat while waiting, and bound it so a
-        # genuine servicing wedge fails fast -> the host reboots and recovers.
+        # Feature BINARIES (IIS Web-Server on the issuing/sub CA, ADCS on every CA) are
+        # pre-staged by Phase 2/3 DSC (InstallFeatureForSCCM InstallCA/IsOfflineRootCA).
+        # We DELIBERATELY DO NOT call Install-WindowsFeature here: on some DCs the
+        # ServerManager 'Collecting data' WMI provider hangs INDEFINITELY even when the
+        # box is IDLE and the feature is already installed (PROVEN on pushlab: guest
+        # responsive, W3SVC Running, CertSvc present, yet step2 wedged on the no-op ADCS
+        # install). Verify presence with a fast LOCAL service check; if genuinely missing,
+        # FAIL FAST with a clear message (fix = ensure Phase 2/3 staged it) instead of a
+        # fragile servicing install inside the PKI window.
         function Install-FeatureBounded {
-            param([string]$Name, [string]$Label, [int]$TimeoutSec = 600)
-            # Fast local pre-check: if the role binaries are already present (pre-staged
-            # by Phase 2/3 DSC), skip Install-WindowsFeature ENTIRELY -- even a no-op
-            # install runs the ServerManager "Collecting data" inventory that can wedge.
-            # W3SVC is registered by the Web-Server role; CertSvc by Adcs-Cert-Authority
-            # (at feature install, before CA config) -- their presence proves the feature.
+            param([string]$Name, [string]$Label)
             $svcName = switch ($Name) { 'Web-Server' { 'W3SVC' } 'Adcs-Cert-Authority' { 'CertSvc' } default { $null } }
-            if ($svcName -and (Get-Service -Name $svcName -ErrorAction SilentlyContinue)) {
-                _Log "$Label -- $Name already installed (service $svcName present, pre-staged by DSC); skipping Install-WindowsFeature."
-                _Progress "$Label -- already present (pre-staged by DSC); skipping install"
+            if (-not $svcName) { return }
+            if (Get-Service -Name $svcName -ErrorAction SilentlyContinue) {
+                _Log "$Label -- $Name present (service $svcName); pre-staged by Phase 2/3 DSC."
+                _Progress "$Label -- already present (pre-staged); skipping install"
                 return
             }
-            $fj = Start-Job -ScriptBlock {
-                param($n)
-                Import-Module ServerManager -ErrorAction Stop
-                Install-WindowsFeature $n -IncludeManagementTools
-            } -ArgumentList $Name
-            $fsw = [System.Diagnostics.Stopwatch]::StartNew()
-            while ($fj.State -eq 'Running') {
-                _Progress "$Label (Install-WindowsFeature $Name)"
-                Start-Sleep -Seconds 5
-                if ($fsw.Elapsed.TotalSeconds -ge $TimeoutSec) {
-                    Stop-Job $fj -ErrorAction SilentlyContinue
-                    Remove-Job $fj -Force -ErrorAction SilentlyContinue
-                    throw "Install-WindowsFeature $Name wedged in ServerManager 'Collecting data' for > ${TimeoutSec}s -- needs host reboot"
-                }
-            }
-            $fr = Receive-Job $fj -ErrorAction SilentlyContinue
-            Remove-Job $fj -Force -ErrorAction SilentlyContinue
-            return $fr
+            throw "$Name is NOT installed (service $svcName absent). It must be pre-staged by Phase 2/3 DSC (InstallFeatureForSCCM InstallCA/IsOfflineRootCA); PKI will not run Install-WindowsFeature inside its window."
         }
 
         # The Enterprise Subordinate CA install PUBLISHES to the Configuration NC
