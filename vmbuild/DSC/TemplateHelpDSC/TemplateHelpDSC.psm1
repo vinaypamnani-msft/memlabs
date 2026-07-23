@@ -4152,6 +4152,11 @@ class InstallFeatureForSCCM {
     [DscProperty(Mandatory)]
     [string[]] $Role
 
+    # Optional extra features the caller wants installed alongside the role's
+    # baseline set (e.g. PKI CA VMs pre-installing Web-Server + Adcs-Cert-Authority).
+    [DscProperty()]
+    [string[]] $AdditionalFeatures
+
     [DscProperty(NotConfigurable)]
     [string] $Version = "8"
 
@@ -4325,6 +4330,16 @@ class InstallFeatureForSCCM {
             foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
                 [void]$features.Add($f)
             }
+        }
+
+        # Extra features requested by the caller. PKI CA VMs pass Web-Server +
+        # Adcs-Cert-Authority here so the role BINARIES are laid down during Phase 2/3
+        # DSC -- under lighter load and with DSC's native reboot handling -- leaving the
+        # post-Phase2 PKI orchestrator (Install-PKI) to only CONFIGURE the CA instead of
+        # running a ServerManager servicing install inside its fragile, heavily-loaded
+        # window (where it wedged on "Collecting data...").
+        foreach ($f in @($this.AdditionalFeatures)) {
+            if ($f) { [void]$features.Add($f) }
         }
 
         return @($features)

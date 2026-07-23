@@ -134,9 +134,10 @@
         }
 
         InstallFeatureForSCCM InstallFeature {
-            Name      = "WorkgroupMember"
-            Role      = "WorkgroupMember"
-            DependsOn = "[SetCustomPagingFile]PagingSettings"
+            Name               = "WorkgroupMember"
+            Role               = "WorkgroupMember"
+            AdditionalFeatures = @(if ($thisVM.role -eq 'StandaloneRootCA') { 'Adcs-Cert-Authority' } elseif ($thisVM.InstallCA) { 'Web-Server'; 'Adcs-Cert-Authority' })
+            DependsOn          = "[SetCustomPagingFile]PagingSettings"
         }
 
         WriteStatus Complete {

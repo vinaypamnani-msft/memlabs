@@ -173,9 +173,10 @@
         }
 
         InstallFeatureForSCCM InstallFeature {
-            Name      = 'DC'
-            Role      = 'DC'
-            DependsOn = "[InitializeDisks]InitDisks"
+            Name               = 'DC'
+            Role               = 'DC'
+            AdditionalFeatures = @(if ($thisVM.InstallCA) { 'Web-Server'; 'Adcs-Cert-Authority' })
+            DependsOn          = "[InitializeDisks]InitDisks"
         }
 
         # Configure the custom page file BEFORE promoting the DC and suppress its
