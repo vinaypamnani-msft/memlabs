@@ -618,6 +618,65 @@ Write-DscStatus "$Tag Starting perfloading"
         }
     }
 
+    # --- OSD content targeting (save DP disk space) ---------------------------
+    # The multi-GB OSD content (boot images, OS images, OS upgrade packages, USMT)
+    # is only useful on a DP an OSDClient can actually PXE-boot from. PXE is a
+    # subnet-local DHCP broadcast, so an OSDClient can only boot from a DP on its
+    # OWN subnet (cross-subnet PXE would need an ip-helper/DHCP relay we don't set
+    # up). So: distribute OSD content ONLY to DP(s) that share a subnet with an
+    # OSDClient, and enable PXE on those DP(s). If the lab has NO OSDClient, OSD
+    # content is still created but NOT distributed anywhere (saves ~25GB per DP);
+    # add an OSDClient on a DP's subnet and re-run to distribute + enable PXE.
+    $OsdDpGroupName = "OSD DPS"
+    $osdDefaultNet = $deployConfig.vmOptions.network
+    $osdNetOf = { param($vm) if ($vm.network) { "$($vm.network)" } else { "$osdDefaultNet" } }
+    $osdSubnets = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | ForEach-Object { & $osdNetOf $_ } | Where-Object { $_ } | Select-Object -Unique)
+    $osdDistTarget = $null
+    $hasOsdTargets = $false
+    if ($osdSubnets.Count -eq 0) {
+        Write-DscStatus "$Tag No OSDClient in this lab -- OSD content will be created but NOT distributed (saves DP disk space). Add an OSDClient on a DP's subnet and re-run to distribute + enable PXE."
+    }
+    else {
+        Write-DscStatus "$Tag OSDClient subnet(s): $($osdSubnets -join ', ') -- locating same-subnet DP(s) for OSD content + PXE"
+        $osdDps = @()
+        foreach ($dp in @(Get-CMDistributionPoint -AllSite -ErrorAction SilentlyContinue)) {
+            $dpFqdn = ($dp.NetworkOSPath -replace '^\\\\', '')
+            $dpShort = ($dpFqdn -split '\.')[0]
+            $dpVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $dpShort } | Select-Object -First 1
+            if (-not $dpVm) { continue }
+            if ($osdSubnets -contains (& $osdNetOf $dpVm)) { $osdDps += [PSCustomObject]@{ Fqdn = $dpFqdn; Short = $dpShort } }
+        }
+        $osdDps = @($osdDps | Sort-Object Short -Unique)
+        if ($osdDps.Count -eq 0) {
+            Write-DscStatus "$Tag WARNING: OSDClient exists but NO DP is on its subnet(s) $($osdSubnets -join ', ') -- OSD content NOT distributed and PXE cannot work. Add a DP (SiteSystem) on the OSDClient's subnet."
+        }
+        else {
+            if ("$OsdDpGroupName" -notin @((Get-CMDistributionPointGroup -ErrorAction SilentlyContinue).Name)) {
+                $null = New-CMDistributionPointGroup -Name $OsdDpGroupName -Description "DPs on an OSDClient subnet (OSD content + PXE)" -ErrorAction SilentlyContinue
+                Write-DscStatus "$Tag Created DP group '$OsdDpGroupName'"
+            }
+            foreach ($d in $osdDps) {
+                try { Add-CMDistributionPointToGroup -DistributionPointGroupName $OsdDpGroupName -DistributionPointName $d.Short -ErrorAction Stop; Write-DscStatus "$Tag Added OSD DP '$($d.Short)' to '$OsdDpGroupName'" }
+                catch { Write-DscStatus "$Tag OSD DP '$($d.Short)' not added to '$OsdDpGroupName' (likely already a member)" }
+                # Enable PXE. Prefer the NonWDS PXE responder (no separate WDS role);
+                # fall back to plain EnablePxe if this build lacks -EnableNonWdsPxe.
+                try {
+                    Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -EnableNonWdsPxe $true -ErrorAction Stop
+                    Write-DscStatus "$Tag Enabled PXE (NonWDS) on OSD DP '$($d.Short)'"
+                }
+                catch {
+                    try {
+                        Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -ErrorAction Stop
+                        Write-DscStatus "$Tag Enabled PXE on OSD DP '$($d.Short)'"
+                    }
+                    catch { Write-DscStatus "$Tag WARNING: Failed to enable PXE on OSD DP '$($d.Short)': $($_.Exception.Message)" }
+                }
+            }
+            $osdDistTarget = $OsdDpGroupName
+            $hasOsdTargets = $true
+        }
+    }
+
     # Get all boot images. On a child Primary in a hierarchy, boot images
     # are replicated from the CAS and may not be available immediately.
     $BootImages = @(Get-CMBootImage)
@@ -671,10 +730,13 @@ Write-DscStatus "$Tag Starting perfloading"
         if ($alreadyDistributed) {
             Write-DscStatus "$Tag Boot image already distributed to $($dpTargets.Count) DP(s): $biName ($packageId) -- skipping"
         }
+        elseif (-not $hasOsdTargets) {
+            Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing boot image '$biName' ($packageId) (saves space); it will distribute + PXE-enable when an OSDClient is added on a DP subnet"
+        }
         else {
             try {
-                Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName "ALL DPS"
-                Write-DscStatus "$Tag Successfully started distribution for boot image: $biName ($packageId)"
+                Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName $osdDistTarget
+                Write-DscStatus "$Tag Successfully started distribution for boot image '$biName' ($packageId) to '$osdDistTarget'"
             }
             catch {
                 $biDistMsg = "$_"
@@ -785,11 +847,18 @@ Write-DscStatus "$Tag Starting perfloading"
             # Add cm_svc user as a CM Account
             $unencrypted = Get-Content $cm_svc_file
         }
-        #distribute the OS packages and upgrade packages 
-        Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName  "ALL DPS" -ErrorAction SilentlyContinue
-        Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully distributed for OS Image and upgrade packages"
+        #distribute the OS packages and upgrade packages -- ONLY to OSD-capable DP(s)
+        # (same subnet as an OSDClient). No OSDClient -> skip so the multi-GB content
+        # doesn't fill every DP; a re-run distributes once an OSDClient is added.
+        if ($hasOsdTargets) {
+            Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
+            Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
+            Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
+            Write-DscStatus "$Tag Distributed OS image + upgrade + USMT content to '$osdDistTarget' (OSDClient subnet DP)"
+        }
+        else {
+            Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing OS image/upgrade/USMT content (saves space); will distribute when an OSDClient is added"
+        }
      
 
         # Create the in-place upgrade task sequence
