@@ -101,7 +101,17 @@ if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq
     exit 1
 }
 
-. $commonPath -InJob
+# Initialize storage so $Common.LocalAdmin (vmbuildadmin credential) is populated
+# from the cached vmbuildadmin.txt. Do NOT use -InJob here: it skips storage init,
+# leaving $Common.LocalAdmin null so Get-VmSession fails with "password is null".
+# Skip the slow maintenance/cache/host-prep work we don't need for a diagnostic.
+. $commonPath -SkipMaintenanceRefresh -SkipVmCacheRefresh -SkipEnvironmentDetection -SkipHostPreparation
+
+if (-not $Common.LocalAdmin -or -not $Common.LocalAdmin.Password) {
+    Write-Host "ERROR: local admin (vmbuildadmin) credential not loaded. Expected cache at $(Join-Path $vmbuildRoot 'cache\vmbuildadmin.txt')." -ForegroundColor Red
+    Write-Host "  Run this from an initialized vmbuild session (or refresh your storage token) so Get-VmSession has a password." -ForegroundColor Yellow
+    exit 1
+}
 
 # --- Resolve targets ---------------------------------------------------------
 if ($ConfigPath -and (Test-Path $ConfigPath)) {
