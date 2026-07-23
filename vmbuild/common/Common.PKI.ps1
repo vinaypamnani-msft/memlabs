@@ -2329,35 +2329,20 @@ Critical=Yes
                                 break
                             }
                             if ($subLastErr -match 'already installed') {
-                                # CA installed but no CSR: regenerate it via certreq.
-                                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
-                                if ($svc) {
-                                    _Log "CA already installed (no CSR file found). Generating new CSR via certreq..."
-                                    $infContent = @"
-[NewRequest]
-Subject = "CN=$IntCAName"
-KeyLength = 2048
-Exportable = TRUE
-UserProtected = FALSE
-MachineKeySet = TRUE
-ProviderName = "RSA#Microsoft Software Key Storage Provider"
-HashAlgorithm = SHA256
-RequestType = PKCS10
-[RequestAttributes]
-CertificateTemplate = SubCA
-"@
-                                    $infFile = Join-Path $IntCAFilesPath "subreq.inf"
-                                    Set-Content -Path $infFile -Value $infContent -Force
-                                    & certreq.exe -new $infFile $reqFile | Out-Null
-                                    if (-not (Test-Path $reqFile)) {
-                                        throw "Failed to generate CSR. CA is partially installed but CSR could not be created."
-                                    }
-                                    _Log "CSR generated from existing installation: $reqFile"
-                                    $subConfigured = $true
-                                    break
-                                }
-                                # 'already installed' but no service: fall through to throw.
-                                throw
+                                # CA installed but the CSR file is GONE. The old recovery ran
+                                # `certreq -new`, which (a) HANGS with no timeout in a non-
+                                # interactive PSDirect session (PROVEN: step2 wedged here on a
+                                # healthy, idle PL-HOAGIE -- durable log's last line was
+                                # "Generating new CSR via certreq...") and (b) generates a
+                                # MISMATCHED key that does NOT correspond to the installed CA.
+                                # Correct recovery: tear down the partial CA so the NEXT attempt
+                                # does a clean Install-AdcsCertificationAuthority that regenerates
+                                # a matching key + CSR. Bounded by maxSubTries.
+                                _Log "CA already installed but CSR file missing -- uninstalling the partial CA so the next attempt reinstalls cleanly (avoids the hang-prone, key-mismatching certreq -new path)."
+                                _Progress "tearing down partial CA (CSR missing) for a clean reinstall..."
+                                try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+                                Start-Sleep -Seconds 5
+                                continue
                             }
                             # Classify the post-dcpromo AD-publish window as transient.
                             $isRange = $subLastErr -match '0x80072082|ERROR_DS_RANGE_CONSTRAINT|acceptable range'
