@@ -2095,6 +2095,32 @@ Empty=True
             # Enabling here guarantees it for the session-refresh + re-run sessions.
             try { & auditpol.exe /set /subcategory:"Group Membership" /success:enable 2>&1 | Out-Null; _Log "Enabled 'Audit Group Membership' (success) so Security 4627 captures token group SIDs at logon." } catch {}
             _Progress "Step 2: starting (checking existing CA state)..."
+
+            # Environment snapshot (fast LOCAL checks only -- NO ServerManager/CIM/LDAP that
+            # could hang). Written to the durable guest log so the FIRST lines tell us the
+            # box's servicing/token state when step2 began -- decoupled from the PSDirect
+            # channel. Tests the load-INDEPENDENT hypotheses: pending-reboot/CBS wedge and
+            # the settling-token (EA-less) race.
+            try {
+                $upMin = [int]([Environment]::TickCount / 60000)
+                _Log "[ENV] UptimeMin=$upMin (approx, from TickCount -- no WMI)"
+                $pendReboot = @()
+                if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $pendReboot += 'CBS' }
+                if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $pendReboot += 'WU' }
+                $pfro = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+                if ($pfro) { $pendReboot += 'PendingFileRename' }
+                _Log "[ENV] PendingReboot=$([string]::Join('+', $pendReboot) -replace '^$','none') (a stuck CBS/pending-reboot makes Install-WindowsFeature hang on 'Collecting data' even on an IDLE box)"
+                $ti = Get-Service -Name TrustedInstaller -ErrorAction SilentlyContinue
+                $tiw = @(Get-Process -Name TiWorker -ErrorAction SilentlyContinue)
+                _Log "[ENV] TrustedInstaller=$(if($ti){$ti.Status}else{'absent'}) TiWorkerProcs=$($tiw.Count)"
+                $w3 = Get-Service -Name W3SVC -ErrorAction SilentlyContinue
+                $cs = Get-Service -Name CertSvc -ErrorAction SilentlyContinue
+                _Log "[ENV] Web-Server(W3SVC)=$(if($w3){'present'}else{'ABSENT -> IIS NOT pre-staged'}) ADCS(CertSvc)=$(if($cs){'present'}else{'ABSENT -> ADCS NOT pre-staged'})"
+                $g = whoami /groups /fo list 2>&1 | Out-String
+                $ea = ($g -match '-519\b') -or ($g -match 'Enterprise Admins')
+                _Log "[ENV] Identity=$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) TokenEnterpriseAdmins=$ea (false => settling-token race; a fresh host session mints a PAC that carries EA)"
+            } catch { _Log "[ENV] snapshot error: $($_.Exception.Message)" }
+
             # Check if Sub CA is already fully configured (has a valid cert installed)
             $subCAComplete = $false
             $subCAPartial = $false
