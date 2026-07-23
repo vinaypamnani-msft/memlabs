@@ -786,6 +786,30 @@ function Install-SingleTierPKI {
             elseif ($writeReady -eq $false) { $class = 'AccessDenied' }
             elseif ($writeReady -eq $true) { $class = 'RangeConstraint' }
             _Log "[PKI-DIAG] classification=$class"
+            # AT-LOGON-TIME proof: Security 4627 'Group Membership' for THIS session's Logon
+            # ID lists the exact SIDs that were in the token WHEN THE SESSION WAS MINTED. EA
+            # absent there == the stale token was baked at logon (pre-GC-ready). klist shows
+            # the TGT age. LogonId via CIM association (no P/Invoke).
+            try {
+                $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue
+                $ls = $null
+                if ($proc) { $ls = Get-CimAssociatedInstance $proc -ResultClassName Win32_LogonSession -ErrorAction SilentlyContinue | Select-Object -First 1 }
+                if ($ls) {
+                    $luidHex = ('0x{0:X}' -f [int64]$ls.LogonId)
+                    _Log "[PKI-DIAG] Session LogonId=$luidHex  LogonStart=$($ls.StartTime)"
+                    $sec4627 = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4627 } -MaxEvents 200 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match [regex]::Escape($luidHex) } | Select-Object -First 1
+                    if ($sec4627) {
+                        $logonEA = [bool]($sec4627.Message -match 'S-1-5-21-[0-9-]+-519')
+                        _Log "[PKI-DIAG] AT-LOGON (4627 GroupMembership for $luidHex): EnterpriseAdmins present=$logonEA @ $($sec4627.TimeCreated)"
+                        if (-not $logonEA) { _Log "[PKI-DIAG] => token minted WITHOUT Enterprise Admins at logon (pre-GC-ready) -- settling-token proven AT-LOGON." }
+                    }
+                    else { _Log "[PKI-DIAG] 4627 GroupMembership for $luidHex not found (Audit Group Membership subcategory may be off, or aged out)." }
+                }
+            } catch { _Log "[PKI-DIAG] logon-event check error: $($_.Exception.Message)" }
+            try {
+                $kl = klist 2>&1 | Out-String
+                foreach ($ln in ($kl -split "`r?`n")) { if ($ln -match 'Start Time|End Time|Cached TGT|Current LogonId|Server: krbtgt') { _Log "[PKI-DIAG] klist: $($ln.Trim())" } }
+            } catch {}
             return @{ Class = $class; HasEA = $hasEA; WriteReady = $writeReady }
         }
 
@@ -1860,6 +1884,30 @@ Empty=True
             elseif ($writeReady -eq $false) { $class = 'AccessDenied' }
             elseif ($writeReady -eq $true) { $class = 'RangeConstraint' }
             _Log "[PKI-DIAG] classification=$class"
+            # AT-LOGON-TIME proof: Security 4627 'Group Membership' for THIS session's Logon
+            # ID lists the exact SIDs that were in the token WHEN THE SESSION WAS MINTED. EA
+            # absent there == the stale token was baked at logon (pre-GC-ready). klist shows
+            # the TGT age. LogonId via CIM association (no P/Invoke).
+            try {
+                $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue
+                $ls = $null
+                if ($proc) { $ls = Get-CimAssociatedInstance $proc -ResultClassName Win32_LogonSession -ErrorAction SilentlyContinue | Select-Object -First 1 }
+                if ($ls) {
+                    $luidHex = ('0x{0:X}' -f [int64]$ls.LogonId)
+                    _Log "[PKI-DIAG] Session LogonId=$luidHex  LogonStart=$($ls.StartTime)"
+                    $sec4627 = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4627 } -MaxEvents 200 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match [regex]::Escape($luidHex) } | Select-Object -First 1
+                    if ($sec4627) {
+                        $logonEA = [bool]($sec4627.Message -match 'S-1-5-21-[0-9-]+-519')
+                        _Log "[PKI-DIAG] AT-LOGON (4627 GroupMembership for $luidHex): EnterpriseAdmins present=$logonEA @ $($sec4627.TimeCreated)"
+                        if (-not $logonEA) { _Log "[PKI-DIAG] => token minted WITHOUT Enterprise Admins at logon (pre-GC-ready) -- settling-token proven AT-LOGON." }
+                    }
+                    else { _Log "[PKI-DIAG] 4627 GroupMembership for $luidHex not found (Audit Group Membership subcategory may be off, or aged out)." }
+                }
+            } catch { _Log "[PKI-DIAG] logon-event check error: $($_.Exception.Message)" }
+            try {
+                $kl = klist 2>&1 | Out-String
+                foreach ($ln in ($kl -split "`r?`n")) { if ($ln -match 'Start Time|End Time|Cached TGT|Current LogonId|Server: krbtgt') { _Log "[PKI-DIAG] klist: $($ln.Trim())" } }
+            } catch {}
             return @{ Class = $class; HasEA = $hasEA; WriteReady = $writeReady }
         }
 

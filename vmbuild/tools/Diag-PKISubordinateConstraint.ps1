@@ -372,6 +372,31 @@ $diagScript = {
     }
     catch { _R "token analysis error: $($_.Exception.Message)" }
 
+    _H "AT-LOGON-TIME EVIDENCE (Security 4627 group membership for this Logon ID + klist)"
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue
+        $ls = $null
+        if ($proc) { $ls = Get-CimAssociatedInstance $proc -ResultClassName Win32_LogonSession -ErrorAction SilentlyContinue | Select-Object -First 1 }
+        if ($ls) {
+            $luidHex = ('0x{0:X}' -f [int64]$ls.LogonId)
+            _R "Session LogonId=$luidHex   LogonStart=$($ls.StartTime)"
+            $sec4627 = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4627 } -MaxEvents 200 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match [regex]::Escape($luidHex) } | Select-Object -First 1
+            if ($sec4627) {
+                $logonEA = [bool]($sec4627.Message -match 'S-1-5-21-[0-9-]+-519')
+                _R "AT-LOGON (4627 GroupMembership for $luidHex): Enterprise Admins present=$logonEA   @ $($sec4627.TimeCreated)"
+                if (-not $logonEA) { _R "=> token minted WITHOUT Enterprise Admins at logon (pre-GC-ready) -- settling-token proven AT-LOGON." }
+            }
+            else { _R "4627 GroupMembership for $luidHex not found (Audit Group Membership subcategory may be off, or aged out)." }
+        }
+        else { _R "(could not resolve this process's Logon session)" }
+    }
+    catch { _R "logon-event check error: $($_.Exception.Message)" }
+    try {
+        $kl = klist 2>&1 | Out-String
+        foreach ($ln in ($kl -split "`r?`n")) { if ($ln -match 'Start Time|End Time|Cached TGT|Current LogonId|Server: krbtgt') { _R "  klist: $($ln.Trim())" } }
+    }
+    catch { _R "klist error: $($_.Exception.Message)" }
+
     _H "SERVICES"
     foreach ($svc in 'NTDS', 'Netlogon', 'certsvc', 'DNS', 'kdc') {
         try { $s = Get-Service -Name $svc -ErrorAction SilentlyContinue; _R ("{0}: {1}" -f $svc, $(if ($s) { $s.Status } else { 'absent' })) } catch { _R "$svc : $($_.Exception.Message)" }
