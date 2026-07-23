@@ -1700,18 +1700,35 @@ Empty=True
 
         $ErrorActionPreference = 'Stop'
         $report = [System.Collections.Generic.List[string]]::new()
-        function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
+        # Durable guest-side log that SURVIVES a host-side job kill. $report is BUFFERED
+        # and returned only when the scriptblock finishes, so when Invoke-VmCommand stops
+        # a stalled job the buffer is LOST and the host log shows nothing. Mirror every
+        # _Log/_Progress line to this file (immediate flush) so the host can pull it back
+        # after a stall and see EXACTLY where step2 wedged.
+        $Step2LogFile = "C:\staging\MemLabs-PKI-Step2.log"
+        try {
+            $sldir = Split-Path $Step2LogFile -Parent
+            if (-not (Test-Path $sldir)) { New-Item -ItemType Directory -Path $sldir -Force | Out-Null }
+            "==== PKI Step 2 (Subordinate CA '$IntCAName') start $(Get-Date -Format 'o') PID=$PID ====" | Out-File -FilePath $Step2LogFile -Encoding utf8 -Force
+        } catch {}
+        function _Log($m) {
+            $line = "$(Get-Date -Format 'HH:mm:ss') $m"
+            $report.Add($line)
+            try { Add-Content -LiteralPath $Step2LogFile -Value $line -ErrorAction SilentlyContinue } catch {}
+        }
 
         # Live heartbeat to the host. _Log is BUFFERED and only returns when the whole
         # scriptblock finishes, so step2 looks frozen in real time. _Progress emits a
         # Write-Progress record that Invoke-VmCommand -PollProgress forwards LIVE to the
         # console AND resets the stall timeout, so a genuine wedge is caught fast while a
-        # slow-but-working step is not killed. Mirrors the single-tier CA path.
+        # slow-but-working step is not killed. It ALSO appends to the durable guest log so
+        # the LAST heartbeat before a wedge survives a job kill. Mirrors the single-tier CA path.
         $step2ProgressStart = Get-Date
         function _Progress($status) {
             try {
                 $el = [int]((Get-Date) - $step2ProgressStart).TotalSeconds
                 Write-Progress -Activity "Subordinate CA '$IntCAName'" -Status "$status (elapsed ${el}s)"
+                Add-Content -LiteralPath $Step2LogFile -Value "$(Get-Date -Format 'HH:mm:ss') [PROGRESS] $status (elapsed ${el}s)" -ErrorAction SilentlyContinue
             } catch {}
         }
 
@@ -1771,22 +1788,38 @@ Empty=True
             # Create+delete a throwaway container under Public Key Services -- the
             # closest safe proxy for the CA's own publish write. Readable != writable
             # right after dcpromo; only the WRITE surfaces the 0x80072082 window.
-            try {
-                $rootDSE = [ADSI]"LDAP://RootDSE"
-                $configNC = $rootDSE.configurationNamingContext
-                if (-not $configNC) { return @{ Ready = $false; Transient = $true; Err = "no configNC" } }
-                $pks = [ADSI]"LDAP://CN=Public Key Services,CN=Services,$configNC"
-                $probeName = "memlabs-pkiprobe-" + ([guid]::NewGuid().ToString('N').Substring(0, 8))
-                $child = $pks.Create("container", "CN=$probeName")
-                $child.SetInfo()
-                try { $pks.Delete("container", "CN=$probeName") } catch {}
-                return @{ Ready = $true; Transient = $false; Err = $null }
+            # The [ADSI] bind + SetInfo() write are SYNCHRONOUS with NO timeout and HANG
+            # INDEFINITELY against a wedged/overloaded local DC -- that froze the pre-install
+            # gate before its heartbeat could fire. Run in a CHILD JOB capped at 45s so a
+            # hung probe is returned as a transient 'busy' and the caller keeps waiting +
+            # heart-beating instead of blocking forever.
+            $pj = Start-Job -ScriptBlock {
+                try {
+                    $rootDSE = [ADSI]"LDAP://RootDSE"
+                    $configNC = $rootDSE.configurationNamingContext
+                    if (-not $configNC) { return @{ Ready = $false; Transient = $true; Err = "no configNC" } }
+                    $pks = [ADSI]"LDAP://CN=Public Key Services,CN=Services,$configNC"
+                    $probeName = "memlabs-pkiprobe-" + ([guid]::NewGuid().ToString('N').Substring(0, 8))
+                    $child = $pks.Create("container", "CN=$probeName")
+                    $child.SetInfo()
+                    try { $pks.Delete("container", "CN=$probeName") } catch {}
+                    return @{ Ready = $true; Transient = $false; Err = $null }
+                }
+                catch {
+                    $m = "$($_.Exception.Message)"
+                    $transient = $m -match '0x80072082|RANGE_CONSTRAINT|acceptable range|0x8007200E|ERROR_DS_BUSY|0x8007200F|UNWILLING_TO_PERFORM|busy|0x80070005|access is denied'
+                    return @{ Ready = $false; Transient = $transient; Err = $m }
+                }
             }
-            catch {
-                $m = "$($_.Exception.Message)"
-                $transient = $m -match '0x80072082|RANGE_CONSTRAINT|acceptable range|0x8007200E|ERROR_DS_BUSY|0x8007200F|UNWILLING_TO_PERFORM|busy|0x80070005|access is denied'
-                return @{ Ready = $false; Transient = $transient; Err = $m }
+            if (Wait-Job $pj -Timeout 45) {
+                $r = Receive-Job $pj -ErrorAction SilentlyContinue
+                Remove-Job $pj -Force -ErrorAction SilentlyContinue
+                if ($r) { return $r }
+                return @{ Ready = $false; Transient = $true; Err = "probe returned no result" }
             }
+            Stop-Job $pj -ErrorAction SilentlyContinue
+            Remove-Job $pj -Force -ErrorAction SilentlyContinue
+            return @{ Ready = $false; Transient = $true; Err = "probe timed out after 45s (DC not responding to LDAP write - transient)" }
         }
         function Wait-AdDsReady {
             param([int]$TimeoutSec = 300, [switch]$RequireWritable)
@@ -2469,6 +2502,27 @@ CertificateTemplate = SubCA
         $sb2 = $null
         if ($result2 -and $result2.ScriptBlockOutput) { $sb2 = $result2.ScriptBlockOutput } else { $sb2 = $result2 }
         $cls2 = if ($sb2 -and $sb2.FailClass) { "$($sb2.FailClass)" } elseif (-not ($result2 -and $result2.ScriptBlockOutput)) { "channel-died/timeout" } else { "unknown" }
+
+        # Pull the DURABLE guest-side step2 log so the host log shows WHERE it wedged --
+        # the buffered in-guest $report is LOST when a stalled job is killed, which is why
+        # "review the logs, you never find anything." Bounded (-AsJob -TimeoutSeconds 60)
+        # so a dead channel can't hang the host here too. Pulled BEFORE the retry re-runs
+        # step2 (which overwrites the file).
+        try {
+            $tailRes = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName -DisplayName "Pull Step2 guest log" -SuppressLog `
+                -AsJob -TimeoutSeconds 60 `
+                -ScriptBlock { if (Test-Path "C:\staging\MemLabs-PKI-Step2.log") { Get-Content -LiteralPath "C:\staging\MemLabs-PKI-Step2.log" -Tail 40 } }
+            $tail = if ($tailRes -and $tailRes.ScriptBlockOutput) { $tailRes.ScriptBlockOutput } else { $tailRes }
+            if ($tail) {
+                Write-Log "[TwoTierPKI] ---- last 40 lines of the DURABLE guest step2 log (class=$cls2) ----"
+                foreach ($tl in @($tail)) { Write-Log "[TwoTierPKI][guest-step2] $tl" }
+                Write-Log "[TwoTierPKI] ---- end guest step2 log ----"
+            }
+            else {
+                Write-Log "[TwoTierPKI] Could not pull the guest step2 log (channel may be dead or file missing)." -Warning
+            }
+        }
+        catch { Write-Log "[TwoTierPKI] guest step2 log pull errored: $($_.Exception.Message)" -Warning }
 
         # Tier A (cheap, no reboot): drop the cached session and retry. A FRESH session
         # recovers BOTH failure modes we actually see: (1) a DEAD PSDirect channel (guest
