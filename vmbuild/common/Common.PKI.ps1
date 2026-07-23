@@ -832,6 +832,11 @@ function Install-SingleTierPKI {
         }
 
         try {
+            # Ensure the 'Audit Group Membership' subcategory is ON so Security event 4627
+            # records the token's group SIDs at each logon -- the at-logon EA evidence the
+            # settling-token diagnostic reads. Idempotent; left enabled (harmless, low volume).
+            # Enabling here guarantees it for the session-refresh + re-run sessions.
+            try { & auditpol.exe /set /subcategory:"Group Membership" /success:enable 2>&1 | Out-Null; _Log "Enabled 'Audit Group Membership' (success) so Security 4627 captures token group SIDs at logon." } catch {}
             # Idempotency: only skip when the CA is genuinely CONFIGURED.
             if (Test-CaConfigured) {
                 _Log "CA already configured (Active CA present) - skipping installation"
@@ -1934,6 +1939,11 @@ Empty=True
         }
 
         try {
+            # Ensure the 'Audit Group Membership' subcategory is ON so Security event 4627
+            # records the token's group SIDs at each logon -- the at-logon EA evidence the
+            # settling-token diagnostic reads. Idempotent; left enabled (harmless, low volume).
+            # Enabling here guarantees it for the session-refresh + re-run sessions.
+            try { & auditpol.exe /set /subcategory:"Group Membership" /success:enable 2>&1 | Out-Null; _Log "Enabled 'Audit Group Membership' (success) so Security 4627 captures token group SIDs at logon." } catch {}
             # Check if Sub CA is already fully configured (has a valid cert installed)
             $subCAComplete = $false
             $subCAPartial = $false
