@@ -8246,6 +8246,7 @@ function Test-PullDPConfiguration {
                     -Filter "ServerNALPath LIKE '%$dpName%'" -ErrorAction Stop)
             if ($pkgStatus.Count -eq 0) {
                 $results.Passed = $false
+                $results.CollectLogs = $true
                 $results.Details.Add("FAIL: DP '$dpName' has NO package distribution rows (SMS_PackageStatusDistPointsSummarizer) -- no content has been targeted/pulled to this pull DP yet; clients get empty DP locations and loop in ccmsetup")
             }
             else {
@@ -8253,6 +8254,9 @@ function Test-PullDPConfiguration {
                 $notInstalled = @($pkgStatus | Where-Object { $_.State -ne 0 })
                 $results.Details.Add("OK: DP '$dpName' has $($pkgStatus.Count) package row(s), $installedCount Installed")
                 if ($notInstalled.Count -gt 0) {
+                    # Collect the pull DP's transfer logs whenever content is behind
+                    # (even a WARN), so we can see WHY it is stuck without a hard FAIL.
+                    $results.CollectLogs = $true
                     # Split severity so the pull DP missing content is ALWAYS surfaced
                     # (never masked by a fallback DP), but a DP that is still pulling
                     # doesn't hard-fail the build: a package the pull DP is still
@@ -8315,13 +8319,12 @@ function Test-PullDPConfiguration {
         -DisplayName "Phase11-PullDP-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 
-    # If the pull-DP config/content check failed, auto-collect the DP's own
-    # content-transfer logs (PullDP.log + DataTransferService.log from the CCM
-    # client log dir) and the source site server's distmgr/PkgXferMgr logs into
-    # the host logs folder, so the pull failure can be triaged offline without
-    # hand-running commands against the VMs.
-    if (($result.ScriptBlockOutput -is [hashtable]) -and ($result.ScriptBlockOutput.Passed -eq $false)) {
-        Write-Log "[Phase $Phase] $VMName [PullDP]: content/config check failed -- collecting pull-DP + source logs into the logs folder" -OutputStream
+    # If the pull DP failed OR is behind on content (even a WARN), auto-collect its
+    # own content-transfer logs (PullDP.log + DataTransferService.log) and the source
+    # site server's distmgr/PkgXferMgr logs into the host logs folder, so the pull
+    # failure/backlog can be triaged offline without hand-running commands.
+    if (($result.ScriptBlockOutput -is [hashtable]) -and (($result.ScriptBlockOutput.Passed -eq $false) -or ($result.ScriptBlockOutput.ContainsKey('CollectLogs') -and $result.ScriptBlockOutput.CollectLogs))) {
+        Write-Log "[Phase $Phase] $VMName [PullDP]: content behind/failed -- collecting pull-DP + source logs into the logs folder" -OutputStream
         $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'PullDP' -Collector $Phase11CcmClientLogCollector
         $null = Save-Phase11GuestLogs -VMName $parentVM.vmName -DomainName $domain -RoleLabel 'PullDP-Source' -Collector $Phase11SmsSiteLogCollector
     }
@@ -8479,21 +8482,19 @@ function Test-CMClientPackageDistribution {
         -DisplayName "Phase11-ClientPkg-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 
-    # On a distribution failure, auto-collect the site server's distmgr.log +
-    # PkgXferMgr.log (they name the failing DP + reason, e.g. a pull-DP 404) into
-    # the host logs folder so it can be triaged without hand-running commands.
-    if (($result.ScriptBlockOutput -is [hashtable]) -and ($result.ScriptBlockOutput.Passed -eq $false)) {
-        Write-Log "[Phase $Phase] $VMName [ClientPkg]: distribution check failed -- collecting distmgr/PkgXferMgr logs into the logs folder" -OutputStream
+    # On a distribution failure OR any DP behind on the client package (even a
+    # WARN, e.g. a Secondary DP stuck at ContentValidating), auto-collect the site
+    # server's distmgr.log + PkgXferMgr.log and the failing DP's own logs so the
+    # reason is captured without hand-running commands.
+    $failing = @()
+    if (($result.ScriptBlockOutput -is [hashtable]) -and $result.ScriptBlockOutput.ContainsKey('FailingDPs')) { $failing = @($result.ScriptBlockOutput.FailingDPs | Where-Object { $_ }) }
+    if (($result.ScriptBlockOutput -is [hashtable]) -and (($result.ScriptBlockOutput.Passed -eq $false) -or ($failing.Count -gt 0))) {
+        Write-Log "[Phase $Phase] $VMName [ClientPkg]: distribution failed or a DP is behind -- collecting distmgr/PkgXferMgr logs into the logs folder" -OutputStream
         $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'ClientPkg' -Collector $Phase11SmsSiteLogCollector
-        # Also pull logs from each DP that lacks the client package (content
-        # validation stuck, pull behind, etc.) so the reason is captured on the DP
-        # itself -- e.g. a Secondary's DP stuck at ContentValidating (State 7).
-        $failing = @()
-        if ($result.ScriptBlockOutput.ContainsKey('FailingDPs')) { $failing = @($result.ScriptBlockOutput.FailingDPs) }
-        foreach ($dpShort in ($failing | Where-Object { $_ } | Select-Object -Unique)) {
+        foreach ($dpShort in ($failing | Select-Object -Unique)) {
             $dpVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$dpShort".ToUpper()) } | Select-Object -First 1
             if (-not $dpVm) { continue }
-            Write-Log "[Phase $Phase] $VMName [ClientPkg]: collecting DP logs from failing DP '$($dpVm.vmName)'" -OutputStream
+            Write-Log "[Phase $Phase] $VMName [ClientPkg]: collecting DP logs from behind/failing DP '$($dpVm.vmName)'" -OutputStream
             $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11CcmClientLogCollector
             $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11SmsSiteLogCollector
         }
