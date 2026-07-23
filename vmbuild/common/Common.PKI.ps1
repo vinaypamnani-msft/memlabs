@@ -649,6 +649,117 @@ function Install-SingleTierPKI {
             return $out
         }
 
+        # ── In-flight ADVANCED DIAGNOSTICS (mirrors the two-tier path) ────────
+        # Runs automatically when the Enterprise Root CA publish keeps failing, so
+        # the ground truth (identity/EA token, Config-NC writability, container
+        # DACLs, DC health, topology/replication, certocm.log, DS events) lands in
+        # the build log without a manual re-run. Returns a classification the
+        # escalation ladder + host reboot decision are gated on.
+        function Invoke-PkiPublishDiagnostics {
+            param([datetime]$Since, [string]$Reason = "")
+            $hasEA = $null; $writeReady = $null; $writeErr = $null
+            _Log "──── PKI-DIAG ($Reason) ────"
+            try {
+                $wi = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+                _Log "[PKI-DIAG] Identity: $($wi.Name)  IsSystem=$($wi.IsSystem)"
+            } catch {}
+            try {
+                $g = whoami /groups /fo list 2>&1 | Out-String
+                $hasEA = ($g -match '-519\b') -or ($g -match 'Enterprise Admins')
+                $hasDA = ($g -match '-512\b') -or ($g -match 'Domain Admins')
+                $hasSA = ($g -match '-518\b') -or ($g -match 'Schema Admins')
+                _Log "[PKI-DIAG] Token EnterpriseAdmins=$hasEA DomainAdmins=$hasDA SchemaAdmins=$hasSA"
+            } catch { _Log "[PKI-DIAG] whoami error: $($_.Exception.Message)" }
+            try {
+                $probe = Test-ConfigNCWritable
+                $writeReady = [bool]$probe.Ready
+                $writeErr = "$($probe.Err)"
+                _Log "[PKI-DIAG] Config-NC write probe: Ready=$($probe.Ready) Transient=$($probe.Transient) Err=$writeErr"
+            } catch { _Log "[PKI-DIAG] write probe error: $($_.Exception.Message)" }
+            try {
+                $configCtx = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+                $pksDN = "CN=Public Key Services,CN=Services,$configCtx"
+                foreach ($c in 'CN=Certification Authorities', 'CN=NTAuthCertificates', 'CN=Enrollment Services') {
+                    try {
+                        $de = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$c,$pksDN")
+                        $sec = $de.ObjectSecurity
+                        $owner = $sec.GetOwner([System.Security.Principal.NTAccount]).Value
+                        $writers = @()
+                        foreach ($ace in $sec.GetAccessRules($true, $true, [System.Security.Principal.NTAccount])) {
+                            if ("$($ace.ActiveDirectoryRights)" -match 'Write|GenericAll|CreateChild') { $writers += "$($ace.AccessControlType):$($ace.IdentityReference.Value)" }
+                        }
+                        _Log "[PKI-DIAG] DACL $c owner=$owner writers=[$(( $writers | Select-Object -Unique) -join ', ')]"
+                    } catch { _Log "[PKI-DIAG] DACL $c error: $($_.Exception.Message)" }
+                }
+            } catch {}
+            try {
+                $dd = dcdiag /test:Services /test:Advertising /test:NetLogons 2>&1 | Out-String
+                foreach ($ln in ($dd -split "`r?`n")) { if ($ln -match 'passed test|failed test') { _Log "[PKI-DIAG] dcdiag: $($ln.Trim())" } }
+            } catch { _Log "[PKI-DIAG] dcdiag error: $($_.Exception.Message)" }
+            try {
+                $configCtx2 = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+                $dcCount = $null
+                try {
+                    $srch = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://CN=Sites,$configCtx2", "(objectClass=nTDSDSA)")
+                    $srch.PageSize = 100
+                    $dcCount = @($srch.FindAll()).Count
+                } catch {}
+                _Log "[PKI-DIAG] Forest DC count (nTDSDSA): $dcCount  (1 => no inter-DC replication possible; a persistent write refusal is purely local readiness)"
+                try {
+                    $bound = nltest /dsgetdc:$env:USERDNSDOMAIN 2>&1 | Out-String
+                    foreach ($ln in ($bound -split "`r?`n")) { if ($ln -match '\bDC:|Dom Name|Flags:|Our Site|The command') { _Log "[PKI-DIAG] dsgetdc: $($ln.Trim())" } }
+                } catch {}
+                try {
+                    $rr = repadmin /showrepl 2>&1 | Out-String
+                    foreach ($ln in ($rr -split "`r?`n")) { if ($ln -match 'error|fail|was successful|Last attempt|Source:|Naming Context|only one|no inbound|Default-First') { _Log "[PKI-DIAG] repadmin: $($ln.Trim())" } }
+                } catch {}
+                $sysvol = Get-SmbShare -Name SYSVOL -ErrorAction SilentlyContinue
+                $netlogon = Get-SmbShare -Name NETLOGON -ErrorAction SilentlyContinue
+                _Log "[PKI-DIAG] Shares: SYSVOL=$([bool]$sysvol) NETLOGON=$([bool]$netlogon)"
+                $dfsr = Get-Service -Name DFSR -ErrorAction SilentlyContinue
+                _Log "[PKI-DIAG] DFSR service: $(if ($dfsr) { $dfsr.Status } else { 'absent' })"
+                try {
+                    $sync = Get-WinEvent -FilterHashtable @{ LogName = 'DFS Replication'; Id = 4602 } -MaxEvents 1 -ErrorAction SilentlyContinue
+                    if ($sync) { _Log "[PKI-DIAG] DFSR SYSVOL initial-sync (event 4602) completed at $($sync.TimeCreated)" }
+                    else { _Log "[PKI-DIAG] DFSR SYSVOL initial-sync (event 4602): NOT found (SYSVOL may still be converging)" }
+                } catch {}
+            } catch { _Log "[PKI-DIAG] topology/replication capture error: $($_.Exception.Message)" }
+            try {
+                if (Test-Path 'C:\Windows\certocm.log') {
+                    foreach ($ln in (Get-Content 'C:\Windows\certocm.log' -Tail 25 -ErrorAction SilentlyContinue)) { if ($ln.Trim()) { _Log "[PKI-DIAG] certocm: $ln" } }
+                }
+            } catch {}
+            try {
+                $evts2 = Get-WinEvent -FilterHashtable @{ LogName = 'Directory Service'; StartTime = $Since } -ErrorAction SilentlyContinue | Sort-Object TimeCreated | Select-Object -First 25
+                foreach ($e in $evts2) { $f = ($e.Message -replace '\s+', ' '); _Log ("[PKI-DIAG] DS Id={0} {1} {2}" -f $e.Id, $e.LevelDisplayName, $f.Substring(0, [Math]::Min(240, $f.Length))) }
+            } catch {}
+            $class = 'Unknown'
+            if ($writeReady -eq $false -and $hasEA -eq $false) { $class = 'Structural' }
+            elseif ($hasEA -eq $false) { $class = 'TokenNoEA' }
+            elseif ($writeReady -eq $false) { $class = 'AccessDenied' }
+            elseif ($writeReady -eq $true) { $class = 'RangeConstraint' }
+            _Log "[PKI-DIAG] classification=$class"
+            return @{ Class = $class; HasEA = $hasEA; WriteReady = $writeReady }
+        }
+
+        # ── ESCALATION Tier 1: forced token + AD refresh (no reboot) ──────────
+        function Invoke-PkiTokenAdRefresh {
+            _Log "[PKI-ESC] Tier1: forcing token + AD refresh (gpupdate, klist purge, certutil -pulse, schema reload)."
+            try { & gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+            try { & klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
+            try { & klist.exe purge 2>&1 | Out-Null } catch {}
+            try { & certutil.exe -pulse 2>&1 | Out-Null } catch {}
+            Invoke-SchemaCacheReload | Out-Null
+        }
+
+        # ── ESCALATION Tier 2: full ADCS role reinstall (no reboot) ───────────
+        function Invoke-PkiRoleReinstall {
+            _Log "[PKI-ESC] Tier2: reinstalling the ADCS role feature (uninstall config + remove/add Adcs-Cert-Authority)."
+            try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+            try { Remove-WindowsFeature Adcs-Cert-Authority -ErrorAction SilentlyContinue | Out-Null } catch { _Log "[PKI-ESC] role remove note: $($_.Exception.Message)" }
+            try { Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools -ErrorAction SilentlyContinue | Out-Null } catch { _Log "[PKI-ESC] role add note: $($_.Exception.Message)" }
+        }
+
         try {
             # Idempotency: only skip when the CA is genuinely CONFIGURED.
             if (Test-CaConfigured) {
@@ -742,6 +853,14 @@ LoadDefaultTemplates=0
                 $feEnabled = $false
                 $feLevelPrior = $null
                 $caLoopStart = Get-Date
+                # In-flight diagnostics + no-reboot escalation ladder (mirrors two-tier).
+                # Fires only at thresholds so the happy path / timing-window case is
+                # never disturbed. The single-tier HOST reboot path is the separate
+                # FastFail experiment above, so this loop does not itself reboot.
+                $escDiagAt = 3
+                $escTier1At = 8
+                $escTier2At = 13
+                $caLastClass = 'Unknown'
                 try {
                     for ($caTry = 1; $caTry -le $maxCaTries; $caTry++) {
                         try {
@@ -788,6 +907,19 @@ LoadDefaultTemplates=0
                                     _Log "Enabled NTDS '15 Field Engineering'=5 to capture the exact constraint attribute on the next attempt (prior=$feLevelPrior)."
                                 }
                             }
+                            # In-flight advanced diagnostics + evidence-gated escalation.
+                            if ($caTry -eq $escDiagAt) {
+                                $d = Invoke-PkiPublishDiagnostics -Since $caLoopStart -Reason "attempt $caTry still failing"
+                                $caLastClass = $d.Class
+                            }
+                            if ($caTry -eq $escTier1At) {
+                                Invoke-PkiTokenAdRefresh
+                                $d = Invoke-PkiPublishDiagnostics -Since $caLoopStart -Reason "post-Tier1"
+                                $caLastClass = $d.Class
+                            }
+                            if ($caTry -eq $escTier2At) {
+                                Invoke-PkiRoleReinstall
+                            }
                             _Progress "attempt $caTry/${maxCaTries}: waiting for AD DS readiness after remediation..."
                             Wait-AdDsReady -TimeoutSec 180 | Out-Null
                             # Backoff with a ~5s heartbeat so the wait is visibly counting
@@ -812,6 +944,8 @@ LoadDefaultTemplates=0
                     }
                 }
                 if (-not $caConfigured) {
+                    $dFinal = Invoke-PkiPublishDiagnostics -Since $caLoopStart -Reason "final failure after $maxCaTries attempts"
+                    _Log "[PKI-ESC] Final classification '$($dFinal.Class)'. (Single-tier host reboot is handled by the FastFail experiment path.)"
                     throw "Enterprise Root CA configuration failed after $maxCaTries attempts. Last error: $caLastErr"
                 }
 
