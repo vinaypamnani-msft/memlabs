@@ -8190,6 +8190,36 @@ function Test-PullDPConfiguration {
         param($sc, $dpName, $dpFqdn, $expectedSrc)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        # Reads the site server's distmgr.log to tell whether DistMgr is STILL
+        # retrying a package (it retries a failed distribution ~100 times over ~2
+        # days) vs has ABANDONED it. Used to keep non-client (OSD/app) content that
+        # is merely churning under load as a WARN instead of a hard FAIL.
+        $getDistmgrRetryStatus = {
+            param($pkgId)
+            $smsDir = $null
+            foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+                try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+                if ($smsDir) { break }
+            }
+            if (-not $smsDir) { return $null }
+            $line = $null
+            foreach ($lf in @("$smsDir\Logs\distmgr.log", "$smsDir\Logs\distmgr.lo_")) {
+                if (-not (Test-Path $lf)) { continue }
+                $hit = Get-Content -LiteralPath $lf -Tail 12000 -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -like "*$pkgId*" -and $_ -match 'retr(y|ies|ying)' } | Select-Object -Last 1
+                if ($hit) { $line = $hit; break }
+            }
+            if (-not $line) { return $null }
+            if ($line -match 'will retry\s+(\d+)\s+more times') {
+                return @{ StillRetrying = ([int]$Matches[1] -gt 0); Remaining = [int]$Matches[1]; Line = $line.Trim() }
+            }
+            if ($line -match 'will not (retry|try)|exceeded the maximum|maximum number of retries') {
+                return @{ StillRetrying = $false; Remaining = 0; Line = $line.Trim() }
+            }
+            # Saw retry activity but no explicit remaining-count -> assume still cycling.
+            return @{ StillRetrying = $true; Remaining = -1; Line = $line.Trim() }
+        }
+
         $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_DistributionPointInfo -Filter `"ServerName LIKE '%$dpName%'`"")
         try {
             # DP may not appear in SMS_DistributionPointInfo immediately after
@@ -8284,12 +8314,28 @@ function Test-PullDPConfiguration {
                 $otherTerminal = @($otherRows | Where-Object { $_.State -in 3, 6, 8 })
                 $results.Details.Add("INFO: DP '$dpName' other content: $otherInstalled/$($otherRows.Count) Installed, $($otherInProg.Count) still distributing (OSD/app content -- not client-critical)")
                 if ($otherTerminal.Count -gt 0) {
-                    $results.Passed = $false
+                    # Non-client content (OSD/app): DistMgr retries a failed
+                    # distribution ~100 times over ~2 days, so a State 3/6/8 snapshot
+                    # during a build is almost always still-retrying churn, not
+                    # corruption. Only FAIL once DistMgr has actually GIVEN UP; while
+                    # it is still retrying, WARN (and still collect logs).
                     $results.CollectLogs = $true
-                    $results.Details.Add("FAIL: DP '$dpName' has $($otherTerminal.Count) non-client package(s) in a TERMINAL failed state (3/6/8):")
+                    $abandoned = @()
                     foreach ($ot in $otherTerminal | Select-Object -First 10) {
                         $sn = $stateName["$([int]$ot.State)"]; if (-not $sn) { $sn = "State$($ot.State)" }
-                        $results.Details.Add("  PackageID=$($ot.PackageID) State=$sn")
+                        $rs = & $getDistmgrRetryStatus $ot.PackageID
+                        if ($rs -and -not $rs.StillRetrying) {
+                            $abandoned += $ot
+                            $results.Details.Add("  PackageID=$($ot.PackageID) State=$sn -- DistMgr GAVE UP retrying: $($rs.Line)")
+                        }
+                        else {
+                            $rem = if ($rs) { if ($rs.Remaining -ge 0) { "$($rs.Remaining) attempts left" } else { 'still retrying' } } else { 'still retrying (no give-up logged)' }
+                            $results.Details.Add("WARN: DP '$dpName' non-client package $($ot.PackageID) State=$sn but DistMgr is $rem (OSD/app content -- not client-critical)")
+                        }
+                    }
+                    if ($abandoned.Count -gt 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: DP '$dpName' has $($abandoned.Count) non-client package(s) in a TERMINAL failed state that DistMgr has ABANDONED (3/6/8) -- see PackageIDs above")
                     }
                 }
             }
@@ -8380,6 +8426,34 @@ function Test-CMClientPackageDistribution {
             if ("$nal" -match '\\\\([^\\"\]]+)') { return $Matches[1] } else { return "$nal" }
         }
 
+        # Reads distmgr.log to tell whether DistMgr is STILL retrying a package vs
+        # has ABANDONED it (retries exhausted). Keeps non-client (OSD/app) content
+        # that is merely churning under load as a WARN instead of a hard FAIL.
+        $getDistmgrRetryStatus = {
+            param($pkgId)
+            $smsDir = $null
+            foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+                try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+                if ($smsDir) { break }
+            }
+            if (-not $smsDir) { return $null }
+            $line = $null
+            foreach ($lf in @("$smsDir\Logs\distmgr.log", "$smsDir\Logs\distmgr.lo_")) {
+                if (-not (Test-Path $lf)) { continue }
+                $hit = Get-Content -LiteralPath $lf -Tail 12000 -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -like "*$pkgId*" -and $_ -match 'retr(y|ies|ying)' } | Select-Object -Last 1
+                if ($hit) { $line = $hit; break }
+            }
+            if (-not $line) { return $null }
+            if ($line -match 'will retry\s+(\d+)\s+more times') {
+                return @{ StillRetrying = ([int]$Matches[1] -gt 0); Remaining = [int]$Matches[1]; Line = $line.Trim() }
+            }
+            if ($line -match 'will not (retry|try)|exceeded the maximum|maximum number of retries') {
+                return @{ StillRetrying = $false; Remaining = 0; Line = $line.Trim() }
+            }
+            return @{ StillRetrying = $true; Remaining = -1; Line = $line.Trim() }
+        }
+
         $failingDps = New-Object System.Collections.Generic.List[string]
 
         # --- ConfigMgr client package(s): the critical client-install content ---
@@ -8467,17 +8541,51 @@ function Test-CMClientPackageDistribution {
         }
 
         # --- Site-wide sweep: any package stuck in a TERMINAL failed state -----
+        # The CLIENT package is client-critical -> a terminal state always FAILs.
+        # Non-client content (perfloading OSD images, apps) is NOT client-critical
+        # and DistMgr retries a failed distribution ~100 times over ~2 days, so a
+        # State 3/6/8 snapshot during a build is almost always still-retrying churn,
+        # not corruption. Only FAIL non-client content once DistMgr has actually
+        # GIVEN UP (retries exhausted); while it is still retrying, WARN.
         try {
+            $clientPkgIds = @($clientPkgs | ForEach-Object { $_.PackageID })
             $failedRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "State = 3 OR State = 6 OR State = 8" -ErrorAction Stop)
             if ($failedRows.Count -eq 0) {
                 $results.Details.Add("OK: no packages in a terminal distribution-failed state (3/6/8) site-wide")
             }
             else {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: $($failedRows.Count) package/DP distribution(s) in a terminal failed state (3/6/8):")
-                foreach ($r in $failedRows | Select-Object -First 20) {
+                $clientFailed = @($failedRows | Where-Object { $clientPkgIds -contains $_.PackageID })
+                $nonClientFailed = @($failedRows | Where-Object { $clientPkgIds -notcontains $_.PackageID })
+
+                if ($clientFailed.Count -gt 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: $($clientFailed.Count) CLIENT package/DP distribution(s) in a terminal failed state (3/6/8):")
+                    foreach ($r in $clientFailed | Select-Object -First 20) {
+                        $sn = $stateName["$([int]$r.State)"]; if (-not $sn) { $sn = "State$($r.State)" }
+                        $dpn = & $dpNameOf $r.ServerNALPath
+                        [void]$failingDps.Add(("$dpn" -split '\.')[0])
+                        $results.Details.Add("  PackageID=$($r.PackageID) DP=$dpn State=$sn")
+                    }
+                }
+
+                $abandonedNonClient = 0
+                foreach ($r in $nonClientFailed | Select-Object -First 20) {
                     $sn = $stateName["$([int]$r.State)"]; if (-not $sn) { $sn = "State$($r.State)" }
-                    $results.Details.Add("  PackageID=$($r.PackageID) DP=$(& $dpNameOf $r.ServerNALPath) State=$sn")
+                    $dpn = & $dpNameOf $r.ServerNALPath
+                    [void]$failingDps.Add(("$dpn" -split '\.')[0])
+                    $rs = & $getDistmgrRetryStatus $r.PackageID
+                    if ($rs -and -not $rs.StillRetrying) {
+                        $results.Passed = $false
+                        $abandonedNonClient++
+                        $results.Details.Add("FAIL: non-client package $($r.PackageID) on DP=$dpn is $sn and DistMgr has GIVEN UP retrying (abandoned) -- $($rs.Line)")
+                    }
+                    else {
+                        $rem = if ($rs) { if ($rs.Remaining -ge 0) { "$($rs.Remaining) attempts left" } else { 'still retrying' } } else { 'still retrying (no give-up logged)' }
+                        $results.Details.Add("WARN: non-client package $($r.PackageID) on DP=$dpn is $sn but not client-critical and DistMgr is $rem (OSD/app content) -- not failing the build")
+                    }
+                }
+                if ($clientFailed.Count -eq 0 -and $abandonedNonClient -eq 0 -and $nonClientFailed.Count -gt 0) {
+                    $results.Details.Add("OK: $($nonClientFailed.Count) non-client package/DP distribution(s) are failed but DistMgr is still retrying them (OSD/app content -- not client-critical)")
                 }
             }
         }
