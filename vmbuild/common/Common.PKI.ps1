@@ -1156,20 +1156,22 @@ LoadDefaultTemplates=0
         $sbOut = $null
         if ($result -and $result.ScriptBlockOutput) { $sbOut = $result.ScriptBlockOutput } else { $sbOut = $result }
         if ($sbOut -and $sbOut.Success) { break }
+        $clsCA = if ($sbOut -and $sbOut.FailClass) { "$($sbOut.FailClass)" } elseif (-not ($result -and $result.ScriptBlockOutput)) { "channel-died/timeout" } else { "unknown" }
 
-        # Tier A (cheap, no reboot): fresh session => fresh Kerberos PAC that now carries
-        # Enterprise Admins once the GC has settled.
-        if ($sbOut -and $sbOut.NeedsHostReboot -and (-not $refreshedSessionForCA)) {
-            Write-Log "[SingleTierPKI] CA install exhausted the in-guest ladder (class=$($sbOut.FailClass)). Dropping the cached PSDirect session so the retry mints a FRESH logon token (settling-token fix), then retrying (no reboot)..." -Warning
+        # Tier A (cheap, no reboot): drop the cached session and retry. A FRESH session
+        # recovers BOTH a DEAD PSDirect channel (guest host died/stalled under load -> no
+        # ScriptBlockOutput) and the settling-token race (fresh Kerberos PAC). Fire on ANY fail.
+        if (-not $refreshedSessionForCA) {
+            Write-Log "[SingleTierPKI] CA install failed (class=$clsCA). Dropping the cached PSDirect session so the retry mints a FRESH channel + logon token, then retrying (no reboot)..." -Warning
             try { Remove-VmSessionFromCache -VmName $caVMName } catch { Write-Log "[SingleTierPKI] session eviction note: $($_.Exception.Message)" }
             $refreshedSessionForCA = $true
             continue
         }
-        # Tier B (reboot): only if the fresh session also failed.
-        if ($sbOut -and $sbOut.NeedsHostReboot -and (-not $rebootedForCA)) {
-            Write-Log "[SingleTierPKI] Fresh session did not clear it (class=$($sbOut.FailClass)). Rebooting the CA/DC $caVMName ONCE from the host for a fresh session/Kerberos PAC, then retrying..." -Warning
+        # Tier B (reboot): the fresh session ALSO failed -> reboot the CA/DC ONCE, then retry.
+        if (-not $rebootedForCA) {
+            Write-Log "[SingleTierPKI] Fresh session did not clear it (class=$clsCA). Rebooting the CA/DC $caVMName ONCE from the host, then retrying..." -Warning
             try {
-                $rebooted = Restart-VM2Smart -Name $caVMName -AllowTurnOff -Reason "PKI Enterprise Root CA structural failure ($($sbOut.FailClass)) - host reboot tier"
+                $rebooted = Restart-VM2Smart -Name $caVMName -AllowTurnOff -Reason "PKI Enterprise Root CA failure ($clsCA) - host reboot tier"
                 Write-Log "[SingleTierPKI] $caVMName restart issued (restarted=$rebooted); waiting for it to come back ready for PSDirect/AD..."
                 $null = Wait-ForVm -VmName $caVMName -PathToVerify "C:\Users" -VmDomainName $domainName -TimeoutMinutes 15
             }
@@ -1966,6 +1968,7 @@ Empty=True
             # settling-token diagnostic reads. Idempotent; left enabled (harmless, low volume).
             # Enabling here guarantees it for the session-refresh + re-run sessions.
             try { & auditpol.exe /set /subcategory:"Group Membership" /success:enable 2>&1 | Out-Null; _Log "Enabled 'Audit Group Membership' (success) so Security 4627 captures token group SIDs at logon." } catch {}
+            _Progress "Step 2: starting (checking existing CA state)..."
             # Check if Sub CA is already fully configured (has a valid cert installed)
             $subCAComplete = $false
             $subCAPartial = $false
@@ -1991,7 +1994,9 @@ Empty=True
 
             # Install IIS (idempotent)
             _Log "Installing IIS Web-Server..."
+            _Progress "Step 2: installing IIS Web-Server (Install-WindowsFeature; slow under servicing load)..."
             Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
+            _Progress "Step 2: IIS installed; importing WebAdministration..."
             Import-Module WebAdministration
 
             # Create CRL virtual directory (idempotent)
@@ -2019,6 +2024,7 @@ Empty=True
 
             # Publish root cert to AD (skip if already present by thumbprint)
             _Log "Publishing root cert to AD..."
+            _Progress "Step 2: publishing root cert to AD (dspublish)..."
             $rootCertFile = Join-Path $RootCAFilesPath "$RootCAName.crt"
             if (-not (Test-Path $rootCertFile)) {
                 throw "Root CA certificate not found: $rootCertFile"
@@ -2143,6 +2149,7 @@ Critical=Yes
             else {
                 # Install ADCS role (idempotent)
                 _Log "Installing ADCS role..."
+                _Progress "Step 2: installing ADCS role (Install-WindowsFeature Adcs-Cert-Authority)..."
                 Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
 
                 # Enterprise Subordinate CA setup writes Enrollment Services /
@@ -2366,21 +2373,25 @@ CertificateTemplate = SubCA
 
         $sb2 = $null
         if ($result2 -and $result2.ScriptBlockOutput) { $sb2 = $result2.ScriptBlockOutput } else { $sb2 = $result2 }
+        $cls2 = if ($sb2 -and $sb2.FailClass) { "$($sb2.FailClass)" } elseif (-not ($result2 -and $result2.ScriptBlockOutput)) { "channel-died/timeout" } else { "unknown" }
 
-        # Tier A (cheap, no reboot): fresh session => fresh Kerberos PAC that now
-        # carries Enterprise Admins once the GC has settled.
-        if ($sb2 -and $sb2.NeedsHostReboot -and (-not $refreshedSessionForStep2)) {
-            Write-Log "[TwoTierPKI] Step 2 exhausted the in-guest ladder (class=$($sb2.FailClass)). Dropping the cached PSDirect session so the retry mints a FRESH logon token (settling-token fix), then retrying Step 2 (no reboot)..." -Warning
+        # Tier A (cheap, no reboot): drop the cached session and retry. A FRESH session
+        # recovers BOTH failure modes we actually see: (1) a DEAD PSDirect channel (guest
+        # host died / stalled under load -> no ScriptBlockOutput) and (2) the settling-token
+        # race (fresh Kerberos PAC now carries Enterprise Admins). Fire on ANY step2 failure.
+        if (-not $refreshedSessionForStep2) {
+            Write-Log "[TwoTierPKI] Step 2 failed (class=$cls2). Dropping the cached PSDirect session so the retry mints a FRESH channel + logon token, then retrying Step 2 (no reboot)..." -Warning
             try { Remove-VmSessionFromCache -VmName $issuingCAVMName } catch { Write-Log "[TwoTierPKI] session eviction note: $($_.Exception.Message)" }
             $refreshedSessionForStep2 = $true
             continue
         }
 
-        # Tier B (reboot): only if the fresh session also failed.
-        if ($sb2 -and $sb2.NeedsHostReboot -and (-not $rebootedForStep2)) {
-            Write-Log "[TwoTierPKI] Fresh session did not clear it (class=$($sb2.FailClass)). Rebooting the CA/DC $issuingCAVMName ONCE from the host for a fresh session/Kerberos PAC, then retrying Step 2..." -Warning
+        # Tier B (reboot): the fresh session ALSO failed -> reboot the CA/DC ONCE (clears a
+        # wedged guest + gives a fresh PAC), then retry. Bounded to a single reboot.
+        if (-not $rebootedForStep2) {
+            Write-Log "[TwoTierPKI] Fresh session did not clear it (class=$cls2). Rebooting the CA/DC $issuingCAVMName ONCE from the host, then retrying Step 2..." -Warning
             try {
-                $rebooted = Restart-VM2Smart -Name $issuingCAVMName -AllowTurnOff -Reason "PKI subordinate CA structural failure ($($sb2.FailClass)) - host reboot tier"
+                $rebooted = Restart-VM2Smart -Name $issuingCAVMName -AllowTurnOff -Reason "PKI subordinate CA failure ($cls2) - host reboot tier"
                 Write-Log "[TwoTierPKI] $issuingCAVMName restart issued (restarted=$rebooted); waiting for it to come back ready for PSDirect/AD..."
                 $null = Wait-ForVm -VmName $issuingCAVMName -PathToVerify "C:\Users" -VmDomainName $domainName -TimeoutMinutes 15
             }
