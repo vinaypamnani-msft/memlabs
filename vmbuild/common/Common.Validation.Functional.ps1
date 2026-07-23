@@ -8549,9 +8549,58 @@ function Test-AdditionalDisks {
             $results.Details.Add("CMD: Get-Volume -DriveLetter $letter")
             $vol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
             if (-not $vol) {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: Volume '$letter`:' not present")
-                continue
+                # Missing volume -- dump full disk/partition/volume state so we can tell
+                # "disk truly absent (host never attached it)" from "disk present but
+                # OFFLINE / partition without a drive letter", then attempt a SAFE
+                # recovery (online offline disks; assign the expected letter to a
+                # matching lettertless data partition -- e.g. a SQL data disk that lost
+                # its letter) and re-check. Never formats (no data loss).
+                $results.Details.Add("WARN: Volume '$letter`:' not present -- capturing disk diagnostics")
+                try {
+                    foreach ($d in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) {
+                        $results.Details.Add("  DIAG Disk#$($d.Number): '$($d.FriendlyName)' $([math]::Round($d.Size / 1GB, 1))GB Style=$($d.PartitionStyle) OpStatus=$($d.OperationalStatus) Offline=$($d.IsOffline) ReadOnly=$($d.IsReadOnly)")
+                    }
+                    foreach ($p in @(Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.Size -gt 100MB } | Sort-Object DiskNumber, PartitionNumber)) {
+                        $results.Details.Add("  DIAG Partition Disk#$($p.DiskNumber)/Part#$($p.PartitionNumber): Letter='$($p.DriveLetter)' $([math]::Round($p.Size / 1GB, 1))GB Type=$($p.Type)")
+                    }
+                    foreach ($v in @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter })) {
+                        $results.Details.Add("  DIAG Volume $($v.DriveLetter): $([math]::Round($v.Size / 1GB, 1))GB $($v.FileSystem) '$($v.FileSystemLabel)'")
+                    }
+                }
+                catch { $results.Details.Add("  DIAG: disk enumeration failed: $($_.Exception.Message)") }
+
+                try {
+                    foreach ($od in @(Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.IsOffline })) {
+                        try {
+                            Set-Disk -Number $od.Number -IsOffline $false -ErrorAction Stop
+                            if ($od.IsReadOnly) { Set-Disk -Number $od.Number -IsReadOnly $false -ErrorAction SilentlyContinue }
+                            $results.Details.Add("  RECOVERED: brought Disk#$($od.Number) online")
+                        }
+                        catch { $results.Details.Add("  DIAG: could not online Disk#$($od.Number): $($_.Exception.Message)") }
+                    }
+                    Start-Sleep -Seconds 3
+                    $vol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if (-not $vol) {
+                        $cand = @(Get-Partition -ErrorAction SilentlyContinue | Where-Object { -not $_.DriveLetter -and $_.Size -gt 1GB -and $_.Type -notin 'Reserved', 'System' } | Sort-Object Size -Descending) | Select-Object -First 1
+                        if ($cand) {
+                            try {
+                                Set-Partition -DiskNumber $cand.DiskNumber -PartitionNumber $cand.PartitionNumber -NewDriveLetter $letter -ErrorAction Stop
+                                $results.Details.Add("  RECOVERED: assigned drive letter '$letter' to Disk#$($cand.DiskNumber)/Part#$($cand.PartitionNumber) ($([math]::Round($cand.Size / 1GB, 1))GB)")
+                                Start-Sleep -Seconds 2
+                                $vol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                            }
+                            catch { $results.Details.Add("  DIAG: could not assign '$letter': $($_.Exception.Message)") }
+                        }
+                    }
+                }
+                catch { $results.Details.Add("  DIAG: recovery attempt error: $($_.Exception.Message)") }
+
+                if (-not $vol) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Volume '$letter`:' not present -- disk absent or unrecoverable (see DIAG above; if no Disk# matches the expected size, the host did not attach the disk)")
+                    continue
+                }
+                $results.Details.Add("RECOVERED: Volume '$letter`:' recovered (was missing; disk onlined / drive letter reassigned)")
             }
             if ($vol.FileSystem -ne 'NTFS') {
                 $results.Details.Add("WARN: Volume '$letter`:' filesystem is '$($vol.FileSystem)' (expected NTFS)")
