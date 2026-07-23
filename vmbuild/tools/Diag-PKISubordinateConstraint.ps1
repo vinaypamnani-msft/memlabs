@@ -343,6 +343,34 @@ $diagScript = {
         _R "GlobalCatalogReady: $($rdse.isGlobalCatalogReady)   (EA is Universal -> expanded via the GC)"
     }
     catch { _R "AD tokenGroups check error: $($_.Exception.Message)" }
+    # DIRECT TOKEN ANALYSIS: compare THIS session's token to a FRESH one AD mints now.
+    #  processEA = does the running token carry Enterprise Admins (RID 519)?
+    #  freshEA   = S4U2Self mints a brand-new token for this account from CURRENT
+    #              directory membership (no password) = what a NEW logon would get.
+    # processEA=false while freshEA/adHasEA=true == settling-token race, proven token-side.
+    try {
+        $processEA = $null; $freshEA = $null
+        try {
+            $pg = @([System.Security.Principal.WindowsIdentity]::GetCurrent().Groups | ForEach-Object { $_.Value } | Where-Object { $_ -like '*-519' })
+            $processEA = ($pg.Count -gt 0)
+        }
+        catch {}
+        try {
+            $s4u = New-Object System.Security.Principal.WindowsIdentity("$env:USERNAME@$env:USERDNSDOMAIN")
+            $fg = @($s4u.Groups | ForEach-Object { $_.Value } | Where-Object { $_ -like '*-519' })
+            $freshEA = ($fg.Count -gt 0)
+            $s4u.Dispose()
+        }
+        catch { _R "S4U fresh-token probe error: $($_.Exception.Message)" }
+        _R "TOKEN ANALYSIS: processToken EA=$processEA | freshS4U EA=$freshEA | AD tokenGroups EA=$adHasEA"
+        if ($processEA -eq $false -and ($freshEA -eq $true -or $adHasEA -eq $true)) {
+            _R "VERDICT: SETTLING-TOKEN CONFIRMED -- this session's token lacks Enterprise Admins but AD/a fresh logon HAS it; a NEW session fixes it (no reboot needed)."
+        }
+        elseif ($processEA -eq $true) {
+            _R "VERDICT: token carries Enterprise Admins now (not a settling-token case at this moment)."
+        }
+    }
+    catch { _R "token analysis error: $($_.Exception.Message)" }
 
     _H "SERVICES"
     foreach ($svc in 'NTDS', 'Netlogon', 'certsvc', 'DNS', 'kdc') {

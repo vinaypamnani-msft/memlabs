@@ -757,8 +757,30 @@ function Install-SingleTierPKI {
                 _Log "[PKI-DIAG] AD tokenGroups EnterpriseAdmins=$adHasEA  (vs logon-token EA=$hasEA; AD=true & token=false => SETTLING/STALE-TOKEN race -> fresh session fixes it)"
                 _Log "[PKI-DIAG] GlobalCatalogReady=$($rdse.isGlobalCatalogReady) (EA is Universal -> expanded via the GC)"
             } catch { _Log "[PKI-DIAG] AD tokenGroups check error: $($_.Exception.Message)" }
+            # DIRECT TOKEN ANALYSIS (client/DC side): compare the ACTUAL install-session token
+            # to a FRESH one AD would mint now. processEA = does THIS session's Kerberos token
+            # carry Enterprise Admins (RID 519)? freshEA = S4U2Self mints a brand-new token for
+            # this SAME account from CURRENT directory membership (no password) = what a NEW
+            # logon/session would get now. processEA=false while freshEA/adHasEA=true proves the
+            # settling-token race TOKEN-SIDE (cached session stale; a fresh session, not a
+            # reboot, fixes it).
+            $processEA = $null; $freshEA = $null
+            try {
+                $pg = @([System.Security.Principal.WindowsIdentity]::GetCurrent().Groups | ForEach-Object { $_.Value } | Where-Object { $_ -like '*-519' })
+                $processEA = ($pg.Count -gt 0)
+            } catch {}
+            try {
+                $s4u = New-Object System.Security.Principal.WindowsIdentity("$env:USERNAME@$env:USERDNSDOMAIN")
+                $fg = @($s4u.Groups | ForEach-Object { $_.Value } | Where-Object { $_ -like '*-519' })
+                $freshEA = ($fg.Count -gt 0)
+                $s4u.Dispose()
+            } catch { _Log "[PKI-DIAG] S4U fresh-token probe error: $($_.Exception.Message)" }
+            _Log "[PKI-DIAG] TOKEN ANALYSIS: processToken EA=$processEA | freshS4U EA=$freshEA | AD tokenGroups EA=$adHasEA"
+            if ($processEA -eq $false -and ($freshEA -eq $true -or $adHasEA -eq $true)) {
+                _Log "[PKI-DIAG] VERDICT: SETTLING-TOKEN CONFIRMED -- this session's token lacks Enterprise Admins but AD/a fresh logon HAS it; a NEW session fixes it (no reboot needed)."
+            }
             $class = 'Unknown'
-            if ($hasEA -eq $false -and $adHasEA -eq $true) { $class = 'SettlingToken' }
+            if (($hasEA -eq $false -or $processEA -eq $false) -and ($adHasEA -eq $true -or $freshEA -eq $true)) { $class = 'SettlingToken' }
             elseif ($writeReady -eq $false -and $hasEA -eq $false) { $class = 'Structural' }
             elseif ($hasEA -eq $false) { $class = 'TokenNoEA' }
             elseif ($writeReady -eq $false) { $class = 'AccessDenied' }
@@ -1809,8 +1831,30 @@ Empty=True
                 _Log "[PKI-DIAG] AD tokenGroups EnterpriseAdmins=$adHasEA  (vs logon-token EA=$hasEA; AD=true & token=false => SETTLING/STALE-TOKEN race -> fresh session fixes it)"
                 _Log "[PKI-DIAG] GlobalCatalogReady=$($rdse.isGlobalCatalogReady) (EA is Universal -> expanded via the GC)"
             } catch { _Log "[PKI-DIAG] AD tokenGroups check error: $($_.Exception.Message)" }
+            # DIRECT TOKEN ANALYSIS (client/DC side): compare the ACTUAL install-session token
+            # to a FRESH one AD would mint now. processEA = does THIS session's Kerberos token
+            # carry Enterprise Admins (RID 519)? freshEA = S4U2Self mints a brand-new token for
+            # this SAME account from CURRENT directory membership (no password) = what a NEW
+            # logon/session would get now. processEA=false while freshEA/adHasEA=true proves the
+            # settling-token race TOKEN-SIDE (cached session stale; a fresh session, not a
+            # reboot, fixes it).
+            $processEA = $null; $freshEA = $null
+            try {
+                $pg = @([System.Security.Principal.WindowsIdentity]::GetCurrent().Groups | ForEach-Object { $_.Value } | Where-Object { $_ -like '*-519' })
+                $processEA = ($pg.Count -gt 0)
+            } catch {}
+            try {
+                $s4u = New-Object System.Security.Principal.WindowsIdentity("$env:USERNAME@$env:USERDNSDOMAIN")
+                $fg = @($s4u.Groups | ForEach-Object { $_.Value } | Where-Object { $_ -like '*-519' })
+                $freshEA = ($fg.Count -gt 0)
+                $s4u.Dispose()
+            } catch { _Log "[PKI-DIAG] S4U fresh-token probe error: $($_.Exception.Message)" }
+            _Log "[PKI-DIAG] TOKEN ANALYSIS: processToken EA=$processEA | freshS4U EA=$freshEA | AD tokenGroups EA=$adHasEA"
+            if ($processEA -eq $false -and ($freshEA -eq $true -or $adHasEA -eq $true)) {
+                _Log "[PKI-DIAG] VERDICT: SETTLING-TOKEN CONFIRMED -- this session's token lacks Enterprise Admins but AD/a fresh logon HAS it; a NEW session fixes it (no reboot needed)."
+            }
             $class = 'Unknown'
-            if ($hasEA -eq $false -and $adHasEA -eq $true) { $class = 'SettlingToken' }
+            if (($hasEA -eq $false -or $processEA -eq $false) -and ($adHasEA -eq $true -or $freshEA -eq $true)) { $class = 'SettlingToken' }
             elseif ($writeReady -eq $false -and $hasEA -eq $false) { $class = 'Structural' }
             elseif ($hasEA -eq $false) { $class = 'TokenNoEA' }
             elseif ($writeReady -eq $false) { $class = 'AccessDenied' }
