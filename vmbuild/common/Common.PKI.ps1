@@ -512,6 +512,17 @@ function Install-SingleTierPKI {
         # genuine servicing wedge fails fast -> the host reboots and recovers.
         function Install-FeatureBounded {
             param([string]$Name, [string]$Label, [int]$TimeoutSec = 600)
+            # Fast local pre-check: if the role binaries are already present (pre-staged
+            # by Phase 2/3 DSC), skip Install-WindowsFeature ENTIRELY -- even a no-op
+            # install runs the ServerManager "Collecting data" inventory that can wedge.
+            # W3SVC is registered by the Web-Server role; CertSvc by Adcs-Cert-Authority
+            # (at feature install, before CA config) -- their presence proves the feature.
+            $svcName = switch ($Name) { 'Web-Server' { 'W3SVC' } 'Adcs-Cert-Authority' { 'CertSvc' } default { $null } }
+            if ($svcName -and (Get-Service -Name $svcName -ErrorAction SilentlyContinue)) {
+                _Log "$Label -- $Name already installed (service $svcName present, pre-staged by DSC); skipping Install-WindowsFeature."
+                _Progress "$Label -- already present (pre-staged by DSC); skipping install"
+                return
+            }
             $fj = Start-Job -ScriptBlock {
                 param($n)
                 Import-Module ServerManager -ErrorAction Stop
@@ -1714,6 +1725,17 @@ Empty=True
         # genuine servicing wedge fails fast -> the host reboots and recovers.
         function Install-FeatureBounded {
             param([string]$Name, [string]$Label, [int]$TimeoutSec = 600)
+            # Fast local pre-check: if the role binaries are already present (pre-staged
+            # by Phase 2/3 DSC), skip Install-WindowsFeature ENTIRELY -- even a no-op
+            # install runs the ServerManager "Collecting data" inventory that can wedge.
+            # W3SVC is registered by the Web-Server role; CertSvc by Adcs-Cert-Authority
+            # (at feature install, before CA config) -- their presence proves the feature.
+            $svcName = switch ($Name) { 'Web-Server' { 'W3SVC' } 'Adcs-Cert-Authority' { 'CertSvc' } default { $null } }
+            if ($svcName -and (Get-Service -Name $svcName -ErrorAction SilentlyContinue)) {
+                _Log "$Label -- $Name already installed (service $svcName present, pre-staged by DSC); skipping Install-WindowsFeature."
+                _Progress "$Label -- already present (pre-staged by DSC); skipping install"
+                return
+            }
             $fj = Start-Job -ScriptBlock {
                 param($n)
                 Import-Module ServerManager -ErrorAction Stop
