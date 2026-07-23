@@ -1081,23 +1081,27 @@ LoadDefaultTemplates=0
             # Install IIS (idempotent)
             _Log "Installing IIS Web-Server..."
             Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
-            Import-Module WebAdministration
 
-            # Create CRL virtual directory
+            # Create CRL virtual directory -- use appcmd.exe, NOT the WebAdministration
+            # module. Import-Module WebAdministration auto-creates the IIS: drive by
+            # enumerating sites via WAS/COM, which deadlocks/hangs right after
+            # Install-WindowsFeature Web-Server under servicing load. appcmd edits
+            # applicationHost.config directly and never touches the IIS: drive provider.
             _Log "Creating CRL virtual directory..."
             if (-not (Test-Path $WebFolderPath)) {
                 New-Item -ItemType Directory -Path $WebFolderPath -Force | Out-Null
             }
-            $existingVDir = Get-WebVirtualDirectory -Site "Default Web Site" -Name "CRL" -ErrorAction SilentlyContinue
+            $appcmd = Join-Path $env:windir "System32\inetsrv\appcmd.exe"
+            $existingVDir = & $appcmd list vdir "Default Web Site/CRL" 2>$null
             if (-not $existingVDir) {
-                New-WebVirtualDirectory -Site "Default Web Site" -Name "CRL" -PhysicalPath $WebFolderPath | Out-Null
+                & $appcmd add vdir /app.name:"Default Web Site/" /path:/CRL /physicalPath:"$WebFolderPath" 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: appcmd add vdir CRL exit $LASTEXITCODE" }
             }
 
             # Enable double-escaping
             _Log "Enabling double-escaping on CRL vdir..."
-            Set-WebConfigurationProperty -PSPath "IIS:\Sites\Default Web Site\CRL" `
-                -Filter "system.webServer/security/requestFiltering" `
-                -Name "allowDoubleEscaping" -Value $true
+            & $appcmd set config "Default Web Site/CRL" /section:system.webServer/security/requestFiltering /allowDoubleEscaping:true /commit:apphost 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: appcmd set allowDoubleEscaping exit $LASTEXITCODE" }
 
             # Restart CA to apply CDP/AIA changes and publish CRL
             _Log "Restarting CertSvc and publishing CRL..."
@@ -1996,24 +2000,28 @@ Empty=True
             _Log "Installing IIS Web-Server..."
             _Progress "Step 2: installing IIS Web-Server (Install-WindowsFeature; slow under servicing load)..."
             Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
-            _Progress "Step 2: IIS installed; importing WebAdministration..."
-            Import-Module WebAdministration
+            _Progress "Step 2: IIS installed; configuring CRL vdir via appcmd..."
 
-            # Create CRL virtual directory (idempotent)
+            # Create CRL virtual directory (idempotent) -- use appcmd.exe, NOT the
+            # WebAdministration module. Import-Module WebAdministration auto-creates the
+            # IIS: drive by enumerating sites via WAS/COM, which deadlocks/hangs right
+            # after Install-WindowsFeature Web-Server under servicing load. appcmd edits
+            # applicationHost.config directly and never touches the IIS: drive provider.
             _Log "Creating CRL virtual directory..."
             if (-not (Test-Path $WebFolderPath)) {
                 New-Item -ItemType Directory -Path $WebFolderPath -Force | Out-Null
             }
-            $existingVDir = Get-WebVirtualDirectory -Site "Default Web Site" -Name "CRL" -ErrorAction SilentlyContinue
+            $appcmd = Join-Path $env:windir "System32\inetsrv\appcmd.exe"
+            $existingVDir = & $appcmd list vdir "Default Web Site/CRL" 2>$null
             if (-not $existingVDir) {
-                New-WebVirtualDirectory -Site "Default Web Site" -Name "CRL" -PhysicalPath $WebFolderPath | Out-Null
+                & $appcmd add vdir /app.name:"Default Web Site/" /path:/CRL /physicalPath:"$WebFolderPath" 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: appcmd add vdir CRL exit $LASTEXITCODE" }
             }
 
             # Enable double-escaping (idempotent)
             _Log "Enabling double-escaping on CRL vdir..."
-            Set-WebConfigurationProperty -PSPath "IIS:\Sites\Default Web Site\CRL" `
-                -Filter "system.webServer/security/requestFiltering" `
-                -Name "allowDoubleEscaping" -Value $true
+            & $appcmd set config "Default Web Site/CRL" /section:system.webServer/security/requestFiltering /allowDoubleEscaping:true /commit:apphost 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: appcmd set allowDoubleEscaping exit $LASTEXITCODE" }
 
             # Copy Root CA files to web folder
             _Log "Copying Root CA files to web folder..."
