@@ -8920,6 +8920,12 @@ function Test-CMSiteWideFunctionality {
     } | Select-Object -First 1
     $supServer = if ($supVmObj) { "$($supVmObj.vmName).$domain" } else { '' }
 
+    # Whether any OSDClient exists in this lab. perfloading only distributes OSD
+    # content (boot/OS images) to DP(s) on an OSDClient's subnet (to save space +
+    # because PXE is subnet-local), so with NO OSDClient the boot image is
+    # intentionally not distributed anywhere -- that's INFO, not a WARN.
+    $hasOsdClient = [bool]($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | Select-Object -First 1)
+
     # Expected boundary groups + their subnet boundaries, mirroring
     # InstallBoundaryGroups.ps1: one boundary group named by site code, each
     # containing an IPRange boundary for that site's subnet (.1-.254 over /24).
@@ -8970,13 +8976,14 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner)
+        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner)
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
         $isPrimary = ($vmRole -eq 'Primary')
         $hasSup = ($hasSUPInner -eq 'True')
         $offlineSup = ($offlineSupInner -eq 'True')
+        $expectOsd = ($expectOsdInner -eq 'True')
         # WSUS admin API endpoint for this site's SUP. When the site uses PKI,
         # WSUS is SSL-configured and its admin API (ApiRemoting30) REQUIRES SSL:
         # an HTTP call on 8530 returns HTTP 403 Forbidden, so PKI sites MUST use
@@ -9359,6 +9366,9 @@ function Test-CMSiteWideFunctionality {
                                 catch { $targeted = @() }
                                 if ($targeted.Count -ge 1) {
                                     $results.Details.Add("OK: Boot image '$biName' targeted to $($targeted.Count) DP(s); distribution pending (DistMgr has not yet posted status)")
+                                }
+                                elseif (-not $expectOsd) {
+                                    $results.Details.Add("INFO: Boot image '$biName' not distributed to any DP -- no OSDClient in this lab (OSD content is only distributed to an OSDClient-subnet DP to save space)")
                                 }
                                 else {
                                     $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) not distributed to any DP and no distribution targeting found")
@@ -9902,7 +9912,7 @@ function Test-CMSiteWideFunctionality {
 
     $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup) `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient) `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
