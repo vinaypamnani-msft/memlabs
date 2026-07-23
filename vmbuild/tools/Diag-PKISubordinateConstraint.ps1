@@ -101,22 +101,42 @@ if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq
     exit 1
 }
 
-# Initialize storage so $Common.LocalAdmin (vmbuildadmin credential) is populated
-# from the cached vmbuildadmin.txt. Get-VmSession needs $Common.LocalAdmin.Password
-# to build the domain credential.
-#   - If this session is ALREADY initialized (you dot-sourced Common.ps1 yourself),
-#     reuse it as-is -- re-running init cold with an expired/offline token can drop
-#     the credential.
-#   - Otherwise try a fast init.
+# Initialize so $Common.LocalAdmin (vmbuildadmin credential) is populated -- Get-VmSession
+# needs $Common.LocalAdmin.Password to build the domain credential.
+#
+# The tricky part: a "Fast"/no-storage init sets $Common.Initialized = $true but does NOT
+# load the credential, and the whole init block is gated on that flag -- so once a light
+# init has run, re-dot-sourcing (even a full one) is a NO-OP and the credential never loads.
+# So we don't rely on re-running init: we (a) reuse an already-good session, else (b) bring
+# $Common up with a fast init, then (c) load the credential DIRECTLY from the cached
+# vmbuildadmin.txt via Get-LocalAdminCredential (cache-first, offline-safe), resetting the
+# Initialized flag so a real init can still run later if something needs it.
 # Do NOT use -InJob: it skips storage init and leaves $Common.LocalAdmin null.
-if ($global:Common -and $global:Common.LocalAdmin -and $global:Common.LocalAdmin.Password) {
+function Test-CredLoaded { return ($Common -and $Common.LocalAdmin -and $Common.LocalAdmin.Password) }
+
+if (Test-CredLoaded) {
     Write-Host "Using already-initialized session (Common.LocalAdmin present)." -ForegroundColor DarkGray
 }
 else {
+    # Bring $Common up (sets CachePath etc.). Fast = no slow maintenance/host-prep,
+    # and no storage-JSON fetch that throws when the token is expired.
     . $commonPath -FastInit
 }
 
-if (-not $Common.LocalAdmin -or -not $Common.LocalAdmin.Password) {
+if (-not (Test-CredLoaded) -and (Get-Command Get-LocalAdminCredential -ErrorAction SilentlyContinue)) {
+    Write-Host "Credential not loaded by init; loading vmbuildadmin directly from cache..." -ForegroundColor DarkGray
+    if ($Common) { $Common.Initialized = $false }
+    try { $null = Get-LocalAdminCredential } catch {}
+}
+
+if (-not (Test-CredLoaded)) {
+    # Last resort: force a genuine full init (Initialized reset so the gate re-opens).
+    Write-Host "Forcing a full re-init to load the credential..." -ForegroundColor DarkGray
+    if ($Common) { $Common.Initialized = $false }
+    . $commonPath
+}
+
+if (-not (Test-CredLoaded)) {
     Write-Host "ERROR: local admin (vmbuildadmin) credential not loaded (expected cache at $(Join-Path $vmbuildRoot 'cache\vmbuildadmin.txt'))." -ForegroundColor Red
     Write-Host "  Initialize this session first, then re-run the tool:" -ForegroundColor Yellow
     Write-Host "      . .\Common.ps1 -FastInit" -ForegroundColor Cyan
