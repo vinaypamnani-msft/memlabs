@@ -1584,6 +1584,40 @@ Empty=True
                 foreach ($ln in ($dd -split "`r?`n")) { if ($ln -match 'passed test|failed test') { _Log "[PKI-DIAG] dcdiag: $($ln.Trim())" } }
             } catch { _Log "[PKI-DIAG] dcdiag error: $($_.Exception.Message)" }
             try {
+                # Topology + replication-convergence signals: distinguishes an INTRA-DC
+                # readiness gate (single-DC forest -> loopback bind, no partner to
+                # converge with) from an INTER-DC replication-convergence gate. Captures
+                # the DC count, which DC the publish actually binds to, repadmin repl
+                # state, and SYSVOL/DFSR initial-sync readiness so the settle-window
+                # MECHANISM is recorded in flight, not just inferred from absence.
+                $configCtx2 = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+                $dcCount = $null
+                try {
+                    $sr = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://CN=Sites,$configCtx2", "(objectClass=nTDSDSA)")
+                    $sr.PageSize = 100
+                    $dcCount = @($sr.FindAll()).Count
+                } catch {}
+                _Log "[PKI-DIAG] Forest DC count (nTDSDSA): $dcCount  (1 => no inter-DC replication possible; a persistent write refusal is purely local readiness)"
+                try {
+                    $bound = nltest /dsgetdc:$env:USERDNSDOMAIN 2>&1 | Out-String
+                    foreach ($ln in ($bound -split "`r?`n")) { if ($ln -match '\bDC:|Dom Name|Flags:|Our Site|The command') { _Log "[PKI-DIAG] dsgetdc: $($ln.Trim())" } }
+                } catch {}
+                try {
+                    $rr = repadmin /showrepl 2>&1 | Out-String
+                    foreach ($ln in ($rr -split "`r?`n")) { if ($ln -match 'error|fail|was successful|Last attempt|Source:|Naming Context|only one|no inbound|Default-First') { _Log "[PKI-DIAG] repadmin: $($ln.Trim())" } }
+                } catch {}
+                $sysvol = Get-SmbShare -Name SYSVOL -ErrorAction SilentlyContinue
+                $netlogon = Get-SmbShare -Name NETLOGON -ErrorAction SilentlyContinue
+                _Log "[PKI-DIAG] Shares: SYSVOL=$([bool]$sysvol) NETLOGON=$([bool]$netlogon)"
+                $dfsr = Get-Service -Name DFSR -ErrorAction SilentlyContinue
+                _Log "[PKI-DIAG] DFSR service: $(if ($dfsr) { $dfsr.Status } else { 'absent' })"
+                try {
+                    $sync = Get-WinEvent -FilterHashtable @{ LogName = 'DFS Replication'; Id = 4602 } -MaxEvents 1 -ErrorAction SilentlyContinue
+                    if ($sync) { _Log "[PKI-DIAG] DFSR SYSVOL initial-sync (event 4602) completed at $($sync.TimeCreated)" }
+                    else { _Log "[PKI-DIAG] DFSR SYSVOL initial-sync (event 4602): NOT found (SYSVOL may still be converging)" }
+                } catch {}
+            } catch { _Log "[PKI-DIAG] topology/replication capture error: $($_.Exception.Message)" }
+            try {
                 if (Test-Path 'C:\Windows\certocm.log') {
                     foreach ($ln in (Get-Content 'C:\Windows\certocm.log' -Tail 25 -ErrorAction SilentlyContinue)) { if ($ln.Trim()) { _Log "[PKI-DIAG] certocm: $ln" } }
                 }

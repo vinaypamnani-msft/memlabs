@@ -365,6 +365,40 @@ $diagScript = {
     }
     catch { _R "dcdiag error: $($_.Exception.Message)" }
 
+    _H "TOPOLOGY + REPLICATION CONVERGENCE (intra-DC readiness vs inter-DC convergence gate)"
+    try {
+        $dcCount = $null
+        try {
+            $sr = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://CN=Sites,$configNC", "(objectClass=nTDSDSA)")
+            $sr.PageSize = 100
+            $dcCount = @($sr.FindAll()).Count
+        }
+        catch {}
+        _R "Forest DC count (nTDSDSA objects): $dcCount   (1 => single-DC forest: no inter-DC replication possible, so a persistent write refusal is purely LOCAL readiness)"
+        try {
+            $bound = nltest /dsgetdc:$env:USERDNSDOMAIN 2>&1 | Out-String
+            foreach ($ln in ($bound -split "`r?`n")) { if ($ln.Trim()) { _R "  dsgetdc: $($ln.Trim())" } }
+        }
+        catch { _R "  nltest error: $($_.Exception.Message)" }
+        try {
+            $rr = repadmin /showrepl 2>&1 | Out-String
+            foreach ($ln in ($rr -split "`r?`n")) { if ($ln.Trim()) { _R "  repadmin: $($ln.Trim())" } }
+        }
+        catch { _R "  repadmin error: $($_.Exception.Message)" }
+        $sysvol = Get-SmbShare -Name SYSVOL -ErrorAction SilentlyContinue
+        $netlogon = Get-SmbShare -Name NETLOGON -ErrorAction SilentlyContinue
+        _R "Shares: SYSVOL=$([bool]$sysvol) NETLOGON=$([bool]$netlogon)"
+        $dfsr = Get-Service -Name DFSR -ErrorAction SilentlyContinue
+        _R "DFSR service: $(if ($dfsr) { $dfsr.Status } else { 'absent' })"
+        try {
+            $sync = Get-WinEvent -FilterHashtable @{ LogName = 'DFS Replication'; Id = 4602 } -MaxEvents 1 -ErrorAction SilentlyContinue
+            if ($sync) { _R "DFSR SYSVOL initial-sync (event 4602) completed at $($sync.TimeCreated)" }
+            else { _R "DFSR SYSVOL initial-sync (event 4602): NOT found (SYSVOL may still be converging)" }
+        }
+        catch {}
+    }
+    catch { _R "topology/replication capture error: $($_.Exception.Message)" }
+
     _H "PKI CONTAINERS under Public Key Services (+ children)"
     $pksDN = $null
     try {
@@ -562,7 +596,7 @@ $ErrorActionPreference = 'Continue'
 
 $modeMsg = if ($doRepro) { "READ + REPRO (re-runs the failing install)" } else { "READ-ONLY collection" }
 $diag = New-Object System.Collections.Generic.List[string]
-function Log-Line { param([string]$m, [string]$c = 'Gray') Write-Host $m -ForegroundColor $c; $diag.Add($m) }
+function Write-DiagLine { param([string]$m, [string]$c = 'Gray') Write-Host $m -ForegroundColor $c; $diag.Add($m) }
 
 $header = @(
     "Two-Tier PKI Subordinate RANGE_CONSTRAINT / dspublish ACCESS_DENIED diagnostic",
@@ -576,17 +610,17 @@ $header | Set-Content -Path $logFile -Encoding UTF8
 $vm = $null
 try { $vm = Get-VM -Name $CaVMName -ErrorAction SilentlyContinue } catch {}
 if (-not $vm) {
-    Log-Line "PREFLIGHT FAIL: Hyper-V VM '$CaVMName' not found on this host." 'Red'
-    Log-Line "  Running lab VMs:" 'Yellow'
-    try { Get-VM | Where-Object { $_.State -eq 'Running' } | Select-Object -ExpandProperty Name | Sort-Object | ForEach-Object { Log-Line "    $_" } } catch { Log-Line "    (Get-VM failed: $($_.Exception.Message))" }
-    Log-Line "  -> Pass the correct -CaVMName (with prefix, e.g. PL-HOAGIE) or -ConfigPath." 'Yellow'
+    Write-DiagLine "PREFLIGHT FAIL: Hyper-V VM '$CaVMName' not found on this host." 'Red'
+    Write-DiagLine "  Running lab VMs:" 'Yellow'
+    try { Get-VM | Where-Object { $_.State -eq 'Running' } | Select-Object -ExpandProperty Name | Sort-Object | ForEach-Object { Write-DiagLine "    $_" } } catch { Write-DiagLine "    (Get-VM failed: $($_.Exception.Message))" }
+    Write-DiagLine "  -> Pass the correct -CaVMName (with prefix, e.g. PL-HOAGIE) or -ConfigPath." 'Yellow'
     $diag | Add-Content -Path $logFile -Encoding UTF8
     Write-Host ""; Write-Host "Log written to: $logFile" -ForegroundColor Green
     return
 }
-Log-Line "Preflight: VM '$CaVMName' State=$($vm.State)  Uptime=$($vm.Uptime)"
+Write-DiagLine "Preflight: VM '$CaVMName' State=$($vm.State)  Uptime=$($vm.Uptime)"
 if ($vm.State -ne 'Running') {
-    Log-Line "PREFLIGHT FAIL: VM '$CaVMName' is not Running (State=$($vm.State)). Start it, then re-run." 'Red'
+    Write-DiagLine "PREFLIGHT FAIL: VM '$CaVMName' is not Running (State=$($vm.State)). Start it, then re-run." 'Red'
     $diag | Add-Content -Path $logFile -Encoding UTF8
     Write-Host ""; Write-Host "Log written to: $logFile" -ForegroundColor Green
     return
@@ -598,21 +632,21 @@ try {
     $session = Get-VmSession -VmName $CaVMName -VmDomainName $Domain
 }
 catch {
-    Log-Line "Get-VmSession threw: $($_.Exception.Message)" 'Red'
+    Write-DiagLine "Get-VmSession threw: $($_.Exception.Message)" 'Red'
 }
 if (-not $session) {
-    Log-Line "SESSION FAIL: Get-VmSession returned null for $CaVMName / $Domain (domain-cred PSDirect path failed)." 'Red'
-    Log-Line "  The DC/CA may be mid-reboot, the domain creds may be wrong, or the guest may be unreachable." 'Yellow'
+    Write-DiagLine "SESSION FAIL: Get-VmSession returned null for $CaVMName / $Domain (domain-cred PSDirect path failed)." 'Red'
+    Write-DiagLine "  The DC/CA may be mid-reboot, the domain creds may be wrong, or the guest may be unreachable." 'Yellow'
     $diag | Add-Content -Path $logFile -Encoding UTF8
     Write-Host ""; Write-Host "Log written to: $logFile" -ForegroundColor Green
     return
 }
 try {
     $ping = Invoke-Command -Session $session -ScriptBlock { "$env:COMPUTERNAME|$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" } -ErrorAction Stop
-    Log-Line "Session OK: guest replied '$ping'"
+    Write-DiagLine "Session OK: guest replied '$ping'"
 }
 catch {
-    Log-Line "SESSION SANITY FAIL: Invoke-Command on the session threw: $($_.Exception.Message)" 'Red'
+    Write-DiagLine "SESSION SANITY FAIL: Invoke-Command on the session threw: $($_.Exception.Message)" 'Red'
     $diag | Add-Content -Path $logFile -Encoding UTF8
     Write-Host ""; Write-Host "Log written to: $logFile" -ForegroundColor Green
     return
@@ -625,8 +659,8 @@ try {
     $out = Invoke-Command -Session $session -ScriptBlock $diagScript -ArgumentList $CaName, $Domain, $doRepro -ErrorAction Stop
 }
 catch {
-    Log-Line "COLLECTOR THREW: $($_.Exception.Message)" 'Red'
-    if ($_.ScriptStackTrace) { Log-Line "  $($_.ScriptStackTrace -replace '\s+', ' ')" }
+    Write-DiagLine "COLLECTOR THREW: $($_.Exception.Message)" 'Red'
+    if ($_.ScriptStackTrace) { Write-DiagLine "  $($_.ScriptStackTrace -replace '\s+', ' ')" }
 }
 
 if ($out -and $out.Report) {
@@ -643,8 +677,8 @@ if ($out -and $out.Report) {
     Write-Host "  - CERTUTIL -DSPUBLISH REPRO          (the ACCESS_DENIED call, live)"
 }
 else {
-    Log-Line "NO REPORT RETURNED. Raw result type: $(if ($null -ne $out) { $out.GetType().FullName } else { '<null>' })" 'Yellow'
-    if ($null -ne $out) { Log-Line (($out | Format-List * | Out-String)) }
+    Write-DiagLine "NO REPORT RETURNED. Raw result type: $(if ($null -ne $out) { $out.GetType().FullName } else { '<null>' })" 'Yellow'
+    if ($null -ne $out) { Write-DiagLine (($out | Format-List * | Out-String)) }
     $diag | Add-Content -Path $logFile -Encoding UTF8
     Write-Host ""
     Write-Host "WARNING: in-guest collector returned no report. See $logFile for the captured detail." -ForegroundColor Yellow
