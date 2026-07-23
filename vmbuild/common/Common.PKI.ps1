@@ -502,6 +502,36 @@ function Install-SingleTierPKI {
             } catch {}
         }
 
+        # Install-WindowsFeature streams a ServerManager "Collecting data..." progress
+        # record. Under -PollProgress the host forwards that progress and RESETS the
+        # stall timeout on every update -- a WEDGED ServerManager keeps re-emitting it,
+        # so the host never detects the hang and the build appears stuck on "Collecting
+        # data" forever. Run the feature install in a CHILD JOB (its progress stays in
+        # the job and never reaches the parent runspace, so it can't reset the host
+        # stall timer), emit our OWN _Progress heartbeat while waiting, and bound it so a
+        # genuine servicing wedge fails fast -> the host reboots and recovers.
+        function Install-FeatureBounded {
+            param([string]$Name, [string]$Label, [int]$TimeoutSec = 600)
+            $fj = Start-Job -ScriptBlock {
+                param($n)
+                Import-Module ServerManager -ErrorAction Stop
+                Install-WindowsFeature $n -IncludeManagementTools
+            } -ArgumentList $Name
+            $fsw = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($fj.State -eq 'Running') {
+                _Progress "$Label (Install-WindowsFeature $Name)"
+                Start-Sleep -Seconds 5
+                if ($fsw.Elapsed.TotalSeconds -ge $TimeoutSec) {
+                    Stop-Job $fj -ErrorAction SilentlyContinue
+                    Remove-Job $fj -Force -ErrorAction SilentlyContinue
+                    throw "Install-WindowsFeature $Name wedged in ServerManager 'Collecting data' for > ${TimeoutSec}s -- needs host reboot"
+                }
+            }
+            $fr = Receive-Job $fj -ErrorAction SilentlyContinue
+            Remove-Job $fj -Force -ErrorAction SilentlyContinue
+            return $fr
+        }
+
         function Wait-CertSvcReady {
             param([int]$TimeoutSec = 60)
             $deadline = (Get-Date).AddSeconds($TimeoutSec)
@@ -886,7 +916,7 @@ LoadDefaultTemplates=0
 
                 # Install ADCS role (idempotent)
                 _Log "Installing ADCS role..."
-                Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
+                Install-FeatureBounded -Name 'Adcs-Cert-Authority' -Label 'Installing ADCS role' | Out-Null
 
                 # Gate on AD readiness before publishing the Enterprise CA: wait for the
                 # directory to ACCEPT a Config-NC WRITE (not just be reachable). Matches two-tier.
@@ -1080,7 +1110,7 @@ LoadDefaultTemplates=0
 
             # Install IIS (idempotent)
             _Log "Installing IIS Web-Server..."
-            Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
+            Install-FeatureBounded -Name 'Web-Server' -Label 'Installing IIS Web-Server' | Out-Null
 
             # Create CRL virtual directory -- use appcmd.exe, NOT the WebAdministration
             # module. Import-Module WebAdministration auto-creates the IIS: drive by
@@ -1671,6 +1701,36 @@ Empty=True
             } catch {}
         }
 
+        # Install-WindowsFeature streams a ServerManager "Collecting data..." progress
+        # record. Under -PollProgress the host forwards that progress and RESETS the
+        # stall timeout on every update -- a WEDGED ServerManager keeps re-emitting it,
+        # so the host never detects the hang and step2 appears stuck on "Collecting
+        # data" forever. Run the feature install in a CHILD JOB (its progress stays in
+        # the job and never reaches the parent runspace, so it can't reset the host
+        # stall timer), emit our OWN _Progress heartbeat while waiting, and bound it so a
+        # genuine servicing wedge fails fast -> the host reboots and recovers.
+        function Install-FeatureBounded {
+            param([string]$Name, [string]$Label, [int]$TimeoutSec = 600)
+            $fj = Start-Job -ScriptBlock {
+                param($n)
+                Import-Module ServerManager -ErrorAction Stop
+                Install-WindowsFeature $n -IncludeManagementTools
+            } -ArgumentList $Name
+            $fsw = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($fj.State -eq 'Running') {
+                _Progress "$Label (Install-WindowsFeature $Name)"
+                Start-Sleep -Seconds 5
+                if ($fsw.Elapsed.TotalSeconds -ge $TimeoutSec) {
+                    Stop-Job $fj -ErrorAction SilentlyContinue
+                    Remove-Job $fj -Force -ErrorAction SilentlyContinue
+                    throw "Install-WindowsFeature $Name wedged in ServerManager 'Collecting data' for > ${TimeoutSec}s -- needs host reboot"
+                }
+            }
+            $fr = Receive-Job $fj -ErrorAction SilentlyContinue
+            Remove-Job $fj -Force -ErrorAction SilentlyContinue
+            return $fr
+        }
+
         # The Enterprise Subordinate CA install PUBLISHES to the Configuration NC
         # (Enrollment Services / NTAuth / adds the machine to Cert Publishers) even
         # when it only outputs a CSR. On a freshly promoted forest that publish is
@@ -1998,8 +2058,7 @@ Empty=True
 
             # Install IIS (idempotent)
             _Log "Installing IIS Web-Server..."
-            _Progress "Step 2: installing IIS Web-Server (Install-WindowsFeature; slow under servicing load)..."
-            Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
+            Install-FeatureBounded -Name 'Web-Server' -Label 'Step 2: installing IIS Web-Server' | Out-Null
             _Progress "Step 2: IIS installed; configuring CRL vdir via appcmd..."
 
             # Create CRL virtual directory (idempotent) -- use appcmd.exe, NOT the
@@ -2157,8 +2216,7 @@ Critical=Yes
             else {
                 # Install ADCS role (idempotent)
                 _Log "Installing ADCS role..."
-                _Progress "Step 2: installing ADCS role (Install-WindowsFeature Adcs-Cert-Authority)..."
-                Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
+                Install-FeatureBounded -Name 'Adcs-Cert-Authority' -Label 'Step 2: installing ADCS role' | Out-Null
 
                 # Enterprise Subordinate CA setup writes Enrollment Services /
                 # NTAuth objects to the Configuration NC (even with -OutputCertRequestFile).
