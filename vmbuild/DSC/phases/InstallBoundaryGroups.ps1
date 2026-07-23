@@ -117,8 +117,16 @@ $ensureClientPkgCoverage = {
                         Write-DscStatus "Client pkg coverage: DP '$dp' had no distribution -> distributed [esc.0, try $try]"
                     }
                     else {
-                        try { Update-CMDistributionPoint -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop }
-                        catch { Update-CMDistributionPoint -PackageName 'Configuration Manager Client Package' -DistributionPointName $dp -ErrorAction Stop }
+                        # Update-CMDistributionPoint has NO -DistributionPointName parameter
+                        # (it redistributes a package to ALL its DPs). To target the single
+                        # wedged DP, use Invoke-CMContentRedistribution; fall back to the
+                        # all-DP redistribute only if that cmdlet is unavailable.
+                        if (Get-Command Invoke-CMContentRedistribution -ErrorAction SilentlyContinue) {
+                            Invoke-CMContentRedistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
+                        }
+                        else {
+                            Update-CMDistributionPoint -PackageId $PackageID -ErrorAction Stop
+                        }
                         Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed [esc.0, try $try]"
                     }
                     $escalation[$u] = 0
