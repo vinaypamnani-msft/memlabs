@@ -1534,6 +1534,95 @@ Empty=True
             return $out
         }
 
+        # ── In-flight ADVANCED DIAGNOSTICS ────────────────────────────────────
+        # Runs automatically when the publish keeps failing, so we capture the
+        # ground truth (identity/EA token, Config-NC writability, container DACLs,
+        # DC health, certocm.log, DS events) in the build log without a manual
+        # re-run. Returns a classification the escalation ladder + host reboot
+        # decision are gated on: 'RangeConstraint' (schema/attribute), 'AccessDenied'
+        # (Config-NC write refused), 'TokenNoEA' (running id lacks Enterprise Admins),
+        # 'Structural' (write refused AND not EA), or 'Unknown'.
+        function Invoke-PkiPublishDiagnostics {
+            param([datetime]$Since, [string]$Reason = "")
+            $hasEA = $null; $writeReady = $null; $writeErr = $null
+            _Log "──── PKI-DIAG ($Reason) ────"
+            try {
+                $wi = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+                _Log "[PKI-DIAG] Identity: $($wi.Name)  IsSystem=$($wi.IsSystem)"
+            } catch {}
+            try {
+                $g = whoami /groups /fo list 2>&1 | Out-String
+                $hasEA = ($g -match '-519\b') -or ($g -match 'Enterprise Admins')
+                $hasDA = ($g -match '-512\b') -or ($g -match 'Domain Admins')
+                $hasSA = ($g -match '-518\b') -or ($g -match 'Schema Admins')
+                _Log "[PKI-DIAG] Token EnterpriseAdmins=$hasEA DomainAdmins=$hasDA SchemaAdmins=$hasSA"
+            } catch { _Log "[PKI-DIAG] whoami error: $($_.Exception.Message)" }
+            try {
+                $probe = Test-ConfigNCWritable
+                $writeReady = [bool]$probe.Ready
+                $writeErr = "$($probe.Err)"
+                _Log "[PKI-DIAG] Config-NC write probe: Ready=$($probe.Ready) Transient=$($probe.Transient) Err=$writeErr"
+            } catch { _Log "[PKI-DIAG] write probe error: $($_.Exception.Message)" }
+            try {
+                $configCtx = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+                $pksDN = "CN=Public Key Services,CN=Services,$configCtx"
+                foreach ($c in 'CN=Certification Authorities', 'CN=NTAuthCertificates', 'CN=Enrollment Services') {
+                    try {
+                        $de = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$c,$pksDN")
+                        $sec = $de.ObjectSecurity
+                        $owner = $sec.GetOwner([System.Security.Principal.NTAccount]).Value
+                        $writers = @()
+                        foreach ($ace in $sec.GetAccessRules($true, $true, [System.Security.Principal.NTAccount])) {
+                            if ("$($ace.ActiveDirectoryRights)" -match 'Write|GenericAll|CreateChild') { $writers += "$($ace.AccessControlType):$($ace.IdentityReference.Value)" }
+                        }
+                        _Log "[PKI-DIAG] DACL $c owner=$owner writers=[$(( $writers | Select-Object -Unique) -join ', ')]"
+                    } catch { _Log "[PKI-DIAG] DACL $c error: $($_.Exception.Message)" }
+                }
+            } catch {}
+            try {
+                $dd = dcdiag /test:Services /test:Advertising /test:NetLogons 2>&1 | Out-String
+                foreach ($ln in ($dd -split "`r?`n")) { if ($ln -match 'passed test|failed test') { _Log "[PKI-DIAG] dcdiag: $($ln.Trim())" } }
+            } catch { _Log "[PKI-DIAG] dcdiag error: $($_.Exception.Message)" }
+            try {
+                if (Test-Path 'C:\Windows\certocm.log') {
+                    foreach ($ln in (Get-Content 'C:\Windows\certocm.log' -Tail 25 -ErrorAction SilentlyContinue)) { if ($ln.Trim()) { _Log "[PKI-DIAG] certocm: $ln" } }
+                }
+            } catch {}
+            try {
+                $evts = Get-WinEvent -FilterHashtable @{ LogName = 'Directory Service'; StartTime = $Since } -ErrorAction SilentlyContinue | Sort-Object TimeCreated | Select-Object -First 25
+                foreach ($e in $evts) { $f = ($e.Message -replace '\s+', ' '); _Log ("[PKI-DIAG] DS Id={0} {1} {2}" -f $e.Id, $e.LevelDisplayName, $f.Substring(0, [Math]::Min(240, $f.Length))) }
+            } catch {}
+            $class = 'Unknown'
+            if ($writeReady -eq $false -and $hasEA -eq $false) { $class = 'Structural' }
+            elseif ($hasEA -eq $false) { $class = 'TokenNoEA' }
+            elseif ($writeReady -eq $false) { $class = 'AccessDenied' }
+            elseif ($writeReady -eq $true) { $class = 'RangeConstraint' }
+            _Log "[PKI-DIAG] classification=$class"
+            return @{ Class = $class; HasEA = $hasEA; WriteReady = $writeReady }
+        }
+
+        # ── ESCALATION Tier 1: forced token + AD refresh (no reboot) ──────────
+        # For an ACCESS_DENIED / stale-PAC style failure: refresh the machine and
+        # user Kerberos context and nudge the directory before the next attempt.
+        function Invoke-PkiTokenAdRefresh {
+            _Log "[PKI-ESC] Tier1: forcing token + AD refresh (gpupdate, klist purge, certutil -pulse, schema reload)."
+            try { & gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+            try { & klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
+            try { & klist.exe purge 2>&1 | Out-Null } catch {}
+            try { & certutil.exe -pulse 2>&1 | Out-Null } catch {}
+            Invoke-SchemaCacheReload | Out-Null
+        }
+
+        # ── ESCALATION Tier 2: full ADCS role reinstall (no reboot) ───────────
+        # For a stuck component: tear down the CA config AND the role feature, then
+        # re-add it, in case the ADCS install state itself is corrupt.
+        function Invoke-PkiRoleReinstall {
+            _Log "[PKI-ESC] Tier2: reinstalling the ADCS role feature (uninstall config + remove/add Adcs-Cert-Authority)."
+            try { Uninstall-AdcsCertificationAuthority -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+            try { Remove-WindowsFeature Adcs-Cert-Authority -ErrorAction SilentlyContinue | Out-Null } catch { _Log "[PKI-ESC] role remove note: $($_.Exception.Message)" }
+            try { Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools -ErrorAction SilentlyContinue | Out-Null } catch { _Log "[PKI-ESC] role add note: $($_.Exception.Message)" }
+        }
+
         try {
             # Check if Sub CA is already fully configured (has a valid cert installed)
             $subCAComplete = $false
@@ -1743,6 +1832,15 @@ Critical=Yes
                 $feEnabled = $false
                 $feLevelPrior = $null
                 $subLoopStart = Get-Date
+                # Escalation thresholds (attempt numbers). Diagnostics run automatically
+                # in-flight; the ladder only fires late so the happy path / normal
+                # timing-window case (which clears on its own within the budget) is
+                # never disturbed by a destructive action.
+                $escDiagAt = 3       # first auto-diagnostic snapshot
+                $escTier1At = 8      # token + AD refresh (no reboot)
+                $escTier2At = 13     # ADCS role reinstall (no reboot)
+                $subLastClass = 'Unknown'
+                $subNeedsHostReboot = $false
                 try {
                     for ($subTry = 1; $subTry -le $maxSubTries; $subTry++) {
                         try {
@@ -1817,6 +1915,22 @@ CertificateTemplate = SubCA
                                     _Log "Enabled NTDS '15 Field Engineering'=5 to capture the exact constraint attribute on the next attempt (prior=$feLevelPrior)."
                                 }
                             }
+                            # In-flight advanced diagnostics + evidence-gated escalation ladder.
+                            # These fire only at thresholds, so a normal timing-window
+                            # deploy (which clears within the budget) is never disturbed.
+                            if ($subTry -eq $escDiagAt) {
+                                $d = Invoke-PkiPublishDiagnostics -Since $subLoopStart -Reason "attempt $subTry still failing"
+                                $subLastClass = $d.Class
+                            }
+                            if ($subTry -eq $escTier1At) {
+                                Invoke-PkiTokenAdRefresh
+                                $d = Invoke-PkiPublishDiagnostics -Since $subLoopStart -Reason "post-Tier1"
+                                $subLastClass = $d.Class
+                            }
+                            if ($subTry -eq $escTier2At) {
+                                Invoke-PkiRoleReinstall
+                                # role reinstall drops the CSR path expectation; nothing else to reset.
+                            }
                             Wait-AdDsReady -TimeoutSec 180 -RequireWritable | Out-Null
                             $backoffSec = [Math]::Min(180, 30 * $subTry)
                             _Log "Attempt $subTry/$maxSubTries failed (post-dcpromo AD settling); waiting ${backoffSec}s before retry..."
@@ -1834,7 +1948,23 @@ CertificateTemplate = SubCA
                     }
                 }
                 if (-not $subConfigured) {
-                    throw "Enterprise Subordinate CA configuration failed after $maxSubTries attempts. Last error: $subLastErr"
+                    # Final in-flight capture + reboot recommendation. When the failure
+                    # is STRUCTURAL (Config-NC write refused and/or the running identity
+                    # lacks Enterprise Admins) rather than the transient timing window,
+                    # a host reboot of the DC (which re-establishes a fresh Kerberos PAC
+                    # / token in a new session) is the next lever -- so flag it for the
+                    # host to act on. A pure RangeConstraint (write probe succeeds) is
+                    # NOT flagged: reboot only RESETS the settle clock and makes it worse.
+                    $dFinal = Invoke-PkiPublishDiagnostics -Since $subLoopStart -Reason "final failure after $maxSubTries attempts"
+                    $subLastClass = $dFinal.Class
+                    if ($subLastClass -eq 'Structural' -or $subLastClass -eq 'AccessDenied' -or $subLastClass -eq 'TokenNoEA') {
+                        $subNeedsHostReboot = $true
+                        _Log "[PKI-ESC] Recommending a HOST reboot of the CA/DC: failure classified '$subLastClass' (not the transient timing window). A fresh session/PAC after reboot is the next lever."
+                    }
+                    else {
+                        _Log "[PKI-ESC] NOT recommending a reboot: failure classified '$subLastClass' (reboot only resets the post-dcpromo settle clock)."
+                    }
+                    return @{ Success = $false; Log = $report.ToArray(); Error = "Enterprise Subordinate CA configuration failed after $maxSubTries attempts. Last error: $subLastErr"; NeedsHostReboot = $subNeedsHostReboot; FailClass = $subLastClass }
                 }
 
                 if (-not (Test-Path $reqFile)) {
@@ -1853,13 +1983,41 @@ CertificateTemplate = SubCA
     }
 
     Flush-LogBuffer -All
-    $result2 = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName `
-        -ScriptBlock $step2Script `
-        -ArgumentList $intCAName, $intCAServer, $domainName, $webURL, $webFolderPath, $rootCAName, $rootCAFilesPath, $intCAFilesPath `
-        -DisplayName "TwoTierPKI Step 2: Prepare Intermediate CA" `
-        -TimeoutSeconds 3600
+    # Step 2 with an evidence-gated HOST reboot tier. The in-guest loop runs its
+    # own diagnostics + no-reboot escalation ladder (token/AD refresh, role
+    # reinstall) and, on exhaustion, returns NeedsHostReboot=$true ONLY when the
+    # failure is structural (Config-NC write refused / running id not an Enterprise
+    # Admin) rather than the transient timing window. In that case the CA IS the
+    # sole DC, so only the host can reboot it -- a reboot yields a fresh
+    # session/Kerberos PAC on the next pass. We reboot at most ONCE.
+    $step2Args = $intCAName, $intCAServer, $domainName, $webURL, $webFolderPath, $rootCAName, $rootCAFilesPath, $intCAFilesPath
+    $rebootedForStep2 = $false
+    while ($true) {
+        $result2 = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName `
+            -ScriptBlock $step2Script `
+            -ArgumentList $step2Args `
+            -DisplayName "TwoTierPKI Step 2: Prepare Intermediate CA" `
+            -TimeoutSeconds 3600
 
-    if (-not (Test-PKIStepResult -Result $result2 -StepName "Step 2" -LogPrefix "TwoTierPKI" -LogSource "CA" -LogOnly)) {
+        $step2Ok = Test-PKIStepResult -Result $result2 -StepName "Step 2" -LogPrefix "TwoTierPKI" -LogSource "CA" -LogOnly
+        if ($step2Ok) { break }
+
+        $sb2 = $null
+        if ($result2 -and $result2.ScriptBlockOutput) { $sb2 = $result2.ScriptBlockOutput } else { $sb2 = $result2 }
+        if ($sb2 -and $sb2.NeedsHostReboot -and (-not $rebootedForStep2)) {
+            Write-Log "[TwoTierPKI] Step 2 exhausted the in-guest ladder with a STRUCTURAL failure (class=$($sb2.FailClass)). Rebooting the CA/DC $issuingCAVMName ONCE from the host to get a fresh session/Kerberos PAC, then retrying Step 2..." -Warning
+            try {
+                $rebooted = Restart-VM2Smart -Name $issuingCAVMName -AllowTurnOff -Reason "PKI subordinate CA structural failure ($($sb2.FailClass)) - host reboot tier"
+                Write-Log "[TwoTierPKI] $issuingCAVMName restart issued (restarted=$rebooted); waiting for it to come back ready for PSDirect/AD..."
+                $null = Wait-ForVm -VmName $issuingCAVMName -PathToVerify "C:\Users" -VmDomainName $domainName -TimeoutMinutes 15
+            }
+            catch {
+                Write-Log "[TwoTierPKI] reboot/wait of $issuingCAVMName errored: $($_.Exception.Message) - not retrying further." -Warning
+                return $false
+            }
+            $rebootedForStep2 = $true
+            continue
+        }
         return $false
     }
 
