@@ -8896,7 +8896,13 @@ function Test-AdditionalDisks {
                     $vhdSize = $null
                     try { $vhdSize = [math]::Round((Get-VHD -Path $hd.Path -ErrorAction Stop).Size / 1GB, 1) } catch {}
                     $shared = if ($hd.SupportPersistentReservations) { ' SHARED(clustered VHDX)' } else { '' }
-                    $hostLines.Add("  DIAG HOST VHDX: '$($hd.Path)' Ctlr=$($hd.ControllerType)$($hd.ControllerNumber)/Loc$($hd.ControllerLocation)$(if ($vhdSize) { " ${vhdSize}GB" })$shared")
+                    # VHDX file timestamps: on a FRESH deploy every data disk is newly
+                    # created, so an old CreationTime here betrays a stale/leftover VHDX
+                    # from a prior lab (the real host-side duplicate) vs a disk created by
+                    # this build (a pure guest phantom).
+                    $vhdTs = ''
+                    try { $fi = Get-Item -LiteralPath $hd.Path -ErrorAction Stop; $vhdTs = " Created=$($fi.CreationTime.ToString('MM-dd HH:mm')) Modified=$($fi.LastWriteTime.ToString('MM-dd HH:mm'))" } catch {}
+                    $hostLines.Add("  DIAG HOST VHDX: '$($hd.Path)' Ctlr=$($hd.ControllerType)$($hd.ControllerNumber)/Loc$($hd.ControllerLocation)$(if ($vhdSize) { " ${vhdSize}GB" })$shared$vhdTs")
                 }
                 $dupPaths = @($hostDisks | Group-Object Path | Where-Object { $_.Count -gt 1 })
                 if ($dupPaths.Count -gt 0) {
