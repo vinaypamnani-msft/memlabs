@@ -393,7 +393,8 @@
       "memory": "2GB",
       "virtualProcs": 2,
       "tpmEnabled": true,
-      "vmGeneration": "2"
+      "vmGeneration": "2",
+      "network": "10.66.11.0"
     }
   ]
 }
