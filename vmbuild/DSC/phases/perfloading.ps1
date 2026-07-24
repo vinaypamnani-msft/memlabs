@@ -1108,15 +1108,25 @@ Write-DscStatus "$Tag Starting perfloading"
     $baselinesZip = "C:\tools\baselines.zip"
     $baselineFolder = "C:\tools\baselines"
 
-    if (Test-Path $baselinesZip) {
+    # CIs/baselines are client-facing configuration that MEMLABS stages and
+    # imports on the Primary ONLY -- baselines.zip is copied solely to the
+    # Primary site server (Common.ScriptBlocks.ps1: role -eq 'Primary'). In a
+    # hierarchy the CAS holds no client resources, so this block was never meant
+    # to run there; because the zip is never present on a CAS it only produced a
+    # spurious "baselines.zip not found ... skipping CI/baseline import" WARNING
+    # on every run. Skip on CAS, matching the collections/Office CAS gates.
+    if ($CurrentRole -eq "CAS") {
+        Write-DscStatus "$Tag Skipping CI/baseline import on CAS (client-facing config is imported on the Primary)"
+    }
+    elseif (Test-Path $baselinesZip) {
         Expand-Archive -Path $baselinesZip -DestinationPath "C:\tools\" -Force
     }
     else {
         Write-DscStatus "$Tag WARNING: baselines.zip not found at $baselinesZip — skipping CI/baseline import"
     }
 
-    # Get all .cab files in the folder
-    if (Test-Path $baselineFolder) {
+    # Get all .cab files in the folder (never on CAS -- see the gate above)
+    if ($CurrentRole -ne "CAS" -and (Test-Path $baselineFolder)) {
     $ConfigNames = Get-ChildItem -Path $baselineFolder -Filter "*.cab"
 
     ForEach ($ConfigName in $ConfigNames) {
