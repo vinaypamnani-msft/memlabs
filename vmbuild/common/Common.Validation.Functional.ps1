@@ -8772,9 +8772,15 @@ function Test-AdditionalDisks {
                     $results.Details.Add("RECOVERED: '$letter`:' was claimed by $preDupN disks (phantom/ghost); a storage rescan cleared it (now $postDupN)")
                 }
                 else {
-                    $results.Details.Add("WARN: $postDupN disks/partitions claim drive letter '$letter`:' after a storage rescan -- disk-signature COLLISION making '$letter`:' intermittently unavailable. If the host has only ONE data disk attached (Get-VMHardDiskDrive), this is a GUEST PHANTOM/ghost disk -> reboot the VM to clear it; if TWO are attached, remove the duplicate VHDX on the host. DIAG:")
+                    $results.Details.Add("WARN: $postDupN disks/partitions claim drive letter '$letter`:' after a storage rescan -- disk-signature COLLISION making '$letter`:' intermittently unavailable. See the HOST DIAG below (added automatically by the caller) for the definitive cause: HOST has exactly the config's data VHDX -> GUEST PHANTOM/ghost disk (reboot the VM to clear it); HOST has a duplicate/extra data VHDX -> remove it on the host (a reboot will NOT fix that). DIAG:")
                     foreach ($dp in @(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue)) { $results.Details.Add("  DIAG dup partition: Disk#$($dp.DiskNumber)/Part#$($dp.PartitionNumber) $([math]::Round($dp.Size / 1GB, 1))GB") }
-                    foreach ($dd in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) { $results.Details.Add("  DIAG Disk#$($dd.Number): $([math]::Round($dd.Size / 1GB, 1))GB Sig=$($dd.Signature) Guid=$($dd.Guid) Offline=$($dd.IsOffline)") }
+                    # Dump each disk with its stable identity fields. Two entries
+                    # that share the SAME UniqueId/SerialNumber/Path are the SAME
+                    # underlying VHDX double-reported by the guest (a pure PHANTOM;
+                    # a reboot clears it); DIFFERENT identities mean two real disks
+                    # are attached (a host-side duplicate VHDX -- see the HOST DIAG
+                    # added by the caller). A null/blank Disk# is a ghost object.
+                    foreach ($dd in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) { $results.Details.Add("  DIAG Disk#$($dd.Number): $([math]::Round($dd.Size / 1GB, 1))GB Sig=$($dd.Signature) Guid=$($dd.Guid) Offline=$($dd.IsOffline) Bus=$($dd.BusType) OpStatus=$($dd.OperationalStatus) Serial='$($dd.SerialNumber)' UniqueId='$($dd.UniqueId)' Path='$($dd.Path)'") }
                 }
             }
             if ($vol.FileSystem -ne 'NTFS') {
@@ -8791,6 +8797,68 @@ function Test-AdditionalDisks {
         -ScriptBlock $scriptBlock -ArgumentList (($disks -join ',')) `
         -DisplayName "Phase11-Disks-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
+
+    # HOST-SIDE truth for a drive-letter collision. The guest scriptblock can see
+    # a duplicate drive letter but CANNOT see whether the HOST actually attached
+    # the data VHDX twice -- so the guest WARN could only *tell a human* to run
+    # Get-VMHardDiskDrive by hand. This Phase 11 check runs on the Hyper-V host,
+    # so do it automatically: enumerate the VM's attached VHDX and decide
+    # definitively between a GUEST PHANTOM (host has exactly the expected data
+    # disks -> a reboot clears the ghost) and a real HOST-SIDE duplicate VHDX
+    # (the same VHDX attached twice, or more data disks than the config defines
+    # -- which survives a redeploy and a reboot will NOT fix). The latter is a
+    # genuine defect and is escalated from WARN to FAIL.
+    try {
+        $sbOut = $result.ScriptBlockOutput
+        if ($sbOut -is [System.Collections.IEnumerable] -and $sbOut -isnot [System.Collections.IDictionary] -and $sbOut -isnot [string]) {
+            foreach ($item in $sbOut) { if ($item -is [System.Collections.IDictionary] -and $item.Contains('Passed')) { $sbOut = $item; break } }
+        }
+        if ($sbOut -is [System.Collections.IDictionary] -and $sbOut.Details -and
+            (@($sbOut.Details | Where-Object { $_ -match 'disks/partitions claim drive letter' }).Count -gt 0)) {
+
+            $expectedDataDisks = @($disks).Count
+            $hostLines = [System.Collections.Generic.List[string]]::new()
+            $hostDup = $false
+            try {
+                $hostDisks = @(Get-VMHardDiskDrive -VMName $VMName -ErrorAction Stop)
+                # Data VHDX are named '<vm>_DATA_<n>.vhdx' by New-VirtualMachine; fall
+                # back to "anything not the OS disk at controller 0 / location 0".
+                $dataVhdx = @($hostDisks | Where-Object { $_.Path -match '_DATA_\d+\.vhdx$' })
+                if ($dataVhdx.Count -eq 0) { $dataVhdx = @($hostDisks | Where-Object { -not ($_.ControllerNumber -eq 0 -and $_.ControllerLocation -eq 0) }) }
+                $hostLines.Add("  DIAG HOST: $($hostDisks.Count) VHDX attached to VM '$VMName'; $($dataVhdx.Count) data disk(s), config defines $expectedDataDisks")
+                foreach ($hd in $hostDisks) {
+                    $vhdSize = $null
+                    try { $vhdSize = [math]::Round((Get-VHD -Path $hd.Path -ErrorAction Stop).Size / 1GB, 1) } catch {}
+                    $hostLines.Add("  DIAG HOST VHDX: '$($hd.Path)' Ctlr=$($hd.ControllerType)$($hd.ControllerNumber)/Loc$($hd.ControllerLocation)$(if ($vhdSize) { " ${vhdSize}GB" })")
+                }
+                $dupPaths = @($hostDisks | Group-Object Path | Where-Object { $_.Count -gt 1 })
+                if ($dupPaths.Count -gt 0) {
+                    $hostLines.Add("FAIL: HOST attaches the SAME VHDX more than once: $(($dupPaths | ForEach-Object { $_.Name }) -join '; ') -- detach the duplicate on the host (a reboot will NOT fix this)")
+                    $hostDup = $true
+                }
+                elseif ($dataVhdx.Count -gt $expectedDataDisks) {
+                    $hostLines.Add("FAIL: HOST has $($dataVhdx.Count) data VHDX attached but config defines only $expectedDataDisks -- a stale/duplicate data VHDX is attached on the host; detach+delete the extra VHDX (this is NOT a guest phantom, a reboot will NOT fix it): $(($dataVhdx | ForEach-Object { $_.Path }) -join '; ')")
+                    $hostDup = $true
+                }
+                else {
+                    $hostLines.Add("WARN: HOST has exactly $($dataVhdx.Count) data VHDX (matches config) -> the duplicate '$($disks -join ',')' seen in the guest is a GUEST PHANTOM/ghost disk; reboot '$VMName' to clear it")
+                }
+            }
+            catch {
+                $hostLines.Add("  DIAG HOST: could not enumerate host VHDX for '$VMName': $($_.Exception.Message)")
+            }
+
+            # $sbOut is a rehydrated Hashtable whose Details collection may be
+            # fixed-size after PSRemoting deserialization -- rebuild it rather than
+            # calling .Add(), and set keys on the hashtable (which is mutable).
+            $newDetails = [System.Collections.Generic.List[string]]::new()
+            foreach ($l in $sbOut.Details) { $newDetails.Add([string]$l) }
+            foreach ($l in $hostLines) { $newDetails.Add($l) }
+            $sbOut.Details = $newDetails
+            if ($hostDup) { $sbOut.Passed = $false }
+        }
+    }
+    catch { }
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'Disks' -Result $result)
 }
