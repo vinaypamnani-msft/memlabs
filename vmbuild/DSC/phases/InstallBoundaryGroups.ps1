@@ -107,6 +107,14 @@ $ensureClientPkgCoverage = {
     catch { Write-DscStatus "Client pkg coverage: could not enumerate boundary-group site systems: $($_.Exception.Message)"; return }
     if ($bgDpFqdns.Count -eq 0) { return }
 
+    # Site servers (CAS/Primary/Secondary) run SMS_EXECUTIVE + distmgr. Restarting a
+    # site server's executive sets distmgr's thread-exit flag (m_bShutdownRequest) and
+    # ABORTS any in-flight inter-site content bundle with ERROR_REQUEST_ABORTED
+    # (0x800704d3) -- source-confirmed in distmgr.cpp CreatePackageBundle. So the
+    # level-2 "wake distmgr" restart must NEVER target one (esp. the primary that is
+    # sending content down to a secondary -- that IS the failure we're clearing).
+    $siteServerHosts = @($deployConfig.virtualMachines | Where-Object { $_.role -in 'CAS', 'Primary', 'Secondary' } | ForEach-Object { "$($_.vmName)".ToUpper() })
+
     # Escalation ladder per DP -- a plain redistribute does NOT clear a Secondary DP
     # wedged at ContentValidating (its distmgr may be idle on a 3600s sleep cycle),
     # so escalate: (0) redistribute -> (1) remove + re-add content (force a clean
@@ -164,14 +172,27 @@ $ensureClientPkgCoverage = {
                     $escalation[$u] = 1
                 }
                 elseif ($level -eq 1 -and $try -ge 8) {
-                    # Level 2: wake the DP's distmgr (it may be idle on a 3600s sleep).
+                    # Level 2: last resort. Historically restarted SMS_EXECUTIVE on the DP
+                    # to "wake" an idle secondary distmgr -- but per distmgr source
+                    # (CreatePackageBundle -> SetCancelFlag(&m_bShutdownRequest); the
+                    # content library returns ERROR_REQUEST_ABORTED only when that flag is
+                    # set; m_bShutdownRequest is set only when the distmgr thread exits),
+                    # restarting a SITE SERVER's executive ABORTS its in-flight inter-site
+                    # content bundle with 0x800704d3 -- the very failure this remediation is
+                    # meant to clear (self-inflicted on the primary PL-MELT sending to the
+                    # secondary). NEVER restart a site server's executive; let distmgr retry.
                     $dpHost = ("$dp" -split '\.')[0]
-                    try {
-                        $svc = Get-Service -ComputerName $dpHost -Name 'SMS_EXECUTIVE' -ErrorAction Stop
-                        Restart-Service -InputObject $svc -Force -ErrorAction Stop
-                        Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> restarted SMS_EXECUTIVE on '$dpHost' to wake distmgr [esc.2, try $try]"
+                    if ($siteServerHosts -contains $dpHost.ToUpper()) {
+                        Write-DscStatus "Client pkg coverage: DP '$dp' is a SITE SERVER -> NOT restarting SMS_EXECUTIVE (that aborts in-flight inter-site content bundles: distmgr 0x800704d3). Leaving distmgr to retry uninterrupted. [esc.2, try $try]" -Warning
                     }
-                    catch { Write-DscStatus "Client pkg coverage: could not restart SMS_EXECUTIVE on '$dpHost' (WinRM/RPC?): $($_.Exception.Message)" }
+                    else {
+                        try {
+                            $svc = Get-Service -ComputerName $dpHost -Name 'SMS_EXECUTIVE' -ErrorAction Stop
+                            Restart-Service -InputObject $svc -Force -ErrorAction Stop
+                            Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> restarted SMS_EXECUTIVE on '$dpHost' to wake distmgr [esc.2, try $try]"
+                        }
+                        catch { Write-DscStatus "Client pkg coverage: could not restart SMS_EXECUTIVE on '$dpHost' (WinRM/RPC?): $($_.Exception.Message)" }
+                    }
                     $escalation[$u] = 2
                 }
             }
@@ -215,7 +236,7 @@ $ensureClientPkgCoverage = {
                         $hits = @(Get-Content $p -Tail 3000 -ErrorAction SilentlyContinue | Where-Object { $_ -match $pat } | Select-Object -Last $n)
                         (@($hits | ForEach-Object { $m = [regex]::Match($_, '<!\[LOG\[(.*?)\]LOG\]!>'); if ($m.Success) { $m.Groups[1].Value } else { $_ } }) -join ' | ')
                     }
-                    $o = [ordered]@{ PkgLib = ''; ContentLibDrive = ''; Distmgr = ''; PkgXfer = ''; Despool = ''; Sender = '' }
+                    $o = [ordered]@{ PkgLib = ''; ContentLibDrive = ''; Distmgr = ''; PkgXfer = ''; Despool = ''; Sender = ''; Exec = '' }
                     $clRoot = $null
                     foreach ($cl in @('E:\SCCMContentLib', 'D:\SCCMContentLib', 'F:\SCCMContentLib', 'C:\SCCMContentLib')) {
                         $pl = Join-Path $cl 'PkgLib'
@@ -240,11 +261,36 @@ $ensureClientPkgCoverage = {
                         # sender: the SENDING side inter-site transfer.
                         $o.Sender = & $grab (Join-Path $logs 'sender.log') 3 "$pkgId|Error|0x8|failed|retry"
                     }
+                    # SMS_EXECUTIVE forensics: a 0x800704d3 bundle abort means this site's
+                    # executive/distmgr was STOPPED mid-build. Show when it last started and
+                    # how many SCM start/stop (event 7036) entries it logged in the last 2h --
+                    # a high count = a restart LOOP = the real root cause of the inter-site
+                    # abort (find + stop whatever keeps bouncing the service).
+                    try {
+                        $exe = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+                        $startedNote = ''
+                        if ($exe.ProcessId -gt 0) { $pp = Get-Process -Id $exe.ProcessId -ErrorAction SilentlyContinue; if ($pp) { $startedNote = " up since $($pp.StartTime.ToString('MM-dd HH:mm:ss'))" } }
+                        $recent = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7036; StartTime = (Get-Date).AddHours(-2) } -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'SMS_EXECUTIVE' })
+                        $o.Exec = "State=$($exe.State)$startedNote; $($recent.Count) SCM start/stop (7036) events in last 2h"
+                    }
+                    catch {}
                     return $o
                 }
                 $pkgLibNote = if ($diag.PkgLib) { "PkgLib HAS [$($diag.PkgLib)]" } else { "PkgLib MISSING $PackageID -> content never arrived on this DP" }
                 Write-DscStatus "Client pkg coverage diag [$dp]: summarizer $sInfo ; $pkgLibNote ; $($diag.ContentLibDrive)" -Warning
                 if ($diag.Distmgr) { Write-DscStatus "Client pkg coverage diag [$dp] distmgr: $($diag.Distmgr)" -Warning }
+                # Source-confirmed (distmgr.cpp CreatePackageBundle ->
+                # SetCancelFlag(&m_bShutdownRequest); the content library returns
+                # ERROR_REQUEST_ABORTED ONLY when that flag is set; m_bShutdownRequest is
+                # set ONLY when the distmgr thread is exiting): a 0x800704d3 on an inter-
+                # site bundle means the SENDING site's SMS_EXECUTIVE/distmgr was STOPPED or
+                # RESTARTED mid-build. This is NOT benign -- if it keeps happening,
+                # something keeps bouncing the sending site's executive; that restarter is
+                # the ROOT CAUSE to hunt (see the executive forensics line below).
+                if ($diag.Distmgr -match 'creating package bundle' -and $diag.Distmgr -match '0x800704d3') {
+                    Write-DscStatus "Client pkg coverage diag [$dp]: 0x800704d3 = ERROR_REQUEST_ABORTED -- the inter-site content bundle was aborted because the SENDING site's SMS_EXECUTIVE/distmgr was STOPPED/RESTARTED mid-build (source: distmgr's bundle cancel flag is the thread-exit m_bShutdownRequest). NOT benign if persistent: find + stop whatever keeps restarting SMS_EXECUTIVE on the sending site (see executive forensics)." -Warning
+                }
+                if ($diag.Exec) { Write-DscStatus "Client pkg coverage diag [$dp] SMS_EXECUTIVE: $($diag.Exec)" -Warning }
                 if ($diag.PkgXfer) { Write-DscStatus "Client pkg coverage diag [$dp] PkgXferMgr: $($diag.PkgXfer)" -Warning }
                 if ($diag.Despool) { Write-DscStatus "Client pkg coverage diag [$dp] despool: $($diag.Despool)" -Warning }
                 if ($diag.Sender) { Write-DscStatus "Client pkg coverage diag [$dp] sender: $($diag.Sender)" -Warning }
