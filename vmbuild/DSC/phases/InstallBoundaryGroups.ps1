@@ -74,6 +74,31 @@ $ensureClientPkgCoverage = {
     $fqdnOf = { param($nal) if ("$nal" -match '\\([^\\"\]]+)') { $Matches[1] } else { $null } }
     $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
 
+    # Version-proof per-DP (re)distribute. The ConfigMgr cmdlet surface for
+    # targeting a SINGLE DP is inconsistent across builds and was breaking here:
+    #   * Invoke-CMContentRedistribution has NO -PackageId on this build
+    #     ("A parameter cannot be found that matches parameter name 'PackageId'").
+    #   * Update-CMDistributionPoint has no -DistributionPointName (all-DP only).
+    #   * Start-CMContentDistribution throws "No content destination was found ...
+    #     already been distributed" when a distribution row already exists.
+    # The SMS_DistributionPoint targeting instance is the reliable path: if the
+    # package is already targeted at the DP, flip RefreshNow=$true + Put() to force
+    # a redistribute (works even for a DP wedged at ContentValidating/Failed); only
+    # when there is NO targeting row do we create one with Start-CMContentDistribution.
+    # Deciding on the targeting table (not the lagging summarizer) also avoids the
+    # "already distributed" throw when the summarizer row hasn't appeared yet.
+    $redistOrDistribute = {
+        param($dpFqdn)
+        $targeting = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue |
+                Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dpFqdn })
+        if ($targeting.Count -gt 0) {
+            foreach ($t in $targeting) { $t.RefreshNow = $true; [void]$t.Put() }
+            return 'redistributed'
+        }
+        Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dpFqdn -ErrorAction Stop
+        return 'distributed'
+    }
+
     $bgDpFqdns = @()
     try {
         $bgDpFqdns = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop |
@@ -111,31 +136,30 @@ $ensureClientPkgCoverage = {
             $level = if ($escalation.ContainsKey($u)) { $escalation[$u] } else { -1 }
             try {
                 if ($level -lt 0) {
-                    # Level 0: gentle (re)distribute.
-                    if (-not $hasRow) {
-                        Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
+                    # Level 0: gentle (re)distribute via the version-proof WMI path.
+                    # $hasRow (summarizer) is unreliable here -- it lags targeting,
+                    # so a DP that is already targeted but has no summarizer row yet
+                    # would fail Start-CMContentDistribution with "already distributed".
+                    # $redistOrDistribute checks the targeting table and picks
+                    # RefreshNow (already targeted) vs distribute (not targeted).
+                    $action = & $redistOrDistribute $dp
+                    if ($action -eq 'distributed') {
                         Write-DscStatus "Client pkg coverage: DP '$dp' had no distribution -> distributed [esc.0, try $try]"
                     }
                     else {
-                        # Update-CMDistributionPoint has NO -DistributionPointName parameter
-                        # (it redistributes a package to ALL its DPs). To target the single
-                        # wedged DP, use Invoke-CMContentRedistribution; fall back to the
-                        # all-DP redistribute only if that cmdlet is unavailable.
-                        if (Get-Command Invoke-CMContentRedistribution -ErrorAction SilentlyContinue) {
-                            Invoke-CMContentRedistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
-                        }
-                        else {
-                            Update-CMDistributionPoint -PackageId $PackageID -ErrorAction Stop
-                        }
-                        Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed [esc.0, try $try]"
+                        Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed (RefreshNow) [esc.0, try $try]"
                     }
                     $escalation[$u] = 0
                 }
                 elseif ($level -eq 0 -and $try -ge 4) {
                     # Level 1: remove + re-add content (clean copy through the wedge).
+                    # The Remove is best-effort (a wedged Secondary DP may reject it),
+                    # so re-add via the $redistOrDistribute helper -- if the targeting
+                    # row survived the Remove it RefreshNow's it instead of throwing
+                    # "already distributed"; if the Remove took, it distributes fresh.
                     try { Remove-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -Force -ErrorAction Stop } catch {}
                     Start-Sleep -Seconds 10
-                    Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
+                    & $redistOrDistribute $dp | Out-Null
                     Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> removed + re-added content [esc.1, try $try]"
                     $escalation[$u] = 1
                 }
