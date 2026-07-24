@@ -445,18 +445,36 @@ function Set-CmMediaMountAndShare {
                 }
             }
             catch { }
-            # Detect the CM media by scanning EVERY drive letter (C..Z) for the
-            # setup binary, NOT by filtering Get-Volume on DriveType -eq 'CD-ROM'.
-            # The DriveType filter proved unreliable: when the disc is busy (the
-            # site's own setup reads it concurrently) or enumerated in a different
-            # session, Get-Volume can omit the very CD-ROM the guest is actively
-            # using (observed: setup ran from G:\ while Get-Volume returned only the
-            # cache disc D:). A direct Test-Path on each letter finds the media
-            # wherever it landed, regardless of volume-type classification.
+            # STRONGEST signal first: if CM Setup / Setupdl is already executing
+            # from the media, its open image handle proves the disc is present and
+            # names the drive. This survives the Gen2 optical-enumeration flakiness
+            # that hides a busy disc from Get-Volume / Win32_CDROMDrive / a bare
+            # drive-letter Test-Path scan (observed: setup was running from F:\ for
+            # 26s while Win32_CDROMDrive enumerated only the idle cache disc D:).
+            # A running process's ExecutablePath cannot be an enumeration phantom.
             $cd = $null
-            foreach ($n in 67..90) {
-                $dl = [char]$n
-                if (Test-Path ("${dl}:\SMSSETUP\BIN\X64\Setup.exe")) { $cd = "${dl}:"; break }
+            try {
+                $sp = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='setupdl.exe' OR Name='setup.exe'" -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ExecutablePath -match '(?i)^[A-Za-z]:\\SMSSETUP\\BIN\\X64\\setup(dl)?\.exe$' }) |
+                    Select-Object -First 1
+                if ($sp -and $sp.ExecutablePath) {
+                    $cd = $sp.ExecutablePath.Substring(0, 2)  # e.g. 'F:'
+                    $diag.Add("CM Setup already running from ${cd} ($($sp.Name)); media present (process handle).")
+                }
+            }
+            catch { }
+            # Fallback: scan EVERY drive letter (C..Z) for the setup binary, NOT by
+            # filtering Get-Volume on DriveType -eq 'CD-ROM'. The DriveType filter
+            # proved unreliable: when the disc is busy (the site's own setup reads
+            # it concurrently) or enumerated in a different session, Get-Volume can
+            # omit the very CD-ROM the guest is actively using. A direct Test-Path
+            # on each letter finds the media wherever it landed, regardless of
+            # volume-type classification.
+            if (-not $cd) {
+                foreach ($n in 67..90) {
+                    $dl = [char]$n
+                    if (Test-Path ("${dl}:\SMSSETUP\BIN\X64\Setup.exe")) { $cd = "${dl}:"; break }
+                }
             }
             if (-not $cd) {
                 try { & pnputil.exe /scan-devices *>$null } catch { }
@@ -481,43 +499,105 @@ function Set-CmMediaMountAndShare {
             $diag.Add("Drives with CM setup (any type): $(if ($cmLetters.Count) { $cmLetters -join ', ' } else { '<none>' })")
             $drv = @(Get-CimInstance -ClassName Win32_CDROMDrive -ErrorAction SilentlyContinue)
             $diag.Add("Win32_CDROMDrive=$($drv.Count): " + (($drv | ForEach-Object { "$($_.Drive)|MediaLoaded=$($_.MediaLoaded)" }) -join '; '))
+            # Report any running CM Setup and where it's reading from -- the
+            # authoritative 'media is present' signal when enumeration is flaky.
+            $spAll = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='setupdl.exe' OR Name='setup.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath })
+            $diag.Add("CM Setup processes: $(if ($spAll.Count) { ($spAll | ForEach-Object { "$($_.Name)@$($_.ExecutablePath)" }) -join '; ' } else { '<none>' })")
         }
         catch { $diag.Add("diag error: $($_.Exception.Message)") }
         return @{ Found = [bool]$cd; Root = $(if ($cd) { "$cd\" } else { $null }); Diag = $diag }
     }
 
-    # ---- Host-driven diagnose -> repair loop. The host owns the DVD at the
-    # hypervisor and re-presents the disc between guest probes. Key lesson learned
-    # the hard way: DO NOT churn the DVDs (repeated eject/remount/remove/re-add).
-    # That leaves orphan empty drives and pushes discs to high, climbing SCSI
-    # controller locations, which WEDGES a Gen2 guest's optical enumeration (it
-    # then shows a stale/phantom disc and can't see the real media). Instead, on a
-    # miss, REBUILD the optical layout cleanly in one shot (remove all DVD drives,
-    # re-add every wanted disc fresh at low locations -- Reset-AllDvdDrivesOnVm),
-    # which preserves co-mounts (cache + SQL + CM can all be present at once) and
-    # de-churns. Reboot is the final tier, taken only from the clean topology.
-    $maxAttempts = 4
+    # Lightweight, churn-free check: is CM Setup already reading the media? A
+    # running setupdl.exe/setup.exe whose image lives on \SMSSETUP\BIN\X64 proves
+    # the disc is present and names its drive -- an open image handle can't be an
+    # enumeration phantom. Used to AVOID yanking the DVD out from under a live
+    # install (a reset/reboot mid-setup would corrupt it).
+    $setupRunningScript = {
+        $sp = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='setupdl.exe' OR Name='setup.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.ExecutablePath -match '(?i)^[A-Za-z]:\\SMSSETUP\\BIN\\X64\\setup(dl)?\.exe$' }) |
+            Select-Object -First 1
+        if ($sp -and $sp.ExecutablePath) { return @{ Running = $true; Root = $sp.ExecutablePath.Substring(0, 3) } }
+        return @{ Running = $false; Root = $null }
+    }
+
+    # ---- Host-driven diagnose -> repair loop, BUDGETED to the DC's tolerance.
+    # The DC's WaitForExtendSchemaFile polls the CMCB share for extadsch.exe for up
+    # to 30 minutes before it throws, so giving up after a few quick tries here just
+    # deadlocks the DC waiting on a share we stopped trying to create. Instead we
+    # keep re-presenting/probing for nearly that whole window as long as there is
+    # ANY chance the disc is present (the host ISO still exists), and only declare
+    # failure when that budget is exhausted.
+    #
+    # Escalation stays gentle, spaced out, and NEVER churns the DVD while CM Setup
+    # is reading it (a reset/reboot mid-install would corrupt setup):
+    #   - every loop: a cheap, churn-free guest probe. It also detects a running
+    #     Setup (proof-positive the media is present, and it names the drive).
+    #   - a clean DVD reset (remove all + re-add discs fresh at low locations --
+    #     de-churns, un-wedges Gen2 optical enumeration) at most ~every 4 min.
+    #   - a reboot from the clean topology (a disc present at boot is always
+    #     enumerated) at most ~every 10 min, capped at 2, and only when Setup is
+    #     NOT running -- re-checked immediately before the reboot.
     $mediaRoot = $null
-    for ($attempt = 1; $attempt -le $maxAttempts -and -not $mediaRoot; $attempt++) {
-        # Diagnose the host side first: the ISO file must exist on disk.
+    $loopStart = Get-Date
+    $mediaDeadline = $loopStart.AddMinutes(28)
+    $attempt = 0
+    $lastResetAt = [DateTime]::MinValue
+    $lastRebootAt = [DateTime]::MinValue
+    $rebootCount = 0
+    while (-not $mediaRoot -and (Get-Date) -lt $mediaDeadline) {
+        $attempt++
+        $minsLeft = [int]((($mediaDeadline) - (Get-Date)).TotalMinutes)
+
+        # There's no chance to present anything if the host ISO itself is gone.
+        # Treat as a transient host blip and re-check rather than failing outright.
         if (-not (Test-Path $isoPath)) {
-            Write-Log "[Phase $Phase]: $($vmName): CM ISO path missing on host: $isoPath [attempt $attempt/$maxAttempts]." -Warning
-            Start-Sleep -Seconds 5
+            Write-Log "[Phase $Phase]: $($vmName): CM ISO path missing on host: $isoPath [attempt $attempt, ~$minsLeft min left]; re-checking." -Warning
+            Start-Sleep -Seconds 15
             continue
         }
-        # Repair, escalating per attempt WITHOUT churning the DVDs:
-        #   attempt 1: ensure the CM ISO is attached (idempotent add). No churn.
-        #   attempt 2-3: clean DVD reset -- remove ALL drives (clears orphan empties
-        #              + climbing locations) and re-add every wanted disc fresh at a
-        #              low location. Preserves co-mounted cache/SQL discs; the fresh
-        #              device-arrival un-wedges guest enumeration.
-        #   attempt 4: REBOOT from the clean topology. A disc present at boot is
-        #              always enumerated by Windows -- the repair that cannot fail.
+
+        # Idempotently ensure the ISO is attached at the hypervisor (no churn).
         $attached = $false
         try { $attached = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath }) } catch { }
-        $mountOk = $true
-        if ($attempt -ge 4) {
-            Write-Log "[Phase $Phase]: $($vmName): CM media still not visible after clean DVD resets; rebooting the guest from the clean topology so the attached disc is enumerated at boot [attempt $attempt/$maxAttempts]." -Warning
+        if (-not $attached) {
+            $null = Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
+            try { $attached = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath }) } catch { $attached = $false }
+        }
+
+        # Churn-free guest probe: detects a running CM Setup (proof of media) or the
+        # setup binary on any drive letter, and returns the guest's optical diag.
+        $probe = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $probeScript -ArgumentList @(60) -SuppressLog -DisplayName "Locate CM media ($attempt)"
+        $out = $probe.ScriptBlockOutput
+        if ($out -is [hashtable] -and $out.Found) {
+            $mediaRoot = [string]$out.Root
+            Write-Log "[Phase $Phase]: $($vmName): CM media visible at $mediaRoot [attempt $attempt]." -LogOnly
+            break
+        }
+        # Signal back to host: log the guest's optical inventory so a miss is diagnosable.
+        if ($out -is [hashtable] -and $out.Diag) {
+            foreach ($d in $out.Diag) { Write-Log "[Phase $Phase]: $($vmName): [CM media diag] $d" -LogOnly }
+        }
+        elseif ($probe.ScriptBlockFailed) {
+            Write-Log "[Phase $Phase]: $($vmName): CM media probe errored [attempt $attempt]: $($probe.ScriptBlockOutput)" -Warning
+        }
+
+        # FINAL guard before any disruptive repair: re-confirm Setup did not start
+        # during the probe. If it did, the media is present -- use it and never
+        # churn the disc out from under the running install.
+        $sr = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $setupRunningScript -SuppressLog -DisplayName "Recheck CM setup ($attempt)"
+        if ($sr.ScriptBlockOutput -is [hashtable] -and $sr.ScriptBlockOutput.Running) {
+            $mediaRoot = [string]$sr.ScriptBlockOutput.Root
+            Write-Log "[Phase $Phase]: $($vmName): CM Setup now running from $mediaRoot; using it as the media root (no DVD churn)." -LogOnly
+            break
+        }
+
+        # Not visible yet, and Setup isn't reading it -> safe to escalate. Space the
+        # disruptive repairs out so we don't churn the optical stack every loop.
+        $now = Get-Date
+        $elapsedMin = ($now - $loopStart).TotalMinutes
+        if ($elapsedMin -ge 8 -and ($now - $lastRebootAt).TotalMinutes -ge 10 -and $rebootCount -lt 2) {
+            Write-Log "[Phase $Phase]: $($vmName): CM media still not visible after clean resets; rebooting from the clean topology so the attached disc enumerates at boot [reboot $($rebootCount + 1)/2, ~$minsLeft min left]." -Warning
             $null = Reset-AllDvdDrivesOnVm -VmName $vmName -RequiredIsoPath $isoPath -Context "CM" -Phase $Phase
             try {
                 Restart-VM -Name $vmName -Force -ErrorAction Stop
@@ -531,45 +611,22 @@ function Set-CmMediaMountAndShare {
             # Wait for the guest to come back before probing (a path that always
             # exists once Windows is up).
             $null = Wait-ForVm -VmName $vmName -VmDomainName $domain -PathToVerify "C:\Windows\System32\cmd.exe" -TimeoutMinutes 10 -Quiet
+            $lastRebootAt = Get-Date
+            $rebootCount++
         }
-        elseif ($attempt -ge 2) {
-            Write-Log "[Phase $Phase]: $($vmName): clean CM DVD reset (remove all + re-add discs cleanly) to un-wedge guest enumeration [attempt $attempt/$maxAttempts]." -LogOnly
-            $mountOk = Reset-AllDvdDrivesOnVm -VmName $vmName -RequiredIsoPath $isoPath -Context "CM" -Phase $Phase
+        elseif (($now - $lastResetAt).TotalMinutes -ge 4) {
+            Write-Log "[Phase $Phase]: $($vmName): CM media not visible [attempt $attempt, ~$minsLeft min left]; clean DVD reset to un-wedge guest enumeration." -Warning
+            $null = Reset-AllDvdDrivesOnVm -VmName $vmName -RequiredIsoPath $isoPath -Context "CM" -Phase $Phase
+            $lastResetAt = $now
         }
         else {
-            $mountOk = Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
+            Start-Sleep -Seconds 15
         }
-        if (-not $mountOk) {
-            Write-Log "[Phase $Phase]: $($vmName): host could not attach CM ISO $isoPath [attempt $attempt/$maxAttempts]; retrying." -Warning
-            Start-Sleep -Seconds 5
-            continue
-        }
-        # Verify the attach actually landed at the hypervisor before probing.
-        try { $attached = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath }) } catch { $attached = $false }
-        if (-not $attached) {
-            Write-Log "[Phase $Phase]: $($vmName): CM ISO not attached at hypervisor after mount [attempt $attempt/$maxAttempts]; retrying." -Warning
-            continue
-        }
-        $probeSeconds = if ($attempt -eq 1) { 90 } elseif ($attempt -ge 4) { 120 } else { 60 }
-        $probe = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $probeScript -ArgumentList @($probeSeconds) -SuppressLog -DisplayName "Locate CM media ($attempt)"
-        $out = $probe.ScriptBlockOutput
-        if ($out -is [hashtable] -and $out.Found) {
-            $mediaRoot = [string]$out.Root
-            Write-Log "[Phase $Phase]: $($vmName): CM media visible at $mediaRoot [attempt $attempt/$maxAttempts]." -LogOnly
-            break
-        }
-        # Signal back to host: log the guest's optical inventory so a miss is diagnosable.
-        if ($out -is [hashtable] -and $out.Diag) {
-            foreach ($d in $out.Diag) { Write-Log "[Phase $Phase]: $($vmName): [CM media diag] $d" -LogOnly }
-        }
-        elseif ($probe.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($vmName): CM media probe errored [attempt $attempt/$maxAttempts]: $($probe.ScriptBlockOutput)" -Warning
-        }
-        Write-Log "[Phase $Phase]: $($vmName): CM media not visible to guest [attempt $attempt/$maxAttempts]; will re-present and retry." -Warning
     }
 
     if (-not $mediaRoot) {
-        Write-Log "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $maxAttempts host repair attempts (clean DVD resets and a guest reboot); the CMCB share (DC schema extension depends on it) cannot be created." -Failure -OutputStream
+        $waited = [int](((Get-Date) - $loopStart).TotalMinutes)
+        Write-Log "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $attempt attempts over ~$waited min (clean DVD resets and guest reboots); the CMCB share (DC schema extension depends on it) cannot be created." -Failure -OutputStream
         return
     }
 
