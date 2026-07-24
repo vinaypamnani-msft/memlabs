@@ -89,11 +89,31 @@ Write-DscStatus "$Tag Starting perfloading"
             try {
                 $col = New-CMDeviceCollection -Name $colName -LimitingCollectionName "All Systems" -Comment "VMs targeted for Microsoft 365 Apps install" -ErrorAction Stop
                 Write-DscStatus "$Tag Created collection: $colName"
-                Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $col.CollectionID -ErrorAction SilentlyContinue
             }
             catch {
                 Write-DscStatus "$Tag WARNING: Failed to create Office Install Targets collection: $($_.Exception.Message)"
                 return $null
+            }
+
+            # Move the new collection under the MEMLABS folder as a best-effort,
+            # cosmetic step. This function is called EARLY (before the Office app
+            # deployment is authored) -- ahead of the main collection loop that
+            # creates \DeviceCollection\MEMLABS -- so on a fresh lab the folder
+            # does not exist yet. Move-CMObject raises a TERMINATING error on a
+            # missing target folder, which -ErrorAction SilentlyContinue does NOT
+            # suppress; previously that bubbled into the catch above, produced a
+            # misleading "Failed to create Office Install Targets collection"
+            # warning, returned $null, and skipped adding the query membership
+            # rule -- leaving the Office deployment pointed at an empty collection.
+            # Ensure the folder exists first and keep the move non-fatal.
+            try {
+                if (-not (Get-CMFolder -FolderPath "\DeviceCollection\MEMLABS" -ErrorAction SilentlyContinue)) {
+                    New-CMFolder -Name "MEMLABS" -ParentFolderPath "\DeviceCollection" -ErrorAction SilentlyContinue | Out-Null
+                }
+                Move-CMObject -FolderPath "$SiteCode`:\DeviceCollection\MEMLABS" -ObjectId $col.CollectionID -ErrorAction SilentlyContinue
+            }
+            catch {
+                Write-DscStatus "$Tag Note: could not move '$colName' under the MEMLABS folder (cosmetic only): $($_.Exception.Message)"
             }
         }
 
