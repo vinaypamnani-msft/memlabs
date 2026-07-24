@@ -1373,13 +1373,28 @@ function Install-TwoTierPKI {
         }
 
         try {
-            # Check if CA is already installed (idempotency)
+            # Check if CA is already CONFIGURED (idempotency). The certsvc SERVICE
+            # existing only means the ADCS ROLE binaries are present -- Phase 2 DSC
+            # now pre-stages Adcs-Cert-Authority (Phase2WorkgroupMember ->
+            # InstallFeatureForSCCM IsOfflineRootCA), which registers certsvc in a
+            # Stopped state BEFORE the CA is configured. A CONFIGURED CA is indicated
+            # by the Configuration\Active registry value, written by
+            # Install-AdcsCertificationAuthority. Testing the service alone made a
+            # fresh, unconfigured box look "installed", so the code skipped the real
+            # configuration and then FAILED trying to START an unconfigured certsvc
+            # ("Cannot start service certsvc on computer '.'"). Mirrors the
+            # Test-CaConfigured gate used by the issuing/single-tier CA step.
             $caAlreadyInstalled = $false
             try {
-                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
-                if ($svc) {
+                $cfgRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+                $active = (Get-ItemProperty -Path $cfgRoot -Name 'Active' -ErrorAction SilentlyContinue).Active
+                if (-not [string]::IsNullOrWhiteSpace($active) -and (Test-Path (Join-Path $cfgRoot $active))) {
                     $caAlreadyInstalled = $true
-                    _Log "CA service already exists (state: $($svc.Status)) - skipping installation"
+                    $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                    _Log "CA already configured (Active='$active', service state: $($svc.Status)) - skipping installation"
+                }
+                else {
+                    _Log "certsvc present but CA not yet configured (no Configuration\Active) - will configure the Root CA."
                 }
             } catch {}
 
