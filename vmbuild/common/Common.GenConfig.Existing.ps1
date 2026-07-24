@@ -727,6 +727,21 @@ function Get-ValidNetworksForVM {
 
     $rolesToCheck = @("Primary", "CAS", "Secondary")
 
+    # OSDClient: PXE is a subnet-local DHCP broadcast, so an OSDClient can only
+    # boot from a DP on its OWN subnet. Only offer subnets that already have a DP
+    # (installDP or a pull DP -- perfloading enables PXE on the same-subnet DP). A
+    # subnet whose DP was removed (e.g. an HA site server that lost its co-located
+    # DP, leaving the default network DP-less) must NOT be an option. Fall back to
+    # the full list ONLY if NO subnet has a DP yet (don't trap the user mid-build;
+    # Test-Configuration still blocks an OSDClient on a DP-less subnet).
+    if ($CurrentVM.Role -eq 'OSDClient') {
+        $vmListForDp = Get-List2 -DeployConfig $ConfigToCheck
+        $dpSubnets = @($vmListForDp | Where-Object { $_.installDP -eq $true -or $_.enablePullDP -eq $true } | ForEach-Object { if ($_.network) { "$($_.network)" } else { "$($ConfigToCheck.vmOptions.network)" } } | Where-Object { $_ } | Select-Object -Unique)
+        $dpOnly = @($subnetList | Where-Object { $dpSubnets -contains $_ })
+        if ($dpOnly.Count -gt 0) { return $dpOnly }
+        return $subnetList
+    }
+
     if ($CurrentVM.Role -notin $rolesToCheck) {
         Write-Verbose "Current VM $($CurrentVm.Role) returning all subnets"
         return $subnetList

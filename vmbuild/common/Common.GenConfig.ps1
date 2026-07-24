@@ -34,6 +34,14 @@ Function Get-ValidSubnets {
         $subnetlist = Get-ValidNetworksForVM -ConfigToCheck $configToCheck -Currentvm $vmToCheck
     }
 
+    # An OSDClient can only PXE-boot from a DP on its own subnet, so
+    # Get-ValidNetworksForVM already limited the list to subnets that have a DP.
+    # Do NOT append brand-new empty subnets for it (a fresh subnet has no DP and
+    # can never do OSD/PXE); return the DP-restricted list as-is.
+    if ($vmToCheck -and $vmToCheck.Role -eq 'OSDClient') {
+        return @($subnetlist | Where-Object { $_ } | Sort-Object -Property { [System.Version]$_ } | Get-Unique)
+    }
+
     $usedSubnets += $subnetList
     $subnetList = @($subnetList | Sort-Object -Property { [System.Version]$_ } | Get-Unique)
     $addedsubnets = 0
