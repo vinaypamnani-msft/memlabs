@@ -182,24 +182,47 @@ $ensureClientPkgCoverage = {
     }
 
     # Final state + rich DP-side diagnostics if anything is still not Installed --
-    # so a genuine wedge (content never replicated, distmgr stuck, PFX decrypt) is
-    # captured in the phase log instead of just failing later in Phase 11.
-    $state = @{}
+    # so a genuine wedge (content never replicated, distmgr stuck, PFX decrypt,
+    # inter-site bundle failure, version skew) is captured in the phase log instead
+    # of just failing later in Phase 11.
+    #
+    # Package's CURRENT source version: a DP pinned at an OLDER version is a
+    # content-UPDATE/replication problem, not "never distributed" (observed: the
+    # pull DP had v3 while the site server processed v1). Capture it to flag skew.
+    $pkgSourceVersion = $null
+    try { $pkgSourceVersion = (Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue | Select-Object -First 1).SourceVersion } catch {}
+
+    $state = @{}; $stateVer = @{}
     foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
-        $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpper()] = [int]$r.State }
+        $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpper()] = [int]$r.State; $stateVer[$f.ToUpper()] = "$($r.SourceVersion)" }
     }
     $stillBad = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
     if ($stillBad.Count -gt 0) {
-        Write-DscStatus "Client pkg coverage: STILL not Installed after $maxTries tries on: $($stillBad -join ', '). Capturing DP-side diagnostics..." -Warning
+        Write-DscStatus "Client pkg coverage: STILL not Installed after $maxTries tries on: $($stillBad -join ', ') [pkg $PackageID SourceVersion=$pkgSourceVersion]. Capturing DP-side diagnostics..." -Warning
         foreach ($dp in $stillBad) {
             $dpHost = ("$dp" -split '\.')[0]
+            $u = $dp.ToUpper()
+            $sInfo = if ($state.ContainsKey($u)) { "State=$($stateName["$($state[$u])"]) DPSourceVersion=$($stateVer[$u]) vs pkg=$pkgSourceVersion" } else { "no summarizer row (never targeted, or not yet reported)" }
             try {
                 $diag = Invoke-Command -ComputerName $dpHost -ArgumentList $PackageID -ErrorAction Stop -ScriptBlock {
                     param($pkgId)
-                    $o = [ordered]@{ PkgLib = ''; Distmgr = '' }
+                    # Tail-bounded, TARGETED CMTrace-log reader: last $n lines that match
+                    # $pat (unwrapped), so a busy log yields package-relevant lines instead
+                    # of unrelated trailing noise.
+                    $grab = {
+                        param($p, $n, $pat)
+                        if (-not (Test-Path $p)) { return "" }
+                        $hits = @(Get-Content $p -Tail 3000 -ErrorAction SilentlyContinue | Where-Object { $_ -match $pat } | Select-Object -Last $n)
+                        (@($hits | ForEach-Object { $m = [regex]::Match($_, '<!\[LOG\[(.*?)\]LOG\]!>'); if ($m.Success) { $m.Groups[1].Value } else { $_ } }) -join ' | ')
+                    }
+                    $o = [ordered]@{ PkgLib = ''; ContentLibDrive = ''; Distmgr = ''; PkgXfer = ''; Despool = ''; Sender = '' }
+                    $clRoot = $null
                     foreach ($cl in @('E:\SCCMContentLib', 'D:\SCCMContentLib', 'F:\SCCMContentLib', 'C:\SCCMContentLib')) {
                         $pl = Join-Path $cl 'PkgLib'
-                        if (Test-Path $pl) { $o.PkgLib = (@(Get-ChildItem $pl -Filter "$pkgId*.INI" -ErrorAction SilentlyContinue).Name) -join ','; break }
+                        if (Test-Path $pl) { $clRoot = $cl; $o.PkgLib = (@(Get-ChildItem $pl -Filter "$pkgId*.INI" -ErrorAction SilentlyContinue).Name) -join ','; break }
+                    }
+                    if ($clRoot) {
+                        try { $drv = Get-PSDrive -Name ($clRoot.Substring(0, 1)) -ErrorAction Stop; $o.ContentLibDrive = "$($clRoot.Substring(0, 1)) free=$([math]::Round($drv.Free / 1GB, 1))GB" } catch {}
                     }
                     $smsDir = $null
                     foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
@@ -207,13 +230,24 @@ $ensureClientPkgCoverage = {
                         if ($smsDir) { break }
                     }
                     if ($smsDir) {
-                        $lp = Join-Path $smsDir 'Logs\distmgr.log'
-                        if (Test-Path $lp) { $o.Distmgr = (@(Get-Content $lp -Tail 4 -ErrorAction SilentlyContinue | ForEach-Object { [regex]::Match($_, '<!\[LOG\[(.*?)\]LOG\]!>').Groups[1].Value }) -join ' | ') }
+                        $logs = Join-Path $smsDir 'Logs'
+                        # distmgr: package activity + inter-site bundle / cert-decrypt faults.
+                        $o.Distmgr = & $grab (Join-Path $logs 'distmgr.log') 6 "$pkgId|creating package bundle|0x800704d3|hasn.t arrived|Failed to decrypt|PFX|No content destination"
+                        # PkgXferMgr: pull-DP + inter-site send failures (STATMSG 8211).
+                        $o.PkgXfer = & $grab (Join-Path $logs 'PkgXferMgr.log') 4 "$pkgId|8211|Failed|error|abort"
+                        # despool: the RECEIVING (child/secondary) side unpacking bundles.
+                        $o.Despool = & $grab (Join-Path $logs 'despool.log') 4 "$pkgId|bundle|0x800704d3|decrypt|instruction"
+                        # sender: the SENDING side inter-site transfer.
+                        $o.Sender = & $grab (Join-Path $logs 'sender.log') 3 "$pkgId|Error|0x8|failed|retry"
                     }
                     return $o
                 }
                 $pkgLibNote = if ($diag.PkgLib) { "PkgLib HAS [$($diag.PkgLib)]" } else { "PkgLib MISSING $PackageID -> content never arrived on this DP" }
-                Write-DscStatus "Client pkg coverage diag [$dp]: $pkgLibNote ; distmgr: $($diag.Distmgr)" -Warning
+                Write-DscStatus "Client pkg coverage diag [$dp]: summarizer $sInfo ; $pkgLibNote ; $($diag.ContentLibDrive)" -Warning
+                if ($diag.Distmgr) { Write-DscStatus "Client pkg coverage diag [$dp] distmgr: $($diag.Distmgr)" -Warning }
+                if ($diag.PkgXfer) { Write-DscStatus "Client pkg coverage diag [$dp] PkgXferMgr: $($diag.PkgXfer)" -Warning }
+                if ($diag.Despool) { Write-DscStatus "Client pkg coverage diag [$dp] despool: $($diag.Despool)" -Warning }
+                if ($diag.Sender) { Write-DscStatus "Client pkg coverage diag [$dp] sender: $($diag.Sender)" -Warning }
             }
             catch { Write-DscStatus "Client pkg coverage diag [$dp]: remote query failed (WinRM?): $($_.Exception.Message)" -Warning }
         }
