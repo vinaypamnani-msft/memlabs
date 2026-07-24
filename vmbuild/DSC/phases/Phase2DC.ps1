@@ -172,10 +172,18 @@
             Status    = "Installing required windows features"
         }
 
+        # NEVER stage the ADCS (Certificate Server) role BEFORE the DC promotion.
+        # Install-ADDSForest/Install-ADDSDomainController refuses to promote a
+        # machine that already has a Certificate Server installed, failing with
+        # "Verification of prerequisites for Domain Controller promotion failed.
+        # Certificate Server is installed." When this DC is ALSO the issuing CA
+        # ($thisVM.InstallCA), the CA role BINARIES are staged AFTER the promotion
+        # (InstallCAFeature below), so the post-Phase2 PKI orchestrator still finds
+        # CertSvc pre-staged and only has to CONFIGURE the CA.
         InstallFeatureForSCCM InstallFeature {
             Name      = 'DC'
             Role      = 'DC'
-            InstallCA = [bool]$thisVM.InstallCA
+            InstallCA = $false
             DependsOn = "[InitializeDisks]InitDisks"
         }
 
@@ -207,6 +215,22 @@
             DomainMode                    = 'WinThreshold'
             DependsOn                     = "[WriteStatus]FirstDS"
             DomainNetBiosName             = $netbiosName
+        }
+
+        # Stage the ADCS (Certificate Server) role binaries for a DC that is ALSO
+        # the issuing/subordinate CA -- but ONLY after the promotion above (a CA
+        # present pre-promotion fails dcpromo; see InstallFeature comment). This
+        # lays down the CA role while Phase 2 DSC is still running, so the serial
+        # post-Phase2 PKI orchestrator (Install-PKI) finds CertSvc pre-staged and
+        # only CONFIGURES the CA instead of running a ServerManager install inside
+        # its fragile, heavily-loaded window.
+        if ($ThisVM.InstallCA) {
+            InstallFeatureForSCCM InstallCAFeature {
+                Name      = 'DCCA'
+                Role      = 'DC'
+                InstallCA = $true
+                DependsOn = "[ADDomain]FirstDS"
+            }
         }
 
         # Set the KDC default encryption types so all accounts (even those
