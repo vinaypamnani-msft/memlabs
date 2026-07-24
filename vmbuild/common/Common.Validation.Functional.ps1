@@ -9493,7 +9493,7 @@ function Test-CMSiteWideFunctionality {
                                     $results.Details.Add("INFO: Boot image '$biName' not distributed to any DP -- no OSDClient in this lab (OSD content is only distributed to an OSDClient-subnet DP to save space)")
                                 }
                                 else {
-                                    $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) not distributed to any DP and no distribution targeting found")
+                                    $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) not distributed to any DP -- an OSDClient exists but no DP shares its subnet, so OSD content (boot images) can't be distributed and PXE can't work. Add a DP on the OSDClient's subnet, or move the OSDClient to a subnet that already has one (Test-Configuration now blocks this up front).")
                                 }
                             }
                         }
@@ -9623,8 +9623,18 @@ function Test-CMSiteWideFunctionality {
                     $supErr = $syncStatus.LastSyncErrorCode
                     $supErrHex = ''
                     try { $supErrHex = '0x{0:X8}' -f ([uint32]([int64]$supErr -band 0xFFFFFFFF)) } catch {}
-                    if ($supErrHex -eq '0x80131500') {
-                        $results.Details.Add("INFO: SUP last CM sync reported Failed (6703) with a transient exception ($supErrHex); the WSUS-native catalog check below is authoritative")
+                    # Known-TRANSIENT/retryable sync errors that self-heal on the next
+                    # cycle -- defer the verdict to the WSUS-native catalog/UpdateCount
+                    # cross-check below (authoritative) rather than hard-failing on one bad
+                    # cycle. A genuinely broken catalog still WARNs via that native check.
+                    #   0x80131500 COR_E_EXCEPTION (generic managed exception)
+                    #   0x800C0008 INET_E_DOWNLOAD_FAILURE (MU download failed -- throttle/
+                    #              timeout/transient network under load; WSUS retries)
+                    #   0x80244007 / 0x8024401C / 0x80244022 WU HTTP SOAP/timeout/503
+                    #   0x80072EE2 WININET operation timed out
+                    $transientSyncErrors = @('0x80131500', '0x800C0008', '0x80244007', '0x8024401C', '0x80244022', '0x80072EE2')
+                    if ($supErrHex -in $transientSyncErrors) {
+                        $results.Details.Add("INFO: SUP last CM sync reported Failed (6703) with a transient/retryable error ($supErrHex); WSUS retries and the WSUS-native catalog check below is authoritative")
                     }
                     else {
                         $supErrShown = if ($supErrHex) { "$supErr / $supErrHex" } else { "$supErr" }
