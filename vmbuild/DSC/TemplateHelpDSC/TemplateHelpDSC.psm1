@@ -5512,6 +5512,30 @@ class ClusterRemoveUnwantedIPs {
 }
 
 
+function Test-ModuleAvailable {
+    # Quick, network-free "is this module installed and usable?" check. Reads the
+    # module manifest via Get-Module -ListAvailable (no PowerShellGet dependency,
+    # no PSGallery round-trip) and confirms it actually exposes commands, so a
+    # half-copied/partial module folder doesn't read as a good install. Falls
+    # back to a bounded Import-Module only when the manifest declares its exports
+    # lazily (wildcards). Returns $true/$false, never throws.
+    param([Parameter(Mandatory)][string] $Name)
+
+    $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+    try {
+        $m = Get-Module -ListAvailable -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $m) { return $false }
+        if ($m.ExportedCommands -and $m.ExportedCommands.Count -gt 0) { return $true }
+        try {
+            Import-Module $Name -ErrorAction Stop -WarningAction SilentlyContinue
+            return [bool](Get-Module -Name $Name)
+        }
+        catch { return $false }
+    }
+    catch { return $false }
+    finally { $global:VerbosePreference = $savedVP }
+}
+
 [DscResource()]
 class ModuleAdd {
     [DscProperty(Key)]
@@ -5622,12 +5646,51 @@ class ModuleAdd {
         }
 
         } finally { $global:VerbosePreference = $savedVP }
+
+        # Verify the module is actually usable now and stamp a marker so future
+        # Test() calls (a phase re-run, or Phase 4/5/7 which each ModuleAdd
+        # SqlServer) short-circuit instead of paying the PSGallery bootstrap
+        # again (~230s just for the NuGet+PowerShellGet bootstrap on a cold VM).
+        if (Test-ModuleAvailable -Name $_moduleName) {
+            New-Item -ItemType File -Path (Join-Path 'C:\staging\DSC' ("ModuleAdd.$_moduleName.ok")) -Force -ErrorAction SilentlyContinue | Out-Null
+            Write-Status "$_moduleName module verified available."
+        }
+        else {
+            Write-Status "WARNING: $_moduleName install completed but the module is not detected as available."
+        }
     }
 
     [bool] Test() {
 
         $_ModuleName = $this.CheckModuleName
         write-verbose ('Searching for module:' + $_ModuleName)
+
+        # Fast path: a previously-verified install drops a marker file. When the
+        # marker is present AND the module is still importable on disk, skip the
+        # whole Get-InstalledModule / PSGallery bootstrap in Set().
+        $marker = Join-Path 'C:\staging\DSC' ("ModuleAdd.$_ModuleName.ok")
+        if (Test-Path $marker) {
+            if (Test-ModuleAvailable -Name $_ModuleName) {
+                write-verbose ("$_ModuleName marker present and module still available; skipping install.")
+                return $true
+            }
+            # Marker is stale (module went missing) -- drop it and reinstall.
+            Remove-Item $marker -Force -ErrorAction SilentlyContinue
+        }
+
+        # A module already present on disk satisfies us regardless of HOW it got
+        # there (base-image pre-stage, Save-Module, or a prior Install-Module).
+        # Get-Module -ListAvailable is faster than Get-InstalledModule, needs no
+        # PowerShellGet, and -- unlike Get-InstalledModule -- also sees modules
+        # that weren't registered through PowerShellGet.
+        if (Test-ModuleAvailable -Name $_ModuleName) {
+            New-Item -ItemType File -Path $marker -Force -ErrorAction SilentlyContinue | Out-Null
+            write-verbose ("Found module on disk: $_ModuleName")
+            return $true
+        }
+
+        # Legacy fallback: honor a PowerShellGet-registered install even if the
+        # quick manifest check above didn't see exposed commands.
         $GetModuleStatus = $null
         $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
         try { $GetModuleStatus = Get-InstalledModule -Name $_ModuleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue }
@@ -5635,6 +5698,7 @@ class ModuleAdd {
 
         if ($GetModuleStatus) {
             write-verbose ('Found module:' + $_ModuleName + 'ModuleStatus:' + $GetModuleStatus.Version)
+            New-Item -ItemType File -Path $marker -Force -ErrorAction SilentlyContinue | Out-Null
             return $true
         }
 
