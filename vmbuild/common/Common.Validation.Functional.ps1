@@ -6817,7 +6817,11 @@ $Phase11CcmClientLogCollector = {
 }
 
 $Phase11SmsSiteLogCollector = {
-    # distmgr.log + PkgXferMgr.log live under <SMS install>\Logs on a site server.
+    # Site-server content-distribution + INTER-SITE replication logs live under
+    # <SMS install>\Logs. distmgr/PkgXferMgr cover local + pull-DP distribution;
+    # sender/despool/rcmctrl cover the CAS<->primary<->secondary content pipeline --
+    # a Secondary DP stuck on the client package is an inter-site problem, and the
+    # "Error creating package bundle ... 0x800704d3" abort is on the SENDING side.
     $out = @{}
     $smsDir = $null
     foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
@@ -6825,12 +6829,30 @@ $Phase11SmsSiteLogCollector = {
         if ($smsDir) { break }
     }
     if (-not $smsDir -or -not (Test-Path $smsDir)) { return $out }
-    foreach ($n in @('distmgr.log', 'PkgXferMgr.log')) {
+    foreach ($n in @('distmgr.log', 'PkgXferMgr.log', 'sender.log', 'despool.log', 'rcmctrl.log')) {
         $p = Join-Path $smsDir "Logs\$n"
         if (Test-Path $p) {
             try { $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$n] = ($c -join "`r`n") } } catch {}
         }
     }
+    # SMS_EXECUTIVE restart forensics -- the ROOT-CAUSE signal for a 0x800704d3
+    # inter-site bundle abort: distmgr sets its bundle cancel flag to the thread-exit
+    # m_bShutdownRequest, so that error means the executive was STOPPED/RESTARTED
+    # mid-build. Capture the service/process start time + recent SCM 7036 start/stop
+    # events so a restart LOOP (the real cause) is visible without hand-pulling.
+    try {
+        $lines = @()
+        $exe = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction SilentlyContinue
+        if ($exe) {
+            $lines += "SMS_EXECUTIVE State=$($exe.State) StartMode=$($exe.StartMode) PID=$($exe.ProcessId)"
+            if ($exe.ProcessId -gt 0) { $pp = Get-Process -Id $exe.ProcessId -ErrorAction SilentlyContinue; if ($pp) { $lines += "Process up since $($pp.StartTime.ToString('yyyy-MM-dd HH:mm:ss'))" } }
+        }
+        $lines += "--- Service Control Manager 7036 events mentioning SMS_EXECUTIVE (last 24h) ---"
+        $evs = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7036; StartTime = (Get-Date).AddHours(-24) } -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'SMS_EXECUTIVE' } | Select-Object -First 60)
+        foreach ($e in $evs) { $lines += "$($e.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))  $($e.Message)" }
+        if ($lines.Count -gt 0) { $out['SMS_EXECUTIVE-restarts.txt'] = ($lines -join "`r`n") }
+    }
+    catch {}
     return $out
 }
 
