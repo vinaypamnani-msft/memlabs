@@ -1256,14 +1256,33 @@ function Test-WsusBaselineImportSuccess {
 function Get-WsusTaxonomyCategoryCount {
     # Lightweight count of the WSUS UpdateCategories taxonomy. Used to gauge
     # whether a cab import landed (postinstall=~17, healthy cab=~400+).
+    #
+    # This runs ON the WSUS host, so prefer the LOCAL AdminProxy API, which is
+    # port/SSL-independent. On a PKI WSUS the ApiRemoting30 endpoint is set to
+    # Require SSL, so a Get-WsusServer call on 8530 (HTTP) returns 403 and the
+    # old code returned -1 even when the taxonomy was fully populated -- which
+    # made Wait-WsusBaselineImport conclude the cab "did not complete", retry,
+    # and log the spurious "Baseline import retry ended exit=, TaxonomyCats=-1"
+    # warning on every PKI lab. Fall back to the remoting API (requested HTTP
+    # port, then the 8531 SSL endpoint) only if the local API is unavailable.
     param([string]$ServerName = $env:COMPUTERNAME, [int]$PortNumber = 8530)
+    $isLocal = ($ServerName -eq $env:COMPUTERNAME) -or ($ServerName -eq 'localhost') -or ($ServerName -eq '.')
+    if ($isLocal) {
+        try {
+            [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+            $ws = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+            if ($ws) { return @($ws.GetUpdateCategories()).Count }
+        } catch {}
+    }
     try {
         $w = Get-WsusServer -Name $ServerName -PortNumber $PortNumber -ErrorAction Stop
-        if (-not $w) { return -1 }
-        return @($w.GetUpdateCategories()).Count
-    } catch {
-        return -1
-    }
+        if ($w) { return @($w.GetUpdateCategories()).Count }
+    } catch {}
+    try {
+        $w = Get-WsusServer -Name $ServerName -PortNumber 8531 -UseSsl -ErrorAction Stop
+        if ($w) { return @($w.GetUpdateCategories()).Count }
+    } catch {}
+    return -1
 }
 
 function Start-WsusBaselineImportBackground {
