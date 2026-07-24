@@ -2216,6 +2216,33 @@ function Test-Configuration {
             }
         }
 
+        # OSDClient Validations
+        # =====================
+        # An OSDClient PXE-boots to run an OS-deployment task sequence. PXE is a
+        # subnet-local DHCP broadcast, so an OSDClient can only boot from a DP on
+        # its OWN subnet (memlabs does not configure cross-subnet DHCP relay / ip-
+        # helper). With no DP on the subnet, perfloading distributes no OSD content
+        # there and PXE can't work -- but perfloading only WARNs at BUILD time, by
+        # which point the mis-configured lab is already deploying. Catch it up front
+        # so the user adds a DP (or moves the OSDClient) before deploying.
+        $osdClientVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "OSDClient" })
+        if ($osdClientVMs.Count -gt 0) {
+            # Include EXISTING VMs so an already-deployed DP on the subnet counts
+            # (avoids a false block when adding an OSDClient to an existing lab).
+            $allVmsForOsd = Get-List2 -deployConfig $deployConfig
+            $osdDefaultNet = $deployConfig.vmOptions.network
+            $osdNetOf = { param($v) if ($v.network) { "$($v.network)" } else { "$osdDefaultNet" } }
+            # A DP is any VM that installs one -- a real DP or a pull DP (both can
+            # host OSD content + have PXE enabled). Matches perfloading's DP search.
+            $osdDpSubnets = @($allVmsForOsd | Where-Object { $_.installDP -eq $true -or $_.enablePullDP -eq $true } | ForEach-Object { & $osdNetOf $_ } | Where-Object { $_ } | Select-Object -Unique)
+            foreach ($osd in $osdClientVMs) {
+                $osdNet = & $osdNetOf $osd
+                if ($osdDpSubnets -notcontains $osdNet) {
+                    Add-ValidationMessage -Message "OSDClient Validation: VM [$($osd.vmName)] is on subnet [$osdNet], which has no Distribution Point. An OSDClient PXE-boots from a subnet-local DP (cross-subnet PXE is not supported), so OSD content can't be distributed there and PXE can't work. Add a DP (a Primary/SiteSystem with installDP, or a pull DP) on subnet [$osdNet], or place the OSDClient on a subnet that already has one." -ReturnObject $return -Warning
+                }
+            }
+        }
+
         # MP database replica: two replicas on the SAME SQL server must use SEPARATE
         # instances. Group replica MPs by their replica SQL host and fail if any two
         # resolve to the same server + instance.
