@@ -626,7 +626,7 @@ function Set-CmMediaMountAndShare {
 
     if (-not $mediaRoot) {
         $waited = [int](((Get-Date) - $loopStart).TotalMinutes)
-        Write-Log "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $attempt attempts over ~$waited min (clean DVD resets and guest reboots); the CMCB share (DC schema extension depends on it) cannot be created." -Failure -OutputStream
+        Write-RedX "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $attempt attempts over ~$waited min (clean DVD resets and guest reboots); the CMCB share (DC schema extension depends on it) cannot be created." -WriteLog -ForegroundColor Red
         return
     }
 
@@ -668,7 +668,7 @@ function Set-CmMediaMountAndShare {
     }
     $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName, $mediaRoot) -DisplayName "Share CM media ($shareName)"
     if ($res.ScriptBlockFailed) {
-        Write-Log "[Phase $Phase]: $($vmName): Failed to create CM media share '$shareName' (DC schema extension depends on it). $($res.ScriptBlockOutput)" -Failure -OutputStream
+        Write-RedX "[Phase $Phase]: $($vmName): Failed to create CM media share '$shareName' (DC schema extension depends on it). $($res.ScriptBlockOutput)" -WriteLog -ForegroundColor Red
     }
     else {
         Write-Log "[Phase $Phase]: $($vmName): CM media share ready ($($res.ScriptBlockOutput))" -LogOnly
