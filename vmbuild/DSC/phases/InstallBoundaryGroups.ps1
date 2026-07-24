@@ -236,14 +236,33 @@ $ensureClientPkgCoverage = {
                         $hits = @(Get-Content $p -Tail 3000 -ErrorAction SilentlyContinue | Where-Object { $_ -match $pat } | Select-Object -Last $n)
                         (@($hits | ForEach-Object { $m = [regex]::Match($_, '<!\[LOG\[(.*?)\]LOG\]!>'); if ($m.Success) { $m.Groups[1].Value } else { $_ } }) -join ' | ')
                     }
-                    $o = [ordered]@{ PkgLib = ''; ContentLibDrive = ''; Distmgr = ''; PkgXfer = ''; Despool = ''; Sender = ''; Exec = '' }
-                    $clRoot = $null
-                    foreach ($cl in @('E:\SCCMContentLib', 'D:\SCCMContentLib', 'F:\SCCMContentLib', 'C:\SCCMContentLib')) {
-                        $pl = Join-Path $cl 'PkgLib'
-                        if (Test-Path $pl) { $clRoot = $cl; $o.PkgLib = (@(Get-ChildItem $pl -Filter "$pkgId*.INI" -ErrorAction SilentlyContinue).Name) -join ','; break }
+                    $o = [ordered]@{ PkgLib = ''; ContentLib = ''; Distmgr = ''; PkgXfer = ''; Despool = ''; Sender = ''; Exec = '' }
+                    # Resolve the ACTUAL content library root from the DP registry. For an
+                    # HA site the library is RELOCATED to a remote share (\\<FileServer>\...
+                    # via remoteContentLibVM), so the old hard-coded E:/D:/F:/C:\SCCMContentLib
+                    # probe gave a FALSE "PkgLib MISSING -> content never arrived" plus no
+                    # drive info. ContentLibraryPath is a UNC path on an HA site.
+                    $clRoot = $null; $clRemote = $false
+                    try {
+                        $clp = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name ContentLibraryPath -ErrorAction Stop).ContentLibraryPath
+                        if ($clp) { $clRoot = "$clp"; $clRemote = ($clRoot -like '\\*') }
+                    } catch {}
+                    if (-not $clRoot) {
+                        foreach ($cl in @('E:\SCCMContentLib', 'D:\SCCMContentLib', 'F:\SCCMContentLib', 'C:\SCCMContentLib')) {
+                            if (Test-Path (Join-Path $cl 'PkgLib')) { $clRoot = $cl; break }
+                        }
                     }
                     if ($clRoot) {
-                        try { $drv = Get-PSDrive -Name ($clRoot.Substring(0, 1)) -ErrorAction Stop; $o.ContentLibDrive = "$($clRoot.Substring(0, 1)) free=$([math]::Round($drv.Free / 1GB, 1))GB" } catch {}
+                        $pl = Join-Path $clRoot 'PkgLib'
+                        $reach = Test-Path $pl
+                        if ($reach) { $o.PkgLib = (@(Get-ChildItem $pl -Filter "$pkgId*.INI" -ErrorAction SilentlyContinue).Name) -join ',' }
+                        if ($clRemote) {
+                            $clHostName = ($clRoot -replace '^\\\\', '' -split '\\')[0]
+                            $o.ContentLib = "REMOTE content library '$clRoot' (HA remoteContentLibVM) host=$clHostName reachable=$reach"
+                        }
+                        else {
+                            try { $drv = Get-PSDrive -Name ($clRoot.Substring(0, 1)) -ErrorAction Stop; $o.ContentLib = "LOCAL content library '$clRoot' drive free=$([math]::Round($drv.Free / 1GB, 1))GB" } catch { $o.ContentLib = "LOCAL content library '$clRoot'" }
+                        }
                     }
                     $smsDir = $null
                     foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
@@ -252,8 +271,9 @@ $ensureClientPkgCoverage = {
                     }
                     if ($smsDir) {
                         $logs = Join-Path $smsDir 'Logs'
-                        # distmgr: package activity + inter-site bundle / cert-decrypt faults.
-                        $o.Distmgr = & $grab (Join-Path $logs 'distmgr.log') 6 "$pkgId|creating package bundle|0x800704d3|hasn.t arrived|Failed to decrypt|PFX|No content destination"
+                        # distmgr: package activity + inter-site bundle / cert-decrypt /
+                        # content-library-write (HA remote content lib) faults.
+                        $o.Distmgr = & $grab (Join-Path $logs 'distmgr.log') 8 "$pkgId|creating package bundle|0x800704d3|hasn.t arrived|Failed to decrypt|PFX|No content destination|CopyFileExW|Failed to add the file|TakeContentSnapshot"
                         # PkgXferMgr: pull-DP + inter-site send failures (STATMSG 8211).
                         $o.PkgXfer = & $grab (Join-Path $logs 'PkgXferMgr.log') 4 "$pkgId|8211|Failed|error|abort"
                         # despool: the RECEIVING (child/secondary) side unpacking bundles.
@@ -276,8 +296,8 @@ $ensureClientPkgCoverage = {
                     catch {}
                     return $o
                 }
-                $pkgLibNote = if ($diag.PkgLib) { "PkgLib HAS [$($diag.PkgLib)]" } else { "PkgLib MISSING $PackageID -> content never arrived on this DP" }
-                Write-DscStatus "Client pkg coverage diag [$dp]: summarizer $sInfo ; $pkgLibNote ; $($diag.ContentLibDrive)" -Warning
+                $pkgLibNote = if ($diag.PkgLib) { "PkgLib HAS [$($diag.PkgLib)]" } elseif ($diag.ContentLib -match 'REMOTE') { "$PackageID not yet listed in the content library" } else { "PkgLib MISSING $PackageID -> content never arrived on this DP" }
+                Write-DscStatus "Client pkg coverage diag [$dp]: summarizer $sInfo ; $pkgLibNote ; $($diag.ContentLib)" -Warning
                 if ($diag.Distmgr) { Write-DscStatus "Client pkg coverage diag [$dp] distmgr: $($diag.Distmgr)" -Warning }
                 # Source-confirmed (distmgr.cpp CreatePackageBundle ->
                 # SetCancelFlag(&m_bShutdownRequest); the content library returns
@@ -289,6 +309,15 @@ $ensureClientPkgCoverage = {
                 # the ROOT CAUSE to hunt (see the executive forensics line below).
                 if ($diag.Distmgr -match 'creating package bundle' -and $diag.Distmgr -match '0x800704d3') {
                     Write-DscStatus "Client pkg coverage diag [$dp]: 0x800704d3 = ERROR_REQUEST_ABORTED -- the inter-site content bundle was aborted because the SENDING site's SMS_EXECUTIVE/distmgr was STOPPED/RESTARTED mid-build (source: distmgr's bundle cancel flag is the thread-exit m_bShutdownRequest). NOT benign if persistent: find + stop whatever keeps restarting SMS_EXECUTIVE on the sending site (see executive forensics)." -Warning
+                }
+                # A 0x800704d3 on a CopyFileExW / TakeContentSnapshot / AddFile to the
+                # content library = the WRITE to the content library was aborted. On an HA
+                # site the library is REMOTE (\\<FileServer>); if the site server can't
+                # populate it, NO package snapshots -> NOTHING distributes anywhere (every
+                # package fails, not just the client package). This is the site-wide root
+                # cause and outranks the per-DP symptoms above.
+                if ($diag.Distmgr -match 'CopyFileExW|TakeContentSnapshot|Failed to add the file' -and $diag.Distmgr -match '0x800704d3') {
+                    Write-DscStatus "Client pkg coverage diag [$dp]: 0x800704d3 writing to the content library ($($diag.ContentLib)) -- content snapshot ABORTED. If the library is REMOTE (HA remoteContentLibVM), verify the FileServer host is UP and the site server's machine account can WRITE the ContentLib share; a broken remote content library blocks ALL content distribution for the whole site." -Warning
                 }
                 if ($diag.Exec) { Write-DscStatus "Client pkg coverage diag [$dp] SMS_EXECUTIVE: $($diag.Exec)" -Warning }
                 if ($diag.PkgXfer) { Write-DscStatus "Client pkg coverage diag [$dp] PkgXferMgr: $($diag.PkgXfer)" -Warning }
