@@ -38,6 +38,49 @@ if (-not $SiteCode) {
     return
 }
 
+# --- One-time recovery for a WEDGED distmgr (stuck cancel/shutdown flag) ----------
+# A distmgr whose internal cancel flag (m_bShutdownRequest) is stuck TRUE stays
+# RUNNING but aborts EVERY content operation with 0x800704d3 (CopyFileExW cancelled /
+# TakeContentSnapshot aborted), silently blocking ALL content distribution for the
+# site (nothing snapshots -> nothing replicates to child sites or DPs). CM source
+# (distmgr.cpp): that flag is cleared ONLY by the CDistributionManager constructor --
+# never in Initialize() or at thread (re)start -- so only a FRESH PROCESS clears it; a
+# component/thread-only restart does not. A full SMS_EXECUTIVE restart is the proven
+# cure (confirmed on pushlab HA/remote content library: content flowed within seconds).
+# The SMS Provider is hosted by WMI (smsprov), NOT SMS_EXECUTIVE, so this recycles
+# distmgr without dropping the provider connected below. Fire ONCE, and only on the
+# confirmed wedge signature (many 0x800704d3 aborts, ZERO successes, executive up a
+# while so it isn't a fresh/normal start -- which also prevents a restart loop).
+try {
+    $imDir = $null
+    foreach ($ik in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+        try { $imDir = (Get-ItemProperty -Path $ik -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+        if ($imDir) { break }
+    }
+    $dmLog = if ($imDir) { Join-Path $imDir 'Logs\distmgr.log' } else { $null }
+    if ($dmLog -and (Test-Path $dmLog)) {
+        $dmTail = @(Get-Content $dmLog -Tail 800 -ErrorAction SilentlyContinue)
+        $dmAborts = @($dmTail | Where-Object { $_ -match '0x800704d3' -and $_ -match 'CopyFileExW|CreatePackageBundle|TakeContentSnapshot|AddContentToBundle|SnapshotPackage|BundleLegacyContentFiles' }).Count
+        $dmSucc = @($dmTail | Where-Object { $_ -match 'Created minijob to send compressed copy|Removing retry key for package' }).Count
+        $exeUpMin = 999
+        try {
+            $exeSvc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+            if ($exeSvc.ProcessId -gt 0) { $exeProc = Get-Process -Id $exeSvc.ProcessId -ErrorAction SilentlyContinue; if ($exeProc) { $exeUpMin = ((Get-Date) - $exeProc.StartTime).TotalMinutes } }
+        }
+        catch {}
+        if ($dmAborts -ge 5 -and $dmSucc -eq 0 -and $exeUpMin -gt 20) {
+            Write-DscStatus "distmgr WEDGED: $dmAborts x 0x800704d3 content aborts and 0 successes in the recent log, SMS_EXECUTIVE up $([int]$exeUpMin)m -- a stuck distmgr cancel state is blocking ALL content distribution for this site. Restarting SMS_EXECUTIVE ONCE to clear it (the cancel flag is only reset by a fresh process)." -Warning
+            try {
+                Restart-Service -Name SMS_EXECUTIVE -Force -ErrorAction Stop
+                Write-DscStatus "Restarted SMS_EXECUTIVE to clear the wedged distmgr; waiting 90s for components to resume."
+                Start-Sleep -Seconds 90
+            }
+            catch { Write-DscStatus "Could not restart SMS_EXECUTIVE to clear the wedged distmgr: $($_.Exception.Message)" -Warning }
+        }
+    }
+}
+catch {}
+
 # Provider
 $smsProvider = Get-SMSProvider -SiteCode $SiteCode
 if (-not $smsProvider.FQDN) {
@@ -292,6 +335,16 @@ $ensureClientPkgCoverage = {
                         if ($exe.ProcessId -gt 0) { $pp = Get-Process -Id $exe.ProcessId -ErrorAction SilentlyContinue; if ($pp) { $startedNote = " up since $($pp.StartTime.ToString('MM-dd HH:mm:ss'))" } }
                         $recent = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7036; StartTime = (Get-Date).AddHours(-2) } -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'SMS_EXECUTIVE' })
                         $o.Exec = "State=$($exe.State)$startedNote; $($recent.Count) SCM start/stop (7036) events in last 2h"
+                    }
+                    catch {}
+                    # distmgr COMPONENT state (SMS_ComponentSummarizer): the service-level
+                    # 7036 check above CANNOT see a component that is RUNNING but WEDGED
+                    # (thread alive, but Status=Critical because every op is aborting).
+                    # Status: 0=OK, 1=Warning, 2=Critical.
+                    try {
+                        $scNs = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop).'Site Code'
+                        $dmc = Get-CimInstance -Namespace "root\SMS\site_$scNs" -ClassName SMS_ComponentSummarizer -Filter "ComponentName='SMS_DISTRIBUTION_MANAGER'" -ErrorAction Stop | Select-Object -First 1
+                        if ($dmc) { $o.Exec += "; distmgr component State=$($dmc.State) Status=$($dmc.Status)(0=OK/1=Warn/2=Critical)" }
                     }
                     catch {}
                     return $o
