@@ -297,7 +297,13 @@ foreach ($SUP in $SUPs) {
     }
 
     $SUPFQDN = $SUP.ServerName.Trim() + "." + $DomainFullName
-    $domainUserName = "$($DomainFullName)\$($SUP.ServerName.Trim())"
+    # Grant the SUP server's MACHINE account CM Full Administrator so the Patch My
+    # PC publishing service (runs as SYSTEM on the SUP) can author/deploy third-
+    # party update CIs. A computer's down-level logon name is DOMAIN\NAME$ -- without
+    # the trailing '$' New-CMAdministrativeUser's AD validation fails every run with
+    # "Validation of input parameters failed. Cannot continue." (the account never
+    # resolves), so the intended grant silently never happened.
+    $domainUserName = "$($DomainFullName)\$($SUP.ServerName.Trim())" + '$'
     Write-DscStatus "Installing SUP on $SUPFQDN"
     $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$domainUserName*" } -ErrorAction SilentlyContinue
 
