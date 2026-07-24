@@ -8825,6 +8825,28 @@ function Test-AdditionalDisks {
                         }
                     }
                     catch {}
+                    # SetupAPI.dev.log: the AUTHORITATIVE per-device install timeline. Each
+                    # disk PnP installs writes a "Device Install ... Disk" section with a
+                    # "Section start <timestamp>", so a phantom/ghost disk's arrival is
+                    # timestamped to the second (pins it to the exact build operation).
+                    # ETW System events can miss a ghost that arrives without a normal PnP
+                    # install; this file catches those.
+                    try {
+                        $sapi = 'C:\Windows\INF\setupapi.dev.log'
+                        if (Test-Path $sapi) {
+                            $sl = @(Get-Content $sapi -Tail 6000 -ErrorAction SilentlyContinue)
+                            $sHits = [System.Collections.Generic.List[string]]::new()
+                            for ($si = 0; $si -lt $sl.Count; $si++) {
+                                if ($sl[$si] -match 'Device Install.*(Disk|Virtual_Disk|storvsc)') {
+                                    $sts = ''
+                                    if (($si + 1) -lt $sl.Count -and $sl[$si + 1] -match 'Section start (.+)$') { $sts = $Matches[1].Trim() }
+                                    $sHits.Add("  DIAG WHEN setupapi: $sts $($sl[$si].Trim())")
+                                }
+                            }
+                            foreach ($sh in @($sHits | Select-Object -Last 8)) { $results.Details.Add($sh) }
+                        }
+                    }
+                    catch {}
                 }
             }
             if ($vol.FileSystem -ne 'NTFS') {
@@ -8901,6 +8923,18 @@ function Test-AdditionalDisks {
                     else { $hostLines.Add("  DIAG HOST WHEN: VM has no checkpoints") }
                     $vmObj = Get-VM -Name $VMName -ErrorAction SilentlyContinue
                     if ($vmObj -and $vmObj.Uptime) { $hostLines.Add("  DIAG HOST WHEN: guest uptime $([int]$vmObj.Uptime.TotalMinutes)m") }
+                }
+                catch {}
+                # Host Hyper-V logs: disk attach/detach and checkpoint create/apply/delete
+                # for THIS VM are timestamped here -- the host-side "when" that pairs with
+                # the guest device-arrival timeline (System log + SetupAPI) above.
+                try {
+                    $hvEvts = @(Get-WinEvent -FilterHashtable @{ LogName = @('Microsoft-Windows-Hyper-V-VMMS-Admin', 'Microsoft-Windows-Hyper-V-Worker-Admin'); StartTime = (Get-Date).AddHours(-24) } -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Message -match [regex]::Escape($VMName) -and $_.Message -match 'disk|VHD|checkpoint|snapshot|attach|detach|remov|merg' } | Select-Object -First 12)
+                    foreach ($he in $hvEvts) {
+                        $hmsg = ($he.Message -replace '\r?\n', ' ' -replace '\s+', ' ').Trim(); if ($hmsg.Length -gt 160) { $hmsg = $hmsg.Substring(0, 160) + '...' }
+                        $hostLines.Add("  DIAG HOST WHEN hv: $($he.TimeCreated.ToString('MM-dd HH:mm:ss')) [$($he.Id)] $hmsg")
+                    }
                 }
                 catch {}
             }
