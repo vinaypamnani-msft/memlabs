@@ -8803,6 +8803,28 @@ function Test-AdditionalDisks {
                     # are attached (a host-side duplicate VHDX -- see the HOST DIAG
                     # added by the caller). A null/blank Disk# is a ghost object.
                     foreach ($dd in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) { $results.Details.Add("  DIAG Disk#$($dd.Number): $([math]::Round($dd.Size / 1GB, 1))GB Sig=$($dd.Signature) Guid=$($dd.Guid) Offline=$($dd.IsOffline) Bus=$($dd.BusType) OpStatus=$($dd.OperationalStatus) Serial='$($dd.SerialNumber)' UniqueId='$($dd.UniqueId)' Path='$($dd.Path)'") }
+                    # WHEN did the phantom appear? Correlate it to the build timeline:
+                    # guest last-boot + the recent storage/PnP arrival/removal events
+                    # (disk / partmgr / storvsc / vmbus / Kernel-PnP / Ntfs) from the
+                    # System log. A phantom disk object is created by a surprise disk
+                    # remove/re-add or a checkpoint apply, so these timestamps pin the
+                    # operation/phase that introduced it (e.g. a SQLAO cluster/shared-disk
+                    # step or a checkpoint merge) instead of just knowing it exists.
+                    try {
+                        $bootT = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).LastBootUpTime
+                        if ($bootT) { $results.Details.Add("  DIAG WHEN: guest last boot $($bootT.ToString('yyyy-MM-dd HH:mm:ss')) (uptime $([int]((Get-Date) - $bootT).TotalMinutes)m)") }
+                    }
+                    catch {}
+                    try {
+                        $stEvts = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = (Get-Date).AddHours(-24) } -MaxEvents 1500 -ErrorAction SilentlyContinue |
+                                Where-Object { $_.ProviderName -match 'disk|partmgr|Kernel-PnP|storvsc|VmBus|Ntfs' -and $_.Message -match 'disk|volume|surprise|arriv|remov|attach|signature|Harddisk' } |
+                                Select-Object -First 15)
+                        foreach ($ev in $stEvts) {
+                            $emsg = ($ev.Message -replace '\r?\n', ' ' -replace '\s+', ' ').Trim(); if ($emsg.Length -gt 150) { $emsg = $emsg.Substring(0, 150) + '...' }
+                            $results.Details.Add("  DIAG WHEN: $($ev.TimeCreated.ToString('MM-dd HH:mm:ss')) [$($ev.ProviderName)/$($ev.Id)] $emsg")
+                        }
+                    }
+                    catch {}
                 }
             }
             if ($vol.FileSystem -ne 'NTFS') {
@@ -8851,7 +8873,8 @@ function Test-AdditionalDisks {
                 foreach ($hd in $hostDisks) {
                     $vhdSize = $null
                     try { $vhdSize = [math]::Round((Get-VHD -Path $hd.Path -ErrorAction Stop).Size / 1GB, 1) } catch {}
-                    $hostLines.Add("  DIAG HOST VHDX: '$($hd.Path)' Ctlr=$($hd.ControllerType)$($hd.ControllerNumber)/Loc$($hd.ControllerLocation)$(if ($vhdSize) { " ${vhdSize}GB" })")
+                    $shared = if ($hd.SupportPersistentReservations) { ' SHARED(clustered VHDX)' } else { '' }
+                    $hostLines.Add("  DIAG HOST VHDX: '$($hd.Path)' Ctlr=$($hd.ControllerType)$($hd.ControllerNumber)/Loc$($hd.ControllerLocation)$(if ($vhdSize) { " ${vhdSize}GB" })$shared")
                 }
                 $dupPaths = @($hostDisks | Group-Object Path | Where-Object { $_.Count -gt 1 })
                 if ($dupPaths.Count -gt 0) {
@@ -8865,6 +8888,21 @@ function Test-AdditionalDisks {
                 else {
                     $hostLines.Add("WARN: HOST has exactly $($dataVhdx.Count) data VHDX (matches config) -> the duplicate '$($disks -join ',')' seen in the guest is a GUEST PHANTOM/ghost disk; reboot '$VMName' to clear it")
                 }
+                # WHEN/origin (host side): a lingering or recently-applied checkpoint and
+                # disk hot-add/remove are the usual causes of a guest phantom disk. Report
+                # the VM's checkpoints + guest uptime so a checkpoint apply/merge (or a
+                # long-lived checkpoint spanning the phase the phantom appeared) is visible.
+                try {
+                    $snaps = @(Get-VMSnapshot -VMName $VMName -ErrorAction SilentlyContinue)
+                    if ($snaps.Count -gt 0) {
+                        $snapDesc = ($snaps | ForEach-Object { "$($_.Name)@$($_.CreationTime.ToString('MM-dd HH:mm'))" }) -join '; '
+                        $hostLines.Add("  DIAG HOST WHEN: VM has $($snaps.Count) checkpoint(s): $snapDesc -- a checkpoint apply/merge can leave a guest phantom disk")
+                    }
+                    else { $hostLines.Add("  DIAG HOST WHEN: VM has no checkpoints") }
+                    $vmObj = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+                    if ($vmObj -and $vmObj.Uptime) { $hostLines.Add("  DIAG HOST WHEN: guest uptime $([int]$vmObj.Uptime.TotalMinutes)m") }
+                }
+                catch {}
             }
             catch {
                 $hostLines.Add("  DIAG HOST: could not enumerate host VHDX for '$VMName': $($_.Exception.Message)")
