@@ -387,6 +387,23 @@ function Invoke-CMSetupPrereqDownload {
 
     $success = 0
     $fail = 0
+    $redistPurged = 0
+
+    # --- Single-instance guard -------------------------------------------------
+    # Only ONE setupdl download may run against $CMRedist at a time. Two setupdl.exe
+    # processes writing the same redist folder corrupt each other's partial files --
+    # a source of the deterministic "Manifest verification failed" wedge. A system
+    # mutex serializes callers (Phase 3 pre-warm vs Phase 8 vs a DSC re-apply); we
+    # also kill any stray setupdl.exe immediately before each launch below.
+    $setupdlMutex = $null; $haveSetupdlMutex = $false
+    try { $setupdlMutex = New-Object System.Threading.Mutex($false, 'Global\MemLabs_CMSetupPrereqDownload') } catch { $setupdlMutex = $null }
+    if ($setupdlMutex) {
+        try { $haveSetupdlMutex = $setupdlMutex.WaitOne([TimeSpan]::FromMinutes(90)) }
+        catch [System.Threading.AbandonedMutexException] { $haveSetupdlMutex = $true }  # prior holder died; we own it now
+        if (-not $haveSetupdlMutex) { Write-DscStatus "CM pre-req download: could not acquire the setupdl lock within 90 min; proceeding best-effort." }
+    }
+
+    try {
 
     # Per-attempt timeout for setupdl.exe. Historically we called
     # Start-Process -Wait with no cap; if setupdl wedged on a single CDN
@@ -414,6 +431,17 @@ function Invoke-CMSetupPrereqDownload {
 
     # We require 2 success entries in a row
     while ($success -le 1) {
+
+        # Single-instance: kill any stray setupdl.exe (a leftover pre-warm, a prior
+        # killed attempt, or a racing caller) so OURS is the only one writing the
+        # redist folder / setup log this pass.
+        Get-Process -Name 'setupdl' -ErrorAction SilentlyContinue | ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch { } }
+
+        # Remember the setup-log size before this attempt so the failure handler can
+        # inspect ONLY the lines this attempt writes (offset-based slice), and a
+        # stale failure line from an earlier attempt can't re-trigger a purge.
+        $logPosBefore = 0
+        try { if (Test-Path $CMLog) { $logPosBefore = (Get-Item $CMLog -ErrorAction SilentlyContinue).Length } } catch { }
 
         # Start Setupdl.exe asynchronously so we can poll its log for progress
         # and enforce a per-attempt timeout.
@@ -512,6 +540,44 @@ function Invoke-CMSetupPrereqDownload {
             Clear-DnsClientCache -ErrorAction SilentlyContinue
             $success = 0
             $fail++
+
+            # DETERMINISTIC-corruption recovery. setupdl is idempotent -- it never
+            # re-downloads a file that already exists on disk -- so a stale or corrupt
+            # file in $CMRedist (classically carried over from an OLDER CM build across
+            # lab re-runs) fails hash/manifest verification IDENTICALLY on every retry,
+            # burning all $MaxTries. When THIS attempt's setup-log slice shows a
+            # manifest/hash failure, delete the prereq redist content so the next
+            # setupdl re-fetches a clean, media-matching set. We inspect ONLY the log
+            # written during this attempt (offset $logPosBefore) so a stale failure
+            # line from an earlier attempt can't re-trigger a purge. Purge at most
+            # twice: if a FRESH redist still fails verification it's a real media/CDN
+            # problem, not staleness, so let the normal retry/fail path handle it.
+            $attemptLog = ''
+            try {
+                if (Test-Path $CMLog) {
+                    $fsChk = [System.IO.File]::Open($CMLog, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    try {
+                        if ($fsChk.Length -gt $logPosBefore) {
+                            $fsChk.Seek($logPosBefore, [System.IO.SeekOrigin]::Begin) | Out-Null
+                            $srChk = New-Object System.IO.StreamReader($fsChk)
+                            $attemptLog = $srChk.ReadToEnd()
+                            $srChk.Dispose()
+                        }
+                    }
+                    finally { $fsChk.Dispose() }
+                }
+            }
+            catch { }
+
+            if ($attemptLog -match 'Manifest verification failed|File hash check failed' -and $redistPurged -lt 2) {
+                Write-DscStatus "Pre-Req: manifest/hash verification FAILED -- deleting the prereq redist content under '$CMRedist' and re-downloading fresh (stale/corrupt files setupdl would otherwise never re-fetch)."
+                try { Remove-Item -Path (Join-Path $CMRedist '*') -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+                $redistPurged++
+                # A purge-and-refetch is a recovery, not a transient flake -- don't
+                # let it consume the retry budget meant for network hiccups.
+                $fail = [Math]::Max(0, $fail - 1)
+            }
+
             if ($fail -ge $MaxTries) {
                 Write-DscStatus "Pre-Req Downloading failed after $MaxTries tries. see $CMLog"
                 return $false
@@ -522,6 +588,13 @@ function Invoke-CMSetupPrereqDownload {
     }
 
     return $true
+    }
+    finally {
+        if ($setupdlMutex) {
+            if ($haveSetupdlMutex) { try { $setupdlMutex.ReleaseMutex() } catch { } }
+            try { $setupdlMutex.Dispose() } catch { }
+        }
+    }
 }
 
 function Stop-CMSetupPrereqPrewarm {
