@@ -88,6 +88,7 @@ if ($exists) {
 
     if (-not $exFailed) {
         Write-DscStatus "Passive Site Server is already installed on $($SSVM.vmName) (ServerState=$exStateHex). Exiting."
+        if (-not $SkipStatusFileUpdate) { $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Completed' -StampEndTime }
         Start-Sleep -Seconds 5 # Force sleep for status to update on host.
         return
     }
@@ -132,6 +133,9 @@ if ($exists) {
 
     if (-not $exDone) {
         Write-DscStatus "Passive site server on $($SSVM.vmName) still not healthy after $exRetry RetryInstallation attempt(s) (last ServerState=$exLastHex). Check failovermgr.log + ConfigMgrSetup.log on $passiveFQDN." -Failure
+    }
+    elseif (-not $SkipStatusFileUpdate) {
+        $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Completed' -StampEndTime
     }
     Start-Sleep -Seconds 5 # Force sleep for status to update on host.
     return

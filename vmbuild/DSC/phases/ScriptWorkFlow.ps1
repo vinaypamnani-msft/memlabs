@@ -684,7 +684,29 @@ if ($containsPassive) {
         $DomainFullName = $deployConfig.vmOptions.domainName
         $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
         $passiveExists = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
-        if ($Configuration.InstallPassive.Status -ne "Completed" -or -not $passiveExists) {
+
+        # The role existing + InstallPassive=Completed is NOT sufficient: CM can
+        # report a transient Ready state (so the first install stamped Completed)
+        # and then regress to a FAILED category (0x0001FFFF SiteServerInstallationFailed
+        # / 0x0002FFFF PREREQ_ERROR) after the async Stage 14/15 work
+        # (install SMS_FAILOVER_MANAGER, validate access to remote site systems)
+        # fails. CM never self-heals that. Read the authoritative ServerState so a
+        # re-run RE-INVOKES InstallPassiveSiteServer.ps1 (whose early-exit drives
+        # RetryInstallation) instead of skipping a genuinely-broken passive.
+        $passiveFailed = $false
+        try {
+            $pSite = "$($containsPassive.siteCode)"
+            $pNode = Get-WmiObject -Namespace "root\SMS\site_$pSite" -Class SMS_SCI_SysResUse `
+                -Filter "RoleName = 'SMS Site Server' AND SiteCode = '$pSite' AND SiteSystemStatus = 0" -ErrorAction Stop | Select-Object -First 1
+            if ($pNode -and $null -ne $pNode.ServerState) {
+                $ps = [int]$pNode.ServerState
+                $passiveFailed = ($ps -gt 0 -and ('{0:X4}' -f ($ps % 65536)).Substring(0, 1) -eq 'F')
+                if ($passiveFailed) { Write-DscStatus ("ContainsPassive: passive $($containsPassive.vmName) is present but ConfigMgr reports a FAILED ServerState (0x{0:X8}); will re-run InstallPassiveSiteServer.ps1 to drive RetryInstallation." -f $ps) }
+            }
+        }
+        catch {}
+
+        if ($Configuration.InstallPassive.Status -ne "Completed" -or -not $passiveExists -or $passiveFailed) {
             Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
             Set-Location $LogPath
@@ -692,7 +714,7 @@ if ($containsPassive) {
             $passiveRan = $true
         }
         else {
-            Write-DscStatus "ContainsPassive Skipping InstallPassiveSiteServer.ps1 (passive role verified on $($containsPassive.vmName))"
+            Write-DscStatus "ContainsPassive Skipping InstallPassiveSiteServer.ps1 (passive role verified + ServerState healthy on $($containsPassive.vmName))"
         }
     }
 
