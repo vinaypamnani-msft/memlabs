@@ -690,8 +690,13 @@ Write-DscStatus "$Tag Starting perfloading"
                 Write-DscStatus "$Tag Created DP group '$OsdDpGroupName'"
             }
             foreach ($d in $osdDps) {
-                try { Add-CMDistributionPointToGroup -DistributionPointGroupName $OsdDpGroupName -DistributionPointName $d.Short -ErrorAction Stop; Write-DscStatus "$Tag Added OSD DP '$($d.Short)' to '$OsdDpGroupName'" }
-                catch { Write-DscStatus "$Tag OSD DP '$($d.Short)' not added to '$OsdDpGroupName' (likely already a member)" }
+                # Add the DP to the group by its FQDN, NOT its short name. Add-CMDistributionPointToGroup
+                # resolves -DistributionPointName against the DP's ServerName (FQDN); passing the short
+                # name ('PL-PANCETTA') fails to match, the error is swallowed, and the group is left EMPTY
+                # -- so every Start-CMContentDistribution to 'OSD DPS' becomes a no-op and OSD content never
+                # lands (the Phase 11 'not on any DP' WARN). This mirrors the working 'ALL DPS' block above.
+                try { Add-CMDistributionPointToGroup -DistributionPointGroupName $OsdDpGroupName -DistributionPointName $d.Fqdn -ErrorAction Stop; Write-DscStatus "$Tag Added OSD DP '$($d.Fqdn)' to '$OsdDpGroupName'" }
+                catch { Write-DscStatus "$Tag OSD DP '$($d.Fqdn)' not added to '$OsdDpGroupName' (likely already a member): $($_.Exception.Message)" }
                 # Enable PXE. Prefer the NonWDS PXE responder (no separate WDS role);
                 # fall back to plain EnablePxe if this build lacks -EnableNonWdsPxe.
                 try {
