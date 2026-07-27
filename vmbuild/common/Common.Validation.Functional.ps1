@@ -9775,7 +9775,7 @@ function Test-CMSiteWideFunctionality {
                                     $results.Details.Add("INFO: Boot image '$biName' not distributed to any DP -- no OSDClient in this lab (OSD content is only distributed to an OSDClient-subnet DP to save space)")
                                 }
                                 else {
-                                    $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) not distributed to any DP -- an OSDClient exists but no DP shares its subnet, so OSD content (boot images) can't be distributed and PXE can't work. Add a DP on the OSDClient's subnet, or move the OSDClient to a subnet that already has one (Test-Configuration now blocks this up front).")
+                                    $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) is not on any DP yet, so PXE can't work. An OSDClient exists, so perfloading distributes it to the OSDClient-subnet DP during Phase 8 -- re-run to distribute. If it persists, confirm a DP shares the OSDClient's subnet.")
                                 }
                             }
                         }
