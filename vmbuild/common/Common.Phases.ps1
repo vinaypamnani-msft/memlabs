@@ -856,8 +856,8 @@ function Start-Phase {
     # Cross-forest: mount the CM ISO on the EXTERNAL top-level site servers before
     # Phase 2 so a joining domain's DC can read their CMCB share for schema
     # extension. No-op for URL-download CM versions / non-cross-forest configs.
-    # (Local site-server CM mounts happen just before Wait-Phase for 8/9 so the
-    # Phase 8 pre-install auto-snapshot doesn't capture the mounted ISO.)
+    # (Local site-server CM mounts happen in the Phase 8/9 block below, before
+    # Start-PhaseJobs.)
     if ($Phase -eq 2) {
         Mount-CmIsoForExternalSchema -deployConfig $deployConfig
     }
@@ -867,6 +867,26 @@ function Start-Phase {
     # with no mutex and no cross-job race. Only Phase 5 needs these.
     if ($Phase -eq 5) {
         Set-SQLAOHeartbeatIPs -DeployConfig $deployConfig
+    }
+
+    # Phase 8/9 CM media: take the pre-install rollback snapshot and mount the CM
+    # media BEFORE Start-PhaseJobs dispatches the DSC workers -- mirroring the
+    # Phase 4 SQL ISO mount above. The ordering here is deliberate and load-bearing:
+    #   1. Snapshot FIRST, while NO CM ISO is attached anywhere, so the rollback
+    #      checkpoint never captures the host ISO path (this is the reason the mount
+    #      used to be deferred until after Start-PhaseJobs).
+    #   2. Mount the CM media SECOND and let drive letters settle, so the media is
+    #      present and lettered before any guest CM setup runs.
+    # Because the discs are locked in up front and never churned mid-phase, the old
+    # host-side probe / DVD-reset race (cache disc grabbing D: while the CM disc
+    # came up letterless -> false "media not visible" -> CMCB share never created
+    # -> DC extadsch deadlock) can no longer happen. No-op for URL-download CM
+    # versions; idempotent on -StartPhase reruns.
+    if ($Phase -eq 8) {
+        Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
+    }
+    if ($Phase -eq 8 -or $Phase -eq 9) {
+        Mount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
     }
 
     # Start Phase
@@ -885,15 +905,6 @@ function Start-Phase {
         return $true
     }
     $global:PhaseSkipped = $false
-
-    # Mount the CM ISO on the top-level site servers now -- AFTER Start-PhaseJobs
-    # (which takes the Phase 8 pre-install auto-snapshot) so the transient
-    # rollback checkpoint doesn't capture the mounted ISO, and BEFORE Wait-Phase
-    # so the media + CMCB share are ready long before the DSC run reaches CM
-    # setup. No-op for URL-download CM versions. Idempotent on -StartPhase reruns.
-    if ($Phase -eq 8 -or $Phase -eq 9) {
-        Mount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
-    }
 
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig
 
@@ -2679,6 +2690,74 @@ function Wait-Phase {
     }
 }
 
+# Take the Phase 8 pre-install rollback snapshot of the domain. Extracted from
+# Get-ConfigurationData so the phase orchestrator can take it EARLY -- before the
+# CM media is mounted and before Start-PhaseJobs dispatches the DSC workers --
+# guaranteeing the checkpoint is ISO-free and the media can then be locked in and
+# left untouched for the whole phase. Gating is unchanged from the old inline
+# block: only snapshot when a CAS/Primary in the Phase 8 set has never finished
+# Phase 8 (the risky first CM install), honoring $global:NoSnapshot and an
+# existing snapshot of the same name.
+function Invoke-Phase8PreInstallSnapshot {
+    param([object]$deployConfig)
+
+    if ($global:NoSnapshot) { return }
+    $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
+    if (-not $cd) { return }
+
+    $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $Global:ConfigurationShort
+    $snapshot = $null
+    $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
+    if ($dc) {
+        $snapshot = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*$autoSnapshotName*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
+    }
+
+    # Snapshot decision is based ONLY on CAS/Primary site servers in the Phase 8
+    # set. They are the ones actually running CM setup; other Phase 8 VMs (DPMP,
+    # PassiveSite, Secondary, etc.) are secondary work whose failure is
+    # recoverable. Other roles (AAD-joined clients, etc.) don't even run in Phase 8.
+    #
+    # Snapshot only when there's a CAS/Primary in the set that has NOT yet finished
+    # Phase 8 -- i.e. the risky first CM install is about to happen. If the
+    # CAS/Primary in scope has already done Phase 8 once (re-run, validation pass,
+    # adding a secondary), the install already succeeded and a new rollback point
+    # is unnecessary. If there's no CAS/Primary in the Phase 8 set at all, no CM
+    # site install is happening -- also skip. lastPhaseComplete is monotonic (see
+    # Set-VMNote in Common.ps1), so '< 8' reliably means "this CAS/Primary has
+    # never finished Phase 8" -- the only state where a pre-install rollback point
+    # is useful. This covers both the happy first-deploy path AND a resume after an
+    # earlier phase (e.g. Phase 4) failed, while skipping no-op re-runs on a lab
+    # that already reached 8+.
+    $phase8SiteServers = $cd.AllNodes | Where-Object {
+        $_.NodeName -ne "*" -and ($_.Role -eq 'CAS' -or $_.Role -eq 'Primary')
+    }
+    $needsSnapshot = $false
+    foreach ($node in $phase8SiteServers) {
+        $vmNote = Get-VMNote -VMName $node.NodeName
+        if (-not $vmNote -or -not $vmNote.lastPhaseComplete -or $vmNote.lastPhaseComplete -lt 8) {
+            $needsSnapshot = $true
+            break
+        }
+    }
+
+    if (-not $needsSnapshot) {
+        if (-not $phase8SiteServers) {
+            Write-Log "[Phase 8] Skipping auto-snapshot: no CAS/Primary in Phase 8 set" -LogOnly
+        }
+        else {
+            Write-Log "[Phase 8] Skipping auto-snapshot: CAS/Primary already completed Phase 8 (re-run)" -LogOnly
+        }
+    }
+    elseif (-not $snapshot) {
+        $response = Read-YesOrNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
+        if (-not ($response -eq "n")) {
+            Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
+            write-log -HostOnly ""
+            write-log "Auto Snapshot $autoSnapshotName completed."
+        }
+    }
+}
+
 function Get-ConfigurationData {
     param (
         [int]$Phase,
@@ -2700,65 +2779,12 @@ function Get-ConfigurationData {
         "6" { $cd = Get-Phase6ConfigurationData -deployConfig $deployConfig }
         "7" { $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig }
         "8" {
+            # The Phase 8 pre-install rollback snapshot is taken earlier now, by
+            # Invoke-Phase8PreInstallSnapshot in the phase orchestrator -- BEFORE
+            # the CM media is mounted and BEFORE Start-PhaseJobs dispatches the DSC
+            # workers -- so the checkpoint stays ISO-free and the media can be
+            # locked in up front. Here we only build the configuration data.
             $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
-            if ($cd -and -not $global:NoSnapshot) {
-                $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $Global:ConfigurationShort
-                $snapshot = $null
-                $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
-                if ($dc) {
-                    $snapshot = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*$autoSnapshotName*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
-                }
-
-                # Snapshot decision is based ONLY on CAS/Primary site servers in
-                # the Phase 8 set. They are the ones actually running CM setup;
-                # other Phase 8 VMs (DPMP, PassiveSite, Secondary, etc.) are
-                # secondary work whose failure is recoverable. Other roles
-                # (AAD-joined clients, etc.) don't even run in Phase 8.
-                #
-                # Snapshot only when there's a CAS/Primary in the set that has
-                # NOT yet finished Phase 8 -- i.e. the risky first CM install is
-                # about to happen. If the CAS/Primary in scope has already done
-                # Phase 8 once (re-run, validation pass, adding a secondary),
-                # the install already succeeded and a new rollback point is
-                # unnecessary. If there's no CAS/Primary in the Phase 8 set at
-                # all, no CM site install is happening -- also skip.
-                # lastPhaseComplete is now monotonic (see Set-VMNote in Common.ps1),
-                # so '< 8' reliably means "this CAS/Primary has never finished
-                # Phase 8" -- the only state where a pre-install rollback point
-                # is useful. This correctly covers both the happy first-deploy
-                # path AND a resume after an earlier phase (e.g. Phase 4) failed,
-                # while skipping no-op re-runs on a lab that already reached 8+.
-                $phase8SiteServers = $cd.AllNodes | Where-Object {
-                    $_.NodeName -ne "*" -and ($_.Role -eq 'CAS' -or $_.Role -eq 'Primary')
-                }
-                $needsSnapshot = $false
-                foreach ($node in $phase8SiteServers) {
-                    $vmNote = Get-VMNote -VMName $node.NodeName
-                    if (-not $vmNote -or -not $vmNote.lastPhaseComplete -or $vmNote.lastPhaseComplete -lt 8) {
-                        $needsSnapshot = $true
-                        break
-                    }
-                }
-
-                if (-not $needsSnapshot) {
-                    if (-not $phase8SiteServers) {
-                        Write-Log "[Phase 8] Skipping auto-snapshot: no CAS/Primary in Phase 8 set" -LogOnly
-                    }
-                    else {
-                        Write-Log "[Phase 8] Skipping auto-snapshot: CAS/Primary already completed Phase 8 (re-run)" -LogOnly
-                    }
-                }
-                elseif (-not $snapshot) {
-                    $response = Read-YesOrNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
-                    if (-not ($response -eq "n")) {
-                        Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
-                        write-log -HostOnly ""
-                        write-log "Auto Snapshot $autoSnapshotName completed."
-                    }
-                }
-
-            }
-
         }
         "9" { $cd = Get-Phase9ConfigurationData -deployConfig $deployConfig }
         Default { return }
