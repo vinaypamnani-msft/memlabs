@@ -746,6 +746,14 @@ Write-DscStatus "$Tag Starting perfloading"
             Write-DscStatus "$Tag WARNING: Failed to enable command support for boot image: $biName ($packageId). Error: $_"
         }
 
+        # memlabs OSDClients are all x64 Gen2 VMs -- there is no arm64 PXE target,
+        # so don't waste DP space distributing the arm64 boot image (command support
+        # was still enabled above so it's usable if an arm64 client is ever added).
+        if ($biName -match 'arm64') {
+            Write-DscStatus "$Tag Skipping distribution of arm64 boot image '$biName' ($packageId) -- memlabs OSDClients are x64 (no arm64 PXE target)"
+            continue
+        }
+
         # Distribute the boot image to the OSD DP group (the DP(s) that share an
         # OSDClient's subnet). Only SKIP when the content is already on EVERY OSD
         # DP -- verified per-DP, not "any row exists". The old pre-check treated

@@ -9774,6 +9774,12 @@ function Test-CMSiteWideFunctionality {
                                 elseif (-not $expectOsd) {
                                     $results.Details.Add("INFO: Boot image '$biName' not distributed to any DP -- no OSDClient in this lab (OSD content is only distributed to an OSDClient-subnet DP to save space)")
                                 }
+                                elseif ($biName -match 'arm64') {
+                                    # memlabs OSDClients are all x64 Gen2 VMs -- there is no arm64
+                                    # PXE target, so the arm64 boot image is intentionally not
+                                    # distributed. Advisory only, not a real problem.
+                                    $results.Details.Add("INFO: Boot image '$biName' not distributed to any DP -- no arm64 OSDClient in this lab (memlabs OSDClients are x64; only the x64 boot image is distributed for PXE)")
+                                }
                                 else {
                                     $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) is not on any DP yet, so PXE can't work. An OSDClient exists, so perfloading distributes it to the OSDClient-subnet DP during Phase 8 -- re-run to distribute. If it persists, confirm a DP shares the OSDClient's subnet.")
                                 }
