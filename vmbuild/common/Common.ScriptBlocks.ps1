@@ -172,6 +172,14 @@ $global:Phase11Job = {
             # Remove the Read-DSCLog desktop shortcut now that validation passed
             # and re-enable WU services that Phase 1 disabled for the deploy.
             $domainName = $deployConfig.vmOptions.domainName
+            # These two cleanups are Windows-only PSDirect operations. On a Linux VM
+            # (or a no-PSDirect role like OSDClient/AADClient/StandaloneRootCA) they
+            # just hang on the PSDirect connect timeout + retries for MINUTES with no
+            # log output (everything here is -SuppressLog) -- this is the "LinuxClient
+            # validation is slow / appears hung" symptom: the LinuxClient's real tests
+            # (ping+SSH+SMB) finish in ~10s, then this block silently burned ~3 min
+            # trying to PSDirect into a guest that has no Windows PSDirect endpoint.
+            if (-not (Test-VmIsLinux -Vm $currentItem) -and $currentItem.role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
             Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
                 $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
                 Remove-Item (Join-Path $desktop 'Read DSC Log.lnk') -Force -ErrorAction SilentlyContinue
@@ -241,6 +249,7 @@ $global:Phase11Job = {
             if ($revertResult.ScriptBlockOutput) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): WU lockdown revert: $($revertResult.ScriptBlockOutput)" -LogOnly
             }
+            } # end Windows-only post-pass cleanup guard (skipped for Linux / no-PSDirect roles)
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Functional validation PASSED for $($currentItem.role)." -OutputStream -Success
         }
