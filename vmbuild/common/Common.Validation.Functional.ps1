@@ -6635,26 +6635,34 @@ function Test-PassiveSiteFunctionality {
             if ($null -ne $ss -and $ss -gt 0 -and (('{0:X4}' -f ($ss % 65536)).Substring(0, 1) -eq 'F')) {
                 $results.Passed = $false
                 $ssName = switch ($ss) { 131071 { 'SiteServerInstallationFailed' } 196607 { 'PREREQ_ERROR' } default { 'Installation failed / prereq error' } }
-                $results.Details.Add("FAIL: Passive site server '$passiveName' registered but ConfigMgr reports ServerState=$ssHex ($ssName). The local ConfigMgrSetup.log on $passiveName can show a CLEAN install -- passive state is driven by hman on the ACTIVE site server; hman.log/rcmctrl.log (auto-collected below) are authoritative.")
-                # Dump the detailed HA installation substages so the FAILING step is
-                # named, not just the top-level failed state. Fields per _smsprov.mof
-                # SMS_HA_SiteServerDetailedMonitoring: SubStageName/Description/StageId/
-                # IsComplete/Progress/SiteServerInstallID (retry count)/MessageTime.
+                $results.Details.Add("FAIL: Passive site server '$passiveName' registered but ConfigMgr reports ServerState=$ssHex ($ssName). The local ConfigMgrSetup.log on $passiveName can show a CLEAN install (files land) -- the passive install is orchestrated by SMS_FAILOVER_MANAGER; failovermgr.log (+ smsexec.log) on BOTH nodes are authoritative (auto-collected below), NOT hman.log.")
+                # Dump the detailed HA installation substages so the FAILING/STALLED
+                # step is named, not just the top-level failed state. Fields per
+                # _smsprov.mof SMS_HA_SiteServerDetailedMonitoring: SubStageName/
+                # Description/StageId/IsComplete (2=done,4=failed,blank=not-run)/
+                # Progress/SiteServerInstallID (retry count)/Parameter.
                 try {
                     $mon = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_HA_SiteServerDetailedMonitoring -Filter "SiteServerName LIKE '%$passiveName%'" -ErrorAction Stop |
-                            Where-Object { $_.Applicable -ne 0 } | Sort-Object OrderId)
+                            Where-Object { $_.Applicable -ne 0 } | Sort-Object StageId, SubStageid)
                     if ($mon.Count) {
-                        $retryN = @($mon | ForEach-Object { $_.SiteServerInstallID } | Sort-Object -Descending | Select-Object -First 1)
-                        $results.Details.Add("INFO: HA install substages (SiteServerInstallID/retry=$retryN):")
+                        $retryN = @($mon | ForEach-Object { $_.SiteServerInstallID } | Where-Object { $_ } | Sort-Object -Descending | Select-Object -First 1)
+                        $results.Details.Add("INFO: HA install substages (latest SiteServerInstallID/retry=$retryN):")
+                        $maxDoneStage = -1
+                        $firstStalled = $null
                         foreach ($r in $mon) {
-                            $mt = try { [System.Management.ManagementDateTimeConverter]::ToDateTime($r.MessageTime).ToString('MM-dd HH:mm:ss') } catch { '' }
-                            $flag = if ($r.IsComplete -eq 4) { 'FAILED' } elseif ($r.IsComplete -eq 2 -or $r.Progress -eq 100) { 'done' } else { "inprogress(IsComplete=$($r.IsComplete),Progress=$($r.Progress))" }
-                            $desc = "$($r.Description)".Trim(); if ($desc.Length -gt 200) { $desc = $desc.Substring(0, 200) }
-                            $results.Details.Add(("  [{0}] Stage {1}/{2} '{3}': {4}{5}{6}" -f $flag, $r.StageId, $r.SubStageid, $r.SubStageName, ($(if ($desc) { $desc } else { '(no description)' })), $(if ($r.Parameter) { " | Param=$($r.Parameter)" } else { '' }), $(if ($mt) { " | $mt" } else { '' })))
+                            $hasState = ($null -ne $r.IsComplete -and "$($r.IsComplete)" -ne '')
+                            $flag = if ($r.IsComplete -eq 4) { 'FAILED' } elseif ($r.IsComplete -eq 2 -or $r.Progress -eq 100) { 'done' } elseif (-not $hasState) { 'NOT-RUN' } else { "inprogress(IsComplete=$($r.IsComplete),Progress=$($r.Progress))" }
+                            if ($flag -eq 'done' -and [int]$r.StageId -gt $maxDoneStage) { $maxDoneStage = [int]$r.StageId }
+                            if (-not $firstStalled -and ($flag -eq 'FAILED' -or $flag -eq 'NOT-RUN')) { $firstStalled = $r }
+                            $desc = "$($r.Description)".Trim(); if ($desc.Length -gt 180) { $desc = $desc.Substring(0, 180) }
+                            $results.Details.Add(("  [{0}] Stage {1}/{2} '{3}': {4}{5}" -f $flag, $r.StageId, $r.SubStageid, $r.SubStageName, ($(if ($desc) { $desc } else { '(no description)' })), $(if ($r.Parameter) { " | Param=$($r.Parameter)" } else { '' })))
+                        }
+                        if ($firstStalled) {
+                            $results.Details.Add(("VERDICT: install completed through Stage {0}; STALLED/FAILED entering Stage {1} '{2}'. This substage is orchestrated by SMS_FAILOVER_MANAGER -- read failovermgr.log (and smsexec.log for service install). Stage 14 'Validating access to remote site systems' failing points at remote site system / remote content-library reachability (e.g. the HA remoteContentLibVM)." -f $maxDoneStage, $firstStalled.StageId, $firstStalled.SubStageName))
                         }
                     }
                     else {
-                        $results.Details.Add("INFO: SMS_HA_SiteServerDetailedMonitoring returned no applicable substage rows for '$passiveName' (state driven by hman -- see auto-collected hman.log).")
+                        $results.Details.Add("INFO: SMS_HA_SiteServerDetailedMonitoring returned no applicable substage rows for '$passiveName' -- read the auto-collected failovermgr.log.")
                     }
                 }
                 catch {
@@ -6678,13 +6686,14 @@ function Test-PassiveSiteFunctionality {
         -AsJob -TimeoutSeconds 300
 
     # When ConfigMgr reports the passive node in a failed/prereq-error state, the
-    # local ConfigMgrSetup.log often looks clean -- the state is driven by hman on
-    # the ACTIVE site server (passive install + ongoing content-library/inbox sync
-    # monitoring). Auto-collect hman.log/rcmctrl.log from BOTH the active server
-    # (the state driver) and the passive node (its setup log) so the regression
-    # reason is captured without hand-pulling logs.
+    # local ConfigMgrSetup.log often looks clean -- the passive install is
+    # orchestrated by SMS_FAILOVER_MANAGER (Stage 14/15: install SMS_EXECUTIVE +
+    # SMS_FAILOVER_MANAGER, validate the site server, validate access to remote
+    # site systems, become-ready). Auto-collect failovermgr.log/smsexec.log (the
+    # authoritative logs) plus hman/rcmctrl/ConfigMgrSetup from BOTH the active
+    # server and the passive node so the regression reason is captured.
     if (($parentResult.ScriptBlockOutput -is [hashtable]) -and ($parentResult.ScriptBlockOutput.Passed -eq $false)) {
-        Write-Log "[Phase $Phase] $VMName [PassiveSite]: passive node reported in a failed/prereq state -- collecting hman/rcmctrl/ConfigMgrSetup logs from the active site server '$($activeVM.vmName)' and the passive node" -OutputStream
+        Write-Log "[Phase $Phase] $VMName [PassiveSite]: passive node reported in a failed/prereq state -- collecting failovermgr/smsexec/hman/rcmctrl/ConfigMgrSetup logs from the active site server '$($activeVM.vmName)' and the passive node" -OutputStream
         $null = Save-Phase11GuestLogs -VMName $activeVM.vmName -DomainName $domain -RoleLabel 'PassiveSite-Active' -Collector $Phase11PassiveSiteDiagCollector
         $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'PassiveSite-Node' -Collector $Phase11PassiveSiteDiagCollector
     }
@@ -6991,12 +7000,14 @@ $Phase11SecondaryCertDiagCollector = {
 $Phase11PassiveSiteDiagCollector = {
     # Diagnose a passive (HA) site server whose ConfigMgr ServerState regressed to
     # 0x0001FFFF (SiteServerInstallationFailed) / 0x0002FFFF (PREREQ_ERROR). The
-    # local ConfigMgrSetup.log usually shows a CLEAN install because the passive
-    # node's state is driven by hman on the ACTIVE site server (passive install +
-    # ongoing content-library / inbox sync monitoring). Grab hman.log (the state
-    # driver), rcmctrl.log (DRS), sitecomp.log, and ConfigMgrSetup.log from
-    # whichever node this runs on so the ACTIVE-side reason and the passive-side
-    # setup are both captured.
+    # local ConfigMgrSetup.log usually shows a CLEAN install (files land) -- the
+    # passive install is orchestrated by SMS_FAILOVER_MANAGER: every
+    # SMS_HA_SiteServerDetailedMonitoring substage says "Check failovermgr.log"
+    # (Stage 14/15: install SMS_EXECUTIVE + SMS_FAILOVER_MANAGER, validate the site
+    # server, VALIDATE ACCESS TO REMOTE SITE SYSTEMS, become-ready). So
+    # failovermgr.log (+ smsexec.log for the service install) is AUTHORITATIVE, not
+    # hman.log (which only heartbeats "site system currently in use"). Grab all of
+    # them from whichever node this runs on (active + passive both matter).
     $out = @{}
     $smsDir = $null
     foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
@@ -7004,7 +7015,7 @@ $Phase11PassiveSiteDiagCollector = {
         if ($smsDir) { break }
     }
     if ($smsDir) {
-        foreach ($n in @('hman.log', 'rcmctrl.log', 'sitecomp.log')) {
+        foreach ($n in @('failovermgr.log', 'smsexec.log', 'hman.log', 'rcmctrl.log', 'sitecomp.log')) {
             $p = Join-Path $smsDir "Logs\$n"
             if (Test-Path $p) { try { $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$n] = ($c -join "`r`n") } } catch {} }
         }
