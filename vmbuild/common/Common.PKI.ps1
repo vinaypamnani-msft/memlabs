@@ -2502,16 +2502,32 @@ Critical=Yes
         # Pull the DURABLE guest-side step2 log so the host log shows WHERE it wedged --
         # the buffered in-guest $report is LOST when a stalled job is killed, which is why
         # "review the logs, you never find anything." Bounded (-AsJob -TimeoutSeconds 60)
-        # so a dead channel can't hang the host here too. Pulled BEFORE the retry re-runs
-        # step2 (which overwrites the file).
+        # so a dead channel can't hang the host here too (a synchronous Copy-Item
+        # -FromSession WOULD hang, so we pull the CONTENT through the bounded job instead
+        # of copying the file). Pulled BEFORE the retry re-runs step2 (which overwrites the
+        # guest file). We save the WHOLE file as a standalone artifact in the host logs\
+        # folder -- so it syncs back like the Phase 11 guest logs -- AND echo the last 40
+        # lines inline into the main log so the wedge point is visible there too.
         try {
-            $tailRes = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName -DisplayName "Pull Step2 guest log" -SuppressLog `
+            $fullRes = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName -DisplayName "Pull Step2 guest log" -SuppressLog `
                 -AsJob -TimeoutSeconds 60 `
-                -ScriptBlock { if (Test-Path "C:\staging\MemLabs-PKI-Step2.log") { Get-Content -LiteralPath "C:\staging\MemLabs-PKI-Step2.log" -Tail 40 } }
-            $tail = if ($tailRes -and $tailRes.ScriptBlockOutput) { $tailRes.ScriptBlockOutput } else { $tailRes }
-            if ($tail) {
+                -ScriptBlock { if (Test-Path "C:\staging\MemLabs-PKI-Step2.log") { Get-Content -LiteralPath "C:\staging\MemLabs-PKI-Step2.log" } }
+            $full = if ($fullRes -and $fullRes.ScriptBlockOutput) { $fullRes.ScriptBlockOutput } else { $fullRes }
+            if ($full) {
+                $fullLines = @($full)
+                # Standalone artifact in logs\ (per-VM + timestamp so retries/reboots don't clobber).
+                try {
+                    $logsDir = Split-Path $Common.LogPath -Parent
+                    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+                    $stepLogPath = Join-Path $logsDir "$issuingCAVMName-PKI-Step2-$stamp.log"
+                    $fullLines | Out-File -LiteralPath $stepLogPath -Encoding utf8 -Force -ErrorAction Stop
+                    Write-Log "[TwoTierPKI] Saved full guest step2 log (class=$cls2, $($fullLines.Count) lines) -> $stepLogPath"
+                }
+                catch { Write-Log "[TwoTierPKI] could not save full guest step2 log to logs folder: $($_.Exception.Message)" -Warning }
+                # Inline tail (last 40) so the wedge point shows in the main VMBuild log too.
+                $tail = if ($fullLines.Count -gt 40) { $fullLines[-40..-1] } else { $fullLines }
                 Write-Log "[TwoTierPKI] ---- last 40 lines of the DURABLE guest step2 log (class=$cls2) ----"
-                foreach ($tl in @($tail)) { Write-Log "[TwoTierPKI][guest-step2] $tl" }
+                foreach ($tl in $tail) { Write-Log "[TwoTierPKI][guest-step2] $tl" }
                 Write-Log "[TwoTierPKI] ---- end guest step2 log ----"
             }
             else {
