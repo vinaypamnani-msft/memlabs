@@ -746,39 +746,49 @@ Write-DscStatus "$Tag Starting perfloading"
             Write-DscStatus "$Tag WARNING: Failed to enable command support for boot image: $biName ($packageId). Error: $_"
         }
 
-        # Distribute the boot image. On a re-run the content is already on the
-        # DP(s), and Start-CMContentDistribution then throws "No content
-        # destination was found ... already been distributed" -- a benign
-        # condition that the old catch logged as a scary "Failed". Pre-check
-        # the targeting table (SMS_DistributionPoint lists package->DP
-        # assignments) and skip when already distributed; if the pre-check
-        # misses and the cmdlet still reports an "already distributed" error,
-        # classify it as informational rather than a failure.
-        $alreadyDistributed = $false
-        try {
-            $dpTargets = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
-            if ($dpTargets.Count -gt 0) { $alreadyDistributed = $true }
-        }
-        catch { }
-
-        if ($alreadyDistributed) {
-            Write-DscStatus "$Tag Boot image already distributed to $($dpTargets.Count) DP(s): $biName ($packageId) -- skipping"
-        }
-        elseif (-not $hasOsdTargets) {
+        # Distribute the boot image to the OSD DP group (the DP(s) that share an
+        # OSDClient's subnet). Only SKIP when the content is already on EVERY OSD
+        # DP -- verified per-DP, not "any row exists". The old pre-check treated
+        # ANY SMS_DistributionPoint row for this PackageID as "done", but these
+        # boot images are often CAS-owned (e.g. BUN000xx under a child Primary),
+        # so that table can carry a hierarchy-replicated / stale assignment for a
+        # DIFFERENT (CAS or removed) DP. That false positive made perfloading skip
+        # the real distribution, leaving the OSD DP PXE-enabled but with NO boot-
+        # image content -- exactly what Phase 11 later flags as "not distributed
+        # to any DP". Match the actual OSD DP server(s) so we distribute whenever
+        # the content is missing on one of them.
+        if (-not $hasOsdTargets) {
             Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing boot image '$biName' ($packageId) (saves space); it will distribute + PXE-enable when an OSDClient is added on a DP subnet"
         }
         else {
+            $osdDpFqdns = @($osdDps | ForEach-Object { "$($_.Fqdn)" } | Where-Object { $_ })
+            $distributedFqdns = @()
             try {
-                Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName $osdDistTarget
-                Write-DscStatus "$Tag Successfully started distribution for boot image '$biName' ($packageId) to '$osdDistTarget'"
-            }
-            catch {
-                $biDistMsg = "$_"
-                if ($biDistMsg -match 'already been distributed' -or $biDistMsg -match 'No content destination was found') {
-                    Write-DscStatus "$Tag Boot image already distributed: $biName ($packageId) -- skipping"
+                $dpTargets = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
+                foreach ($t in $dpTargets) {
+                    # ServerNALPath looks like: ...["Display=\\PL-PANCETTA.domain\"]...\\PL-PANCETTA.domain\
+                    if ("$($t.ServerNALPath)" -match '\\\\([^\\"]+)') { $distributedFqdns += $matches[1] }
                 }
-                else {
-                    Write-DscStatus "$Tag WARNING: Failed to start distribution for boot image: $biName ($packageId). Error: $_"
+            }
+            catch { }
+            $missingOsdDps = @($osdDpFqdns | Where-Object { $fq = $_; -not ($distributedFqdns | Where-Object { $_ -eq $fq }) })
+
+            if ($osdDpFqdns.Count -gt 0 -and $missingOsdDps.Count -eq 0) {
+                Write-DscStatus "$Tag Boot image already on all OSD DP(s) ($($osdDpFqdns -join ', ')): $biName ($packageId) -- skipping"
+            }
+            else {
+                try {
+                    Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName $osdDistTarget
+                    Write-DscStatus "$Tag Successfully started distribution for boot image '$biName' ($packageId) to '$osdDistTarget'$(if ($missingOsdDps.Count) { " (missing on: $($missingOsdDps -join ', '))" })"
+                }
+                catch {
+                    $biDistMsg = "$_"
+                    if ($biDistMsg -match 'already been distributed' -or $biDistMsg -match 'No content destination was found') {
+                        Write-DscStatus "$Tag Boot image already distributed: $biName ($packageId) -- skipping"
+                    }
+                    else {
+                        Write-DscStatus "$Tag WARNING: Failed to start distribution for boot image: $biName ($packageId). Error: $_"
+                    }
                 }
             }
         }
