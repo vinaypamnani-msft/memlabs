@@ -8972,18 +8972,33 @@ function Test-AdditionalDisks {
             # attached, but a surprise disk remove/re-add or a checkpoint apply left a
             # stale disk object in the guest (Server 2025 storvsc is prone to this), so
             # two disks fight over the letter and it is intermittently unavailable.
-            # First try a non-disruptive storage rescan (drops most ghosts); only WARN
-            # if it persists. Never auto-offline a disk (could break SQL).
-            $preDupN = [Math]::Max(@(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue).Count, @(Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue).Count)
+            # Count only REAL, locally-attached disks claiming the letter. On a
+            # Failover Cluster node (e.g. SQLAO) the CLUSTERED Windows Storage
+            # subsystem reflects the PARTNER node's data disk -- including its
+            # drive-letter attribute -- into this node's Get-Disk/Get-Partition view
+            # as a phantom claimant with a NULL DiskNumber. That is a benign reporting
+            # artifact, NOT a real collision: the device layer has exactly one real
+            # disk on the letter (verified: one PnP devnode + one registry instance per
+            # data disk; the reflected object has no disk.sys number and a \\?\Disk{guid}
+            # path). Filtering to partitions with a non-null DiskNumber drops the cluster
+            # reflection while STILL catching a genuine duplicate -- two really-attached
+            # local disks each have a non-null DiskNumber, so that count stays > 1.
+            $letterParts = @(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue)
+            $localParts = @($letterParts | Where-Object { $null -ne $_.DiskNumber })
+            $reflectedN = $letterParts.Count - $localParts.Count
+            if ($reflectedN -gt 0) {
+                $results.Details.Add("OK: '$letter`:' shows $reflectedN additional claimant(s) reflected by the Clustered Windows Storage subsystem (the partner node's disk on a Failover Cluster / SQLAO) -- benign cluster-view artifact, ignored ($($localParts.Count) real local disk(s) claim '$letter`:')")
+            }
+            $preDupN = $localParts.Count
             if ($preDupN -gt 1) {
                 try { Update-HostStorageCache -ErrorAction SilentlyContinue } catch {}
                 Start-Sleep -Seconds 3
-                $postDupN = [Math]::Max(@(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue).Count, @(Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue).Count)
+                $postDupN = @(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue | Where-Object { $null -ne $_.DiskNumber }).Count
                 if ($postDupN -le 1) {
-                    $results.Details.Add("RECOVERED: '$letter`:' was claimed by $preDupN disks (phantom/ghost); a storage rescan cleared it (now $postDupN)")
+                    $results.Details.Add("RECOVERED: '$letter`:' was claimed by $preDupN local disks (phantom/ghost); a storage rescan cleared it (now $postDupN)")
                 }
                 else {
-                    $results.Details.Add("WARN: $postDupN disks/partitions claim drive letter '$letter`:' after a storage rescan -- disk-signature COLLISION making '$letter`:' intermittently unavailable. See the HOST DIAG below (added automatically by the caller) for the definitive cause: HOST has exactly the config's data VHDX -> GUEST PHANTOM/ghost disk (reboot the VM to clear it); HOST has a duplicate/extra data VHDX -> remove it on the host (a reboot will NOT fix that). DIAG:")
+                    $results.Details.Add("WARN: $postDupN LOCALLY-ATTACHED disks/partitions claim drive letter '$letter`:' after a storage rescan -- a genuine disk-signature COLLISION between two real disks (cluster-reflected partner-node disks are already excluded). See the HOST DIAG below (added automatically by the caller) for the definitive cause: HOST has exactly the config's data VHDX -> in-guest duplicate (reboot the VM to clear it); HOST has a duplicate/extra data VHDX -> remove it on the host (a reboot will NOT fix that). DIAG:")
                     foreach ($dp in @(Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue)) { $results.Details.Add("  DIAG dup partition: Disk#$($dp.DiskNumber)/Part#$($dp.PartitionNumber) $([math]::Round($dp.Size / 1GB, 1))GB") }
                     # Dump each disk with its stable identity fields. Two entries
                     # that share the SAME UniqueId/SerialNumber/Path are the SAME
