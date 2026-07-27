@@ -2503,6 +2503,12 @@ Critical=Yes
     $step2Args = $intCAName, $intCAServer, $domainName, $webURL, $webFolderPath, $rootCAName, $rootCAFilesPath, $intCAFilesPath
     $refreshedSessionForStep2 = $false
     $rebootedForStep2 = $false
+    # RANGE_CONSTRAINT is the post-dcpromo schema-settling window (directory otherwise
+    # healthy: EA present, Config-NC writable, GC ready) that closes purely on ELAPSED
+    # TIME; a reboot RESETS that clock and makes it LONGER (team-proven), so we handle it
+    # with bounded NO-REBOOT re-runs instead of the reboot tier.
+    $rangeReruns = 0
+    $maxRangeReruns = 2
     # Proactively drop any cached PSDirect session BEFORE the first Step 2 attempt so
     # attempt 1 mints a FRESH post-promotion logon token -- which carries Enterprise
     # Admins once the GC can expand it -- instead of riding a possibly-stale session
@@ -2573,6 +2579,22 @@ Critical=Yes
             try { Remove-VmSessionFromCache -VmName $issuingCAVMName } catch { Write-Log "[TwoTierPKI] session eviction note: $($_.Exception.Message)" }
             $refreshedSessionForStep2 = $true
             continue
+        }
+
+        # RANGE_CONSTRAINT window: a reboot is HARMFUL here -- it RESETS the post-dcpromo
+        # settle clock and makes the window LONGER (team-proven). The directory is
+        # otherwise healthy (EA present, Config-NC writable, GC ready); ONLY elapsed time
+        # closes it. So do NOT reboot -- keep re-running Step 2 (no reboot, fresh session
+        # each time) to accumulate more wall-clock, bounded so we still give up eventually.
+        if ($cls2 -eq 'RangeConstraint') {
+            $rangeReruns++
+            if ($rangeReruns -le $maxRangeReruns) {
+                Write-Log "[TwoTierPKI] Step 2 still RANGE_CONSTRAINT (post-dcpromo schema-settling window; a reboot would RESET the clock and lengthen it). No-reboot re-run $rangeReruns/$maxRangeReruns to wait out more elapsed time..." -Warning
+                try { Remove-VmSessionFromCache -VmName $issuingCAVMName } catch {}
+                continue
+            }
+            Write-Log "[TwoTierPKI] RANGE_CONSTRAINT window did not close after $maxRangeReruns no-reboot re-runs -- giving up WITHOUT a reboot (a reboot only lengthens the post-dcpromo settle window)." -Failure
+            return $false
         }
 
         # Tier B (reboot): the fresh session ALSO failed -> reboot the CA/DC ONCE (clears a
