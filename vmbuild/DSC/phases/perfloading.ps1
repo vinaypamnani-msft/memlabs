@@ -309,6 +309,22 @@ Write-DscStatus "$Tag Starting perfloading"
         }
     }
 
+    # VERIFY the add actually took. A silently-failed add (e.g. wrong name form,
+    # like the short-name-vs-FQDN bug that left 'OSD DPS' empty) makes every
+    # Start-CMContentDistribution to the group a no-op. Re-query membership from
+    # WMI and WARN loudly if the group is empty despite having DPs to add.
+    try {
+        $allGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$DPGroupName'" -ErrorAction SilentlyContinue
+        $allMemberCount = if ($allGrpWmi) { @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($allGrpWmi.GroupID)'" -ErrorAction SilentlyContinue).Count } else { 0 }
+        if ($DistributionPoints.Count -gt 0 -and $allMemberCount -eq 0) {
+            Write-DscStatus "$Tag WARNING: '$DPGroupName' has NO members after reconcile despite $($DistributionPoints.Count) DP(s) -- content distribution to the group will be a no-op"
+        }
+        else {
+            Write-DscStatus "$Tag Verified '$DPGroupName' membership: $allMemberCount DP(s)"
+        }
+    }
+    catch { Write-DscStatus "$Tag Could not verify '$DPGroupName' membership: $($_.Exception.Message)" }
+
 
     #Enable Site features (hierarchy-level — top-level site only)
     if ($isTopLevel) {
@@ -711,6 +727,23 @@ Write-DscStatus "$Tag Starting perfloading"
                     catch { Write-DscStatus "$Tag WARNING: Failed to enable PXE on OSD DP '$($d.Short)': $($_.Exception.Message)" }
                 }
             }
+            # VERIFY each OSD DP is actually a member (a silently-failed add leaves
+            # the group EMPTY and makes distribution to it a no-op -- exactly the bug
+            # that hid the boot image from the OSDClient-subnet DP). Check per-DP so a
+            # partial failure is caught, not just a fully-empty group.
+            try {
+                $osdGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$OsdDpGroupName'" -ErrorAction SilentlyContinue
+                $osdMemberNals = if ($osdGrpWmi) { @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction SilentlyContinue | ForEach-Object { "$($_.DPNALPath)" }) } else { @() }
+                foreach ($d in $osdDps) {
+                    if (@($osdMemberNals | Where-Object { $_ -match [regex]::Escape($d.Fqdn) }).Count -eq 0) {
+                        Write-DscStatus "$Tag WARNING: OSD DP '$($d.Fqdn)' is NOT a member of '$OsdDpGroupName' after add -- OSD content distribution to the group will miss it"
+                    }
+                    else {
+                        Write-DscStatus "$Tag Verified OSD DP '$($d.Fqdn)' is a member of '$OsdDpGroupName'"
+                    }
+                }
+            }
+            catch { Write-DscStatus "$Tag Could not verify '$OsdDpGroupName' membership: $($_.Exception.Message)" }
             $osdDistTarget = $OsdDpGroupName
             $hasOsdTargets = $true
         }
