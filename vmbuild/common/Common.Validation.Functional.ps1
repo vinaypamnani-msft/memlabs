@@ -6856,6 +6856,101 @@ $Phase11SmsSiteLogCollector = {
     return $out
 }
 
+$Phase11SecondaryCertDiagCollector = {
+    # Diagnose a Secondary site whose distmgr is wedged repeating
+    #   "site exchange certificate is not found. Can not decrypt the data."
+    #   "Failed to decrypt cert PFX data"  ->  "~Sleep 3600 seconds..."
+    # CM source (distmgr.cpp -> CServerAccount::Decrypt ->
+    # CSiteSettings::GetEncryptedSiteExchangeCertificate) reads the DP identity
+    # cert PFX and decrypts it with the site's OWN SiteExchangeCertificate, stored
+    # in this Secondary's site DB: SC_SiteDefinition_Property Name='SiteExchangeCertificate'
+    # (+ the PFX in CM_RoleIdCertificates RoleTypeID=4). If that row is missing the
+    # decrypt fails, distmgr sleeps, and NOTHING (incl. the CM client package) ever
+    # distributes to this DP -> its boundary-group clients wedge in the ccmsetup
+    # GetDPLocations loop. Confirm the missing cert straight from the DB.
+    $out = @{}
+    $lines = @()
+    $siteCode = $null; $smsDir = $null
+    try { $siteCode = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop).'Site Code' } catch {}
+    foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+        try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+        if ($smsDir) { break }
+    }
+    $lines += "SiteCode=$siteCode  SMSInstallDir=$smsDir  Probed=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+
+    # Confirm the distmgr cert-decrypt wedge signature (last 4000 lines).
+    $sig = 0; $lastSig = ''
+    if ($smsDir) {
+        $dm = Join-Path $smsDir 'Logs\distmgr.log'
+        if (Test-Path $dm) {
+            try {
+                $tail = Get-Content -LiteralPath $dm -Tail 4000 -ErrorAction SilentlyContinue
+                $m = @($tail | Where-Object { $_ -match 'site exchange certificate is not found|Failed to decrypt cert PFX data|Failed to decrypt data using format' })
+                $sig = $m.Count
+                if ($m.Count) { $lastSig = ($m | Select-Object -Last 1).Trim() }
+            }
+            catch {}
+        }
+    }
+    $lines += "distmgr cert-decrypt-failure lines (last 4000): $sig"
+    if ($lastSig) { $lines += "  last: $lastSig" }
+
+    # Enumerate installed SQL instances; probe the CM secondary DB for the cert.
+    $instances = @()
+    try {
+        $ip = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction Stop
+        foreach ($p in $ip.PSObject.Properties) { if ($p.Name -notmatch '^PS') { $instances += $p.Name } }
+    }
+    catch {}
+    $lines += "SQL instances: $($instances -join ', ')"
+    $db = if ($siteCode) { "CM_$siteCode" } else { $null }
+    $probed = $false
+    # Secondary sites default to the CONFIGMGRSEC SQL Express instance; try it first.
+    foreach ($inst in (@('CONFIGMGRSEC') + $instances | Select-Object -Unique)) {
+        if ($probed -or -not $db) { break }
+        $srv = if ($inst -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$inst" }
+        $cn = $null
+        try {
+            $cs = "Server=$srv;Database=$db;Integrated Security=SSPI;Connect Timeout=8;TrustServerCertificate=True"
+            $cn = New-Object System.Data.SqlClient.SqlConnection $cs
+            $cn.Open()
+            $qExch = "SELECT COUNT(*) FROM SC_SiteDefinition_Property WHERE Name='SiteExchangeCertificate'"
+            try { $c = $cn.CreateCommand(); $c.CommandText = "SELECT COUNT(*) FROM SC_SiteDefinition_Property WHERE Name='SiteExchangeCertificate' AND SiteNumber=dbo.fnGetSiteNumber()"; $c.CommandTimeout = 15; $exch = [int]$c.ExecuteScalar() }
+            catch { $c = $cn.CreateCommand(); $c.CommandText = $qExch; $c.CommandTimeout = 15; $exch = [int]$c.ExecuteScalar() }
+            $c2 = $cn.CreateCommand(); $c2.CommandText = "SELECT COUNT(*) FROM CM_RoleIdCertificates WHERE RoleTypeID=4"; $c2.CommandTimeout = 15
+            $pfx = [int]$c2.ExecuteScalar()
+            $lines += "DB $db on $($srv): SiteExchangeCertificate rows=$exch ; CM_RoleIdCertificates(RoleTypeID=4) rows=$pfx"
+            if ($exch -eq 0 -or $pfx -eq 0) {
+                $lines += "  => VERDICT: site exchange certificate / RoleId PFX is MISSING in the Secondary's site DB. distmgr cannot decrypt the DP identity cert, so it distributes NOTHING to this DP (client package never becomes Installed) and its boundary-group clients loop in ccmsetup GetDPLocations. FIX: recover the Secondary site (Recover Secondary Site / reinstall) so the SiteExchangeCertificate + CM_RoleIdCertificates RoleTypeID=4 PFX are regenerated."
+            }
+            else {
+                $lines += "  => site exchange certificate present; the PFX decrypt failure is a key/permission issue, not a missing cert. Check hman.log/ConfigMgrSetup.log below."
+            }
+            $probed = $true
+        }
+        catch {
+            $lines += "DB probe $db on $srv failed: $($_.Exception.Message)"
+        }
+        finally {
+            if ($cn -and $cn.State -eq 'Open') { try { $cn.Close() } catch {} }
+        }
+    }
+    if (-not $probed) { $lines += "Could not probe any SQL instance for the site exchange certificate (permissions or instance not found)." }
+    $out['SecondaryCertDiag.txt'] = ($lines -join "`r`n")
+
+    # hman.log (parent<->child site + certificate exchange) + secondary setup log.
+    if ($smsDir) {
+        foreach ($n in @('hman.log', 'sitecomp.log')) {
+            $p = Join-Path $smsDir "Logs\$n"
+            if (Test-Path $p) { try { $c = Get-Content -LiteralPath $p -Tail 3000 -ErrorAction SilentlyContinue; if ($c) { $out[$n] = ($c -join "`r`n") } } catch {} }
+        }
+    }
+    foreach ($sp in @('C:\ConfigMgrSetup.log', "$smsDir\Logs\ConfigMgrSetup.log")) {
+        if ($sp -and (Test-Path $sp)) { try { $c = Get-Content -LiteralPath $sp -Tail 3000 -ErrorAction SilentlyContinue; if ($c) { $out['ConfigMgrSetup.log'] = ($c -join "`r`n"); break } } catch {} }
+    }
+    return $out
+}
+
 function Test-DomainMemberFunctionality {
     <#
     .SYNOPSIS
@@ -8671,6 +8766,16 @@ function Test-CMClientPackageDistribution {
             Write-Log "[Phase $Phase] $VMName [ClientPkg]: collecting DP logs from behind/failing DP '$($dpVm.vmName)'" -OutputStream
             $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11CcmClientLogCollector
             $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11SmsSiteLogCollector
+            # A Secondary DP that never gets the client package is often wedged in
+            # distmgr on "site exchange certificate is not found / Failed to decrypt
+            # cert PFX data" -- its site DB lost the SiteExchangeCertificate, so it
+            # can't decrypt the DP identity cert and distributes NOTHING. Probe the
+            # Secondary's site DB directly so the ROOT cause is captured, not just
+            # the symptom.
+            if ("$($dpVm.role)" -eq 'Secondary') {
+                Write-Log "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is a Secondary DP -- probing its site DB for the site exchange certificate (distmgr PFX-decrypt wedge)" -OutputStream
+                $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-SecCert' -Collector $Phase11SecondaryCertDiagCollector -TimeoutSeconds 180
+            }
         }
     }
 
