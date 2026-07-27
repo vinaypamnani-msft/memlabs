@@ -2348,6 +2348,8 @@ Critical=Yes
                 $escTier2At = 5      # hard-reset CA config (no reboot)
                 $subLastClass = 'Unknown'
                 $subNeedsHostReboot = $false
+                $rangeTries = 0          # RANGE_CONSTRAINT (session-bound) captures on THIS session
+                $maxRangeInGuest = 2     # then hand back to the host for a FRESH session
                 try {
                     for ($subTry = 1; $subTry -le $maxSubTries; $subTry++) {
                         try {
@@ -2408,35 +2410,54 @@ Critical=Yes
                                     $feEnabled = $true
                                     _Log "Enabled NTDS '15 Field Engineering'=5 to capture the exact constraint attribute on the next attempt (prior=$feLevelPrior)."
                                 }
+                                # RANGE_CONSTRAINT is bound to THIS logon session/token, NOT the
+                                # directory: a FRESH session (EA present, GC ready, Config-NC
+                                # writable, zero DS constraint events -- proven by the host probe)
+                                # publishes fine, but an in-guest retry can NEVER re-mint this
+                                # token. So after a couple of quick captures, hand back to the
+                                # HOST to re-mint a fresh session and re-run -- far faster than
+                                # grinding the whole 6-attempt budget (or waiting out a timing
+                                # window that isn't the cause).
+                                $rangeTries++
+                                if ($rangeTries -ge $maxRangeInGuest) {
+                                    _Log "[PKI-ESC] RANGE_CONSTRAINT persisted across $rangeTries attempts on THIS session -- handing back so the host re-mints a FRESH session (new logon/PAC) and re-runs (no reboot)."
+                                    _Progress "range-constraint x$rangeTries on this session; handing back to host for a FRESH session..."
+                                    return @{ Success = $false; Log = $report.ToArray(); Error = "Subordinate CA publish RANGE_CONSTRAINT (0x80072082) persisted on this session after $rangeTries attempts; a fresh host session is the lever."; NeedsHostReboot = $false; FailClass = 'RangeConstraint' }
+                                }
+                                # Session issue, not a timing window -> brief pause, then one
+                                # more capture attempt (which hands back above). No 180s wait.
+                                _Progress "attempt $subTry range-constraint; brief pause before one more capture..."
+                                Start-Sleep -Seconds 15
                             }
-                            # In-flight advanced diagnostics + evidence-gated escalation ladder.
-                            # These fire only at thresholds, so a normal timing-window
-                            # deploy (which clears within the budget) is never disturbed.
-                            if ($subTry -eq $escDiagAt) {
-                                _Progress "attempt $subTry failed; running advanced diagnostics..."
-                                $d = Invoke-PkiPublishDiagnostics -Since $subLoopStart -Reason "attempt $subTry still failing"
-                                $subLastClass = $d.Class
-                            }
-                            if ($subTry -eq $escTier1At) {
-                                _Progress "escalation Tier1: token + AD refresh..."
-                                Invoke-PkiTokenAdRefresh
-                                $d = Invoke-PkiPublishDiagnostics -Since $subLoopStart -Reason "post-Tier1"
-                                $subLastClass = $d.Class
-                            }
-                            if ($subTry -eq $escTier2At) {
-                                _Progress "escalation Tier2: hard-reset CA config..."
-                                Invoke-PkiRoleReinstall
-                                # role reinstall drops the CSR path expectation; nothing else to reset.
-                            }
-                            _Progress "attempt $subTry failed; waiting for AD DS write-readiness..."
-                            Wait-AdDsReady -TimeoutSec 180 -RequireWritable | Out-Null
-                            $backoffSec = [Math]::Min(45, 15 * $subTry)
-                            _Log "Attempt $subTry/$maxSubTries failed (post-dcpromo AD settling); waiting ${backoffSec}s before retry..."
-                            $boDeadline = (Get-Date).AddSeconds($backoffSec)
-                            while ((Get-Date) -lt $boDeadline) {
-                                $rem = [int]($boDeadline - (Get-Date)).TotalSeconds
-                                _Progress "attempt $subTry/$maxSubTries failed; next retry in ${rem}s"
-                                Start-Sleep -Seconds 5
+                            else {
+                                # Other transient AD errors (DS_BUSY/UNWILLING/NO_SUCH_OBJECT):
+                                # genuinely brief -> keep the write-readiness wait + backoff ladder.
+                                if ($subTry -eq $escDiagAt) {
+                                    _Progress "attempt $subTry failed; running advanced diagnostics..."
+                                    $d = Invoke-PkiPublishDiagnostics -Since $subLoopStart -Reason "attempt $subTry still failing"
+                                    $subLastClass = $d.Class
+                                }
+                                if ($subTry -eq $escTier1At) {
+                                    _Progress "escalation Tier1: token + AD refresh..."
+                                    Invoke-PkiTokenAdRefresh
+                                    $d = Invoke-PkiPublishDiagnostics -Since $subLoopStart -Reason "post-Tier1"
+                                    $subLastClass = $d.Class
+                                }
+                                if ($subTry -eq $escTier2At) {
+                                    _Progress "escalation Tier2: hard-reset CA config..."
+                                    Invoke-PkiRoleReinstall
+                                    # role reinstall drops the CSR path expectation; nothing else to reset.
+                                }
+                                _Progress "attempt $subTry failed; waiting for AD DS write-readiness..."
+                                Wait-AdDsReady -TimeoutSec 180 -RequireWritable | Out-Null
+                                $backoffSec = [Math]::Min(45, 15 * $subTry)
+                                _Log "Attempt $subTry/$maxSubTries failed (transient AD settling); waiting ${backoffSec}s before retry..."
+                                $boDeadline = (Get-Date).AddSeconds($backoffSec)
+                                while ((Get-Date) -lt $boDeadline) {
+                                    $rem = [int]($boDeadline - (Get-Date)).TotalSeconds
+                                    _Progress "attempt $subTry/$maxSubTries failed; next retry in ${rem}s"
+                                    Start-Sleep -Seconds 5
+                                }
                             }
                         }
                     }
@@ -2503,12 +2524,16 @@ Critical=Yes
     $step2Args = $intCAName, $intCAServer, $domainName, $webURL, $webFolderPath, $rootCAName, $rootCAFilesPath, $intCAFilesPath
     $refreshedSessionForStep2 = $false
     $rebootedForStep2 = $false
-    # RANGE_CONSTRAINT is the post-dcpromo schema-settling window (directory otherwise
-    # healthy: EA present, Config-NC writable, GC ready) that closes purely on ELAPSED
-    # TIME; a reboot RESETS that clock and makes it LONGER (team-proven), so we handle it
-    # with bounded NO-REBOOT re-runs instead of the reboot tier.
+    # RANGE_CONSTRAINT (0x80072082) on the sub-CA publish is bound to the in-guest logon
+    # SESSION/token, not the directory: a FRESH session (EA present, Config-NC writable,
+    # GC ready, zero DS constraint events) publishes fine, while an in-guest retry can
+    # never re-mint its token. A reboot is WRONG (only resets the post-dcpromo clock). So
+    # we drop the cached session and re-run Step 2 on a FRESH session, bounded by a
+    # no-reboot wall-clock window (covers the rare case it really is still settling).
     $rangeReruns = 0
-    $maxRangeReruns = 2
+    $step2Start = Get-Date
+    $rangeNoRebootMax = 40
+    $rangeDeadline = $step2Start.AddMinutes($rangeNoRebootMax)
     # Proactively drop any cached PSDirect session BEFORE the first Step 2 attempt so
     # attempt 1 mints a FRESH post-promotion logon token -- which carries Enterprise
     # Admins once the GC can expand it -- instead of riding a possibly-stale session
@@ -2587,13 +2612,14 @@ Critical=Yes
         # closes it. So do NOT reboot -- keep re-running Step 2 (no reboot, fresh session
         # each time) to accumulate more wall-clock, bounded so we still give up eventually.
         if ($cls2 -eq 'RangeConstraint') {
-            $rangeReruns++
-            if ($rangeReruns -le $maxRangeReruns) {
-                Write-Log "[TwoTierPKI] Step 2 still RANGE_CONSTRAINT (post-dcpromo schema-settling window; a reboot would RESET the clock and lengthen it). No-reboot re-run $rangeReruns/$maxRangeReruns to wait out more elapsed time..." -Warning
+            if ((Get-Date) -lt $rangeDeadline) {
+                $rangeReruns++
+                Write-Log "[TwoTierPKI] Step 2 RANGE_CONSTRAINT (session-bound: a fresh logon/PAC publishes fine; a reboot would only RESET the post-dcpromo clock). Dropping the cached session and re-running Step 2 on a FRESH session -- re-run $rangeReruns (no reboot; deadline $($rangeDeadline.ToString('HH:mm')))..." -Warning
                 try { Remove-VmSessionFromCache -VmName $issuingCAVMName } catch {}
+                Start-Sleep -Seconds 15
                 continue
             }
-            Write-Log "[TwoTierPKI] RANGE_CONSTRAINT window did not close after $maxRangeReruns no-reboot re-runs -- giving up WITHOUT a reboot (a reboot only lengthens the post-dcpromo settle window)." -Failure
+            Write-Log "[TwoTierPKI] RANGE_CONSTRAINT did not clear within the ${rangeNoRebootMax}-min no-reboot window after $rangeReruns fresh-session re-runs -- giving up WITHOUT a reboot (a reboot only lengthens the post-dcpromo settle window)." -Failure
             return $false
         }
 
