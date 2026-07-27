@@ -69,7 +69,70 @@ $contentLibShare = "\\$remoteLibVMName\$shareName\ContentLib"
 # Check if Passive already exists
 $exists = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server"
 if ($exists) {
-    Write-DscStatus "Passive Site Server is already installed on $($SSVM.vmName). Exiting."
+    # The role existing is necessary but NOT sufficient. A stress build can leave
+    # the passive with ServerState in a FAILED category (0x0001FFFF
+    # SiteServerInstallationFailed / 0x0002FFFF PREREQ_ERROR): CM can briefly report
+    # a Ready-category ServerState (so the first install loop exits "complete") and
+    # then regress after the async Stage 14/15 work (install SMS_FAILOVER_MANAGER,
+    # validate access to remote site systems) fails -- e.g. sitecomp on the passive
+    # couldn't read the install.map from the active during an SMB / content-library
+    # blip. CM does NOT self-heal this, and the active failover manager sits idle.
+    # So on a RE-RUN, before exiting, read the authoritative ServerState and, when
+    # failed, drive the exact console recovery (SMS_SCI_SysResUse.RetryInstallation)
+    # until it reaches a Ready category. A healthy passive just exits as before.
+    $exPassiveNode = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_SCI_SysResUse `
+        -Filter "RoleName = 'SMS Site Server' AND SiteCode = '$SiteCode' AND SiteSystemStatus = 0" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $exState = if ($exPassiveNode -and $null -ne $exPassiveNode.ServerState) { [int]$exPassiveNode.ServerState } else { 0 }
+    $exStateHex = '0x{0:X8}' -f $exState
+    $exFailed = ($exState -gt 0 -and ('{0:X4}' -f ($exState % 65536)).Substring(0, 1) -eq 'F')
+
+    if (-not $exFailed) {
+        Write-DscStatus "Passive Site Server is already installed on $($SSVM.vmName) (ServerState=$exStateHex). Exiting."
+        Start-Sleep -Seconds 5 # Force sleep for status to update on host.
+        return
+    }
+
+    Write-DscStatus "Passive Site Server on $($SSVM.vmName) is present but ConfigMgr reports a FAILED state (ServerState=$exStateHex); driving RetryInstallation (console-equivalent) to finish the stalled HA install."
+    $exRetryMax = 2
+    $exRetry = 0
+    $exDone = $false
+    $exLastHex = $exStateHex
+    while ($exRetry -lt $exRetryMax -and -not $exDone) {
+        try {
+            $exServerName = ([string]$exPassiveNode.NetworkOSPath).Replace('\\', '')
+            $exClass = [wmiclass]"\\$($smsProvider.FQDN)\$($smsProvider.NamespacePath):SMS_SCI_SysResUse"
+            $exMp = $exClass.GetMethodParameters('RetryInstallation')
+            $exMp.SiteCode = [string]$exPassiveNode.SiteCode
+            $exMp.ServerName = $exServerName
+            $null = $exClass.InvokeMethod('RetryInstallation', $exMp, $null)
+            $exRetry++
+            Write-DscStatus "RetryInstallation invoked for $exServerName (attempt $exRetry/$exRetryMax); waiting up to ~30 min for it to reach Ready." -RetrySeconds 60
+        }
+        catch {
+            Write-DscStatus "Failed to invoke RetryInstallation on $passiveFQDN. Error: $($_.Exception.Message)" -Failure
+            return
+        }
+
+        # Poll the authoritative ServerState for this retry to reach an OK category.
+        for ($w = 1; $w -le 30; $w++) {
+            Start-Sleep -Seconds 60
+            $exNode2 = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_SCI_SysResUse `
+                -Filter "RoleName = 'SMS Site Server' AND SiteCode = '$SiteCode' AND SiteSystemStatus = 0" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $exNode2 -or $null -eq $exNode2.ServerState) { continue }
+            $exState2 = [int]$exNode2.ServerState
+            $exLastHex = '0x{0:X8}' -f $exState2
+            if (($exState2 -band 0xFFFF0000) -eq 0x00030000) {
+                Write-DscStatus "Passive site server on $passiveFQDN recovered via RetryInstallation (ServerState=$exLastHex); add complete."
+                $exDone = $true
+                break
+            }
+            Write-DscStatus "Waiting for passive $passiveFQDN to recover (ServerState=$exLastHex, attempt $w/30)" -RetrySeconds 60
+        }
+    }
+
+    if (-not $exDone) {
+        Write-DscStatus "Passive site server on $($SSVM.vmName) still not healthy after $exRetry RetryInstallation attempt(s) (last ServerState=$exLastHex). Check failovermgr.log + ConfigMgrSetup.log on $passiveFQDN." -Failure
+    }
     Start-Sleep -Seconds 5 # Force sleep for status to update on host.
     return
 }
