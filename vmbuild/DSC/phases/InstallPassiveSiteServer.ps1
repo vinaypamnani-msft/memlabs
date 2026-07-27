@@ -66,6 +66,32 @@ if ($remoteLibVMName -is [string]) { $remoteLibVMName = $remoteLibVMName.Trim() 
 $computersToAdd = @("$($SSVM.vmName)$", "$($ThisMachineName)$")
 $contentLibShare = "\\$remoteLibVMName\$shareName\ContentLib"
 
+# CM can briefly report a Ready-category ServerState (0x0003xxxx) and then REGRESS
+# to a FAILED category (0x0001FFFF / 0x0002FFFF) if the async finalization -- the
+# SMS_FAILOVER_MANAGER component install + site-server public-key / cert exchange --
+# fails AFTER the transient Ready (observed 07-25: reached 0x00030003, verified
+# "healthy", then regressed and Phase 11 failed). So NEVER declare the passive
+# complete the instant it first hits the OK category: re-poll for a settle window
+# and require it to STAY in the OK category. Returns $true only if stable.
+function Confirm-CMPassiveReadyStable {
+    param(
+        [Parameter(Mandatory)]$ProviderFqdn,
+        [Parameter(Mandatory)]$Namespace,
+        [Parameter(Mandatory)]$Site,
+        [int]$SettleSeconds = 300,
+        [int]$PollSeconds = 30
+    )
+    $deadline = (Get-Date).AddSeconds($SettleSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds $PollSeconds
+        $n = Get-WmiObject -ComputerName $ProviderFqdn -Namespace $Namespace -Class SMS_SCI_SysResUse `
+            -Filter "RoleName = 'SMS Site Server' AND SiteCode = '$Site' AND SiteSystemStatus = 0" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $n -or $null -eq $n.ServerState) { continue }
+        if (([int]$n.ServerState -band 0xFFFF0000) -ne 0x00030000) { return $false }
+    }
+    return $true
+}
+
 # Check if Passive already exists
 $exists = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server"
 if ($exists) {
@@ -136,9 +162,18 @@ if ($exists) {
         $exLastHex = '0x{0:X8}' -f $exState2
 
         if (($exState2 -band 0xFFFF0000) -eq 0x00030000) {
-            Write-DscStatus "Passive site server on $passiveFQDN recovered via RetryInstallation (ServerState=$exLastHex) after $exWaited min; add complete."
-            $exDone = $true
-            break
+            # Reached the OK category -- but confirm it STAYS Ready (settle) before
+            # declaring complete, to avoid the transient-Ready-then-regress trap.
+            Write-DscStatus "Passive $passiveFQDN reached Ready (ServerState=$exLastHex); confirming it stays Ready for ~5 min before declaring complete." -RetrySeconds 60
+            if (Confirm-CMPassiveReadyStable -ProviderFqdn $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Site $SiteCode) {
+                Write-DscStatus "Passive site server on $passiveFQDN recovered via RetryInstallation (ServerState=$exLastHex, stable ~5 min) after $exWaited min; add complete."
+                $exDone = $true
+                break
+            }
+            else {
+                Write-DscStatus "Passive $passiveFQDN dropped back out of Ready during the settle window; continuing to wait." -Warning
+                continue
+            }
         }
 
         $exReFailed = ($exState2 -gt 0 -and ('{0:X4}' -f ($exState2 % 65536)).Substring(0, 1) -eq 'F')
@@ -561,8 +596,18 @@ do {
         $cmFailed = Test-CMServerStateFailed -ServerState $serverState
 
         if ($cmReady) {
-            Write-DscStatus "ConfigMgr reports passive site server on $passiveFQDN ready (ServerState=$serverStateHex); add complete."
-            $passiveComplete = $true
+            # Settle before declaring complete: CM can report Ready transiently and
+            # then regress if async finalization (SMS_FAILOVER_MANAGER install /
+            # public-key + cert exchange) fails afterward (observed 07-25). Require
+            # it to STAY in the OK category for ~5 min.
+            Write-DscStatus "ConfigMgr reports passive site server on $passiveFQDN ready (ServerState=$serverStateHex); confirming it stays Ready for ~5 min before declaring complete." -RetrySeconds 60
+            if (Confirm-CMPassiveReadyStable -ProviderFqdn $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Site $SiteCode) {
+                Write-DscStatus "Passive site server on $passiveFQDN confirmed ready (stable ~5 min); add complete."
+                $passiveComplete = $true
+            }
+            else {
+                Write-DscStatus "Passive $passiveFQDN dropped back out of Ready during the settle window; continuing to monitor." -Warning
+            }
         }
         elseif ($cmFailed) {
             # CM has declared failure -- exactly what the console surfaces as
