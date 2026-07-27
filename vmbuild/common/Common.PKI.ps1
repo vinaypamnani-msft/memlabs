@@ -2128,6 +2128,27 @@ Empty=True
                 return @{ Success = $true; Log = $report.ToArray(); ReqFile = $reqFile; AlreadyComplete = $true }
             }
 
+            # ── Settling-token FAST-FAIL (before ANY Config-NC write) ────────────
+            # Every Config-NC write below (dspublish root/NTAuth, then the subordinate
+            # CA publish) needs Enterprise Admins. If THIS session's token lacks EA but a
+            # FRESH logon WOULD carry it (S4U proves the AD membership is present, only
+            # this cached token is stale), do NOT burn the IIS + dspublish + ADCS + 6-
+            # attempt sequence on a doomed token that no in-guest retry can re-mint --
+            # return immediately so the HOST drops the cached session and re-runs on a
+            # fresh EA-carrying logon (Tier A, no reboot). Only fires on the genuine
+            # settling-token signature (process EA-less AND fresh EA-true); a genuinely
+            # non-EA account (fresh ALSO EA-less) or an unprobeable token falls through
+            # to the normal path so we never bounce forever (host Tier A/B are bounded).
+            try {
+                $eaState = Get-EaTokenState
+                _Log "[PKI-EA] Pre-install token check: processEA=$($eaState.ProcessEA) freshS4U_EA=$($eaState.FreshEA)"
+                if ($eaState.ProcessEA -eq $false -and $eaState.FreshEA -eq $true) {
+                    _Log "[PKI-EA] Settling-token detected: this session's token LACKS Enterprise Admins but a fresh logon HAS it. Failing FAST so the host re-runs on a fresh EA-carrying session (no in-guest retry can re-mint this token)."
+                    _Progress "settling-token detected (session lacks EA); handing back to host for a fresh session..."
+                    return @{ Success = $false; Log = $report.ToArray(); Error = "Settling-token: install session token lacks Enterprise Admins (a fresh logon has it). Host should drop the cached session and re-run."; FailClass = 'SettlingToken'; NeedsHostReboot = $false }
+                }
+            } catch { _Log "[PKI-EA] pre-install token check error: $($_.Exception.Message)" }
+
             # Install IIS (idempotent)
             _Log "Installing IIS Web-Server..."
             Install-FeatureBounded -Name 'Web-Server' -Label 'Step 2: installing IIS Web-Server' | Out-Null
@@ -2482,6 +2503,13 @@ Critical=Yes
     $step2Args = $intCAName, $intCAServer, $domainName, $webURL, $webFolderPath, $rootCAName, $rootCAFilesPath, $intCAFilesPath
     $refreshedSessionForStep2 = $false
     $rebootedForStep2 = $false
+    # Proactively drop any cached PSDirect session BEFORE the first Step 2 attempt so
+    # attempt 1 mints a FRESH post-promotion logon token -- which carries Enterprise
+    # Admins once the GC can expand it -- instead of riding a possibly-stale session
+    # whose token was minted pre-GC-ready (the settling-token race). Cheap (~1-2s to
+    # re-establish), no reboot; pairs with the in-guest EA fast-fail so a stale token
+    # is never used for a Config-NC write.
+    try { Remove-VmSessionFromCache -VmName $issuingCAVMName; Write-Log "[TwoTierPKI] Dropped cached PSDirect session before Step 2 so attempt 1 runs on a fresh (EA-carrying) logon token." -LogOnly } catch { Write-Log "[TwoTierPKI] pre-Step2 session eviction note: $($_.Exception.Message)" -LogOnly }
     while ($true) {
         # -AsJob is REQUIRED for -TimeoutSeconds to be enforced (Invoke-VmCommand ignores
         # the timeout on the synchronous path -> a wedged in-guest command hangs the host
