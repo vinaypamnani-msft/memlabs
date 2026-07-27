@@ -150,6 +150,29 @@ $ensureClientPkgCoverage = {
     catch { Write-DscStatus "Client pkg coverage: could not enumerate boundary-group site systems: $($_.Exception.Message)"; return }
     if ($bgDpFqdns.Count -eq 0) { return }
 
+    # SMS_BoundaryGroupSiteSystems lists ALL site systems in a boundary group --
+    # DPs, MPs AND SUPs (memlabs adds all three: Get-CMDistributionPoint +
+    # Get-CMManagementPoint + Get-CMSoftwareUpdatePoint). The client PACKAGE is
+    # DP content and only ever reports Installed on a DISTRIBUTION POINT, so an
+    # MP/SUP-only site system (e.g. an HA Primary like the site server itself,
+    # whose content library is remote and which has NO DP role) can never satisfy
+    # this check -- it would spin all $maxTries and warn. Intersect with the real
+    # DP list (SMS_DistributionPointInfo) so coverage only waits on actual DPs.
+    $dpFqdnSet = @{}
+    foreach ($d in @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPointInfo -ErrorAction SilentlyContinue)) {
+        $df = & $fqdnOf $d.NALPath
+        if (-not $df -and $d.ServerName) { $df = "$($d.ServerName)" }
+        if ($df) { $dpFqdnSet[$df.ToUpper()] = $true }
+    }
+    if ($dpFqdnSet.Count -gt 0) {
+        $nonDp = @($bgDpFqdns | Where-Object { -not $dpFqdnSet.ContainsKey($_.ToUpper()) })
+        if ($nonDp.Count -gt 0) {
+            Write-DscStatus "Client pkg coverage: excluding $($nonDp.Count) boundary-group site system(s) that are MP/SUP-only, not DPs (no client-package content lands there): $($nonDp -join ', ')"
+        }
+        $bgDpFqdns = @($bgDpFqdns | Where-Object { $dpFqdnSet.ContainsKey($_.ToUpper()) })
+    }
+    if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems in boundary groups to cover."; return }
+
     # Site servers (CAS/Primary/Secondary) run SMS_EXECUTIVE + distmgr. Restarting a
     # site server's executive sets distmgr's thread-exit flag (m_bShutdownRequest) and
     # ABORTS any in-flight inter-site content bundle with ERROR_REQUEST_ABORTED
