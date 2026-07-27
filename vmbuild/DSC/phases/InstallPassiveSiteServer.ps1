@@ -94,45 +94,73 @@ if ($exists) {
     }
 
     Write-DscStatus "Passive Site Server on $($SSVM.vmName) is present but ConfigMgr reports a FAILED state (ServerState=$exStateHex); driving RetryInstallation (console-equivalent) to finish the stalled HA install."
-    $exRetryMax = 2
+    $exServerName = ([string]$exPassiveNode.NetworkOSPath).Replace('\\', '')
+    $exRetryMax = 2            # only RE-FIRE on a genuine re-fail -- never interrupt an in-progress install
     $exRetry = 0
     $exDone = $false
     $exLastHex = $exStateHex
-    while ($exRetry -lt $exRetryMax -and -not $exDone) {
-        try {
-            $exServerName = ([string]$exPassiveNode.NetworkOSPath).Replace('\\', '')
-            $exClass = [wmiclass]"\\$($smsProvider.FQDN)\$($smsProvider.NamespacePath):SMS_SCI_SysResUse"
-            $exMp = $exClass.GetMethodParameters('RetryInstallation')
-            $exMp.SiteCode = [string]$exPassiveNode.SiteCode
-            $exMp.ServerName = $exServerName
-            $null = $exClass.InvokeMethod('RetryInstallation', $exMp, $null)
-            $exRetry++
-            Write-DscStatus "RetryInstallation invoked for $exServerName (attempt $exRetry/$exRetryMax); waiting up to ~30 min for it to reach Ready." -RetrySeconds 60
-        }
-        catch {
-            Write-DscStatus "Failed to invoke RetryInstallation on $passiveFQDN. Error: $($_.Exception.Message)" -Failure
-            return
+    $exWaitCapMin = 60         # total minutes to allow recovery (the initial passive install took ~18 min)
+    $exWaited = 0
+
+    $invokeRetry = {
+        $exClass = [wmiclass]"\\$($smsProvider.FQDN)\$($smsProvider.NamespacePath):SMS_SCI_SysResUse"
+        $exMp = $exClass.GetMethodParameters('RetryInstallation')
+        $exMp.SiteCode = [string]$exPassiveNode.SiteCode
+        $exMp.ServerName = $exServerName
+        $null = $exClass.InvokeMethod('RetryInstallation', $exMp, $null)
+    }
+
+    try {
+        & $invokeRetry
+        $exRetry++
+        Write-DscStatus "RetryInstallation invoked for $exServerName (attempt $exRetry/$exRetryMax); waiting up to $exWaitCapMin min for it to reach Ready." -RetrySeconds 60
+    }
+    catch {
+        Write-DscStatus "Failed to invoke RetryInstallation on $passiveFQDN. Error: $($_.Exception.Message)" -Failure
+        return
+    }
+
+    # Poll the authoritative ServerState. Reaching the 0x0003xxxx OK category = done.
+    # A ServerState in the Installing/Synchronizing category (0x0001xxxx / 0x0002xxxx
+    # with a low word != FFFF) means it is actively PROGRESSING -- keep waiting, do
+    # NOT re-issue RetryInstallation (that resets an in-flight install). Only re-fire
+    # when it goes back to a FAILED category (low word FFFF), and only up to
+    # $exRetryMax. Bounded by $exWaitCapMin so it can never hang the phase.
+    while (-not $exDone -and $exWaited -lt $exWaitCapMin) {
+        Start-Sleep -Seconds 60
+        $exWaited++
+        $exNode2 = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_SCI_SysResUse `
+            -Filter "RoleName = 'SMS Site Server' AND SiteCode = '$SiteCode' AND SiteSystemStatus = 0" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $exNode2 -or $null -eq $exNode2.ServerState) { continue }
+        $exState2 = [int]$exNode2.ServerState
+        $exLastHex = '0x{0:X8}' -f $exState2
+
+        if (($exState2 -band 0xFFFF0000) -eq 0x00030000) {
+            Write-DscStatus "Passive site server on $passiveFQDN recovered via RetryInstallation (ServerState=$exLastHex) after $exWaited min; add complete."
+            $exDone = $true
+            break
         }
 
-        # Poll the authoritative ServerState for this retry to reach an OK category.
-        for ($w = 1; $w -le 30; $w++) {
-            Start-Sleep -Seconds 60
-            $exNode2 = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_SCI_SysResUse `
-                -Filter "RoleName = 'SMS Site Server' AND SiteCode = '$SiteCode' AND SiteSystemStatus = 0" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $exNode2 -or $null -eq $exNode2.ServerState) { continue }
-            $exState2 = [int]$exNode2.ServerState
-            $exLastHex = '0x{0:X8}' -f $exState2
-            if (($exState2 -band 0xFFFF0000) -eq 0x00030000) {
-                Write-DscStatus "Passive site server on $passiveFQDN recovered via RetryInstallation (ServerState=$exLastHex); add complete."
-                $exDone = $true
+        $exReFailed = ($exState2 -gt 0 -and ('{0:X4}' -f ($exState2 % 65536)).Substring(0, 1) -eq 'F')
+        if ($exReFailed) {
+            if ($exRetry -lt $exRetryMax) {
+                Write-DscStatus "Passive $passiveFQDN re-failed (ServerState=$exLastHex) after $exWaited min; issuing RetryInstallation attempt $($exRetry + 1)/$exRetryMax." -Warning
+                try { & $invokeRetry; $exRetry++ }
+                catch { Write-DscStatus "RetryInstallation re-invoke failed on $passiveFQDN`: $($_.Exception.Message)" -Failure; break }
+            }
+            else {
+                Write-DscStatus "Passive $passiveFQDN still failing (ServerState=$exLastHex) after $exRetry attempt(s)/$exWaited min; giving up." -Warning
                 break
             }
-            Write-DscStatus "Waiting for passive $passiveFQDN to recover (ServerState=$exLastHex, attempt $w/30)" -RetrySeconds 60
+        }
+        else {
+            # Installing / Synchronizing -- progressing; keep waiting (no re-issue).
+            Write-DscStatus "Waiting for passive $passiveFQDN to recover (ServerState=$exLastHex, $exWaited/$exWaitCapMin min)" -RetrySeconds 60
         }
     }
 
     if (-not $exDone) {
-        Write-DscStatus "Passive site server on $($SSVM.vmName) still not healthy after $exRetry RetryInstallation attempt(s) (last ServerState=$exLastHex). Check failovermgr.log + ConfigMgrSetup.log on $passiveFQDN." -Failure
+        Write-DscStatus "Passive site server on $($SSVM.vmName) still not healthy after $exRetry RetryInstallation attempt(s)/$exWaited min (last ServerState=$exLastHex). Check failovermgr.log + ConfigMgrSetup.log on $passiveFQDN." -Failure
     }
     elseif (-not $SkipStatusFileUpdate) {
         $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Completed' -StampEndTime
