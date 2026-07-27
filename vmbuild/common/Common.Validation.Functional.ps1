@@ -8682,7 +8682,16 @@ function Test-CMClientPackageDistribution {
 
         # --- ConfigMgr client package(s): the critical client-install content ---
         try {
-            $clientPkgs = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "Name LIKE 'Configuration Manager Client%'" -ErrorAction Stop)
+            # 'Configuration Manager Client%' matches THREE site-created packages:
+            #   * 'Configuration Manager Client Package'         -- production client content (REQUIRED on a DP; every ccmsetup pulls it)
+            #   * 'Configuration Manager Client Upgrade Package' -- auto-upgrade content (normally auto-distributed)
+            #   * 'Configuration Manager Client Piloting Package'-- PRE-PRODUCTION/pilot client content
+            # The Piloting package exists only when a pre-production client is staged and is
+            # consumed ONLY by members of the pre-production collection -- it is NEVER required
+            # for a normal client install and memlabs never distributes it to a DP. Gating
+            # Phase 11 on it (NOT distributed to ANY DP / no BG coverage) is a false positive
+            # that fails otherwise-healthy sites, so exclude it from this coverage check.
+            $clientPkgs = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "Name LIKE 'Configuration Manager Client%' AND Name NOT LIKE '%Piloting%'" -ErrorAction Stop)
         }
         catch {
             $results.Passed = $false
