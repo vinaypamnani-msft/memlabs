@@ -173,6 +173,42 @@ $ensureClientPkgCoverage = {
     }
     if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems in boundary groups to cover."; return }
 
+    # A SECONDARY-site DP only receives the client package via slow inter-site
+    # content replication (parent Primary -> secondary despool -> secondary distmgr),
+    # and only AFTER the secondary is fully installed + its replication link is Active
+    # -- which frequently isn't true yet when this Phase 8 gate runs, so waiting on it
+    # burns the whole budget and warns. That wait is only worth taking when a client
+    # actually DEPENDS on that secondary's DP. So: if any push client is assigned to
+    # the secondary (its resolved pushClient site code == the secondary's site code,
+    # or a legacy pushClient=$true client sits on the secondary's own subnet), WAIT
+    # for it as before; if NONE are, SKIP it (the parent-Primary DPs still cover every
+    # boundary, and the content will arrive on its own via normal inter-site
+    # replication -- Phase 11 re-checks). Non-secondary DPs are always waited on.
+    $vmByHost = @{}
+    foreach ($v in @($deployConfig.virtualMachines)) { if ($v.vmName) { $vmByHost["$($v.vmName)".ToUpper()] = $v } }
+    $secSkipped = @()
+    $keptDpFqdns = @()
+    foreach ($dp in $bgDpFqdns) {
+        $dpHost = ("$dp" -split '\.')[0].ToUpper()
+        $dpVm = $vmByHost[$dpHost]
+        if (-not $dpVm -or $dpVm.role -ne 'Secondary') { $keptDpFqdns += $dp; continue }   # not a secondary -> always cover
+        $secSite = "$($dpVm.siteCode)"
+        $secNet = "$($dpVm.network)"
+        $assigned = @($deployConfig.virtualMachines | Where-Object {
+                ($_.pushClient -ne $false) -and (
+                    ("$($_.pushClient)" -eq $secSite) -or
+                    (($_.pushClient -eq $true) -and $secNet -and ("$($_.network)" -eq $secNet))
+                )
+            })
+        if ($assigned.Count -gt 0) { $keptDpFqdns += $dp }                                  # clients depend on it -> wait
+        else { $secSkipped += "$dp" }                                                       # no clients -> skip
+    }
+    $bgDpFqdns = @($keptDpFqdns)
+    if ($secSkipped.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: skipping $($secSkipped.Count) secondary-site DP(s) with NO push clients assigned (parent-Primary DPs still serve those boundaries; client package will arrive via normal inter-site replication): $($secSkipped -join ', ')"
+    }
+    if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems require client-package coverage."; return }
+
     # Site servers (CAS/Primary/Secondary) run SMS_EXECUTIVE + distmgr. Restarting a
     # site server's executive sets distmgr's thread-exit flag (m_bShutdownRequest) and
     # ABORTS any in-flight inter-site content bundle with ERROR_REQUEST_ABORTED
