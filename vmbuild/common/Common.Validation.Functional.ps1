@@ -1716,13 +1716,24 @@ function Test-SqlIsoNotMounted {
     # host-side check runs, so a cache-*.iso must NOT fail the VM (it caused a
     # spurious Phase 11 FAIL on every SQL/SQLAO VM whose cache eject lagged the
     # validator). The DSC payload ISO (dsc-<hash>.iso) is mounted+ejected within
-    # the per-VM DSC copy step and is likewise not a SQL ISO. Ignore both here and
-    # only flag a real SQL ISO.
+    # the per-VM DSC copy step and is likewise not a SQL ISO.
+    #
+    # The CM install ISO is ALSO not a SQL ISO: it has its own lifecycle (mounted
+    # on the site server in Phase 8/9, ejected by Dismount-CmIsoForPhase after a
+    # SUCCESSFUL CM phase; deliberately left mounted on a failed/standalone CM
+    # phase for inspection). It caused a spurious Phase 11 FAIL on Primary/CAS site
+    # servers (which have remote SQL and never get a SQL ISO at all) whenever the
+    # CM phase was run standalone or left the disc mounted. CM ISOs live under the
+    # azureFiles '\CM\' subfolder, whereas SQL ISOs sit directly at the azureFiles
+    # root (Get-SqlIsoPathForVm joins the bare filename), so a CM-folder ISO is
+    # unambiguously not the SQL media -- ignore it here and let the CM dismount
+    # path own it. Only flag a real SQL ISO.
     $dvd = Get-VMDvdDrive -VMName $VMName -ErrorAction SilentlyContinue
     $mountedPath = ($dvd | Where-Object {
             $_.Path -and
             ([System.IO.Path]::GetFileName($_.Path)) -notlike 'cache-*.iso' -and
-            ([System.IO.Path]::GetFileName($_.Path)) -notlike 'dsc-*.iso'
+            ([System.IO.Path]::GetFileName($_.Path)) -notlike 'dsc-*.iso' -and
+            ([System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName($_.Path))) -ne 'CM'
         } | Select-Object -First 1).Path
 
     if ($mountedPath) {
