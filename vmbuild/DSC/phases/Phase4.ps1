@@ -326,21 +326,65 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
             # assign via CIM -> WMI -> mountvol until S:\setup.exe resolves.
             Script AssignSqlIsoDriveLetter {
                 GetScript  = { @{ Result = '' } }
-                TestScript = { Test-Path 'S:\setup.exe' }
+                TestScript = { [bool](Test-Path 'S:\setup.exe' -ErrorAction SilentlyContinue) }
                 SetScript  = {
                     $mountvol = "$env:SystemRoot\System32\mountvol.exe"
 
-                    # (1) Locate the optical volume holding the SQL media (setup.exe
-                    #     at its root). DriveType 5 = CD-ROM = mounted ISO.
-                    $sqlVol = $null
-                    foreach ($vol in (Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue)) {
-                        if ($vol.DriveLetter -and (Test-Path (Join-Path "$($vol.DriveLetter)\" 'setup.exe'))) {
-                            $sqlVol = $vol
-                            break
+                    # Locate the optical (DriveType 5 = CD-ROM = mounted ISO) volume
+                    # holding the SQL media (setup.exe at its root). Handles the
+                    # LETTERLESS disc: after the host mounts two discs (cache + SQL),
+                    # the guest can transiently enumerate the SQL disc without a drive
+                    # letter, and a letter-only probe would then miss it, throw "SQL
+                    # ISO not found", re-stage pending.mof and strand the config into a
+                    # reboot. Bind a temporary scratch letter to probe letterless
+                    # optical volumes so the disc is recognized even mid-churn.
+                    $findSqlVol = {
+                        $optical = @(Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue)
+                        # (a) Prefer a lettered optical volume with setup.exe at its root.
+                        foreach ($vol in $optical) {
+                            if ($vol.DriveLetter -and (Test-Path (Join-Path "$($vol.DriveLetter)\" 'setup.exe') -ErrorAction SilentlyContinue)) {
+                                return $vol
+                            }
                         }
+                        # (b) Probe letterless optical volumes via a temporary scratch letter.
+                        $scratchPool = @('R', 'Q', 'P', 'O', 'N', 'M')
+                        $used = @{}
+                        foreach ($v in (Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue)) {
+                            if ($v.DriveLetter) { $used[([string]$v.DriveLetter).TrimEnd(':')] = $true }
+                        }
+                        foreach ($vol in $optical) {
+                            if ($vol.DriveLetter) { continue }
+                            $scratch = $scratchPool | Where-Object { -not $used.ContainsKey($_) } | Select-Object -First 1
+                            if (-not $scratch) { break }
+                            $isSql = $false
+                            try {
+                                & $mountvol "${scratch}:" $vol.DeviceID 2>$null | Out-Null
+                                Start-Sleep -Seconds 1
+                                $isSql = [bool](Test-Path "${scratch}:\setup.exe" -ErrorAction SilentlyContinue)
+                            }
+                            catch {}
+                            # Release the scratch letter either way -- if it IS the SQL
+                            # disc, the assignment below re-letters it to S: cleanly.
+                            try { & $mountvol "${scratch}:" /D 2>$null | Out-Null } catch {}
+                            if ($isSql) { return $vol }
+                        }
+                        return $null
                     }
+
+                    # (1) Locate the SQL optical volume, polling briefly: after a host
+                    #     mount the guest can take a few seconds to enumerate the disc,
+                    #     and with two discs attached the SQL disc can transiently appear
+                    #     letterless. Waiting ~2 min for it to settle avoids stranding
+                    #     pending.mof (and forcing a reboot) on a disc that IS present.
+                    $sqlVol = $null
+                    $deadline = (Get-Date).AddMinutes(2)
+                    do {
+                        $sqlVol = & $findSqlVol
+                        if ($sqlVol) { break }
+                        Start-Sleep -Seconds 10
+                    } while ((Get-Date) -lt $deadline)
                     if (-not $sqlVol) {
-                        throw "SQL ISO not found on any CD-ROM volume (expected setup.exe at the optical drive root). The host should have mounted it before Phase 4."
+                        throw "SQL ISO not found on any CD-ROM volume (expected setup.exe at the optical drive root) after waiting 2 min. The host should have mounted it before Phase 4."
                     }
                     if ($sqlVol.DriveLetter -eq 'S:') {
                         Write-Verbose "SQL ISO already on S:."
