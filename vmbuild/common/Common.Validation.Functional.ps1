@@ -3713,13 +3713,14 @@ function Test-CMSiteFunctionality {
 
         $drsScriptBlock = {
             param($parentSC, $childCodes)
-            $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+            $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new(); LinkActive = @{} }
 
             # StatusName lookup for readable output
             $statusName = @{ 0='Deleted'; 1='Tombstoned'; 2='Active'; 3='Active_InterOp'; 4='Initializing'; 5='NotStarted'; 6='Error'; 7='Unknown'; 8='Degraded'; 9='Failed' }
             $failedStates = @(6, 8, 9)  # Error, Degraded, Failed
 
             foreach ($childSC in $childCodes) {
+                $results.LinkActive[$childSC] = $false
                 # --- Child site visibility via SMS_Site ---
                 $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$parentSC' -Class SMS_Site -Filter `"SiteCode = '$childSC'`"")
                 $maxSiteAttempts = 10
@@ -3765,6 +3766,7 @@ function Test-CMSiteFunctionality {
                         $s2Name = if ($statusName.ContainsKey($s2s1)) { $statusName[$s2s1] } else { "Unknown($s2s1)" }
 
                         if ($ls -eq 2 -and $s1s2 -eq 2 -and $s2s1 -eq 2) {
+                            $results.LinkActive[$childSC] = $true
                             $results.Details.Add("OK: DRS link $parentSC -> $childSC is Active")
                         }
                         elseif ($ls -in $failedStates -or $s1s2 -in $failedStates -or $s2s1 -in $failedStates) {
@@ -3790,6 +3792,36 @@ function Test-CMSiteFunctionality {
 
         $drsPassed = Format-TestResult -VMName $VMName -RoleLabel "ChildSites ($siteCode)" -Result $drsResult
         if (-not $drsPassed) { $passed = $false }
+
+        # If a child SECONDARY's replication link isn't Active AND we NEEDED it to be
+        # -- i.e. a push client is actually assigned to that secondary (its resolved
+        # pushClient site code == the secondary's site code, or a legacy pushClient=
+        # $true client on the secondary's own subnet) -- collect the inter-site
+        # content-pipeline diagnostics on BOTH sides (parent = sender, secondary =
+        # despool), the same set we pull for other content/link failures. Without an
+        # Active link the client package can't reach the secondary DP, so a stuck link
+        # is the root cause worth capturing. If no client depends on it, the link
+        # lagging is benign and we don't spam diagnostics.
+        $linkActive = @{}
+        if ($drsResult -and ($drsResult.ScriptBlockOutput -is [hashtable]) -and $drsResult.ScriptBlockOutput.ContainsKey('LinkActive') -and ($drsResult.ScriptBlockOutput.LinkActive -is [hashtable])) {
+            $linkActive = $drsResult.ScriptBlockOutput.LinkActive
+        }
+        foreach ($childVm in @($childSites | Where-Object { $_.role -eq 'Secondary' })) {
+            $csc = "$($childVm.siteCode)"
+            $csNet = "$($childVm.network)"
+            $isActive = ($linkActive.ContainsKey($csc) -and $linkActive[$csc] -eq $true)
+            if ($isActive) { continue }
+            $assigned = @($DeployConfig.virtualMachines | Where-Object {
+                    ($_.pushClient -ne $false) -and (
+                        ("$($_.pushClient)" -eq $csc) -or
+                        (($_.pushClient -eq $true) -and $csNet -and ("$($_.network)" -eq $csNet))
+                    )
+                })
+            if ($assigned.Count -eq 0) { continue }
+            Write-Log "[Phase $Phase] $VMName [ChildSites ($siteCode)]: secondary '$csc' link NOT Active but $($assigned.Count) push client(s) are assigned to it ($(($assigned | ForEach-Object { $_.vmName }) -join ', ')) -- collecting inter-site content-pipeline diagnostics from parent '$VMName' and secondary '$($childVm.vmName)'" -OutputStream
+            $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel "SecondaryLink-Parent ($csc)" -Collector $Phase11SmsSiteLogCollector
+            $null = Save-Phase11GuestLogs -VMName $childVm.vmName -DomainName $domain -RoleLabel "SecondaryLink-Secondary ($csc)" -Collector $Phase11SmsSiteLogCollector
+        }
     }
 
     # Verify remote site system roles (DPs) are registered in WMI.

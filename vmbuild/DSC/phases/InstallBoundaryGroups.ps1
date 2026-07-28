@@ -209,6 +209,48 @@ $ensureClientPkgCoverage = {
     }
     if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems require client-package coverage."; return }
 
+    # We ARE covering one or more secondary-site DPs (clients depend on them).
+    # Content can't land on a secondary DP until that secondary's replication link
+    # to this parent is Active -- until then the parent's distmgr logs "...is not an
+    # active site, ignore it" and sends nothing, so spinning the content escalations
+    # is pointless. Gate the content wait on link activation, 30 min max (a secondary
+    # that just finished installing still needs DRS init + link Active). If the link
+    # is still not Active after 30 min, warn and fall through: the parent-Primary DPs
+    # still serve every boundary, and Phase 11 re-checks + collects link diagnostics.
+    $secLinkSites = @{}   # secondary siteCode -> $true (for kept secondary DPs)
+    foreach ($dp in $bgDpFqdns) {
+        $dpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
+        if ($dpVm -and $dpVm.role -eq 'Secondary' -and $dpVm.siteCode) { $secLinkSites["$($dpVm.siteCode)"] = $true }
+    }
+    if ($secLinkSites.Count -gt 0) {
+        $linkDeadline = (Get-Date).AddMinutes(30)
+        $pendingLink = @($secLinkSites.Keys)
+        while ($pendingLink.Count -gt 0 -and (Get-Date) -lt $linkDeadline) {
+            $stillPending = @()
+            foreach ($sc in $pendingLink) {
+                $isActive = $false
+                try {
+                    $rs = Get-CMDatabaseReplicationStatus -Site2 $sc -ErrorAction SilentlyContinue
+                    # LinkStatus/GlobalState enum: 2 = Active (both directions must be Active).
+                    if ($rs -and [int]$rs.LinkStatus -eq 2 -and [int]$rs.Site1ToSite2GlobalState -eq 2 -and [int]$rs.Site2ToSite1GlobalState -eq 2) { $isActive = $true }
+                }
+                catch {}
+                if ($isActive) { Write-DscStatus "Client pkg coverage: secondary '$sc' replication link is Active -- client-package content can now flow." }
+                else { $stillPending += $sc }
+            }
+            $pendingLink = @($stillPending)
+            if ($pendingLink.Count -gt 0) {
+                $remainMin = [int]((($linkDeadline) - (Get-Date)).TotalMinutes)
+                if ($remainMin -lt 0) { $remainMin = 0 }
+                Write-DscStatus "Client pkg coverage: waiting for secondary replication link(s) to be Active before the client-package wait: $($pendingLink -join ', ') [~${remainMin}m left of 30m]"
+                Start-Sleep -Seconds 30
+            }
+        }
+        if ($pendingLink.Count -gt 0) {
+            Write-DscStatus "Client pkg coverage: secondary replication link(s) still NOT Active after 30 min: $($pendingLink -join ', '). Proceeding with the client-package wait anyway (content can't arrive until the link activates; Phase 11 re-checks and collects link diagnostics)." -Warning
+        }
+    }
+
     # Site servers (CAS/Primary/Secondary) run SMS_EXECUTIVE + distmgr. Restarting a
     # site server's executive sets distmgr's thread-exit flag (m_bShutdownRequest) and
     # ABORTS any in-flight inter-site content bundle with ERROR_REQUEST_ABORTED
