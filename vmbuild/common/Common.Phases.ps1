@@ -484,6 +484,13 @@ function Set-CmMediaMountAndShare {
         }
         # Always snapshot the guest's optical + drive-scan state for the host log.
         try {
+            # PID identifies the wsmprovhost backing THIS PSDirect session. When the
+            # host evicts the cached session before each probe, a fresh session ->
+            # a new PID here; a stale reused runspace keeps the same PID. So a
+            # changing PID across attempts confirms the probe is genuinely running
+            # on a fresh session (the fix), and a device count that jumps when the
+            # PID changes is the smoking gun for a cached-session stale device view.
+            $diag.Add("probe session PID=$PID")
             $cdVols = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveType -eq 'CD-ROM' })
             if ($cdVols.Count -eq 0) { $diag.Add("guest sees NO CD-ROM volumes") }
             foreach ($v in $cdVols) {
@@ -499,6 +506,21 @@ function Set-CmMediaMountAndShare {
             $diag.Add("Drives with CM setup (any type): $(if ($cmLetters.Count) { $cmLetters -join ', ' } else { '<none>' })")
             $drv = @(Get-CimInstance -ClassName Win32_CDROMDrive -ErrorAction SilentlyContinue)
             $diag.Add("Win32_CDROMDrive=$($drv.Count): " + (($drv | ForEach-Object { "$($_.Drive)|MediaLoaded=$($_.MediaLoaded)" }) -join '; '))
+            # Cross-check the CIM count with the legacy WMI provider and .NET
+            # DriveInfo. All three read the SAME global device layer, so if they
+            # disagree the session's view is split/stale rather than the media
+            # being absent -- the decisive signal that separates a detection bug
+            # from a genuine "no disc" case.
+            try {
+                $wmi = @(Get-WmiObject -Class Win32_CDROMDrive -ErrorAction SilentlyContinue)
+                $diag.Add("Win32_CDROMDrive(WMI)=$($wmi.Count): " + (($wmi | ForEach-Object { "$($_.Drive)|MediaLoaded=$($_.MediaLoaded)|Vol='$($_.VolumeName)'" }) -join '; '))
+            }
+            catch { $diag.Add("Win32_CDROMDrive(WMI) query failed: $($_.Exception.Message)") }
+            try {
+                $di = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'CDRom' })
+                $diag.Add("DriveInfo CDRom=$($di.Count): " + (($di | ForEach-Object { "$($_.Name)|Ready=$($_.IsReady)|Label='$(if ($_.IsReady) { $_.VolumeLabel } else { '' })'" }) -join '; '))
+            }
+            catch { $diag.Add("DriveInfo query failed: $($_.Exception.Message)") }
             # Report any running CM Setup and where it's reading from -- the
             # authoritative 'media is present' signal when enumeration is flaky.
             $spAll = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='setupdl.exe' OR Name='setup.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath })
@@ -564,6 +586,24 @@ function Set-CmMediaMountAndShare {
             $null = Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
             try { $attached = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath }) } catch { $attached = $false }
         }
+
+        # DETECTION FIX + DIAG: run the media probe on a FRESH PSDirect session.
+        # Get-VmSession hands Invoke-VmCommand a LONG-LIVED cached session (one per
+        # VM, reused for the whole build). A cached runspace created BEFORE the CM
+        # disc was attached can hold a STALE optical / DOS-device view: the disc
+        # that arrived after the session started is invisible to it, even though
+        # every FRESH session sees it at D: -- the guest's own CM Setup, an
+        # interactive logon, and a standalone Invoke-Command all read the media
+        # fine while only this reused probe session reported "CD-ROM D: 700MB
+        # cmMedia=False, Win32_CDROMDrive=1" (the cache disc) for 28 min straight.
+        # This is the same cached-vs-fresh split as the PKI Step 2 token race.
+        # Evicting the cached session forces the next Invoke-VmCommand to build a
+        # fresh, validated session that sees current media. It's cheap (~1-2s
+        # rebuild vs the loop's 15s+ cadence) and turns a 28-min churn-and-fail
+        # into an instant hit when the media is genuinely present. The probe is
+        # synchronous with no in-flight job bound to the session, so disposing it
+        # here is safe.
+        Remove-VmSessionFromCache -VmName $vmName
 
         # Churn-free guest probe: detects a running CM Setup (proof of media) or the
         # setup binary on any drive letter, and returns the guest's optical diag.
