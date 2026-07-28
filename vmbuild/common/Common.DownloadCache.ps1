@@ -491,6 +491,16 @@ function Mount-IsoOnVm {
             $dvds = @(Get-VMDvdDrive -VMName $VmName -ErrorAction Stop)
             if ($dvds | Where-Object { $_.Path -eq $IsoPath }) {
                 Write-Log "$tag$($VmName): Mounted $Context ISO $IsoPath" -LogOnly
+                # A disc was just (re)attached at the hypervisor. Any host-side
+                # PSDirect session for this VM that was created BEFORE this change
+                # holds a STALE optical / DOS-device view: a process can't refresh
+                # its own device map, so the cached session keeps enumerating the
+                # pre-mount disc set and never sees the disc we just added -- the
+                # exact cached-vs-fresh split behind the CM media "cmMedia=False" and
+                # SQL ISO letterless misses. Evict the cached session so the NEXT
+                # Invoke-VmCommand builds a fresh, validated session that enumerates
+                # the current media. Cheap (~1-2s rebuild), never throws.
+                Invoke-VmSessionRefreshAfterMediaChange -VmName $VmName
                 return $true
             }
         }
@@ -501,6 +511,24 @@ function Mount-IsoOnVm {
     }
     Write-Log "$tag$($VmName): Failed to mount $Context ISO $IsoPath after 3 attempts" -LogOnly
     return $false
+}
+
+# Evict a VM's cached host-side PSDirect session(s) after the host has changed
+# the VM's optical/DVD layout (mount / eject / reset). Centralizes the fix for
+# the whole "an existing session can't see the new drive/letter" class: rather
+# than each call site remembering to refresh, every ISO primitive that mutates
+# the DVD set calls this, so no host code path ever reads a stale optical view.
+# The next Get-VmSession then rebuilds a fresh session that enumerates the
+# current media. No-op + never throws if the eviction helper isn't loaded (e.g.
+# a primitive used from a standalone script/unit test).
+function Invoke-VmSessionRefreshAfterMediaChange {
+    param([Parameter(Mandatory)][string]$VmName)
+    try {
+        if (Get-Command -Name Remove-VmSessionFromCache -ErrorAction SilentlyContinue) {
+            Remove-VmSessionFromCache -VmName $VmName
+        }
+    }
+    catch { }
 }
 
 function Dismount-IsoFromVm {
@@ -611,6 +639,12 @@ function Reset-AllDvdDrivesOnVm {
     catch {
         Write-Log "$tag$($VmName): $Context DVD reset failed: $($_.Exception.Message)" -LogOnly
     }
+    # The optical topology was just rebuilt (all drives removed + discs re-added).
+    # Evict the cached host session so the next probe sees the fresh device set,
+    # not the pre-reset view (this is the reset path's equivalent of the mount
+    # eviction -- without it the very DVD reset done to un-wedge enumeration would
+    # be re-read through the same stale session that couldn't see the disc).
+    Invoke-VmSessionRefreshAfterMediaChange -VmName $VmName
     return ([bool](@(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $RequiredIsoPath }))
 }
 
