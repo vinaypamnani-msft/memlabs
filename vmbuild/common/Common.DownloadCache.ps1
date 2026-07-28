@@ -531,6 +531,75 @@ function Invoke-VmSessionRefreshAfterMediaChange {
     catch { }
 }
 
+function Confirm-IsoVisibleInGuest {
+    # Host-side POSTCONDITION for a mount: confirm the GUEST actually enumerates the
+    # disc we just attached, probing on a FRESH PSDirect session each attempt so a
+    # stale optical view never sticks (Mount-IsoOnVm already evicted the cached
+    # session; we re-evict per attempt for safety). The disc is identified by a
+    # content marker at its root ($MarkerRelativePath, e.g. 'setup.exe' for SQL,
+    # 'SMSSETUP\BIN\X64\Setup.exe' for CM) rather than by drive-type classification,
+    # which is unreliable while a disc is busy / letterless. Any letterless optical
+    # is given a temporary letter so the content probe can see it. Returns $true as
+    # soon as the guest sees it, $false after the timeout. Never throws.
+    #
+    # This front-loads visibility to the host -- where we hold the fresh-session
+    # lever -- instead of relying solely on the in-guest DSC resource to re-find the
+    # media, generalizing the CM media probe as a reusable postcondition.
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$VmDomainName,
+        [Parameter(Mandatory)][string]$MarkerRelativePath,
+        [string]$Context = 'ISO',
+        [int]$TimeoutSeconds = 120,
+        [int]$Phase = 0
+    )
+    $tag = ""
+    if ($Phase -gt 0) { $tag = "[Phase $Phase]: " }
+
+    $probe = {
+        param($marker)
+        # Give any letterless optical volume a letter so the content probe sees it.
+        try {
+            $letterless = @(Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue | Where-Object { -not $_.DriveLetter })
+            if ($letterless.Count -gt 0) {
+                $free = @()
+                foreach ($n in 70..90) { $l = [char]$n; if (-not (Test-Path "${l}:\")) { $free += $l } }
+                $i = 0
+                foreach ($vol in $letterless) {
+                    if ($i -ge $free.Count) { break }
+                    Set-CimInstance -InputObject $vol -Property @{ DriveLetter = "$($free[$i]):" } -ErrorAction SilentlyContinue
+                    $i++
+                }
+            }
+        }
+        catch { }
+        foreach ($n in 67..90) { $dl = [char]$n; if (Test-Path ("${dl}:\$marker")) { return "${dl}:" } }
+        # Nudge a device rescan and re-scan once more before giving up this attempt.
+        try { & pnputil.exe /scan-devices *>$null } catch { }
+        try { "rescan" | & diskpart.exe *>$null } catch { }
+        foreach ($n in 67..90) { $dl = [char]$n; if (Test-Path ("${dl}:\$marker")) { return "${dl}:" } }
+        return $null
+    }
+
+    $deadline = (Get-Date).AddSeconds([int]$TimeoutSeconds)
+    $attempt = 0
+    while ((Get-Date) -lt $deadline) {
+        $attempt++
+        # Fresh session each attempt: a runspace created before the disc arrived
+        # holds a stale optical view and would never see it (the whole bug class).
+        Invoke-VmSessionRefreshAfterMediaChange -VmName $VmName
+        $r = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock $probe -ArgumentList @($MarkerRelativePath) -SuppressLog -DisplayName "$Context media visible? ($attempt)"
+        $root = $r.ScriptBlockOutput
+        if ($root -is [string] -and $root) {
+            Write-Log "$tag$($VmName): $Context media visible in guest at $root [attempt $attempt]." -LogOnly
+            return $true
+        }
+        Start-Sleep -Seconds 8
+    }
+    Write-Log "$tag$($VmName): $Context media NOT visible in guest after ~$([int]$TimeoutSeconds)s (marker '$MarkerRelativePath'); leaving it to the in-guest re-enumeration." -Warning
+    return $false
+}
+
 function Dismount-IsoFromVm {
     # Idempotent, per-drive eject. Ejects ONLY the drive(s) whose media is this exact
     # ISO path -- leaves every other mounted ISO and every empty drive untouched.

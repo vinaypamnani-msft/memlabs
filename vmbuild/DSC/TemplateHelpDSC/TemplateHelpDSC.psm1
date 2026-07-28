@@ -3375,6 +3375,139 @@ class RegisterTaskScheduler {
     }
 }
 
+function Resolve-OpticalMediaDriveLetter {
+    # Reliably locate the optical (mounted-ISO) disc that carries $MarkerRelativePath
+    # at its root and give it $TargetDriveLetter, returning "<letter>:" on success or
+    # $null (never throws). This is the reusable in-guest form of the drive-letter
+    # resolution the SQL media (Phase 4 AssignSqlIsoDriveLetter) and any other
+    # in-guest media reader needs, so the same hardening lives in ONE place.
+    #
+    # Why it exists: the guest's own long-lived LCM/DSC session can hold a STALE
+    # optical view -- a disc the host attached AFTER the session started can
+    # enumerate LETTERLESS or lag entirely, and a naive "find the lettered CD-ROM"
+    # then misses it and the dependent resource strands (re-stages pending.mof).
+    # This helper (a) POLLS for the disc to settle (device rescan between tries),
+    # (b) recognizes a LETTERLESS disc by binding a temporary scratch letter to
+    # probe it by content, and (c) assigns the target letter via CIM -> WMI ->
+    # mountvol until the marker resolves.
+    param(
+        [string]$MarkerRelativePath = 'setup.exe',
+        [string]$TargetDriveLetter = 'S',
+        [int]$TimeoutSeconds = 120
+    )
+    $target = ([string]$TargetDriveLetter).TrimEnd(':')   # 'S'
+    $targetColon = "${target}:"                           # 'S:'
+    $mountvol = "$env:SystemRoot\System32\mountvol.exe"
+
+    $hasMarker = { param($L) try { [bool](Test-Path (Join-Path "${L}:\" $MarkerRelativePath) -ErrorAction SilentlyContinue) } catch { $false } }
+
+    $findVol = {
+        $optical = @(Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue)
+        # (a) Prefer a lettered optical volume carrying the marker at its root.
+        foreach ($vol in $optical) {
+            if ($vol.DriveLetter -and (& $hasMarker (([string]$vol.DriveLetter).TrimEnd(':')))) { return $vol }
+        }
+        # (b) Probe LETTERLESS optical volumes via a temporary scratch letter, so a
+        #     disc that merely lacks a letter (two-disc optical enumeration churn) is
+        #     still recognized instead of being treated as absent.
+        $scratchPool = @('R', 'Q', 'P', 'O', 'N', 'M')
+        $used = @{}
+        foreach ($v in (Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue)) {
+            if ($v.DriveLetter) { $used[([string]$v.DriveLetter).TrimEnd(':')] = $true }
+        }
+        foreach ($vol in $optical) {
+            if ($vol.DriveLetter) { continue }
+            $scratch = $scratchPool | Where-Object { -not $used.ContainsKey($_) } | Select-Object -First 1
+            if (-not $scratch) { break }
+            $isMatch = $false
+            try {
+                & $mountvol "${scratch}:" $vol.DeviceID 2>$null | Out-Null
+                Start-Sleep -Seconds 1
+                $isMatch = [bool](& $hasMarker $scratch)
+            }
+            catch { }
+            try { & $mountvol "${scratch}:" /D 2>$null | Out-Null } catch { }
+            if ($isMatch) { return $vol }
+        }
+        return $null
+    }
+
+    # (1) Locate the disc, polling briefly: after a host mount the guest can take a
+    #     few seconds to enumerate it, and with two discs attached it can appear
+    #     letterless. Rescan devices between tries.
+    $disc = $null
+    $deadline = (Get-Date).AddSeconds([int]$TimeoutSeconds)
+    do {
+        $disc = & $findVol
+        if ($disc) { break }
+        try { & pnputil.exe /scan-devices *>$null } catch { }
+        try { "rescan" | & diskpart.exe *>$null } catch { }
+        Start-Sleep -Seconds 5
+    } while ((Get-Date) -lt $deadline)
+    if (-not $disc) { return $null }
+    if ($disc.DriveLetter -eq $targetColon) { return $targetColon }
+
+    # (2) Free the target letter so the reassignment can't be rejected: park a live
+    #     holder on a high letter, clear any mount-point mapping, and drop a stale
+    #     \DosDevices reservation left by a prior mount whose volume is gone.
+    $high = @('Z', 'Y', 'X', 'W', 'V', 'U', 'T')
+    $used = @{}
+    foreach ($v in (Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue)) {
+        if ($v.DriveLetter) { $used[([string]$v.DriveLetter).TrimEnd(':')] = $true }
+    }
+    $holder = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '$targetColon'" -ErrorAction SilentlyContinue
+    if ($holder) {
+        $free = $high | Where-Object { -not $used.ContainsKey($_) } | Select-Object -First 1
+        if ($free) {
+            try {
+                $wmiHolder = Get-WmiObject -Class Win32_Volume -ErrorAction SilentlyContinue | Where-Object { $_.DeviceID -eq $holder.DeviceID } | Select-Object -First 1
+                if ($wmiHolder) { $wmiHolder | Set-WmiInstance -Arguments @{ DriveLetter = "${free}:" } -ErrorAction SilentlyContinue | Out-Null }
+            }
+            catch { }
+        }
+    }
+    try { & $mountvol $targetColon /D 2>$null | Out-Null } catch { }
+    try {
+        $stillHeld = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = '$targetColon'" -ErrorAction SilentlyContinue
+        if (-not $stillHeld) {
+            $md = 'HKLM:\SYSTEM\MountedDevices'
+            $name = "\DosDevices\$targetColon"
+            if ($null -ne (Get-ItemProperty -Path $md -Name $name -ErrorAction SilentlyContinue)) {
+                Remove-ItemProperty -Path $md -Name $name -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch { }
+
+    # (3) Assign the target letter to the disc, trying each method until the marker
+    #     resolves under it.
+    $assigned = $false
+    try {
+        $disc.DriveLetter = $targetColon
+        Set-CimInstance -InputObject $disc -ErrorAction Stop
+        $assigned = [bool](& $hasMarker $target)
+    }
+    catch { }
+    if (-not $assigned) {
+        try {
+            $wmiVol = Get-WmiObject -Class Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue | Where-Object { $_.DeviceID -eq $disc.DeviceID } | Select-Object -First 1
+            if ($wmiVol) { $wmiVol | Set-WmiInstance -Arguments @{ DriveLetter = $targetColon } -ErrorAction SilentlyContinue | Out-Null }
+            $assigned = [bool](& $hasMarker $target)
+        }
+        catch { }
+    }
+    if (-not $assigned) {
+        try {
+            & $mountvol $targetColon $disc.DeviceID 2>$null | Out-Null
+            Start-Sleep -Seconds 1
+            $assigned = [bool](& $hasMarker $target)
+        }
+        catch { }
+    }
+    if ($assigned) { return $targetColon }
+    return $null
+}
+
 [DscResource()]
 class InitializeDisks {
     [DscProperty(key)]

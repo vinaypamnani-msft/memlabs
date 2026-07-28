@@ -266,6 +266,22 @@ function Mount-SqlIsoForPhase {
         # media-arrival event and the Phase 4 DSC can see the disc.
         if (-not (Mount-IsoOnVm -VmName $vm.vmName -IsoPath $sqlIsoPath -Context "SQL" -Phase 4 -RepresentIfAttached)) {
             Write-Log "[Phase 4]: $($vm.vmName): Failed mounting SQL ISO $sqlIsoPath as a DVD drive" -Failure -OutputStream
+            continue
+        }
+
+        # POSTCONDITION: confirm the GUEST actually enumerates the SQL disc, on a
+        # fresh PSDirect session (Mount-IsoOnVm already evicted the stale one). This
+        # front-loads visibility to the host -- where we hold the fresh-session lever
+        # -- so the disc is proven present BEFORE Phase 4 DSC runs, instead of relying
+        # solely on the in-guest AssignSqlIsoDriveLetter to re-find it. On a miss, one
+        # clean DVD reset un-wedges a two-disc Gen2 enumeration; a persistent miss is
+        # left to the in-guest helper (which polls + re-enumerates for 2 min). Never
+        # fatal here -- a false host-side miss must not fail the mount.
+        $sqlDomainName = if ($vm.Domain) { $vm.Domain } else { $deployConfig.vmOptions.domainName }
+        if (-not (Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $sqlDomainName -MarkerRelativePath 'setup.exe' -Context 'SQL' -Phase 4 -TimeoutSeconds 90)) {
+            Write-Log "[Phase 4]: $($vm.vmName): SQL media not yet visible in guest after mount; clean DVD reset + recheck." -Warning
+            $null = Reset-AllDvdDrivesOnVm -VmName $vm.vmName -RequiredIsoPath $sqlIsoPath -Context "SQL" -Phase 4
+            $null = Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $sqlDomainName -MarkerRelativePath 'setup.exe' -Context 'SQL' -Phase 4 -TimeoutSeconds 60
         }
     }
 }
