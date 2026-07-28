@@ -3390,6 +3390,14 @@ function Resolve-OpticalMediaDriveLetter {
     # (b) recognizes a LETTERLESS disc by binding a temporary scratch letter to
     # probe it by content, and (c) assigns the target letter via CIM -> WMI ->
     # mountvol until the marker resolves.
+    #
+    # USAGE: call only from CLASS-BASED DSC resources in THIS module (the module is
+    # already loaded there, so the call is free). Do NOT call it from a DSC Script
+    # resource via `Import-Module TemplateHelpDSC` -- importing this large
+    # class-based module inside the LCM's own Script-resource runspace re-parses
+    # every DSC class and is extremely slow (it froze Phase 4 AssignSqlIsoDrive-
+    # Letter for ~8 min and tripped the stranded-PendingConfiguration self-healer).
+    # A Script resource must keep its own compact inline copy instead.
     param(
         [string]$MarkerRelativePath = 'setup.exe',
         [string]$TargetDriveLetter = 'S',

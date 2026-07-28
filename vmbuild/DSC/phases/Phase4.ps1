@@ -328,26 +328,147 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
                 GetScript  = { @{ Result = '' } }
                 TestScript = { [bool](Test-Path 'S:\setup.exe' -ErrorAction SilentlyContinue) }
                 SetScript  = {
-                    # Resolve the SQL install disc to S: via the shared, hardened
-                    # in-guest helper (TemplateHelpDSC\Resolve-OpticalMediaDriveLetter).
-                    # It polls for the disc to settle, recognizes a LETTERLESS disc by
-                    # scratch-letter content probe (the two-disc optical enumeration
-                    # churn that used to strand pending.mof -> forced reboot), and
-                    # assigns S: via CIM -> WMI -> mountvol until S:\setup.exe resolves.
-                    # The module is guaranteed present (the config Import-DscResource's
-                    # it), so Import-Module resolves it in this Script resource session.
-                    Import-Module TemplateHelpDSC -ErrorAction SilentlyContinue
-                    $resolved = $null
-                    if (Get-Command -Name Resolve-OpticalMediaDriveLetter -ErrorAction SilentlyContinue) {
-                        $resolved = Resolve-OpticalMediaDriveLetter -MarkerRelativePath 'setup.exe' -TargetDriveLetter 'S' -TimeoutSeconds 120
+                    # NOTE: this logic is intentionally INLINE and self-contained. Do
+                    # NOT refactor it to Import-Module TemplateHelpDSC +
+                    # Resolve-OpticalMediaDriveLetter: importing the large class-based
+                    # TemplateHelpDSC module INSIDE the LCM's own Script resource is
+                    # extremely slow (it re-parses every DSC class + re-imports every
+                    # function), which froze this step for ~8 min and tripped the
+                    # "stranded PendingConfiguration" self-healer for nothing (observed
+                    # on ZZ-RAMEN: last status was "[[Script]AssignSqlIsoDriveLetter]
+                    # Importing function ..." for the whole window). The shared module
+                    # function exists for CLASS-BASED in-guest readers (which already
+                    # have the module loaded, so calling it is free); a Script resource
+                    # keeps its own fast copy.
+                    $mountvol = "$env:SystemRoot\System32\mountvol.exe"
+
+                    # Locate the optical (DriveType 5 = CD-ROM = mounted ISO) volume
+                    # holding the SQL media (setup.exe at its root). Handles the
+                    # LETTERLESS disc: after the host mounts two discs (cache + SQL),
+                    # the guest can transiently enumerate the SQL disc without a drive
+                    # letter, and a letter-only probe would then miss it, throw "SQL
+                    # ISO not found", re-stage pending.mof and strand the config into a
+                    # reboot. Bind a temporary scratch letter to probe letterless
+                    # optical volumes so the disc is recognized even mid-churn.
+                    $findSqlVol = {
+                        $optical = @(Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue)
+                        # (a) Prefer a lettered optical volume with setup.exe at its root.
+                        foreach ($vol in $optical) {
+                            if ($vol.DriveLetter -and (Test-Path (Join-Path "$($vol.DriveLetter)\" 'setup.exe') -ErrorAction SilentlyContinue)) {
+                                return $vol
+                            }
+                        }
+                        # (b) Probe letterless optical volumes via a temporary scratch letter.
+                        $scratchPool = @('R', 'Q', 'P', 'O', 'N', 'M')
+                        $used = @{}
+                        foreach ($v in (Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue)) {
+                            if ($v.DriveLetter) { $used[([string]$v.DriveLetter).TrimEnd(':')] = $true }
+                        }
+                        foreach ($vol in $optical) {
+                            if ($vol.DriveLetter) { continue }
+                            $scratch = $scratchPool | Where-Object { -not $used.ContainsKey($_) } | Select-Object -First 1
+                            if (-not $scratch) { break }
+                            $isSql = $false
+                            try {
+                                & $mountvol "${scratch}:" $vol.DeviceID 2>$null | Out-Null
+                                Start-Sleep -Seconds 1
+                                $isSql = [bool](Test-Path "${scratch}:\setup.exe" -ErrorAction SilentlyContinue)
+                            }
+                            catch {}
+                            # Release the scratch letter either way -- if it IS the SQL
+                            # disc, the assignment below re-letters it to S: cleanly.
+                            try { & $mountvol "${scratch}:" /D 2>$null | Out-Null } catch {}
+                            if ($isSql) { return $vol }
+                        }
+                        return $null
                     }
-                    else {
-                        throw "Resolve-OpticalMediaDriveLetter not available from TemplateHelpDSC; cannot assign S: to the SQL media."
+
+                    # (1) Locate the SQL optical volume, polling briefly: after a host
+                    #     mount the guest can take a few seconds to enumerate the disc,
+                    #     and with two discs attached the SQL disc can transiently appear
+                    #     letterless. Waiting ~2 min for it to settle avoids stranding
+                    #     pending.mof (and forcing a reboot) on a disc that IS present.
+                    $sqlVol = $null
+                    $deadline = (Get-Date).AddMinutes(2)
+                    do {
+                        $sqlVol = & $findSqlVol
+                        if ($sqlVol) { break }
+                        Start-Sleep -Seconds 10
+                    } while ((Get-Date) -lt $deadline)
+                    if (-not $sqlVol) {
+                        throw "SQL ISO not found on any CD-ROM volume (expected setup.exe at the optical drive root) after waiting 2 min. The host should have mounted it before Phase 4."
                     }
-                    if (-not $resolved) {
-                        throw "SQL ISO not resolved to S: (no optical volume carrying setup.exe became visible within 2 min). The host should have mounted it before Phase 4; the disc may be enumerating letterless."
+                    if ($sqlVol.DriveLetter -eq 'S:') {
+                        Write-Verbose "SQL ISO already on S:."
+                        return
                     }
-                    Write-Verbose "SQL ISO available at $resolved."
+
+                    # (2) Free S: so the reassignment can't be rejected with "Not available".
+                    #  (2a) If a LIVE volume currently occupies S:, park it on a high free letter.
+                    $high = @('Z', 'Y', 'X', 'W', 'V', 'U', 'T')
+                    $used = @{}
+                    foreach ($v in (Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue)) {
+                        if ($v.DriveLetter) { $used[([string]$v.DriveLetter).TrimEnd(':')] = $true }
+                    }
+                    $sHolder = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = 'S:'" -ErrorAction SilentlyContinue
+                    if ($sHolder) {
+                        $free = $high | Where-Object { -not $used.ContainsKey($_) } | Select-Object -First 1
+                        if ($free) {
+                            Write-Verbose "Parking current S: holder on ${free}: to free S: for the SQL ISO."
+                            try {
+                                $wmiHolder = Get-WmiObject -Class Win32_Volume -ErrorAction SilentlyContinue | Where-Object { $_.DeviceID -eq $sHolder.DeviceID } | Select-Object -First 1
+                                if ($wmiHolder) { $wmiHolder | Set-WmiInstance -Arguments @{ DriveLetter = "${free}:" } -ErrorAction SilentlyContinue | Out-Null }
+                            }
+                            catch {}
+                        }
+                    }
+                    #  (2b) Clear any leftover mount-point mapping for S:.
+                    try { & $mountvol S: /D 2>$null | Out-Null } catch {}
+                    #  (2c) Clear a STALE MountedDevices reservation (\DosDevices\S:) left by a
+                    #       prior mount whose volume no longer exists -- the actual cause of the
+                    #       "Not available" rejection -- but only if no live volume holds S: now.
+                    try {
+                        $stillHeld = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter = 'S:'" -ErrorAction SilentlyContinue
+                        if (-not $stillHeld) {
+                            $md = 'HKLM:\SYSTEM\MountedDevices'
+                            if ($null -ne (Get-ItemProperty -Path $md -Name '\DosDevices\S:' -ErrorAction SilentlyContinue)) {
+                                Remove-ItemProperty -Path $md -Name '\DosDevices\S:' -ErrorAction SilentlyContinue
+                            }
+                        }
+                    }
+                    catch {}
+
+                    # (3) Assign S: to the SQL disc, trying each method until S:\setup.exe resolves.
+                    $assigned = $false
+                    #  (3a) CIM InputObject.
+                    try {
+                        $sqlVol.DriveLetter = 'S:'
+                        Set-CimInstance -InputObject $sqlVol -ErrorAction Stop
+                        $assigned = (Test-Path 'S:\setup.exe')
+                    }
+                    catch { Write-Verbose "CIM S: assign failed: $($_.Exception.Message)" }
+                    #  (3b) WMI Set-WmiInstance (the method InitializeDisks uses successfully).
+                    if (-not $assigned) {
+                        try {
+                            $wmiVol = Get-WmiObject -Class Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue | Where-Object { $_.DeviceID -eq $sqlVol.DeviceID } | Select-Object -First 1
+                            if ($wmiVol) { $wmiVol | Set-WmiInstance -Arguments @{ DriveLetter = 'S:' } -ErrorAction SilentlyContinue | Out-Null }
+                            $assigned = (Test-Path 'S:\setup.exe')
+                        }
+                        catch { Write-Verbose "WMI S: assign failed: $($_.Exception.Message)" }
+                    }
+                    #  (3c) mountvol bind by device path.
+                    if (-not $assigned) {
+                        try {
+                            & $mountvol S: $sqlVol.DeviceID 2>$null | Out-Null
+                            Start-Sleep -Seconds 1
+                            $assigned = (Test-Path 'S:\setup.exe')
+                        }
+                        catch { Write-Verbose "mountvol S: assign failed: $($_.Exception.Message)" }
+                    }
+
+                    if (-not $assigned) {
+                        throw "Failed to assign S: to SQL ISO volume ($($sqlVol.DeviceID)) after CIM/WMI/mountvol attempts. Current optical letter: $($sqlVol.DriveLetter)."
+                    }
                 }
                 DependsOn  = $nextDepend
             }
