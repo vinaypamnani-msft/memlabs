@@ -1251,6 +1251,19 @@ finally {
                 if ($cacheVm.vmName) {
                     Dismount-MemlabsCacheIsoFromVm -VmName $cacheVm.vmName
                     Dismount-MemlabsDscIsoFromVm -VmName $cacheVm.vmName
+                    # On a SUCCESSFUL build, also strip any SQL / CM / OS install
+                    # media that a per-phase eject left behind (the per-phase ejects
+                    # are gated on whole-phase success, so a sibling VM's failure can
+                    # orphan media on the VMs that succeeded; a -StartPhase partial
+                    # run can likewise leave it mounted). This guarantees a finished
+                    # lab ends with a clean optical layout -- no host ISO path baked
+                    # into checkpoints / .memlabs exports, and no leftover-ISO
+                    # validator trip. On a FAILED build we intentionally skip this so
+                    # the media stays mounted for inspection and an idempotent
+                    # -StartPhase retry (whose eventual success then sweeps it).
+                    if ($NewLabsuccess -eq $true) {
+                        Dismount-AllManagedIsosFromVm -VmName $cacheVm.vmName
+                    }
                 }
             }
             Remove-StaleMemlabsCacheIso

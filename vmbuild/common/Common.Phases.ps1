@@ -926,7 +926,31 @@ function Start-Phase {
         Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
     }
     if ($Phase -eq 8 -or $Phase -eq 9) {
-        Mount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
+        # Only mount CM media when this phase actually has DSC work. Phase 9
+        # (multi-forest secondary/passive add) is a NO-OP unless there is a hidden
+        # cross-domain Primary, and Phase 8 is a no-op on a -StartPhase run whose
+        # site servers are already installed. Without this gate, Mount-CmIsoForPhase
+        # still mounts + probes + DVD-resets the CM media on every top-level site
+        # server for a phase that then reports "No VMs need this step. Skipping." --
+        # wasteful churn that can even wedge the guest optical stack (observed:
+        # Phase 9 "CM media not visible ... clean DVD reset" immediately before
+        # "No VMs need this step"). Gate on the SAME pure config-data builder
+        # Start-PhaseJobs uses to decide applicability (Get-PhaseNConfigurationData
+        # returns null when no Windows DSC node needs the phase). Call the builder
+        # directly -- NOT Get-ConfigurationData -- to avoid its critical-VM
+        # verification side effect running twice.
+        $cmPhaseHasWork = if ($Phase -eq 9) {
+            [bool](Get-Phase9ConfigurationData -deployConfig $deployConfig)
+        }
+        else {
+            [bool](Get-Phase8ConfigurationData -deployConfig $deployConfig)
+        }
+        if ($cmPhaseHasWork) {
+            Mount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
+        }
+        else {
+            Write-Log "[Phase $Phase] No DSC nodes need this phase; skipping CM media mount (avoids churning the optical stack for a no-op phase)." -LogOnly
+        }
     }
 
     # Start Phase

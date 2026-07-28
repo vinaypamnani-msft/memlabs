@@ -657,6 +657,58 @@ function Dismount-IsoFromAllVMs {
     return $ejected
 }
 
+function Dismount-AllManagedIsosFromVm {
+    # Guaranteed, idempotent end-of-build teardown of EVERY memlabs-managed ISO
+    # from one VM's DVD drives. "Managed" = any mounted ISO whose file lives under
+    # our azureFiles tree (OS install / SQL / CM media) PLUS the transient
+    # cache-<hash>.iso and dsc-<hash>.iso. Ejects media only (leaves the empty DVD
+    # drive); touches nothing that isn't ours; never throws.
+    #
+    # This is the safety net that makes the whole ISO lifecycle reliable regardless
+    # of which per-phase eject ran. The per-phase ejects (Dismount-SqlIsoForPhase,
+    # Dismount-CmIsoForPhase) are gated on WHOLE-PHASE success, so a single VM
+    # failing a phase leaves install media mounted on every sibling that succeeded,
+    # and a killed / -StartPhase-partial run can leave media mounted indefinitely --
+    # which then bakes a host ISO path into checkpoints / .memlabs exports and trips
+    # the Phase 11 leftover-ISO validator. Called once per VM from New-Lab's finally
+    # on a SUCCESSFUL build, this sweeps the lab clean no matter what the per-phase
+    # ejects skipped. On a FAILED build it is deliberately NOT called, so the media
+    # stays mounted on the failed VM for inspection and an idempotent -StartPhase
+    # retry (the retry's eventual success then triggers the sweep).
+    param([Parameter(Mandatory)][string]$VmName)
+
+    $azureRoot = $null
+    try {
+        if ($Common -and $Common.AzureFilesPath) { $azureRoot = [System.IO.Path]::GetFullPath($Common.AzureFilesPath) }
+    }
+    catch { $azureRoot = $null }
+
+    try {
+        foreach ($d in @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue)) {
+            if (-not $d.Path) { continue }
+            $name = [System.IO.Path]::GetFileName($d.Path)
+            $isManaged = $false
+            if ($name -like 'cache-*.iso' -or $name -like 'dsc-*.iso') {
+                $isManaged = $true
+            }
+            elseif ($azureRoot) {
+                # Any ISO staged from our azureFiles tree (OS/SQL/CM). Full-path
+                # compare so a same-named ISO from another root is never touched.
+                $full = $d.Path
+                try { $full = [System.IO.Path]::GetFullPath($d.Path) } catch { $full = $d.Path }
+                if ($full.StartsWith($azureRoot, [System.StringComparison]::OrdinalIgnoreCase)) { $isManaged = $true }
+            }
+            if ($isManaged) {
+                Set-VMDvdDrive -VMName $VmName -ControllerNumber $d.ControllerNumber -ControllerLocation $d.ControllerLocation -Path $null -ErrorAction SilentlyContinue
+                Write-Log "$($VmName): end-of-build ISO teardown -- ejected $($d.Path)" -LogOnly
+            }
+        }
+    }
+    catch {
+        Write-Log "$($VmName): end-of-build ISO teardown failed (non-fatal): $($_.Exception.Message)" -LogOnly
+    }
+}
+
 function Mount-MemlabsCacheIsoToVm {
     # Mount the cache ISO read-only on a VM's DVD drive. Idempotent + per-drive +
     # multi-drive via Mount-IsoOnVm: reuses an empty drive, or adds its own drive
