@@ -6103,7 +6103,17 @@ function Invoke-VmCommand {
                             }
                         }
                         if ($jobTimedOut) {
-                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
+                            # -SuppressLog callers (e.g. best-effort telemetry like
+                            # Get-GuestTimingStats polling ScriptWorkflow.json) explicitly asked
+                            # not to spam the console/log with expected, non-fatal timeouts --
+                            # honor that here too instead of always emitting an -Failure (ERROR)
+                            # line. Still recorded to the log file for diagnostics.
+                            if ($SuppressLog) {
+                                Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -LogOnly -Verbose
+                            }
+                            else {
+                                Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
+                            }
                             # A timed-out PSDirect/PSRemoting job is wedged on a dead or hung
                             # VMBus channel. Stop-Job / Remove-Job BLOCK on it (often for
                             # minutes) because the remote pipeline can't acknowledge
