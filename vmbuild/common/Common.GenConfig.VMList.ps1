@@ -116,6 +116,12 @@ function Select-Options {
             # Existing-VM noise reduction: remove pure telemetry rows, and hide cmOptions
             # unless this is a top-level site server (inherited/irrelevant elsewhere).
             if ($isExisting) {
+                # "*-Original" markers are per-session diff artifacts stamped by this
+                # function when a prop is first edited (to remember its pre-edit value).
+                # They are internal bookkeeping, never user-actionable -- don't render them.
+                if ($item.EndsWith("-Original")) {
+                    continue
+                }
                 if ($item -in $existingNoiseProps) {
                     continue
                 }
