@@ -101,6 +101,70 @@ function Select-Options {
         # Prefix (already part of vmName), AdminName, domain and domainNetBiosName are
         # global / domain-wide -- not per-VM -- so they're dropped here too.
         $existingNoiseProps = @("appliedFixes", "vmId", "inProgress", "source", "state", "success", "vmBuild", "ReservationCreated", "lastPhaseComplete", "lastUpdate", "memLabsDeployVersion", "deployedOS", "AssignedIP", "LastKnownIP", "Prefix", "AdminName", "domain", "domainNetBiosName")
+        if ($isExisting) {
+            # EXISTING VM: render as two visually distinct sections instead of one
+            # interleaved list where every non-editable row looked like an error
+            # (RosyBrown/red). First a calm, read-only "Information" block, then an
+            # "Editable Properties" block with interactive/semantic colors. Classify
+            # each surviving property (after noise removal) as info vs editable using
+            # the same predicates as before; a locked SUP/PatchMyPC (deployed, no
+            # removal path) and any already-true add-only flag land in Information.
+            $infoItems = [System.Collections.ArrayList]@()
+            $editItems = [System.Collections.ArrayList]@()
+            foreach ($item in (Get-SortedProperties $property)) {
+                if ($item -eq "ExistingVM" -or $item -eq "AdditionalDisks") { continue }
+                if ($item.EndsWith("-Original")) { continue }               # per-session diff bookkeeping
+                if ($item -in $existingNoiseProps) { continue }             # pure telemetry / folded rows
+                if ($item -eq "cmOptions" -and -not $isTopLevelSiteServer) { continue }
+                $value = $property."$($item)"
+                $lockedForDeployedSup = ($item -eq "InstallSUP" -or $item -eq "wsusDataBaseServer" -or $item -eq "wsusContentDir") -and $supAlreadyDeployed
+                $lockedForDeployedPmpc = ($item -eq "InstallPatchMyPC" -or $item -eq "PatchMyPCFileServer") -and $pmpcAlreadyDeployed
+                $isInfo = ($item -notin $existingPropList) -or ($item -ne "useProxy" -and $value -eq $true -and $null -eq $property."$($item + "-Original")") -or $lockedForDeployedSup -or $lockedForDeployedPmpc
+                if ($isInfo) { [void]$infoItems.Add($item) } else { [void]$editItems.Add($item) }
+            }
+
+            # --- Information (read-only) ---
+            if ($infoItems.Count -gt 0) {
+                $null = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*IB" -ItemText "" -selectable $false -selected $false
+                $null = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*IH" -ItemText "   ─────────  Information (read-only)  ─────────" -selectable $false -selected $false -Color1 $Global:Common.Colors.GenConfigHeader
+                foreach ($item in $infoItems) {
+                    $value = $property."$($item)"
+                    # Fold telemetry siblings onto their parent row.
+                    $displayValue = $value
+                    if ($item -eq "network" -and $combinedIp) {
+                        $displayValue = "$value  ·  IP $combinedIp"
+                    }
+                    elseif ($item -eq "operatingSystem" -and $property.deployedOS -and ([string]$property.deployedOS -ne [string]$value)) {
+                        # A difference is normal: the config uses an OS alias (e.g. "Windows
+                        # 11 Latest") and deployedOS is the resolved build. Informational.
+                        $displayValue = "$value  (deployed: $($property.deployedOS))"
+                    }
+                    $null = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "     $($($item).PadRight($padding," "")) = $displayValue" -Color1 "LightSlateGray" -selectable $false -HelpFunction $HelpFunction
+                }
+            }
+
+            # --- Editable Properties ---
+            if ($editItems.Count -gt 0) {
+                $null = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*EB" -ItemText "" -selectable $false -selected $false
+                $null = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*EH" -ItemText "   ─────────  Editable Properties  ─────────" -selectable $false -selected $false -Color1 $Global:Common.Colors.GenConfigHeader
+                foreach ($item in $editItems) {
+                    $i = $i + 1
+                    $value = $property."$($item)"
+                    if ($item -eq "cmOptions") {
+                        $TextToDisplay = get-CMOptionsSummary -CmOptions $value
+                        $color = $Global:Common.Colors.GenConfigNonDefault
+                    }
+                    else {
+                        $TextToDisplay = Get-AdditionalInformation -item $item -data $value
+                        $color = Get-AdditionalInformationColor -item $item -data $value
+                    }
+                    $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction
+                    write-log -verbose "Adding $item as element $i in itemmap with currentvalue $value"
+                    $itemMap[$i] = $item
+                }
+            }
+        }
+        else {
         foreach ($item in (Get-SortedProperties $property)) {
             $value = $property."$($item)"
             if ($isExisting -and $item -eq "ExistingVM") {
@@ -114,47 +178,6 @@ function Select-Options {
             # Manage Disks entry is shown for all VMs.)
             if ($item -eq "AdditionalDisks") {
                 continue
-            }
-            # Existing-VM noise reduction: remove pure telemetry rows, and hide cmOptions
-            # unless this is a top-level site server (inherited/irrelevant elsewhere).
-            if ($isExisting) {
-                # "*-Original" markers are per-session diff artifacts stamped by this
-                # function when a prop is first edited (to remember its pre-edit value).
-                # They are internal bookkeeping, never user-actionable -- don't render them.
-                if ($item.EndsWith("-Original")) {
-                    continue
-                }
-                if ($item -in $existingNoiseProps) {
-                    continue
-                }
-                if ($item -eq "cmOptions" -and -not $isTopLevelSiteServer) {
-                    continue
-                }
-            }
-            # Deployed-SUP / -PatchMyPC locks: once deployed there is no removal path, so
-            # InstallSUP / InstallPatchMyPC must NOT be toggleable off (only false->true is
-            # allowed, i.e. adding to a VM that deployed without them), and their dependent
-            # settings (WSUS DB / content dir; PatchMyPC file server) can't change in place.
-            # Render read-only when already deployed; when NOT yet deployed they stay
-            # toggleable and (once on) their pickers are available.
-            $lockedForDeployedSup = ($item -eq "InstallSUP" -or $item -eq "wsusDataBaseServer" -or $item -eq "wsusContentDir") -and $supAlreadyDeployed
-            $lockedForDeployedPmpc = ($item -eq "InstallPatchMyPC" -or $item -eq "PatchMyPCFileServer") -and $pmpcAlreadyDeployed
-            if ($isExisting -and ($item -notin $existingPropList -or ($item -ne "useProxy" -and $value -eq $true -and $null -eq $property."$($item + "-Original")") -or $lockedForDeployedSup -or $lockedForDeployedPmpc )) {
-                # Fold telemetry siblings onto their parent row for the existing-VM view.
-                $displayValue = $value
-                if ($item -eq "network" -and $combinedIp) {
-                    $displayValue = "$value  ·  IP $combinedIp"
-                }
-                elseif ($item -eq "operatingSystem" -and $property.deployedOS -and ([string]$property.deployedOS -ne [string]$value)) {
-                    # A difference is normal: the config uses an OS alias (e.g. "Windows 11
-                    # Latest") and deployedOS is the resolved build. Informational only.
-                    $displayValue = "$value  (deployed: $($property.deployedOS))"
-                }
-                $color = $Global:Common.Colors.GenConfigHidden
-                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "        $($($item).PadRight($padding," "")) = $displayValue" -Color1 $color -selectable $false -HelpFunction $HelpFunction
-                #Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
-                continue
-
             }
 
             $i = $i + 1
@@ -194,6 +217,7 @@ function Select-Options {
             write-log -verbose "Adding $item as element $i in itemmap with currentvalue $value"
             $itemMap[$i] = $item
             #Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay" -Color $color
+        }
         }
 
        
