@@ -749,7 +749,13 @@ function Test-ValidVmSupported {
             Test-ValidMachineName $VM.wsusDataBaseServer -ReturnObject $ReturnObject
             Test-MachineNameExists $VM.wsusDataBaseServer -ReturnObject $ReturnObject -config $ConfigObject
 
-            $SQLVM = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $($VM.wsusDataBaseServer) }
+            # The WSUS DB server can be an EXISTING, already-deployed SQL VM (e.g. adding a
+            # SUP to an existing MP/DP and pointing its WSUS DB at the deployed site server).
+            # Such a VM is not in $ConfigObject.virtualMachines yet (existing VMs are folded
+            # in later by Add-ExistingVMsToDeployConfig), so resolve it the same way the
+            # existence check above does -- via Get-List2, which includes existing VMs.
+            $nameWithPrefix = $ConfigObject.vmOptions.prefix + $VM.wsusDataBaseServer
+            $SQLVM = Get-List2 -deployConfig $ConfigObject -SmartUpdate | Where-Object { $_.vmName -eq $($VM.wsusDataBaseServer) -or $_.vmName -eq $nameWithPrefix }
             if (-not $SQLVM.sqlVersion) {
                 Add-ValidationMessage -Message "$vmRole Validation: VM [$($VM.wsusDataBaseServer)] does not contain sql; When deploying WSUS Role with remote SQL, you must specify the SQL VM." -ReturnObject $ReturnObject -Warning
             }
