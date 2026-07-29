@@ -87,6 +87,18 @@ function Select-Options {
         # this session (it captures the as-deployed value), otherwise the current
         # InstallSUP IS the deployed value (existing VMs load with deployed state).
         $supAlreadyDeployed = if ($null -ne $property."InstallSUP-Original") { [bool]$property."InstallSUP-Original" } else { [bool]$property.InstallSUP }
+        # PatchMyPC has no removal path either; treat it one-way like the SUP.
+        $pmpcAlreadyDeployed = if ($null -ne $property."InstallPatchMyPC-Original") { [bool]$property."InstallPatchMyPC-Original" } else { [bool]$property.InstallPatchMyPC }
+        # cmOptions is only meaningful on a top-level site server (CAS/Primary with no
+        # parent); on any other existing VM it's inherited noise.
+        $isTopLevelSiteServer = ($property.role -in @("CAS", "Primary")) -and [string]::IsNullOrEmpty([string]$property.parentSiteCode)
+        # Combined-display source for the existing-VM network row: prefer the DHCP
+        # reservation (AssignedIP), fall back to the last-known lease.
+        $combinedIp = if ($property.AssignedIP) { [string]$property.AssignedIP } elseif ($property.LastKnownIP) { [string]$property.LastKnownIP } else { $null }
+        # Pure runtime/telemetry props: never actionable here, so on an EXISTING VM drop
+        # them entirely instead of showing grey clutter. AssignedIP / LastKnownIP fold into
+        # the network row and deployedOS folds into the OS row (handled in the grey block).
+        $existingNoiseProps = @("appliedFixes", "vmId", "inProgress", "source", "state", "success", "vmBuild", "ReservationCreated", "lastPhaseComplete", "lastUpdate", "memLabsDeployVersion", "deployedOS", "AssignedIP", "LastKnownIP")
         foreach ($item in (Get-SortedProperties $property)) {
             $value = $property."$($item)"
             if ($isExisting -and $item -eq "ExistingVM") {
@@ -101,16 +113,37 @@ function Select-Options {
             if ($item -eq "AdditionalDisks") {
                 continue
             }
-            # Deployed-SUP locks: once a SUP is deployed there is no removal path, so
-            # InstallSUP must NOT be toggleable off (only false->true is allowed, i.e.
-            # adding a SUP to a VM that deployed without one), and its WSUS DB / content
-            # dir can't be changed in place. Render all three read-only when the SUP is
-            # already deployed. When the SUP is NOT yet deployed, InstallSUP stays
-            # toggleable and (once on) the DB/content-dir picker is available.
+            # Existing-VM noise reduction: remove pure telemetry rows, and hide cmOptions
+            # unless this is a top-level site server (inherited/irrelevant elsewhere).
+            if ($isExisting) {
+                if ($item -in $existingNoiseProps) {
+                    continue
+                }
+                if ($item -eq "cmOptions" -and -not $isTopLevelSiteServer) {
+                    continue
+                }
+            }
+            # Deployed-SUP / -PatchMyPC locks: once deployed there is no removal path, so
+            # InstallSUP / InstallPatchMyPC must NOT be toggleable off (only false->true is
+            # allowed, i.e. adding to a VM that deployed without them), and their dependent
+            # settings (WSUS DB / content dir; PatchMyPC file server) can't change in place.
+            # Render read-only when already deployed; when NOT yet deployed they stay
+            # toggleable and (once on) their pickers are available.
             $lockedForDeployedSup = ($item -eq "InstallSUP" -or $item -eq "wsusDataBaseServer" -or $item -eq "wsusContentDir") -and $supAlreadyDeployed
-            if ($isExisting -and ($item -notin $existingPropList -or ($item -ne "useProxy" -and $value -eq $true -and $null -eq $property."$($item + "-Original")") -or $lockedForDeployedSup )) {
+            $lockedForDeployedPmpc = ($item -eq "InstallPatchMyPC" -or $item -eq "PatchMyPCFileServer") -and $pmpcAlreadyDeployed
+            if ($isExisting -and ($item -notin $existingPropList -or ($item -ne "useProxy" -and $value -eq $true -and $null -eq $property."$($item + "-Original")") -or $lockedForDeployedSup -or $lockedForDeployedPmpc )) {
+                # Fold telemetry siblings onto their parent row for the existing-VM view.
+                $displayValue = $value
+                if ($item -eq "network" -and $combinedIp) {
+                    $displayValue = "$value  ·  IP $combinedIp"
+                }
+                elseif ($item -eq "operatingSystem" -and $property.deployedOS -and ([string]$property.deployedOS -ne [string]$value)) {
+                    # A difference is normal: the config uses an OS alias (e.g. "Windows 11
+                    # Latest") and deployedOS is the resolved build. Informational only.
+                    $displayValue = "$value  (deployed: $($property.deployedOS))"
+                }
                 $color = $Global:Common.Colors.GenConfigHidden
-                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "        $($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false -HelpFunction $HelpFunction
+                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "        $($($item).PadRight($padding," "")) = $displayValue" -Color1 $color -selectable $false -HelpFunction $HelpFunction
                 #Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
                 continue
 

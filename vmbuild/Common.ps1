@@ -8655,7 +8655,11 @@ function Set-SupportedOptions {
     # rows -- otherwise they show grey/read-only and the user can't open the
     # Get-WsusDBName picker to choose WID / local SQL / remote SQL / an existing
     # SQL VM for the WSUS database (or change the content dir).
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy", "installOffice", "useDatabaseReplica", "replicaSqlServerVM", "replicaDbName", "wsusDataBaseServer", "wsusContentDir")
+    # InstallPatchMyPC / PatchMyPCFileServer and pushClient are updatable so they
+    # can be ADDED to an existing VM (PatchMyPC installs in Phase 8 from
+    # InstallPatchMyPC; pushClient re-runs the client push in Phase 8). Like the
+    # SUP, PatchMyPC has no removal path, so genconfig locks it once deployed.
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy", "installOffice", "useDatabaseReplica", "replicaSqlServerVM", "replicaDbName", "wsusDataBaseServer", "wsusContentDir", "InstallPatchMyPC", "PatchMyPCFileServer", "pushClient")
     $propsToUpdate = $updatablePropList
 
     $cmVersions += Get-CMVersions
