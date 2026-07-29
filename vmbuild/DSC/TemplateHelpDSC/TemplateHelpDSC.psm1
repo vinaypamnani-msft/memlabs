@@ -5964,6 +5964,20 @@ class ConfigureWSUS {
 
     [void] Set() {
 
+        # --- Preflight: ensure the IIS 6 metabase (IISADMIN) is usable before postinstall ---
+        # WSUS postinstall's ConfigureWebsite step creates the WSUS Administration site by
+        # binding the IIS 6 metabase via ADSI (IIS://localhost/...), which is served by the
+        # IISADMIN service. On rare VMs the metabase's encrypted session key is orphaned
+        # (the base-image metabase was encrypted with machine keys that got regenerated at
+        # deploy) and IISADMIN will not start -- service exit 0x80090006 "Invalid Signature".
+        # ConfigureWebsite then fails with COM 0x80080005 and the phase used to loop its
+        # entire ~5h budget re-probing a dead metabase. Detect that here and repair it
+        # (reinstall IIS 6 Metabase Compatibility) BEFORE postinstall. Returns $false when a
+        # reboot was requested for the repair -- return and let the phase resume after reboot.
+        if (-not $this.EnsureIisMetabaseHealthy()) {
+            return
+        }
+
         $_HTTPSurl = $this.HTTPSUrl
         $_FriendlyName = $this.TemplateName
         $postinstallOutput = ""
@@ -6296,6 +6310,80 @@ class ConfigureWSUS {
         }
         catch {
             Write-Status "WsusPool: restart after hardening failed: $_"
+        }
+    }
+
+    # Can the IISADMIN service (IIS 6 metabase compatibility) actually run? That is the
+    # prerequisite for WSUS postinstall's ConfigureWebsite ADSI (IIS://) bind. Ensures the
+    # service is Automatic + started; returns $true only when it reaches Running.
+    hidden [bool] TestIisAdminHealthy() {
+        $svc = Get-Service -Name 'IISADMIN' -ErrorAction SilentlyContinue
+        if (-not $svc) { return $false }
+        if ($svc.StartType -eq 'Disabled') { Set-Service -Name 'IISADMIN' -StartupType Automatic -ErrorAction SilentlyContinue }
+        if ($svc.Status -ne 'Running') {
+            try { Start-Service -Name 'IISADMIN' -ErrorAction Stop } catch { }
+        }
+        return ((Get-Service -Name 'IISADMIN' -ErrorAction SilentlyContinue).Status -eq 'Running')
+    }
+
+    # Ensure the IIS 6 metabase is usable before postinstall. If IISADMIN cannot start
+    # (orphaned metabase encryption -> 0x80090006 Invalid Signature) the fix is to reinstall
+    # the IIS-Metabase feature so a fresh metabase is generated + re-keyed to this VM's
+    # current machine keys. That reinstall needs TWO sequenced reboots (a single-pass
+    # disable+enable stages both to the same pending reboot and cancels out), so this is a
+    # small marker-driven state machine that requests a reboot ($global:DSCMachineStatus=1)
+    # between steps and is resumed by the phase framework. Bounded to a single repair cycle.
+    # Returns:
+    #   $true  -> metabase healthy (or nothing to repair) -- caller may proceed to postinstall
+    #   $false -> a reboot was requested -- caller should return and resume after the reboot
+    hidden [bool] EnsureIisMetabaseHealthy() {
+        $stateFile = 'C:\staging\DSC\wsus-metabase-repair.state'
+        try { $null = New-Item -ItemType Directory -Path (Split-Path $stateFile -Parent) -Force -ErrorAction SilentlyContinue } catch { }
+        $step = ''
+        if (Test-Path $stateFile) {
+            $raw = Get-Content -Path $stateFile -Raw -ErrorAction SilentlyContinue
+            if ($raw) { $step = $raw.Trim() }
+        }
+
+        if ([string]::IsNullOrEmpty($step)) {
+            # Not repairing. If there is no IISADMIN service, this VM has no IIS 6 metabase
+            # to gate -- let postinstall proceed (it will surface any real problem itself).
+            if (-not (Get-Service -Name 'IISADMIN' -ErrorAction SilentlyContinue)) { return $true }
+            if ($this.TestIisAdminHealthy()) { return $true }
+
+            $code = (Get-CimInstance Win32_Service -Filter "Name='IISADMIN'" -ErrorAction SilentlyContinue).ExitCode
+            Write-Status "IISADMIN (IIS 6 metabase) will not start (service ExitCode=$code) -- WSUS ConfigureWebsite would fail. Reinstalling IIS 6 Metabase Compatibility to rebuild a decryptable metabase (reboot 1 of 2)"
+            foreach ($s in @('W3SVC', 'WAS', 'IISADMIN')) { try { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue } catch { } }
+            & dism.exe /online /disable-feature /featurename:IIS-Metabase /norestart 2>&1 | Out-Null
+            Set-Content -Path $stateFile -Value 'disable-done' -Force
+            $global:DSCMachineStatus = 1
+            return $false
+        }
+        elseif ($step -eq 'disable-done') {
+            Write-Status "Re-enabling IIS 6 Metabase Compatibility to generate a fresh, re-keyed metabase (reboot 2 of 2)"
+            & dism.exe /online /enable-feature /featurename:IIS-Metabase /norestart 2>&1 | Out-Null
+            Set-Content -Path $stateFile -Value 'enable-done' -Force
+            $global:DSCMachineStatus = 1
+            return $false
+        }
+        elseif ($step -eq 'enable-done') {
+            if ($this.TestIisAdminHealthy()) {
+                Write-Status "IIS 6 Metabase Compatibility reinstalled -- IISADMIN is Running; metabase repaired"
+                Remove-Item -Path $stateFile -Force -ErrorAction SilentlyContinue
+                return $true
+            }
+            $code = (Get-CimInstance Win32_Service -Filter "Name='IISADMIN'" -ErrorAction SilentlyContinue).ExitCode
+            Set-Content -Path $stateFile -Value 'failed' -Force
+            Write-Status "IIS 6 Metabase Compatibility reinstall did NOT fix IISADMIN (ExitCode=$code); WSUS cannot be configured on this VM"
+            throw "IIS 6 Metabase Compatibility could not be repaired (IISADMIN start error $code -- orphaned IIS metabase encryption key). WSUS cannot be configured on this VM; rebuild the VM."
+        }
+        else {
+            # 'failed' (or unknown): do not re-run the reboot cycle. Proceed only if healthy now.
+            if ($this.TestIisAdminHealthy()) {
+                Remove-Item -Path $stateFile -Force -ErrorAction SilentlyContinue
+                return $true
+            }
+            throw "IIS 6 Metabase Compatibility repair already failed on this VM (IISADMIN 0x80090006, orphaned metabase encryption key). WSUS cannot be configured; rebuild the VM."
         }
     }
 
