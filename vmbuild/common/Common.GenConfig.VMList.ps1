@@ -98,7 +98,9 @@ function Select-Options {
         # Pure runtime/telemetry props: never actionable here, so on an EXISTING VM drop
         # them entirely instead of showing grey clutter. AssignedIP / LastKnownIP fold into
         # the network row and deployedOS folds into the OS row (handled in the grey block).
-        $existingNoiseProps = @("appliedFixes", "vmId", "inProgress", "source", "state", "success", "vmBuild", "ReservationCreated", "lastPhaseComplete", "lastUpdate", "memLabsDeployVersion", "deployedOS", "AssignedIP", "LastKnownIP")
+        # Prefix (already part of vmName), AdminName, domain and domainNetBiosName are
+        # global / domain-wide -- not per-VM -- so they're dropped here too.
+        $existingNoiseProps = @("appliedFixes", "vmId", "inProgress", "source", "state", "success", "vmBuild", "ReservationCreated", "lastPhaseComplete", "lastUpdate", "memLabsDeployVersion", "deployedOS", "AssignedIP", "LastKnownIP", "Prefix", "AdminName", "domain", "domainNetBiosName")
         foreach ($item in (Get-SortedProperties $property)) {
             $value = $property."$($item)"
             if ($isExisting -and $item -eq "ExistingVM") {
