@@ -80,6 +80,13 @@ function Select-Options {
         $fakeNetwork = $null
         $padding = 26
         $itemMap = @{}
+        # wsusDataBaseServer / wsusContentDir are only meaningful to edit while the
+        # SUP is being NEWLY added -- once the SUP has been deployed you cannot change
+        # its WSUS database (WID<->SQL) or content dir in place. Determine the DEPLOYED
+        # SUP state: use InstallSUP-Original when the user has already toggled InstallSUP
+        # this session (it captures the as-deployed value), otherwise the current
+        # InstallSUP IS the deployed value (existing VMs load with deployed state).
+        $supAlreadyDeployed = if ($null -ne $property."InstallSUP-Original") { [bool]$property."InstallSUP-Original" } else { [bool]$property.InstallSUP }
         foreach ($item in (Get-SortedProperties $property)) {
             $value = $property."$($item)"
             if ($isExisting -and $item -eq "ExistingVM") {
@@ -94,7 +101,7 @@ function Select-Options {
             if ($item -eq "AdditionalDisks") {
                 continue
             }
-            if ($isExisting -and ($item -notin $existingPropList -or ($item -ne "useProxy" -and $value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
+            if ($isExisting -and ($item -notin $existingPropList -or ($item -ne "useProxy" -and $value -eq $true -and $null -eq $property."$($item + "-Original")") -or (($item -eq "wsusDataBaseServer" -or $item -eq "wsusContentDir") -and $supAlreadyDeployed) )) {
                 $color = $Global:Common.Colors.GenConfigHidden
                 $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "        $($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false -HelpFunction $HelpFunction
                 #Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
