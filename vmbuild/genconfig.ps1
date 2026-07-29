@@ -692,6 +692,18 @@ function Get-ExistingVMs {
                 $evm.PsObject.Members.Remove($prop)
             }
         }
+        # "-Original" markers are per-session genconfig diff artifacts (stamped by
+        # Select-Options the first time a prop is edited to remember its pre-edit
+        # value). They are NOT real deployment state, but Set-VMNote can merge them
+        # into the VM note, so a prior "add a SUP" session (which toggled InstallSUP
+        # false->true and stamped InstallSUP-Original=false) can leave that stale
+        # marker on the deployed VM. Loading it would fool the deployed-state locks
+        # (e.g. re-allow toggling a now-deployed SUP off). Strip them so every edit
+        # session starts from clean, authoritative deployed values and re-stamps as
+        # the user actually edits.
+        foreach ($origProp in @($evm.PSObject.Properties | Where-Object { $_.Name.EndsWith("-Original") })) {
+            $evm.PsObject.Members.Remove($origProp.Name)
+        }
         if ($evm.SqlVersion -and $null -eq $evm.sqlInstanceName) {
             $evm | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER" -force
         }

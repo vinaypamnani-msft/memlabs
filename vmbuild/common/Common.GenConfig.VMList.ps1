@@ -101,7 +101,14 @@ function Select-Options {
             if ($item -eq "AdditionalDisks") {
                 continue
             }
-            if ($isExisting -and ($item -notin $existingPropList -or ($item -ne "useProxy" -and $value -eq $true -and $null -eq $property."$($item + "-Original")") -or (($item -eq "wsusDataBaseServer" -or $item -eq "wsusContentDir") -and $supAlreadyDeployed) )) {
+            # Deployed-SUP locks: once a SUP is deployed there is no removal path, so
+            # InstallSUP must NOT be toggleable off (only false->true is allowed, i.e.
+            # adding a SUP to a VM that deployed without one), and its WSUS DB / content
+            # dir can't be changed in place. Render all three read-only when the SUP is
+            # already deployed. When the SUP is NOT yet deployed, InstallSUP stays
+            # toggleable and (once on) the DB/content-dir picker is available.
+            $lockedForDeployedSup = ($item -eq "InstallSUP" -or $item -eq "wsusDataBaseServer" -or $item -eq "wsusContentDir") -and $supAlreadyDeployed
+            if ($isExisting -and ($item -notin $existingPropList -or ($item -ne "useProxy" -and $value -eq $true -and $null -eq $property."$($item + "-Original")") -or $lockedForDeployedSup )) {
                 $color = $Global:Common.Colors.GenConfigHidden
                 $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "        $($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false -HelpFunction $HelpFunction
                 #Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
