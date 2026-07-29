@@ -8650,9 +8650,13 @@ function Set-SupportedOptions {
         "LinuxClient"
     )
 
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy", "installOffice", "useDatabaseReplica", "replicaSqlServerVM", "replicaDbName")
+    # wsusDataBaseServer / wsusContentDir must be updatable so that when a SUP is
+    # added to an EXISTING MP/DP, the modify-VM menu renders them as selectable
+    # rows -- otherwise they show grey/read-only and the user can't open the
+    # Get-WsusDBName picker to choose WID / local SQL / remote SQL / an existing
+    # SQL VM for the WSUS database (or change the content dir).
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy", "installOffice", "useDatabaseReplica", "replicaSqlServerVM", "replicaDbName", "wsusDataBaseServer", "wsusContentDir")
     $propsToUpdate = $updatablePropList
-    $propsToUpdate += "wsusContentDir"
 
     $cmVersions += Get-CMVersions
 
