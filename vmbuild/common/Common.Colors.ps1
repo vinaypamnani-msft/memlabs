@@ -226,6 +226,9 @@ function Get-Colors {
         GenConfigSiteCode          = "DarkOrange"
         GenConfigTrue              = "LightGreen"
         GenConfigFalse             = "FireBrick"
+        # Softer "off" tone for editable False booleans in the modify-existing-VM menu,
+        # where a hard red read as an error rather than a simple off/on toggle.
+        GenConfigFalseSoft         = "Silver"
 
         # ---- Errors
         #Configuration is not valid. Saving is not advised. Proceed with caution. Hit CTRL-C to exit

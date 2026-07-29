@@ -157,6 +157,11 @@ function Select-Options {
                     else {
                         $TextToDisplay = Get-AdditionalInformation -item $item -data $value
                         $color = Get-AdditionalInformationColor -item $item -data $value
+                        # Soften the hard red on editable False booleans -- here False is
+                        # just an off toggle, not an error, so a muted grey reads better.
+                        if ($color -eq $Global:Common.Colors.GenConfigFalse) {
+                            $color = $Global:Common.Colors.GenConfigFalseSoft
+                        }
                     }
                     $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction
                     write-log -verbose "Adding $item as element $i in itemmap with currentvalue $value"
