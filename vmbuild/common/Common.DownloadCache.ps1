@@ -885,23 +885,33 @@ function Get-MemlabsDscIsoForPayload {
         $isoPath = Join-Path $isoDir "dsc-$hash.iso"
         if (Test-Path $isoPath) { return $isoPath }
 
-        # New-NoCloudSeedIsoWithImapi takes the IMAPI mutex itself (and sizes
-        # FreeMediaBlocks for large payloads), so no outer lock is needed -- and
-        # there is no staging folder to assemble because AddTree reads the live DSC
-        # folder directly ($false = put its CONTENTS at the ISO root, matching the
-        # C:\staging\DSC layout Copy-ItemSafe produces). Concurrent builders of the
-        # SAME hash are safe: each writes a per-PID temp then Move-Items; identical
-        # content means whoever lands first wins and the rest no-op.
-        $tmpIso = "$isoPath.$PID.tmp"
+        # Serialize the complete check/build/publish sequence per content hash.
+        # The IMAPI mutex inside New-NoCloudSeedIsoWithImapi protects COM, but it
+        # does not stop each waiting VM_Config process from building the same ISO
+        # after the previous process publishes it. Recheck under this lock so one
+        # process builds and every waiter immediately reuses the finished artifact.
+        $mutex = [System.Threading.Mutex]::new($false, "Global\MemlabsDscIsoBuild-$hash")
+        $null = $mutex.WaitOne()
         try {
-            if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
-            New-NoCloudSeedIsoWithImapi -SourceDir $srcDir -OutputIsoPath $tmpIso -VolumeLabel $script:MemlabsDscVolumeLabel
-            if (-not (Test-Path $tmpIso)) { throw "DSC ISO build produced no output for $isoPath" }
-            if (-not (Test-Path $isoPath)) { Move-Item -Path $tmpIso -Destination $isoPath -Force }
-            Write-Log "DownloadCache: built $([System.IO.Path]::GetFileName($isoPath)) (DSC payload)." -LogOnly
+            if (Test-Path $isoPath) { return $isoPath }
+
+            # AddTree reads the live DSC folder directly ($false puts its contents
+            # at the ISO root, matching the C:\staging\DSC layout).
+            $tmpIso = "$isoPath.$PID.tmp"
+            try {
+                if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
+                New-NoCloudSeedIsoWithImapi -SourceDir $srcDir -OutputIsoPath $tmpIso -VolumeLabel $script:MemlabsDscVolumeLabel
+                if (-not (Test-Path $tmpIso)) { throw "DSC ISO build produced no output for $isoPath" }
+                Move-Item -Path $tmpIso -Destination $isoPath -Force
+                Write-Log "DownloadCache: built $([System.IO.Path]::GetFileName($isoPath)) (DSC payload)." -LogOnly
+            }
+            finally {
+                if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
+            }
         }
         finally {
-            if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
+            $mutex.ReleaseMutex()
+            $mutex.Dispose()
         }
         return $isoPath
     }

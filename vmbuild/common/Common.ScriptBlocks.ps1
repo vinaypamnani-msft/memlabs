@@ -2985,12 +2985,13 @@ $global:VM_Config = {
             # disk copy. The ISO carries the SAME $rootPath\DSC folder Copy-ItemSafe
             # ships (DSC.zip + loose scripts), so the guest ends with an identical
             # C:\staging\DSC regardless of which path delivered it. Fully reversible:
-            # any miss (Gen1 VM, busy single DVD, build/mount/copy failure, or the
-            # $env:MEMLABS_NO_DSC_ISO kill switch) falls through to the legacy copy.
+            # any miss (Gen1 VM without a reusable DVD, build/mount/copy failure,
+            # or the $env:MEMLABS_NO_DSC_ISO kill switch) falls through to the
+            # legacy copy.
             if (-not $env:MEMLABS_NO_DSC_ISO) {
                 try {
                     $dscVm = Get-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue
-                    if ($dscVm -and $dscVm.Generation -ne 1) {
+                    if ($dscVm) {
                         $dscIso = Get-MemlabsDscIsoForPayload -RootPath $rootPath -Signature $dscSourceSignature
                         if ($dscIso -and (Mount-MemlabsDscIsoToVm -VmName $currentItem.vmName -IsoPath $dscIso)) {
                             Write-Progress2 $Activity -Status "Copying DSC files from mounted ISO" -percentcomplete 35 -force
