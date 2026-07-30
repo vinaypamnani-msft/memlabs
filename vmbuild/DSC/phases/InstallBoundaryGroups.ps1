@@ -267,7 +267,21 @@ $ensureClientPkgCoverage = {
     # or two when it is going to work.
     $escalation = @{}   # DP-upper -> highest escalation level already applied
     $maxTries = 24
+    # A CAS/parent-owned package (e.g. the client package under a child primary) has NO
+    # local content yet (StoredPkgVersion=0); its content must first replicate DOWN from
+    # the parent before it can land on a local DP. That inter-site transfer is slow, so
+    # give it a much larger budget and (below) never tear down the targeting meanwhile.
+    $maxTriesContentPending = 90
     for ($try = 1; $try -le $maxTries; $try++) {
+        # Is the client package content present at THIS site yet? StoredPkgVersion=0
+        # means it is still replicating down from a parent/CAS site.
+        $storedVer = 0
+        try { $sp = Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue | Select-Object -First 1; if ($sp) { $storedVer = [int]$sp.StoredPkgVersion } } catch {}
+        $contentPendingFromParent = ($storedVer -lt 1)
+        if ($contentPendingFromParent -and $maxTries -lt $maxTriesContentPending) {
+            $maxTries = $maxTriesContentPending
+            Write-DscStatus "Client pkg coverage: client package content has not replicated down to site $SiteCode yet (StoredPkgVersion=0; source is a parent/CAS site). Waiting for the parent to send content (up to ~45 min) and NOT tearing down the DP targeting that signals it."
+        }
         $state = @{}
         foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
             $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpper()] = [int]$r.State }
@@ -302,6 +316,20 @@ $ensureClientPkgCoverage = {
                         Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed (RefreshNow) [esc.0, try $try]"
                     }
                     $escalation[$u] = 0
+                }
+                elseif ($contentPendingFromParent) {
+                    # Content isn't at this site yet -> the DP CANNOT receive it until the
+                    # parent/CAS sends it down. Removing/re-adding or restarting only tears
+                    # down the SMS_DistributionPoint row that signals the parent (observed:
+                    # it stranded the client package at 'no-row' while a sibling CAS package
+                    # that kept its targeting flowed down fine). Only re-establish a vanished
+                    # targeting row; otherwise just wait for the content to replicate down.
+                    $hasTgt = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue |
+                            Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }).Count -gt 0
+                    if (-not $hasTgt) {
+                        Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
+                        Write-DscStatus "Client pkg coverage: DP '$dp' targeting row was missing -> re-distributed to re-signal the parent; waiting for content to replicate down (StoredPkgVersion=0) [content-pending, try $try]"
+                    }
                 }
                 elseif ($level -eq 0 -and $try -ge 4) {
                     # Level 1: remove + re-add content (clean copy through the wedge).
