@@ -748,18 +748,23 @@ function Clear-CmMediaMount {
     Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "CM" -Phase $Phase
 }
 
-# Mount CM media for the top-level site servers this phase needs (Phase 8:
-# non-hidden installers; Phase 9: include hidden parents for later adds).
+# Mount CM media for the top-level site servers this phase needs. Hidden top-level
+# site servers are INCLUDED: in an add scenario (e.g. AddPS2) the existing CAS/Primary
+# is hidden, but a Phase 8 DC still schema-extends against its \\<server>\CMCB share
+# (WaitForExtendSchemaFile) and the guest installs off its CM DVD -- excluding it left
+# the media unmounted, so the DC hung waiting for extadsch.exe on a share never created.
 function Mount-CmIsoForPhase {
     param([object]$deployConfig, [int]$Phase)
-    $targets = if ($Phase -ge 9) { Get-CmMediaSiteServers -deployConfig $deployConfig -IncludeHidden } else { Get-CmMediaSiteServers -deployConfig $deployConfig }
+    $targets = Get-CmMediaSiteServers -deployConfig $deployConfig -IncludeHidden
     foreach ($t in $targets) { Set-CmMediaMountAndShare -Target $t -deployConfig $deployConfig -Phase $Phase }
 }
 
-# Eject CM media from the top-level site servers after a successful phase.
+# Eject CM media from the top-level site servers after a successful phase. Mirrors
+# Mount-CmIsoForPhase's target set (IncludeHidden) so a hidden site server's ISO/share
+# isn't left mounted and baked into checkpoints / .memlabs exports.
 function Dismount-CmIsoForPhase {
     param([object]$deployConfig, [int]$Phase)
-    $targets = if ($Phase -ge 9) { Get-CmMediaSiteServers -deployConfig $deployConfig -IncludeHidden } else { Get-CmMediaSiteServers -deployConfig $deployConfig }
+    $targets = Get-CmMediaSiteServers -deployConfig $deployConfig -IncludeHidden
     foreach ($t in $targets) { Clear-CmMediaMount -Target $t -deployConfig $deployConfig -Phase $Phase }
 }
 
