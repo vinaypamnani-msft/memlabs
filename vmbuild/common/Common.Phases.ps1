@@ -1192,6 +1192,30 @@ function Start-NormalJobs {
     return $return
 }
 
+function Get-MissingDscDispatchNodes {
+    param (
+        [object]$ConfigurationData,
+        [object]$deployConfig
+    )
+
+    $dispatchNodeNames = @()
+    foreach ($vm in $deployConfig.virtualMachines) {
+        $dispatchNodeNames += $vm.vmName
+        if ($vm.vmName -and $vm.domain) {
+            $dispatchNodeNames += "$($vm.vmName).$($vm.domain)"
+        }
+    }
+
+    foreach ($node in $ConfigurationData.AllNodes) {
+        if ([string]::IsNullOrWhiteSpace([string]$node.NodeName)) {
+            '<empty NodeName>'
+        }
+        elseif ($node.NodeName -notin @('*', 'LOCALHOST') -and $node.NodeName -notin $dispatchNodeNames) {
+            $node.NodeName
+        }
+    }
+}
+
 
 function Start-PhaseJobs {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '',
@@ -1294,6 +1318,20 @@ function Start-PhaseJobs {
     }
     else {
         $multiNodeDsc = $false
+    }
+
+    if ($multiNodeDsc) {
+        $missingDispatchNodes = @(Get-MissingDscDispatchNodes -ConfigurationData $ConfigurationData -deployConfig $deployConfig | Select-Object -Unique)
+        if ($missingDispatchNodes.Count -gt 0) {
+            Write-Log "[Phase $Phase] ConfigurationData contains DSC node(s) with no dispatchable VM worker: $($missingDispatchNodes -join ', '). Aborting before the DC readiness handshake." -Failure
+            return [PSCustomObject]@{
+                Failed         = $missingDispatchNodes.Count
+                Success        = 0
+                Jobs           = 0
+                Applicable     = $true
+                AdditionalData = $null
+            }
+        }
     }
 
     # Phase 8 preflight: ensure each CAS/Primary's machine account is in local
