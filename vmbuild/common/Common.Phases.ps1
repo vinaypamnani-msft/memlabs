@@ -3333,7 +3333,13 @@ function Get-Phase8ConfigurationData {
 
             if (-not $MultiDomain) {
                 if ($vm.Role -eq "PassiveSite" -and $vm.remoteContentLibVM) {
-                    if ($fsVMsAdded -notcontains $vm.remoteContentLibVM) {
+                    # Add-to-existing configurations can reference an existing
+                    # remote content-library server without carrying that VM in
+                    # virtualMachines. InstallPassiveSiteServer configures the
+                    # content-library share remotely; only include the generic
+                    # FileServer DSC node when this run can dispatch its worker.
+                    $remoteContentLibVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vm.remoteContentLibVM } | Select-Object -First 1
+                    if ($remoteContentLibVM -and $fsVMsAdded -notcontains $vm.remoteContentLibVM) {
                         $newItem = @{
                             NodeName = $vm.remoteContentLibVM
                             Role     = "FileServer"
