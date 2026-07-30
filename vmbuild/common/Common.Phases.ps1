@@ -1213,50 +1213,6 @@ function Start-PhaseJobs {
         $global:DSC_CopiedTime = Get-Date
     }
 
-    # Phase 2 is single-node DSC, so an unchanged, healthy node can safely skip
-    # its entire worker. Hash the normalized deployment plus every executable
-    # input that controls Phase 2. The stamp is written only after a successful
-    # apply; any code/config change invalidates it and restores the normal path.
-    $phaseSuccessFingerprint = $null
-    if ($Phase -eq 2) {
-        try {
-            $fingerprintConfig = $deployConfig | ConvertTo-Json -Depth 20 | ConvertFrom-Json
-            if ($fingerprintConfig.parameters -and $fingerprintConfig.parameters.PSObject.Properties['ThisMachineName']) {
-                $fingerprintConfig.parameters.PSObject.Properties.Remove('ThisMachineName')
-            }
-            $runtimeProperties = @('appliedFixes', 'inProgress', 'lastPhaseComplete', 'lastUpdate', 'phaseFingerprints', 'state', 'success')
-            foreach ($fingerprintVm in $fingerprintConfig.virtualMachines) {
-                foreach ($runtimeProperty in $runtimeProperties) {
-                    if ($fingerprintVm.PSObject.Properties[$runtimeProperty]) {
-                        $fingerprintVm.PSObject.Properties.Remove($runtimeProperty)
-                    }
-                }
-            }
-
-            $fingerprintFiles = @(
-                Get-Item (Join-Path (Split-Path $PSScriptRoot -Parent) 'Common.ps1') -ErrorAction Stop
-                Get-Item (Join-Path $PSScriptRoot 'Common.Phases.ps1') -ErrorAction Stop
-                Get-Item (Join-Path $PSScriptRoot 'Common.ScriptBlocks.ps1') -ErrorAction Stop
-                Get-ChildItem -Path $dscSourcePath -File -Recurse -ErrorAction Stop
-            ) | Sort-Object FullName
-            $fileParts = foreach ($fingerprintFile in $fingerprintFiles) {
-                "$($fingerprintFile.FullName)|$((Get-FileHash -Path $fingerprintFile.FullName -Algorithm SHA256).Hash)"
-            }
-            $fingerprintText = (($fingerprintConfig | ConvertTo-Json -Depth 20 -Compress), ($fileParts -join "`n")) -join "`n"
-            $fingerprintStream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($fingerprintText))
-            try {
-                $phaseSuccessFingerprint = (Get-FileHash -InputStream $fingerprintStream -Algorithm SHA256).Hash
-            }
-            finally {
-                $fingerprintStream.Dispose()
-            }
-            Write-Log "[Phase 2] Rerun fingerprint: $phaseSuccessFingerprint" -LogOnly
-        }
-        catch {
-            Write-Log "[Phase 2] Could not compute rerun fingerprint; fast skip disabled: $($_.Exception.Message)" -Warning
-        }
-    }
-
     $global:preparePhasePercent = 5
     Write-Progress2 "Preparing Phase $Phase" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 

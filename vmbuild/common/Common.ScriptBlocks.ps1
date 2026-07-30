@@ -1718,7 +1718,6 @@ $global:VM_Config = {
         $reservation = $using:reservation
         $alreadyCopiedDSC = $using:alreadyCopiedDSC
         $phaseRunGuid = $using:phaseRunGuid
-        $phaseSuccessFingerprint = $using:phaseSuccessFingerprint
         $quietWUThisRun = $using:quietWUThisRun
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
@@ -1769,49 +1768,6 @@ $global:VM_Config = {
         }
         else {
             $domainName = "WORKGROUP"
-        }
-
-        # Phase 2 reruns spend most of their time preparing an apply whose DSC
-        # resources are already compliant. A matching success stamp is necessary
-        # but not sufficient: cheaply confirm the guest is reachable, DSC is idle
-        # and successful, no reboot is pending, tools remain present, and domain
-        # health is intact. Any uncertainty falls through to the full repair path.
-        if ($Phase -eq 2 -and $phaseSuccessFingerprint -and $currentItem.role -ne 'AADClient') {
-            $phaseNote = Get-VMNote -VMName $currentItem.vmName
-            $stampedFingerprint = $null
-            if ($phaseNote -and $phaseNote.phaseFingerprints -and $phaseNote.phaseFingerprints.PSObject.Properties['Phase2']) {
-                $stampedFingerprint = $phaseNote.phaseFingerprints.Phase2
-            }
-            if ($stampedFingerprint -eq $phaseSuccessFingerprint) {
-                $health = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ArgumentList $currentItem.role -SuppressLog -DisplayName 'Phase 2 rerun health check' -ScriptBlock {
-                    param($role)
-                    $reasons = @()
-                    $lcmState = try { (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState } catch { 'Unknown' }
-                    $lastDscStatus = try { (Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1).Status } catch { 'Unknown' }
-                    if ($lcmState -ne 'Idle') { $reasons += "LCM=$lcmState" }
-                    if ($lastDscStatus -ne 'Success') { $reasons += "DSC=$lastDscStatus" }
-                    if (-not (Test-Path 'C:\Tools\Tools.MD5')) { $reasons += 'tools marker missing' }
-                    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $reasons += 'CBS reboot pending' }
-                    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $reasons += 'WU reboot pending' }
-                    $pendingRename = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
-                    if ($pendingRename) { $reasons += 'file rename reboot pending' }
-                    if ($role -in @('DC', 'BDC')) {
-                        foreach ($serviceName in @('NTDS', 'DNS', 'Netlogon')) {
-                            if ((Get-Service -Name $serviceName -ErrorAction SilentlyContinue).Status -ne 'Running') { $reasons += "$serviceName not running" }
-                        }
-                    }
-                    elseif ((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).PartOfDomain) {
-                        if (-not (Test-ComputerSecureChannel -ErrorAction SilentlyContinue)) { $reasons += 'secure channel failed' }
-                    }
-                    [PSCustomObject]@{ Healthy = ($reasons.Count -eq 0); Reasons = ($reasons -join '; ') }
-                }
-                if (-not $health.ScriptBlockFailed -and $health.ScriptBlockOutput -and $health.ScriptBlockOutput.Healthy) {
-                    Write-Log "[Phase 2]: $($currentItem.vmName): Configuration fingerprint matches and health checks passed. Skipping tools, DSC preparation, and apply." -OutputStream -Success
-                    return
-                }
-                $healthReason = if ($health.ScriptBlockFailed) { 'health probe failed' } elseif ($health.ScriptBlockOutput) { $health.ScriptBlockOutput.Reasons } else { 'health probe returned no data' }
-                Write-Log "[Phase 2]: $($currentItem.vmName): Fast skip rejected ($healthReason); running full configuration." -LogOnly
-            }
         }
 
         # AADClient idempotency: once OOBE has been reached, the VM has no
@@ -6121,16 +6077,6 @@ $global:VM_Config = {
             }
 
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -Phase $Phase
-            if ($complete -and $Phase -eq 2 -and $phaseSuccessFingerprint) {
-                $phaseNote = Get-VMNote -VMName $currentItem.vmName
-                if ($phaseNote) {
-                    if (-not $phaseNote.phaseFingerprints) {
-                        $phaseNote | Add-Member -MemberType NoteProperty -Name 'phaseFingerprints' -Value ([PSCustomObject]@{}) -Force
-                    }
-                    $phaseNote.phaseFingerprints | Add-Member -MemberType NoteProperty -Name 'Phase2' -Value $phaseSuccessFingerprint -Force
-                    Set-VMNote -VMName $currentItem.vmName -vmNote $phaseNote
-                }
-            }
         }
 
         # If the phase succeeded, check for a pending reboot and clear it now

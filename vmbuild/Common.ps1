@@ -3323,9 +3323,6 @@ function New-VmNote {
         # "has this CAS/Primary ever finished Phase 8?" (lastPhaseComplete >= 8).
         $existingNote = Get-VMNote -VMName $VmName
         $existingMax = if ($existingNote -and $existingNote.lastPhaseComplete) { [int]$existingNote.lastPhaseComplete } else { 0 }
-        if ($existingNote -and $existingNote.phaseFingerprints) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "phaseFingerprints" -Value $existingNote.phaseFingerprints -Force
-        }
         if ($Successful -and $Phase -gt 0) {
             $newMax = [Math]::Max($existingMax, [int]$Phase)
             $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $newMax -Force
