@@ -2237,7 +2237,12 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Skipping pending-reboot check -- $skipRebootProbe." -LogOnly
         }
         else {
-            $rebootCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Check pending reboot"
+            # Stay on the asynchronous PSDirect path used by Stop_RunningDSC.
+            # In VM_Config's outer Start-Job process, the first synchronous
+            # pipeline after that nested remoting job repeatedly fails during
+            # pipeline creation even though the cached session reports Available.
+            # Consecutive -AsJob calls do not exhibit that transition failure.
+            $rebootCheck = Invoke-VmCommand -AsJob -TimeoutSeconds 60 -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Check pending reboot"
         }
         if ($rebootCheck.ScriptBlockOutput -and $rebootCheck.ScriptBlockOutput -ne $false) {
             $rebootResult = $rebootCheck.ScriptBlockOutput
