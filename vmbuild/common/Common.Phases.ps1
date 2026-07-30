@@ -3332,7 +3332,7 @@ function Get-Phase8ConfigurationData {
             $NumberOfNodesAdded = $NumberOfNodesAdded + 1
 
             if (-not $MultiDomain) {
-                if ($vm.PassiveSite) {
+                if ($vm.Role -eq "PassiveSite" -and $vm.remoteContentLibVM) {
                     if ($fsVMsAdded -notcontains $vm.remoteContentLibVM) {
                         $newItem = @{
                             NodeName = $vm.remoteContentLibVM
