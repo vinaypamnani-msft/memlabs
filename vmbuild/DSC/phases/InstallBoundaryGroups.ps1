@@ -553,7 +553,11 @@ if ($allBGsExist) {
         # the client package is on every client-serving DP. This early-return used to
         # skip the coverage repair further down, so a DP stuck at ContentValidating
         # never self-healed on a Phase 8 re-run.
-        if ($pushClients -and -not $ThisVm.thisParams.PassiveNode) {
+        # Coverage is NOT gated on client PUSH: Phase 11's ClientPkg check hard-fails
+        # whenever a boundary-group DP lacks the client package, and clients installed
+        # by ANY method (push, SCP/GPO, manual) pull ccmsetup content from that DP. A
+        # no-push lab (pushClient=false) must still get the client package onto its DP.
+        if (-not $ThisVm.thisParams.PassiveNode) {
             & $ensureChildBgFallbackDps
             & $ensureClientPkgCoverage
         }
@@ -746,6 +750,18 @@ if ($ThisVm.thisParams.PassiveNode) {
     Write-DscStatus "Passive site server detected — client push will proceed for other VMs"
 }
 
+# Ensure the client package is present on every client-serving boundary-group DP
+# BEFORE the no-push short-circuit below. Phase 11's ClientPkg check hard-fails if a
+# boundary-group DP lacks the client package, and clients installed by ANY method
+# (push, SCP/GPO, manual) pull ccmsetup content from that DP -- so coverage must NOT
+# be gated on client PUSH. Previously this ran only on the push path, so a no-push
+# lab (pushClient=false) returned here without ever distributing the client package
+# to the new DP, failing Phase 11 with the DP stuck at ContentValidating.
+if (-not $ThisVm.thisParams.PassiveNode) {
+    & $ensureChildBgFallbackDps
+    & $ensureClientPkgCoverage
+}
+
 # Push Clients
 #==============
 if (-not $pushClients) {
@@ -761,11 +777,8 @@ if (-not $pushClients) {
 # Wait for collection to populate
 
 if ($ClientNames) {
-    # Ensure the client package is present on every client-serving DP (see the
-    # $ensureClientPkgCoverage definition near the top). Runs on the fresh-deploy
-    # path; the "BGs already exist" early-return above calls the same scriptblock.
-    & $ensureChildBgFallbackDps
-    & $ensureClientPkgCoverage
+    # Client-package coverage already ensured above (runs regardless of push).
+    $null = $ClientNames
 }
 else {
     Write-DscStatus "Skipping Client Push. No Clients to push."
