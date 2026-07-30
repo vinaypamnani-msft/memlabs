@@ -242,7 +242,7 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
 
                 WriteStatus DownloadSQLCU {
                     DependsOn = $nextDepend
-                    Status    = "Downloading CU File for '$($ThisVM.sqlVersion)'"
+                    Status    = "Ensuring SQL CU is available for '$($ThisVM.sqlVersion)'"
                 }
 
                 DownloadFile DownloadSQLCU {

@@ -61,9 +61,63 @@ function Copy-MemlabsCachedFile {
 
         $destDir = Split-Path $Dest -Parent
         if ($destDir -and -not (Test-Path $destDir)) { New-Item -ItemType Directory -Force -Path $destDir | Out-Null }
+        $hashCachePath = "$Dest.SHA1"
         if (Test-Path $Dest) { Remove-Item $Dest -Force -ErrorAction SilentlyContinue | Out-Null }
+        if (Test-Path $hashCachePath) { Remove-Item $hashCachePath -Force -ErrorAction SilentlyContinue | Out-Null }
         Copy-Item -Path $src -Destination $Dest -Force -ErrorAction Stop
         if (-not (Test-Path $Dest)) { return $false }
+        if ($entry.sha1) {
+            $destItem = Get-Item $Dest -ErrorAction Stop
+            @(
+                ([string]$entry.sha1).ToLowerInvariant()
+                $destItem.Length.ToString()
+                $destItem.LastWriteTimeUtc.ToString('o')
+            ) | Out-File -FilePath $hashCachePath -Force
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+
+function Initialize-MemlabsCachedHashSidecar {
+    param([string] $Url, [string] $Dest, [string] $ExpectedHash)
+    if (-not (Test-Path $Dest) -or [string]::IsNullOrWhiteSpace($ExpectedHash)) { return $false }
+    try {
+        $drive = $null
+        foreach ($cd in (Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=5" -ErrorAction SilentlyContinue)) {
+            if ($cd.VolumeName -eq 'MEMLABSCACHE' -and $cd.DeviceID) { $drive = $cd.DeviceID; break }
+        }
+        if (-not $drive) { return $false }
+
+        $manifestPath = Join-Path "$drive\" 'manifest.json'
+        if (-not (Test-Path $manifestPath)) { return $false }
+        $manifest = Get-Content -Path $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        $entry = $null
+        $urlTrim = $Url.Trim()
+        foreach ($prop in $manifest.files.psobject.properties) {
+            if ($prop.Name -eq $Url -or [string]::Equals($prop.Name.Trim(), $urlTrim, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $entry = $prop.Value
+                break
+            }
+        }
+        if (-not $entry -or -not $entry.file -or -not $entry.sha1) { return $false }
+        if (-not [string]::Equals([string]$entry.sha1, $ExpectedHash, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+
+        $src = Join-Path "$drive\" $entry.file
+        if (-not (Test-Path $src)) { return $false }
+        $srcItem = Get-Item $src -ErrorAction Stop
+        $destItem = Get-Item $Dest -ErrorAction Stop
+        if ($srcItem.Length -ne $destItem.Length -or $srcItem.LastWriteTimeUtc -ne $destItem.LastWriteTimeUtc) { return $false }
+        if ($entry.size -and ([int64]$destItem.Length -ne [int64]$entry.size)) { return $false }
+
+        @(
+            $ExpectedHash.ToLowerInvariant()
+            $destItem.Length.ToString()
+            $destItem.LastWriteTimeUtc.ToString('o')
+        ) | Out-File -FilePath "$Dest.SHA1" -Force
         return $true
     }
     catch {
@@ -2597,7 +2651,14 @@ class DownloadFile {
             }
 
             if (-not $useCachedHash) {
-                $actualHash = (Get-FileHash $this.FilePath -Algorithm SHA1).Hash.ToLowerInvariant()
+                if (Initialize-MemlabsCachedHashSidecar -Url $this.DownloadUrl -Dest $this.FilePath -ExpectedHash $expectedHash) {
+                    $actualHash = $expectedHash
+                    $useCachedHash = $true
+                    Write-Verbose "Restored SHA1 cache for $(Split-Path $this.FilePath -Leaf) from matching MemLabs cache metadata"
+                }
+                else {
+                    $actualHash = (Get-FileHash $this.FilePath -Algorithm SHA1).Hash.ToLowerInvariant()
+                }
             }
 
             if ($actualHash -ne $expectedHash) {
