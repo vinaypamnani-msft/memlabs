@@ -954,7 +954,11 @@ if ($ThisVM.role -ne "CAS") {
             if ($ThisVM.thisParams -and $ThisVM.thisParams.ClientPush) {
                 $pushTargets = @($ThisVM.thisParams.ClientPush | Where-Object { $_ -and $_ -ne $ThisVM.vmName })
             }
-            if ($pushTargets.Count -gt 0 -and $ThisVM.siteCode) {
+            if ($pushTargets.Count -eq 0) {
+                $needCertPulse = $false
+                Write-DscStatus "No push targets configured; skipping host cert pre-stage."
+            }
+            elseif ($ThisVM.siteCode) {
                 $cpNs = "root\sms\site_$($ThisVM.siteCode)"
                 $notYetClient = @()
                 foreach ($t in $pushTargets) {
