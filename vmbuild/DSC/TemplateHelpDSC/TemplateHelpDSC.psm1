@@ -4402,16 +4402,20 @@ class InstallFeatureForSCCM {
         }
         catch {}
 
-        # Required server features for this role (empty on client OS). The list is
-        # computed once in GetRequiredFeatures() and shared with Test() so the two can
-        # never drift.
+        # Required server features for this role (empty on client OS). Re-query here
+        # because Test() may have found only one missing feature; submitting the full
+        # role list makes ServerManager reprocess every already-installed feature.
         $featureList = @($this.GetRequiredFeatures())
         if ($featureList.Count -gt 0) {
-            Write-Status "Installing $($featureList.Count) Windows Features: $($featureList -join ', ')"
-            $result = Install-WindowsFeature -Name $featureList -IncludeManagementTools
-            if ($result.RestartNeeded -eq "Yes") {
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-                $global:DSCMachineStatus = 1
+            $featureState = @($this.GetFeatureState($featureList))
+            $missingFeatures = @($featureState | Where-Object { $_.InstallState -ne "Installed" } | ForEach-Object { $_.Name })
+            if ($missingFeatures.Count -gt 0) {
+                Write-Status "Installing $($missingFeatures.Count) missing Windows Features: $($missingFeatures -join ', ')"
+                $result = Install-WindowsFeature -Name $missingFeatures -IncludeManagementTools
+                if ($result.RestartNeeded -eq "Yes") {
+                    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                    $global:DSCMachineStatus = 1
+                }
             }
         }
 
@@ -4444,10 +4448,27 @@ class InstallFeatureForSCCM {
             # (whose old marker hasn't been cleaned yet) aren't re-run on the first pass.
             return ([bool]((Test-Path $this.MarkerPath()) -or (Test-Path "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt")))
         }
-        # Assigned + wrapped in @() so Get-WindowsFeature objects never leak onto the
-        # success stream (a non-boolean leak hard-fails a PS5.1 DSC Test method).
-        $missing = @(Get-WindowsFeature -Name $featureList -ErrorAction SilentlyContinue | Where-Object { $_.InstallState -ne "Installed" })
+        $featureState = @($this.GetFeatureState($featureList))
+        $missing = @($featureState | Where-Object { $_.InstallState -ne "Installed" })
         return ($missing.Count -eq 0)
+    }
+
+    [object[]] GetFeatureState([string[]] $featureList) {
+        $lastError = $null
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                $featureState = @(Get-WindowsFeature -Name $featureList -ErrorAction Stop)
+                if ($featureState.Count -ne $featureList.Count) {
+                    throw "ServerManager returned $($featureState.Count) of $($featureList.Count) requested features."
+                }
+                return $featureState
+            }
+            catch {
+                $lastError = $_
+                if ($attempt -lt 3) { Start-Sleep -Seconds 2 }
+            }
+        }
+        throw "Unable to query required Windows features after 3 attempts: $($lastError.Exception.Message)"
     }
 
     [string] MarkerPath() {
