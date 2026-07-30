@@ -580,6 +580,96 @@ function Invoke-MRemoteNGMaintenance {
     Write-LogMessage 'mRemoteNG maintenance completed.'
 }
 
+function Invoke-RdcManMaintenance {
+    Write-LogMessage 'Starting RDCMan maintenance...'
+
+    $minimumVersion = [version]'3.12.0.0'
+    $installDirectory = 'C:\tools'
+    $rdcManExe = Join-Path $installDirectory 'RDCMan.exe'
+    $installedVersion = $null
+
+    if (Test-Path $rdcManExe) {
+        try {
+            $installedVersion = [version](Get-Item $rdcManExe).VersionInfo.ProductVersion
+        }
+        catch {
+            Write-LogMessage "Could not read the RDCMan version at '$rdcManExe': $_" -Level 'WARNING'
+        }
+    }
+
+    $requiresInstall = -not $installedVersion -or $installedVersion -lt $minimumVersion
+    $runningProcesses = @(Get-Process -Name RDCMan -ErrorAction SilentlyContinue)
+    $hasIncompatibleRunningProcess = $false
+    foreach ($runningProcess in $runningProcesses) {
+        try {
+            $runningVersion = [version](Get-Item $runningProcess.Path).VersionInfo.ProductVersion
+            if ($runningVersion -lt $minimumVersion) {
+                Write-LogMessage "Running RDCMan $runningVersion at '$($runningProcess.Path)' is below $minimumVersion."
+                $hasIncompatibleRunningProcess = $true
+            }
+        }
+        catch {
+            Write-LogMessage "Could not verify running RDCMan process $($runningProcess.Id): $_" -Level 'WARNING'
+            $hasIncompatibleRunningProcess = $true
+        }
+    }
+
+    $restartAfterMaintenance = $false
+    if ($runningProcesses.Count -gt 0 -and ($requiresInstall -or $hasIncompatibleRunningProcess)) {
+        Write-LogMessage 'Stopping RDCMan to install or launch the compatible version...'
+        $runningProcesses | Stop-Process -Force -ErrorAction Stop
+        Start-Sleep -Seconds 1
+        $restartAfterMaintenance = $true
+    }
+
+    if (-not $requiresInstall) {
+        Write-LogMessage "RDCMan $installedVersion found at $rdcManExe. No upgrade needed."
+    }
+    else {
+        if ($installedVersion) {
+            Write-LogMessage "RDCMan $installedVersion is below the required version $minimumVersion."
+        }
+        else {
+            Write-LogMessage "RDCMan $minimumVersion or newer was not found at $rdcManExe."
+        }
+
+        if (-not (Test-Path $installDirectory)) {
+            New-Item -Path $installDirectory -ItemType Directory -Force | Out-Null
+        }
+
+        $downloadPath = Join-Path $env:TEMP "RDCMan-$([guid]::NewGuid().ToString('N')).exe"
+        try {
+            Write-LogMessage 'Downloading the latest RDCMan from Sysinternals...'
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri 'https://live.sysinternals.com/RDCMan.exe' -OutFile $downloadPath -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+
+            $downloadedVersion = [version](Get-Item $downloadPath).VersionInfo.ProductVersion
+            if ($downloadedVersion -lt $minimumVersion) {
+                throw "Sysinternals supplied RDCMan $downloadedVersion; version $minimumVersion or newer is required."
+            }
+
+            Copy-Item -Path $downloadPath -Destination $rdcManExe -Force -ErrorAction Stop
+            $installedVersion = [version](Get-Item $rdcManExe).VersionInfo.ProductVersion
+            if ($installedVersion -lt $minimumVersion) {
+                throw "RDCMan version verification failed after installation (found $installedVersion)."
+            }
+
+            Write-LogMessage "RDCMan $installedVersion installed successfully at $rdcManExe."
+        }
+        finally {
+            $ProgressPreference = 'Continue'
+            Remove-Item -Path $downloadPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($restartAfterMaintenance) {
+        Start-Process -FilePath $rdcManExe -ArgumentList '/reconnect' -WorkingDirectory $installDirectory
+        Write-LogMessage 'Restarted the compatible RDCMan executable.'
+    }
+
+    Write-LogMessage 'RDCMan maintenance completed.'
+}
+
 function Invoke-WeeklyUpgrades {
     Write-LogMessage 'Starting weekly upgrades...'
 
@@ -677,6 +767,7 @@ try { Invoke-GitMaintenance } catch { Write-LogMessage "Git maintenance threw: $
 try { Invoke-System32CurlMaintenance } catch { Write-LogMessage "System32 curl maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+try { Invoke-RdcManMaintenance } catch { Write-LogMessage "RDCMan maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-MRemoteNGMaintenance } catch { Write-LogMessage "mRemoteNG maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-WeeklyUpgrades } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 

@@ -284,29 +284,53 @@ function Install-RDCman {
     $rdcmanpath = "C:\ProgramData\chocolatey\lib\sysinternals\tools"
     $Global:newrdcmanpath = "C:\tools"
     $rdcmanexe = "RDCMan.exe"
+    $minimumVersion = [version]"3.12.0.0"
+    $sourceExe = Join-Path $rdcmanpath $rdcmanexe
+    $destinationExe = Join-Path $Global:newrdcmanpath $rdcmanexe
 
     # create C:\tools if not present
     if (-not (Test-Path $Global:newrdcmanpath)) {
         New-Item -Path $Global:newrdcmanpath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
     }
 
-    # Download rdcman, if not present
-    if (-not (Test-Path "$rdcmanpath\$rdcmanexe")) {
-
+    $destinationVersion = $null
+    if (Test-Path $destinationExe) {
         try {
-            $ProgressPreference = 'SilentlyContinue'
-            Start-BitsTransfer -Source "https://live.sysinternals.com/$rdcmanexe" -Destination "$Global:newrdcmanpath\$rdcmanexe" -ErrorAction SilentlyContinue
+            $destinationVersion = [version](Get-Item $destinationExe).VersionInfo.ProductVersion
         }
         catch {
-            Write-Log "Could not download latest RDCMan.exe. $_" -Warning -LogOnly
-        }
-        finally {
-            $ProgressPreference = 'Continue'
+            Write-Log "Could not read the RDCMan version at $destinationExe. $_" -Warning -LogOnly
         }
     }
-    else {
-        Copy-Item -Path "$rdcmanpath\$rdcmanexe" -Destination "$Global:newrdcmanpath\$rdcmanexe" -Force -ErrorAction SilentlyContinue
+
+    if (-not $destinationVersion -or $destinationVersion -lt $minimumVersion) {
+        $sourceVersion = $null
+        if (Test-Path $sourceExe) {
+            try {
+                $sourceVersion = [version](Get-Item $sourceExe).VersionInfo.ProductVersion
+            }
+            catch {
+                Write-Log "Could not read the RDCMan version at $sourceExe. $_" -Warning -LogOnly
+            }
+        }
+
+        if ($sourceVersion -and $sourceVersion -ge $minimumVersion) {
+            Copy-Item -Path $sourceExe -Destination $destinationExe -Force -ErrorAction Stop
+        }
+        else {
+            try {
+                $ProgressPreference = 'SilentlyContinue'
+                Start-BitsTransfer -Source "https://live.sysinternals.com/$rdcmanexe" -Destination $destinationExe -ErrorAction Stop
+            }
+            catch {
+                Write-Log "Could not download RDCMan $minimumVersion or newer. $_" -Warning -LogOnly
+            }
+            finally {
+                $ProgressPreference = 'Continue'
+            }
+        }
     }
+
     # set file associations
     & cmd /c assoc .rdg=rdcman | Out-Null
     & cmd /c ftype rdcman=$Global:newrdcmanpath\$rdcmanexe | Out-Null

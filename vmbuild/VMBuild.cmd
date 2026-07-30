@@ -165,6 +165,22 @@ IF ERRORLEVEL 1 (
     ECHO WARNING: Maintenance script reported one or more errors.
 )
 
+REM RDCMan.settings uses the v3.12 schema. Do not continue with an older
+REM executable even if maintenance could not download or install the update.
+powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -Command "$p='C:\tools\RDCMan.exe'; if (-not (Test-Path $p)) { exit 1 }; try { $v=[version](Get-Item $p).VersionInfo.ProductVersion } catch { exit 1 }; if ($v -lt [version]'3.12.0.0') { exit 1 }"
+IF ERRORLEVEL 1 (
+    ECHO.
+    ECHO ============================================================
+    ECHO  ERROR: RDCMan 3.12 or newer is required.
+    ECHO  Automatic installation did not produce a compatible
+    ECHO  C:\tools\RDCMan.exe. Check the maintenance log and network,
+    ECHO  then re-run VMBuild.cmd.
+    ECHO ============================================================
+    ECHO.
+    PAUSE
+    GOTO END
+)
+
 REM ============================================================
 REM Prune logs / temp / cache older than 7 days
 REM ============================================================
