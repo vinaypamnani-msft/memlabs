@@ -2452,6 +2452,7 @@ $global:VM_Config = {
             if ($success -and $IPAddress.ScriptBlockOutput) {
                 $resolvedIP = $null
                 $ipSource = 'none'
+                $reservationIP = $null
 
                 # 1. DHCP reservation — most authoritative.
                 # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
@@ -2528,34 +2529,39 @@ $global:VM_Config = {
                     # CAS/Primary/Secondary get fixed-IP reservations in Phase 1.
                     # Linux VMs get theirs during Phase 1 creation. OSDClient has no network.
                     if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
-                        # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
-                        try {
-                            $vmMac = Get-VMMacIsolated -VmName $currentItem.vmName
-                            if ($vmMac) {
-                                if ($currentItem.role -in "InternetClient", "AADClient") {
-                                    $realnetwork = "172.31.250.0"
-                                }
-                                else {
-                                    # Derive the scope from the IP we're actually reserving so a VM on a
-                                    # secondary subnet (e.g. an existing DC on a different network than the
-                                    # VMs being added this run) reserves in ITS OWN /24 scope rather than
-                                    # vmOptions.network (which is the NEW deployment's network). A DHCP
-                                    # reservation must live in the scope that contains the IP, so reserving
-                                    # a .110.1 address against a .112.0 scope fails every retry.
-                                    $ipOctets = ([string]$resolvedIP).Split('.')
-                                    if ($ipOctets.Count -eq 4) {
-                                        $realnetwork = "$($ipOctets[0]).$($ipOctets[1]).$($ipOctets[2]).0"
-                                    }
-                                    elseif ($currentItem.network) { $realnetwork = $currentItem.network }
-                                    else { $realnetwork = $deployConfig.vmOptions.network }
-                                }
-                                Remove-DHCPReservation -mac $vmMac -vmName $currentItem.vmName
-                                Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $resolvedIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName)"
-                            }
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $resolvedIP" -LogOnly
+                        if ($reservationIP -and $reservationIP -eq $resolvedIP) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation already matches $resolvedIP" -LogOnly
                         }
-                        catch {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $resolvedIP. $_" -Warning
+                        else {
+                            # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
+                            try {
+                                $vmMac = Get-VMMacIsolated -VmName $currentItem.vmName
+                                if ($vmMac) {
+                                    if ($currentItem.role -in "InternetClient", "AADClient") {
+                                        $realnetwork = "172.31.250.0"
+                                    }
+                                    else {
+                                        # Derive the scope from the IP we're actually reserving so a VM on a
+                                        # secondary subnet (e.g. an existing DC on a different network than the
+                                        # VMs being added this run) reserves in ITS OWN /24 scope rather than
+                                        # vmOptions.network (which is the NEW deployment's network). A DHCP
+                                        # reservation must live in the scope that contains the IP, so reserving
+                                        # a .110.1 address against a .112.0 scope fails every retry.
+                                        $ipOctets = ([string]$resolvedIP).Split('.')
+                                        if ($ipOctets.Count -eq 4) {
+                                            $realnetwork = "$($ipOctets[0]).$($ipOctets[1]).$($ipOctets[2]).0"
+                                        }
+                                        elseif ($currentItem.network) { $realnetwork = $currentItem.network }
+                                        else { $realnetwork = $deployConfig.vmOptions.network }
+                                    }
+                                    Remove-DHCPReservation -mac $vmMac -vmName $currentItem.vmName
+                                    Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $resolvedIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName)"
+                                }
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $resolvedIP" -LogOnly
+                            }
+                            catch {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $resolvedIP. $_" -Warning
+                            }
                         }
                     }
                 }
