@@ -143,12 +143,19 @@ $ensureClientPkgCoverage = {
     }
 
     $bgDpFqdns = @()
+    $bgLinks = @()
+    $expectedBgObjects = @()
     try {
-        $bgDpFqdns = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop |
+        $expectedBgNames = @($bgs.SiteCode | Where-Object { $_ } | Select-Object -Unique)
+        $expectedBgObjects = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop |
+            Where-Object { $expectedBgNames -contains $_.Name })
+        $expectedBgIds = @($expectedBgObjects | ForEach-Object { $_.GroupID })
+        $bgLinks = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop |
+            Where-Object { $expectedBgIds -contains $_.GroupID })
+        $bgDpFqdns = @($bgLinks |
                 ForEach-Object { & $fqdnOf $_.ServerNALPath } | Where-Object { $_ } | Select-Object -Unique)
     }
     catch { Write-DscStatus "Client pkg coverage: could not enumerate boundary-group site systems: $($_.Exception.Message)"; return }
-    if ($bgDpFqdns.Count -eq 0) { return }
 
     # SMS_BoundaryGroupSiteSystems lists ALL site systems in a boundary group --
     # DPs, MPs AND SUPs (memlabs adds all three: Get-CMDistributionPoint +
@@ -164,14 +171,26 @@ $ensureClientPkgCoverage = {
         if (-not $df -and $d.ServerName) { $df = "$($d.ServerName)" }
         if ($df) { $dpFqdnSet[$df.ToUpper()] = $true }
     }
-    if ($dpFqdnSet.Count -gt 0) {
-        $nonDp = @($bgDpFqdns | Where-Object { -not $dpFqdnSet.ContainsKey($_.ToUpper()) })
-        if ($nonDp.Count -gt 0) {
-            Write-DscStatus "Client pkg coverage: excluding $($nonDp.Count) boundary-group site system(s) that are MP/SUP-only, not DPs (no client-package content lands there): $($nonDp -join ', ')"
-        }
-        $bgDpFqdns = @($bgDpFqdns | Where-Object { $dpFqdnSet.ContainsKey($_.ToUpper()) })
+    $nonDp = @($bgDpFqdns | Where-Object { -not $dpFqdnSet.ContainsKey($_.ToUpper()) })
+    if ($nonDp.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: excluding $($nonDp.Count) boundary-group site system(s) that are MP/SUP-only, not DPs (no client-package content lands there): $($nonDp -join ', ')"
     }
-    if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems in boundary groups to cover."; return }
+    $bgDpFqdns = @($bgDpFqdns | Where-Object { $dpFqdnSet.ContainsKey($_.ToUpper()) })
+
+    $existingExpectedBgNames = @($expectedBgObjects | ForEach-Object { $_.Name })
+    $groupsWithoutDps = @($expectedBgNames | Where-Object { $existingExpectedBgNames -notcontains $_ })
+    foreach ($expectedBg in $expectedBgObjects) {
+        $linkedDps = @($bgLinks | Where-Object { $_.GroupID -eq $expectedBg.GroupID } |
+                ForEach-Object { & $fqdnOf $_.ServerNALPath } |
+                Where-Object { $_ -and $dpFqdnSet.ContainsKey($_.ToUpper()) } |
+                Select-Object -Unique)
+        if ($linkedDps.Count -eq 0) { $groupsWithoutDps += $expectedBg.Name }
+    }
+    if ($groupsWithoutDps.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: boundary group(s) have NO registered Distribution Point after membership reconciliation: $($groupsWithoutDps -join ', '). Clients in these groups cannot locate the client package." -Failure
+        return
+    }
+    if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems in expected boundary groups to cover." -Failure; return }
 
     # A SECONDARY-site DP only receives the client package via slow inter-site
     # content replication (parent Primary -> secondary despool -> secondary distmgr),
@@ -527,7 +546,7 @@ $ensureChildBgFallbackDps = {
         foreach ($childSite in ($bgs.SiteCode | Select-Object -Unique | Where-Object { $_ -and $_ -ne $SiteCode })) {
             if (-not (Get-CMBoundaryGroup -Name $childSite -ErrorAction SilentlyContinue)) { continue }
             try {
-                Set-CMBoundaryGroup -Name $childSite -AddSiteSystemServerName $parentDps -ErrorAction SilentlyContinue
+                Set-CMBoundaryGroup -Name $childSite -AddSiteSystemServerName $parentDps -ErrorAction Stop
                 Write-DscStatus "Ensured parent DP(s) $($parentDps -join ',') are fallback content sources in child Boundary Group '$childSite'"
             }
             catch { Write-DscStatus "Could not add parent DP(s) to child BG '$childSite': $($_.Exception.Message)" }
@@ -577,6 +596,26 @@ if ($allBGsExist) {
     $adsgdiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
     if ($adiscovery.Value1.ToLower() -eq "active" -and $adsgdiscovery.Value1.ToLower() -eq "active") {
         Write-DscStatus "All boundary groups, boundaries, and discovery already configured. Skipping."
+        # A DP/MP/SUP can be added after its boundary group already exists (for
+        # example, an add-on SiteSystem deployment). The old early-return path
+        # never reconciled site-system membership, so the new DP remained outside
+        # the BG and the client-package coverage gate could neither see nor target
+        # it. Add every currently registered site system before checking content.
+        foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
+            $sitesystems = @()
+            $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+            $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+            $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+            $sitesystems = @($sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
+            if ($sitesystems.Count -eq 0) { continue }
+            try {
+                Set-CMBoundaryGroup -Name $bgsitecode -AddSiteSystemServerName $sitesystems -ErrorAction Stop
+                Write-DscStatus "Reconciled Boundary Group '$bgsitecode' with registered Site Systems $($sitesystems -join ',')"
+            }
+            catch {
+                Write-DscStatus "Could not reconcile Site Systems in Boundary Group '$bgsitecode': $($_.Exception.Message)" -Warning
+            }
+        }
         # Even when BGs are already configured (re-run / steady state), still ensure
         # the client package is on every client-serving DP. This early-return used to
         # skip the coverage repair further down, so a DP stuck at ContentValidating
@@ -647,7 +686,7 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
         if ($exists) {
             if ($sitesystems) {
                 Write-DscStatus "Updating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
-                Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $sitesystems
+                Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $sitesystems -ErrorAction Stop
             }
             else {
                 Write-DscStatus "Boundary Group '$bgsitecode' already exists; no site systems registered yet to add (site '$bgsitecode' still installing)"
@@ -656,14 +695,14 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
         else {
             if ($sitesystems) {
                 Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
-                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgDefaultSite -AddSiteSystemServerName $sitesystems
+                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgDefaultSite -AddSiteSystemServerName $sitesystems -ErrorAction Stop
             }
             else {
                 # Site row exists but no site systems registered yet (secondary
                 # still installing). Create the group now so it EXISTS + replicates;
                 # the DP is added when it comes online (later pass / re-run).
                 Write-DscStatus "Creating Boundary Group '$bgsitecode' (site '$bgsitecode' still installing - no site systems yet; DP added on a later pass) in sitecode $SiteCode"
-                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgDefaultSite
+                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgDefaultSite -ErrorAction Stop
             }
         }
     }

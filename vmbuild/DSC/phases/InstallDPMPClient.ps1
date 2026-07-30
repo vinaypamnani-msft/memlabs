@@ -224,6 +224,7 @@ if ($allInstalled) {
 Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
 Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
 Write-DscStatus "Pull DP role to be installed on '$($PullDPNames -join ',')'"
+$dpInstallFailed = $false
 
 # Register bare site systems (no DP/MP/SUP/RP) in the console so roles can
 # be added manually after deployment (e.g. Reporting Services Point).
@@ -248,7 +249,10 @@ foreach ($DP in $DPs) {
     }
 
     $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
-    Install-DP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode -usePKI:$usePKI
+    $dpInstallResult = @(Install-DP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode -usePKI:$usePKI)
+    if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
+        $dpInstallFailed = $true
+    }
 }
 
 foreach ($MP in $MPs) {
@@ -280,7 +284,10 @@ foreach ($PDP in $PullDPs) {
     $EnsuredSourceDPs[$SourceDPFQDN] = $true
     if (-not (Get-CMDistributionPoint -SiteSystemServerName $SourceDPFQDN -SiteCode $PDP.ServerSiteCode)) {
         Write-DscStatus "Pull DP source '$SourceDPFQDN' is not a Distribution Point yet. Installing standard DP on the source first (required before adding pull DPs)."
-        Install-DP -ServerFQDN $SourceDPFQDN -ServerSiteCode $PDP.ServerSiteCode -usePKI:$usePKI
+        $dpInstallResult = @(Install-DP -ServerFQDN $SourceDPFQDN -ServerSiteCode $PDP.ServerSiteCode -usePKI:$usePKI)
+        if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
+            $dpInstallFailed = $true
+        }
     }
 }
 
@@ -298,7 +305,10 @@ foreach ($PDP in $PullDPs) {
 
     $DPFQDN = $PDP.ServerName.Trim() + "." + $DomainFullName
     $SourceDPFQDN = $PDP.SourceDP.Trim() + "." + $DomainFullName
-    Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN -usePKI:$usePKI
+    $dpInstallResult = @(Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN -usePKI:$usePKI)
+    if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
+        $dpInstallFailed = $true
+    }
 }
 
 # Force install DP/MP on PS Site Server ONLY when the site has no dedicated DP/MP.
@@ -318,7 +328,10 @@ $configuredMPsThisSite = @($MPs | Where-Object { $_.ServerSiteCode -eq $SiteCode
 if ($dpCount -eq 0) {
     if ($configuredDPsThisSite -eq 0) {
         Write-DscStatus "No DP's found or configured in site $SiteCode. Forcing DP install on Site Server $ThisMachineName"
-        Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
+        $dpInstallResult = @(Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI)
+        if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
+            $dpInstallFailed = $true
+        }
     }
     else {
         Write-DscStatus "No DP registered in site $SiteCode yet, but $configuredDPsThisSite dedicated DP(s) are configured -- NOT forcing a DP onto site server $ThisMachineName (the standalone DP owns this role)."
@@ -333,6 +346,14 @@ if ($mpCount -eq 0) {
     else {
         Write-DscStatus "No MP registered in site $SiteCode yet, but $configuredMPsThisSite dedicated MP(s) are configured -- NOT forcing an MP onto site server $ThisMachineName (the standalone MP owns this role)."
     }
+}
+
+if ($dpInstallFailed) {
+    Write-DscStatus "One or more Distribution Point roles failed to register. Leaving InstallDP incomplete so Phase 8 retries before boundary-group and client-package validation." -Failure
+    $Configuration.InstallDP.Status = 'NotStart'
+    $Configuration.InstallDP.EndTime = ''
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
 }
 
 # Mark completed

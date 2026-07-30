@@ -791,7 +791,8 @@ function Install-DP {
             Set-ItemProperty -Path "HKLM:\Software\Microsoft\SMS\DP" -Name "SSLState" -Value 63 -Force
         }    
     }
-    
+
+    return [bool]$dpinstalled
 }
 
 function Install-PullDP {
@@ -882,6 +883,8 @@ function Install-PullDP {
         }
 
     } until ($dpinstalled -or $installFailure)
+
+    return [bool]$dpinstalled
 }
 
 function Confirm-MPHttpsBinding {
