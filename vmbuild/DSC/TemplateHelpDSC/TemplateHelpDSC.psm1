@@ -2110,6 +2110,27 @@ class WaitForExtendSchemaFile {
     [bool] Test() {
         $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         Write-Status "WaitForExtendSchemaFile: running as '$($identity.Name)' (AuthType=$($identity.AuthenticationType), IsSystem=$($identity.IsSystem))"
+        # Already-extended short-circuit: if the CM AD schema is present, do NOT enter
+        # Set() -- it would block up to 30 min waiting for the site server's CMCB media
+        # share just to run a no-op extadsch.exe. On a -StartPhase re-run that share is
+        # ejected after the prior successful CM phase and may not be re-mounted yet.
+        # extadsch is cumulative/idempotent and the schema is a one-time forest-wide
+        # extension, so its presence means there is nothing to do.
+        try {
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $schemaNC = (Get-ADRootDSE -ErrorAction Stop).schemaNamingContext
+            if ($schemaNC) {
+                $smsObjs = @(Get-ADObject -SearchBase $schemaNC -Filter "name -like 'MS-SMS-*' -or name -like 'mS-SMS-*'" -ErrorAction Stop)
+                if ($smsObjs.Count -ge 18) {
+                    Write-Status "CM AD schema already extended ($($smsObjs.Count) MS-SMS-* objects present) -- skipping the extadsch.exe media wait/re-run."
+                    return $true
+                }
+                Write-Status "CM AD schema not yet extended ($($smsObjs.Count)/18 MS-SMS-* objects) -- will wait for media and run extadsch."
+            }
+        }
+        catch {
+            Write-Status "Schema pre-check failed ($($_.Exception.Message)); will run the normal wait + extadsch."
+        }
         return $false
     }
 
