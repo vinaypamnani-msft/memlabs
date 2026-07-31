@@ -270,14 +270,6 @@ $ensureClientPkgCoverage = {
         }
     }
 
-    # Site servers (CAS/Primary/Secondary) run SMS_EXECUTIVE + distmgr. Restarting a
-    # site server's executive sets distmgr's thread-exit flag (m_bShutdownRequest) and
-    # ABORTS any in-flight inter-site content bundle with ERROR_REQUEST_ABORTED
-    # (0x800704d3) -- source-confirmed in distmgr.cpp CreatePackageBundle. So the
-    # level-2 "wake distmgr" restart must NEVER target one (esp. the primary that is
-    # sending content down to a secondary -- that IS the failure we're clearing).
-    $siteServerHosts = @($deployConfig.virtualMachines | Where-Object { $_.role -in 'CAS', 'Primary', 'Secondary' } | ForEach-Object { "$($_.vmName)".ToUpper() })
-
     # Escalation ladder per DP -- a plain redistribute does NOT clear a Secondary DP
     # wedged at ContentValidating (its distmgr may be idle on a 3600s sleep cycle),
     # so escalate: (0) redistribute -> (1) remove + re-add content (force a clean
@@ -315,9 +307,26 @@ $ensureClientPkgCoverage = {
             $hasRow = $state.ContainsKey($u)
             $st = if ($hasRow) { $state[$u] } else { -1 }
             $stName = if ($stateName.ContainsKey("$st")) { $stateName["$st"] } else { "State$st" }
-            # Let actively-progressing distributions (InstallPending=1 / Retrying=2)
-            # finish on their own.
-            if ($st -in 1, 2) { continue }
+            # InstallPending (1) is a distribution actually in flight -- leave it alone.
+            if ($st -eq 1) { continue }
+            # InstallRetrying (2) is NOT progress: the copy already FAILED and distmgr is
+            # parked on its retry backoff (STATMSG 2326 reports 30 minutes / 100 retries),
+            # which is longer than this gate's whole budget. Observed cause on a fresh
+            # child primary: distmgr starts the copy 1-2s before the DP finishes creating
+            # its SMS_DP_SMSPKG$ / SMSSIG$ virtual directories, so the first attempt always
+            # loses the race. Re-arm the targeting row every 5 min so distmgr re-processes
+            # the package now instead of waiting out the backoff; never escalate past this
+            # (removing content from a DP mid-retry is what strands the package).
+            if ($st -eq 2) {
+                if (($try % 10) -eq 0) {
+                    try {
+                        & $redistOrDistribute $dp | Out-Null
+                        Write-DscStatus "Client pkg coverage: DP '$dp' is InstallRetrying (distmgr is in a ~30 min retry backoff after a failed copy) -> re-armed with RefreshNow to retry now [try $try]"
+                    }
+                    catch { Write-DscStatus "Client pkg coverage: RefreshNow re-arm on DP '$dp' failed: $($_.Exception.Message)" }
+                }
+                continue
+            }
             $level = if ($escalation.ContainsKey($u)) { $escalation[$u] } else { -1 }
             try {
                 if ($level -lt 0) {
@@ -363,33 +372,25 @@ $ensureClientPkgCoverage = {
                     $escalation[$u] = 1
                 }
                 elseif ($level -eq 1 -and $try -ge 8) {
-                    # Level 2: last resort. Historically restarted SMS_EXECUTIVE on the DP
-                    # to "wake" an idle secondary distmgr -- but per distmgr source
-                    # (CreatePackageBundle -> SetCancelFlag(&m_bShutdownRequest); the
-                    # content library returns ERROR_REQUEST_ABORTED only when that flag is
-                    # set; m_bShutdownRequest is set only when the distmgr thread exits),
-                    # restarting a SITE SERVER's executive ABORTS its in-flight inter-site
-                    # content bundle with 0x800704d3 -- the very failure this remediation is
-                    # meant to clear (self-inflicted on the primary PL-MELT sending to the
-                    # secondary). NEVER restart a site server's executive; let distmgr retry.
-                    $dpHost = ("$dp" -split '\.')[0]
-                    if ($siteServerHosts -contains $dpHost.ToUpper()) {
-                        Write-DscStatus "Client pkg coverage: DP '$dp' is a SITE SERVER -> NOT restarting SMS_EXECUTIVE (that aborts in-flight inter-site content bundles: distmgr 0x800704d3). Leaving distmgr to retry uninterrupted. [esc.2, try $try]" -Warning
-                    }
-                    else {
-                        try {
-                            $svc = Get-Service -ComputerName $dpHost -Name 'SMS_EXECUTIVE' -ErrorAction Stop
-                            Restart-Service -InputObject $svc -Force -ErrorAction Stop
-                            Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> restarted SMS_EXECUTIVE on '$dpHost' to wake distmgr [esc.2, try $try]"
-                        }
-                        catch { Write-DscStatus "Client pkg coverage: could not restart SMS_EXECUTIVE on '$dpHost' (WinRM/RPC?): $($_.Exception.Message)" }
-                    }
+                    # Never restart SMS_EXECUTIVE as content remediation. On a site server
+                    # that aborts distmgr's in-flight bundle; on a remote DP there is no
+                    # distmgr to wake, and stopping the executive kills SMS_DP_PROVIDER
+                    # during content import/status publication. The latter produces the
+                    # exact false state this gate is waiting on: PkgLib has the package but
+                    # the site receives no Installed summarizer row. Leave the transfer and
+                    # DP provider uninterrupted so normal retry/status processing can finish.
+                    Write-DscStatus "Client pkg coverage: DP '$dp' still $stName after clean redistribution -> NOT restarting SMS_EXECUTIVE (that can abort content import/status publication). Leaving ConfigMgr retry processing uninterrupted. [esc.2, try $try]" -Warning
                     $escalation[$u] = 2
                 }
             }
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
         }
-        Write-DscStatus "Client pkg coverage: waiting for client package on: $($notInstalled -join ', ') [$try/$maxTries]"
+        $waitDesc = @($notInstalled | ForEach-Object {
+                $uw = $_.ToUpper()
+                $sw = if (-not $state.ContainsKey($uw)) { 'no-row' } elseif ($stateName.ContainsKey("$($state[$uw])")) { $stateName["$($state[$uw])"] } else { "State$($state[$uw])" }
+                "$_ ($sw)"
+            })
+        Write-DscStatus "Client pkg coverage: waiting for client package on: $($waitDesc -join ', ') [$try/$maxTries]"
         Start-Sleep -Seconds 30
     }
 
