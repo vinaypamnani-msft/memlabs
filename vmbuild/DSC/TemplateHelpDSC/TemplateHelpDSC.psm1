@@ -4408,6 +4408,14 @@ class InstallFeatureForSCCM {
         $featureList = @($this.GetRequiredFeatures())
         if ($featureList.Count -gt 0) {
             $featureState = @($this.GetFeatureState($featureList))
+            $pendingFeatures = @($featureState | Where-Object { ([string]$_.InstallState) -like "*Pending" } | ForEach-Object { $_.Name })
+            if ($pendingFeatures.Count -gt 0) {
+                Write-Status "Windows Feature servicing is pending restart: $($pendingFeatures -join ', ')"
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
+                return
+            }
+
             $missingFeatures = @($featureState | Where-Object { $_.InstallState -ne "Installed" } | ForEach-Object { $_.Name })
             if ($missingFeatures.Count -gt 0) {
                 Write-Status "Installing $($missingFeatures.Count) missing Windows Features: $($missingFeatures -join ', ')"
