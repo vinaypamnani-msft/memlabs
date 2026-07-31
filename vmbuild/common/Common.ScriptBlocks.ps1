@@ -4491,13 +4491,19 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished waiting on all nodes"
 
             Write-Progress2 "Creating DSC" -status "Invoking DSC_CreateConfig" -PercentComplete 0 -force
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Creating DSC configuration."
+            $dscCreateStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
+            $dscCreateStopWatch.Stop()
             if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration after $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC configuration creation completed in $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds."
 
             Write-Progress2 "Starting DSC" -status "Invoking DSC_StartConfig" -PercentComplete 50 -force
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting DSC configuration."
+            $dscStartStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
                 Start-Sleep -Seconds 15
@@ -4515,8 +4521,9 @@ $global:VM_Config = {
                                         
                 }
             }
-            Write-Progress2 "Starting DSC" -status "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration." -PercentComplete 100 -force
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration."
+            $dscStartStopWatch.Stop()
+            Write-Progress2 "Starting DSC" -status "[Phase $Phase]: $($currentItem.vmName): DSC start command returned." -PercentComplete 100 -force
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC start command returned after $([math]::Round($dscStartStopWatch.Elapsed.TotalSeconds, 1)) seconds."
         }
 
         # =============================================================

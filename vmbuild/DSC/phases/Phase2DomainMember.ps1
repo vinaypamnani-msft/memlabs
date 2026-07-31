@@ -99,7 +99,22 @@
                 New-ItemProperty -Path $auPath -Name 'NoAutoUpdate' -PropertyType DWord -Value 1 -Force | Out-Null
                 New-ItemProperty -Path $wuPath -Name 'DoNotConnectToWindowsUpdateInternetLocations' -PropertyType DWord -Value 1 -Force | Out-Null
                 New-ItemProperty -Path $wuPath -Name 'DisableWindowsUpdateAccess' -PropertyType DWord -Value 1 -Force | Out-Null
-                Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+                $service = Get-Service -Name wuauserv -ErrorAction SilentlyContinue
+                if ($service -and $service.Status -ne 'Stopped') {
+                    $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+                    try {
+                        $service.Stop()
+                        $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+                    }
+                    catch {
+                        $service.Refresh()
+                        Write-Warning "wuauserv did not stop within 30 seconds. Current status: $($service.Status). Error: $_"
+                    }
+                    finally {
+                        $stopWatch.Stop()
+                        Write-Verbose "wuauserv stop attempt completed in $([math]::Round($stopWatch.Elapsed.TotalSeconds, 1)) seconds."
+                    }
+                }
             }
         }
 
