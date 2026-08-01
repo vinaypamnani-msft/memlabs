@@ -2122,6 +2122,11 @@ $global:VM_Config = {
         # even though sessions connect fine.
         $Test_PendingReboot = {
             $reasons = @()
+            # Locals, not globals: the PSDirect session is cached and reused for the
+            # whole run, so globals here would carry a prior phase's file-rename
+            # details into this phase's answer.
+            $pendingFileRenameDetails = $null
+            $pendingDeleteOnlyOps = 0
             # Component Based Servicing
             if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $reasons += 'CBS\RebootPending' }
             if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootInProgress') { $reasons += 'CBS\RebootInProgress' }
@@ -2158,7 +2163,7 @@ $global:VM_Config = {
                     }
                     $opLines += "$src -> $dst"
                 }
-                $global:_PendingFileRenameDetails = $opLines -join "`n"
+                $pendingFileRenameDetails = $opLines -join "`n"
                 if ($renameCount -gt 0) {
                     # Actual renames present -- need a reboot
                     $reasons += "PendingFileRename ($renameCount renames, $($opLines.Count) total ops)"
@@ -2166,7 +2171,7 @@ $global:VM_Config = {
                 else {
                     # All entries are delete-only (temp file cleanup). Log for
                     # diagnostics but don't trigger a reboot.
-                    $global:_PendingDeleteOnlyOps = $opLines.Count
+                    $pendingDeleteOnlyOps = $opLines.Count
                 }
             }
             # Pending computer rename
@@ -2196,18 +2201,18 @@ $global:VM_Config = {
                 } catch {}
                 $result = [pscustomobject]@{
                     Reasons = $reasons -join '; '
-                    PendingFileOps = if ($global:_PendingFileRenameDetails) { $global:_PendingFileRenameDetails } else { $null }
-                    DeleteOnlyOps = if ($global:_PendingDeleteOnlyOps) { $global:_PendingDeleteOnlyOps } else { 0 }
+                    PendingFileOps = $pendingFileRenameDetails
+                    DeleteOnlyOps = $pendingDeleteOnlyOps
                     DeferredFor = $deferredFor
                 }
                 return $result
             }
             # Return delete-only count for informational logging even when no reboot needed
-            if ($global:_PendingDeleteOnlyOps -and $global:_PendingDeleteOnlyOps -gt 0) {
+            if ($pendingDeleteOnlyOps -gt 0) {
                 return [pscustomobject]@{
                     Reasons = $null
-                    PendingFileOps = $global:_PendingFileRenameDetails
-                    DeleteOnlyOps = $global:_PendingDeleteOnlyOps
+                    PendingFileOps = $pendingFileRenameDetails
+                    DeleteOnlyOps = $pendingDeleteOnlyOps
                 }
             }
             return $false
@@ -2242,14 +2247,21 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Skipping pending-reboot check -- $skipRebootProbe." -LogOnly
         }
         else {
-            # Stay on the asynchronous PSDirect path used by Stop_RunningDSC.
-            # In VM_Config's outer Start-Job process, the first synchronous
-            # pipeline after that nested remoting job repeatedly fails during
-            # pipeline creation even though the cached session reports Available.
-            # Consecutive -AsJob calls do not exhibit that transition failure.
-            $rebootCheck = Invoke-VmCommand -AsJob -TimeoutSeconds 60 -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Check pending reboot"
+            # Synchronous, matching the post-phase check below that has always
+            # worked. The -AsJob form used here failed 553/553 across the CSTest2
+            # runs: Invoke-Command -AsJob surfaces a remote fault only on the CHILD
+            # job, so -ErrorVariable stayed empty, the job went Failed, the output
+            # was discarded and the check never once ran. The transport-ready probe
+            # that now ends the preceding Stop-DSC job covers the pipeline-create
+            # race that -AsJob was reaching for.
+            $rebootCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Check pending reboot"
         }
-        if ($rebootCheck.ScriptBlockOutput -and $rebootCheck.ScriptBlockOutput -ne $false) {
+        if ($rebootCheck -and $rebootCheck.ScriptBlockFailed) {
+            # A failed check back-fills ScriptBlockOutput with the error text, which
+            # is truthy -- without this guard it gets read as a result object below.
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending-reboot check failed; continuing without it. $($rebootCheck.ScriptBlockOutput)" -Warning -LogOnly
+        }
+        elseif ($rebootCheck.ScriptBlockOutput -and $rebootCheck.ScriptBlockOutput -ne $false) {
             $rebootResult = $rebootCheck.ScriptBlockOutput
             # Delete-only PendingFileRename ops don't require a reboot
             if (-not $rebootResult.Reasons) {
@@ -6132,7 +6144,10 @@ $global:VM_Config = {
         if ($complete -and $Phase -lt 8) {
             try {
                 $reboot = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Post-phase reboot check" -SuppressLog
-                if ($reboot.ScriptBlockOutput -and $reboot.ScriptBlockOutput -ne $false) {
+                if ($reboot.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Post-phase reboot check failed; skipping. $($reboot.ScriptBlockOutput)" -LogOnly
+                }
+                elseif ($reboot.ScriptBlockOutput -and $reboot.ScriptBlockOutput -ne $false) {
                     $rebootResult = $reboot.ScriptBlockOutput
                     # Delete-only PendingFileRename ops don't require a reboot
                     if (-not $rebootResult.Reasons) {

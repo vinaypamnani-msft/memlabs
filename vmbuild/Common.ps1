@@ -5887,6 +5887,7 @@ function Invoke-VmCommand {
 
         # Run script block inside VM
         $inflightToken = $null
+        $jobFailureReason = $null
         if (-not $failed) {
             # Mark this scriptblock as in-flight on $ps so a concurrent pipeline on
             # the SAME cached session (the suspected cause of "An error occurred while
@@ -6033,8 +6034,28 @@ function Invoke-VmCommand {
                         Write-Log "$VmName`: Job '$DisplayName' Failed State: $($job.State)" -LogOnly
                         $failed = $true
                         $return.ScriptBlockFailed = $true
+                        # -ErrorVariable on Invoke-Command -AsJob only captures errors raised
+                        # while STARTING the job; anything the remote pipeline throws lands on
+                        # the child job, so $Err2 is empty for every real job failure and the
+                        # message degenerated to "Unknown Error". Harvest the child job's
+                        # failure reason / error stream so the log names the actual fault.
+                        $jobFailureReason = $null
+                        try {
+                            $reasonParts = @()
+                            foreach ($cj in @($job.ChildJobs)) {
+                                if ($cj.JobStateInfo -and $cj.JobStateInfo.Reason) { $reasonParts += "$($cj.JobStateInfo.Reason)".Trim() }
+                                if ($cj.Error -and $cj.Error.Count -gt 0) { $reasonParts += @($cj.Error | ForEach-Object { "$_".Trim() }) }
+                            }
+                            if ($job.JobStateInfo -and $job.JobStateInfo.Reason) { $reasonParts += "$($job.JobStateInfo.Reason)".Trim() }
+                            $reasonParts = @($reasonParts | Where-Object { $_ } | Select-Object -Unique)
+                            if ($reasonParts.Count -gt 0) { $jobFailureReason = $reasonParts -join '; ' }
+                        }
+                        catch {}
                         if ($Err2.Count -ne 0) {
                             $OutErr = "$($Err2[0].ToString().Trim())"
+                        }
+                        elseif ($jobFailureReason) {
+                            $OutErr = $jobFailureReason
                         }
                         else {
                             $OutErr = "Unknown Error"
@@ -6281,6 +6302,9 @@ function Invoke-VmCommand {
             }
             elseif ($caughtException) {
                 $return.ErrorDetails = @("$caughtException".Trim())
+            }
+            elseif ($jobFailureReason) {
+                $return.ErrorDetails = @($jobFailureReason)
             }
             # Populate ScriptBlockOutput with error text when command failed but output is null
             if ($null -eq $return.ScriptBlockOutput) {
