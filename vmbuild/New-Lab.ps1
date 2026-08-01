@@ -1415,6 +1415,12 @@ finally {
     # Set quick edit back
     Set-QuickEdit
 
+    # Jobs and cached PSSessions can leave large, now-unreachable object graphs
+    # resident in this long-lived launcher process. Collect and trim only this
+    # process after cleanup, and log managed/private/working-set before/after so
+    # persistent private growth can be distinguished from reclaimable residency.
+    Invoke-HostMemoryReclaim -CurrentProcessOnly
+
     Write-Host
     if ($NewLabsuccess -ne $true) {
         if ($exitcode -ne 2) {

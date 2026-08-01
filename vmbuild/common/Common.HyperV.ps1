@@ -288,7 +288,9 @@ function Clear-StrayVhdMounts {
 # Returns the change in '\Memory\Available MBytes' (MB freed) for logging.
 function Invoke-HostMemoryReclaim {
     [CmdletBinding()]
-    param()
+    param(
+        [switch]$CurrentProcessOnly
+    )
 
     $beforeMB = $null
     try { $beforeMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue } catch {}
@@ -308,6 +310,19 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
     }
     catch {}
 
+    # Snapshot after one-time Add-Type initialization so helper compilation is
+    # not mistaken for private-memory growth caused by cleanup.
+    $beforeWorkingSetMB = $null
+    $beforePrivateMB = $null
+    $managedBeforeMB = $null
+    try {
+        $beforeProcess = Get-Process -Id $PID -ErrorAction Stop
+        $beforeWorkingSetMB = [Math]::Round($beforeProcess.WorkingSet64 / 1MB, 0)
+        $beforePrivateMB = [Math]::Round($beforeProcess.PrivateMemorySize64 / 1MB, 0)
+        $managedBeforeMB = [Math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 0)
+    }
+    catch {}
+
     # 1. Managed GC in the host process.
     try {
         [System.GC]::Collect()
@@ -319,7 +334,12 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
     # 2. Trim working sets of our PowerShell processes (host + job workers).
     $trimmed = 0
     try {
-        $psProcs = Get-Process -Name 'pwsh', 'powershell' -ErrorAction SilentlyContinue
+        $psProcs = if ($CurrentProcessOnly) {
+            @(Get-Process -Id $PID -ErrorAction SilentlyContinue)
+        }
+        else {
+            @(Get-Process -Name 'pwsh', 'powershell' -ErrorAction SilentlyContinue)
+        }
         foreach ($p in $psProcs) {
             try {
                 if ([MemLabs.MemReclaim]::SetProcessWorkingSetSize($p.Handle, [System.IntPtr](-1), [System.IntPtr](-1))) {
@@ -331,15 +351,30 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
     }
     catch {}
 
-    # 3. Flush the system file cache working set.
-    try { [void][MemLabs.MemReclaim]::SetSystemFileCacheSize([System.IntPtr](-1), [System.IntPtr](-1), 0) } catch {}
+    # 3. Flush the system file cache working set during host-wide OOM recovery.
+    if (-not $CurrentProcessOnly) {
+        try { [void][MemLabs.MemReclaim]::SetSystemFileCacheSize([System.IntPtr](-1), [System.IntPtr](-1), 0) } catch {}
+    }
 
     $afterMB = $null
     try { $afterMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue } catch {}
+    $afterWorkingSetMB = $null
+    $afterPrivateMB = $null
+    $managedAfterMB = $null
+    try {
+        $afterProcess = Get-Process -Id $PID -ErrorAction Stop
+        $afterWorkingSetMB = [Math]::Round($afterProcess.WorkingSet64 / 1MB, 0)
+        $afterPrivateMB = [Math]::Round($afterProcess.PrivateMemorySize64 / 1MB, 0)
+        $managedAfterMB = [Math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 0)
+    }
+    catch {}
 
     $freedMB = if (($null -ne $beforeMB) -and ($null -ne $afterMB)) { [Math]::Round($afterMB - $beforeMB, 0) } else { $null }
     try {
-        if ($null -ne $freedMB) {
+        if ($CurrentProcessOnly -and ($null -ne $beforeWorkingSetMB) -and ($null -ne $afterWorkingSetMB)) {
+            Write-Log "Invoke-HostMemoryReclaim: launcher pid $PID after cleanup - managed ${managedBeforeMB}MB -> ${managedAfterMB}MB, private ${beforePrivateMB}MB -> ${afterPrivateMB}MB, WS ${beforeWorkingSetMB}MB -> ${afterWorkingSetMB}MB" -LogOnly
+        }
+        elseif ($null -ne $freedMB) {
             Write-Log "Invoke-HostMemoryReclaim: GC + trimmed $trimmed PowerShell working set(s) + flushed file cache; available memory changed by ${freedMB}MB (now $([Math]::Round($afterMB,0))MB)" -LogOnly
         }
         else {
