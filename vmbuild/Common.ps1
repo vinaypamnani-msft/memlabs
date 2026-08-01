@@ -5101,22 +5101,27 @@ function Get-AvailableMemoryGB {
         [string[]]$ExcludeVMs
     )
 
-    # Use total physical RAM instead of free memory for a stable, deterministic
-    # calculation that isn't affected by OS cache fluctuations.
-    $totalPhysical = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
-    $usableBytes = $totalPhysical - 8GB
+    # Base capacity on live available RAM so root-partition and host-process
+    # usage is included. Total physical RAM minus VM-assigned memory assumes
+    # all non-VM usage fits inside the fixed reserve, which can substantially
+    # overstate capacity on a loaded Hyper-V host.
+    $availableBytes = $null
+    try {
+        $availableBytes = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue * 1MB
+    }
+    catch {
+        $availableBytes = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).FreePhysicalMemory * 1KB
+    }
 
-    # Subtract memory assigned to running Hyper-V VMs, optionally excluding
-    # VMs that belong to the caller's deployment (so their memory stays in the
-    # "available" pool for that deployment's total calculation).
+    # The caller's total includes its already-running VMs. Credit their current
+    # assigned memory back so rerun validation does not count it twice.
     $runningVMs = Get-VM | Where-Object { $_.State -eq "Running" }
     if ($ExcludeVMs) {
-        $runningVMs = $runningVMs | Where-Object { $_.Name -notin $ExcludeVMs }
+        $excludedRunningMemory = ($runningVMs | Where-Object { $_.Name -in $ExcludeVMs } | Measure-Object -Property MemoryAssigned -Sum).Sum
     }
-    $runningVMMemory = ($runningVMs | Measure-Object -Property MemoryAssigned -Sum).Sum
-    if (-not $runningVMMemory) { $runningVMMemory = 0 }
+    if (-not $excludedRunningMemory) { $excludedRunningMemory = 0 }
 
-    $availableMemory = [Math]::Round(($usableBytes - $runningVMMemory) / 1GB, 2)
+    $availableMemory = [Math]::Round(($availableBytes + $excludedRunningMemory - 8GB) / 1GB, 2)
     if ($availableMemory -lt 0) {
         $availableMemory = 0
     }

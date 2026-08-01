@@ -4352,7 +4352,13 @@ Function Show-Summary {
         $alreadyRunningMemory = if ($runningConfigVMs.Count -gt 0) { ($runningConfigVMs.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum).Sum / 1GB } else { 0 }
         $availableMemory = Get-AvailableMemoryGB -ExcludeVMs $fixedConfig.vmName
         $runningInfo = if ($alreadyRunningMemory -gt 0) { " ($($alreadyRunningMemory)GB already running)" } else { "" }
-        Write-GreenCheck "This configuration will use $($totalMemory)GB$runningInfo out of $($availableMemory)GB Available RAM on host machine [8GB Buffer]"
+        $memorySummary = "This configuration will use $($totalMemory)GB$runningInfo out of $($availableMemory)GB deployable RAM on host machine [after 8GB reserve]"
+        if ($totalMemory -le $availableMemory) {
+            Write-GreenCheck $memorySummary
+        }
+        else {
+            Write-OrangePoint $memorySummary
+        }
     }
 
     if (-not $Common.DevBranch) {

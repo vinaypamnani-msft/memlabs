@@ -855,14 +855,15 @@ function Start-Phase {
         # Memory pre-flight. Phase 1 starts every new VM concurrently for file
         # injection, so the host has to hold ALL their startup memory at once
         # on top of the OS/Hyper-V baseline and the ~N concurrent VM_Create job
-        # processes that mount and inject VHDs. The static validation check uses
-        # only an 8GB buffer against total physical RAM, which is thinner than a
-        # loaded host's real baseline, so a config that "fits" (sum < total) can
-        # still OOM mid-phase and force a full rollback (seen on
+        # processes that mount and inject VHDs. Re-check immediately before
+        # creation because available memory can change after validation; a
+        # config that fit earlier can still OOM mid-phase and force a full
+        # rollback (seen on
         # wacky.sandwich.lab: ZZ-TURNIP, the 25th VM, failed to start with
         # 0x8007000E at ~93GB committed on a 128GB host). Re-check here against
         # REAL available memory and let the user bail before any VM is created.
-        # Default is "continue" so unattended runs are never blocked.
+        # Default to abort so unattended runs do not proceed into a predictable
+        # OOM failure and full Phase 1 rollback.
         try {
             $existingVmNames = (Get-List -Type VM -SmartUpdate).vmName
             $newVMs = @($deployConfig.virtualMachines | Where-Object { -not $_.hidden -and $_.vmName -notin $existingVmNames })
@@ -878,7 +879,7 @@ function Start-Phase {
                     $needGB = [Math]::Round($newStartupGB + $hostReserveGB, 1)
                     if ($needGB -gt $availGB) {
                         Write-OrangePoint "[Phase 1] Memory pre-flight: creating $($newVMs.Count) VM(s) needs ~$($newStartupGB)GB startup + $($hostReserveGB)GB host reserve = $($needGB)GB, but only $($availGB)GB is currently available. The build may run out of memory mid-phase and roll back." -WriteLog
-                        $memResp = Read-YesOrNoWithTimeout -timeout 30 -prompt "Continue Phase 1 anyway? (Y/n)" -Default "y"
+                        $memResp = Read-YesOrNoWithTimeout -timeout 30 -prompt "Continue Phase 1 anyway? (y/N)" -Default "n"
                         if ($memResp -and $memResp.ToString().ToLower() -eq "n") {
                             Write-RedX "[Phase 1] Aborted by user: insufficient available memory (~$($needGB)GB needed, $($availGB)GB available)." -WriteLog
                             return $false
