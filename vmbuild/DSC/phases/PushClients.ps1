@@ -291,6 +291,36 @@ $pushMaxAttempts = 2
 # record belongs to the previous incarnation and must be cleared so ccmsetup
 # re-runs on the new machine. RSAT-free (ADSISearcher) so it works on any site
 # server. PS5.1-safe.
+function Test-RemoteCMClientInstalled {
+    <#
+    .SYNOPSIS
+    Returns $true when the target machine already has a ConfigMgr client on
+    disk. Asked of the MACHINE itself over SMB (admin$ = %windir%), not of this
+    site's CM database.
+
+    Why: in a hierarchy a client owned by ANOTHER site may never show up in this
+    site's 'All Systems', so the CM-side pre-check below can't trim it and the
+    discovery wait then burns its full budget on it -- on EVERY rerun, forever.
+    The machine's own filesystem is the one source of truth that can't be stale
+    or site-scoped. RSAT-free, remoting-free, PS5.1-safe.
+    #>
+    param([string]$ComputerName)
+
+    if ([string]::IsNullOrWhiteSpace($ComputerName)) { return $false }
+
+    $probePaths = @(
+        "\\$ComputerName\admin`$\CCM\CcmExec.exe",
+        "\\$ComputerName\c`$\Windows\CCM\CcmExec.exe"
+    )
+    foreach ($p in $probePaths) {
+        try {
+            if (Test-Path -Path $p -PathType Leaf -ErrorAction SilentlyContinue) { return $true }
+        }
+        catch {}
+    }
+    return $false
+}
+
 function Test-CMClientRecordStale {
     param([string]$ShortName, [string]$SiteCode)
 
@@ -372,7 +402,18 @@ try {
 
 foreach ($clientName in $ClientNameList) {
     $cmIsClient = ($allDevices | Where-Object { ($_.Name -eq $clientName -or $_.Name -like "$($clientName).*") -and $_.IsClient }).Count -gt 0
-    if (-not $cmIsClient) { continue }
+    if (-not $cmIsClient) {
+        # No client record in THIS site's collection. In a hierarchy that only
+        # means it isn't our client -- the machine may already be a fully
+        # installed client of a sibling site, in which case it will never appear
+        # here and the discovery wait below is guaranteed dead time. Ask the
+        # machine itself before committing to that wait.
+        if (Test-RemoteCMClientInstalled -ComputerName $clientName) {
+            Write-DscStatus "[ClientPush] Pre-check: $clientName already has the CM client on disk (owned by another site; not in this site's '$CollectionName'). Skipping."
+            $ClientNameList = @($ClientNameList | Where-Object { $_ -ne $clientName })
+        }
+        continue
+    }
 
     # CM reports this name as an installed client. Verify the record actually
     # belongs to the CURRENT machine before trusting it -- on a redeploy the
@@ -472,6 +513,16 @@ if ($PackageSuccess -eq 0) {
 $installedmachinelist = @(get-cmdevice -CollectionName $CollectionName -ErrorAction Stop | Where-Object {$_.IsClient} | Select-Object -ExpandProperty Name)
 $machinelist = @(get-cmdevice -CollectionName $CollectionName -ErrorAction Stop).Name
 Write-DscStatus "[ClientPush] Already installed: $($installedmachinelist -join ','). Discovered: $($machinelist -join ',')"
+
+# Shared discovery budget for the WHOLE push run. Previously each client got its
+# own 2 x 600s wait loop, so N never-discoverable clients cost N x ~21 minutes of
+# pure sleeping (measured: 5 clients = ~105 min per config, on reruns that
+# changed nothing). System discovery is site-wide -- one Invoke-CMSystemDiscovery
+# covers every pending client -- so the budget is shared, not per-client.
+$discoveryBudgetMinutes = 20
+$discoveryDeadline = (Get-Date).AddMinutes($discoveryBudgetMinutes)
+$lastDiscoveryRun = [datetime]::MinValue
+
 $clientIndex = 0
 foreach ($client in $ClientNameList) {
     $clientIndex++
@@ -492,29 +543,37 @@ foreach ($client in $ClientNameList) {
         continue
     }
 
-    $failCount = 0
+    # Machine-sourced short-circuit. The CM-side pre-check above can only see
+    # devices in THIS site's 'All Systems'; a client owned by a sibling site in
+    # the hierarchy is invisible here and would otherwise consume the entire
+    # discovery budget waiting for a record that is never coming.
+    if (Test-RemoteCMClientInstalled -ComputerName $client) {
+        Write-DscStatus "[ClientPush] ($clientIndex/$($ClientNameList.Count)) $client already has the CM client installed on disk. Skipping push."
+        continue
+    }
+
     $success = $true
     while ($machinelist -notcontains $client) {
-        if ($failCount -ge 2) {
+        if ((Get-Date) -ge $discoveryDeadline) {
+            Write-DscStatus "[ClientPush] Shared ${discoveryBudgetMinutes}m discovery budget exhausted; $client never appeared in '$CollectionName'. Skipping." -Warning
             $success = $false
             break
         }
-        Invoke-CMSystemDiscovery
-        Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
-        $seconds = 600
-        while ($seconds -ge 0) {
-            Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
-            Start-Sleep -Seconds 30
-            $seconds -= 30
-            $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
-            if ($machinelist -contains $client) {
-                Write-DscStatus "$client is in'$CollectionName'"
-                break
-            }
+        # Discovery is site-wide, so re-triggering it per client is wasted work.
+        # Kick it at most once every 10 minutes for the whole run.
+        if (((Get-Date) - $lastDiscoveryRun).TotalMinutes -ge 10) {
+            Invoke-CMSystemDiscovery
+            Invoke-CMDeviceCollectionUpdate -Name $CollectionName
+            $lastDiscoveryRun = Get-Date
         }
-        $failCount++
-        
+
+        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
+        Start-Sleep -Seconds 30
+        $machinelist = @((get-cmdevice -CollectionName $CollectionName).Name)
+        if ($machinelist -contains $client) {
+            Write-DscStatus "$client is in '$CollectionName'"
+        }
     }
     if ($success) {
         # Re-check if client is already installed or ccmsetup is already running
