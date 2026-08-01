@@ -439,12 +439,24 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
                     catch {}
 
                     # (3) Assign S: to the SQL disc, trying each method until S:\setup.exe resolves.
+                    # The mount manager publishes a new drive letter ASYNCHRONOUSLY, so probing
+                    # S:\setup.exe the instant Set-CimInstance returns races that publication and
+                    # reports a false failure -- observed on CS2-PS3SQL where all three methods
+                    # "failed" and the throw itself reported "Current optical letter: S:".
+                    $confirmS = {
+                        $limit = (Get-Date).AddSeconds(10)
+                        do {
+                            if (Test-Path 'S:\setup.exe' -ErrorAction SilentlyContinue) { return $true }
+                            Start-Sleep -Milliseconds 500
+                        } while ((Get-Date) -lt $limit)
+                        return $false
+                    }
                     $assigned = $false
                     #  (3a) CIM InputObject.
                     try {
                         $sqlVol.DriveLetter = 'S:'
                         Set-CimInstance -InputObject $sqlVol -ErrorAction Stop
-                        $assigned = (Test-Path 'S:\setup.exe')
+                        $assigned = & $confirmS
                     }
                     catch { Write-Verbose "CIM S: assign failed: $($_.Exception.Message)" }
                     #  (3b) WMI Set-WmiInstance (the method InitializeDisks uses successfully).
@@ -452,7 +464,7 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
                         try {
                             $wmiVol = Get-WmiObject -Class Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue | Where-Object { $_.DeviceID -eq $sqlVol.DeviceID } | Select-Object -First 1
                             if ($wmiVol) { $wmiVol | Set-WmiInstance -Arguments @{ DriveLetter = 'S:' } -ErrorAction SilentlyContinue | Out-Null }
-                            $assigned = (Test-Path 'S:\setup.exe')
+                            $assigned = & $confirmS
                         }
                         catch { Write-Verbose "WMI S: assign failed: $($_.Exception.Message)" }
                     }
@@ -460,14 +472,21 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
                     if (-not $assigned) {
                         try {
                             & $mountvol S: $sqlVol.DeviceID 2>$null | Out-Null
-                            Start-Sleep -Seconds 1
-                            $assigned = (Test-Path 'S:\setup.exe')
+                            $assigned = & $confirmS
                         }
                         catch { Write-Verbose "mountvol S: assign failed: $($_.Exception.Message)" }
                     }
 
                     if (-not $assigned) {
-                        throw "Failed to assign S: to SQL ISO volume ($($sqlVol.DeviceID)) after CIM/WMI/mountvol attempts. Current optical letter: $($sqlVol.DriveLetter)."
+                        # Re-query: $sqlVol.DriveLetter was mutated to 'S:' by (3a) above, so
+                        # echoing it would report the letter we wanted, not the one in effect.
+                        $actualLetter = $null
+                        try {
+                            $actualLetter = (Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue |
+                                    Where-Object { $_.DeviceID -eq $sqlVol.DeviceID } | Select-Object -First 1).DriveLetter
+                        }
+                        catch {}
+                        throw "Failed to assign S: to SQL ISO volume ($($sqlVol.DeviceID)) after CIM/WMI/mountvol attempts. Current optical letter: $actualLetter."
                     }
                 }
                 DependsOn  = $nextDepend
