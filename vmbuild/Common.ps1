@@ -1217,7 +1217,8 @@ function Get-File {
             }
 
             # --- Resilient copy loop for local files (especially VHDX) ---
-            # Strategy: alternate BITS and robocopy with increasing backoff.
+            # Strategy: use unbuffered robocopy first, then BITS as fallback,
+            # with increasing backoff.
             # Only give up on non-recoverable errors (source missing, disk
             # full, access denied). Transient I/O errors under heavy load
             # are retried indefinitely.
@@ -1230,7 +1231,7 @@ function Get-File {
             }
 
             # VHDX copy — keep trying until it works or we hit a fatal error
-            $maxRounds = 10          # 10 rounds × (BITS + robocopy) = 20 total attempts
+            $maxRounds = 10          # 10 rounds × (robocopy + BITS) = 20 total attempts
             $lastError = $null
             for ($round = 1; $round -le $maxRounds; $round++) {
 
@@ -1254,10 +1255,54 @@ function Get-File {
                     Write-Log "Get-File: Could not check free space: $($_.ToString().Trim())" -Warning
                 }
 
-                # --- Try BITS ---
+                # --- Try robocopy first ---
+                # Foreground BITS copies of multi-GB VHDX files can leave the
+                # calling pwsh worker with a multi-GB reclaimable working set.
+                # /J uses unbuffered I/O and avoids consuming the memory needed
+                # to start the newly cloned VMs.
+                $roboSrc = Split-Path $Source -Parent
+                $roboDst = Split-Path $Destination -Parent
+                $roboFile = Split-Path $Source -Leaf
+                $destFile = Split-Path $Destination -Leaf
+                $needsRename = $roboFile -ne $destFile
+                $tempCopy = if ($needsRename) { Join-Path $roboDst $roboFile } else { $Destination }
+
+                foreach ($partialPath in @($Destination, $tempCopy) | Select-Object -Unique) {
+                    if (Test-Path $partialPath) {
+                        Remove-Item -LiteralPath $partialPath -Force -ErrorAction SilentlyContinue
+                    }
+                }
+
+                # /J = unbuffered I/O; /R:2 /W:10 = bounded internal retries;
+                # /NP = no progress percentage.
+                $roboArgs = @($roboSrc, $roboDst, $roboFile, '/J', '/R:2', '/W:10', '/NP')
+                Write-Log "Get-File: robocopy (round $round/$maxRounds) $($roboArgs -join ' ')" -LogOnly
+                $roboResult = & robocopy @roboArgs 2>&1
+                $roboExit = $LASTEXITCODE
+
+                if ($roboExit -lt 8) {
+                    if ($needsRename -and (Test-Path $tempCopy)) {
+                        Rename-Item -LiteralPath $tempCopy -NewName $destFile -Force -ErrorAction Stop
+                    }
+                    if (Test-Path $Destination) {
+                        Write-Log "Get-File: robocopy succeeded (round $round, exit $roboExit)."
+                        return $true
+                    }
+                }
+
+                $roboTail = ($roboResult | Select-Object -Last 3) -join " | "
+                $lastError = "robocopy exit $roboExit : $roboTail"
+                Write-Log "Get-File: robocopy failed (round $round, exit $roboExit): $roboTail. Trying BITS..." -Warning
+                foreach ($partialPath in @($Destination, $tempCopy) | Select-Object -Unique) {
+                    if (Test-Path $partialPath) {
+                        Remove-Item -LiteralPath $partialPath -Force -ErrorAction SilentlyContinue
+                    }
+                }
+
+                # --- Try BITS fallback ---
                 $bitsError = $null
                 try {
-                    Write-Log "Get-File: BITS copy attempt (round $round/$maxRounds) for '$sourceDisplay'" -LogOnly
+                    Write-Log "Get-File: BITS fallback attempt (round $round/$maxRounds) for '$sourceDisplay'" -LogOnly
                     Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
                 }
                 catch {
@@ -1279,55 +1324,10 @@ function Get-File {
                         Write-Log "Get-File: BITS access denied for '$sourceDisplay'. Cannot retry." -Failure
                         throw $bitsError
                     }
-                    Write-Log "Get-File: BITS failed (round $round): $($errMsg.Trim()). Trying robocopy..." -Warning
+                    Write-Log "Get-File: BITS fallback failed (round $round): $($errMsg.Trim())." -Warning
                 }
                 else {
-                    Write-Log "Get-File: BITS reported success but '$Destination' missing (round $round). Trying robocopy..." -Warning
-                }
-
-                # --- Try robocopy ---
-                if (Test-Path -LiteralPath $Source -PathType Leaf) {
-                    $roboSrc = Split-Path $Source -Parent
-                    $roboDst = Split-Path $Destination -Parent
-                    $roboFile = Split-Path $Source -Leaf
-                    $destFile = Split-Path $Destination -Leaf
-                    $needsRename = $roboFile -ne $destFile
-
-                    # Clean up any partial file
-                    if (Test-Path $Destination) {
-                        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
-                    }
-                    if ($needsRename) {
-                        $tempCopy = Join-Path $roboDst $roboFile
-                        if (Test-Path $tempCopy) {
-                            Remove-Item -LiteralPath $tempCopy -Force -ErrorAction SilentlyContinue
-                        }
-                    }
-
-                    # /J = unbuffered I/O (avoids cache pressure on large files)
-                    # /R:2 /W:10 = 2 retries, 10s wait (robocopy's own retries)
-                    # /NP = no progress percentage
-                    $roboArgs = @($roboSrc, $roboDst, $roboFile, '/J', '/R:2', '/W:10', '/NP')
-                    Write-Log "Get-File: robocopy (round $round) $($roboArgs -join ' ')" -LogOnly
-                    $roboResult = & robocopy @roboArgs 2>&1
-                    $roboExit = $LASTEXITCODE
-
-                    if ($roboExit -lt 8) {
-                        if ($needsRename) {
-                            $copiedPath = Join-Path $roboDst $roboFile
-                            if (Test-Path $copiedPath) {
-                                Rename-Item -LiteralPath $copiedPath -NewName $destFile -Force -ErrorAction Stop
-                            }
-                        }
-                        if (Test-Path $Destination) {
-                            Write-Log "Get-File: robocopy succeeded (round $round, exit $roboExit)."
-                            return $true
-                        }
-                    }
-
-                    $roboTail = ($roboResult | Select-Object -Last 3) -join " | "
-                    $lastError = "robocopy exit $roboExit : $roboTail"
-                    Write-Log "Get-File: robocopy failed (round $round, exit $roboExit): $roboTail" -Warning
+                    Write-Log "Get-File: BITS fallback reported success but '$Destination' is missing (round $round)." -Warning
                 }
 
                 # Backoff before next round — cap at 60s
@@ -1339,7 +1339,7 @@ function Get-File {
             }
 
             # All rounds exhausted
-            Write-Log "Get-File: Copy of '$sourceDisplay' failed after $maxRounds rounds of BITS + robocopy. Last error: $lastError" -Failure
+            Write-Log "Get-File: Copy of '$sourceDisplay' failed after $maxRounds rounds of robocopy + BITS. Last error: $lastError" -Failure
 
             # If the SOURCE is a cached azureFiles file (e.g. a base-image VHDX) the copy
             # may have failed because the cached file rotted on disk (bad sector). Confirm

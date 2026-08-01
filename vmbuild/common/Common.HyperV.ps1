@@ -491,7 +491,9 @@ function Start-VM2 {
                                     Where-Object { $_.WorkingSet64 -gt 500MB -and $_.Name -notin @('vmms', 'vmwp', 'vmmem', 'System', 'Memory Compression', 'MsMpEng') } |
                                     Sort-Object WorkingSet64 -Descending | Select-Object -First 5
                                 if ($topProcs) {
-                                    $procList = ($topProcs | ForEach-Object { "$($_.Name)=$([Math]::Round($_.WorkingSet64 / 1GB, 1))GB" }) -join ', '
+                                    $procList = ($topProcs | ForEach-Object {
+                                        "$($_.Name)(pid=$($_.Id), WS=$([Math]::Round($_.WorkingSet64 / 1GB, 1))GB, private=$([Math]::Round($_.PrivateMemorySize64 / 1GB, 1))GB)"
+                                    }) -join ', '
                                     Write-Log "${Name}: OOM reclaim hint - top non-HyperV host memory users: $procList" -LogOnly
                                 }
                                 # The Phase 1 VM_Create jobs each spawn a pwsh.exe,
@@ -501,8 +503,9 @@ function Start-VM2 {
                                 # aggregate pressure the build itself is creating.
                                 $psProcs = @($allProcs | Where-Object { $_.Name -in @('pwsh', 'powershell') })
                                 if ($psProcs.Count -gt 0) {
-                                    $psTotalGB = [Math]::Round((($psProcs | Measure-Object -Property WorkingSet64 -Sum).Sum / 1GB), 1)
-                                    Write-Log "${Name}: OOM reclaim hint - $($psProcs.Count) PowerShell process(es) (pwsh/powershell) holding ${psTotalGB}GB total" -LogOnly
+                                    $psWorkingSetGB = [Math]::Round((($psProcs | Measure-Object -Property WorkingSet64 -Sum).Sum / 1GB), 1)
+                                    $psPrivateGB = [Math]::Round((($psProcs | Measure-Object -Property PrivateMemorySize64 -Sum).Sum / 1GB), 1)
+                                    Write-Log "${Name}: OOM reclaim hint - $($psProcs.Count) PowerShell process(es) (pwsh/powershell): WS=${psWorkingSetGB}GB, private=${psPrivateGB}GB total" -LogOnly
                                 }
                             }
                             catch {}
