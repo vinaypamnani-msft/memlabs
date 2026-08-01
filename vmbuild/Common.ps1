@@ -5975,6 +5975,59 @@ function Invoke-VmCommand {
                         # output, so removing it here is safe and closes that race.
                         Remove-Job $job -Force -ErrorAction SilentlyContinue
 
+                        # The PSRemotingJob above ran ON the cached session's runspace
+                        # (Invoke-Command -Session $ps -AsJob). Wait-Job + Remove-Job return as
+                        # soon as the job object is reaped, but the SERVER-SIDE (in-guest)
+                        # PSDirect/VMBus pipeline from that job keeps tearing down for a brief
+                        # window AFTER local Remove-Job. If the very next caller issues a
+                        # SYNCHRONOUS Invoke-Command on this same cached session during that window
+                        # (e.g. Stop-DSC -AsJob immediately followed by the synchronous "Check
+                        # pending reboot" probe in Common.ScriptBlocks.ps1), the new pipeline-create
+                        # races that server-side teardown and surfaces the non-terminating engine
+                        # error "An error occurred while creating the pipeline."
+                        #
+                        # PROVEN (CSTest full pass 2026-06-29/30, 884baf8f diag, 841/841 samples):
+                        # at the failure site runspaceAvail=Available, concurrentOnSameSession=<none>.
+                        # So the LOCAL RunspaceAvailability flag is a FALSE-READY signal -- it flips
+                        # to Available the instant the job is reaped, well before the transport's
+                        # server-side pipeline is actually gone. Gating on RunspaceAvailability
+                        # (the prior fix) is therefore inert: it returns immediately and provides no
+                        # protection, which is exactly why the flood persisted (838 errors, 0
+                        # "did not return to Available" give-ups).
+                        #
+                        # Real fix: probe ACTUAL pipeline-creatability. Issue a trivial round-trip
+                        # on the same cached session; if it throws the pipeline/transport-teardown
+                        # error, the server side isn't ready yet -- back off and retry. Once a
+                        # round-trip succeeds, the transport is clear and the next synchronous reuse
+                        # is safe. Bounded (~5s) so a genuinely wedged session can't hang the caller.
+                        try {
+                            if ($ps -and $ps.Runspace) {
+                                $teardownSig = 'creating the pipeline|pipeline is not|session is in|availability is Busy|not available to run commands|has been closed|No valid sessions|transport|broken'
+                                $probeDeadline = (Get-Date).AddSeconds(5)
+                                $probeReady = $false
+                                while (-not $probeReady -and (Get-Date) -lt $probeDeadline) {
+                                    try {
+                                        $null = Invoke-Command -Session $ps -ScriptBlock { 1 } -ErrorAction Stop
+                                        $probeReady = $true
+                                    }
+                                    catch {
+                                        if ("$($_.Exception.Message)" -match $teardownSig) {
+                                            # server-side pipeline still tearing down -- back off
+                                            Start-Sleep -Milliseconds 100
+                                        }
+                                        else {
+                                            # Unexpected error (not the teardown race): stop probing
+                                            # and let the real call surface/handle it.
+                                            $probeReady = $true
+                                        }
+                                    }
+                                }
+                                if (-not $probeReady -and -not $SuppressLog) {
+                                    Write-Log "$VmName`: Session transport did not become pipeline-ready within 5s after job '$DisplayName'; proceeding (next call may rebuild the session)." -LogOnly
+                                }
+                            }
+                        }
+                        catch { }
                     }
                     else {
                         Write-Log "$VmName`: Job '$DisplayName' Failed State: $($job.State)" -LogOnly
