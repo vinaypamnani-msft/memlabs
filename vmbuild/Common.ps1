@@ -6001,30 +6001,65 @@ function Invoke-VmCommand {
                         # error, the server side isn't ready yet -- back off and retry. Once a
                         # round-trip succeeds, the transport is clear and the next synchronous reuse
                         # is safe. Bounded (~5s) so a genuinely wedged session can't hang the caller.
+                        #
+                        # The probe must be judged on its RESULT, not on whether it threw.
+                        # "An error occurred while creating the pipeline" is a non-terminating
+                        # engine error written straight to the error stream by the remoting
+                        # layer -- -ErrorAction Stop does NOT convert it (that is precisely why
+                        # the real synchronous call below catches it via -ErrorVariable and not
+                        # via catch{}). The first version of this probe used -ErrorAction Stop
+                        # inside try/catch, so it never threw, set ready on the first attempt
+                        # and was completely inert: 0 give-up lines logged while the pending-
+                        # reboot check that immediately follows failed on every VM. Check the
+                        # error stream and the round-trip value instead.
                         try {
                             if ($ps -and $ps.Runspace) {
                                 $teardownSig = 'creating the pipeline|pipeline is not|session is in|availability is Busy|not available to run commands|has been closed|No valid sessions|transport|broken'
+                                $probeSw = [System.Diagnostics.Stopwatch]::StartNew()
                                 $probeDeadline = (Get-Date).AddSeconds(5)
                                 $probeReady = $false
+                                $probeAttempts = 0
                                 while (-not $probeReady -and (Get-Date) -lt $probeDeadline) {
+                                    $probeAttempts++
+                                    $probeErr = $null
+                                    $probeOut = $null
                                     try {
-                                        $null = Invoke-Command -Session $ps -ScriptBlock { 1 } -ErrorAction Stop
-                                        $probeReady = $true
+                                        $probeOut = Invoke-Command -Session $ps -ScriptBlock { 1 } -ErrorVariable probeErr -ErrorAction SilentlyContinue
                                     }
                                     catch {
-                                        if ("$($_.Exception.Message)" -match $teardownSig) {
-                                            # server-side pipeline still tearing down -- back off
-                                            Start-Sleep -Milliseconds 100
-                                        }
-                                        else {
-                                            # Unexpected error (not the teardown race): stop probing
-                                            # and let the real call surface/handle it.
-                                            $probeReady = $true
-                                        }
+                                        $probeErr = @($_)
+                                    }
+                                    $probeBlob = ""
+                                    if ($probeErr -and $probeErr.Count -gt 0) { $probeBlob = ($probeErr | ForEach-Object { "$_" }) -join ' ' }
+                                    if ($probeOut -eq 1 -and -not $probeBlob) {
+                                        $probeReady = $true
+                                    }
+                                    elseif ($probeBlob -and $probeBlob -notmatch $teardownSig) {
+                                        # Unexpected error (not the teardown race): stop probing
+                                        # and let the real call surface/handle it.
+                                        break
+                                    }
+                                    else {
+                                        # Still tearing down (error matched, or the round-trip
+                                        # silently produced nothing) -- back off.
+                                        Start-Sleep -Milliseconds 100
                                     }
                                 }
-                                if (-not $probeReady -and -not $SuppressLog) {
-                                    Write-Log "$VmName`: Session transport did not become pipeline-ready within 5s after job '$DisplayName'; proceeding (next call may rebuild the session)." -LogOnly
+                                $probeSw.Stop()
+                                if ($probeReady) {
+                                    if ($probeAttempts -gt 1 -and -not $SuppressLog) {
+                                        Write-Log "$VmName`: Session transport became pipeline-ready after $probeAttempts attempts ($([math]::Round($probeSw.Elapsed.TotalSeconds,1))s) following job '$DisplayName'." -LogOnly
+                                    }
+                                }
+                                else {
+                                    if (-not $SuppressLog) {
+                                        Write-Log "$VmName`: Session transport did not become pipeline-ready within $([math]::Round($probeSw.Elapsed.TotalSeconds,1))s ($probeAttempts attempts) after job '$DisplayName'; evicting the cached session so the next call rebuilds it." -LogOnly
+                                    }
+                                    # Leak rather than dispose: the server-side pipeline from the
+                                    # job is demonstrably still alive, and disposing a session
+                                    # whose transport is mid-teardown is the disposed-object
+                                    # callback crash documented above.
+                                    Remove-VmSessionFromCache -VmName $VmName -LeakSession
                                 }
                             }
                         }
