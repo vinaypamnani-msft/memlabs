@@ -15,6 +15,7 @@
       "role": "Primary",
       "operatingSystem": "Server 2019",
       "memory": "4GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "parentSiteCode": "CS1",
       "cmInstallDir": "E:\\ConfigMgr",
@@ -31,6 +32,7 @@
       "role": "SiteSystem",
       "operatingSystem": "Server 2022",
       "memory": "8GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "additionalDisks": {
         "E": "250GB"
@@ -47,6 +49,7 @@
       "role": "DomainMember",
       "operatingSystem": "Server 2019",
       "memory": "8GB",
+      "dynamicMinRam": "4GB",
       "virtualProcs": 8,
       "sqlVersion": "SQL Server 2019",
       "sqlInstanceName": "BOB",

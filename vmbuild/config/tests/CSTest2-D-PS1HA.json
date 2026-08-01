@@ -15,6 +15,7 @@
       "role": "PassiveSite",
       "operatingSystem": "Server 2022",
       "memory": "4GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "siteCode": "PS2",
       "cmInstallDir": "E:\\ConfigMgr",

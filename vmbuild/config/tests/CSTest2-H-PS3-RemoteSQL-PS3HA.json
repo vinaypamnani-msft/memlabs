@@ -15,6 +15,7 @@
       "role": "SiteSystem",
       "operatingSystem": "Server 2022",
       "memory": "3GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "additionalDisks": {
         "E": "250GB"
@@ -30,6 +31,7 @@
       "role": "Primary",
       "operatingSystem": "Server 2016",
       "memory": "4GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "parentSiteCode": "",
       "cmInstallDir": "E:\\ConfigMgr",
@@ -46,6 +48,7 @@
       "role": "PassiveSite",
       "operatingSystem": "Server 2022",
       "memory": "4GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "siteCode": "PS3",
       "cmInstallDir": "E:\\ConfigMgr",
@@ -59,6 +62,7 @@
       "role": "DomainMember",
       "operatingSystem": "Server 2016",
       "memory": "8GB",
+      "dynamicMinRam": "4GB",
       "virtualProcs": 8,
       "sqlVersion": "SQL Server 2017",
       "sqlInstanceName": "MSSQLSERVER",
@@ -74,6 +78,7 @@
       "role": "DomainMember",
       "operatingSystem": "Windows 10 1909 (64-bit)",
       "memory": "2GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 2,
       "domainUser": "vinay"
     }

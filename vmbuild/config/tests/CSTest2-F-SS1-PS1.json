@@ -15,6 +15,7 @@
       "role": "Secondary",
       "operatingSystem": "Server 2022",
       "memory": "4GB",
+      "dynamicMinRam": "4GB",
       "virtualProcs": 4,
       "parentSiteCode": "PS2",
       "siteCode": "SS1",

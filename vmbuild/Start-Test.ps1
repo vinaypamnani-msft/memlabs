@@ -1,4 +1,4 @@
-#Start-Test.ps1
+﻿#Start-Test.ps1
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true, HelpMessage = "Prefix of tests to perform", ParameterSetName = 'TestName')]
@@ -356,8 +356,9 @@ function Run-Test {
         
             if ($dynamicMemory) {
                 foreach ($vm in $config.virtualMachines) {
-                    write-host "updating dynamicMinRam to 1GB on $($vm.VmName)"
-                    $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value "1GB" -Force
+                    $dynamicMinRam = if ($vm.sqlVersion) { "4GB" } else { "1GB" }
+                    write-host "updating dynamicMinRam to $dynamicMinRam on $($vm.VmName)"
+                    $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value $dynamicMinRam -Force
                 }       
             }
             if ($serverVersion) {

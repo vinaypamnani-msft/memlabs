@@ -25,6 +25,7 @@
       "operatingSystem": "Server 2022",
       "role": "DC",
       "memory": "2GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4
     },
     {
@@ -37,6 +38,7 @@
         "E": "250GB"
       },
       "memory": "8GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "remoteSQLVM": "CS1SQL",
       "InstallRP": true,
@@ -51,6 +53,7 @@
       "role": "DomainMember",
       "operatingSystem": "Server 2022",
       "memory": "8GB",
+      "dynamicMinRam": "4GB",
       "virtualProcs": 8,
       "sqlVersion": "SQL Server 2019",
       "sqlInstanceName": "MSSQLSERVER",
@@ -67,6 +70,7 @@
       "role": "FileServer",
       "operatingSystem": "Server 2019",
       "memory": "3GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "tpmEnabled": false,
       "installSSMS": true,
@@ -74,7 +78,7 @@
         "E": "600GB",
         "F": "200GB"
       },
-      "dynamicMinRam": "3GB"
+      "dynamicMinRam": "1GB"
     },
     {
       "vmName": "PS1DPMPSUP1",
@@ -84,6 +88,7 @@
         "E": "250GB"
       },
       "memory": "5GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "siteCode": "PS1",
       "installMP": true,
@@ -105,6 +110,7 @@
         "E": "250GB"
       },
       "memory": "4GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "remoteSQLVM": "PS1SQL",
       "InstallRP": false,
@@ -115,6 +121,7 @@
       "role": "DomainMember",
       "operatingSystem": "Server 2022",
       "memory": "8GB",
+      "dynamicMinRam": "4GB",
       "virtualProcs": 8,
       "sqlVersion": "SQL Server 2019",
       "sqlInstanceName": "MSSQLSERVER",
@@ -131,6 +138,7 @@
       "role": "DomainMember",
       "operatingSystem": "Windows 10 Latest (64-bit)",
       "memory": "2GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 2
     },
     {
@@ -138,6 +146,7 @@
       "role": "DomainMember",
       "operatingSystem": "Windows 11 Latest",
       "memory": "4GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 2
     }
   ]
