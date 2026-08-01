@@ -4135,9 +4135,28 @@ $global:VM_Config = {
                     "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append
                     $null = Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
 
-                    $wait = Wait-Job -Timeout 30 -name $currentItem.vmName
+                    # A healthy push stays Running for the whole apply, so Wait-Job -Timeout 30
+                    # always burned its full timeout. Poll instead: leave as soon as every child
+                    # job is off NotStarted and the push has held Running for a short settle
+                    # window (long enough to still catch an immediate WinRM/CIM failure), and
+                    # keep Wait-Job's contract of returning the job only on a terminal state.
+                    $startSettleSeconds = 5
+                    $startWaitSeconds = 30
+                    $wait = $null
+                    $startWatch = [System.Diagnostics.Stopwatch]::StartNew()
+                    while ($startWatch.Elapsed.TotalSeconds -lt $startWaitSeconds) {
+                        $probe = Get-Job -Name $currentItem.vmName -ErrorAction SilentlyContinue
+                        if (-not $probe) { break }
+                        if ($probe.State -ne 'Running' -and $probe.State -ne 'NotStarted') { $wait = $probe; break }
+                        if ($probe.State -eq 'Running' -and $startWatch.Elapsed.TotalSeconds -ge $startSettleSeconds) {
+                            $notStarted = @($probe.ChildJobs | Where-Object { $_.State -eq 'NotStarted' })
+                            if ($notStarted.Count -eq 0) { break }
+                        }
+                        Start-Sleep -Seconds 1
+                    }
+                    $startWatch.Stop()
                     $job = get-job -name $currentItem.vmName
-                    "Job.State $($job.State)" | Out-File $log -Append
+                    "Job.State $($job.State) after $([math]::Round($startWatch.Elapsed.TotalSeconds,1))s" | Out-File $log -Append
 
                     # Log per-node child job status for diagnostics.
                     # Even when the overall job is Running, individual
@@ -4151,7 +4170,7 @@ $global:VM_Config = {
                         $cjMsg | Out-File $log -Append
                     }
 
-                    # Wait 30 seconds for job to start. If the job has not been started, or has not completed, then log an error
+                    # If the job never reached Running, or already finished, log an error
                     if ($job.State -ne "Running") {
                         "Job detail: Name=$($job.Name) State=$($job.State) HasErrors=$($job.HasMoreData)" | Out-File $log -Append
                         $data = Receive-Job -name $currentItem.vmName 2>&1
