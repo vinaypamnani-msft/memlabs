@@ -133,7 +133,12 @@ $global:Phase11Job = {
         # Test-VmFunctionality's own uptime settle-gate then lets it converge.
         $null = Repair-VmPSDirectChannel -VmName $currentItem.vmName -VmDomainName $domainNameForLogging -Phase "$Phase"
 
-        $passed = Test-VmFunctionality -VMName $currentItem.vmName -CurrentItem $currentItem -DeployConfig $deployConfig
+        $testResult = @(Test-VmFunctionality -VMName $currentItem.vmName -CurrentItem $currentItem -DeployConfig $deployConfig)
+        $passed = $testResult.Count -eq 1 -and $testResult[0] -is [bool] -and $testResult[0]
+        if ($testResult.Count -ne 1 -or $testResult[0] -isnot [bool]) {
+            $types = @($testResult | ForEach-Object { if ($null -eq $_) { '<null>' } else { $_.GetType().FullName } }) -join ', '
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Validation returned unexpected output (count=$($testResult.Count), types=$types); treating as FAILED." -LogOnly
+        }
 
         # Emit buffered output lines (failures/warnings collected during test)
         # This must happen at top-level where -OutputStream goes to job output.
