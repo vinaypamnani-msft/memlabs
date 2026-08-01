@@ -1670,6 +1670,35 @@ function Add-VMToAccountLists {
     }
 }
 
+function Get-VMDeployedNetwork {
+    <#
+    .SYNOPSIS
+    Returns the REAL subnet of an already-deployed VM, or $null.
+
+    Add-ExistingVMToDeployConfig deliberately strips 'network' from every hidden
+    VM it injects, so anything that reads $vm.network straight off the config
+    silently falls back to the NEW deployment's vmOptions.network -- which makes
+    every pre-existing site server and client look like it lives on the subnet
+    currently being deployed. PS5.1-safe.
+    #>
+    param (
+        [Parameter(Mandatory = $false)] [string] $VmName,
+        [Parameter(Mandatory = $false)] [string] $Domain
+    )
+
+    if ([string]::IsNullOrWhiteSpace($VmName)) { return $null }
+    try {
+        if ($Domain) { $list = Get-List -Type VM -DomainName $Domain }
+        else { $list = Get-List -Type VM }
+        $match = $list | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+        if ($match -and $match.network) { return $match.network }
+    }
+    catch {
+        Write-Log "Get-VMDeployedNetwork: lookup failed for '$VmName': $($_.Exception.Message)" -LogOnly -Warning
+    }
+    return $null
+}
+
 function Get-EligiblePushSites {
     <#
     .SYNOPSIS
@@ -1688,6 +1717,9 @@ function Get-EligiblePushSites {
     $sites = @()
     $seen = @{}
 
+    $lookupDomain = $Domain
+    if (-not $lookupDomain -and $Config -and $Config.vmOptions) { $lookupDomain = $Config.vmOptions.domainName }
+
     # Config sites first (authoritative for an in-progress edit / fresh deploy).
     if ($Config -and $Config.virtualMachines) {
         $defaultNet = $null
@@ -1696,7 +1728,12 @@ function Get-EligiblePushSites {
             if (-not $vm.siteCode) { continue }
             $key = $vm.siteCode.ToLowerInvariant()
             if ($seen.ContainsKey($key)) { continue }
-            $net = if ($vm.network) { $vm.network } else { $defaultNet }
+            $net = $vm.network
+            # An existing site server carries no 'network' in the config; using
+            # $defaultNet here would put it on the subnet being deployed now and
+            # make it tie with (and lose to) the new Primary on every subnet match.
+            if (-not $net) { $net = Get-VMDeployedNetwork -VmName $vm.vmName -Domain $lookupDomain }
+            if (-not $net) { $net = $defaultNet }
             $sites += [PSCustomObject]@{ SiteCode = $vm.siteCode; Network = $net; Role = $vm.role }
             $seen[$key] = $true
         }
@@ -1766,7 +1803,12 @@ function Resolve-PushClientSite {
     # Needs resolution ($true, an invalid/stale code, or defaulting).
     $subnet = $null
     if ($VM.network) { $subnet = $VM.network }
-    elseif ($Config -and $Config.vmOptions) { $subnet = $Config.vmOptions.network }
+    else {
+        $lookupDomain = $Domain
+        if (-not $lookupDomain -and $Config -and $Config.vmOptions) { $lookupDomain = $Config.vmOptions.domainName }
+        $subnet = Get-VMDeployedNetwork -VmName $VM.vmName -Domain $lookupDomain
+    }
+    if (-not $subnet -and $Config -and $Config.vmOptions) { $subnet = $Config.vmOptions.network }
 
     if ($subnet) {
         $match = $eligible | Where-Object { $_.Network -eq $subnet } | Select-Object -First 1
@@ -1795,13 +1837,18 @@ function Get-PushClientSubnetLock {
         [Parameter(Mandatory = $false)] [string] $DefaultNet
     )
     if (-not $Subnet) { return $null }
+    $lookupDomain = $Domain
+    if (-not $lookupDomain -and $Config -and $Config.vmOptions) { $lookupDomain = $Config.vmOptions.domainName }
     if ($Config -and $Config.virtualMachines) {
         foreach ($o in $Config.virtualMachines) {
             if ($ExcludeVmName -and $o.vmName -eq $ExcludeVmName) { continue }
             if ($o.role -notin @('Primary', 'Secondary')) { continue }
             if (-not $o.siteCode) { continue }
-            $on = $DefaultNet
-            if ($o.network) { $on = $o.network }
+            $on = $o.network
+            # Existing site servers carry no 'network' in the config; $DefaultNet
+            # would falsely place them on the subnet being deployed now.
+            if (-not $on) { $on = Get-VMDeployedNetwork -VmName $o.vmName -Domain $lookupDomain }
+            if (-not $on) { $on = $DefaultNet }
             if ($on -eq $Subnet) { return $o.siteCode }
         }
     }
