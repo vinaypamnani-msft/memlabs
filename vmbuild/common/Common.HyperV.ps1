@@ -479,17 +479,63 @@ function Write-PowerShellJobLeakDiag {
         $result.RunningJobs = @($jobs | Where-Object { $_.State -eq 'Running' }).Count
 
         # This process's own footprint. The launcher is the single biggest
-        # PowerShell consumer on a long run (observed ~2GB), and none of the
-        # per-worker accounting explains it, so report it alongside.
+        # PowerShell consumer on a long run (observed 2.27GB after 33h under
+        # Start-Test -All) and none of the per-worker accounting explains it.
+        # clrHeap vs ws is the fork in the road: if the CLR heap is small while
+        # the working set is huge, the growth is unmanaged (handles/CIM/
+        # fragmentation) and no amount of clearing PowerShell state will help.
         try {
             $self = Get-Process -Id $PID -ErrorAction Stop
             $result.SelfMB = [Math]::Round($self.WorkingSet64 / 1MB)
             $gcMB = [Math]::Round([GC]::GetTotalMemory($false) / 1MB)
+            $selfAge = -1
+            try { $selfAge = [Math]::Round(((Get-Date) - $self.StartTime).TotalMinutes) } catch { }
             $cacheCounts = @()
-            try { $cacheCounts += "ps_cache=$(@($global:ps_cache.Keys).Count)" } catch { }
-            try { $cacheCounts += "vm_List=$(@($global:vm_List).Count)" } catch { }
-            try { $cacheCounts += "ps_inflight=$(@($global:ps_inflight.Keys).Count)" } catch { }
-            Write-Log "[JobLeak] $Context`: this process ws=$($result.SelfMB)MB private=$([Math]::Round($self.PrivateMemorySize64/1MB))MB clrHeap=${gcMB}MB handles=$($self.HandleCount) threads=$($self.Threads.Count) $($cacheCounts -join ' ')" -LogOnly
+            try { if ($global:ps_cache) { $cacheCounts += "ps_cache=$(@($global:ps_cache.Keys).Count)" } } catch { }
+            try { if ($global:vm_List) { $cacheCounts += "vm_List=$(@($global:vm_List).Count)" } } catch { }
+            try { if ($global:ps_inflight) { $cacheCounts += "ps_inflight=$(@($global:ps_inflight.Keys).Count)" } } catch { }
+            Write-Log "[JobLeak] $Context`: this process age=${selfAge}m ws=$($result.SelfMB)MB private=$([Math]::Round($self.PrivateMemorySize64/1MB))MB clrHeap=${gcMB}MB handles=$($self.HandleCount) threads=$($self.Threads.Count) $($cacheCounts -join ' ')" -LogOnly
+
+            # Log buffers retain StringBuilder CAPACITY across flushes -- Length=0
+            # does not release chunks -- and Start-Test keeps one entry per log
+            # path for every lab it has ever built in this shell.
+            try {
+                $bufTotal = 0
+                $bufCount = 0
+                foreach ($k in @($global:LogBuffers.Keys)) {
+                    $b = $global:LogBuffers[$k].Builder
+                    if ($b) { $bufTotal += $b.Capacity; $bufCount++ }
+                }
+                if ($bufCount -gt 0) {
+                    Write-Log "[JobLeak] $Context`: $bufCount log buffer(s) retaining $([Math]::Round($bufTotal/1KB))KB of StringBuilder capacity." -LogOnly
+                }
+            }
+            catch { }
+
+            # Biggest global collections. A launcher that grows GB over a multi-lab
+            # run is accumulating in one of these; naming the top few turns a
+            # guess into a measurement.
+            try {
+                $big = @()
+                foreach ($v in @(Get-Variable -Scope Global -ErrorAction SilentlyContinue)) {
+                    if ($v.Name -in 'args', 'input', 'PSBoundParameters', 'MyInvocation', 'PSCmdlet', 'Matches', 'Error', 'foreach', 'switch', 'this', '_') { continue }
+                    $val = $v.Value
+                    if ($null -eq $val) { continue }
+                    $count = 0
+                    if ($val -is [string]) { $count = $val.Length }
+                    elseif ($val -is [System.Collections.ICollection]) { $count = $val.Count }
+                    else { continue }
+                    if ($count -ge 1000) { $big += [pscustomobject]@{ Name = $v.Name; Count = $count; Type = $val.GetType().Name } }
+                }
+                foreach ($b in ($big | Sort-Object Count -Descending | Select-Object -First 8)) {
+                    Write-Log "[JobLeak] $Context`: large global `$$($b.Name) [$($b.Type)] holds $($b.Count) item(s)/char(s)." -LogOnly
+                }
+                # Every swallowed catch in this codebase still appends to $Error, and
+                # an ErrorRecord can retain whatever object threw (job objects, big
+                # strings). PS7 caps the list, so a count at the cap means it is full.
+                try { Write-Log "[JobLeak] $Context`: `$Error holds $(@($global:Error).Count) retained ErrorRecord(s)." -LogOnly } catch { }
+            }
+            catch { }
         }
         catch { }
 
@@ -517,14 +563,17 @@ function Write-PowerShellJobLeakDiag {
 
         $totalMB = 0
         $rows = New-Object System.Collections.Generic.List[string]
+        $procInfo = New-Object System.Collections.Generic.List[object]
         foreach ($d in $descendants) {
             $proc = Get-Process -Id $d.ProcessId -ErrorAction SilentlyContinue
             if (-not $proc) { continue }
             $mb = [Math]::Round($proc.WorkingSet64 / 1MB)
             $totalMB += $mb
             $ageMin = -1
-            try { $ageMin = [Math]::Round(((Get-Date) - $proc.StartTime).TotalMinutes) } catch { }
+            $started = $null
+            try { $started = $proc.StartTime; $ageMin = [Math]::Round(((Get-Date) - $started).TotalMinutes) } catch { }
             $isWorker = ("$($d.CommandLine)" -match '-s\s+-NoLogo')
+            $procInfo.Add([pscustomobject]@{ Pid = [int]$d.ProcessId; MB = $mb; AgeMin = $ageMin; Started = $started; Worker = $isWorker })
             $rows.Add(("  pid={0,-7} parent={1,-7} ws={2,5}MB age={3,4}m jobWorker={4}" -f $d.ProcessId, $d.ParentProcessId, $mb, $ageMin, $isWorker))
         }
         $result.WorkerProcs = $rows.Count
@@ -539,11 +588,46 @@ function Write-PowerShellJobLeakDiag {
         if ($rows.Count -gt 0 -or $result.RunningJobs -gt 0) { Write-Log $summary -Warning }
         else { Write-Log $summary -LogOnly }
 
+        # Pair each job with the worker process started closest to it. The job
+        # object does not expose its worker pid (NewProcessConnectionInfo.Process
+        # is internal and comes back empty via reflection), but a job and its
+        # worker are created within ~1s of each other, so start-time proximity is
+        # exact in practice -- and it is what turns "pid 14272 has been alive 5
+        # hours" into "CS4-CS1SQL [DomainMember] has been stuck 5 hours".
+        $unmatched = [System.Collections.Generic.List[object]]::new($procInfo)
         foreach ($j in $jobs) {
             $ageMin = -1
-            try { if ($j.PSBeginTime) { $ageMin = [Math]::Round(((Get-Date) - $j.PSBeginTime).TotalMinutes) } } catch { }
-            Write-Log ("  job id={0,-5} state={1,-10} age={2,4}m name='{3}'" -f $j.Id, $j.State, $ageMin, $j.Name) -LogOnly
+            $begin = $null
+            try { $begin = $j.PSBeginTime; if ($begin) { $ageMin = [Math]::Round(((Get-Date) - $begin).TotalMinutes) } } catch { }
+            $match = $null
+            if ($begin) {
+                $best = [double]::MaxValue
+                foreach ($pi in $unmatched) {
+                    if (-not $pi.Started) { continue }
+                    $delta = [Math]::Abs(($pi.Started - $begin).TotalSeconds)
+                    if ($delta -lt $best) { $best = $delta; $match = $pi }
+                }
+                if ($match -and $best -gt 30) { $match = $null }
+            }
+            $procNote = 'worker=<not matched>'
+            if ($match) {
+                $procNote = "worker pid=$($match.Pid) ws=$($match.MB)MB"
+                [void]$unmatched.Remove($match)
+            }
+            Write-Log ("  job id={0,-5} state={1,-10} age={2,4}m {3} name='{4}'" -f $j.Id, $j.State, $ageMin, $procNote, $j.Name) -LogOnly
         }
+
+        # A worker much older than its siblings is a job that never finished --
+        # the one thing worth chasing when the rest are a phase legitimately in
+        # flight. Compare against the median so a whole slow phase isn't flagged.
+        $workerAges = @($procInfo | Where-Object { $_.Worker -and $_.AgeMin -ge 0 } | Select-Object -ExpandProperty AgeMin | Sort-Object)
+        if ($workerAges.Count -ge 3) {
+            $median = $workerAges[[int]($workerAges.Count / 2)]
+            foreach ($pi in ($procInfo | Where-Object { $_.Worker -and $_.AgeMin -gt 30 -and $_.AgeMin -gt ($median * 3) })) {
+                Write-Log "[JobLeak] $Context`: worker pid=$($pi.Pid) is $($pi.AgeMin)m old against a median of ${median}m for the other $($workerAges.Count - 1) worker(s) -- that job never finished. It is holding $($pi.MB)MB." -Warning
+            }
+        }
+
         foreach ($r in $rows) { Write-Log $r -LogOnly }
     }
     catch {
