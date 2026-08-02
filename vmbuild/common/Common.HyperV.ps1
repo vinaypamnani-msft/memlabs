@@ -386,6 +386,64 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
     return $freedMB
 }
 
+function Write-HostMemoryPressureDiag {
+    <#
+    .SYNOPSIS
+    Log WHICH VMs are holding the host's RAM, so a memory failure is actionable.
+
+    .DESCRIPTION
+    The Phase 1 OOM on CSTest2-H burned 22 minutes and a full rollback, and the
+    only memory evidence in the log was a running "~8.6GB available" counter. That
+    says the host is full but not what filled it -- and on a cumulative CSTest run
+    the answer ("the previous lab's VMs are still up") is the whole fix.
+    Lists running VMs by assigned memory, plus the dynamic-memory demand/assigned
+    split that decides whether waiting will actually free anything. Never throws.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Context = 'memory pressure',
+        [switch]$OutputStream
+    )
+
+    function Write-MemDiagLine {
+        param([string]$Text)
+        if ($OutputStream) { Write-Log "[MemDiag] $Context`: $Text" -OutputStream } else { Write-Log "[MemDiag] $Context`: $Text" -LogOnly }
+    }
+
+    try {
+        $availMB = $null
+        try { $availMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue } catch { }
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $totalGB = if ($os) { [Math]::Round($os.TotalVisibleMemorySize / 1MB, 1) } else { 0 }
+        Write-MemDiagLine ("host total={0}GB available={1}GB" -f $totalGB, $(if ($availMB) { [Math]::Round($availMB / 1024, 1) } else { '?' }))
+
+        $running = @(Get-VM2 -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' })
+        $assignedGB = 0
+        foreach ($v in $running) { try { $assignedGB += $v.MemoryAssigned } catch { } }
+        $assignedGB = [Math]::Round($assignedGB / 1GB, 1)
+        Write-MemDiagLine ("{0} running VM(s) holding {1}GB assigned" -f $running.Count, $assignedGB)
+
+        # Group by lab prefix -- on a cumulative CSTest run this immediately names
+        # the earlier lab whose VMs are the ones to shut down.
+        $byPrefix = $running | Group-Object { ("$($_.Name)" -split '-')[0] } | Sort-Object { ($_.Group | Measure-Object MemoryAssigned -Sum).Sum } -Descending
+        foreach ($g in $byPrefix) {
+            $gb = [Math]::Round((($g.Group | Measure-Object MemoryAssigned -Sum).Sum) / 1GB, 1)
+            Write-MemDiagLine ("  prefix '{0}': {1} VM(s), {2}GB" -f $g.Name, $g.Count, $gb)
+        }
+
+        foreach ($v in ($running | Sort-Object MemoryAssigned -Descending | Select-Object -First 12)) {
+            $a = [Math]::Round($v.MemoryAssigned / 1MB)
+            $d = 0
+            try { $d = [Math]::Round($v.MemoryDemand / 1MB) } catch { }
+            # assigned >> demand on a dynamic VM = memory that WILL come back on its
+            # own; assigned ~= demand = it is genuinely in use and waiting is futile.
+            $slack = $a - $d
+            Write-MemDiagLine ("  {0,-18} assigned={1,6}MB demand={2,6}MB reclaimable~={3,6}MB dynamic={4} status='{5}'" -f $v.Name, $a, $d, $slack, $v.DynamicMemoryEnabled, $v.MemoryStatus)
+        }
+    }
+    catch { try { Write-MemDiagLine "diag failed: $($_.Exception.Message)" } catch { } }
+}
+
 function Start-VM2 {
     [CmdletBinding()]
     param (
@@ -619,6 +677,11 @@ function Start-VM2 {
                 # Hyper-V message (e.g. OOM 0x8007000E) corrupts the progress UI.
                 $stopErrText = (($StopError | ForEach-Object { $_.ToString() }) -join '; ') -replace '\s*\r?\n\s*', ' '
                 Write-Log "${Name}: Failed to start the VM. $stopErrText" -Warning
+                # A terminal memory failure is the one case where the operator needs
+                # to know what is holding the RAM, not just that it ran out.
+                if ($stopErrText -match '0x8007000E|not enough memory|Insufficient system resources|allocate') {
+                    Write-HostMemoryPressureDiag -Context "$Name Start-VM gave up (out of memory)" -OutputStream
+                }
                 if ($Passthru.IsPresent) {
                     return $false
                 }

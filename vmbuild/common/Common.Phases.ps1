@@ -785,6 +785,50 @@ function Dismount-CmIsoForExternalSchema {
     }
 }
 
+function Resolve-PhaseResult {
+    <#
+    .SYNOPSIS
+    Reduce Start-Phase's return to the single boolean it meant to return.
+
+    .DESCRIPTION
+    Start-Phase is ~300 lines and calls a dozen helpers as bare statements
+    (Build-ToolZipsForPhase2, Mount-/Dismount-*IsoForPhase, Clean-StaleToolZips,
+    Invoke-Phase8PreInstallSnapshot ...). If any of them ever emits to the success
+    stream, the caller's `$configured = Start-Phase ...` gets an ARRAY, and
+    `-not $configured` on a multi-element array is FALSE -- so a phase that
+    returned $false would be treated as a pass and New-Lab would roll on to the
+    next phase. That exact defect has already been found twice in this codebase:
+    Run-Test/New-Lab (beb5673d, the harness ran the next TEST after a failed build)
+    and Install-Tools (723507fd, a failed tool injection reported a clean phase).
+
+    Take the LAST boolean -- Start-Phase's own `return` is always last -- and treat
+    "no boolean at all" as failure. Any non-boolean in the stream is a latent leak,
+    so name what it was: that's the only way we'll find the offender.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$Raw,
+        [object]$Phase
+    )
+
+    $items = @($Raw)
+    $bools = @($items | Where-Object { $_ -is [bool] })
+
+    if ($items.Count -ne 1 -or $bools.Count -ne 1) {
+        $shape = ($items | ForEach-Object {
+                if ($null -eq $_) { '<null>' } else { "$($_.GetType().Name)='$("$_" -replace '\s+', ' ')'" }
+            }) -join ' , '
+        if ($shape.Length -gt 300) { $shape = $shape.Substring(0, 300) + '...' }
+        Write-Log "[Phase $Phase] Start-Phase returned $($items.Count) object(s) instead of one boolean -- something in Start-Phase leaked to the success stream. Shape: [$shape]. Judging on the last boolean; suppress the leaking call with `$null = ." -Warning
+    }
+
+    if ($bools.Count -eq 0) {
+        Write-Log "[Phase $Phase] Start-Phase returned no boolean at all; treating the phase as FAILED." -Failure
+        return $false
+    }
+    return [bool]($bools[-1])
+}
+
 function Start-Phase {
 
     param(
@@ -877,13 +921,42 @@ function Start-Phase {
                     # and the concurrent Phase 1 job processes injecting VHDs.
                     $hostReserveGB = 8
                     $needGB = [Math]::Round($newStartupGB + $hostReserveGB, 1)
+
+                    if ($needGB -gt $availGB) {
+                        # Wait before asking. On a cumulative CSTest run the previous
+                        # lab's VMs are still ballooning down, and available memory
+                        # genuinely moves (the CSTest2-H failure sampled 12.8 -> 1.3 ->
+                        # 8.8GB inside three minutes). A short wait costs nothing next
+                        # to a 22-minute OOM rollback.
+                        $waitDeadline = (Get-Date).AddMinutes(4)
+                        while ($needGB -gt $availGB -and (Get-Date) -lt $waitDeadline) {
+                            Write-Progress2 "Phase 1" -Status "Waiting for host memory: need ~${needGB}GB, ${availGB}GB available" -force
+                            Start-Sleep -Seconds 15
+                            try { $availMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue } catch { break }
+                            $availGB = [Math]::Round($availMB / 1024, 1)
+                        }
+                    }
+
                     if ($needGB -gt $availGB) {
                         Write-OrangePoint "[Phase 1] Memory pre-flight: creating $($newVMs.Count) VM(s) needs ~$($newStartupGB)GB startup + $($hostReserveGB)GB host reserve = $($needGB)GB, but only $($availGB)GB is currently available. The build may run out of memory mid-phase and roll back." -WriteLog
+                        # Name the VMs holding the RAM. Without this the operator sees a
+                        # shortfall with no idea which lab to shut down.
+                        Write-HostMemoryPressureDiag -Context "Phase 1 pre-flight shortfall (need ${needGB}GB, have ${availGB}GB)" -OutputStream
+
                         $memResp = Read-YesOrNoWithTimeout -timeout 30 -prompt "Continue Phase 1 anyway? (y/N)" -Default "n"
-                        if ($memResp -and $memResp.ToString().ToLower() -eq "n") {
-                            Write-RedX "[Phase 1] Aborted by user: insufficient available memory (~$($needGB)GB needed, $($availGB)GB available)." -WriteLog
+                        # Require an explicit single 'y'. The old test was
+                        # `-eq "n"` on $memResp.ToString(), which silently CONTINUES for
+                        # every other value -- a leaked object, an array, $null, anything.
+                        # On the one run this ever fired (CSTest2-H, unattended at 01:35)
+                        # it did not abort, and the log recorded nothing about why. Log
+                        # exactly what came back so a repeat is diagnosable.
+                        $memAnswer = "$(@($memResp) | Where-Object { "$_" -match '^[YyNn]$' } | Select-Object -Last 1)"
+                        Write-Log "[Phase 1] Memory pre-flight prompt returned type='$(if ($null -eq $memResp) { '<null>' } else { $memResp.GetType().Name })' count=$(@($memResp).Count) raw='$(@($memResp) -join '|')' -> answer='$memAnswer'" -LogOnly
+                        if ($memAnswer -notmatch '^[Yy]$') {
+                            Write-RedX "[Phase 1] Aborting: insufficient available memory (~$($needGB)GB needed, $($availGB)GB available after waiting). Shut down VMs from a previous lab, or re-run and answer 'y' to proceed anyway." -WriteLog
                             return $false
                         }
+                        Write-Log "[Phase 1] Memory pre-flight: operator chose to continue despite the shortfall." -LogOnly
                     }
                     else {
                         Write-Log "[Phase 1] Memory pre-flight OK: ~$($newStartupGB)GB startup + $($hostReserveGB)GB reserve = $($needGB)GB <= $($availGB)GB available." -LogOnly
@@ -904,15 +977,18 @@ function Start-Phase {
     # benefits from the same lifetime/error handling.
 
     # Pre-build tools zips on the host so Phase 2 jobs skip Compress-Archive.
+    # NOTE: every helper called at statement level in this function is $null-assigned.
+    # Start-Phase's return value is the phase pass/fail gate in New-Lab, and anything
+    # one of these emits to the success stream would turn it into a truthy array.
     if ($Phase -eq 2) {
-        Build-ToolZipsForPhase2 -deployConfig $deployConfig
+        $null = Build-ToolZipsForPhase2 -deployConfig $deployConfig
     }
 
     # Mount the SQL ISO to each SQL VM just before Phase 4 installs SQL from it.
     # The single DVD drive is free here because the create-time CM/OSD copies
     # already ejected. Idempotent on -StartPhase 4 reruns.
     if ($Phase -eq 4) {
-        Mount-SqlIsoForPhase -deployConfig $deployConfig
+        $null = Mount-SqlIsoForPhase -deployConfig $deployConfig
     }
 
     # Cross-forest: mount the CM ISO on the EXTERNAL top-level site servers before
@@ -921,14 +997,14 @@ function Start-Phase {
     # (Local site-server CM mounts happen in the Phase 8/9 block below, before
     # Start-PhaseJobs.)
     if ($Phase -eq 2) {
-        Mount-CmIsoForExternalSchema -deployConfig $deployConfig
+        $null = Mount-CmIsoForExternalSchema -deployConfig $deployConfig
     }
 
     # Allocate the SQLAO cluster heartbeat IPs (10.250.251.x) once, serially, here
     # -- before the parallel Phase 5 jobs fan out -- so every node gets a unique IP
     # with no mutex and no cross-job race. Only Phase 5 needs these.
     if ($Phase -eq 5) {
-        Set-SQLAOHeartbeatIPs -DeployConfig $deployConfig
+        $null = Set-SQLAOHeartbeatIPs -DeployConfig $deployConfig
     }
 
     # Phase 8/9 CM media: take the pre-install rollback snapshot and mount the CM
@@ -945,7 +1021,7 @@ function Start-Phase {
     # -> DC extadsch deadlock) can no longer happen. No-op for URL-download CM
     # versions; idempotent on -StartPhase reruns.
     if ($Phase -eq 8) {
-        Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
+        $null = Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
     }
     if ($Phase -eq 8 -or $Phase -eq 9) {
         # Only mount CM media when this phase actually has DSC work. Phase 9
@@ -968,7 +1044,7 @@ function Start-Phase {
             [bool](Get-Phase8ConfigurationData -deployConfig $deployConfig)
         }
         if ($cmPhaseHasWork) {
-            Mount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
+            $null = Mount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
         }
         else {
             Write-Log "[Phase $Phase] No DSC nodes need this phase; skipping CM media mount (avoids churning the optical stack for a no-op phase)." -LogOnly
@@ -997,23 +1073,23 @@ function Start-Phase {
     # Phase 2 builds tool zips keyed by fingerprint. Clean up any stale
     # zips from previous runs that are no longer referenced.
     if ($Phase -eq 2) {
-        Clean-StaleToolZips
+        $null = Clean-StaleToolZips
     }
 
     # Eject the SQL ISO after a SUCCESSFUL Phase 4. On failure leave it mounted
     # so the VM can be inspected; a -StartPhase 4 retry re-mounts idempotently.
     if ($Phase -eq 4 -and $result.Failed -eq 0) {
-        Dismount-SqlIsoForPhase -deployConfig $deployConfig
+        $null = Dismount-SqlIsoForPhase -deployConfig $deployConfig
     }
 
     # Eject the CM ISO + drop the CMCB share after a SUCCESSFUL CM phase, so the
     # host ISO path isn't baked into checkpoints / .memlabs exports. On failure
     # leave it mounted for inspection; a -StartPhase retry re-mounts idempotently.
     if ($Phase -eq 2 -and $result.Failed -eq 0) {
-        Dismount-CmIsoForExternalSchema -deployConfig $deployConfig
+        $null = Dismount-CmIsoForExternalSchema -deployConfig $deployConfig
     }
     if (($Phase -eq 8 -or $Phase -eq 9) -and $result.Failed -eq 0) {
-        Dismount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
+        $null = Dismount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
     }
 
     Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures. Time: $($result.Elapsed)"
@@ -1074,7 +1150,7 @@ function Start-Phase {
 
         # Clean up stale tool zips from previous runs that are no longer
         # referenced. Keeps current-fingerprint zips so reruns skip rebuild.
-        Clean-StaleToolZips
+        $null = Clean-StaleToolZips
 
         $postPhaseTimer.Stop()
         if ($postPhaseScope.Count -gt 0) {

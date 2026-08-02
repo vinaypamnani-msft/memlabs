@@ -884,10 +884,15 @@ try {
 
     # Prepare existing VM - Phase 0
     $prepared = $true
+    # Default true like $prepared: if every phase is skipped (-Phase / -SkipPhase /
+    # -StartPhase past the end) the loop never assigns it, and the end-of-run gate
+    # at "if (-not $prepared -or -not $configured)" would report a run where nothing
+    # ran, and nothing failed, as FINISHED WITH FAILURES.
+    $configured = $true
     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
     if ($containsHidden) {
         Write-Phase -Phase 0
-        $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig -WhatIf:$WhatIf
+        $prepared = Resolve-PhaseResult -Raw (Start-Phase -Phase 0 -deployConfig $deployConfig -WhatIf:$WhatIf) -Phase 0
     }
 
     # AADClient idempotency: if an AADClient VM exists from a prior interrupted
@@ -986,7 +991,7 @@ try {
             }
             $lastPhase = $currentPhase
             $currentPhase = $i
-            $configured = Start-Phase -Phase $i -deployConfig $deployConfig -WhatIf:$WhatIf
+            $configured = Resolve-PhaseResult -Raw (Start-Phase -Phase $i -deployConfig $deployConfig -WhatIf:$WhatIf) -Phase $i
             if ($global:PhaseSkipped) {
                 $currentPhase = $lastPhase
             }
