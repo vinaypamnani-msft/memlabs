@@ -1328,7 +1328,10 @@ finally {
     # Stop running jobs with live progress. Kill child processes early to
     # avoid Remove-Job -Force blocking for 10+ seconds per stuck job.
     $null = Write-PowerShellJobLeakDiag -Context 'before end-of-run job cleanup' -Quiet
-    $runningJobs = @(Get-Job | Where-Object { $_.State -eq 'Running' })
+    # PSEventJob entries are engine-event subscriptions (the log flush-on-exit
+    # handler), not build work. Stopping and force-removing them tears down the
+    # exit flush and loses the last buffered log lines.
+    $runningJobs = @(Get-Job | Where-Object { $_.State -eq 'Running' -and $_ -isnot [System.Management.Automation.PSEventJob] })
     $totalJobs = $runningJobs.Count
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $blankLine = " " * 100
@@ -1373,7 +1376,7 @@ finally {
 
     # 4) Remove EVERY job, running or not. Unconditional: a job left in the table
     #    keeps its output (and any PSDirect session objects in it) referenced.
-    $remaining = @(Get-Job)
+    $remaining = @(Get-Job | Where-Object { $_ -isnot [System.Management.Automation.PSEventJob] })
     if ($remaining.Count -gt 0) {
         if ($showJobProgress -and $totalJobs -gt 0) { Write-Host -NoNewline "`r${blankLine}`rRemoving $($remaining.Count) job(s)... ($(& $showElapsed)s)" }
         foreach ($job in $remaining) {

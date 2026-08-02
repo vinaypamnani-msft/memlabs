@@ -474,7 +474,10 @@ function Write-PowerShellJobLeakDiag {
     $result = [pscustomobject]@{ Jobs = 0; RunningJobs = 0; WorkerProcs = 0; WorkerMB = 0; SelfMB = 0 }
 
     try {
-        $jobs = @(Get-Job -ErrorAction SilentlyContinue)
+        # PSEventJob = an engine-event subscription (the log flush-on-exit handler),
+        # not build work and not backed by a worker process. Counting them here
+        # reported phantom leaks.
+        $jobs = @(Get-Job -ErrorAction SilentlyContinue | Where-Object { $_ -isnot [System.Management.Automation.PSEventJob] })
         $result.Jobs = $jobs.Count
         $result.RunningJobs = @($jobs | Where-Object { $_.State -eq 'Running' }).Count
 
@@ -515,6 +518,14 @@ function Write-PowerShellJobLeakDiag {
             # Biggest global collections. A launcher that grows GB over a multi-lab
             # run is accumulating in one of these; naming the top few turns a
             # guess into a measurement.
+            try {
+                $subCount = @(Get-EventSubscriber -Force -ErrorAction SilentlyContinue).Count
+                $modCount = @(Get-Module -ErrorAction SilentlyContinue).Count
+                $rsCount = @(Get-Runspace -ErrorAction SilentlyContinue).Count
+                $sessCount = @(Get-PSSession -ErrorAction SilentlyContinue).Count
+                Write-Log "[JobLeak] $Context`: session state -- eventSubscribers=$subCount modules=$modCount runspaces=$rsCount psSessions=$sessCount" -LogOnly
+            }
+            catch { }
             try {
                 $big = @()
                 foreach ($v in @(Get-Variable -Scope Global -ErrorAction SilentlyContinue)) {

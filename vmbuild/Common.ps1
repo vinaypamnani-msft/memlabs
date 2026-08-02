@@ -496,7 +496,12 @@ function Flush-LogBuffer {
 }
 
 function Register-LogBufferExitFlush {
-    if ($Script:LogRotateExitRegistered) { return }
+    # Global, NOT $Script:. New-Lab.ps1 dot-sources Common.ps1 from its OWN script
+    # scope and Start-Test invokes New-Lab once per test in a single shell, so a
+    # $Script: flag is fresh every build and the guard never fires -- verified
+    # accumulating 1 subscriber per invocation in temp/probe-exitevent-accumulation.ps1.
+    # Each leaked subscriber costs ~0.3MB and shows up in Get-Job as a PSEventJob.
+    if ($global:MemLabsExitFlushRegistered) { return }
     try {
         Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action {
             try {
@@ -521,7 +526,7 @@ function Register-LogBufferExitFlush {
                 }
             } catch { }
         } | Out-Null
-        $Script:LogRotateExitRegistered = $true
+        $global:MemLabsExitFlushRegistered = $true
     }
     catch {
         # Non-fatal; we still flush at size/age thresholds and on important
