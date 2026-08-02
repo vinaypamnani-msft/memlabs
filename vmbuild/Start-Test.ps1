@@ -326,6 +326,27 @@ function Invoke-NewLab {
         & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot | Out-Host
         $code = [int]$LASTEXITCODE
     }
+
+    # New-Lab runs INSIDE this process, so its job workers are children of the
+    # harness and survive into the next test. Each is a pwsh.exe holding ~300MB
+    # once it has dot-sourced Common.ps1, so an -All run accumulates them until
+    # Phase 1 of some later test fails its memory pre-flight. Sweep between tests
+    # and report anything that would not die, so the leaking job gets named.
+    try {
+        foreach ($job in @(Get-Job -ErrorAction SilentlyContinue)) {
+            if ($job.State -eq 'Running') { try { $job.StopJobAsync() } catch { } }
+        }
+        $stragglers = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $PID AND Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -match '-s\s+-NoLogo' })
+        foreach ($proc in $stragglers) { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue }
+        foreach ($job in @(Get-Job -ErrorAction SilentlyContinue)) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
+        if ($stragglers.Count -gt 0) {
+            Write-Host "  Swept $($stragglers.Count) leftover job worker process(es) after $(Split-Path $ConfigFile -Leaf)." -ForegroundColor DarkYellow
+        }
+        $null = Write-PowerShellJobLeakDiag -Context "Start-Test after $(Split-Path $ConfigFile -Leaf)"
+    }
+    catch { }
+
     return $code
 }
 

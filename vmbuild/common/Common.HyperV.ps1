@@ -444,6 +444,115 @@ function Write-HostMemoryPressureDiag {
     catch { try { Write-MemDiagLine "diag failed: $($_.Exception.Message)" } catch { } }
 }
 
+function Write-PowerShellJobLeakDiag {
+    <#
+    .SYNOPSIS
+    Inventory the PowerShell jobs and job worker processes this process still owns.
+
+    .DESCRIPTION
+    Every Start-Job spawns a `pwsh.exe -s -NoLogo -NoProfile` child, and memlabs
+    starts one per VM per phase (VM_Create, VM_Config, Proxy_Install,
+    Linux_Configure) plus one per Copy-ItemSafe. Measured, a worker costs ~85MB
+    idle and 300MB+ once it has dot-sourced Common.ps1 -- so a lab host showing
+    39 pwsh processes / 7.6GB is holding roughly a phase's worth of workers that
+    never went away. That is memory the Phase 1 pre-flight then finds missing.
+
+    A worker exits on its own the moment its scriptblock completes (verified:
+    temp/probe-job-child-pids2.ps1 -- Remove-Job is NOT required for the process
+    to go), so anything still alive here is a job that never finished, and the
+    only way to know which is to name it.
+
+    Reports jobs by state with age and name, plus every pwsh descendant of this
+    process with its working set. Best-effort; never throws.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Context = 'end of run',
+        [switch]$Quiet
+    )
+
+    $result = [pscustomobject]@{ Jobs = 0; RunningJobs = 0; WorkerProcs = 0; WorkerMB = 0; SelfMB = 0 }
+
+    try {
+        $jobs = @(Get-Job -ErrorAction SilentlyContinue)
+        $result.Jobs = $jobs.Count
+        $result.RunningJobs = @($jobs | Where-Object { $_.State -eq 'Running' }).Count
+
+        # This process's own footprint. The launcher is the single biggest
+        # PowerShell consumer on a long run (observed ~2GB), and none of the
+        # per-worker accounting explains it, so report it alongside.
+        try {
+            $self = Get-Process -Id $PID -ErrorAction Stop
+            $result.SelfMB = [Math]::Round($self.WorkingSet64 / 1MB)
+            $gcMB = [Math]::Round([GC]::GetTotalMemory($false) / 1MB)
+            $cacheCounts = @()
+            try { $cacheCounts += "ps_cache=$(@($global:ps_cache.Keys).Count)" } catch { }
+            try { $cacheCounts += "vm_List=$(@($global:vm_List).Count)" } catch { }
+            try { $cacheCounts += "ps_inflight=$(@($global:ps_inflight.Keys).Count)" } catch { }
+            Write-Log "[JobLeak] $Context`: this process ws=$($result.SelfMB)MB private=$([Math]::Round($self.PrivateMemorySize64/1MB))MB clrHeap=${gcMB}MB handles=$($self.HandleCount) threads=$($self.Threads.Count) $($cacheCounts -join ' ')" -LogOnly
+        }
+        catch { }
+
+        # Job workers are children of THIS process; a worker that itself started a
+        # job (Copy-ItemSafe inside a phase worker) adds a grandchild, so walk the
+        # whole tree rather than one level.
+        $all = @(Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -ErrorAction SilentlyContinue)
+        $byParent = @{}
+        foreach ($p in $all) {
+            $key = [int]$p.ParentProcessId
+            if (-not $byParent.ContainsKey($key)) { $byParent[$key] = @() }
+            $byParent[$key] += $p
+        }
+        $descendants = New-Object System.Collections.Generic.List[object]
+        $queue = New-Object System.Collections.Generic.Queue[int]
+        $queue.Enqueue([int]$PID)
+        while ($queue.Count -gt 0) {
+            $cur = $queue.Dequeue()
+            foreach ($child in @($byParent[$cur])) {
+                if (-not $child) { continue }
+                $descendants.Add($child)
+                $queue.Enqueue([int]$child.ProcessId)
+            }
+        }
+
+        $totalMB = 0
+        $rows = New-Object System.Collections.Generic.List[string]
+        foreach ($d in $descendants) {
+            $proc = Get-Process -Id $d.ProcessId -ErrorAction SilentlyContinue
+            if (-not $proc) { continue }
+            $mb = [Math]::Round($proc.WorkingSet64 / 1MB)
+            $totalMB += $mb
+            $ageMin = -1
+            try { $ageMin = [Math]::Round(((Get-Date) - $proc.StartTime).TotalMinutes) } catch { }
+            $isWorker = ("$($d.CommandLine)" -match '-s\s+-NoLogo')
+            $rows.Add(("  pid={0,-7} parent={1,-7} ws={2,5}MB age={3,4}m jobWorker={4}" -f $d.ProcessId, $d.ParentProcessId, $mb, $ageMin, $isWorker))
+        }
+        $result.WorkerProcs = $rows.Count
+        $result.WorkerMB = $totalMB
+
+        if ($rows.Count -eq 0 -and $jobs.Count -eq 0) {
+            if (-not $Quiet) { Write-Log "[JobLeak] $Context`: clean -- no PowerShell jobs and no pwsh descendants." -LogOnly }
+            return $result
+        }
+
+        $summary = "[JobLeak] $Context`: $($jobs.Count) job(s) in the table ($($result.RunningJobs) still Running), $($rows.Count) pwsh descendant process(es) holding ${totalMB}MB."
+        if ($rows.Count -gt 0 -or $result.RunningJobs -gt 0) { Write-Log $summary -Warning }
+        else { Write-Log $summary -LogOnly }
+
+        foreach ($j in $jobs) {
+            $ageMin = -1
+            try { if ($j.PSBeginTime) { $ageMin = [Math]::Round(((Get-Date) - $j.PSBeginTime).TotalMinutes) } } catch { }
+            Write-Log ("  job id={0,-5} state={1,-10} age={2,4}m name='{3}'" -f $j.Id, $j.State, $ageMin, $j.Name) -LogOnly
+        }
+        foreach ($r in $rows) { Write-Log $r -LogOnly }
+    }
+    catch {
+        try { Write-Log "[JobLeak] $Context`: diag failed: $($_.Exception.Message)" -LogOnly } catch { }
+    }
+
+    return $result
+}
+
 function Start-VM2 {
     [CmdletBinding()]
     param (

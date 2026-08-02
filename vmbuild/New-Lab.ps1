@@ -1327,17 +1327,27 @@ finally {
 
     # Stop running jobs with live progress. Kill child processes early to
     # avoid Remove-Job -Force blocking for 10+ seconds per stuck job.
+    $null = Write-PowerShellJobLeakDiag -Context 'before end-of-run job cleanup' -Quiet
     $runningJobs = @(Get-Job | Where-Object { $_.State -eq 'Running' })
     $totalJobs = $runningJobs.Count
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $blankLine = " " * 100
     $showElapsed = { [math]::Floor($stopWatch.Elapsed.TotalSeconds) }
+    # Only the single-line progress DISPLAY depends on verbosity. The cleanup
+    # itself must not: this used to be `if ($totalJobs -gt 0 -and -not
+    # $enableVerbose)` with an `elseif ($totalJobs -eq 0)`, so a -Verbose run that
+    # still had running jobs matched NEITHER branch and did no cleanup at all --
+    # no child kill, no stop, no Remove-Job. Start-Test runs New-Lab in its OWN
+    # process, so those workers stayed alive under the harness for the rest of the
+    # -All run and accumulated test after test (~300MB each once they have
+    # dot-sourced Common.ps1).
+    $showJobProgress = -not $enableVerbose
 
-    if ($totalJobs -gt 0 -and -not $enableVerbose) {
+    if ($totalJobs -gt 0) {
         # 1) Kill child pwsh.exe processes immediately — this is what actually
         #    unblocks stuck PSDirect/WMI I/O. Do it before StopJobAsync so
         #    the async stop finds the process already gone.
-        Write-Host -NoNewline "`r${blankLine}`rStopping $totalJobs job(s): killing child processes... ($(& $showElapsed)s)"
+        if ($showJobProgress) { Write-Host -NoNewline "`r${blankLine}`rStopping $totalJobs job(s): killing child processes... ($(& $showElapsed)s)" }
         try {
             $childProcs = Get-CimInstance Win32_Process -Filter "ParentProcessId = $PID AND Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
                           Where-Object { $_.CommandLine -match '-s\s+-NoLogo' }
@@ -1357,31 +1367,34 @@ finally {
         #    jobs out of Running once it detects the process exited. The
         #    manual Get-Job polling we had before only read cached state and
         #    never noticed the child was dead, leaving jobs stuck in Running.
-        Write-Host -NoNewline "`r${blankLine}`rWaiting for jobs to stop... ($(& $showElapsed)s)"
+        if ($showJobProgress) { Write-Host -NoNewline "`r${blankLine}`rWaiting for jobs to stop... ($(& $showElapsed)s)" }
         $null = $runningJobs | Wait-Job -Timeout 10 -ErrorAction SilentlyContinue
-
-        # 4) Remove all jobs — they should be Stopped/Failed/Completed now.
-        #    Any still somehow Running get Remove-Job -Force (child is dead
-        #    so it shouldn't block).
-        $remaining = @(Get-Job)
-        if ($remaining.Count -gt 0) {
-            Write-Host -NoNewline "`r${blankLine}`rRemoving $($remaining.Count) job(s)... ($(& $showElapsed)s)"
-            foreach ($job in $remaining) {
-                Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-            }
-        }
     }
-    elseif ($totalJobs -eq 0) {
-        # Still may have completed/failed jobs to clean up
-        foreach ($job in @(Get-Job)) {
+
+    # 4) Remove EVERY job, running or not. Unconditional: a job left in the table
+    #    keeps its output (and any PSDirect session objects in it) referenced.
+    $remaining = @(Get-Job)
+    if ($remaining.Count -gt 0) {
+        if ($showJobProgress -and $totalJobs -gt 0) { Write-Host -NoNewline "`r${blankLine}`rRemoving $($remaining.Count) job(s)... ($(& $showElapsed)s)" }
+        foreach ($job in $remaining) {
             Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
         }
     }
+
     $stopWatch.Stop()
-    if ($totalJobs -gt 0 -and -not $enableVerbose) {
+    if ($totalJobs -gt 0 -and $showJobProgress) {
         $totalElapsed = & $showElapsed
         Write-Host "`r${blankLine}`rJobs stopped. (${totalElapsed}s)"
     }
+
+    # Anything still standing after that is a genuine leak. Name it -- a worker
+    # exits by itself when its scriptblock finishes, so a survivor is a job that
+    # never finished, and the log is the only place we'll ever see which.
+    $leak = @(Write-PowerShellJobLeakDiag -Context 'after end-of-run job cleanup') | Select-Object -Last 1
+    if ($leak -and $leak.WorkerProcs -gt 0) {
+        Write-Log "$($leak.WorkerProcs) PowerShell job worker process(es) survived cleanup, holding $($leak.WorkerMB)MB. They will keep that memory until this shell exits; see the [JobLeak] lines above for pids." -Warning
+    }
+
     # Close PS Sessions
     foreach ($session in $global:ps_cache.Keys) {
         Write-Log "Closing PS Session $session" -Verbose

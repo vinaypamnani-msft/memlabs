@@ -942,6 +942,9 @@ function Start-Phase {
                         # Name the VMs holding the RAM. Without this the operator sees a
                         # shortfall with no idea which lab to shut down.
                         Write-HostMemoryPressureDiag -Context "Phase 1 pre-flight shortfall (need ${needGB}GB, have ${availGB}GB)" -OutputStream
+                        # ...and whether PowerShell itself is part of the problem: leftover
+                        # job workers hold ~300MB each and are invisible in the VM totals.
+                        $null = Write-PowerShellJobLeakDiag -Context 'Phase 1 pre-flight shortfall'
 
                         $memResp = Read-YesOrNoWithTimeout -timeout 30 -prompt "Continue Phase 1 anyway? (y/N)" -Default "n"
                         # Require an explicit single 'y'. The old test was
