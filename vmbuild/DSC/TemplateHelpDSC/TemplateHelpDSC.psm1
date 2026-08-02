@@ -7037,8 +7037,31 @@ class InstallPBIRS {
             }
         }
         catch {
-            Write-Status "Failed to Configure PBIRS"
-            Write-Verbose "$_"
+            # This catch used to log the bare string "Failed to Configure PBIRS" and
+            # swallow the exception into Write-Verbose (which nothing captures), so a
+            # PBIRS failure produced: DSC resource = SUCCESS, Phase 7 = "0 failures",
+            # a status line with no reason, and then a generic "Reporting SOAP API not
+            # functional" failure in Phase 11 twelve minutes later with no way back to
+            # the cause. Record the whole error instead.
+            $_err = $_
+            $_where = 'unknown'
+            try { $_where = "$($_err.InvocationInfo.ScriptName):$($_err.InvocationInfo.ScriptLineNumber) >> $($_err.InvocationInfo.Line.Trim())" } catch {}
+            $_chain = ''
+            try {
+                $ix = $_err.Exception.InnerException
+                $depth = 0
+                while ($ix -and $depth -lt 4) { $_chain += " <- $($ix.GetType().Name): $($ix.Message)"; $ix = $ix.InnerException; $depth++ }
+            }
+            catch {}
+            Write-Status "Failed to Configure PBIRS: [$($_err.Exception.GetType().Name)] $($_err.Exception.Message)$_chain"
+            Write-Status "Failed to Configure PBIRS at $_where"
+            try { Write-Status "Failed to Configure PBIRS stack: $($_err.ScriptStackTrace -replace '\r?\n', ' | ')" } catch {}
+
+            # The post-install SOAP probe above throws on purpose ("so DSC marks this
+            # resource as failed rather than silently passing") -- honour that. Any
+            # other error stays non-fatal, because PBIRS can still end up functional
+            # after a recoverable hiccup earlier in Set().
+            if ("$($_err.Exception.Message)" -match 'portal is not functional') { throw $_err }
         }
     }
 

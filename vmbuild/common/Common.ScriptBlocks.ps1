@@ -2371,6 +2371,15 @@ $global:VM_Config = {
                                 # adapter restart (a clean DORA from scratch) IN-GUEST, and
                                 # make sure the host scope is Active before the last check.
                                 try {
+                                    # Capture the PRISTINE state first: the adapter reset
+                                    # below rewrites exactly the evidence that says whether
+                                    # the guest ever put a DISCOVER on the wire.
+                                    try {
+                                        $preResetMac = Get-VMMacIsolated -VmName $currentItem.vmName -ExcludeCluster
+                                        Write-DhcpLeaseFailureDiag -VmName $currentItem.vmName -ScopeId $currentNetwork -Mac $preResetMac -VmDomainName $domainName -Tag "[Phase $Phase]: DIAG(pre-reset)" -Quiet
+                                    }
+                                    catch { }
+
                                     Write-Progress2 $Activity -Status "Resetting guest network adapter on $($currentItem.vmName)" -percentcomplete 11 -force
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Still APIPA after NIC reconnect; forcing full guest adapter reset (release/restart/renew)." -Warning -OutputStream
 
@@ -2451,6 +2460,14 @@ $global:VM_Config = {
                                             if ($gline.Trim()) { Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG guest ipconfig: $($gline.Trim())" -LogOnly }
                                         }
                                     }
+                                }
+                                catch { }
+                                # DHCP bindings / audit log / lease census / guest DHCP-client
+                                # event log. Everything above was already proven HEALTHY on both
+                                # recorded APIPA failures, so the answer is in here.
+                                try {
+                                    $finalMac = Get-VMMacIsolated -VmName $currentItem.vmName -ExcludeCluster
+                                    Write-DhcpLeaseFailureDiag -VmName $currentItem.vmName -ScopeId $currentNetwork -Mac $finalMac -VmDomainName $domainName -Tag "[Phase $Phase]: DIAG(final)"
                                 }
                                 catch { }
                                 return
@@ -2596,8 +2613,12 @@ $global:VM_Config = {
                 }
             }
             $injected = Install-Tools -VmName $currentItem.vmName -ShowProgress -SkipAutoDeploy:$SkipAutoDeploy
-            if (-not $injected) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning
+            # Coerce: a stray object on Install-Tools' output stream would make $injected a
+            # truthy array and silently skip everything below (that is exactly what happened
+            # on CS4-CS1SQL). Judge on the boolean the function actually returned.
+            $injectedOk = ((@($injected) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true)
+            if (-not $injectedOk) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning -OutputStream
 
                 # The VM may be wedged (PSDirect OutOfMemoryException, "remote session might have
                 # ended", repeated Get-VmSession failures all indicate the guest is dead). Probe
@@ -2620,9 +2641,15 @@ $global:VM_Config = {
 
                     Write-Progress2 $Activity -Status "Retrying tool injection after reboot" -percentcomplete 13 -force
                     $injected = Install-Tools -VmName $currentItem.vmName -ShowProgress -SkipAutoDeploy:$SkipAutoDeploy
-                    if (-not $injected) {
+                    $injectedOk = ((@($injected) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true)
+                    if (-not $injectedOk) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection still failing after hard reset." -Warning -OutputStream
                     }
+                }
+                if (-not $injectedOk) {
+                    # Surface it to the phase tally. Tools are a hard dependency for later
+                    # phases, so a phase that ends with them missing must not report clean.
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection FAILED -- later phases depend on the injected tools. See the Copy-ItemSafe stall-diag lines above for why the copy died." -Failure -OutputStream
                 }
             }
         }

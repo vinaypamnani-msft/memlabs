@@ -1386,6 +1386,145 @@ function Get-File {
     }
 }
 
+function Write-CopyStallDiag {
+    <#
+    .SYNOPSIS
+    Explain WHY a PSDirect file copy into a guest stopped making progress.
+
+    .DESCRIPTION
+    The tools-bundle copy stalls on the SQL VM of every large lab (CS2-PS3SQL,
+    CS4-CS1SQL, CS6-PS1SQL -- always the same ~tools-*.zip, always the remote-SQL
+    node) and twice burned the full 1800s hard cap, which cost CS4 its tools
+    injection and, downstream, the run. The existing log says only "no growth
+    (16 MB at C:\Windows\Temp\tools-bundle.zip)" -- it proves the copy is dead
+    but says nothing about why, so there has never been anything to act on.
+
+    Captures the four candidate causes at the moment of the stall:
+      host    -- is Hyper-V starving this VM (dynamic-memory pressure / CPU)?
+      guest   -- is it out of memory, out of disk, or pegged?
+      job     -- did the background copy job actually fault?
+      source  -- is the host-side source file readable and how big is it?
+
+    Best-effort; never throws, never blocks the caller's retry path.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $VMName,
+        [string] $VMDomainName,
+        [string] $SourcePath,
+        [string] $GuestPath,
+        $Job,
+        [string] $Reason = 'stall'
+    )
+
+    function Write-CopyDiagLine { param([string]$Text) Write-Log "[Copy-ItemSafe] [$VMName] stall-diag ($Reason): $Text" -LogOnly }
+
+    # --- host view of the VM: dynamic memory pressure is the leading suspect --
+    try {
+        $v = Get-VM2 -Name $VMName -ErrorAction SilentlyContinue
+        if ($v) {
+            $demand = 0; $assigned = 0
+            try { $demand = [math]::Round($v.MemoryDemand / 1MB) } catch { }
+            try { $assigned = [math]::Round($v.MemoryAssigned / 1MB) } catch { }
+            $pressure = 'n/a'
+            if ($assigned -gt 0) { $pressure = [math]::Round(($demand / $assigned) * 100) }
+            Write-CopyDiagLine "vm cpu=$($v.CPUUsage)% memAssigned=${assigned}MB memDemand=${demand}MB pressure=${pressure}% memStatus='$($v.MemoryStatus)' dynamic=$($v.DynamicMemoryEnabled) min=$([math]::Round($v.MemoryMinimum/1MB))MB max=$([math]::Round($v.MemoryMaximum/1MB))MB state=$($v.State) heartbeat=$($v.Heartbeat) uptime=$([int]$v.Uptime.TotalMinutes)m"
+            if ("$($v.MemoryStatus)" -match 'Low|Warning') {
+                Write-CopyDiagLine "vm MemoryStatus='$($v.MemoryStatus)' -- Hyper-V is NOT satisfying this guest's demand. A starved guest pages, and a PSDirect copy (which materializes each chunk in the guest's PowerShell host) is one of the first things to crawl. LIKELY CAUSE."
+            }
+        }
+    }
+    catch { }
+
+    # --- host memory headroom overall -----------------------------------------
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        if ($os) {
+            Write-CopyDiagLine "host freePhysical=$([math]::Round($os.FreePhysicalMemory/1KB))MB totalVisible=$([math]::Round($os.TotalVisibleMemorySize/1KB))MB"
+        }
+        $runningVms = @(Get-VM2 -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' })
+        Write-CopyDiagLine "host runningVMs=$($runningVms.Count)"
+    }
+    catch { }
+
+    # --- source file on the host ----------------------------------------------
+    try {
+        if ($SourcePath -and (Test-Path $SourcePath)) {
+            $srcItem = Get-Item -LiteralPath $SourcePath -ErrorAction SilentlyContinue
+            if ($srcItem -and -not $srcItem.PSIsContainer) {
+                Write-CopyDiagLine "source '$SourcePath' size=$([math]::Round($srcItem.Length/1MB,1))MB lastWrite=$($srcItem.LastWriteTime)"
+            }
+        }
+        else { Write-CopyDiagLine "source '$SourcePath' NOT PRESENT on host" }
+    }
+    catch { }
+
+    # --- the copy job itself ---------------------------------------------------
+    try {
+        if ($Job) {
+            Write-CopyDiagLine "job state=$($Job.State) hasMoreData=$($Job.HasMoreData)"
+            foreach ($cj in @($Job.ChildJobs)) {
+                if ($cj.JobStateInfo -and $cj.JobStateInfo.Reason) { Write-CopyDiagLine "job child reason: $($cj.JobStateInfo.Reason)" }
+                foreach ($e in @($cj.Error | Select-Object -Last 3)) { Write-CopyDiagLine "job child error: $e" }
+                foreach ($w in @($cj.Warning | Select-Object -Last 3)) { Write-CopyDiagLine "job child warning: $w" }
+            }
+        }
+    }
+    catch { }
+
+    # --- guest view ------------------------------------------------------------
+    if ($VMDomainName) {
+        try {
+            $g = Invoke-VmCommand -VmName $VMName -VmDomainName $VMDomainName -DisplayName 'CopyStallDiag' -SuppressLog `
+                -AsJob -TimeoutSeconds 60 -ArgumentList @($GuestPath) -ScriptBlock {
+                param($target)
+                $lines = @()
+                try {
+                    $os = Get-CimInstance Win32_OperatingSystem
+                    $lines += "guest freePhysical=$([math]::Round($os.FreePhysicalMemory/1KB))MB total=$([math]::Round($os.TotalVisibleMemorySize/1KB))MB freeVirtual=$([math]::Round($os.FreeVirtualMemory/1KB))MB"
+                }
+                catch { }
+                try {
+                    $drive = 'C'
+                    if ($target -and $target.Length -gt 1 -and $target[1] -eq ':') { $drive = $target.Substring(0, 1) }
+                    $d = Get-PSDrive -Name $drive -ErrorAction SilentlyContinue
+                    if ($d) { $lines += "guest drive ${drive}: free=$([math]::Round($d.Free/1GB,1))GB used=$([math]::Round($d.Used/1GB,1))GB" }
+                }
+                catch { }
+                try {
+                    if ($target -and (Test-Path $target)) {
+                        $it = Get-Item -LiteralPath $target -ErrorAction SilentlyContinue
+                        $lines += "guest target '$target' size=$([math]::Round($it.Length/1MB,1))MB lastWrite=$($it.LastWriteTime)"
+                    }
+                    else { $lines += "guest target '$target' does not exist yet" }
+                }
+                catch { }
+                try {
+                    $top = Get-Process -ErrorAction SilentlyContinue | Sort-Object -Property CPU -Descending | Select-Object -First 5
+                    foreach ($p in @($top)) { $lines += "guest proc $($p.ProcessName) cpu=$([math]::Round($p.CPU,1))s ws=$([math]::Round($p.WorkingSet64/1MB))MB" }
+                }
+                catch { }
+                try {
+                    # Hard page faults are the signature of a memory-starved guest.
+                    $pf = Get-Counter '\Memory\Pages/sec', '\Processor(_Total)\% Processor Time' -ErrorAction SilentlyContinue
+                    foreach ($s in @($pf.CounterSamples)) { $lines += "guest counter $($s.Path) = $([math]::Round($s.CookedValue,1))" }
+                }
+                catch { }
+                return ($lines -join "`n")
+            }
+            if ($g -and $g.ScriptBlockOutput -and -not $g.ScriptBlockFailed) {
+                foreach ($line in ("$($g.ScriptBlockOutput)" -split "`r?`n")) {
+                    if ($line.Trim()) { Write-CopyDiagLine $line.Trim() }
+                }
+            }
+            else {
+                Write-CopyDiagLine "guest probe returned nothing (failed=$($g.ScriptBlockFailed) timedOut=$($g.TimedOut) channelBroken=$($g.ChannelBroken)) -- if the guest cannot even answer a 60s probe, the copy is not slow, the VM is wedged."
+            }
+        }
+        catch { Write-CopyDiagLine "guest probe threw: $($_.Exception.Message)" }
+    }
+}
+
 function Copy-ItemSafe {
     [CmdletBinding()]
     param (
@@ -1502,6 +1641,7 @@ function Copy-ItemSafe {
             # Hard cap safety net
             if ($elapsedSeconds -ge $maxTotalSeconds) {
                 Write-Log "[Copy-ItemSafe] [$VMName] Copy hit hard cap of ${maxTotalSeconds}s copying $Path. Retries left: $($retries - 1)" -Warning
+                Write-CopyStallDiag -VMName $VMName -VMDomainName $VMDomainName -SourcePath $Path -GuestPath $guestCheckPath -Job $job -Reason 'hard-cap'
                 $timedOut = $true
                 break
             }
@@ -1584,6 +1724,7 @@ function Copy-ItemSafe {
                     if (-not $isIndeterminate -and $stallSeconds -ge $stallTimeoutSeconds) {
                         $stallDetail = if ($progressDetail) { " (last: $progressDetail)" } else { '' }
                         Write-Log "[Copy-ItemSafe] [$VMName] Copy stalled for ${stallSeconds}s with no progress${stallDetail} copying $Path. Retries left: $($retries - 1)" -Warning
+                        Write-CopyStallDiag -VMName $VMName -VMDomainName $VMDomainName -SourcePath $Path -GuestPath $guestCheckPath -Job $job -Reason "stalled-${stallSeconds}s"
                         $timedOut = $true
                         break
                     }
@@ -3753,6 +3894,206 @@ function Get-DHCPReservationIPForMac {
         # .IPAddress is an [ipaddress] (ToString gives the dotted quad) or a
         # plain string.
         if ($r) { [string]$r.IPAddress } else { $null }
+    }
+}
+
+function Write-DhcpLeaseFailureDiag {
+    <#
+    .SYNOPSIS
+    Emit everything needed to tell WHY one VM failed to get a DHCP lease.
+
+    .DESCRIPTION
+    The pre-existing Phase 2 diagnostics (host NIC binding, scope state, scope
+    stats, reservation, guest ipconfig) fired correctly on both APIPA failures
+    (CT3-W10Client1 / CT5-W10Client1) and proved every one of them HEALTHY:
+    NIC connected to the right switch, scope Active with 172 free, a matching
+    reservation, DHCP enabled in the guest, and nine sibling VMs leased on the
+    same subnet. So the answer is not in any of those -- it is in the four
+    places nothing was looking:
+
+      1. DHCP SERVER BINDINGS. Bindings are per-interface and a vEthernet
+         adapter created mid-session can come up unbound. (Both failures
+         followed a "vEthernet (x) IP is '169.254.x'. Changing it to x.200"
+         line -- i.e. a freshly created switch.)
+      2. THE SERVER AUDIT LOG. The only artifact that says whether a DISCOVER
+         from this MAC ever reached the server, and what the server did with
+         it (offer / NACK / decline / "IP found in use" / scope full).
+      3. THE GUEST DHCP CLIENT EVENT LOG. The client's own verdict --
+         no-server-response vs address-conflict vs adapter not ready.
+      4. THE LEASE CENSUS. Whether the server is currently serving anyone on
+         this subnet, which separates "server broken for the whole scope" from
+         "broken for this one VM".
+
+    All steps are individually guarded; this never throws and never blocks the
+    caller's failure path.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $VmName,
+        [Parameter(Mandatory = $true)][string] $ScopeId,
+        [string] $Mac,
+        [string] $VmDomainName,
+        [string] $Tag = 'DIAG',
+        [switch] $Quiet
+    )
+
+    function Write-DhcpDiagLine {
+        param([string]$Text)
+        if ($Quiet) { Write-Log "$Tag $VmName`: $Text" -LogOnly } else { Write-Log "$Tag $VmName`: $Text" -OutputStream }
+    }
+
+    # --- 1. DHCP server service + per-interface bindings ---------------------
+    try {
+        $svc = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
+        Write-DhcpDiagLine "dhcp service: Status=$($svc.Status) StartType=$($svc.StartType)"
+    }
+    catch { }
+    try {
+        $expectedAlias = "vEthernet ($ScopeId)"
+        $expectedIp = ($ScopeId -replace '\.\d+$', '.200')
+        $bindings = Invoke-IsolatedCim -ScriptBlock {
+            Get-DhcpServerv4Binding -ErrorAction SilentlyContinue |
+                ForEach-Object { "$($_.InterfaceAlias)|$($_.IPAddress)|$($_.BindingState)" }
+        }
+        $matched = $false
+        foreach ($b in @($bindings)) {
+            $parts = $b -split '\|'
+            if ($parts[0] -eq $expectedAlias -or $parts[1] -eq $expectedIp) {
+                $matched = $true
+                if ($parts[2] -ne 'True') {
+                    Write-DhcpDiagLine "dhcp binding NOT ENABLED for '$($parts[0])' ($($parts[1])) -- the server never answers DISCOVERs on this subnet. ROOT CAUSE."
+                }
+                else {
+                    Write-DhcpDiagLine "dhcp binding OK for '$($parts[0])' ($($parts[1])) BindingState=$($parts[2])"
+                }
+            }
+        }
+        if (-not $matched) {
+            Write-DhcpDiagLine "dhcp has NO binding entry for '$expectedAlias'/$expectedIp. All bindings: $(@($bindings) -join ' ; ')"
+        }
+    }
+    catch { }
+
+    # --- 2. Host vEthernet adapter for this subnet ---------------------------
+    try {
+        $alias = "vEthernet ($ScopeId)"
+        $hostAdapter = Get-NetAdapter -Name $alias -ErrorAction SilentlyContinue
+        if ($hostAdapter) {
+            $hostIps = @(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $alias -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress })
+            Write-DhcpDiagLine "host vNIC '$alias' Status=$($hostAdapter.Status) Up=$($hostAdapter.MediaConnectionState) IPs=[$($hostIps -join ',')]"
+        }
+        else {
+            Write-DhcpDiagLine "host vNIC '$alias' NOT FOUND."
+        }
+    }
+    catch { }
+
+    # --- 3. Lease census: is the server serving anyone else on this subnet? --
+    try {
+        $leases = Invoke-IsolatedCim -ArgumentList $ScopeId -ScriptBlock {
+            param($scope)
+            Get-DhcpServerv4Lease -ScopeId $scope -ErrorAction SilentlyContinue |
+                ForEach-Object { "$($_.IPAddress)|$($_.ClientId)|$($_.AddressState)|$($_.LeaseExpiryTime)" }
+        }
+        Write-DhcpDiagLine "scope $ScopeId currently holds $(@($leases).Count) lease(s)."
+        foreach ($lease in @($leases)) { Write-Log "$Tag $VmName`:   lease $lease" -LogOnly }
+    }
+    catch { }
+
+    # --- 4. Server audit log: did a DISCOVER from this MAC ever arrive? ------
+    # THE decisive artifact. Event IDs: 10=new lease, 11=renew, 12=release,
+    # 13=IP already in use on the network, 14=request could not be satisfied
+    # (scope exhausted), 15=NACK, 16=DECLINE, 00/01=service start/stop.
+    try {
+        $auditCfg = Invoke-IsolatedCim -ScriptBlock {
+            $a = Get-DhcpServerAuditLog -ErrorAction SilentlyContinue
+            if ($a) { "$($a.Enable)|$($a.Path)" } else { $null }
+        }
+        if (-not $auditCfg) {
+            Write-DhcpDiagLine "dhcp audit log config unavailable."
+        }
+        else {
+            $auditParts = "$auditCfg" -split '\|'
+            $auditEnabled = $auditParts[0]
+            $auditPath = $auditParts[1]
+            Write-DhcpDiagLine "dhcp audit log Enabled=$auditEnabled Path='$auditPath'"
+            if ($auditEnabled -eq 'True' -and (Test-Path $auditPath)) {
+                $macKey = ($Mac -replace '[-:]', '')
+                $todayFile = Join-Path $auditPath ("DhcpSrvLog-" + (Get-Date).ToString('ddd') + ".log")
+                $ydayFile = Join-Path $auditPath ("DhcpSrvLog-" + (Get-Date).AddDays(-1).ToString('ddd') + ".log")
+                $hits = @()
+                foreach ($af in @($ydayFile, $todayFile)) {
+                    if (-not (Test-Path $af)) { continue }
+                    # Copy first: the service holds the live file open with a
+                    # share mode that Select-String can still read, but a copy
+                    # is safe against a mid-write rotation.
+                    $tmp = Join-Path $env:TEMP ("dhcpaudit-" + [guid]::NewGuid().ToString('N') + ".log")
+                    try {
+                        Copy-Item -LiteralPath $af -Destination $tmp -Force -ErrorAction SilentlyContinue
+                        if (Test-Path $tmp) {
+                            $hits += @(Select-String -Path $tmp -Pattern $macKey -SimpleMatch -ErrorAction SilentlyContinue |
+                                    Select-Object -Last 25 | ForEach-Object { $_.Line.Trim() })
+                        }
+                    }
+                    finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+                }
+                if ($hits.Count -eq 0) {
+                    Write-DhcpDiagLine "dhcp audit log has NO entry for MAC $macKey -- the server never saw a DISCOVER from this VM. The packet is being lost between the guest NIC and the host vSwitch port, NOT in DHCP."
+                }
+                else {
+                    Write-DhcpDiagLine "dhcp audit log entries for MAC $macKey (last $($hits.Count)):"
+                    foreach ($h in $hits) { Write-DhcpDiagLine "  audit $h" }
+                }
+            }
+            elseif ($auditEnabled -ne 'True') {
+                Write-DhcpDiagLine "dhcp audit logging is DISABLED -- enable it (Set-DhcpServerAuditLog -Enable `$true) to capture the next occurrence."
+            }
+        }
+    }
+    catch { }
+
+    # --- 5. Guest-side: adapter, DHCP client service, client event log -------
+    if ($VmDomainName) {
+        try {
+            $guest = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -DisplayName "DiagDhcpClient" -ScriptBlock {
+                $out = @()
+                try {
+                    foreach ($a in @(Get-NetAdapter -ErrorAction SilentlyContinue)) {
+                        $out += "adapter '$($a.Name)' Status=$($a.Status) Media=$($a.MediaConnectionState) Speed=$($a.LinkSpeed) MAC=$($a.MacAddress)"
+                    }
+                }
+                catch { }
+                try {
+                    foreach ($i in @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
+                        $out += "ipinterface '$($i.InterfaceAlias)' Dhcp=$($i.Dhcp) ConnState=$($i.ConnectionState) Store=$($i.Store)"
+                    }
+                }
+                catch { }
+                try {
+                    $svc = Get-Service -Name Dhcp -ErrorAction SilentlyContinue
+                    $out += "dhcp client service Status=$($svc.Status) StartType=$($svc.StartType)"
+                }
+                catch { }
+                foreach ($logName in @('Microsoft-Windows-Dhcp-Client/Admin', 'Microsoft-Windows-Dhcp-Client/Operational', 'System')) {
+                    try {
+                        $filter = @{ LogName = $logName; StartTime = (Get-Date).AddMinutes(-30) }
+                        if ($logName -eq 'System') { $filter['ProviderName'] = 'Microsoft-Windows-Dhcp-Client' }
+                        $evts = Get-WinEvent -FilterHashtable $filter -MaxEvents 15 -ErrorAction SilentlyContinue
+                        foreach ($e in @($evts)) {
+                            $out += "event [$logName] $($e.TimeCreated.ToString('HH:mm:ss')) id=$($e.Id) lvl=$($e.LevelDisplayName) $(($e.Message -replace '\s+', ' '))"
+                        }
+                    }
+                    catch { }
+                }
+                return ($out -join "`n")
+            }
+            if ($guest -and $guest.ScriptBlockOutput -and -not $guest.ScriptBlockFailed) {
+                foreach ($gline in ("$($guest.ScriptBlockOutput)" -split "`r?`n")) {
+                    if ($gline.Trim()) { Write-DhcpDiagLine "guest $($gline.Trim())" }
+                }
+            }
+        }
+        catch { }
     }
 }
 
@@ -6061,6 +6402,10 @@ function Invoke-VmCommand {
                                     # callback crash documented above.
                                     Remove-VmSessionFromCache -VmName $VmName -LeakSession
                                 }
+                                # Stamp the timeline AFTER the probe so the next failure autopsy
+                                # reports the gap from "we declared this session usable" to the
+                                # failing pipeline-create, not from Remove-Job.
+                                Set-VmSessionPipelineEvent -Session $ps -Kind "asjob-probed(ready=$probeReady,attempts=$probeAttempts)" -Op $DisplayName
                             }
                         }
                         catch { }
@@ -6257,10 +6602,77 @@ function Invoke-VmCommand {
                     $ProgressPreference = 'SilentlyContinue'
                     try {
                         $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+
+                        # PIPELINE-CREATE RETRY (and the experiment that identifies the cause).
+                        #
+                        # Measured across every run after c0331bc6: the synchronous "Check pending
+                        # reboot" that follows Stop-DSC -AsJob failed 209/209 pre-phase and 173/173
+                        # post-phase with "An error occurred while creating the pipeline" -- a 100%
+                        # failure rate, so the check has never actually run. The post-AsJob
+                        # readiness probe cannot see it: a trivial `{1}` round-trip on the same
+                        # session succeeds on the first attempt every time (0 retry/give-up lines
+                        # logged in 211 teardowns), yet the real call ~1s later still fails.
+                        #
+                        # Retrying is safe ONLY for create-time errors: the signature below is
+                        # raised before any remote code runs, and we additionally require the
+                        # scriptblock to have produced NO output, so a partially-executed
+                        # non-idempotent scriptblock can never be run twice.
+                        #
+                        # The retry is also the diagnostic. Whether attempt 2 succeeds -- and after
+                        # how many ms -- separates the two live hypotheses far more cleanly than
+                        # any passive probe:
+                        #   recovers on attempt 2 within a few hundred ms  => transient race; the
+                        #       server-side teardown window is real and simply outlasts the probe.
+                        #   never recovers on the same session, but the rebuilt session works
+                        #       => the cached session is dead and RunspaceAvailability lies.
+                        #   never recovers even after rebuild => not a session problem at all.
+                        $pipeAttempt = 1
+                        # Local copy with a literal fallback: `-match $null` matches EVERYTHING,
+                        # so if the global were ever missing (dot-source order in a job) this
+                        # loop would retry on any error at all.
+                        $createSig = $global:ps_pipelineCreateSignature
+                        if (-not $createSig) { $createSig = 'An error occurred while creating the pipeline|The pipeline is not available|availability is Busy|is not available to run commands' }
+                        while ($pipeAttempt -lt 4 -and
+                            $null -eq $return.ScriptBlockOutput -and
+                            $Err2 -and $Err2.Count -gt 0 -and
+                            ("$($Err2 -join ' ')" -match $createSig)) {
+
+                            # Logged even under -SuppressLog: every line here is -LogOnly (file
+                            # only, never console), and the post-phase pending-reboot check --
+                            # which fails 100% of the time -- is a -SuppressLog caller.
+                            if ($pipeAttempt -eq 1) {
+                                Write-Log "$VmName`: '$DisplayName' pipeline-create autopsy -- $(Get-VmPipelineFailureAutopsy -Session $ps -Errors $Err2)" -LogOnly
+                            }
+
+                            $backoffMs = 250 * $pipeAttempt
+                            Start-Sleep -Milliseconds $backoffMs
+
+                            # Attempt 3 runs on a FRESH session: if a rebuilt channel succeeds where
+                            # the cached one never does, the cached session was dead and every
+                            # local readiness signal on it was lying.
+                            $rebuilt = $false
+                            if ($pipeAttempt -eq 3) {
+                                Remove-VmSessionFromCache -VmName $VmName -LeakSession
+                                $psRetry = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -MaxRetries 1 -LocalOnly:$localOnlySession -Quiet
+                                if ($psRetry) { $ps = $psRetry; $rebuilt = $true }
+                            }
+
+                            $Err2 = $null
+                            $retrySw = [System.Diagnostics.Stopwatch]::StartNew()
+                            $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+                            $retrySw.Stop()
+
+                            $ok = ($null -ne $return.ScriptBlockOutput) -or (-not $Err2) -or ($Err2.Count -eq 0)
+                            $verdict = if ($ok) { 'RECOVERED' } else { 'still-failing' }
+                            Write-Log "$VmName`: '$DisplayName' pipeline-create retry $pipeAttempt/3 after ${backoffMs}ms (freshSession=$rebuilt) -> $verdict in $([int]$retrySw.Elapsed.TotalMilliseconds)ms." -LogOnly
+                            if ($ok) { break }
+                            $pipeAttempt++
+                        }
                     }
                     finally {
                         $ProgressPreference = $savedProgressPref
                     }
+                    Set-VmSessionPipelineEvent -Session $ps -Kind 'sync-done' -Op $DisplayName
                     # Overwrite any leaked Invoke-Command progress with the clean DisplayName.
                     # $ProgressPreference suppression doesn't reliably prevent PS Direct
                     # sessions from adding raw-scriptblock progress records to the job stream.
@@ -6367,6 +6779,11 @@ function Invoke-VmCommand {
                     # serialization (concurrency) vs the AsJob settle-wait already in
                     # place (transitional) vs something else (Available + idle).
                     Write-Log "$VmName`: '$DisplayName' pipeline-race diag -- $(Get-VmSessionConcurrencyDiag -Session $ps -SelfToken $inflightToken -OutputWasNull $sbOutputWasNull)" -LogOnly
+                    # Full autopsy: exception chain + FullyQualifiedErrorId + the session's
+                    # real state + how long ago the previous pipeline on it finished. The
+                    # race diag above reported an identical, non-discriminating
+                    # 'Available/null/none' on all 800+ historical failures.
+                    Write-Log "$VmName`: '$DisplayName' pipeline-create autopsy -- $(Get-VmPipelineFailureAutopsy -Session $ps -Errors $Err2 -CaughtException $caughtException)" -LogOnly
                 }
             }
         }
@@ -6472,6 +6889,128 @@ function Get-VmSessionConcurrencyDiag {
     }
     catch { return "concurrency-diag-unavailable ($($_.Exception.Message))" }
 }
+
+# Per-session timeline for the "creating the pipeline" investigation. Keyed by
+# PSSession.InstanceId. Records when the session was built and when the previous
+# pipeline on it finished, so the failure autopsy can state -- in milliseconds --
+# how long after the preceding -AsJob teardown the failing pipeline-create landed.
+# That number is what distinguishes a server-side teardown race (tens/hundreds of
+# ms) from a session that has been idle for seconds and is simply dead.
+$global:ps_pipelineTimeline = [System.Collections.Hashtable]::Synchronized(@{})
+
+function Set-VmSessionPipelineEvent {
+    # Record 'what just finished' on a session. Never throws.
+    param($Session, [string]$Kind, [string]$Op)
+    try {
+        if (-not $Session) { return }
+        $key = "$($Session.InstanceId)"
+        [System.Threading.Monitor]::Enter($global:ps_pipelineTimeline.SyncRoot)
+        try {
+            if (-not $global:ps_pipelineTimeline.ContainsKey($key)) { $global:ps_pipelineTimeline[$key] = @{} }
+            $slot = $global:ps_pipelineTimeline[$key]
+            if ($Kind -eq 'created') { $slot['CreatedAt'] = (Get-Date) }
+            else {
+                $slot['LastAt'] = (Get-Date)
+                $slot['LastKind'] = $Kind
+                $slot['LastOp'] = $Op
+            }
+        }
+        finally { [System.Threading.Monitor]::Exit($global:ps_pipelineTimeline.SyncRoot) }
+    }
+    catch { }
+}
+
+function Get-VmPipelineFailureAutopsy {
+    # One-line, high-detail autopsy for a pipeline-create failure. The existing
+    # concurrency diag only reports RunspaceAvailability, which was 'Available' on
+    # every one of the 800+ recorded failures -- i.e. it cannot discriminate. This
+    # adds the three things that can:
+    #   1. the ErrorRecord's FullyQualifiedErrorId + exception chain (names the exact
+    #      throw site inside the remoting stack instead of just its message text),
+    #   2. the session's REAL state (PSSession.State / .Availability /
+    #      Runspace.RunspaceStateInfo.State+Reason -- all different from Availability),
+    #   3. how long ago the previous pipeline on this session finished, and what it was.
+    # Never throws.
+    param($Session, $Errors, $CaughtException)
+    try {
+        $parts = @()
+
+        $sState = '?'; $sAvail = '?'; $rsState = '?'; $rsReason = '<none>'; $rsAvail = '?'
+        if ($Session) {
+            try { $sState = [string]$Session.State } catch { }
+            try { $sAvail = [string]$Session.Availability } catch { }
+            try { $rsAvail = [string]$Session.Runspace.RunspaceAvailability } catch { }
+            try { $rsState = [string]$Session.Runspace.RunspaceStateInfo.State } catch { }
+            try {
+                $r = $Session.Runspace.RunspaceStateInfo.Reason
+                if ($r) { $rsReason = "$($r.GetType().Name): $($r.Message)" }
+            }
+            catch { }
+        }
+        $parts += "sess=[state=$sState avail=$sAvail rsState=$rsState rsAvail=$rsAvail rsReason='$rsReason']"
+
+        $ageStr = 'n/a'; $sinceStr = 'n/a'; $prevOp = '<none>'; $prevKind = '<none>'
+        if ($Session) {
+            $key = "$($Session.InstanceId)"
+            [System.Threading.Monitor]::Enter($global:ps_pipelineTimeline.SyncRoot)
+            try {
+                if ($global:ps_pipelineTimeline.ContainsKey($key)) {
+                    $slot = $global:ps_pipelineTimeline[$key]
+                    if ($slot['CreatedAt']) { $ageStr = "$([int]((Get-Date) - $slot['CreatedAt']).TotalMilliseconds)ms" }
+                    if ($slot['LastAt']) { $sinceStr = "$([int]((Get-Date) - $slot['LastAt']).TotalMilliseconds)ms" }
+                    if ($slot['LastOp']) { $prevOp = $slot['LastOp'] }
+                    if ($slot['LastKind']) { $prevKind = $slot['LastKind'] }
+                }
+            }
+            finally { [System.Threading.Monitor]::Exit($global:ps_pipelineTimeline.SyncRoot) }
+        }
+        $parts += "timeline=[sessionAge=$ageStr sincePrevPipeline=$sinceStr prevKind=$prevKind prevOp='$prevOp']"
+
+        $i = 0
+        foreach ($e in @($Errors)) {
+            if (-not $e) { continue }
+            $i++
+            if ($i -gt 3) { break }
+            $eType = '?'; $eFq = '?'; $eCat = '?'; $eTarget = '<null>'; $inner = '<none>'
+            try { if ($e.Exception) { $eType = $e.Exception.GetType().FullName } } catch { }
+            try { $eFq = [string]$e.FullyQualifiedErrorId } catch { }
+            try { $eCat = [string]$e.CategoryInfo.Category } catch { }
+            try { if ($null -ne $e.TargetObject) { $eTarget = "$($e.TargetObject)" } } catch { }
+            try {
+                $ix = $e.Exception.InnerException
+                $chain = @()
+                $depth = 0
+                while ($ix -and $depth -lt 4) { $chain += "$($ix.GetType().Name): $($ix.Message)"; $ix = $ix.InnerException; $depth++ }
+                if ($chain.Count) { $inner = ($chain -join ' <- ') }
+            }
+            catch { }
+            # TransportErrorCode / ErrorCode carry the hvsocket/WinRM native failure
+            # when the exception is a PSRemotingTransportException -- the single most
+            # useful field for telling a guest-side host death from a local race.
+            $native = ''
+            try {
+                if ($e.Exception.PSObject.Properties['ErrorCode']) { $native += " errorCode=$($e.Exception.ErrorCode)" }
+                if ($e.Exception.PSObject.Properties['TransportMessage']) { $native += " transportMsg='$($e.Exception.TransportMessage)'" }
+            }
+            catch { }
+            $parts += "err$i=[type=$eType fqeid=$eFq cat=$eCat target='$eTarget'$native inner='$inner']"
+        }
+        if ($i -eq 0 -and $CaughtException) {
+            $parts += "caught=[type=$($CaughtException.Exception.GetType().FullName) fqeid=$($CaughtException.FullyQualifiedErrorId)]"
+        }
+
+        return ($parts -join ' ')
+    }
+    catch { return "autopsy-unavailable ($($_.Exception.Message))" }
+}
+
+# Error-message signatures for a pipeline that failed to be CREATED -- i.e. the
+# remote scriptblock provably never started. Deliberately narrower than the
+# teardown signature used elsewhere: 'transport'/'broken'/'closed' can also fire
+# mid-execution, and retrying those risks running a non-idempotent scriptblock
+# twice. Everything here is raised before any remote code runs.
+$global:ps_pipelineCreateSignature = 'An error occurred while creating the pipeline|The pipeline is not available|availability is Busy|is not available to run commands|Cannot invoke the pipeline because it was not created'
+
 
 # New-PSSessionWithTimeout
 # Wraps New-PSSession -VMId in a separate runspace so the call can be
@@ -6905,6 +7444,7 @@ function Get-VmSession {
                 $global:ps_lastGoodCred[$VmName] = $entry.Tag
                 Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
                 $global:ps_cache[$cacheKey] = $ps
+                Set-VmSessionPipelineEvent -Session $ps -Kind 'created'
                 return $ps
             }
             # Detect channel-broken indicators: timeout means VMBus is hung;
@@ -7383,7 +7923,17 @@ function Install-Tools {
             if (-not $worked) {
                 $success = $false
                 Write-Progress2 "Injecting tools" -Status "Failed to Inject at least one tool to $VmName" -Log
-                Write-Log "$vmName`: Failed to inject at least one tool" -Failure -OutputStream
+                # NOT -OutputStream. Write-Log -OutputStream does Write-Output, which lands
+                # in THIS function's output stream -- and every caller assigns the result
+                # ($injected = Install-Tools ...), so the log object was captured into
+                # $injected alongside $false. That made $injected a 2-element array, which
+                # is truthy, so `if (-not $injected)` was FALSE on failure: the Phase 2
+                # wedged-VM detection + hard-reset + retry never ran, and the phase tally
+                # never saw the failure either (CS4-CS1SQL: 'Failed to inject at least one
+                # tool' at 22:47 -> '[Phase 2] 11 success, 0 warnings, 0 failures' at 22:51,
+                # then a Phase 11 failure 5 hours later). The caller emits the OutputStream
+                # line now, where it actually reaches the job's output stream.
+                Write-Log "$vmName`: Failed to inject at least one tool" -Failure
                 start-sleep -seconds 5
 
             }

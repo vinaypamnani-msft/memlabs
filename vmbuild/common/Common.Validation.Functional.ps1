@@ -5135,6 +5135,7 @@ function Test-ReportingFunctionality {
         $results.Details.Add("CMD: New-WebServiceProxy ReportService2005.asmx / GetItemType('/') (polled)")
         $soapOk = $false
         $lastErr = ''
+        $lastErrRecord = $null
         $maxAttempts = 8          # ~8 x 15s = up to ~120s of polling
         $retryDelay = 15
         $bouncedService = $false
@@ -5156,6 +5157,11 @@ function Test-ReportingFunctionality {
                     }
                     catch {
                         $lastErr = "$soapUri -> $($_.Exception.Message)"
+                        # Keep the LAST full exception so the failure branch can unwrap
+                        # it. "There was an error downloading '<url>'" is a WebException
+                        # wrapper -- the actual reason (503 / connection refused / 401 /
+                        # timeout) only exists on the inner exception + response object.
+                        $lastErrRecord = $_
                     }
                 }
                 if (-not $soapOk -and $attempt -lt $maxAttempts) {
@@ -5185,6 +5191,111 @@ function Test-ReportingFunctionality {
         if (-not $soapOk) {
             $results.Passed = $false
             $results.Details.Add("FAIL: Reporting SOAP API not functional after $maxAttempts attempts (last error: $lastErr)")
+
+            # AUTOPSY. "There was an error downloading '<url>'" names the URL and
+            # nothing else, which is why the CSTest2 RP failure was undiagnosable:
+            # Phase 7 had already swallowed the real PBIRS error, and this line was
+            # the only other evidence. Collect the four things that actually
+            # identify the fault, all in-guest, all best-effort.
+
+            # (a) unwrap the WebException -> real HTTP status / socket error
+            try {
+                if ($lastErrRecord) {
+                    $ix = $lastErrRecord.Exception
+                    $depth = 0
+                    while ($ix -and $depth -lt 5) {
+                        $line = "  autopsy exception[$depth]: $($ix.GetType().Name): $($ix.Message)"
+                        if ($ix -is [System.Net.WebException]) {
+                            $line += " status=$($ix.Status)"
+                            try {
+                                if ($ix.Response) {
+                                    $line += " httpStatus=$([int]$ix.Response.StatusCode) $($ix.Response.StatusCode)"
+                                }
+                            }
+                            catch { }
+                        }
+                        $results.Details.Add($line)
+                        $ix = $ix.InnerException
+                        $depth++
+                    }
+                }
+            }
+            catch { }
+
+            # (b) is anything even listening on 80/443?
+            foreach ($probePort in @(80, 443)) {
+                try {
+                    $tcp = New-Object System.Net.Sockets.TcpClient
+                    $iar = $tcp.BeginConnect('127.0.0.1', $probePort, $null, $null)
+                    $connected = $iar.AsyncWaitHandle.WaitOne(3000, $false) -and $tcp.Connected
+                    $results.Details.Add("  autopsy tcp 127.0.0.1:$probePort listening=$connected")
+                    $tcp.Close()
+                }
+                catch { $results.Details.Add("  autopsy tcp 127.0.0.1:$probePort probe threw: $($_.Exception.Message)") }
+            }
+
+            # (c) the Report Server's own configuration WMI class -- IsInitialized
+            #     and the database connection are the two states that decide whether
+            #     the SOAP endpoint can ever answer.
+            try {
+                $rsNs = Get-WmiObject -Namespace 'root\Microsoft\SqlServer\ReportServer' -Class __NAMESPACE -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty Name -First 1
+                if ($rsNs) {
+                    $rsVerNs = Get-WmiObject -Namespace "root\Microsoft\SqlServer\ReportServer\$rsNs" -Class __NAMESPACE -ErrorAction SilentlyContinue |
+                        Select-Object -ExpandProperty Name -First 1
+                    $cfg = Get-WmiObject -Namespace "root\Microsoft\SqlServer\ReportServer\$rsNs\$rsVerNs\Admin" -Class MSReportServer_ConfigurationSetting -ErrorAction SilentlyContinue
+                    if ($cfg) {
+                        $results.Details.Add("  autopsy rsconfig IsInitialized=$($cfg.IsInitialized) InstanceName=$($cfg.InstanceName) DB=$($cfg.DatabaseServerName)/$($cfg.DatabaseName) SecureConnectionLevel=$($cfg.SecureConnectionLevel) Version=$($cfg.Version)")
+                        try {
+                            $urls = $cfg.ListReportServerUrls()
+                            for ($u = 0; $u -lt @($urls.UrlString).Count; $u++) {
+                                $results.Details.Add("  autopsy rsconfig url app='$(@($urls.Application)[$u])' url='$(@($urls.UrlString)[$u])'")
+                            }
+                        }
+                        catch { $results.Details.Add("  autopsy rsconfig ListReportServerUrls threw: $($_.Exception.Message)") }
+                    }
+                    else { $results.Details.Add("  autopsy rsconfig MSReportServer_ConfigurationSetting not found under $rsNs\$rsVerNs") }
+                }
+                else { $results.Details.Add("  autopsy rsconfig namespace root\Microsoft\SqlServer\ReportServer not present") }
+            }
+            catch { $results.Details.Add("  autopsy rsconfig query threw: $($_.Exception.Message)") }
+
+            # (d) the Report Server service log -- the server-side reason
+            try {
+                $rsLogDirs = @(
+                    'C:\PBIRS\PBIRS\ReportServer\LogFiles',
+                    'C:\Program Files\Microsoft Power BI Report Server\PBIRS\LogFiles',
+                    'C:\Program Files\Microsoft SQL Server Reporting Services\SSRS\LogFiles'
+                )
+                $rsLog = $null
+                foreach ($d in $rsLogDirs) {
+                    if (Test-Path $d) {
+                        $rsLog = Get-ChildItem -Path $d -Filter 'ReportServerService_*.log' -ErrorAction SilentlyContinue |
+                            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                        if ($rsLog) { break }
+                    }
+                }
+                if ($rsLog) {
+                    $results.Details.Add("  autopsy rslog $($rsLog.FullName) (last write $($rsLog.LastWriteTime))")
+                    $bad = @(Get-Content -Path $rsLog.FullName -Tail 400 -ErrorAction SilentlyContinue |
+                            Where-Object { $_ -match 'ERROR|Exception|Throwing|rsReportServerDatabase|rsServerConfiguration|Cannot open database' } |
+                            Select-Object -Last 15)
+                    foreach ($b in $bad) { $results.Details.Add("  autopsy rslog| $($b.Trim())") }
+                    if ($bad.Count -eq 0) { $results.Details.Add("  autopsy rslog: no ERROR/Exception lines in the last 400 lines") }
+                }
+                else { $results.Details.Add("  autopsy rslog: no ReportServerService_*.log found in $($rsLogDirs -join ' ; ')") }
+            }
+            catch { $results.Details.Add("  autopsy rslog read threw: $($_.Exception.Message)") }
+
+            # (e) recent Report Server events
+            try {
+                $evts = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddMinutes(-45) } -MaxEvents 200 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ProviderName -match 'Report Server|Power BI|SSRS' } | Select-Object -First 10
+                foreach ($e in @($evts)) {
+                    $results.Details.Add("  autopsy event $($e.TimeCreated.ToString('HH:mm:ss')) [$($e.ProviderName)] id=$($e.Id) $(($e.Message -replace '\s+',' '))")
+                }
+            }
+            catch { }
         }
 
         return $results
@@ -6860,7 +6971,29 @@ function Save-Phase11GuestLogs {
         return $saved
     }
     if (-not $res -or $res.ScriptBlockFailed -or -not ($res.ScriptBlockOutput -is [hashtable]) -or $res.ScriptBlockOutput.Count -eq 0) {
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: log capture: no logs returned from VM" -Warning -LogOnly
+        # This used to collapse four very different causes into one useless string.
+        # CS4-DPMP1 hit it twice on the run where the DP was the whole reason the
+        # build failed, and the log left no way to tell whether PSDirect was down,
+        # the collector threw, or the guest genuinely had no logs.
+        $why = 'unknown'
+        if (-not $res) {
+            $why = 'Invoke-VmCommand returned nothing (no session / call never completed)'
+        }
+        elseif ($res.ScriptBlockFailed) {
+            $detail = ''
+            try { if ($res.ErrorDetails) { $detail = (@($res.ErrorDetails) -join ' | ') } } catch { }
+            if (-not $detail) { try { $detail = "$($res.ScriptBlockOutput)" } catch { } }
+            $why = "collector scriptblock FAILED in guest: $detail (channelBroken=$($res.ChannelBroken) timedOut=$($res.TimedOut))"
+        }
+        elseif (-not ($res.ScriptBlockOutput -is [hashtable])) {
+            $t = '<null>'
+            try { if ($null -ne $res.ScriptBlockOutput) { $t = $res.ScriptBlockOutput.GetType().FullName } } catch { }
+            $why = "collector returned $t instead of a hashtable; value='$("$($res.ScriptBlockOutput)" -replace '\s+', ' ')'"
+        }
+        else {
+            $why = 'collector ran but found NO log files (it resolved no log directory, or the directory held none of the expected logs)'
+        }
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: log capture produced nothing -- $why" -Warning -LogOnly
         return $saved
     }
 
@@ -6889,19 +7022,30 @@ function Save-Phase11GuestLogs {
 $Phase11CcmClientLogCollector = {
     # PullDP.log + DataTransferService.log (BITS) live in the CCM client log dir.
     $out = @{}
+    $diag = @()
     $dir = $null
-    try { $dir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\CCM\Logging\@GLOBAL' -Name 'LogDirectory' -ErrorAction Stop).LogDirectory } catch {}
+    try { $dir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\CCM\Logging\@GLOBAL' -Name 'LogDirectory' -ErrorAction Stop).LogDirectory } catch { $diag += "registry LogDirectory read failed: $($_.Exception.Message)" }
+    if ($dir) { $diag += "registry LogDirectory='$dir' exists=$(Test-Path $dir)" }
     if (-not $dir -or -not (Test-Path $dir)) {
         foreach ($c in @('E:\SMS_CCM\Logs', 'D:\SMS_CCM\Logs', 'F:\SMS_CCM\Logs', 'C:\Windows\CCM\Logs', 'C:\SMS_CCM\Logs')) {
-            if (Test-Path $c) { $dir = $c; break }
+            if (Test-Path $c) { $dir = $c; $diag += "fell back to '$c'"; break }
         }
     }
-    if (-not $dir -or -not (Test-Path $dir)) { return $out }
+    # ALWAYS return a self-diagnostic so an empty result still explains itself --
+    # 'no logs returned from VM' with no reason was the dead end on CS4-DPMP1.
+    if (-not $dir -or -not (Test-Path $dir)) {
+        $diag += 'no CCM log directory found; this VM has no ConfigMgr client installed, or it installed to a path not probed above.'
+        $out['_collector-diag.txt'] = ($diag -join "`r`n")
+        return $out
+    }
     foreach ($pat in @('PullDP.log', 'PullDP-*.log', 'DataTransferService.log', 'DataTransferService-*.log')) {
-        foreach ($f in @(Get-ChildItem -Path (Join-Path $dir $pat) -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 2)) {
-            try { $c = Get-Content -LiteralPath $f.FullName -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$f.Name] = ($c -join "`r`n") } } catch {}
+        $found = @(Get-ChildItem -Path (Join-Path $dir $pat) -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 2)
+        $diag += "pattern '$pat' matched $($found.Count) file(s)"
+        foreach ($f in $found) {
+            try { $c = Get-Content -LiteralPath $f.FullName -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$f.Name] = ($c -join "`r`n") } else { $diag += "  '$($f.Name)' read returned no content" } } catch { $diag += "  '$($f.Name)' read threw: $($_.Exception.Message)" }
         }
     }
+    $out['_collector-diag.txt'] = ($diag -join "`r`n")
     return $out
 }
 
@@ -6912,17 +7056,23 @@ $Phase11SmsSiteLogCollector = {
     # a Secondary DP stuck on the client package is an inter-site problem, and the
     # "Error creating package bundle ... 0x800704d3" abort is on the SENDING side.
     $out = @{}
+    $diag = @()
     $smsDir = $null
     foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
-        try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
-        if ($smsDir) { break }
+        try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
+        if ($smsDir) { $diag += "SMS install dir from '$k' = '$smsDir'"; break }
     }
-    if (-not $smsDir -or -not (Test-Path $smsDir)) { return $out }
+    if (-not $smsDir -or -not (Test-Path $smsDir)) {
+        $diag += "no SMS installation directory found (probed SMS\Identification and SMS\Setup). This VM is a remote DP/site system with no SMS_EXECUTIVE logs, not a site server."
+        $out['_collector-diag.txt'] = ($diag -join "`r`n")
+        return $out
+    }
     foreach ($n in @('distmgr.log', 'PkgXferMgr.log', 'sender.log', 'despool.log', 'rcmctrl.log')) {
         $p = Join-Path $smsDir "Logs\$n"
         if (Test-Path $p) {
-            try { $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$n] = ($c -join "`r`n") } } catch {}
+            try { $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$n] = ($c -join "`r`n") } else { $diag += "'$n' present but read returned no content" } } catch { $diag += "'$n' read threw: $($_.Exception.Message)" }
         }
+        else { $diag += "'$n' not present at $p" }
     }
     # SMS_EXECUTIVE restart forensics -- the ROOT-CAUSE signal for a 0x800704d3
     # inter-site bundle abort: distmgr sets its bundle cancel flag to the thread-exit
@@ -6942,6 +7092,7 @@ $Phase11SmsSiteLogCollector = {
         if ($lines.Count -gt 0) { $out['SMS_EXECUTIVE-restarts.txt'] = ($lines -join "`r`n") }
     }
     catch {}
+    $out['_collector-diag.txt'] = ($diag -join "`r`n")
     return $out
 }
 

@@ -415,7 +415,27 @@ $ensureClientPkgCoverage = {
         foreach ($dp in $stillBad) {
             $dpHost = ("$dp" -split '\.')[0]
             $u = $dp.ToUpper()
-            $sInfo = if ($state.ContainsKey($u)) { "State=$($stateName["$($state[$u])"]) DPSourceVersion=$($stateVer[$u]) vs pkg=$pkgSourceVersion" } else { "no summarizer row (never targeted, or not yet reported)" }
+            $sInfo = if ($state.ContainsKey($u)) { "State=$($stateName["$($state[$u])"]) DPSourceVersion=$($stateVer[$u]) vs pkg=$pkgSourceVersion" } else { "no summarizer row" }
+            if (-not $state.ContainsKey($u)) {
+                # "never targeted, or not yet reported" was a coin toss, and the two halves
+                # need opposite fixes. The TARGETING table (SMS_DistributionPoint) answers it
+                # outright: a row means distribution WAS requested and only the summarizer is
+                # missing/lagging (with PkgLib holding the .INI that means the content landed
+                # but the site DB never recorded it -- so the MP hands clients no DP location
+                # and ccmsetup wedges in GetDPLocations, which is exactly what CS4 did). No row
+                # means the (re)distribute never took and the repair ladder is the problem.
+                try {
+                    $tgt = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue |
+                            Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }) | Select-Object -First 1
+                    if ($tgt) {
+                        $sInfo = "no summarizer row BUT targeting row EXISTS (SMS_DistributionPoint: SiteCode=$($tgt.SiteCode) StoredPkgVersion=$($tgt.StoredPkgVersion) SourceVersion=$($tgt.SourceVersion) LastRefresh=$($tgt.LastRefreshTime)) -> distribution WAS requested; the site DB just never got an Installed status back"
+                    }
+                    else {
+                        $sInfo = 'no summarizer row AND no targeting row (SMS_DistributionPoint) -> the (re)distribute never created a distribution for this DP'
+                    }
+                }
+                catch { $sInfo = "no summarizer row; targeting-row query failed: $($_.Exception.Message)" }
+            }
             try {
                 $diag = Invoke-Command -ComputerName $dpHost -ArgumentList $PackageID -ErrorAction Stop -ScriptBlock {
                     param($pkgId)
@@ -428,7 +448,7 @@ $ensureClientPkgCoverage = {
                         $hits = @(Get-Content $p -Tail 3000 -ErrorAction SilentlyContinue | Where-Object { $_ -match $pat } | Select-Object -Last $n)
                         (@($hits | ForEach-Object { $m = [regex]::Match($_, '<!\[LOG\[(.*?)\]LOG\]!>'); if ($m.Success) { $m.Groups[1].Value } else { $_ } }) -join ' | ')
                     }
-                    $o = [ordered]@{ PkgLib = ''; ContentLib = ''; Distmgr = ''; PkgXfer = ''; Despool = ''; Sender = ''; Exec = '' }
+                    $o = [ordered]@{ PkgLib = ''; ContentLib = ''; Distmgr = ''; PkgXfer = ''; Despool = ''; Sender = ''; Exec = ''; DpProv = '' }
                     # Resolve the ACTUAL content library root from the DP registry. For an
                     # HA site the library is RELOCATED to a remote share (\\<FileServer>\...
                     # via remoteContentLibVM), so the old hard-coded E:/D:/F:/C:\SCCMContentLib
@@ -473,6 +493,25 @@ $ensureClientPkgCoverage = {
                         # sender: the SENDING side inter-site transfer.
                         $o.Sender = & $grab (Join-Path $logs 'sender.log') 3 "$pkgId|Error|0x8|failed|retry"
                     }
+                    # smsdpprov.log -- the DP's OWN content-import + status-publication log,
+                    # and the ONLY one of these that exists on a remote DP (no SMS install dir
+                    # -> every grab above returns empty, which is why CS4-DPMP1's diagnostics
+                    # were blank). This is where "content is in PkgLib but the site never saw
+                    # an Installed row" is explained.
+                    try {
+                        $dpProvLog = $null
+                        foreach ($d in @('E:', 'D:', 'F:', 'C:')) {
+                            $cand = "$d\SMS_DP`$\sms\logs\smsdpprov.log"
+                            if (Test-Path $cand) { $dpProvLog = $cand; break }
+                        }
+                        if ($dpProvLog) {
+                            $o.DpProv = "$dpProvLog :: " + (& $grab $dpProvLog 10 "$pkgId|Failed|error|0x8|ContentLibrary|AddFile|CreateContent|signature|Import")
+                        }
+                        else {
+                            $o.DpProv = 'smsdpprov.log not found (SMS_DP$ share/log missing -> the DP role may not be fully installed on this server)'
+                        }
+                    }
+                    catch { $o.DpProv = "smsdpprov.log read threw: $($_.Exception.Message)" }
                     # SMS_EXECUTIVE forensics: a 0x800704d3 bundle abort means this site's
                     # executive/distmgr was STOPPED mid-build. Show when it last started and
                     # how many SCM start/stop (event 7036) entries it logged in the last 2h --
@@ -522,6 +561,7 @@ $ensureClientPkgCoverage = {
                     Write-DscStatus "Client pkg coverage diag [$dp]: 0x800704d3 writing to the content library ($($diag.ContentLib)) -- content snapshot ABORTED. If the library is REMOTE (HA remoteContentLibVM), verify the FileServer host is UP and the site server's machine account can WRITE the ContentLib share; a broken remote content library blocks ALL content distribution for the whole site." -Warning
                 }
                 if ($diag.Exec) { Write-DscStatus "Client pkg coverage diag [$dp] SMS_EXECUTIVE: $($diag.Exec)" -Warning }
+                if ($diag.DpProv) { Write-DscStatus "Client pkg coverage diag [$dp] smsdpprov: $($diag.DpProv)" -Warning }
                 if ($diag.PkgXfer) { Write-DscStatus "Client pkg coverage diag [$dp] PkgXferMgr: $($diag.PkgXfer)" -Warning }
                 if ($diag.Despool) { Write-DscStatus "Client pkg coverage diag [$dp] despool: $($diag.Despool)" -Warning }
                 if ($diag.Sender) { Write-DscStatus "Client pkg coverage diag [$dp] sender: $($diag.Sender)" -Warning }
