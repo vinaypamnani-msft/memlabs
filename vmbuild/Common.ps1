@@ -7039,6 +7039,10 @@ function New-PSSessionWithTimeout {
     # timeout (channel hung) from auth/connection errors.
     $result = @{ Session = $null; TimedOut = $false; ErrorMessage = $null }
 
+    # Cheap amortised sweep: reclaim anything parked by an earlier abandon that has
+    # since gone quiet.
+    $null = Clear-OrphanRunspaces
+
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
     $rs.Open()
 
@@ -7057,9 +7061,11 @@ function New-PSSessionWithTimeout {
         # blocks until the underlying VMBus call completes.  When PSDirect
         # is wedged, Stop() hangs indefinitely, defeating the timeout.
         # BeginStop queues the cancellation and returns immediately; the
-        # runspace and PowerShell instance are leaked until the async stop
-        # completes or the process exits — acceptable vs. hanging forever.
+        # runspace is parked for deferred disposal rather than abandoned, so
+        # it is reclaimed once the async stop lands instead of holding ~8MB
+        # for the life of the shell.
         try { $psi.BeginStop($null, $null) } catch {}
+        Add-OrphanRunspace -Runspace $rs -PowerShell $psi -Reason 'connect timeout' -VmName $Name
         $result.TimedOut = $true
         return $result
     }
@@ -7084,6 +7090,73 @@ function New-PSSessionWithTimeout {
         $rs.Dispose()
     }
     return $result
+}
+
+# Runspaces that could not be disposed at the moment they were abandoned.
+# RunspaceFactory::CreateRunspace() is the ONLY runspace API in this codebase that
+# leaks 1:1 when not explicitly disposed -- [PowerShell]::Create()+Dispose() and
+# Start-ThreadJob both reclaim cleanly (measured, temp/probe-runspace-creators.ps1)
+# -- and New-PSSessionWithTimeout is its only caller. Both of its abandon paths
+# (connect timeout, and a session evicted with -LeakSession) used to drop the
+# runspace on the floor, where it stayed for the life of the shell holding its own
+# command + format + module tables, ~8MB each. A 5.5h Mega build ended with 121
+# open runspaces against just 18 cached sessions.
+# Deferring rather than never disposing: the reason these are abandoned is that a
+# late transport callback on an already-disposed object crashes the phase process,
+# so give them a settle window and only then reclaim.
+$global:ps_orphanRunspaces = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+
+function Add-OrphanRunspace {
+    param($Runspace, $PowerShell, [string]$Reason, [string]$VmName)
+    try {
+        if (-not $Runspace -and -not $PowerShell) { return }
+        [void]$global:ps_orphanRunspaces.Add([pscustomobject]@{
+                Rs = $Runspace; Ps = $PowerShell; At = (Get-Date); Reason = $Reason; VmName = $VmName
+            })
+    }
+    catch { }
+}
+
+function Clear-OrphanRunspaces {
+    <#
+    .SYNOPSIS
+    Dispose parked runspaces once they are safe to touch.
+    .PARAMETER Force
+    End-of-run: reclaim regardless of age. Jobs have already been removed by then,
+    so the late-callback hazard that made these unsafe is gone.
+    #>
+    [CmdletBinding()]
+    param([switch]$Force, [int]$MinAgeSeconds = 120)
+
+    $reclaimed = 0
+    try {
+        foreach ($entry in @($global:ps_orphanRunspaces)) {
+            if (-not $entry) { continue }
+            $age = ((Get-Date) - $entry.At).TotalSeconds
+            if (-not $Force -and $age -lt $MinAgeSeconds) { continue }
+            # Still executing: leave it. A Dispose() here is the documented crash.
+            if (-not $Force) {
+                $avail = $null
+                try { $avail = $entry.Rs.RunspaceAvailability } catch { }
+                if ("$avail" -eq 'Busy') { continue }
+            }
+            try { if ($entry.Ps) { $entry.Ps.Dispose() } } catch { }
+            try {
+                if ($entry.Rs) {
+                    $entry.Rs.Close()
+                    $entry.Rs.Dispose()
+                }
+            }
+            catch { }
+            [void]$global:ps_orphanRunspaces.Remove($entry)
+            $reclaimed++
+        }
+    }
+    catch { }
+    if ($reclaimed -gt 0) {
+        try { Write-Log "Reclaimed $reclaimed orphaned runspace(s); $(@($global:ps_orphanRunspaces).Count) still parked." -LogOnly } catch { }
+    }
+    return $reclaimed
 }
 
 # Dispose a PSSession and its owner runspace (if created by
@@ -7128,6 +7201,12 @@ function Remove-VmSessionFromCache {
             $sess = $global:ps_cache[$key]
             $global:ps_cache.Remove($key)
             if (-not $LeakSession) { Remove-VmSession $sess }
+            else {
+                # Park the owner runspace rather than dropping it: not disposing NOW
+                # is what keeps the late transport callback safe, but it does not have
+                # to mean never. Clear-OrphanRunspaces reclaims it once it is idle.
+                try { Add-OrphanRunspace -Runspace $sess._OwnerRunspace -Reason 'session leaked (abandoned job)' -VmName $VmName } catch { }
+            }
             $dispNote = if ($LeakSession) { 'leaked (abandoned job may still ride it)' } else { 'disposed' }
             Write-Log "$VmName`: Evicted cached PSDirect session '$key' ($dispNote; timed out / unresponsive)" -Verbose
         }

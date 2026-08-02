@@ -1413,11 +1413,20 @@ finally {
     }
     $global:ps_cache = @{}
 
-    # Runspaces are the launcher's dominant memory cost, so say what is left.
+    # Reclaim runspaces parked by an abandon path (connect timeout, or a session
+    # evicted with -LeakSession). -Force because every job is gone by now, so the
+    # late-transport-callback hazard that made immediate disposal unsafe is over.
+    try { $null = Clear-OrphanRunspaces -Force } catch { }
+
+    # Runspaces are the launcher's dominant memory cost (~8MB each, and the reason a
+    # 5.5h build ended at 121 of them). Break down whatever is left by state so the
+    # next leak names its own source instead of needing another dump.
     try {
         $rsLeft = @(Get-Runspace -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne 1 -and $_.RunspaceStateInfo.State -ne 'Closed' })
         if ($rsLeft.Count -gt 0) {
-            Write-Log "[JobLeak] after session cleanup: $($rsLeft.Count) runspace(s) still open besides the default. Each carries its own command + format tables (~8MB); if this climbs every build, a session is being cached without Remove-VmSession." -Warning
+            $byState = ($rsLeft | Group-Object { "$($_.RunspaceStateInfo.State)/$($_.RunspaceAvailability)" } |
+                    ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
+            Write-Log "[JobLeak] after session cleanup: $($rsLeft.Count) runspace(s) still open besides the default [$byState]; $(@($global:ps_orphanRunspaces).Count) parked awaiting reclaim. Each carries its own command + format tables (~8MB)." -Warning
         }
     }
     catch { }
