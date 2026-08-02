@@ -4634,6 +4634,8 @@ $global:VM_Config = {
         $lcmPendingNoRebootSince = $null   # when the LCM was FIRST seen PendingConfiguration with NO reboot owed (stranded apply)
         $dscResumeCount = 0                # in-place Stop+Start-DscConfiguration -UseExisting attempts this stall episode
         $dscResumeMax = 1                  # gentle in-place resumes before escalating a stranded PendingConfiguration to a reboot
+        $dscResumeTotal = 0                # in-place resumes across the WHOLE phase (per-episode count resets on every status change)
+        $dscResumeTotalMax = 3             # hard cap: a node that inches forward one status line per resume must still escalate
         $lastLcmSampleTime = [DateTime]::MinValue  # throttle for the guest LCM-state poll
         $certPulseDone = $false   # one-shot guard for the PKI cert pre-stage handshake
         $sqlSetupSummaryDumped = $false   # one-shot: dump SQL Setup Summary.txt to the build log on the first SQL-install stall
@@ -4684,12 +4686,13 @@ $global:VM_Config = {
                                 }
                                 $adwsUp = $false
                                 if ($dcIp) {
+                                    $tcp = $null
                                     try {
                                         $tcp = [System.Net.Sockets.TcpClient]::new()
                                         $task = $tcp.ConnectAsync($dcIp, 9389)
                                         $adwsUp = $task.Wait(2000)  # 2-second timeout
-                                        $tcp.Dispose()
                                     } catch { $adwsUp = $false }
+                                    finally { if ($tcp) { $tcp.Dispose() } }
                                 }
                                 if ($adwsUp) {
                                     $dcReadySince = [DateTime]::UtcNow
@@ -4708,7 +4711,23 @@ $global:VM_Config = {
 
                     $minutesSinceDcReady = if ($dcReadySince) { ([DateTime]::UtcNow - $dcReadySince).TotalMinutes } else { 0 }
                     if ($dcReadySince -and $minutesSinceDcReady -gt $recoveryMinutes) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after $([Math]::Round($recoveryMinutes, 1)) min ($nodeCount nodes) since DC ready -- DC may have failed to push config. Attempting local compile+start." -Warning -OutputStream
+                        # "No status yet" only means the GUEST hasn't written DSC_Status.txt -- NOT that the
+                        # DC's push failed. A long first resource (Phase 4's SQL install) keeps the LCM busy
+                        # for many minutes before any status lands, so this fired on 5 of 7 Phase 4 nodes and
+                        # every one came back LCM_Busy. Confirm the guest LCM actually has nothing to do before
+                        # crying wolf: a Busy/Pending LCM proves the push DID arrive, so extend the window
+                        # instead of emitting a warning (which also downgrades the phase summary from success)
+                        # and spending a 300s round-trip on a recovery that can only no-op.
+                        $lcmPush = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -ScriptBlock {
+                            try { (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState } catch { 'unreachable' }
+                        } -SuppressLog
+                        $lcmPushState = if ((-not $lcmPush.ScriptBlockFailed) -and $lcmPush.ScriptBlockOutput) { [string]$lcmPush.ScriptBlockOutput } else { 'unreachable' }
+                        if ($lcmPushState -ne 'Idle') {
+                            $dcReadySince = [DateTime]::UtcNow
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after $([Math]::Round($recoveryMinutes, 1)) min ($nodeCount nodes), but the guest LCM is '$lcmPushState' -- the DC's push arrived and is still applying. Extending the window; not compiling locally." -LogOnly
+                        }
+                        else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after $([Math]::Round($recoveryMinutes, 1)) min ($nodeCount nodes) since DC ready and the guest LCM is Idle -- DC failed to push config. Attempting local compile+start." -Warning -OutputStream
                     $DSC_RecoverLocal = {
                         param($DscFolder)
                         $log = "C:\staging\DSC\DSC_Init.log"
@@ -4813,7 +4832,16 @@ $global:VM_Config = {
                     else {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC local recovery: $recoveryOutput" -Warning -OutputStream
                     }
-                    $dscRecoveryAttempted = $true
+                    # Only consume the one-shot when a recovery actually ran. The guest-side guard returns
+                    # LCM_<state> without touching anything, so treating that as "attempted" would permanently
+                    # disable the real recovery for a node that merely happened to be busy at that instant.
+                    if ($recoveryResult.ScriptBlockFailed -or ("$recoveryOutput" -like 'LCM_*')) {
+                        $dcReadySince = [DateTime]::UtcNow
+                    }
+                    else {
+                        $dscRecoveryAttempted = $true
+                    }
+                    } # else: LCM idle -- local recovery ran
                     } # if dcReadySince and minutesSinceDcReady > recoveryMinutes
                 } # if skipStartDsc and noStatus
 
@@ -5249,7 +5277,7 @@ $global:VM_Config = {
                         # momentary idle (a step that just completed, or the gap between DSC resources) resets
                         # the idle clock on the next sample and never triggers a restart. This is intentionally
                         # independent of the status TEXT -- we never branch on what the status string says.
-                        $staleMins = [int]([DateTime]::UtcNow - $lastStatusChangeTime).TotalMinutes
+                        $staleMins = [int][Math]::Floor(([DateTime]::UtcNow - $lastStatusChangeTime).TotalMinutes)
 
                         # Sample the LCM (throttled to once/min; we do NOT poll the guest on every ~3s
                         # heartbeat) once the status has been stalled past the probe threshold.
@@ -5305,9 +5333,11 @@ $global:VM_Config = {
                             }
                         }
 
-                        $idleMins = if ($lcmIdleSince) { [int]([DateTime]::UtcNow - $lcmIdleSince).TotalMinutes } else { 0 }
-                        $rebootMins = if ($lcmRebootPendingSince) { [int]([DateTime]::UtcNow - $lcmRebootPendingSince).TotalMinutes } else { 0 }
-                        $pendingMins = if ($lcmPendingNoRebootSince) { [int]([DateTime]::UtcNow - $lcmPendingNoRebootSince).TotalMinutes } else { 0 }
+                        # [int] ROUNDS in PowerShell, so [int]3.6 == 4 -- every one of these clocks used to
+                        # trip ~30s early and report a minute more than had elapsed. Floor them.
+                        $idleMins = if ($lcmIdleSince) { [int][Math]::Floor(([DateTime]::UtcNow - $lcmIdleSince).TotalMinutes) } else { 0 }
+                        $rebootMins = if ($lcmRebootPendingSince) { [int][Math]::Floor(([DateTime]::UtcNow - $lcmRebootPendingSince).TotalMinutes) } else { 0 }
+                        $pendingMins = if ($lcmPendingNoRebootSince) { [int][Math]::Floor(([DateTime]::UtcNow - $lcmPendingNoRebootSince).TotalMinutes) } else { 0 }
 
                         if ($lcmRebootPendingSince -and $rebootMins -ge $rebootPendingStuckMinutes -and $staleRestartCount -lt $staleRestartMax) {
                             # The LCM has been parked reboot-pending (PendingReboot / PendingConfiguration /
@@ -5341,7 +5371,7 @@ $global:VM_Config = {
                                 $lastStaleWarningTime = [DateTime]::MinValue
                             }
                         }
-                        elseif ($lcmPendingNoRebootSince -and $pendingMins -ge $rebootStuckMinutes -and ($dscResumeCount -lt $dscResumeMax -or $staleRestartCount -lt $staleRestartMax)) {
+                        elseif ($lcmPendingNoRebootSince -and $pendingMins -ge $rebootStuckMinutes -and ((($dscResumeCount -lt $dscResumeMax) -and ($dscResumeTotal -lt $dscResumeTotalMax)) -or $staleRestartCount -lt $staleRestartMax)) {
                             # Stranded PendingConfiguration with NO reboot owed (pending.mof staged, last apply
                             # didn't request a restart). In ApplyOnly mode nothing auto-resumes it. Tier 1: resume
                             # the pending config IN PLACE via Stop + Start-DscConfiguration -UseExisting (no reboot --
@@ -5414,10 +5444,11 @@ $global:VM_Config = {
                                 $lcmPendingNoRebootSince = [DateTime]::UtcNow   # task is doing work -- restart the window
                                 $lastStaleWarningTime = [DateTime]::MinValue
                             }
-                            elseif ($dscResumeCount -lt $dscResumeMax) {
+                            elseif (($dscResumeCount -lt $dscResumeMax) -and ($dscResumeTotal -lt $dscResumeTotalMax)) {
                                 # TIER 1: gentle in-place resume (fire-and-forget, bounded). No reboot.
                                 $dscResumeCount++
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM stranded PendingConfiguration for ${pendingMins}m (no reboot owed) with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Resuming the pending config in place: Stop + Start-DscConfiguration -UseExisting (resume $dscResumeCount/$dscResumeMax)." -Warning -OutputStream
+                                $dscResumeTotal++
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM stranded PendingConfiguration for ${pendingMins}m (no reboot owed) with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Resuming the pending config in place: Stop + Start-DscConfiguration -UseExisting (resume $dscResumeCount/$dscResumeMax this stall, $dscResumeTotal/$dscResumeTotalMax this phase)." -Warning -OutputStream
                                 # Capture the tail of the guest's most recent DSC ConfigurationStatus record
                                 # (C:\Windows\System32\Configuration\ConfigurationStatus\*.json -- the actual last
                                 # LCM run, what Get-DscConfigurationStatus reads) so the build log shows which
