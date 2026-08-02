@@ -270,13 +270,10 @@ $ensureClientPkgCoverage = {
         }
     }
 
-    # Escalation ladder per DP -- a plain redistribute does NOT clear a Secondary DP
-    # wedged at ContentValidating (its distmgr may be idle on a 3600s sleep cycle),
-    # so escalate: (0) redistribute -> (1) remove + re-add content (force a clean
-    # copy through the wedge) -> (2) restart SMS_EXECUTIVE on the DP to wake its
-    # distmgr. The client package is small, so each step should settle in a minute
-    # or two when it is going to work.
-    $escalation = @{}   # DP-upper -> highest escalation level already applied
+    # Remediation per DP is deliberately NON-destructive: keep the SMS_DistributionPoint
+    # (PkgServers) targeting row alive and flip RefreshNow on it so distmgr re-processes
+    # the package now instead of waiting out its 3600s sleep / 30-min retry backoff.
+    $lastArm = @{}   # DP-upper -> when RefreshNow was last flipped for that DP
     $maxTries = 24
     # A CAS/parent-owned package (e.g. the client package under a child primary) has NO
     # local content yet (StoredPkgVersion=0); its content must first replicate DOWN from
@@ -307,81 +304,45 @@ $ensureClientPkgCoverage = {
             $hasRow = $state.ContainsKey($u)
             $st = if ($hasRow) { $state[$u] } else { -1 }
             $stName = if ($stateName.ContainsKey("$st")) { $stateName["$st"] } else { "State$st" }
-            # InstallPending (1) is a distribution actually in flight -- leave it alone.
-            if ($st -eq 1) { continue }
-            # InstallRetrying (2) is NOT progress: the copy already FAILED and distmgr is
-            # parked on its retry backoff (STATMSG 2326 reports 30 minutes / 100 retries),
-            # which is longer than this gate's whole budget. Observed cause on a fresh
-            # child primary: distmgr starts the copy 1-2s before the DP finishes creating
-            # its SMS_DP_SMSPKG$ / SMSSIG$ virtual directories, so the first attempt always
-            # loses the race. Re-arm the targeting row every 5 min so distmgr re-processes
-            # the package now instead of waiting out the backoff; never escalate past this
-            # (removing content from a DP mid-retry is what strands the package).
-            if ($st -eq 2) {
-                if (($try % 10) -eq 0) {
-                    try {
-                        & $redistOrDistribute $dp | Out-Null
-                        Write-DscStatus "Client pkg coverage: DP '$dp' is InstallRetrying (distmgr is in a ~30 min retry backoff after a failed copy) -> re-armed with RefreshNow to retry now [try $try]"
-                    }
-                    catch { Write-DscStatus "Client pkg coverage: RefreshNow re-arm on DP '$dp' failed: $($_.Exception.Message)" }
+            # The SMS_DistributionPoint (PkgServers) row is the one thing that matters: it
+            # tells distmgr to send the content AND it is what distmgr checks before it will
+            # accept the DP's status file back. With no row the copy still runs to completion
+            # but the result is discarded -- "Will reject STA for DP ... as it does not exist
+            # in the PkgServers table" (STATMSG 2354) -- leaving the content physically on the
+            # DP and permanently un-Installed in the site DB. Restore a missing row on EVERY
+            # iteration; the summarizer is not consulted because it lags the targeting table.
+            $hasTgt = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue |
+                    Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }).Count -gt 0
+            if (-not $hasTgt) {
+                try {
+                    Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
+                    $lastArm[$u] = Get-Date
+                    Write-DscStatus "Client pkg coverage: DP '$dp' had NO targeting row (PkgServers) -> distributed to re-establish it [try $try]"
                 }
+                catch { Write-DscStatus "Client pkg coverage: re-establishing the targeting row for DP '$dp' failed: $($_.Exception.Message)" }
                 continue
             }
-            $level = if ($escalation.ContainsKey($u)) { $escalation[$u] } else { -1 }
+            # InstallPending (1) is a distribution actually in flight -- leave it alone.
+            if ($st -eq 1) { continue }
+            # Content still replicating down from the parent/CAS: the DP cannot receive
+            # anything until it lands locally, so the targeting row above is all that is
+            # needed and poking distmgr changes nothing.
+            if ($contentPendingFromParent) { continue }
+            # Re-arm at most every 5 minutes. RefreshNow is the ONLY remediation, by design.
+            # Remove-CMContentDistribution (the old "clean copy through the wedge" step)
+            # deletes the PkgServers row and stranded the package every time it fired --
+            # most recently 7s after the CAS content finally landed, killing a distribution
+            # that had already reached the DP. Restarting SMS_EXECUTIVE is equally
+            # destructive (it aborts content import / status publication). ConfigMgr's own
+            # retry backoff (STATMSG 2326: 30 min, 100 retries) outlives this whole gate, so
+            # flipping RefreshNow is what makes distmgr re-process the package now.
+            $armedAt = if ($lastArm.ContainsKey($u)) { $lastArm[$u] } else { $null }
+            if ($armedAt -and ((Get-Date) - $armedAt).TotalMinutes -lt 5) { continue }
             try {
-                if ($level -lt 0) {
-                    # Level 0: gentle (re)distribute via the version-proof WMI path.
-                    # $hasRow (summarizer) is unreliable here -- it lags targeting,
-                    # so a DP that is already targeted but has no summarizer row yet
-                    # would fail Start-CMContentDistribution with "already distributed".
-                    # $redistOrDistribute checks the targeting table and picks
-                    # RefreshNow (already targeted) vs distribute (not targeted).
-                    $action = & $redistOrDistribute $dp
-                    if ($action -eq 'distributed') {
-                        Write-DscStatus "Client pkg coverage: DP '$dp' had no distribution -> distributed [esc.0, try $try]"
-                    }
-                    else {
-                        Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed (RefreshNow) [esc.0, try $try]"
-                    }
-                    $escalation[$u] = 0
-                }
-                elseif ($contentPendingFromParent) {
-                    # Content isn't at this site yet -> the DP CANNOT receive it until the
-                    # parent/CAS sends it down. Removing/re-adding or restarting only tears
-                    # down the SMS_DistributionPoint row that signals the parent (observed:
-                    # it stranded the client package at 'no-row' while a sibling CAS package
-                    # that kept its targeting flowed down fine). Only re-establish a vanished
-                    # targeting row; otherwise just wait for the content to replicate down.
-                    $hasTgt = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue |
-                            Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }).Count -gt 0
-                    if (-not $hasTgt) {
-                        Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
-                        Write-DscStatus "Client pkg coverage: DP '$dp' targeting row was missing -> re-distributed to re-signal the parent; waiting for content to replicate down (StoredPkgVersion=0) [content-pending, try $try]"
-                    }
-                }
-                elseif ($level -eq 0 -and $try -ge 4) {
-                    # Level 1: remove + re-add content (clean copy through the wedge).
-                    # The Remove is best-effort (a wedged Secondary DP may reject it),
-                    # so re-add via the $redistOrDistribute helper -- if the targeting
-                    # row survived the Remove it RefreshNow's it instead of throwing
-                    # "already distributed"; if the Remove took, it distributes fresh.
-                    try { Remove-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -Force -ErrorAction Stop } catch {}
-                    Start-Sleep -Seconds 10
-                    & $redistOrDistribute $dp | Out-Null
-                    Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> removed + re-added content [esc.1, try $try]"
-                    $escalation[$u] = 1
-                }
-                elseif ($level -eq 1 -and $try -ge 8) {
-                    # Never restart SMS_EXECUTIVE as content remediation. On a site server
-                    # that aborts distmgr's in-flight bundle; on a remote DP there is no
-                    # distmgr to wake, and stopping the executive kills SMS_DP_PROVIDER
-                    # during content import/status publication. The latter produces the
-                    # exact false state this gate is waiting on: PkgLib has the package but
-                    # the site receives no Installed summarizer row. Leave the transfer and
-                    # DP provider uninterrupted so normal retry/status processing can finish.
-                    Write-DscStatus "Client pkg coverage: DP '$dp' still $stName after clean redistribution -> NOT restarting SMS_EXECUTIVE (that can abort content import/status publication). Leaving ConfigMgr retry processing uninterrupted. [esc.2, try $try]" -Warning
-                    $escalation[$u] = 2
-                }
+                & $redistOrDistribute $dp | Out-Null
+                $lastArm[$u] = Get-Date
+                if ($armedAt) { Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> re-armed with RefreshNow so distmgr retries now instead of waiting out its backoff [try $try]" }
+                else { Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed (RefreshNow) [try $try]" }
             }
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
         }
