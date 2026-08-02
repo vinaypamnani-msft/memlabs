@@ -1398,12 +1398,29 @@ finally {
         Write-Log "$($leak.WorkerProcs) PowerShell job worker process(es) survived cleanup, holding $($leak.WorkerMB)MB. They will keep that memory until this shell exits; see the [JobLeak] lines above for pids." -Warning
     }
 
-    # Close PS Sessions
+    # Close PS Sessions. MUST be Remove-VmSession, not Remove-PSSession:
+    # New-PSSessionWithTimeout deliberately keeps the runspace it created alive on
+    # success (closing it would kill the PSSession whose transport runs through it)
+    # and attaches it to the session as _OwnerRunspace for exactly this cleanup.
+    # Remove-PSSession does not know about that property, so every cached PSDirect
+    # session leaked a whole runspace -- and Start-Test keeps this shell for the
+    # entire -All run. A 2.6GB dump of the harness showed 240 retained LocalRunspace
+    # objects carrying 224,468 CmdletInfo, 352,257 FieldPropertyToken and 3,877,177
+    # InternalScriptExtent: 1.94GB of the 1.94GB managed heap, ~8MB per runspace.
     foreach ($session in $global:ps_cache.Keys) {
         Write-Log "Closing PS Session $session" -Verbose
-        try { Remove-PSSession $global:ps_cache.$session -ErrorAction SilentlyContinue } catch {}
+        try { Remove-VmSession $global:ps_cache.$session } catch {}
     }
     $global:ps_cache = @{}
+
+    # Runspaces are the launcher's dominant memory cost, so say what is left.
+    try {
+        $rsLeft = @(Get-Runspace -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne 1 -and $_.RunspaceStateInfo.State -ne 'Closed' })
+        if ($rsLeft.Count -gt 0) {
+            Write-Log "[JobLeak] after session cleanup: $($rsLeft.Count) runspace(s) still open besides the default. Each carries its own command + format tables (~8MB); if this climbs every build, a session is being cached without Remove-VmSession." -Warning
+        }
+    }
+    catch { }
 
     # Delete in progress or failed VM's
     if ($global:vm_remove_list.Count -gt 0) {
