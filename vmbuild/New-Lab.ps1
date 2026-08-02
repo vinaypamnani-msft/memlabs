@@ -1284,7 +1284,11 @@ finally {
         Set-TitleBar "Script Cancelled"
         Write-Log "### $Configuration Terminated $currentPhase" -HostOnly
         Write-Log "Log file: $($Common.LogPath)" -Warning -NoIndent
-        $exitcode = 2
+        # 55 is a self-restart request (DSC.zip was just rebuilt), not a build failure --
+        # don't clobber it, or the caller can't tell the two apart.
+        if ($exitcode -ne 55) {
+            $exitcode = 2
+        }
         if ($currentPhase -ge 2 -and $currentPhase -le $maxPhase) {
             $offerRestore = $false
             if ($currentPhase -eq 8 -and $deployConfig) {

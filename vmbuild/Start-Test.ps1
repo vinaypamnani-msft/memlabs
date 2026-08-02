@@ -304,6 +304,71 @@ function Set-FeatureOverrides {
     if ($applyOffice) { Enable-Office -Config $Config }
 }
 
+function Invoke-NewLab {
+    # Run one deployment and hand back ONLY its exit code. Two things here are load-bearing:
+    #  1. '| Out-Host' -- New-Lab.ps1 leaks objects onto the success stream. Un-piped they
+    #     join Run-Test's own output, so the caller's "$result = Run-Test" gets an ARRAY and
+    #     "-not $result" evaluates FALSE on failure: a failed build silently rolled on.
+    #  2. Zeroing $LASTEXITCODE first -- New-Lab.ps1 only calls exit when it FAILS, so on
+    #     success $LASTEXITCODE is whatever the last native command left (e.g. the git pull
+    #     above, whose non-zero exit we deliberately tolerate).
+    param(
+        [string]$ConfigFile
+    )
+
+    $global:LASTEXITCODE = 0
+    & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot | Out-Host
+    $code = [int]$LASTEXITCODE
+
+    # 55 = New-Lab rebuilt DSC.zip and needs a restart to pick it up.
+    if ($code -eq 55) {
+        $global:LASTEXITCODE = 0
+        & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot | Out-Host
+        $code = [int]$LASTEXITCODE
+    }
+    return $code
+}
+
+function Get-TestFailureAction {
+    # A failed build must never roll straight on to the next config. The lab is left
+    # intact so it can be repaired in another window; the operator decides what happens next.
+    param(
+        [string]$ConfigFile,
+        [string]$DomainName,
+        [int]$ExitCode
+    )
+
+    Write-Host
+    Write-Host "  BUILD FAILED (exit $ExitCode). The lab has been left intact for investigation." -ForegroundColor Red
+    Write-Host "  Config : $ConfigFile" -ForegroundColor DarkGray
+    Write-Host "  Domain : $DomainName" -ForegroundColor DarkGray
+    Write-Host "  Repair it from another window (New-Lab printed a '-startPhase' resume command above), then choose Retry." -ForegroundColor DarkGray
+    Write-Host
+
+    if (-not [Environment]::UserInteractive) {
+        Write-Host "  Non-interactive host; aborting the test run." -ForegroundColor Yellow
+        return 'Abort'
+    }
+
+    while ($true) {
+        try {
+            $answer = "$(Read-Host '  [R]etry this config, [S]kip it and continue, [A]bort all tests (default A)')".Trim()
+        }
+        catch {
+            # No console to read from (redirected/closed stdin) -- don't spin the prompt.
+            Write-Host "  Could not read a response ($($_.Exception.Message)); aborting the test run." -ForegroundColor Yellow
+            return 'Abort'
+        }
+        if (-not $answer) { return 'Abort' }
+        switch ($answer.Substring(0, 1).ToUpperInvariant()) {
+            'R' { return 'Retry' }
+            'S' { return 'Skip' }
+            'A' { return 'Abort' }
+            default { Write-Host "  Please enter R, S or A." -ForegroundColor Yellow }
+        }
+    }
+}
+
 function Run-Test {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '',
         Justification = 'Local test-runner helper; not an exported cmdlet.')]
@@ -319,6 +384,7 @@ function Run-Test {
     # re-runs the whole cycle (add/repair against the existing VMs) to prove a re-deploy
     # of the full sequence works. A failure in either pass fails the whole group
     # (returns $false), leaving the domain(s) intact for investigation.
+    $groupFailed = $false
     $totalPasses = 2
     for ($pass = 1; $pass -le $totalPasses; $pass++) {
         $passLabel = if ($pass -eq 1) { "deploy" } else { "re-deploy" }
@@ -375,32 +441,43 @@ function Run-Test {
 
             $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
             Write-Host "Starting test ($passLabel) for $testjson.  Adding $domainName to $($global:removeddomains -join ',')"
-            try {
-                & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
-                if ($LASTEXITCODE -eq 55) {
-                    & ./New-Lab.ps1 -Configuration $ModifiedtestFile -NoSnapshot
-                }
-                Write-Host "$LASTEXITCODE was returned from $testjson ($passLabel)"
-                if ($LASTEXITCODE -ne 0) {
-                    return $false
-                }
+
+            $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
+            Write-Host "$exitCode was returned from $testjson ($passLabel)"
+
+            $action = 'Continue'
+            while ($exitCode -ne 0) {
+                Write-Host "$testjson Failed ($passLabel)"
+                Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
+                $action = Get-TestFailureAction -ConfigFile $ModifiedtestFile -DomainName $domainName -ExitCode $exitCode
+                if ($action -ne 'Retry') { break }
+                Write-Host "Retrying $testjson ($passLabel)..." -ForegroundColor Cyan
+                $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
+                Write-Host "$exitCode was returned from $testjson (retry, $passLabel)"
             }
-            finally {
-                if ($LASTEXITCODE -ne 0) {
-                    write-host "$testjson Failed ($passLabel)"
-                    $global:history += "$testjson Failed ($passLabel)"
-                    Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
-                }   
-                else {
-                    write-host "$testjson Completed Successfully ($passLabel)"
-                    $global:history += "$testjson Completed Successfully ($passLabel)"
-                }
+
+            if ($exitCode -eq 0) {
+                Write-Host "$testjson Completed Successfully ($passLabel)"
+                $global:history += "$testjson Completed Successfully ($passLabel)"
+                continue
             }
+
+            # Still failed. Never let a failure be reported as a pass -- even when the
+            # operator elects to keep going, the group stays failed so the caller leaves
+            # every domain in place instead of tearing it down.
+            $groupFailed = $true
+            $global:history += "$testjson Failed ($passLabel)"
+            if ($action -eq 'Skip') {
+                Write-Host "Skipping $testjson and continuing ($passLabel). The group is still marked failed." -ForegroundColor Yellow
+                continue
+            }
+            Write-Host "Aborting the test run. $domainName is left intact." -ForegroundColor Red
+            return $false
         }
     }
     
     [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./Remove-lab.ps1 -DomainName $domainName")
-    return $true
+    return (-not $groupFailed)
 }
 
 # Validate Common.ps1 has UTF-8 BOM before dot-sourcing (PS5.1 needs BOM for non-ASCII chars)
@@ -418,7 +495,12 @@ try {
     $global:history = @()
     $global:removedomains = @()
     if ($test) {
-        $result = Run-Test -Test $Test
+        # Coerce down to the single boolean: anything Run-Test's callees leak onto the
+        # success stream would otherwise make this an array (and every -not test useless).
+        $result = (@(Run-Test -Test $Test) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
+        if (-not $result) {
+            Write-Host "Test '$Test' FAILED. Labs left intact: $($global:removedomains -join ', ')" -ForegroundColor Red
+        }
     }
 
     if ($all) {
@@ -442,9 +524,10 @@ try {
                 write-host "$Test already ran skipping"
                 continue
             }
-            $result = Run-Test -Test $($Test + "-")
+            $result = (@(Run-Test -Test $($Test + "-")) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
             Write-Host "$Test returned $result"
             if (-not $result) {
+                Write-Host "Stopping: '$Test' failed. Labs left intact for repair: $($global:removedomains -join ', ')" -ForegroundColor Red
                 break
             }
             if ($global:removedomains.Count -gt 0) {
