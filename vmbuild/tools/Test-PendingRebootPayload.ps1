@@ -29,17 +29,33 @@
     VM to probe. Pick one that has actually failed -- NOC-DC1 accounts for 30 of the
     'Check pending reboot' failures across the nocm logs.
 .PARAMETER PrecedeWithAsJob
-    Run an -AsJob command first, mimicking "Stop Any Running DSC's" -- the operation
-    the failure most often follows.
+    Run a benign -AsJob command first. NOTE: this only mimics the SHAPE of
+    "Stop Any Running DSC's" (an -AsJob call immediately before the sync one). It
+    does NOT do what that command actually does, and a 5x5 sweep with it passed
+    every payload -- so shape alone is not the trigger.
+.PARAMETER RealStopDsc
+    Send what Stop_RunningDSC really does: drain the guest job table, remove the DSC
+    configuration documents, and FORCE-KILL WmiPrvSE + WmiApSrv in the guest. That
+    kill is the part the benign version omits and is the strongest remaining suspect.
+    The build already does this on every VM at the start of every phase, so it is not
+    an unusual thing to do to the guest -- but it IS disruptive, hence opt-in.
+.PARAMETER StressThreads
+    Starve the HOST threadpool while probing, the way Confirm-PipelineRunspaceFix.ps1
+    does. The failure only ever appears during a build, so host contention is the
+    other half of the missing context.
 .EXAMPLE
-    .\Test-PendingRebootPayload.ps1 -VmName NOC-DC1 -VmDomainName nocm.com -PrecedeWithAsJob
+    .\Test-PendingRebootPayload.ps1 -VmName NOC-DC1 -VmDomainName nocm.com -RealStopDsc
+.EXAMPLE
+    .\Test-PendingRebootPayload.ps1 -VmName NOC-DC1 -VmDomainName nocm.com -RealStopDsc -StressThreads 64 -Runs 20
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$VmName,
     [Parameter(Mandatory)][string]$VmDomainName,
     [int]$Runs = 5,
-    [switch]$PrecedeWithAsJob
+    [switch]$PrecedeWithAsJob,
+    [switch]$RealStopDsc,
+    [int]$StressThreads = 0
 )
 
 $root = Split-Path $PSScriptRoot -Parent
@@ -90,33 +106,68 @@ $payloads = [ordered]@{
 }
 
 "VM       : $VmName ($VmDomainName)"
-"Runs     : $Runs   PrecedeWithAsJob=$PrecedeWithAsJob"
+"Runs     : $Runs   PrecedeWithAsJob=$PrecedeWithAsJob  RealStopDsc=$RealStopDsc  StressThreads=$StressThreads"
 "Payloads : $(@($payloads.Keys) -join ', ')"
 ""
+
+# The failure has never been seen on an idle host. Starve the threadpool the way
+# Confirm-PipelineRunspaceFix.ps1 does, so the launcher is under the same pressure.
+$stressRunspaces = @()
+if ($StressThreads -gt 0) {
+    for ($i = 0; $i -lt $StressThreads; $i++) {
+        $psx = [powershell]::Create()
+        $null = $psx.AddScript({ $end = (Get-Date).AddMinutes(20); while ((Get-Date) -lt $end) { $null = 1..2000 | ForEach-Object { $_ * 2 } } })
+        $null = $psx.BeginInvoke()
+        $stressRunspaces += $psx
+    }
+    "  (started $StressThreads stress worker(s))"
+}
+
+# What Stop_RunningDSC actually does to the guest. The WmiPrvSE/WmiApSrv kill is the
+# part -PrecedeWithAsJob omits, and the build performs it on every VM every phase.
+$realStopDscBody = {
+    try { Get-Job | Remove-Job -Force -ErrorAction SilentlyContinue } catch {}
+    try { Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+    try {
+        Get-Process WmiPrvSE -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+    catch {}
+    'stopdsc-real'
+}
 
 $results = [ordered]@{}
 foreach ($k in $payloads.Keys) { $results[$k] = @{ Ok = 0; Fail = 0; Errs = @() } }
 
-for ($run = 1; $run -le $Runs; $run++) {
-    if ($PrecedeWithAsJob) {
-        $null = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog `
-            -DisplayName 'Stop DSC (repro)' -ScriptBlock { Start-Sleep -Milliseconds 150; 'stopdsc' }
-    }
-    foreach ($k in $payloads.Keys) {
-        $sw = [Diagnostics.Stopwatch]::StartNew()
-        $r = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog `
-            -DisplayName "payload $k" -ScriptBlock $payloads[$k]
-        $sw.Stop()
-        $len = "$($payloads[$k])".Length
-        if ($r.ScriptBlockFailed) {
-            $results[$k].Fail++
-            $msg = ''
-            try { if ($r.ErrorDetails) { $msg = (@($r.ErrorDetails) -join ' | ') } } catch {}
-            $results[$k].Errs += "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms $msg"
+try {
+    for ($run = 1; $run -le $Runs; $run++) {
+        if ($RealStopDsc) {
+            $null = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog `
+                -DisplayName 'Stop Any Running DSC (real)' -ScriptBlock $realStopDscBody
         }
-        else { $results[$k].Ok++ }
-        "run $run  {0,-22} len={1,-6} {2,-4} {3,6}ms" -f $k, $len, $(if ($r.ScriptBlockFailed) { 'FAIL' } else { 'ok' }), [math]::Round($sw.Elapsed.TotalMilliseconds)
+        elseif ($PrecedeWithAsJob) {
+            $null = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog `
+                -DisplayName 'Stop DSC (repro)' -ScriptBlock { Start-Sleep -Milliseconds 150; 'stopdsc' }
+        }
+        foreach ($k in $payloads.Keys) {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $r = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog `
+                -DisplayName "payload $k" -ScriptBlock $payloads[$k]
+            $sw.Stop()
+            $len = "$($payloads[$k])".Length
+            if ($r.ScriptBlockFailed) {
+                $results[$k].Fail++
+                $msg = ''
+                try { if ($r.ErrorDetails) { $msg = (@($r.ErrorDetails) -join ' | ') } } catch {}
+                $results[$k].Errs += "$([math]::Round($sw.Elapsed.TotalMilliseconds))ms $msg"
+            }
+            else { $results[$k].Ok++ }
+            "run $run  {0,-22} len={1,-6} {2,-4} {3,6}ms" -f $k, $len, $(if ($r.ScriptBlockFailed) { 'FAIL' } else { 'ok' }), [math]::Round($sw.Elapsed.TotalMilliseconds)
+        }
     }
+}
+finally {
+    foreach ($psx in $stressRunspaces) { try { $psx.Stop(); $psx.Dispose() } catch {} }
 }
 
 ""
@@ -133,6 +184,9 @@ if ($trivialOk -and $anyRealFail) {
 elseif (-not $trivialOk) {
     "VERDICT: TRANSPORT. Even the trivial payload failed, so the session/channel is genuinely broken here."
 }
+elseif (-not $RealStopDsc -and $StressThreads -eq 0) {
+    "VERDICT: NOT REPRODUCED, and this run did not model the trigger. A 5x5 sweep with -PrecedeWithAsJob already passed everything, which rules OUT payload size and content. Re-run with -RealStopDsc (guest WmiPrvSE/WmiApSrv kill, what the phase actually does) and -StressThreads, ideally during a build."
+}
 else {
-    "VERDICT: NOT REPRODUCED in this window. Re-run during an actual build, or with -PrecedeWithAsJob, on a VM that has failed before."
+    "VERDICT: NOT REPRODUCED even with RealStopDsc=$RealStopDsc StressThreads=$StressThreads. The trigger needs something still absent here -- run it against a VM mid-phase."
 }
