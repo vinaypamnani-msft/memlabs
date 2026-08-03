@@ -162,7 +162,10 @@ function Write-JobProgress {
                     $changed = (-not $lastEntry) -or ($lastEntry.Line -ne $HistoryLine)
                     $stale = $lastEntry -and (($now - $lastEntry.Time).TotalSeconds -ge 10)
                     if ($changed -or $stale) {
-                        $global:JobProgressHistory[$jobKey] = @{ Line = $HistoryLine; Time = $now }
+                        # Status is kept unconcatenated (Line mixes in id/activity/percent) so
+                        # Wait-Phase can read "Waiting on <VM> to Complete" and spot a wait on a
+                        # dependency that has already failed.
+                        $global:JobProgressHistory[$jobKey] = @{ Line = $HistoryLine; Time = $now; Status = $latestStatus; JobName = $jobName }
                         if ($secondsRemaining -gt 0) {
                             $latestStatus += " (Remaining: $($secondsRemaining)s)"
                         }
@@ -2388,6 +2391,14 @@ function Wait-Phase {
 
         $global:JobProgressHistory = @{}
 
+        # A VM blocked in DSC WaitForAll shows LCM=Busy, so none of the host's stall
+        # recovery paths (which need Idle/PendingConfiguration) ever fire, and the
+        # WaitForAll itself is RetryCount 7200 x 5s = 10 HOURS. If the VM it is waiting
+        # on has already failed, that wait can never succeed -- it just burns the rest
+        # of the 10h, warning every 5 min. Track failed VMs and name the doomed waits.
+        $failedVmNames = @{}
+        $deadWaitWarned = @{}
+
         # Track how many output objects we've already displayed per job so
         # warnings/errors from running jobs appear in real-time instead of
         # being deferred until the job completes.
@@ -2414,6 +2425,33 @@ function Wait-Phase {
 
                 # Diagnostic: record progress-stream volume/last-record for this job.
                 Write-JobProgressDiag -Job $job
+
+                # Is this job waiting on a VM that has already failed? The DSC status
+                # names it verbatim ("Waiting on X to Complete", "Waiting for X to finish
+                # adding passive site server role", "Waiting for Site Server X to finish
+                # configuration"). Such a wait can never be satisfied, and nothing else
+                # will cut it short: WaitForAll keeps the LCM Busy so the stall-recovery
+                # paths never fire, its own budget is 10h, and Wait-Phase only aborts the
+                # phase for a DC/CAS failure -- a failed Primary strands its secondary,
+                # passive and SQLAO nodes. Warn once per pair; do not change termination.
+                if ($failedVmNames.Count -gt 0) {
+                    try {
+                        $hist = $global:JobProgressHistory[$job.Id]
+                        # WaitFor is joined with ',' so the status can name several VMs.
+                        if ($hist -and $hist.Status -match 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)') {
+                            foreach ($w in ($Matches[1] -split ',')) {
+                                $waitedOn = "$w".Trim().ToUpper()
+                                if (-not $waitedOn) { continue }
+                                $pairKey = "$($job.Id)|$waitedOn"
+                                if ($failedVmNames.ContainsKey($waitedOn) -and -not $deadWaitWarned.ContainsKey($pairKey)) {
+                                    $deadWaitWarned[$pairKey] = $true
+                                    Write-Log "[Phase $Phase]: $($hist.JobName): waiting on '$waitedOn', which FAILED at $($failedVmNames[$waitedOn].ToString('HH:mm:ss')). This wait cannot succeed and will hold the phase until its 10h DSC budget expires. Status: '$($hist.Status)'" -Warning -OutputStream
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
 
                 # Surface warning/error output objects from running jobs immediately.
                 $streamSource = Get-JobStreamSource -Job $job
@@ -2767,7 +2805,10 @@ function Wait-Phase {
                 }
 
                 # Count once per job based on worst severity seen
-                if ($worstLogLevel -ge 3) { $return.Failed++ }
+                if ($worstLogLevel -ge 3) {
+                    $return.Failed++
+                    try { $failedVmNames[("$jobName" -split ' ')[0].ToUpper()] = (Get-Date) } catch { }
+                }
                 elseif ($worstLogLevel -ge 2) { $return.Warning++ }
                 elseif ($jobOutput) { $return.Success++ }
 
