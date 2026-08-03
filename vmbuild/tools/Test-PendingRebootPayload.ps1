@@ -34,15 +34,18 @@
     does NOT do what that command actually does, and a 5x5 sweep with it passed
     every payload -- so shape alone is not the trigger.
 .PARAMETER RealStopDsc
-    Send what Stop_RunningDSC really does: drain the guest job table, remove the DSC
-    configuration documents, and FORCE-KILL WmiPrvSE + WmiApSrv in the guest. That
-    kill is the part the benign version omits and is the strongest remaining suspect.
-    The build already does this on every VM at the start of every phase, so it is not
-    an unusual thing to do to the guest -- but it IS disruptive, hence opt-in.
+    DESTRUCTIVE. Sends what Stop_RunningDSC really does: drains the guest job table,
+    REMOVES the guest's Current/Pending/Previous DSC configuration documents, and
+    FORCE-KILLS WmiPrvSE + WmiApSrv. Safe only on an IDLE lab -- against a VM that is
+    mid-phase it destroys the configuration the build is applying and the build hangs
+    waiting for status that never arrives. Refuses to run if any VMBuild log has been
+    written in the last 10 minutes; -Force overrides.
+.PARAMETER Force
+    Override the active-build guard on -RealStopDsc.
 .PARAMETER StressThreads
     Starve the HOST threadpool while probing, the way Confirm-PipelineRunspaceFix.ps1
-    does. The failure only ever appears during a build, so host contention is the
-    other half of the missing context.
+    does. Workers are stopped in a finally block; if you Ctrl-C out of the script they
+    can keep burning CPU, so let it finish.
 .EXAMPLE
     .\Test-PendingRebootPayload.ps1 -VmName NOC-DC1 -VmDomainName nocm.com -RealStopDsc
 .EXAMPLE
@@ -55,6 +58,7 @@ param(
     [int]$Runs = 5,
     [switch]$PrecedeWithAsJob,
     [switch]$RealStopDsc,
+    [switch]$Force,
     [int]$StressThreads = 0
 )
 
@@ -109,6 +113,28 @@ $payloads = [ordered]@{
 "Runs     : $Runs   PrecedeWithAsJob=$PrecedeWithAsJob  RealStopDsc=$RealStopDsc  StressThreads=$StressThreads"
 "Payloads : $(@($payloads.Keys) -join ', ')"
 ""
+
+# -RealStopDsc DELETES the guest's DSC configuration documents and kills its LCM.
+# Run against a VM in an active build and it destroys the configuration that build is
+# applying, leaving the host waiting for status that will never arrive. That is
+# exactly what happened on 2026-08-03: a probe overlapped a Phase 3 DSC on NOC-DC1
+# and stranded the deployment. Refuse unless the logs have been quiet for a while.
+if ($RealStopDsc) {
+    $logDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'logs'
+    $recent = @(Get-ChildItem $logDir -Filter 'VMBuild*.jsonl' -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-10) } | Sort-Object LastWriteTime -Descending)
+    if ($recent.Count -gt 0) {
+        $age = [int]((Get-Date) - $recent[0].LastWriteTime).TotalMinutes
+        Write-Host ""
+        Write-Host "REFUSING TO RUN -RealStopDsc: a build looks ACTIVE." -ForegroundColor Red
+        Write-Host "  '$($recent[0].Name)' was written ${age} minute(s) ago." -ForegroundColor Red
+        Write-Host "  -RealStopDsc removes the guest's Current/Pending/Previous DSC documents and force-kills" -ForegroundColor Red
+        Write-Host "  its LCM. Against a VM mid-phase that DESTROYS the configuration being applied and the" -ForegroundColor Red
+        Write-Host "  build will hang waiting for status. Wait for the build to finish, or use -Force to override." -ForegroundColor Red
+        if (-not $Force) { return }
+        Write-Host "  -Force given; continuing anyway." -ForegroundColor Yellow
+    }
+}
 
 # The failure has never been seen on an idle host. Starve the threadpool the way
 # Confirm-PipelineRunspaceFix.ps1 does, so the launcher is under the same pressure.
