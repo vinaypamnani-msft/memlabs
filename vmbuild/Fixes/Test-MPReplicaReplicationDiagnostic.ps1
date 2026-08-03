@@ -458,6 +458,15 @@ if ($replicaVMs.Count -gt 0 -and $siteSqlVM) {
             finally { $c.Dispose(); $sw.Stop() }
         }
         $o.Add('  (probe ran as the diagnostic account; the agent runs as the SQL Agent service account)')
+        foreach ($key in 'HKLM:\SOFTWARE\Microsoft\MSSQLServer\Client\ConnectTo', 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\MSSQLServer\Client\ConnectTo') {
+            try {
+                $p = Get-ItemProperty -Path $key -ErrorAction Stop
+                $names = @($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' })
+                if ($names.Count -eq 0) { $o.Add("  SQL client aliases ($key): (none)") }
+                else { foreach ($n in $names) { $o.Add("  SQL client alias ($key): $($n.Name) = $($n.Value)") } }
+            }
+            catch { $o.Add("  SQL client aliases ($key): (key not present)") }
+        }
         try {
             $c = New-Object System.Data.SqlClient.SqlConnection "Server=$localConn;Database=msdb;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=15"
             $c.Open()

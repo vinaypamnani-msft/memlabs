@@ -517,10 +517,14 @@ if (-not $hardFailed) {
     # here and probe the hop from each replica below.
     $siteSqlTcpPort = 1433
     try {
-        $pq = Invoke-ReplSql -Instance $siteSqlConn -Query "SELECT p = CONVERT(int, ISNULL((SELECT TOP 1 NULLIF(value_data, '') FROM sys.dm_server_registry WHERE value_name = 'TcpPort' AND registry_key LIKE '%\SuperSocketNetLib\Tcp\IPAll'), 0))"
+        $pq = Invoke-ReplSql -Instance $siteSqlConn -Query "SELECT p = CONVERT(int, ISNULL((SELECT TOP 1 NULLIF(LTRIM(RTRIM(value_data)), '') FROM sys.dm_server_registry WHERE value_name = 'TcpPort' AND registry_key LIKE '%\SuperSocketNetLib\Tcp\IPAll'), 0))"
         if ($pq -and [int]$pq.p -gt 0) { $siteSqlTcpPort = [int]$pq.p }
     }
-    catch { Write-DscStatus "$Tag WARNING: could not read the site SQL TCP port: $($_.Exception.Message)" }
+    catch { Write-DscStatus "$Tag WARNING: could not read the site SQL TCP port from the registry: $($_.Exception.Message)" }
+    if ($siteSqlTcpPort -eq 1433) {
+        $siteSqlVmCfg = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $siteSqlShort } | Select-Object -First 1
+        if ($siteSqlVmCfg -and $siteSqlVmCfg.sqlPort -and "$($siteSqlVmCfg.sqlPort)" -ne '1433') { $siteSqlTcpPort = [int]$siteSqlVmCfg.sqlPort }
+    }
     Write-DscStatus "$Tag Pull agents will connect to distributor '$sitePublisherName' on TCP $siteSqlTcpPort."
 
     # Re-run safety (site side): STEP 5.3 imports each replica's SSB cert as master
@@ -553,24 +557,41 @@ END
         }
         Write-DscStatus "$Tag ===== $($t.MPName) -> $($t.ReplicaConn) / $($t.ReplicaDbName) (ordinal $($t.CertOrdinal)) ====="
 
-        # Same hop the pull Distribution Agent takes, from the same box.
+        # The pull Distribution Agent connects to the distributor by the bare server
+        # name baked into its job step (-Distributor <@@SERVERNAME>); replication has
+        # nowhere to put a port, so it always tries 1433. memlabs runs SQL on a custom
+        # port, so that connect is dropped and the agent loops forever on "Agent message
+        # code 20084 - the process could not connect to Distributor" and the snapshot
+        # never applies. A SQL client alias on the replica is the documented fix: it
+        # redirects that exact name to the real fqdn,port. Then probe the same hop.
         try {
-            $reach = Invoke-Command -ComputerName $t.ReplicaShort -ArgumentList $sitePublisherName, $siteSqlTcpPort -ScriptBlock {
-                param($distName, $port)
-                $ips = ''
-                try { $ips = (@([System.Net.Dns]::GetHostAddresses($distName) | ForEach-Object { $_.IPAddressToString }) -join ',') }
-                catch { $ips = "DNS FAILED ($($_.Exception.Message))" }
-                $tcp = 'NO ANSWER (dropped or not listening)'
+            $hop = Invoke-Command -ComputerName $t.ReplicaShort -ArgumentList $sitePublisherName, $siteSqlMachineFqdn, $siteSqlTcpPort -ScriptBlock {
+                param($distName, $distFqdn, $port)
+                $o = @()
+                if ($port -ne 1433) {
+                    $target = "DBMSSOCN,$distFqdn,$port"
+                    foreach ($key in 'HKLM:\SOFTWARE\Microsoft\MSSQLServer\Client\ConnectTo', 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\MSSQLServer\Client\ConnectTo') {
+                        try {
+                            if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+                            $cur = (Get-ItemProperty -Path $key -Name $distName -ErrorAction SilentlyContinue).$distName
+                            if ($cur -ne $target) {
+                                New-ItemProperty -Path $key -Name $distName -Value $target -PropertyType String -Force | Out-Null
+                                $o += "alias $distName -> $target set"
+                            }
+                        }
+                        catch { $o += "WARN alias ($key): $($_.Exception.Message)" }
+                    }
+                }
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                $c = New-Object System.Net.Sockets.TcpClient
-                try { if ($c.BeginConnect($distName, $port, $null, $null).AsyncWaitHandle.WaitOne(6000) -and $c.Connected) { $tcp = 'OPEN' } }
-                catch { $tcp = "ERROR $($_.Exception.Message)" }
-                finally { $c.Close(); $sw.Stop() }
-                return "resolves to $ips ; TCP ${port} = $tcp [$([int]$sw.ElapsedMilliseconds) ms]"
+                $c = New-Object System.Data.SqlClient.SqlConnection "Server=$distName;Database=master;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=15"
+                try { $c.Open(); $o += "connect to '$distName' OK [$([int]$sw.ElapsedMilliseconds) ms]" }
+                catch { $o += "connect to '$distName' FAILED [$([int]$sw.ElapsedMilliseconds) ms]: $($_.Exception.Message)" }
+                finally { $c.Dispose(); $sw.Stop() }
+                return $o
             } -ErrorAction Stop
-            Write-DscStatus "$Tag [$rlabel] distributor '$sitePublisherName' from $($t.ReplicaShort): $reach"
+            foreach ($m in @($hop)) { Write-DscStatus "$Tag [$rlabel] distributor hop: $m" }
         }
-        catch { Write-DscStatus "$Tag WARNING [$rlabel] could not probe distributor reachability from $($t.ReplicaShort): $($_.Exception.Message)" }
+        catch { Write-DscStatus "$Tag WARNING [$rlabel] could not verify the distributor hop from $($t.ReplicaShort): $($_.Exception.Message)" }
 
         # -------------------------------------------------------------------
         # STEP 3 - Subscribe the replica DB (create DB, pull subscription, perms).
