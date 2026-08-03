@@ -7178,6 +7178,78 @@ $Phase11SmsSiteLogCollector = {
     return $out
 }
 
+$Phase11WsusStallCollector = {
+    # Runs ON the SUP when its sync reports Running with ProcessedItems frozen.
+    # The WSUS API (queried from the site server) can only say THAT progress
+    # stopped; everything that says WHY is local to this machine.
+    $out = @{}
+    $diag = @()
+    $lines = @()
+
+    # WsusPool recycling at its private-memory cap is the classic cause: the pool
+    # dies mid-sync, WSUS answers 503, and ProcessedItems freezes with the
+    # subscription still nominally Running.
+    try {
+        Import-Module WebAdministration -ErrorAction Stop
+        foreach ($poolName in @('WsusPool', 'DefaultAppPool')) {
+            $p = Get-Item "IIS:\AppPools\$poolName" -ErrorAction SilentlyContinue
+            if (-not $p) { $lines += "AppPool '$poolName': not present"; continue }
+            $lines += "AppPool '$poolName': State=$($p.state) privateMemoryLimitKB=$($p.recycling.periodicRestart.privateMemory) requestsLimit=$($p.recycling.periodicRestart.requests) timeLimit=$($p.recycling.periodicRestart.time)"
+            foreach ($wp in @(Get-ChildItem "IIS:\AppPools\$poolName\WorkerProcesses" -ErrorAction SilentlyContinue)) {
+                $proc = Get-Process -Id $wp.processId -ErrorAction SilentlyContinue
+                if ($proc) {
+                    $lines += "  w3wp pid=$($wp.processId) state=$($wp.state) privateMB=$([math]::Round($proc.PrivateMemorySize64/1MB)) wsMB=$([math]::Round($proc.WorkingSet64/1MB)) startedAt=$($proc.StartTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+                }
+                else { $lines += "  w3wp pid=$($wp.processId) state=$($wp.state) (process not readable)" }
+            }
+        }
+    }
+    catch { $diag += "IIS/WsusPool inspection failed: $($_.Exception.Message)" }
+
+    # 5074/5079/5080/5081 = app-pool recycle events; 5013 = worker process shutdown.
+    try {
+        $lines += '--- WAS/IIS app-pool recycle events (last 6h) ---'
+        $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WAS'; StartTime = (Get-Date).AddHours(-6) } -ErrorAction SilentlyContinue | Select-Object -First 40)
+        if ($ev.Count -eq 0) { $lines += '  (none)' }
+        foreach ($e in $ev) { $lines += "  $($e.TimeCreated.ToString('HH:mm:ss')) id=$($e.Id) $(($e.Message -replace '\s+', ' ').Trim())" }
+    }
+    catch { $diag += "WAS event query failed: $($_.Exception.Message)" }
+
+    try {
+        $lines += '--- WSUS Application events (last 6h) ---'
+        $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddHours(-6) } -ErrorAction SilentlyContinue |
+                Where-Object { $_.ProviderName -match 'Update Services|WSUS' } | Select-Object -First 40)
+        if ($ev.Count -eq 0) { $lines += '  (none)' }
+        foreach ($e in $ev) { $lines += "  $($e.TimeCreated.ToString('HH:mm:ss')) [$($e.LevelDisplayName)] id=$($e.Id) $(($e.Message -replace '\s+', ' ').Trim())" }
+    }
+    catch { $diag += "Application event query failed: $($_.Exception.Message)" }
+
+    # Content + DB volume free space: a full drive stalls a sync silently.
+    try {
+        $lines += '--- volumes ---'
+        foreach ($v in @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter })) {
+            $lines += "  $($v.DriveLetter): free=$([math]::Round($v.SizeRemaining/1GB,1))GB of $([math]::Round($v.Size/1GB,1))GB"
+        }
+    }
+    catch { }
+
+    $out['WsusStall.txt'] = ($lines -join "`r`n")
+
+    # SoftwareDistribution.log is WSUS's own sync log and names the actual fault.
+    $wsusDir = $null
+    try { $wsusDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Update Services\Server\Setup' -Name 'TargetDir' -ErrorAction Stop).TargetDir } catch { }
+    if (-not $wsusDir) { $wsusDir = 'C:\Program Files\Update Services' }
+    $sdLog = Join-Path $wsusDir 'LogFiles\SoftwareDistribution.log'
+    if (Test-Path $sdLog) {
+        try { $out['SoftwareDistribution.log'] = ((Get-Content -LiteralPath $sdLog -Tail 3000 -ErrorAction SilentlyContinue) -join "`r`n") }
+        catch { $diag += "SoftwareDistribution.log read threw: $($_.Exception.Message)" }
+    }
+    else { $diag += "SoftwareDistribution.log not found at $sdLog (WSUS TargetDir='$wsusDir')" }
+
+    $out['_collector-diag.txt'] = ($diag -join "`r`n")
+    return $out
+}
+
 $Phase11SecondaryCertDiagCollector = {
     # Diagnose a Secondary site whose distmgr is wedged repeating
     #   "site exchange certificate is not found. Can not decrypt the data."
@@ -10648,6 +10720,23 @@ function Test-CMSiteWideFunctionality {
         -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient) `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
+
+    # A sync that reports Running with ProcessedItems frozen (+0 over the sample) is
+    # not "slow", it is stuck -- seen at 90 min / 1006 of 2544 and 50 min / 1638 of
+    # 3648. The WSUS API can only say THAT it stopped, never why, and the answer lives
+    # on the SUP: WsusPool hitting its private-memory cap and recycling into 503s is
+    # the classic cause. Collect from the SUP itself, not the site server.
+    try {
+        $stallLine = $null
+        if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Details) {
+            $stallLine = @($result.ScriptBlockOutput.Details | Where-Object { $_ -match 'WARN: SUP sync at .* may be slow or stuck' }) | Select-Object -First 1
+        }
+        if ($stallLine -and $supVmObj -and $supVmObj.vmName) {
+            Write-Log "[Phase $Phase] $VMName [$siteRoleLabel]: SUP sync appears stuck -- collecting WsusPool/IIS/SoftwareDistribution forensics from '$($supVmObj.vmName)'" -OutputStream
+            $null = Save-Phase11GuestLogs -VMName $supVmObj.vmName -DomainName $domain -RoleLabel 'SUP-SyncStall' -Collector $Phase11WsusStallCollector -TimeoutSeconds 240
+        }
+    }
+    catch { }
 
     return (Format-TestResult -VMName $VMName -RoleLabel $siteRoleLabel -Result $result)
 }

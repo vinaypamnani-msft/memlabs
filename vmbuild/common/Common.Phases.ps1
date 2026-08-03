@@ -2393,11 +2393,9 @@ function Wait-Phase {
 
         # A VM blocked in DSC WaitForAll shows LCM=Busy, so none of the host's stall
         # recovery paths (which need Idle/PendingConfiguration) ever fire, and the
-        # WaitForAll itself is RetryCount 7200 x 5s = 10 HOURS. If the VM it is waiting
-        # on has already failed, that wait can never succeed -- it just burns the rest
-        # of the 10h, warning every 5 min. Track failed VMs and name the doomed waits.
+        # WaitForAll itself is RetryCount 7200 x 5s = 10 HOURS. Track VMs that have
+        # DEFINITIVELY failed so a wait that can never be satisfied can be cut short.
         $failedVmNames = @{}
-        $deadWaitWarned = @{}
 
         # Track how many output objects we've already displayed per job so
         # warnings/errors from running jobs appear in real-time instead of
@@ -2429,28 +2427,44 @@ function Wait-Phase {
                 # Is this job waiting on a VM that has already failed? The DSC status
                 # names it verbatim ("Waiting on X to Complete", "Waiting for X to finish
                 # adding passive site server role", "Waiting for Site Server X to finish
-                # configuration"). Such a wait can never be satisfied, and nothing else
-                # will cut it short: WaitForAll keeps the LCM Busy so the stall-recovery
-                # paths never fire, its own budget is 10h, and Wait-Phase only aborts the
-                # phase for a DC/CAS failure -- a failed Primary strands its secondary,
-                # passive and SQLAO nodes. Warn once per pair; do not change termination.
+                # configuration"). $failedVmNames only ever holds DEFINITIVE failures
+                # (LogLevel 3), so a dependency that is merely still installing is never
+                # in it -- a slow CM install is recoverable and these waits legitimately
+                # run 4h+. A wait on a FAILED dependency can never be satisfied: the
+                # WaitForAll keeps the LCM Busy so no stall-recovery path fires, its own
+                # budget is 10h, and Wait-Phase only aborts the phase for a DC/CAS
+                # failure -- so a failed Primary would strand its secondary, passive and
+                # SQLAO nodes for the rest of that 10h.
                 if ($failedVmNames.Count -gt 0) {
+                    $deadDep = $null
+                    $deadStatus = ''
                     try {
                         $hist = $global:JobProgressHistory[$job.Id]
                         # WaitFor is joined with ',' so the status can name several VMs.
                         if ($hist -and $hist.Status -match 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)') {
                             foreach ($w in ($Matches[1] -split ',')) {
                                 $waitedOn = "$w".Trim().ToUpper()
-                                if (-not $waitedOn) { continue }
-                                $pairKey = "$($job.Id)|$waitedOn"
-                                if ($failedVmNames.ContainsKey($waitedOn) -and -not $deadWaitWarned.ContainsKey($pairKey)) {
-                                    $deadWaitWarned[$pairKey] = $true
-                                    Write-Log "[Phase $Phase]: $($hist.JobName): waiting on '$waitedOn', which FAILED at $($failedVmNames[$waitedOn].ToString('HH:mm:ss')). This wait cannot succeed and will hold the phase until its 10h DSC budget expires. Status: '$($hist.Status)'" -Warning -OutputStream
+                                if ($waitedOn -and $failedVmNames.ContainsKey($waitedOn)) {
+                                    $deadDep = $waitedOn
+                                    $deadStatus = "$($hist.Status)"
+                                    break
                                 }
                             }
                         }
                     }
                     catch { }
+                    if ($deadDep) {
+                        # Stop ONLY this job, never the phase. It must also be removed from
+                        # $jobs: the reaping below handles Failed/Completed only, so a
+                        # Stopped job left in the list keeps $runningJobs non-empty and
+                        # Wait-Phase's `until` never fires.
+                        Write-Log "[Phase $Phase]: $($job.Name): STOPPING this job -- it is waiting on '$deadDep', which FAILED at $($failedVmNames[$deadDep].ToString('HH:mm:ss')). Its DSC WaitForAll can never be satisfied and would otherwise hold the phase for up to 10h. Status: '$deadStatus'" -Failure -OutputStream
+                        try { Stop-Job $job -ErrorAction SilentlyContinue } catch { }
+                        try { $jobs.Remove($job) } catch { }
+                        try { Remove-Job $job -Force -ErrorAction SilentlyContinue } catch { }
+                        $return.Failed++
+                        continue
+                    }
                 }
 
                 # Surface warning/error output objects from running jobs immediately.
