@@ -7024,6 +7024,42 @@ function Get-VmPipelineFailureAutopsy {
             $parts += "caught=[type=$($CaughtException.Exception.GetType().FullName) fqeid=$($CaughtException.FullyQualifiedErrorId)]"
         }
 
+        # THE decisive measurement, and only production can take it. Three synthetic
+        # harnesses have now failed to reproduce this cold -- payload slices up to
+        # 4131 chars, the real Stop_RunningDSC WmiPrvSE kill, and 64 stress threads --
+        # all 150/150 green on an idle host, because server-side teardown there
+        # completes in microseconds. So ask the one question no harness can:
+        # AT THE MOMENT OF FAILURE, does a trivial pipeline still work on this session?
+        #   ok      -> the session and transport are fine RIGHT NOW; the failing
+        #              create raced something specific to it. Retry is viable.
+        #   fail    -> the transport really is down; the readiness probe that runs
+        #              ~1s earlier and always passes is simply too early to see it.
+        # A rebuilt session previously failed 456/456 in 27-42ms, which already argues
+        # against evict-and-rebuild; this separates "session dead" from "create raced".
+        try {
+            # Only probe a session that still claims to be usable. That is not a
+            # limitation: every recorded failure had Availability='Available', so this
+            # is exactly the interesting case, and it avoids issuing a round trip into
+            # an obviously-dead session (Invoke-Command has no timeout to bound it).
+            if ($Session -and "$($Session.Availability)" -eq 'Available') {
+                $probeSw = [Diagnostics.Stopwatch]::StartNew()
+                $probeErr = $null
+                $probeOut = Invoke-Command -Session $Session -ScriptBlock { 1 } -ErrorAction SilentlyContinue -ErrorVariable probeErr
+                $probeSw.Stop()
+                $probeMs = [int]$probeSw.Elapsed.TotalMilliseconds
+                if ($probeOut -eq 1 -and -not $probeErr) {
+                    $parts += "postFailTrivial=[ok ${probeMs}ms -- session ALIVE at failure time]"
+                }
+                else {
+                    $pm = ''
+                    try { if ($probeErr) { $pm = "$(@($probeErr)[0].Exception.Message)" -replace '\s+', ' ' } } catch { }
+                    $parts += "postFailTrivial=[FAILED ${probeMs}ms '$pm']"
+                }
+            }
+            else { $parts += "postFailTrivial=[skipped avail='$(if ($Session) { $Session.Availability } else { '<null session>' })']" }
+        }
+        catch { $parts += "postFailTrivial=[threw '$("$($_.Exception.Message)" -replace '\s+', ' ')']" }
+
         return ($parts -join ' ')
     }
     catch { return "autopsy-unavailable ($($_.Exception.Message))" }
