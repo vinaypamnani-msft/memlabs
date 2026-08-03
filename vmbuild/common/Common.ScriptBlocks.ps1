@@ -1963,6 +1963,58 @@ $global:VM_Config = {
                 }
             }
 
+            # Interrogate BEFORE destroying anything. Everything below runs
+            # unconditionally today -- document purge, Stop-DscConfiguration with a
+            # 30s wait, and a WmiPrvSE kill -- on EVERY VM at the start of EVERY
+            # phase, whether or not the LCM is doing anything. Killing WmiPrvSE
+            # takes the WMI provider host away from every other consumer on the box,
+            # which on a site server includes ConfigMgr's own providers, so it is
+            # worth knowing first whether there was ever anything to stop.
+            #
+            # The LCM query goes through CIM -- the same surface that hangs when the
+            # LCM is mid-apply -- so it MUST be bounded, hence Invoke-CimMethod with
+            # -OperationTimeoutSec rather than Get-DscLocalConfigurationManager. A
+            # timeout is not a failure here: it is positive evidence that WMI is
+            # wedged, which is exactly when the force path below is warranted.
+            #
+            # Anything other than a confident "Idle with no documents on disk" falls
+            # through to the original path unchanged, so a wrong or unreadable answer
+            # can only ever degrade to today's behaviour.
+            $preLcmState = 'Unknown'
+            $preLcmDetail = ''
+            try {
+                $mc = Invoke-CimMethod -Namespace 'root/Microsoft/Windows/DesiredStateConfiguration' `
+                    -ClassName 'MSFT_DSCLocalConfigurationManager' -MethodName 'GetMetaConfiguration' `
+                    -OperationTimeoutSec 10 -ErrorAction Stop
+                if ($mc -and $mc.MetaConfiguration) {
+                    $preLcmState = "$($mc.MetaConfiguration.LCMState)"
+                    # LCMStateDetail names the resource actually being applied, which is
+                    # the difference between "we killed idle housekeeping" and "we killed
+                    # a 40-minute SQL install".
+                    $preLcmDetail = "$($mc.MetaConfiguration.LCMStateDetail)"
+                }
+            }
+            catch { $preLcmState = 'Unreadable' }
+
+            $preDocs = @()
+            foreach ($d in @('Current.mof', 'Pending.mof', 'Previous.mof')) {
+                if (Test-Path -LiteralPath "C:\Windows\System32\Configuration\$d") { $preDocs += $d }
+            }
+
+            if ($preLcmState -eq 'Idle' -and $preDocs.Count -eq 0) {
+                # Provably nothing to stop: no apply is running and there is no
+                # document for a respawned provider host to resume from. Skip the
+                # purge and the 30s stop. The final WmiPrvSE kill still happens
+                # below -- a later phase relies on it to pick up machine.config
+                # <defaultProxy> changes in a fresh AppDomain.
+                try {
+                    Get-Process WmiPrvSE -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                }
+                catch {}
+                return [PSCustomObject]@{ Stopped = $true; LCMState = 'Idle'; PreLCMState = 'Idle'; PreLCMDetail = $preLcmDetail; PreDocs = ''; Action = 'skipped-nothing-to-stop' }
+            }
+
             # 1. Try a clean stop first (flushes DSC logs so they're readable).
             #    Use a short timeout — on first run there's nothing to stop and
             #    it should return instantly; on re-runs a healthy LCM stops in
@@ -2087,7 +2139,7 @@ $global:VM_Config = {
                 } catch {}
                 Start-Sleep -Seconds 2
             }
-            return [PSCustomObject]@{ Stopped = $stopped; LCMState = $lcmState }
+            return [PSCustomObject]@{ Stopped = $stopped; LCMState = $lcmState; PreLCMState = $preLcmState; PreLCMDetail = $preLcmDetail; PreDocs = ($preDocs -join ','); Action = 'stopped' }
         }
 
         Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 5 -force
@@ -2100,6 +2152,19 @@ $global:VM_Config = {
         $stopVmCount = @($deployConfig.virtualMachines).Count
         $stopTimeout = if ($stopVmCount -gt 10) { [Math]::Min(180, 60 + 10 * ($stopVmCount - 10)) } else { 60 }
         $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+        # An LCM found Busy at PHASE START means the previous phase never finished --
+        # we are force-terminating real work, not tidying up. That deserves to be
+        # visible; it used to be sledgehammered silently.
+        $sbo = $result.ScriptBlockOutput
+        if ($sbo -and $sbo.PreLCMState) {
+            if ($sbo.PreLCMState -eq 'Busy') {
+                $what = if ($sbo.PreLCMDetail) { " applying '$($sbo.PreLCMDetail)'" } else { '' }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): LCM was ACTIVELY APPLYING at phase start$what (docs: $($sbo.PreDocs)) -- forcing it down. A previous phase's configuration did not finish." -Warning
+            }
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): pre-stop LCM='$($sbo.PreLCMState)' docs='$($sbo.PreDocs)' -> $($sbo.Action)" -LogOnly
+            }
+        }
         # Escalate not only on a job timeout/failure, but also when the in-guest
         # stop reported the LCM is still Busy (a bounded stop that got killed
         # while hung). Either way the LCM is not confirmed idle, so we must not
