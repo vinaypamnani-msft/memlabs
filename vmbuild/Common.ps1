@@ -7140,7 +7140,7 @@ function New-PSSessionWithTimeout {
         # whose transport was established through it.  Attach it to the
         # session so it can be cleaned up when the session is evicted.
         $result.Session | Add-Member -NotePropertyName '_OwnerRunspace' -NotePropertyValue $rs -Force
-        try { $global:ps_sessionStats['created']++ } catch { }
+        try { (Get-VmSessionStats)['created']++ } catch { }
     }
     else {
         $rs.Close()
@@ -7163,17 +7163,25 @@ function New-PSSessionWithTimeout {
 # so give them a settle window and only then reclaim.
 $global:ps_orphanRunspaces = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 
-# Create-vs-dispose ledger for PSDirect sessions. The end-of-run runspace count
-# cannot distinguish "a session was never handed to Remove-VmSession" from
-# "Remove-VmSession ran and its Close silently failed" -- both leave an open pair.
-# These count both sides so the next run says which.
-$global:ps_sessionStats = [System.Collections.Hashtable]::Synchronized(@{
-        created         = 0   # New-PSSessionWithTimeout returned a live session
-        disposeCalls    = 0   # Remove-VmSession entered
-        disposeLeftOpen = 0   # ...Close()+Dispose() ran, runspace still not Closed
-        disposeNoOwner  = 0   # ...session had no _OwnerRunspace to close
-        disposeThrew    = 0   # ...the close path threw
-    })
+# Create-vs-dispose ledger for PSDirect sessions. Held on the APPDOMAIN, not in
+# $global:, because the thing being measured is ThreadJob workers -- and a ThreadJob
+# gets its own runspace, so its $global: is a different scope. A $global: ledger can
+# only ever see the launcher's own sessions, which is exactly why the first ledger
+# read created=10/disposeCalls=10 while 183 leaked pairs sat there uncounted. AppDomain
+# data is per-PROCESS, so every ThreadJob in the launcher increments the same counters.
+if (-not [System.AppDomain]::CurrentDomain.GetData('MemLabs_SessionStats')) {
+    [System.AppDomain]::CurrentDomain.SetData('MemLabs_SessionStats',
+        [System.Collections.Hashtable]::Synchronized(@{
+                created           = 0   # New-PSSessionWithTimeout returned a live session
+                disposeCalls      = 0   # Remove-VmSession entered
+                disposeLeftOpen   = 0   # ...Close()+Dispose() ran, runspace still not Closed
+                disposeNoOwner    = 0   # ...session had no _OwnerRunspace to close
+                disposeThrew      = 0   # ...the close path threw
+                workerCleanups    = 0   # Clear-VmSessionCache calls (proves the fix is live)
+                workerDisposed    = 0   # sessions those calls released
+            }))
+}
+function Get-VmSessionStats { [System.AppDomain]::CurrentDomain.GetData('MemLabs_SessionStats') }
 
 function Add-OrphanRunspace {
     param($Runspace, $PowerShell, [string]$Reason, [string]$VmName)
@@ -7294,6 +7302,14 @@ function Clear-VmSessionCache {
     }
     catch { }
     try { $null = Clear-OrphanRunspaces -Force } catch { }
+    # Counted on the AppDomain so the launcher can see that thread-job workers really
+    # did run this -- the fix it verifies is otherwise completely silent.
+    try {
+        $st = Get-VmSessionStats
+        $st['workerCleanups']++
+        $st['workerDisposed'] += $n
+    }
+    catch { }
     return $n
 }
 
@@ -7312,7 +7328,7 @@ function Remove-VmSession {
     # the fix live), so the counters below measure whether disposal is being SKIPPED
     # or is being called and FAILING -- two different bugs that look identical from
     # the end-of-run runspace count.
-    try { $global:ps_sessionStats['disposeCalls']++ } catch { }
+    try { (Get-VmSessionStats)['disposeCalls']++ } catch { }
     try { Remove-PSSession $Session -ErrorAction SilentlyContinue } catch {}
     try {
         if ($Session._OwnerRunspace) {
@@ -7322,13 +7338,13 @@ function Remove-VmSession {
             # from never calling it, unless we look.
             try {
                 if ("$($Session._OwnerRunspace.RunspaceStateInfo.State)" -ne 'Closed') {
-                    $global:ps_sessionStats['disposeLeftOpen']++
+                    (Get-VmSessionStats)['disposeLeftOpen']++
                 }
             }
             catch { }
         }
-        else { try { $global:ps_sessionStats['disposeNoOwner']++ } catch { } }
-    } catch { try { $global:ps_sessionStats['disposeThrew']++ } catch { } }
+        else { try { (Get-VmSessionStats)['disposeNoOwner']++ } catch { } }
+    } catch { try { (Get-VmSessionStats)['disposeThrew']++ } catch { } }
 }
 
 # Evict + dispose EVERY cached PSDirect session for a VM and forget its

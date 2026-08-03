@@ -1458,9 +1458,11 @@ finally {
                 #                                       ever handing them to Remove-VmSession
                 #   created ~= disposeCalls, but
                 #   disposeLeftOpen/Threw > 0        -> disposal IS called and is failing
+                # workerCleanups is the deployment signal for the ThreadJob fix: 0 means
+                # the workers are not running Clear-VmSessionCache at all.
                 try {
-                    $st = $global:ps_sessionStats
-                    Write-Log "[JobLeak] session ledger: created=$($st['created']) disposeCalls=$($st['disposeCalls']) leftOpen=$($st['disposeLeftOpen']) noOwner=$($st['disposeNoOwner']) threw=$($st['disposeThrew'])" -Warning
+                    $st = Get-VmSessionStats
+                    Write-Log "[JobLeak] session ledger: created=$($st['created']) disposeCalls=$($st['disposeCalls']) leftOpen=$($st['disposeLeftOpen']) noOwner=$($st['disposeNoOwner']) threw=$($st['disposeThrew']) workerCleanups=$($st['workerCleanups']) workerDisposed=$($st['workerDisposed'])" -Warning
                 }
                 catch { }
             }
