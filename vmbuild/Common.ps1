@@ -6608,70 +6608,36 @@ function Invoke-VmCommand {
                     try {
                         $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
 
-                        # PIPELINE-CREATE RETRY (and the experiment that identifies the cause).
+                        # EXPERIMENT CONCLUDED -- the retry is gone, the autopsy stays.
                         #
-                        # Measured across every run after c0331bc6: the synchronous "Check pending
-                        # reboot" that follows Stop-DSC -AsJob failed 209/209 pre-phase and 173/173
-                        # post-phase with "An error occurred while creating the pipeline" -- a 100%
-                        # failure rate, so the check has never actually run. The post-AsJob
-                        # readiness probe cannot see it: a trivial `{1}` round-trip on the same
-                        # session succeeds on the first attempt every time (0 retry/give-up lines
-                        # logged in 211 teardowns), yet the real call ~1s later still fails.
+                        # The bounded retry added here was there to decide between three
+                        # hypotheses. Across the Mega-A / mpreplica runs it fired 1,364 times
+                        # and RECOVERED 0. 456 of those retries ran on a brand-new session and
+                        # failed identically, in 27-42ms, with the session reporting
+                        # state=Opened avail=Available rsState=Opened rsAvail=Available. So it
+                        # is not a teardown race and not a dead cached session -- the third
+                        # branch: not a session problem at all.
                         #
-                        # Retrying is safe ONLY for create-time errors: the signature below is
-                        # raised before any remote code runs, and we additionally require the
-                        # scriptblock to have produced NO output, so a partially-executed
-                        # non-idempotent scriptblock can never be run twice.
+                        # The error type settles it: System.Management.Automation.RemoteException
+                        # with fqeid=RuntimeException. RemoteException means the record was
+                        # serialized back FROM the guest, so the pipeline to the guest was
+                        # created and something INSIDE $Test_PendingReboot produced it. The
+                        # likely emitters are the calls that spin up their own pipeline in the
+                        # guest -- Invoke-CimMethod against root\ccm\ClientSDK, and
+                        # Get-WindowsFeature, whose ServerManager module loads through the
+                        # WinPS-compat implicit-remoting proxy on a PS7 guest.
                         #
-                        # The retry is also the diagnostic. Whether attempt 2 succeeds -- and after
-                        # how many ms -- separates the two live hypotheses far more cleanly than
-                        # any passive probe:
-                        #   recovers on attempt 2 within a few hundred ms  => transient race; the
-                        #       server-side teardown window is real and simply outlasts the probe.
-                        #   never recovers on the same session, but the rebuilt session works
-                        #       => the cached session is dead and RunspaceAvailability lies.
-                        #   never recovers even after rebuild => not a session problem at all.
-                        $pipeAttempt = 1
-                        # Local copy with a literal fallback: `-match $null` matches EVERYTHING,
-                        # so if the global were ever missing (dot-source order in a job) this
-                        # loop would retry on any error at all.
+                        # Retrying cost ~1.5s plus a session rebuild per occurrence (268 in one
+                        # pass) and those 456 rebuilds each created a runspace, feeding the very
+                        # runspace churn we are trying to remove. Keep the autopsy, which is what
+                        # will name the offending cmdlet.
                         $createSig = $global:ps_pipelineCreateSignature
                         if (-not $createSig) { $createSig = 'An error occurred while creating the pipeline|The pipeline is not available|availability is Busy|is not available to run commands' }
-                        while ($pipeAttempt -lt 4 -and
-                            $null -eq $return.ScriptBlockOutput -and
-                            $Err2 -and $Err2.Count -gt 0 -and
+                        if ($null -eq $return.ScriptBlockOutput -and $Err2 -and $Err2.Count -gt 0 -and
                             ("$($Err2 -join ' ')" -match $createSig)) {
-
-                            # Logged even under -SuppressLog: every line here is -LogOnly (file
-                            # only, never console), and the post-phase pending-reboot check --
-                            # which fails 100% of the time -- is a -SuppressLog caller.
-                            if ($pipeAttempt -eq 1) {
-                                Write-Log "$VmName`: '$DisplayName' pipeline-create autopsy -- $(Get-VmPipelineFailureAutopsy -Session $ps -Errors $Err2)" -LogOnly
-                            }
-
-                            $backoffMs = 250 * $pipeAttempt
-                            Start-Sleep -Milliseconds $backoffMs
-
-                            # Attempt 3 runs on a FRESH session: if a rebuilt channel succeeds where
-                            # the cached one never does, the cached session was dead and every
-                            # local readiness signal on it was lying.
-                            $rebuilt = $false
-                            if ($pipeAttempt -eq 3) {
-                                Remove-VmSessionFromCache -VmName $VmName -LeakSession
-                                $psRetry = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -MaxRetries 1 -LocalOnly:$localOnlySession -Quiet
-                                if ($psRetry) { $ps = $psRetry; $rebuilt = $true }
-                            }
-
-                            $Err2 = $null
-                            $retrySw = [System.Diagnostics.Stopwatch]::StartNew()
-                            $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
-                            $retrySw.Stop()
-
-                            $ok = ($null -ne $return.ScriptBlockOutput) -or (-not $Err2) -or ($Err2.Count -eq 0)
-                            $verdict = if ($ok) { 'RECOVERED' } else { 'still-failing' }
-                            Write-Log "$VmName`: '$DisplayName' pipeline-create retry $pipeAttempt/3 after ${backoffMs}ms (freshSession=$rebuilt) -> $verdict in $([int]$retrySw.Elapsed.TotalMilliseconds)ms." -LogOnly
-                            if ($ok) { break }
-                            $pipeAttempt++
+                            # -LogOnly, so safe to emit even for -SuppressLog callers (the
+                            # post-phase pending-reboot check is one).
+                            Write-Log "$VmName`: '$DisplayName' pipeline-create autopsy -- $(Get-VmPipelineFailureAutopsy -Session $ps -Errors $Err2)" -LogOnly
                         }
                     }
                     finally {
@@ -6999,6 +6965,31 @@ function Get-VmPipelineFailureAutopsy {
             }
             catch { }
             $parts += "err$i=[type=$eType fqeid=$eFq cat=$eCat target='$eTarget'$native inner='$inner']"
+
+            # WHICH command, and WHERE. A RemoteException (which is what all 268 of
+            # these turned out to be) means the record was serialized back FROM the
+            # guest -- the pipeline was created and something inside the scriptblock
+            # raised it. CategoryInfo.Activity names that command; InvocationInfo
+            # gives the line. Without these the message on its own -- "An error
+            # occurred while creating the pipeline" -- is unattributable, which is
+            # why 1,364 retries produced no new information.
+            try {
+                $parts += "err$i-where=[activity='$([string]$e.CategoryInfo.Activity)' reason='$([string]$e.CategoryInfo.Reason)' targetName='$([string]$e.CategoryInfo.TargetName)']"
+            }
+            catch { }
+            try {
+                if ($e.InvocationInfo) {
+                    $srcLine = "$($e.InvocationInfo.Line)" -replace '\s+', ' '
+                    if ($srcLine.Length -gt 120) { $srcLine = $srcLine.Substring(0, 120) }
+                    $parts += "err$i-at=[cmd='$($e.InvocationInfo.MyCommand)' line=$($e.InvocationInfo.ScriptLineNumber) src='$($srcLine.Trim())']"
+                }
+            }
+            catch { }
+            try {
+                $sre = $e.Exception.SerializedRemoteException
+                if ($sre) { $parts += "err$i-remote=[$($sre.GetType().Name): $("$($sre.Message)" -replace '\s+', ' ')]" }
+            }
+            catch { }
         }
         if ($i -eq 0 -and $CaughtException) {
             $parts += "caught=[type=$($CaughtException.Exception.GetType().FullName) fqeid=$($CaughtException.FullyQualifiedErrorId)]"

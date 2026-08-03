@@ -479,7 +479,10 @@ function Update-FileList {
     # In offline mode, try to load from local cache only
     if ($Common.OfflineMode) {
         if (Test-Path $script:fileListPath) {
-            Write-Log "Update-FileList: Offline mode, loading from local cache at $($script:fileListPath)." -Warning
+            # -LogOnly: offline mode is a normal configured state, not a problem, and
+            # every job worker re-inits Common.ps1 -- 906 of one run's 1,648 warnings
+            # were this single line, which buries the warnings that matter.
+            Write-Log "Update-FileList: Offline mode, loading from local cache at $($script:fileListPath)." -LogOnly
             try {
                 $Common.AzureFileList = Get-Content -Path $script:fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                 return $true
