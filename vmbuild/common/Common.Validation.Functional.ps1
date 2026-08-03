@@ -8922,12 +8922,25 @@ function Test-CMClientPackageDistribution {
                 # boundary-group coverage check below (FAILs a BG with no Installed
                 # DP) and the terminal-state sweep (FAILs 3/6/8). So: broken-but-
                 # covered-by-a-fallback-DP -> WARN; blocking or terminal -> FAIL.
-                $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s) -- a fallback DP may still serve clients; see the boundary-group check for whether any clients are blocked:")
+                #
+                # Name the DPs IN the WARN line. The per-DP breakdown below is
+                # -LogOnly (Format-TestResult only consoles FAIL:/WARN:/RECOVERED:
+                # prefixes), so the console used to show this sentence ending in a
+                # colon with nothing after it -- un-actionable, and the operator had
+                # to go find the log to learn which DP. SiteCode matters too: in a
+                # CAS hierarchy each primary judges from its OWN summarizer replica,
+                # so a DP belonging to another site can read stale here.
+                $badSummary = (@($bad | Select-Object -First 5 | ForEach-Object {
+                            $sn2 = $stateName["$([int]$_.State)"]; if (-not $sn2) { $sn2 = "State$($_.State)" }
+                            $dpShort = ("$(& $dpNameOf $_.ServerNALPath)" -split '\.')[0]
+                            "$dpShort=$sn2(site $($_.SiteCode))"
+                        })) -join ', '
+                $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s): $badSummary -- a fallback DP may still serve clients; the boundary-group check below decides whether any client is actually blocked.")
                 foreach ($b in $bad | Select-Object -First 15) {
                     $sn = $stateName["$([int]$b.State)"]; if (-not $sn) { $sn = "State$($b.State)" }
                     $dpn = & $dpNameOf $b.ServerNALPath
                     [void]$failingDps.Add(("$dpn" -split '\.')[0])
-                    $results.Details.Add("  DP=$dpn State=$sn SourceVersion=$($b.SourceVersion) LastCopied=$($b.LastCopied)")
+                    $results.Details.Add("  DP=$dpn Site=$($b.SiteCode) State=$sn SourceVersion=$($b.SourceVersion) LastCopied=$($b.LastCopied)")
                 }
             }
         }
