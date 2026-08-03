@@ -517,9 +517,11 @@ if (-not $hardFailed) {
     # here and probe the hop from each replica below.
     $siteSqlTcpPort = 1433
     try {
+        # TcpPort can hold a list or trailing punctuation, so keep the leading digits only;
+        # TRY_CONVERT because CASE does not reliably short-circuit a CONVERT on a variable.
         $pq = Invoke-ReplSql -Instance $siteSqlConn -Query @"
 DECLARE @v NVARCHAR(128) = (SELECT TOP 1 LTRIM(RTRIM(CONVERT(NVARCHAR(128), value_data))) FROM sys.dm_server_registry WHERE value_name = 'TcpPort' AND registry_key LIKE '%\SuperSocketNetLib\Tcp\IPAll');
-SELECT p = CASE WHEN @v IS NOT NULL AND @v <> '' AND @v NOT LIKE '%[^0-9]%' THEN CONVERT(int, @v) ELSE 0 END;
+SELECT p = ISNULL(TRY_CONVERT(int, NULLIF(LEFT(@v, PATINDEX('%[^0-9]%', @v + 'x') - 1), '')), 0);
 "@
         if ($pq -and [int]$pq.p -gt 0) { $siteSqlTcpPort = [int]$pq.p }
     }
