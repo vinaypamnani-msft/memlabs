@@ -527,7 +527,22 @@ $global:VM_Create = {
                         # memory value can be only decreased") -- 25 times in 72h, each
                         # burning the watchdog's 2 x 60s. Say what happened instead.
                         if ($vm.State -eq 'Running' -and $pinnedMin -gt $vm.MemoryMinimum) {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): cannot raise the dynamic-memory minimum from $([math]::Round($vm.MemoryMinimum / 1GB, 1))GB to $([math]::Round($pinnedMin / 1GB, 1))GB while the VM is running -- Hyper-V only allows a decrease. The guest stays ballooned-down and can be starved during deploy; stop the VM to apply the pin." -Warning -LogOnly
+                            # Hyper-V allows Buffer, Priority and Maximum to change on a live
+                            # VM; only the Minimum (a standing reservation) is one-way down.
+                            # Weight the balancer toward this VM instead of doing nothing --
+                            # same values Restore-DynamicMemory uses.
+                            $pinPriority = 25
+                            $pinBuffer = 10
+                            $pinRole = "$($currentItem.role)"
+                            if ($currentItem.SqlVersion -and $pinRole -eq 'DomainMember') { $pinRole = 'SqlServer' }
+                            if ($pinRole -in @('DC', 'SqlServer', 'Primary', 'SQLAO', 'CAS')) { $pinPriority = 50; $pinBuffer = 20 }
+                            $biasResult = Invoke-VMMemoryPinWithWatchdog -VmName $currentItem.vmName -TimeoutSec 60 -MaxAttempts 2 -MemoryParams @{
+                                MaximumBytes = $memory
+                                Priority     = $pinPriority
+                                Buffer       = $pinBuffer
+                            }
+                            $biasNote = if ($biasResult.Status -eq 'OK') { "applied priority=$pinPriority buffer=$pinBuffer instead" } else { "and the priority/buffer fallback also failed ($($biasResult.Status): $($biasResult.Detail))" }
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): cannot raise the dynamic-memory minimum from $([math]::Round($vm.MemoryMinimum / 1GB, 1))GB to $([math]::Round($pinnedMin / 1GB, 1))GB while the VM is running -- Hyper-V only allows a decrease. $biasNote." -Warning -LogOnly
                         }
                         else {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Pinning dynamic memory min to 99% for deploy" -LogOnly
