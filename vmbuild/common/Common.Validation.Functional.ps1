@@ -10215,7 +10215,31 @@ function Test-CMSiteWideFunctionality {
                     }
                     else {
                         $supErrShown = if ($supErrHex) { "$supErr / $supErrHex" } else { "$supErr" }
-                        $results.Details.Add("WARN: SUP last sync FAILED (state 6703, error code $supErrShown)")
+                        # An HRESULT on its own is not actionable -- 0x80131509 is just
+                        # "a managed InvalidOperationException happened somewhere". WSUS
+                        # keeps the real reason in its own sync history, so read it.
+                        $supFailDiag = ''
+                        if ($supServer) {
+                            try {
+                                $wsusSrvF = Get-WsusServer -Name $supServer -PortNumber $wsusPort -UseSsl:$wsusUseSsl -ErrorAction Stop
+                                $hist = @($wsusSrvF.GetSubscription().GetSynchronizationHistory() | Select-Object -First 1)
+                                if ($hist.Count -gt 0) {
+                                    $h = $hist[0]
+                                    $parts = @("result=$($h.Result)", "error=$($h.Error)")
+                                    if ($h.ErrorText) { $parts += "errorText='$(("$($h.ErrorText)" -replace '\s+', ' ').Trim())'" }
+                                    try { $parts += "ran=$($h.StartTime.ToString('HH:mm:ss'))->$($h.EndTime.ToString('HH:mm:ss'))" } catch { }
+                                    try {
+                                        $ue = @($h.UpdateErrors)
+                                        if ($ue.Count -gt 0) { $parts += "updateErrors=$($ue.Count) first='$(("$($ue[0])" -replace '\s+', ' ').Trim())'" }
+                                    }
+                                    catch { }
+                                    $supFailDiag = " [WSUS history: $($parts -join ' ')]"
+                                }
+                                else { $supFailDiag = ' [WSUS history: no entries]' }
+                            }
+                            catch { $supFailDiag = " [WSUS history not collected from '$($supServer):$wsusPort': $($_.Exception.Message)]" }
+                        }
+                        $results.Details.Add("WARN: SUP last sync FAILED (state 6703, error code $supErrShown)$supFailDiag")
                     }
                 }
                 elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {

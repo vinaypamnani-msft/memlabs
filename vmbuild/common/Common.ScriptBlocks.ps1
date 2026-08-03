@@ -522,19 +522,28 @@ $global:VM_Create = {
                 if ($pinnedMin -lt 40MB) { $pinnedMin = $memory }
                 if ($vm.DynamicMemoryEnabled) {
                     if ($vm.MemoryMinimum -ne $pinnedMin) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Pinning dynamic memory min to 99% for deploy" -LogOnly
-                        $pinResult = Invoke-VMMemoryPinWithWatchdog -VmName $currentItem.vmName -TimeoutSec 60 -MaxAttempts 2 -MemoryParams @{
-                            MinimumBytes = $pinnedMin
-                            MaximumBytes = $memory
-                            StartupBytes = $memory
+                        # Hyper-V lets MemoryMinimum be DECREASED on a running VM but never
+                        # increased, so raising the pin here can only ever throw ("minimum
+                        # memory value can be only decreased") -- 25 times in 72h, each
+                        # burning the watchdog's 2 x 60s. Say what happened instead.
+                        if ($vm.State -eq 'Running' -and $pinnedMin -gt $vm.MemoryMinimum) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): cannot raise the dynamic-memory minimum from $([math]::Round($vm.MemoryMinimum / 1GB, 1))GB to $([math]::Round($pinnedMin / 1GB, 1))GB while the VM is running -- Hyper-V only allows a decrease. The guest stays ballooned-down and can be starved during deploy; stop the VM to apply the pin." -Warning -LogOnly
                         }
-                        switch ($pinResult.Status) {
-                            'OK' { }
-                            'TimedOut' {
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): Dynamic memory pin timed out (VMMS unresponsive after $($pinResult.Attempt) attempt(s)); continuing without pin." -Warning -LogOnly
+                        else {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Pinning dynamic memory min to 99% for deploy" -LogOnly
+                            $pinResult = Invoke-VMMemoryPinWithWatchdog -VmName $currentItem.vmName -TimeoutSec 60 -MaxAttempts 2 -MemoryParams @{
+                                MinimumBytes = $pinnedMin
+                                MaximumBytes = $memory
+                                StartupBytes = $memory
                             }
-                            default {
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): Dynamic memory pin did not apply: $($pinResult.Detail); continuing." -Warning -LogOnly
+                            switch ($pinResult.Status) {
+                                'OK' { }
+                                'TimedOut' {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Dynamic memory pin timed out (VMMS unresponsive after $($pinResult.Attempt) attempt(s)); continuing without pin." -Warning -LogOnly
+                                }
+                                default {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Dynamic memory pin did not apply: $($pinResult.Detail); continuing." -Warning -LogOnly
+                                }
                             }
                         }
                     }
