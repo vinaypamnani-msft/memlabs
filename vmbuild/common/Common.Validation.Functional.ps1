@@ -7074,6 +7074,88 @@ $Phase11SmsSiteLogCollector = {
         }
         else { $diag += "'$n' not present at $p" }
     }
+
+    # A Secondary can sit in a despooler retry loop -- "This package[X]'s information
+    # hasn't arrived yet for this version [N]" -- where the CONTENT arrived but the
+    # METADATA did not, so the package never installs on that site's DP. Seen looping
+    # 15x over 76 min on the client package while rcmctrl reported ReplicationActive,
+    # and despool.log alone cannot say WHICH input is missing.
+    # Per ConfigMgr source (basesvr\minipkg.cpp) the despooler retries when ANY of:
+    #     !IsMainCopySent()  ||  PCK SourceVersion > local row's  ||  !fnIsPkgVersionAvailable()
+    # and fnIsPkgVersionAvailable (Core\Functions\fnIsPkgVersionAvailable.sql) is:
+    #     PkgStatus_G G JOIN PkgStatusHist H ON G.ID = H.PkgID
+    #        AND G.SiteCode = dbo.fnGetSiteCodeBySiteNumber(H.SiteNumber)
+    #     WHERE G.ID=@pkg AND G.Type=1 AND G.SiteCode=@site AND H.PkgVersion=@ver
+    # Query those directly so the next occurrence NAMES the missing row.
+    try {
+        $stalls = @{}
+        foreach ($ln in @("$($out['despool.log'])" -split "`r?`n")) {
+            if ($ln -match "package\[(\w+)\][^\r\n]*information hasn't arrived yet(?:\s+for this version\s+\[(\d+)\])?") {
+                $sp = $Matches[1]
+                $sv = if ($Matches[2]) { [int]$Matches[2] } else { 0 }
+                # NOT named 'Count' -- the hashtable's built-in Count property would win.
+                if (-not $stalls.ContainsKey($sp)) { $stalls[$sp] = @{ Hits = 0; Ver = $sv } }
+                $stalls[$sp].Hits++
+                if ($sv -gt 0) { $stalls[$sp].Ver = $sv }
+            }
+        }
+        # Packages that later stored are converging normally -- only report the wedged ones.
+        foreach ($ln in @("$($out['despool.log'])" -split "`r?`n")) {
+            if ($ln -match 'Stored Package\s+(\w+)\.') { $stalls.Remove($Matches[1]) }
+        }
+
+        if ($stalls.Count -gt 0) {
+            $ml = @("Despooler metadata stall -- content arrived, package row did not.", "")
+            $siteCode = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop).'Site Code'
+            $sr = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+            $dbRaw = $sr.'Database Name'
+            if ($dbRaw -match '\\') { $inst = "$($sr.Server)\$($dbRaw.Split('\')[0])"; $db = $dbRaw.Split('\')[1] } else { $inst = $sr.Server; $db = $dbRaw }
+            $ml += "site=$siteCode  sql=$inst  db=$db"
+            $ml += ""
+
+            # SqlClient, not Invoke-Sqlcmd: a Secondary's SQL Express has no PS SQL module.
+            $cn = New-Object System.Data.SqlClient.SqlConnection
+            $cn.ConnectionString = "Server=$inst;Database=$db;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=20"
+            $cn.Open()
+            try {
+                foreach ($pk in @($stalls.Keys | Sort-Object | Select-Object -First 10)) {
+                    $ver = $stalls[$pk].Ver
+                    $ml += "=== $pk  (retried $($stalls[$pk].Hits)x, PCK version $ver) ==="
+                    foreach ($q in @(
+                            @{ L = 'fnIsPkgVersionAvailable'; T = 'SELECT dbo.fnIsPkgVersionAvailable(@pkg, @site, @ver) AS Available' }
+                            @{ L = 'PkgStatus_G'; T = 'SELECT ID, Type, SiteCode, Status, SourceVersion, PkgVersion, UpdateTime FROM PkgStatus_G WHERE ID = @pkg' }
+                            @{ L = 'PkgStatusHist'; T = 'SELECT PkgID, SiteNumber, PkgVersion FROM PkgStatusHist WHERE PkgID = @pkg' }
+                        )) {
+                        try {
+                            $cmd = $cn.CreateCommand()
+                            $cmd.CommandTimeout = 30
+                            $cmd.CommandText = $q.T
+                            $null = $cmd.Parameters.AddWithValue('@pkg', $pk)
+                            $null = $cmd.Parameters.AddWithValue('@site', $siteCode)
+                            $null = $cmd.Parameters.AddWithValue('@ver', $ver)
+                            $rd = $cmd.ExecuteReader()
+                            $rows = 0
+                            while ($rd.Read()) {
+                                $rows++
+                                $f = @()
+                                for ($i = 0; $i -lt $rd.FieldCount; $i++) { $f += "$($rd.GetName($i))=$(if ($rd.IsDBNull($i)) { '<null>' } else { $rd.GetValue($i) })" }
+                                $ml += "  [$($q.L)] $($f -join ' ')"
+                            }
+                            $rd.Close()
+                            if ($rows -eq 0) { $ml += "  [$($q.L)] NO ROWS  <-- this is the gap" }
+                        }
+                        catch { $ml += "  [$($q.L)] query threw: $($_.Exception.Message)" }
+                    }
+                    $ml += ""
+                }
+            }
+            finally { $cn.Close() }
+            $out['PkgMetaStall.txt'] = ($ml -join "`r`n")
+            $diag += "despooler metadata stall detected on $($stalls.Count) package(s): $(@($stalls.Keys) -join ', ') -- see PkgMetaStall.txt"
+        }
+    }
+    catch { $diag += "package-metadata stall probe threw: $($_.Exception.Message)" }
+
     # SMS_EXECUTIVE restart forensics -- the ROOT-CAUSE signal for a 0x800704d3
     # inter-site bundle abort: distmgr sets its bundle cancel flag to the thread-exit
     # m_bShutdownRequest, so that error means the executive was STOPPED/RESTARTED
