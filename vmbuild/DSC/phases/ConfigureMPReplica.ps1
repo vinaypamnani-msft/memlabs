@@ -218,9 +218,9 @@ function Write-MPReplicaDiagnostics {
     param([string]$SiteInstance, [string]$SiteDb, [object]$Targets)
     Write-DscStatus "$Tag ===== MP replica failure diagnostics ====="
     try {
-        $q = "SELECT broker = (SELECT is_broker_enabled FROM sys.databases WHERE name = DB_NAME()), pubs = (CASE WHEN OBJECT_ID('dbo.syspublications') IS NOT NULL THEN (SELECT COUNT(*) FROM dbo.syspublications WHERE name='ConfigMgr_MPReplica') ELSE 0 END), subs = (CASE WHEN OBJECT_ID('dbo.syssubscriptions') IS NOT NULL THEN (SELECT COUNT(DISTINCT srvid) FROM dbo.syssubscriptions) ELSE 0 END)"
+        $q = "SELECT broker = (SELECT is_broker_enabled FROM sys.databases WHERE name = DB_NAME()), pubs = (CASE WHEN OBJECT_ID('dbo.syspublications') IS NOT NULL THEN (SELECT COUNT(*) FROM dbo.syspublications WHERE name='ConfigMgr_MPReplica') ELSE 0 END), arts = (CASE WHEN OBJECT_ID('dbo.sysarticles') IS NOT NULL THEN (SELECT COUNT(*) FROM dbo.sysarticles a JOIN dbo.syspublications p ON a.pubid = p.pubid WHERE p.name='ConfigMgr_MPReplica') ELSE 0 END), xmlart = (CASE WHEN OBJECT_ID('dbo.sysarticles') IS NOT NULL THEN (SELECT COUNT(*) FROM dbo.sysarticles a JOIN dbo.syspublications p ON a.pubid = p.pubid WHERE p.name='ConfigMgr_MPReplica' AND a.name='XMLConfigStore') ELSE 0 END), subs = (CASE WHEN OBJECT_ID('dbo.syssubscriptions') IS NOT NULL THEN (SELECT COUNT(DISTINCT srvid) FROM dbo.syssubscriptions) ELSE 0 END)"
         $r = Invoke-ReplSql -Instance $SiteInstance -Database $SiteDb -Query $q
-        Write-DscStatus "$Tag [Diag][Site $SiteDb] broker_enabled=$($r.broker) publication=$($r.pubs) subscribers=$($r.subs)"
+        Write-DscStatus "$Tag [Diag][Site $SiteDb] broker_enabled=$($r.broker) publication=$($r.pubs) articles=$($r.arts) XMLConfigStore_article=$($r.xmlart) subscribers=$($r.subs)"
     }
     catch { Write-DscStatus "$Tag [Diag][Site] state query failed: $($_.Exception.Message)" }
     try {
@@ -242,7 +242,8 @@ function Write-MPReplicaDiagnostics {
             $rb = Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT b = ISNULL((SELECT CONVERT(int, is_broker_enabled) FROM sys.databases WHERE name = N'$($t.ReplicaDbName)'), -1)"
             $sub = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL SELECT c = COUNT(*) FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica' ELSE SELECT c = 0"
             $xc = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL SELECT c = COUNT(*) FROM dbo.XMLConfigStore WHERE Name = 'MPReplicaServiceBrokerConfiguration' ELSE SELECT c = 0"
-            Write-DscStatus "$Tag [Diag][Replica $($t.MPName)/$($t.ReplicaDbName)] broker_enabled=$($rb.b) pull_subscriptions=$($sub.c) replicated_XMLConfigStore=$($xc.c) (0 XMLConfigStore = initial snapshot not applied)"
+            $tc = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "SELECT tabs = (SELECT COUNT(*) FROM sys.tables), xmltab = CONVERT(int, CASE WHEN OBJECT_ID('dbo.XMLConfigStore') IS NULL THEN 0 ELSE 1 END)"
+            Write-DscStatus "$Tag [Diag][Replica $($t.MPName)/$($t.ReplicaDbName)] broker_enabled=$($rb.b) pull_subscriptions=$($sub.c) replicated_tables=$($tc.tabs) XMLConfigStore_table=$($tc.xmltab) replicated_XMLConfigStore=$($xc.c) (0 tables = snapshot never applied; tables but 0 XMLConfigStore = it is not a published article)"
         }
         catch { Write-DscStatus "$Tag [Diag][Replica $($t.MPName)] state query failed: $($_.Exception.Message)" }
         # Subscriber-side SQL Agent job history for the pull Distribution Agent. This is
@@ -265,6 +266,17 @@ ORDER BY h.run_date DESC, h.run_time DESC
         catch { Write-DscStatus "$Tag [Diag][Replica $($t.MPName)] job-history query failed: $($_.Exception.Message)" }
     }
     Write-DscStatus "$Tag ===== end diagnostics (run Test-MPDatabaseReplicaHealth.ps1 for the full report) ====="
+}
+
+# The host pulls (and stops appending to) this log as soon as it sees a JOBFAILURE
+# line, so diagnostics have to be emitted BEFORE the failure is reported or they are
+# lost. Every hard-fail path calls this first; the guard keeps it to one dump per run.
+$script:diagWritten = $false
+function Write-MPReplicaDiagnosticsOnce {
+    if ($script:diagWritten) { return }
+    $script:diagWritten = $true
+    try { Write-MPReplicaDiagnostics -SiteInstance $siteSqlConn -SiteDb $siteDbName -Targets $targets }
+    catch { Write-DscStatus "$Tag WARNING: diagnostics collection failed: $($_.Exception.Message)" }
 }
 
 $hardFailed = $false
@@ -458,12 +470,24 @@ try {
         Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "EXEC spCreateMPReplicaPublication"
         Write-DscStatus "$Tag spCreateMPReplicaPublication completed (distributor + CMDistribution + ConfigMgr_MPReplica publication)."
     }
+    # STEP 5.0 waits for the REPLICATED dbo.XMLConfigStore row, so if that table never
+    # became an article the wait can only time out. Log the real article set here rather
+    # than surfacing it 20 minutes later as "the snapshot did not apply".
+    try {
+        $artInfo = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "SELECT arts = COUNT(*), xmlart = SUM(CASE WHEN a.name = 'XMLConfigStore' THEN 1 ELSE 0 END) FROM dbo.sysarticles a JOIN dbo.syspublications p ON a.pubid = p.pubid WHERE p.name = 'ConfigMgr_MPReplica'"
+        Write-DscStatus "$Tag Publication ConfigMgr_MPReplica has $($artInfo.arts) table article(s); XMLConfigStore article present=$($artInfo.xmlart)."
+        if ([int]$artInfo.xmlart -eq 0) {
+            Write-DscStatus "$Tag WARNING: XMLConfigStore is NOT a published article -- the replica can never receive 'MPReplicaServiceBrokerConfiguration' and STEP 5 will time out."
+        }
+    }
+    catch { Write-DscStatus "$Tag WARNING: could not read the publication article list: $($_.Exception.Message)" }
     # NOTE: the Snapshot Agent is (re)started per-subscription in STEP 3, AFTER the
     # subscription is added. The publication is @immediate_sync = 0, so a snapshot
     # generated before any subscription exists has nothing to apply -- the initial
     # sync is driven per replica once its subscription is in place.
 }
 catch {
+    Write-MPReplicaDiagnosticsOnce
     Write-DscStatus "$Tag Failed to publish the site database (spCreateMPReplicaPublication): $($_.Exception.Message)" -Failure
     $hardFailed = $true
 }
@@ -605,18 +629,30 @@ EXEC sp_addpullsubscription_agent @publisher = N'$sitePublisherName', @publisher
 
                 # Start the Snapshot Agent (distributor) to generate the snapshot for the
                 # now-pending subscription, then start the pull Distribution Agent (replica;
-                # created stopped -> only runs at SQL Agent startup) to apply it.
-                Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
-DECLARE @job SYSNAME;
+                # created stopped -> only runs at SQL Agent startup) to apply it. Report each
+                # job by name: a job that is missing, or refuses to start, is the usual reason
+                # the snapshot never appears and a blanket "started" message hides it.
+                $snapStart = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
+DECLARE @job SYSNAME, @res NVARCHAR(400) = N'NO JOB FOUND (subsystem=Snapshot)';
 SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Snapshot' AND s.command LIKE '%ConfigMgr_MPReplica%';
-IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; END TRY BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%already running%' THROW; END CATCH END
+IF @job IS NOT NULL
+BEGIN
+    BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; SET @res = N'started ' + @job; END TRY
+    BEGIN CATCH SET @res = N'start failed (' + @job + '): ' + ERROR_MESSAGE(); END CATCH
+END
+SELECT r = @res;
 "@
-                Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
-DECLARE @job SYSNAME;
+                $distStart = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
+DECLARE @job SYSNAME, @res NVARCHAR(400) = N'NO JOB FOUND (subsystem=Distribution)';
 SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Distribution' AND s.command LIKE '%ConfigMgr_MPReplica%';
-IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; END TRY BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%already running%' THROW; END CATCH END
+IF @job IS NOT NULL
+BEGIN
+    BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; SET @res = N'started ' + @job; END TRY
+    BEGIN CATCH SET @res = N'start failed (' + @job + '): ' + ERROR_MESSAGE(); END CATCH
+END
+SELECT r = @res;
 "@
-                Write-DscStatus "$Tag [$rlabel] snapshot + distribution agents started."
+                Write-DscStatus "$Tag [$rlabel] Snapshot Agent: $($snapStart.r) | Distribution Agent: $($distStart.r)"
             }
 
             # MP machine account: sysadmin on the replica instance.
@@ -662,6 +698,7 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
             }
         }
         catch {
+            Write-MPReplicaDiagnosticsOnce
             Write-DscStatus "$Tag [$rlabel] subscription setup failed: $($_.Exception.Message)" -Failure
             $hardFailed = $true
             continue
@@ -826,9 +863,14 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
             # row from the REPLICATED XMLConfigStore table; until the snapshot applies,
             # that table does not exist in the replica DB and the SP would silently
             # create no SSB objects (its WHILE loops run 0 times on a NULL config).
-            $syncDeadline = (Get-Date).AddMinutes(20)
+            # 20 min baseline, extended (to a 45 min cap) for as long as tables are still
+            # arriving, so a slow-but-working bulk copy of the CM DB isn't killed mid-flight.
+            $syncStart = Get-Date
+            $syncDeadline = $syncStart.AddMinutes(20)
+            $syncHardCap = $syncStart.AddMinutes(45)
             $replicaSynced = $false
             $pollCount = 0
+            $lastTableCount = -1
             while ((Get-Date) -lt $syncDeadline) {
                 try {
                     $chk = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL SELECT COUNT(*) AS c FROM dbo.XMLConfigStore WHERE Name = N'MPReplicaServiceBrokerConfiguration' ELSE SELECT 0 AS c"
@@ -836,9 +878,35 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
                 }
                 catch { }
                 $pollCount++
-                # Every ~2.5 min, re-nudge both agents (the Distribution Agent may have
-                # run once before the snapshot was ready and then exited).
+                # Every ~2.5 min, report progress (so a timeout explains itself in this log
+                # instead of costing another hour-long run) and re-nudge both agents (the
+                # Distribution Agent may have run once before the snapshot was ready and exited).
                 if ($pollCount % 5 -eq 0) {
+                    $tabs = -1
+                    try {
+                        $prog = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "SELECT tabs = COUNT(*) FROM sys.tables"
+                        $tabs = [int]$prog.tabs
+                    }
+                    catch { }
+                    $snapMsg = '(no history)'
+                    try {
+                        $sh = Invoke-ReplSql -Instance $siteSqlConn -Database 'CMDistribution' -Query "SELECT TOP 1 rs = runstatus, cm = LEFT(ISNULL(comments,''),200) FROM dbo.MSsnapshot_history ORDER BY [time] DESC"
+                        if ($sh) { $snapMsg = "rs=$($sh.rs) $($sh.cm)" }
+                    }
+                    catch { }
+                    $jobMsg = '(never ran)'
+                    try {
+                        $jh = Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT TOP 1 st = h.run_status, msg = LEFT(ISNULL(h.[message],''),250) FROM msdb.dbo.sysjobhistory h JOIN msdb.dbo.sysjobsteps s ON s.job_id = h.job_id AND s.step_id = h.step_id WHERE s.subsystem = 'Distribution' AND s.command LIKE '%ConfigMgr_MPReplica%' AND h.step_id > 0 ORDER BY h.run_date DESC, h.run_time DESC"
+                        if ($jh) { $jobMsg = "run_status=$($jh.st) $($jh.msg)" }
+                    }
+                    catch { }
+                    Write-DscStatus "$Tag [$rlabel] waiting for initial snapshot ($([int]((Get-Date) - $syncStart).TotalMinutes) min): replica tables=$tabs | SnapshotAgent $snapMsg | DistAgentJob $jobMsg"
+                    if ($lastTableCount -ge 0 -and $tabs -gt $lastTableCount) {
+                        $ext = (Get-Date).AddMinutes(10)
+                        if ($ext -gt $syncHardCap) { $ext = $syncHardCap }
+                        if ($ext -gt $syncDeadline) { $syncDeadline = $ext }
+                    }
+                    $lastTableCount = $tabs
                     try {
                         Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "DECLARE @job SYSNAME; SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Snapshot' AND s.command LIKE '%ConfigMgr_MPReplica%'; IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; END TRY BEGIN CATCH END END"
                         Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "DECLARE @job SYSNAME; SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Distribution' AND s.command LIKE '%ConfigMgr_MPReplica%'; IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; END TRY BEGIN CATCH END END"
@@ -848,7 +916,7 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
                 Start-Sleep -Seconds 30
             }
             if (-not $replicaSynced) {
-                throw "Replica DB [$($t.ReplicaDbName)] did not receive the replicated XMLConfigStore ('MPReplicaServiceBrokerConfiguration') within 20 minutes; the initial replication snapshot did not apply (see the Snapshot/Distribution Agent history in the diagnostics below). Service Broker cannot be configured."
+                throw "Replica DB [$($t.ReplicaDbName)] did not receive the replicated XMLConfigStore ('MPReplicaServiceBrokerConfiguration') within $([int]((Get-Date) - $syncStart).TotalMinutes) minutes; the initial replication snapshot did not apply (see the Snapshot/Distribution Agent history in the diagnostics below). Service Broker cannot be configured."
             }
             Write-DscStatus "$Tag [$rlabel] replica DB initial replication synced (XMLConfigStore present)."
 
@@ -939,6 +1007,7 @@ END
             Write-DscStatus "$Tag [$rlabel] Service Broker wired (routes both directions)."
         }
         catch {
+            Write-MPReplicaDiagnosticsOnce
             Write-DscStatus "$Tag [$rlabel] Service Broker wiring failed: $($_.Exception.Message)" -Failure
             $hardFailed = $true
             continue
@@ -1031,8 +1100,7 @@ END
 }
 
 if ($hardFailed) {
-    try { Write-MPReplicaDiagnostics -SiteInstance $siteSqlConn -SiteDb $siteDbName -Targets $targets }
-    catch { Write-DscStatus "$Tag WARNING: diagnostics collection failed: $($_.Exception.Message)" }
+    Write-MPReplicaDiagnosticsOnce
     Write-DscStatus "$Tag Completed with failures. See ConfigMgrSetup / DSC logs and run Test-MPDatabaseReplicaHealth.ps1." -Failure
     Set-MPReplicaStatus -Status 'Failed'
     return
