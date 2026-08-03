@@ -517,7 +517,10 @@ if (-not $hardFailed) {
     # here and probe the hop from each replica below.
     $siteSqlTcpPort = 1433
     try {
-        $pq = Invoke-ReplSql -Instance $siteSqlConn -Query "SELECT p = CONVERT(int, ISNULL((SELECT TOP 1 NULLIF(LTRIM(RTRIM(value_data)), '') FROM sys.dm_server_registry WHERE value_name = 'TcpPort' AND registry_key LIKE '%\SuperSocketNetLib\Tcp\IPAll'), 0))"
+        $pq = Invoke-ReplSql -Instance $siteSqlConn -Query @"
+DECLARE @v NVARCHAR(128) = (SELECT TOP 1 LTRIM(RTRIM(CONVERT(NVARCHAR(128), value_data))) FROM sys.dm_server_registry WHERE value_name = 'TcpPort' AND registry_key LIKE '%\SuperSocketNetLib\Tcp\IPAll');
+SELECT p = CASE WHEN @v IS NOT NULL AND @v <> '' AND @v NOT LIKE '%[^0-9]%' THEN CONVERT(int, @v) ELSE 0 END;
+"@
         if ($pq -and [int]$pq.p -gt 0) { $siteSqlTcpPort = [int]$pq.p }
     }
     catch { Write-DscStatus "$Tag WARNING: could not read the site SQL TCP port from the registry: $($_.Exception.Message)" }
@@ -574,19 +577,22 @@ END
                         try {
                             if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
                             $cur = (Get-ItemProperty -Path $key -Name $distName -ErrorAction SilentlyContinue).$distName
-                            if ($cur -ne $target) {
-                                New-ItemProperty -Path $key -Name $distName -Value $target -PropertyType String -Force | Out-Null
-                                $o += "alias $distName -> $target set"
-                            }
+                            if ($cur -ne $target) { New-ItemProperty -Path $key -Name $distName -Value $target -PropertyType String -Force | Out-Null }
+                            $o += "alias $distName = $target ($(if ($key -like '*Wow6432Node*') { 'x86' } else { 'x64' }))"
                         }
                         catch { $o += "WARN alias ($key): $($_.Exception.Message)" }
                     }
                 }
+                # TCP only: this session cannot delegate credentials to a third machine
+                # (double hop -> ANONYMOUS LOGON), and the agent authenticates locally as
+                # the SQL Agent service account anyway, so a login test here proves nothing.
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                $c = New-Object System.Data.SqlClient.SqlConnection "Server=$distName;Database=master;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=15"
-                try { $c.Open(); $o += "connect to '$distName' OK [$([int]$sw.ElapsedMilliseconds) ms]" }
-                catch { $o += "connect to '$distName' FAILED [$([int]$sw.ElapsedMilliseconds) ms]: $($_.Exception.Message)" }
-                finally { $c.Dispose(); $sw.Stop() }
+                $c = New-Object System.Net.Sockets.TcpClient
+                $verdict = 'NO ANSWER (dropped or not listening)'
+                try { if ($c.BeginConnect($distFqdn, $port, $null, $null).AsyncWaitHandle.WaitOne(6000) -and $c.Connected) { $verdict = 'OPEN' } }
+                catch { $verdict = "ERROR $($_.Exception.Message)" }
+                finally { $c.Close(); $sw.Stop() }
+                $o += "TCP ${distFqdn}:$port = $verdict [$([int]$sw.ElapsedMilliseconds) ms]"
                 return $o
             } -ErrorAction Stop
             foreach ($m in @($hop)) { Write-DscStatus "$Tag [$rlabel] distributor hop: $m" }
@@ -642,15 +648,17 @@ END
                 # MSreplication_subscriptions table; referencing it in the same predicate
                 # as the OBJECT_ID guard fails to compile ("Invalid object name"), so the
                 # EXISTS must live inside the outer IF block (deferred compilation).
+                # Errors are swallowed: this is teardown before a fresh re-add, and the
+                # drop SPs raise wordings no phrase list covers (e.g. "There is no
+                # subscription on Publisher '<fqdn>'" for the legacy-name attempt). A
+                # leftover that genuinely survives surfaces on the re-add below.
                 Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
 IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL
 BEGIN
     IF EXISTS (SELECT 1 FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica')
     BEGIN
-        BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$sitePublisherName', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY
-        BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
-        BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY
-        BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
+        BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$sitePublisherName', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY BEGIN CATCH END CATCH
+        BEGIN TRY EXEC sp_droppullsubscription @publisher = N'$siteSqlServer', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica'; END TRY BEGIN CATCH END CATCH
     END
 END
 "@
@@ -659,10 +667,8 @@ END
                 Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
 IF OBJECT_ID('dbo.syspublications') IS NOT NULL
 BEGIN
-    BEGIN TRY EXEC sp_dropsubscription @publication = N'ConfigMgr_MPReplica', @article = N'all', @subscriber = N'$replicaServerName', @destination_db = N'$($t.ReplicaDbName)'; END TRY
-    BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
-    BEGIN TRY EXEC sp_dropsubscription @publication = N'ConfigMgr_MPReplica', @article = N'all', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)'; END TRY
-    BEGIN CATCH IF ERROR_MESSAGE() NOT LIKE '%does not exist%' AND ERROR_MESSAGE() NOT LIKE '%not exist%' AND ERROR_MESSAGE() NOT LIKE '%could not find%' THROW; END CATCH
+    BEGIN TRY EXEC sp_dropsubscription @publication = N'ConfigMgr_MPReplica', @article = N'all', @subscriber = N'$replicaServerName', @destination_db = N'$($t.ReplicaDbName)'; END TRY BEGIN CATCH END CATCH
+    BEGIN TRY EXEC sp_dropsubscription @publication = N'ConfigMgr_MPReplica', @article = N'all', @subscriber = N'$($t.ReplicaSqlName)', @destination_db = N'$($t.ReplicaDbName)'; END TRY BEGIN CATCH END CATCH
 END
 "@
                 # Add fresh subscription on the publisher (pending initialization). Use the
