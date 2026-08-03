@@ -7224,13 +7224,21 @@ function Get-RunspaceInventory {
 function Remove-VmSession {
     param([object]$Session)
     if (-not $Session) { return }
+    # ORDER MATTERS. The PSSession's transport was established THROUGH
+    # _OwnerRunspace (see New-PSSessionWithTimeout: "closing it can destroy the
+    # PSSession whose transport was established through it"), so disposing the
+    # runspace first leaves Remove-PSSession tearing down a session whose transport
+    # is already gone -- it fails silently under -ErrorAction SilentlyContinue and
+    # the RemoteRunspace is never released. That matches what the leak diagnostic
+    # reported: LocalRunspace/<local>=97 and RemoteRunspace/VMConnectionInfo=97,
+    # a perfect 1:1 of undisposed pairs, with ps_cache=0 and no thread jobs.
+    try { Remove-PSSession $Session -ErrorAction SilentlyContinue } catch {}
     try {
         if ($Session._OwnerRunspace) {
             $Session._OwnerRunspace.Close()
             $Session._OwnerRunspace.Dispose()
         }
     } catch {}
-    try { Remove-PSSession $Session -ErrorAction SilentlyContinue } catch {}
 }
 
 # Evict + dispose EVERY cached PSDirect session for a VM and forget its
