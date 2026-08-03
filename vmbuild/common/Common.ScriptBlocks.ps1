@@ -89,6 +89,13 @@ $global:Phase10Job = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
         Write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)"
     }
+    finally {
+        # Maintenance dispatches this as a ThreadJob across EVERY VM, and a thread
+        # job's sessions outlive Remove-Job (its runspace is reclaimed, runspaces
+        # created inside it are not). Without this each pass leaks a runspace pair
+        # per VM into the launcher for the rest of the week-long suite.
+        try { $null = Clear-VmSessionCache } catch { }
+    }
 
 }
 
@@ -1604,6 +1611,11 @@ $global:VM_Create = {
     catch {
         Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
         Write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)"
+    }
+    finally {
+        # Phase 11 is dispatched as a ThreadJob per VM; its sessions outlive
+        # Remove-Job, so without this each validated VM leaks a runspace pair.
+        try { $null = Clear-VmSessionCache } catch { }
     }
 }
 

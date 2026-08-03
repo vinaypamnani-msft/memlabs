@@ -7267,6 +7267,36 @@ function Get-RunspaceInventory {
     return $rows.ToArray()
 }
 
+function Clear-VmSessionCache {
+    <#
+    .SYNOPSIS
+    Dispose every PSDirect session this runspace cached. MUST be called by any
+    Start-ThreadJob worker before it returns.
+    .DESCRIPTION
+    A ThreadJob shares the launcher's PROCESS but gets its own RUNSPACE, and both
+    halves of that matter here (both measured, temp/test-threadjob-inner-runspace.ps1):
+      * its $global: is a SEPARATE scope, so $global:ps_cache and the session ledger
+        it writes are invisible to New-Lab's end-of-run cleanup;
+      * a runspace it creates SURVIVES Remove-Job -- the job's own runspace is
+        reclaimed, anything created inside it is not.
+    So every PSDirect session a thread-job worker opens leaks a LocalRunspace +
+    RemoteRunspace pair into the shared process for the life of the launcher. That is
+    the leak: the ledger read created=10 disposeCalls=10 while 183 pairs stayed open,
+    because the 183 were never created by the launcher's own runspace at all.
+    Harmless in a Start-Job worker, where process exit would have done it anyway.
+    #>
+    $n = 0
+    try {
+        foreach ($key in @($global:ps_cache.Keys)) {
+            try { Remove-VmSession $global:ps_cache[$key]; $n++ } catch { }
+        }
+        $global:ps_cache = @{}
+    }
+    catch { }
+    try { $null = Clear-OrphanRunspaces -Force } catch { }
+    return $n
+}
+
 # Dispose a PSSession and its owner runspace (if created by
 # New-PSSessionWithTimeout).  Use this instead of Remove-PSSession
 # directly when evicting sessions from ps_cache.
