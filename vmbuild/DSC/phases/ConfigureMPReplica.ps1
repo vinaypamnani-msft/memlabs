@@ -215,7 +215,7 @@ function Invoke-ReplSql {
 # Collect an actionable diagnostic snapshot on failure (state that explains WHY the
 # replica isn't working) so it's captured in the DSC log without a manual health run.
 function Write-MPReplicaDiagnostics {
-    param([string]$SiteInstance, [string]$SiteDb, [object]$Targets)
+    param([string]$SiteInstance, [string]$SiteDb, [object[]]$Targets)
     Write-DscStatus "$Tag ===== MP replica failure diagnostics ====="
     try {
         $q = "SELECT broker = (SELECT is_broker_enabled FROM sys.databases WHERE name = DB_NAME()), pubs = (CASE WHEN OBJECT_ID('dbo.syspublications') IS NOT NULL THEN (SELECT COUNT(*) FROM dbo.syspublications WHERE name='ConfigMgr_MPReplica') ELSE 0 END), arts = (CASE WHEN OBJECT_ID('dbo.sysarticles') IS NOT NULL THEN (SELECT COUNT(*) FROM dbo.sysarticles a JOIN dbo.syspublications p ON a.pubid = p.pubid WHERE p.name='ConfigMgr_MPReplica') ELSE 0 END), xmlart = (CASE WHEN OBJECT_ID('dbo.sysarticles') IS NOT NULL THEN (SELECT COUNT(*) FROM dbo.sysarticles a JOIN dbo.syspublications p ON a.pubid = p.pubid WHERE p.name='ConfigMgr_MPReplica' AND a.name='XMLConfigStore') ELSE 0 END), subs = (CASE WHEN OBJECT_ID('dbo.syssubscriptions') IS NOT NULL THEN (SELECT COUNT(DISTINCT srvid) FROM dbo.syssubscriptions) ELSE 0 END)"
@@ -238,6 +238,7 @@ function Write-MPReplicaDiagnostics {
     }
     catch { Write-DscStatus "$Tag [Diag] agent-history query failed: $($_.Exception.Message)" }
     foreach ($t in @($Targets)) {
+        $mpLabel = "$($t.MPName)"
         try {
             $rb = Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT b = ISNULL((SELECT CONVERT(int, is_broker_enabled) FROM sys.databases WHERE name = N'$($t.ReplicaDbName)'), -1)"
             $sub = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL SELECT c = COUNT(*) FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica' ELSE SELECT c = 0"
@@ -245,7 +246,7 @@ function Write-MPReplicaDiagnostics {
             $tc = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "SELECT tabs = (SELECT COUNT(*) FROM sys.tables), xmltab = CONVERT(int, CASE WHEN OBJECT_ID('dbo.XMLConfigStore') IS NULL THEN 0 ELSE 1 END)"
             Write-DscStatus "$Tag [Diag][Replica $($t.MPName)/$($t.ReplicaDbName)] broker_enabled=$($rb.b) pull_subscriptions=$($sub.c) replicated_tables=$($tc.tabs) XMLConfigStore_table=$($tc.xmltab) replicated_XMLConfigStore=$($xc.c) (0 tables = snapshot never applied; tables but 0 XMLConfigStore = it is not a published article)"
         }
-        catch { Write-DscStatus "$Tag [Diag][Replica $($t.MPName)] state query failed: $($_.Exception.Message)" }
+        catch { Write-DscStatus "$Tag [Diag][Replica $mpLabel] state query failed: $($_.Exception.Message)" }
         # Subscriber-side SQL Agent job history for the pull Distribution Agent. This is
         # the ONLY place the real failure shows up: a pull agent that cannot connect to
         # the distributor (login/PAL/snapshot-share) fails on the subscriber and never
@@ -260,10 +261,10 @@ WHERE s.subsystem = 'Distribution' AND s.command LIKE '%ConfigMgr_MPReplica%' AN
 ORDER BY h.run_date DESC, h.run_time DESC
 "@
             $any = $false
-            foreach ($row in @($jh)) { $any = $true; Write-DscStatus "$Tag [Diag][Replica $($t.MPName)][DistAgentJob] run_status=$($row.st): $($row.msg)" }
-            if (-not $any) { Write-DscStatus "$Tag [Diag][Replica $($t.MPName)][DistAgentJob] no job-history rows (Distribution Agent has not run yet)." }
+            foreach ($row in @($jh)) { $any = $true; Write-DscStatus "$Tag [Diag][Replica $mpLabel][DistAgentJob] run_status=$($row.st): $($row.msg)" }
+            if (-not $any) { Write-DscStatus "$Tag [Diag][Replica $mpLabel][DistAgentJob] no job-history rows (Distribution Agent has not run yet)." }
         }
-        catch { Write-DscStatus "$Tag [Diag][Replica $($t.MPName)] job-history query failed: $($_.Exception.Message)" }
+        catch { Write-DscStatus "$Tag [Diag][Replica $mpLabel] job-history query failed: $($_.Exception.Message)" }
     }
     Write-DscStatus "$Tag ===== end diagnostics (run Test-MPDatabaseReplicaHealth.ps1 for the full report) ====="
 }
@@ -276,7 +277,7 @@ function Write-MPReplicaDiagnosticsOnce {
     if ($script:diagWritten) { return }
     $script:diagWritten = $true
     try { Write-MPReplicaDiagnostics -SiteInstance $siteSqlConn -SiteDb $siteDbName -Targets $targets }
-    catch { Write-DscStatus "$Tag WARNING: diagnostics collection failed: $($_.Exception.Message)" }
+    catch { Write-DscStatus "$Tag WARNING: diagnostics collection failed [$($_.Exception.GetType().Name) at line $($_.InvocationInfo.ScriptLineNumber)]: $($_.Exception.Message)" }
 }
 
 $hardFailed = $false
@@ -509,6 +510,19 @@ if (-not $hardFailed) {
     }
     catch { Write-DscStatus "$Tag WARNING: could not read site @@SERVERNAME; using $siteSqlServer for replication names." }
 
+    # The pull Distribution Agent runs ON THE REPLICA and connects back out to the
+    # distributor by this bare @@SERVERNAME. If that one hop fails it retries forever
+    # with "Agent message code 20084 - the process could not connect to Distributor"
+    # and the snapshot never applies, so record the distributor's real listening port
+    # here and probe the hop from each replica below.
+    $siteSqlTcpPort = 1433
+    try {
+        $pq = Invoke-ReplSql -Instance $siteSqlConn -Query "SELECT p = CONVERT(int, ISNULL((SELECT TOP 1 NULLIF(value_data, '') FROM sys.dm_server_registry WHERE value_name = 'TcpPort' AND registry_key LIKE '%\SuperSocketNetLib\Tcp\IPAll'), 0))"
+        if ($pq -and [int]$pq.p -gt 0) { $siteSqlTcpPort = [int]$pq.p }
+    }
+    catch { Write-DscStatus "$Tag WARNING: could not read the site SQL TCP port: $($_.Exception.Message)" }
+    Write-DscStatus "$Tag Pull agents will connect to distributor '$sitePublisherName' on TCP $siteSqlTcpPort."
+
     # Re-run safety (site side): STEP 5.3 imports each replica's SSB cert as master
     # certificate ConfigMgrEndPointCert<DBhash> via an UNGUARDED CREATE CERTIFICATE ...
     # FROM FILE. On EVERY re-run that cert already exists (from the prior run's import) ->
@@ -538,6 +552,25 @@ END
             continue
         }
         Write-DscStatus "$Tag ===== $($t.MPName) -> $($t.ReplicaConn) / $($t.ReplicaDbName) (ordinal $($t.CertOrdinal)) ====="
+
+        # Same hop the pull Distribution Agent takes, from the same box.
+        try {
+            $reach = Invoke-Command -ComputerName $t.ReplicaShort -ArgumentList $sitePublisherName, $siteSqlTcpPort -ScriptBlock {
+                param($distName, $port)
+                $ips = ''
+                try { $ips = (@([System.Net.Dns]::GetHostAddresses($distName) | ForEach-Object { $_.IPAddressToString }) -join ',') }
+                catch { $ips = "DNS FAILED ($($_.Exception.Message))" }
+                $tcp = 'NO ANSWER (dropped or not listening)'
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                $c = New-Object System.Net.Sockets.TcpClient
+                try { if ($c.BeginConnect($distName, $port, $null, $null).AsyncWaitHandle.WaitOne(6000) -and $c.Connected) { $tcp = 'OPEN' } }
+                catch { $tcp = "ERROR $($_.Exception.Message)" }
+                finally { $c.Close(); $sw.Stop() }
+                return "resolves to $ips ; TCP ${port} = $tcp [$([int]$sw.ElapsedMilliseconds) ms]"
+            } -ErrorAction Stop
+            Write-DscStatus "$Tag [$rlabel] distributor '$sitePublisherName' from $($t.ReplicaShort): $reach"
+        }
+        catch { Write-DscStatus "$Tag WARNING [$rlabel] could not probe distributor reachability from $($t.ReplicaShort): $($_.Exception.Message)" }
 
         # -------------------------------------------------------------------
         # STEP 3 - Subscribe the replica DB (create DB, pull subscription, perms).

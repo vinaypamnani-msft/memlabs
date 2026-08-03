@@ -187,6 +187,8 @@ $diag = {
             })
     }
     $replicaVMs = @($targets | ForEach-Object { $_.ReplicaVMName } | Select-Object -Unique)
+    $replicaConnMap = @{}
+    foreach ($t in $targets) { if (-not $replicaConnMap.ContainsKey($t.ReplicaVMName)) { $replicaConnMap[$t.ReplicaVMName] = $t.ReplicaConn } }
     $siteSqlVMShort = (($siteSqlServer -split '\\')[0] -split '\.')[0]
 
     Section "SITE / PUBLISHER  ($siteSqlConn / $siteDbName, site $SiteCode)"
@@ -355,7 +357,7 @@ SELECT tables = (SELECT COUNT(*) FROM sys.tables),
     Emit ''
     Emit 'Key signal: each replica''s "Dist Agent job history" message reveals WHY the snapshot'
     Emit 'is not applying (login/permission/snapshot-share/connectivity to the distributor).'
-    return @{ Report = $out.ToArray(); SiteSqlVM = $siteSqlVMShort; Domain = $DomainFullName; Replicas = $replicaVMs }
+    return @{ Report = $out.ToArray(); SiteSqlVM = $siteSqlVMShort; Domain = $DomainFullName; Replicas = $replicaVMs; ReplicaConns = $replicaConnMap }
 }
 
 $result = Invoke-VmCommand -VmName $SiteServer -VmDomainName $DomainName -ScriptBlock $diag -ArgumentList $DeployConfigPath -DisplayName "MP replica replication diagnostic" -SuppressLog
@@ -410,4 +412,73 @@ if ($siteSqlVM) {
     $aclRes = Invoke-VmCommand -VmName $siteSqlVM -VmDomainName $dom -ScriptBlock $aclSb -DisplayName "MP replica ACL dump" -SuppressLog
     if ($aclRes -and -not $aclRes.ScriptBlockFailed) { foreach ($line in @($aclRes.ScriptBlockOutput)) { Write-Host $line } }
     else { Write-Host "  (ACL dump failed against ${siteSqlVM}: $($aclRes.ScriptBlockOutput))" -ForegroundColor Yellow }
+}
+
+# ---------------------------------------------------------------------------
+# The pull Distribution Agent runs ON THE REPLICA and connects OUT to the
+# distributor by its bare @@SERVERNAME (e.g. -Distributor PT1-PS1SITE). "Agent
+# message code 20084 - the process could not connect to Distributor" after ~15s is
+# a CONNECT timeout, not a login rejection, so probe the same hop from the same
+# box: name resolution, raw TCP, and a real SqlClient login (reporting which port /
+# transport actually answered). Also dump the agent job's verbatim command line --
+# the switches baked into it (notably -DistributorSecurityMode) decide how it
+# authenticates. Read-only.
+# ---------------------------------------------------------------------------
+$replicaVMs = @($so.Replicas)
+$replicaConns = $so.ReplicaConns
+if ($replicaVMs.Count -gt 0 -and $siteSqlVM) {
+    $probeSb = {
+        param($distShort, $domain, $localConn)
+        $o = New-Object System.Collections.Generic.List[string]
+        $distFqdn = "$distShort.$domain"
+        foreach ($n in @($distShort, $distFqdn)) {
+            try { $o.Add("  DNS $n -> " + (@([System.Net.Dns]::GetHostAddresses($n) | ForEach-Object { $_.IPAddressToString }) -join ', ')) }
+            catch { $o.Add("  DNS $n -> FAILED: $($_.Exception.Message)") }
+        }
+        foreach ($p in 1433, 4022, 445) {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $tc = New-Object System.Net.Sockets.TcpClient
+            try {
+                $ok = $tc.BeginConnect($distShort, $p, $null, $null).AsyncWaitHandle.WaitOne(6000)
+                $o.Add("  TCP ${distShort}:$p -> $(if ($ok -and $tc.Connected) { 'OPEN' } else { 'NO ANSWER (dropped/not listening)' })  [$([int]$sw.ElapsedMilliseconds) ms]")
+            }
+            catch { $o.Add("  TCP ${distShort}:$p -> ERROR $($_.Exception.Message)  [$([int]$sw.ElapsedMilliseconds) ms]") }
+            finally { $tc.Close(); $sw.Stop() }
+        }
+        foreach ($srv in @($distShort, $distFqdn)) {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $c = New-Object System.Data.SqlClient.SqlConnection "Server=$srv;Database=master;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=15"
+            try {
+                $c.Open()
+                $cmd = $c.CreateCommand()
+                $cmd.CommandText = "SELECT CONVERT(nvarchar(64), SERVERPROPERTY('MachineName')) + ' port=' + CONVERT(nvarchar(12), ISNULL((SELECT TOP 1 local_tcp_port FROM sys.dm_exec_connections WHERE session_id = @@SPID), 0)) + ' transport=' + ISNULL((SELECT TOP 1 net_transport FROM sys.dm_exec_connections WHERE session_id = @@SPID), '?')"
+                $o.Add("  SQL login '$srv' -> OK [$([int]$sw.ElapsedMilliseconds) ms]  $($cmd.ExecuteScalar())")
+            }
+            catch { $o.Add("  SQL login '$srv' -> FAILED [$([int]$sw.ElapsedMilliseconds) ms]: $($_.Exception.Message)") }
+            finally { $c.Dispose(); $sw.Stop() }
+        }
+        $o.Add('  (probe ran as the diagnostic account; the agent runs as the SQL Agent service account)')
+        try {
+            $c = New-Object System.Data.SqlClient.SqlConnection "Server=$localConn;Database=msdb;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=15"
+            $c.Open()
+            $cmd = $c.CreateCommand()
+            $cmd.CommandText = "SELECT TOP 1 s.command FROM dbo.sysjobsteps s WHERE s.subsystem = 'Distribution' AND s.command LIKE '%ConfigMgr_MPReplica%'"
+            $v = $cmd.ExecuteScalar()
+            $c.Dispose()
+            $o.Add('  Dist Agent job step command line:')
+            $o.Add("      $v")
+        }
+        catch { $o.Add("  Dist Agent job step command: query failed: $($_.Exception.Message)") }
+        return , $o.ToArray()
+    }
+    foreach ($rvm in $replicaVMs) {
+        Write-Host ''
+        Write-Host ('=' * 78) -ForegroundColor Cyan
+        Write-Host "DISTRIBUTOR CONNECTIVITY from replica $rvm  ->  $siteSqlVM" -ForegroundColor Cyan
+        Write-Host ('=' * 78) -ForegroundColor Cyan
+        $localConn = if ($replicaConns -and $replicaConns[$rvm]) { $replicaConns[$rvm] } else { 'localhost' }
+        $pr = Invoke-VmCommand -VmName $rvm -VmDomainName $dom -ScriptBlock $probeSb -ArgumentList $siteSqlVM, $dom, $localConn -DisplayName "Distributor connectivity probe" -SuppressLog
+        if ($pr -and -not $pr.ScriptBlockFailed) { foreach ($line in @($pr.ScriptBlockOutput)) { Write-Host $line } }
+        else { Write-Host "  (probe failed against ${rvm}: $($pr.ScriptBlockOutput))" -ForegroundColor Yellow }
+    }
 }
