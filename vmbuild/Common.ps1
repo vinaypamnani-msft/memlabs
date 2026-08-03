@@ -7140,6 +7140,7 @@ function New-PSSessionWithTimeout {
         # whose transport was established through it.  Attach it to the
         # session so it can be cleaned up when the session is evicted.
         $result.Session | Add-Member -NotePropertyName '_OwnerRunspace' -NotePropertyValue $rs -Force
+        try { $global:ps_sessionStats['created']++ } catch { }
     }
     else {
         $rs.Close()
@@ -7161,6 +7162,18 @@ function New-PSSessionWithTimeout {
 # late transport callback on an already-disposed object crashes the phase process,
 # so give them a settle window and only then reclaim.
 $global:ps_orphanRunspaces = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+
+# Create-vs-dispose ledger for PSDirect sessions. The end-of-run runspace count
+# cannot distinguish "a session was never handed to Remove-VmSession" from
+# "Remove-VmSession ran and its Close silently failed" -- both leave an open pair.
+# These count both sides so the next run says which.
+$global:ps_sessionStats = [System.Collections.Hashtable]::Synchronized(@{
+        created         = 0   # New-PSSessionWithTimeout returned a live session
+        disposeCalls    = 0   # Remove-VmSession entered
+        disposeLeftOpen = 0   # ...Close()+Dispose() ran, runspace still not Closed
+        disposeNoOwner  = 0   # ...session had no _OwnerRunspace to close
+        disposeThrew    = 0   # ...the close path threw
+    })
 
 function Add-OrphanRunspace {
     param($Runspace, $PowerShell, [string]$Reason, [string]$VmName)
@@ -7264,17 +7277,28 @@ function Remove-VmSession {
     # _OwnerRunspace (see New-PSSessionWithTimeout: "closing it can destroy the
     # PSSession whose transport was established through it"), so disposing the
     # runspace first leaves Remove-PSSession tearing down a session whose transport
-    # is already gone -- it fails silently under -ErrorAction SilentlyContinue and
-    # the RemoteRunspace is never released. That matches what the leak diagnostic
-    # reported: LocalRunspace/<local>=97 and RemoteRunspace/VMConnectionInfo=97,
-    # a perfect 1:1 of undisposed pairs, with ps_cache=0 and no thread jobs.
+    # is already gone -- it fails silently under -ErrorAction SilentlyContinue.
+    # NOTE: reordering alone did NOT stop the leak (it kept climbing 238->324 with
+    # the fix live), so the counters below measure whether disposal is being SKIPPED
+    # or is being called and FAILING -- two different bugs that look identical from
+    # the end-of-run runspace count.
+    try { $global:ps_sessionStats['disposeCalls']++ } catch { }
     try { Remove-PSSession $Session -ErrorAction SilentlyContinue } catch {}
     try {
         if ($Session._OwnerRunspace) {
             $Session._OwnerRunspace.Close()
             $Session._OwnerRunspace.Dispose()
+            # Did it actually close? A silently-failed Close is indistinguishable
+            # from never calling it, unless we look.
+            try {
+                if ("$($Session._OwnerRunspace.RunspaceStateInfo.State)" -ne 'Closed') {
+                    $global:ps_sessionStats['disposeLeftOpen']++
+                }
+            }
+            catch { }
         }
-    } catch {}
+        else { try { $global:ps_sessionStats['disposeNoOwner']++ } catch { } }
+    } catch { try { $global:ps_sessionStats['disposeThrew']++ } catch { } }
 }
 
 # Evict + dispose EVERY cached PSDirect session for a VM and forget its

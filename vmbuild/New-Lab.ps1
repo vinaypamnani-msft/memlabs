@@ -1453,6 +1453,16 @@ finally {
                 }
                 catch { }
                 Write-Log "[JobLeak] cross-check: Get-PSSession=$liveSessions ps_cache=$(@($global:ps_cache.Keys).Count) jobs=[$jobSummary]" -Warning
+                # created vs disposed separates the two remaining explanations:
+                #   created >> disposeCalls          -> some path drops sessions without
+                #                                       ever handing them to Remove-VmSession
+                #   created ~= disposeCalls, but
+                #   disposeLeftOpen/Threw > 0        -> disposal IS called and is failing
+                try {
+                    $st = $global:ps_sessionStats
+                    Write-Log "[JobLeak] session ledger: created=$($st['created']) disposeCalls=$($st['disposeCalls']) leftOpen=$($st['disposeLeftOpen']) noOwner=$($st['disposeNoOwner']) threw=$($st['disposeThrew'])" -Warning
+                }
+                catch { }
             }
         }
     }
