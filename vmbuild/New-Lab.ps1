@@ -1427,6 +1427,33 @@ finally {
             $byState = ($rsLeft | Group-Object { "$($_.RunspaceStateInfo.State)/$($_.RunspaceAvailability)" } |
                     ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
             Write-Log "[JobLeak] after session cleanup: $($rsLeft.Count) runspace(s) still open besides the default [$byState]; $(@($global:ps_orphanRunspaces).Count) parked awaiting reclaim. Each carries its own command + format tables (~8MB)." -Warning
+
+            # State alone was not enough: the count climbed 162 -> 182 -> 186 across
+            # consecutive builds in one launcher while "parked" stayed 0, so these are
+            # NOT the orphan-reclaim population. Kind+Origin separates a leaked local
+            # transport runspace from a leaked PSDirect PSSession from a thread job
+            # whose Remove-Job never ran -- three different bugs, three different fixes.
+            $inv = @(Get-RunspaceInventory)
+            if ($inv.Count -gt 0) {
+                $byKind = ($inv | Group-Object { "$($_.Kind)/$($_.Origin)" } | Sort-Object Count -Descending |
+                        ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
+                Write-Log "[JobLeak] runspace owners: $byKind" -Warning
+                $byName = ($inv | Group-Object { ($_.Name -replace '\d+$', '#') } | Sort-Object Count -Descending |
+                        Select-Object -First 8 | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
+                Write-Log "[JobLeak] runspace names: $byName" -LogOnly
+                $topTargets = ($inv | Where-Object { $_.Target } | Group-Object Target | Sort-Object Count -Descending |
+                        Select-Object -First 10 | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
+                if ($topTargets) { Write-Log "[JobLeak] runspace targets: $topTargets" -Warning }
+                $liveSessions = 0
+                try { $liveSessions = @(Get-PSSession -ErrorAction SilentlyContinue).Count } catch { }
+                $jobSummary = ''
+                try {
+                    $jobSummary = (@(Get-Job -ErrorAction SilentlyContinue) | Group-Object { "$($_.GetType().Name)/$($_.State)" } |
+                            ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
+                }
+                catch { }
+                Write-Log "[JobLeak] cross-check: Get-PSSession=$liveSessions ps_cache=$(@($global:ps_cache.Keys).Count) jobs=[$jobSummary]" -Warning
+            }
         }
     }
     catch { }

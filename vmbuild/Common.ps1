@@ -6448,6 +6448,35 @@ function Invoke-VmCommand {
                         if (-not $SuppressLog) {
                             Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $OutErr." -Failure
                         }
+                        # "Unknown Error" means the child job's Reason AND Error stream were
+                        # both empty -- 626 of these in 72h (561 on one VM) with nothing to act
+                        # on. Dump what the job object still knows while it is alive; Remove-Job
+                        # below disposes it. Deliberately a SEPARATE line, not appended to
+                        # $OutErr: the channel-broken classifier below regex-matches $OutErr for
+                        # words like 'transport'/'channel'/'broken' that appear in this text.
+                        if ($OutErr -eq 'Unknown Error') {
+                            try {
+                                $f = @("job=[state=$($job.State) status='$($job.StatusMessage)' loc='$($job.Location)' hasData=$($job.HasMoreData)")
+                                try { if ($job.PSBeginTime -and $job.PSEndTime) { $f += "ran=$([math]::Round((($job.PSEndTime) - ($job.PSBeginTime)).TotalSeconds,1))s" } elseif ($job.PSBeginTime) { $f += "began=$($job.PSBeginTime.ToString('HH:mm:ss.fff')) neverEnded" } else { $f += 'neverBegan' } } catch { }
+                                $f += ']'
+                                $ci = 0
+                                foreach ($cj in @($job.ChildJobs)) {
+                                    $ci++
+                                    $rt = '<none>'
+                                    try { if ($cj.JobStateInfo.Reason) { $rt = $cj.JobStateInfo.Reason.GetType().FullName } } catch { }
+                                    $counts = @()
+                                    foreach ($s in @('Error', 'Warning', 'Verbose', 'Information', 'Output', 'Progress')) {
+                                        try { $counts += "$s=$(@($cj.$s).Count)" } catch { $counts += "$s=?" }
+                                    }
+                                    $f += "child${ci}=[state=$($cj.State) reasonType=$rt $($counts -join ' ') hasData=$($cj.HasMoreData)]"
+                                }
+                                # Session state at the moment of failure is the key correlate:
+                                # a Broken/Closed transport explains an empty error stream.
+                                try { $f += "session=[state=$($ps.State) avail=$($ps.Availability) rs=$($ps.Runspace.RunspaceStateInfo.State)/$($ps.Runspace.RunspaceAvailability)]" } catch { $f += 'session=[unreadable]' }
+                                Write-Log "$VmName`: 'Unknown Error' autopsy for '$DisplayName': $($f -join ' ')" -Warning -LogOnly
+                            }
+                            catch { }
+                        }
                         $jobTimedOut = ($job.State -eq "Running")
                         # Was this terminal failure caused by a broken PSDirect/VMBus channel
                         # (vs an ordinary scriptblock error)? Inspect the job's failure reason
@@ -7148,6 +7177,45 @@ function Clear-OrphanRunspaces {
         try { Write-Log "Reclaimed $reclaimed orphaned runspace(s); $(@($global:ps_orphanRunspaces).Count) still parked." -LogOnly } catch { }
     }
     return $reclaimed
+}
+
+function Get-RunspaceInventory {
+    <#
+    .SYNOPSIS
+    Name the OWNER of every surviving runspace, not just its state.
+    .DESCRIPTION
+    End-of-run counts kept climbing across builds in one launcher (162 -> 182 -> 186)
+    with "0 parked", so the orphan reclaim never saw them -- but a state-only
+    breakdown cannot tell these apart, and they need opposite fixes:
+      * LocalRunspace + <local>  = RunspaceFactory transport runspace (~8MB of command
+                                   and format tables) -- New-PSSessionWithTimeout, or a
+                                   Start-ThreadJob whose job was never Remove-Job'd.
+      * RemoteRunspace + VMConnectionInfo = a PSDirect PSSession never disposed, i.e.
+                                   created outside ps_cache or evicted without
+                                   Remove-VmSession. Target names which VM.
+    #>
+    $rows = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($r in @(Get-Runspace -ErrorAction SilentlyContinue)) {
+            if ($r.Id -eq 1) { continue }
+            if ("$($r.RunspaceStateInfo.State)" -eq 'Closed') { continue }
+            $origin = '<local>'
+            try { if ($r.OriginalConnectionInfo) { $origin = $r.OriginalConnectionInfo.GetType().Name } } catch { }
+            $target = ''
+            try { if ($r.ConnectionInfo -and $r.ConnectionInfo.ComputerName) { $target = "$($r.ConnectionInfo.ComputerName)" } } catch { }
+            if (-not $target) { try { if ($r.ConnectionInfo -and $r.ConnectionInfo.VMName) { $target = "$($r.ConnectionInfo.VMName)" } } catch { } }
+            $rows.Add([pscustomobject]@{
+                    Id     = $r.Id
+                    Kind   = $r.GetType().Name
+                    Origin = $origin
+                    State  = "$($r.RunspaceStateInfo.State)/$($r.RunspaceAvailability)"
+                    Name   = "$($r.Name)"
+                    Target = $target
+                })
+        }
+    }
+    catch { }
+    return $rows.ToArray()
 }
 
 # Dispose a PSSession and its owner runspace (if created by
