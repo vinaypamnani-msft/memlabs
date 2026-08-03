@@ -94,7 +94,19 @@ $global:Phase10Job = {
         # job's sessions outlive Remove-Job (its runspace is reclaimed, runspaces
         # created inside it are not). Without this each pass leaks a runspace pair
         # per VM into the launcher for the rest of the week-long suite.
-        try { $null = Clear-VmSessionCache } catch { }
+        # NOT wrapped in a silent catch: an empty catch here made "the fix is not
+        # deployed" and "the fix ran and threw" indistinguishable for a whole day.
+        try {
+            if (Get-Command Clear-VmSessionCache -ErrorAction SilentlyContinue) {
+                $null = Clear-VmSessionCache
+            }
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Clear-VmSessionCache NOT FOUND -- this worker's PSDirect sessions will leak. Common.ps1 in this runspace is stale." -Warning -LogOnly
+            }
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Clear-VmSessionCache threw: $($_.Exception.Message)" -Warning -LogOnly
+        }
     }
 
 }
@@ -1615,7 +1627,17 @@ $global:VM_Create = {
     finally {
         # Phase 11 is dispatched as a ThreadJob per VM; its sessions outlive
         # Remove-Job, so without this each validated VM leaks a runspace pair.
-        try { $null = Clear-VmSessionCache } catch { }
+        try {
+            if (Get-Command Clear-VmSessionCache -ErrorAction SilentlyContinue) {
+                $null = Clear-VmSessionCache
+            }
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Clear-VmSessionCache NOT FOUND -- this worker's PSDirect sessions will leak. Common.ps1 in this runspace is stale." -Warning -LogOnly
+            }
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Clear-VmSessionCache threw: $($_.Exception.Message)" -Warning -LogOnly
+        }
     }
 }
 
