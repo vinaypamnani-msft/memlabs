@@ -280,6 +280,19 @@ $ensureClientPkgCoverage = {
     # the parent before it can land on a local DP. That inter-site transfer is slow, so
     # give it a much larger budget and (below) never tear down the targeting meanwhile.
     $maxTriesContentPending = 90
+    # A secondary-site DP needs that same budget even when THIS site already holds the
+    # content, because it is one MORE inter-site hop (parent distmgr -> secondary
+    # despool -> secondary distmgr -> secondary DP) and the StoredPkgVersion escalation
+    # below only sees a missing LOCAL copy. Measured on fabrikam: replication link went
+    # Active at 23:20:30, the secondary stored the package at 23:31:11 and finished
+    # adding it to its own DP at 23:31:55 -- the 24-try (~12 min) budget ran out at
+    # 23:32:25, so this warned about a DP that had just gone healthy. The loop still
+    # breaks the moment every DP reports Installed, so the larger budget only costs
+    # wall-clock when the content genuinely has not landed.
+    if ($secLinkSites.Count -gt 0) {
+        $maxTries = $maxTriesContentPending
+        Write-DscStatus "Client pkg coverage: covering secondary-site DP(s) in $(@($secLinkSites.Keys) -join ', ') -- content needs an extra parent->secondary hop, so allowing up to $maxTries tries."
+    }
     for ($try = 1; $try -le $maxTries; $try++) {
         # Is the client package content present at THIS site yet? StoredPkgVersion=0
         # means it is still replicating down from a parent/CAS site.
