@@ -26,12 +26,13 @@
       all payloads fail          -> transport after all; the trivial probe is too weak
 
 .PARAMETER VmName
-    VM to probe. Use one that has failed, e.g. FAB-CS1SQLAO2 or MR1-DC1.
+    VM to probe. Pick one that has actually failed -- NOC-DC1 accounts for 30 of the
+    'Check pending reboot' failures across the nocm logs.
 .PARAMETER PrecedeWithAsJob
     Run an -AsJob command first, mimicking "Stop Any Running DSC's" -- the operation
     the failure most often follows.
 .EXAMPLE
-    .\Test-PendingRebootPayload.ps1 -VmName MR1-DC1 -VmDomainName mpreplica.com -PrecedeWithAsJob
+    .\Test-PendingRebootPayload.ps1 -VmName NOC-DC1 -VmDomainName nocm.com -PrecedeWithAsJob
 #>
 [CmdletBinding()]
 param(
