@@ -7140,7 +7140,14 @@ function New-PSSessionWithTimeout {
         # whose transport was established through it.  Attach it to the
         # session so it can be cleaned up when the session is evicted.
         $result.Session | Add-Member -NotePropertyName '_OwnerRunspace' -NotePropertyValue $rs -Force
-        try { (Get-VmSessionStats)['created']++ } catch { }
+        try {
+            $st = Get-VmSessionStats
+            $st['created']++
+            $tag = Get-VmSessionCallerTag
+            $result.Session | Add-Member -NotePropertyName '_CallerTag' -NotePropertyValue $tag -Force
+            $st['byCaller'][$tag] = 1 + [int]$st['byCaller'][$tag]
+        }
+        catch { }
     }
     else {
         $rs.Close()
@@ -7179,9 +7186,24 @@ if (-not [System.AppDomain]::CurrentDomain.GetData('MemLabs_SessionStats')) {
                 disposeThrew      = 0   # ...the close path threw
                 workerCleanups    = 0   # Clear-VmSessionCache calls (proves the fix is live)
                 workerDisposed    = 0   # sessions those calls released
+                byCaller          = [System.Collections.Hashtable]::Synchronized(@{})  # caller -> net undisposed
             }))
 }
 function Get-VmSessionStats { [System.AppDomain]::CurrentDomain.GetData('MemLabs_SessionStats') }
+
+function Get-VmSessionCallerTag {
+    # Name the code path that owns a session, so the end-of-run report can say WHICH
+    # caller leaks rather than just how many. Skips this module's own plumbing.
+    try {
+        foreach ($fr in @(Get-PSCallStack | Select-Object -Skip 1)) {
+            $fn = "$($fr.FunctionName)"
+            if ($fn -in @('Get-VmSessionCallerTag', 'New-PSSessionWithTimeout', 'Get-VmSession', 'Remove-VmSession', 'Clear-VmSessionCache', '<ScriptBlock>')) { continue }
+            if ($fn) { return $fn }
+        }
+    }
+    catch { }
+    return '<unknown>'
+}
 
 function Add-OrphanRunspace {
     param($Runspace, $PowerShell, [string]$Reason, [string]$VmName)
@@ -7329,6 +7351,12 @@ function Remove-VmSession {
     # or is being called and FAILING -- two different bugs that look identical from
     # the end-of-run runspace count.
     try { (Get-VmSessionStats)['disposeCalls']++ } catch { }
+    # Decrement the creating caller's tally so byCaller ends up as NET undisposed.
+    try {
+        $tag = "$($Session._CallerTag)"
+        if ($tag) { $bc = (Get-VmSessionStats)['byCaller']; $bc[$tag] = [int]$bc[$tag] - 1 }
+    }
+    catch { }
     try { Remove-PSSession $Session -ErrorAction SilentlyContinue } catch {}
     try {
         if ($Session._OwnerRunspace) {

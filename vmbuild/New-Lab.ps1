@@ -1463,6 +1463,11 @@ finally {
                 try {
                     $st = Get-VmSessionStats
                     Write-Log "[JobLeak] session ledger: created=$($st['created']) disposeCalls=$($st['disposeCalls']) leftOpen=$($st['disposeLeftOpen']) noOwner=$($st['disposeNoOwner']) threw=$($st['disposeThrew']) workerCleanups=$($st['workerCleanups']) workerDisposed=$($st['workerDisposed'])" -Warning
+                    # Net undisposed per creating caller -- names the leaking path.
+                    $bc = $st['byCaller']
+                    $net = @($bc.Keys | Where-Object { [int]$bc[$_] -gt 0 } | Sort-Object { - [int]$bc[$_] } | Select-Object -First 8 |
+                            ForEach-Object { "$_=$([int]$bc[$_])" })
+                    if ($net.Count -gt 0) { Write-Log "[JobLeak] undisposed by caller: $($net -join ' ')" -Warning }
                 }
                 catch { }
             }
