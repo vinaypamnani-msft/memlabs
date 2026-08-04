@@ -9992,6 +9992,28 @@ if ($PSVersionTable.PSVersion -ge [Version]'7.4') {
 
 } # end else (non-RemoveOnly profile)
 
+# Stamp what THIS PROCESS loaded, not what is on disk. The phase scriptblocks
+# ($global:VM_Config, $global:Phase10Job, ...) are parsed once, when Common.ScriptBlocks.ps1
+# is dot-sourced, and Start-Job/Start-ThreadJob hands the job that already-parsed object --
+# so the `. Common.ps1 -InJob` at the top of each job refreshes FUNCTIONS but never a
+# scriptblock BODY. A launcher left open across a `git pull` keeps running the old bodies
+# while the log's Git banner (read from the working tree at deploy time) reports the new
+# commit; that mismatch has silently invalidated more than one investigation.
+if (-not $InJob) {
+    $global:MemLabsCodeLoadStamp = [pscustomobject]@{ LoadedUtc = [datetime]::UtcNow; ProcessId = $PID }
+}
+
+function Get-MemLabsStaleSourceFile {
+    # Launcher-resident .ps1 files edited since this process parsed them. A non-empty result
+    # means edits inside scriptblock bodies in those files are NOT running, whatever the
+    # Git banner says -- only a restart picks them up.
+    if (-not $global:MemLabsCodeLoadStamp) { return @() }
+    $loadedUtc = $global:MemLabsCodeLoadStamp.LoadedUtc
+    $files = @(Get-ChildItem -Path $PSScriptRoot -Filter *.ps1 -File -ErrorAction SilentlyContinue) +
+    @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'common') -Filter *.ps1 -File -ErrorAction SilentlyContinue)
+    return @($files | Where-Object { $_.LastWriteTimeUtc -gt $loadedUtc } | Sort-Object LastWriteTimeUtc -Descending)
+}
+
 ############################
 ### Common Object        ###
 ############################

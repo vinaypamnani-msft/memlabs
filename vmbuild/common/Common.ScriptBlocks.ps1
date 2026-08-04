@@ -4395,8 +4395,17 @@ $global:VM_Config = {
             foreach ($vp in @('ClusterIPAddress', 'AGIPAddress')) {
                 if ($currentItem.$vp) { $pfVips += ($currentItem.$vp -replace '/\d+$', '') }
             }
-            # The DC is always on the domain DEFAULT network at .1.
-            $pfDcIp = ($deployConfig.vmOptions.network -replace '\.\d+$', '.1')
+            # Ask the DC VM where it actually is. vmOptions.network is the network of the
+            # VMs in THIS config, which on an add-to-existing-domain deploy is a DIFFERENT
+            # subnet from the DC's -- pstest3 ran vmOptions.network=192.168.131.0 for the new
+            # secondary while the DC and both SQLAO nodes live on 192.168.130.x. Deriving .1
+            # from it aimed every query at a DNS server that does not exist, so the probe came
+            # back empty and declared "not published" on every phase.
+            $pfDcVm = $deployConfig.virtualMachines | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1
+            $pfDcVmName = $pfDcVm.vmName
+            $pfDcIp = $pfDcVm.AssignedIP
+            if (-not $pfDcIp) { $pfDcIp = $pfDcVm.LastKnownIP }
+            if (-not $pfDcIp) { $pfDcIp = ($deployConfig.vmOptions.network -replace '\.\d+$', '.1') }
             $needsDnsFix = $false
             $pfResolvedIps = @()
             try {
@@ -4474,8 +4483,13 @@ $global:VM_Config = {
                     }
                     return ($out -join '; ')
                 }
-                $pfNodeNet = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
-                $pfNodeSubnet = ($pfNodeNet -replace '\.\d+$', '.')
+                # The node's own IP is ground truth for which NIC is the domain NIC; the
+                # configured network can belong to a different subnet (see $pfDcIp above),
+                # which made the in-guest fix find no matching NIC and silently no-op.
+                $pfNodeSubnetSource = $pfOwnIp
+                if (-not $pfNodeSubnetSource) { $pfNodeSubnetSource = $currentItem.network }
+                if (-not $pfNodeSubnetSource) { $pfNodeSubnetSource = $deployConfig.vmOptions.network }
+                $pfNodeSubnet = ($pfNodeSubnetSource -replace '\.\d+$', '.')
                 $pf = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName `
                     -ScriptBlock $preflightFix -ArgumentList @($pfNodeSubnet, $pfOwnIp, $pfVips, $pfDcIp, $pfFqdn) `
                     -DisplayName "Ensure node DNS published"
@@ -4506,7 +4520,6 @@ $global:VM_Config = {
             # DC's PSDirect channel concurrently, was contending and TIMING OUT at
             # ~54s per node ("cache flush failed:") and adding ~1 min to the critical
             # path of phases 3/4/5 for no benefit (the push succeeds regardless).
-            $pfDcVmName = ($deployConfig.virtualMachines | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1).vmName
             if ($needsDnsFix -and $pfDcVmName) {
                 $pfDcFlush = Invoke-VmCommand -VmName $pfDcVmName -VmDomainName $domainName -ScriptBlock {
                     param($fqdn)

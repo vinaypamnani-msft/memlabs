@@ -674,6 +674,19 @@ try {
             Write-Log "Git: $gitBranch @ $gitHash" -LogOnly
         }
     } catch { }
+    # The Git line above describes the working tree; this one describes the code this
+    # process is actually running. They diverge whenever the launcher outlives a pull.
+    try {
+        $staleSource = @(Get-MemLabsStaleSourceFile)
+        $loadedAt = $global:MemLabsCodeLoadStamp.LoadedUtc.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')
+        if ($staleSource.Count -gt 0) {
+            $names = ($staleSource | Select-Object -First 5 -ExpandProperty Name) -join ', '
+            Write-Log "STALE LAUNCHER: this process (PID $PID) parsed its code at $loadedAt; $($staleSource.Count) source file(s) have changed since -- $names. Phase scriptblock bodies are frozen at load, so those edits are NOT running in this deployment. Restart New-Lab to pick them up." -Warning
+        }
+        else {
+            Write-Log "Code loaded at $loadedAt (PID $PID); no source file has changed since." -LogOnly
+        }
+    } catch { }
     Write-Log "PowerShell: $($PSVersionTable.PSVersion) (PID $PID)" -LogOnly
     Write-Log "Host PID: $PID | Parent PID: $((Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId)" -LogOnly
     Write-Log "StartPhase: $StartPhase | Phase: $Phase" -LogOnly
