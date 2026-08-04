@@ -4405,6 +4405,7 @@ class InstallFeatureForSCCM {
         # Required server features for this role (empty on client OS). Re-query here
         # because Test() may have found only one missing feature; submitting the full
         # role list makes ServerManager reprocess every already-installed feature.
+        $stamp = "Finished"
         $featureList = @($this.GetRequiredFeatures())
         if ($featureList.Count -gt 0) {
             $featureState = @($this.GetFeatureState($featureList))
@@ -4417,37 +4418,40 @@ class InstallFeatureForSCCM {
             }
 
             $missingFeatures = @($featureState | Where-Object { $_.InstallState -ne "Installed" } | ForEach-Object { $_.Name })
-            if ($missingFeatures.Count -gt 0) {
+            if ($missingFeatures.Count -eq 0) {
+                $stamp = $this.FeatureSignature($featureList)
+            }
+            else {
                 Write-Status "Installing $($missingFeatures.Count) missing Windows Features: $($missingFeatures -join ', ')"
                 $result = Install-WindowsFeature -Name $missingFeatures -IncludeManagementTools
                 if ($result.RestartNeeded -eq "Yes") {
                     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                     $global:DSCMachineStatus = 1
                 }
+                else {
+                    $stamp = $this.FeatureSignature($featureList)
+                }
             }
         }
 
-        # Durable completion breadcrumb (diagnostics + client-OS fast-path). Lives under
-        # C:\staging so it survives reboots and %windir%\temp cleanup -- the old
-        # %windir%\temp marker was being purged between runs (Phase 10 maintenance / the
-        # reboots during Phase 8 CM install), which made the full feature install +
-        # reboot re-run on every Phase 3 for the SiteSystem boxes. Server-OS idempotency
-        # is now keyed on the ACTUAL installed feature set in Test(), not on this file.
-        $markerPath = $this.MarkerPath()
-        try {
-            $markerDir = Split-Path -Parent $markerPath
-            if (-not (Test-Path $markerDir)) { New-Item -ItemType Directory -Path $markerDir -Force | Out-Null }
-            "Finished" | Out-File -FilePath $markerPath -Append -Encoding ascii
-        }
-        catch {}
+        # Durable completion breadcrumb (diagnostics + client-OS fast-path + the Test()
+        # fast path). Lives under C:\staging so it survives reboots and %windir%\temp
+        # cleanup -- the old %windir%\temp marker was being purged between runs (Phase 10
+        # maintenance / the reboots during Phase 8 CM install), which made the full
+        # feature install + reboot re-run on every Phase 3 for the SiteSystem boxes.
+        # On server OS the file records the exact feature set it vouches for, so it is
+        # only trusted while that set is unchanged; a reboot-pending install leaves the
+        # generic stamp so the next Test() re-verifies against ServerManager.
+        $this.WriteMarker($stamp)
     }
 
     [bool] Test() {
-        # Idempotency is keyed on the ACTUAL installed feature set, not a stamp file, so
-        # a fully-provisioned server never re-runs the install + reboot just because the
-        # marker was cleaned up. Adding a feature in GetRequiredFeatures() is also
-        # auto-detected here (no Version bump needed): a newly-required-but-missing
-        # feature makes Test() return $false and Set() installs only what's missing.
+        # Idempotency is keyed on the ACTUAL installed feature set (the marker below only
+        # caches a result already proven against ServerManager), so a fully-provisioned
+        # server never re-runs the install + reboot just because the marker was cleaned
+        # up. Adding a feature in GetRequiredFeatures() is auto-detected here (no Version
+        # bump needed): a newly-required-but-missing feature makes Test() return $false
+        # and Set() installs only what's missing.
         $featureList = @($this.GetRequiredFeatures())
         if ($featureList.Count -eq 0) {
             # Client OS -- no server features to verify; gate on the durable marker so
@@ -4456,9 +4460,44 @@ class InstallFeatureForSCCM {
             # (whose old marker hasn't been cleaned yet) aren't re-run on the first pass.
             return ([bool]((Test-Path $this.MarkerPath()) -or (Test-Path "$env:windir\temp\InstallFeatureStatus$($this.Role)$($this.Version).txt")))
         }
+
+        # Fast path. Get-WindowsFeature is NOT a cheap read: on a provisioned DP/MP/site
+        # server ServerManager rebuilds its component cache from CBS, which measured
+        # 214-251s per Phase 3 re-run on PT2-DPMP1/PT2-PRISITE (vs 1.5s on a SQL box) --
+        # all of it spent proving a set that was already complete. The marker names the
+        # exact feature set it vouches for and is only written once that set is verified
+        # installed, so a set change (or a Version bump, which is in the file name) falls
+        # through to the real query instead of being masked.
+        $signature = $this.FeatureSignature($featureList)
+        try {
+            $recorded = Get-Content -Path $this.MarkerPath() -TotalCount 1 -ErrorAction Stop
+            if ($recorded -and ([string]$recorded).Trim() -eq $signature) { return $true }
+        }
+        catch {}
+
         $featureState = @($this.GetFeatureState($featureList))
         $missing = @($featureState | Where-Object { $_.InstallState -ne "Installed" })
-        return ($missing.Count -eq 0)
+        if ($missing.Count -eq 0) {
+            # Compliant, but the marker is missing or predates this feature set (existing
+            # lab, or a Set() that ended reboot-pending). Stamp it so the next run is free.
+            $this.WriteMarker($signature)
+            return $true
+        }
+        return $false
+    }
+
+    [string] FeatureSignature([string[]] $featureList) {
+        return (($featureList | Sort-Object -Unique) -join ',')
+    }
+
+    [void] WriteMarker([string] $content) {
+        try {
+            $markerPath = $this.MarkerPath()
+            $markerDir = Split-Path -Parent $markerPath
+            if (-not (Test-Path $markerDir)) { New-Item -ItemType Directory -Path $markerDir -Force | Out-Null }
+            $content | Out-File -FilePath $markerPath -Force -Encoding ascii
+        }
+        catch {}
     }
 
     [object[]] GetFeatureState([string[]] $featureList) {
