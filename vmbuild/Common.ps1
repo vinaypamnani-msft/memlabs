@@ -7221,11 +7221,11 @@ function Get-VmSessionCallerTag {
 }
 
 function Add-OrphanRunspace {
-    param($Runspace, $PowerShell, [string]$Reason, [string]$VmName)
+    param($Runspace, $PowerShell, $Session, [string]$Reason, [string]$VmName)
     try {
-        if (-not $Runspace -and -not $PowerShell) { return }
+        if (-not $Runspace -and -not $PowerShell -and -not $Session) { return }
         [void]$global:ps_orphanRunspaces.Add([pscustomobject]@{
-                Rs = $Runspace; Ps = $PowerShell; At = (Get-Date); Reason = $Reason; VmName = $VmName
+                Rs = $Runspace; Ps = $PowerShell; Sess = $Session; At = (Get-Date); Reason = $Reason; VmName = $VmName
             })
     }
     catch { }
@@ -7255,6 +7255,23 @@ function Clear-OrphanRunspaces {
                 if ("$avail" -eq 'Busy') { continue }
             }
             try { if ($entry.Ps) { $entry.Ps.Dispose() } } catch { }
+            # Release the PSSession BEFORE its owner runspace -- the session's
+            # transport rides that runspace. Parking only the runspace (the original
+            # behaviour) left the RemoteRunspace open forever: the leak ledger showed
+            # 31 undisposed sessions as exactly 31 local + 31 remote runspaces, 22 of
+            # them attributed to Repair-VmPSDirectChannel, whose -LeakSession eviction
+            # is the only path that never disposes.
+            try {
+                if ($entry.Sess) {
+                    Remove-PSSession $entry.Sess -ErrorAction SilentlyContinue
+                    try {
+                        $tag = "$($entry.Sess._CallerTag)"
+                        if ($tag) { $bc = (Get-VmSessionStats)['byCaller']; $bc[$tag] = [int]$bc[$tag] - 1 }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
             try {
                 if ($entry.Rs) {
                     $entry.Rs.Close()
@@ -7418,10 +7435,12 @@ function Remove-VmSessionFromCache {
             $global:ps_cache.Remove($key)
             if (-not $LeakSession) { Remove-VmSession $sess }
             else {
-                # Park the owner runspace rather than dropping it: not disposing NOW
-                # is what keeps the late transport callback safe, but it does not have
-                # to mean never. Clear-OrphanRunspaces reclaims it once it is idle.
-                try { Add-OrphanRunspace -Runspace $sess._OwnerRunspace -Reason 'session leaked (abandoned job)' -VmName $VmName } catch { }
+                # Park the owner runspace AND the session rather than dropping them:
+                # not disposing NOW is what keeps the late transport callback safe, but
+                # it does not have to mean never. Passing the session matters -- parking
+                # the runspace alone left the PSSession's RemoteRunspace open for the
+                # life of the launcher, which is the bulk of the measured leak.
+                try { Add-OrphanRunspace -Runspace $sess._OwnerRunspace -Session $sess -Reason 'session leaked (abandoned job)' -VmName $VmName } catch { }
             }
             $dispNote = if ($LeakSession) { 'leaked (abandoned job may still ride it)' } else { 'disposed' }
             Write-Log "$VmName`: Evicted cached PSDirect session '$key' ($dispNote; timed out / unresponsive)" -Verbose
