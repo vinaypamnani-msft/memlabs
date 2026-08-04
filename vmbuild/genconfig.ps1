@@ -939,7 +939,7 @@ function Select-MainMenu {
                 $filename = Save-Config $Global:Config
                 #$creds = New-Object System.Management.Automation.PSCredential ($Global:Config.vmOptions.adminName, $Global:Common.LocalAdmin.GetNetworkCredential().Password)
                 $t = Test-Configuration -InputObject $Global:Config
-                $response = Get-Menu2 -MenuName "Generate DSC.Zip" -Prompt "Select menu option" -OptionArray $($t.DeployConfig.virtualMachines.vmName) -Test:$false -
+                $response = Get-Menu2 -MenuName "Generate DSC.Zip" -Prompt "Select menu option" -OptionArray $($t.DeployConfig.virtualMachines.vmName) -Test:$false
                 if ($response -eq "ESCAPE") {
                     continue
                 }

@@ -4395,12 +4395,20 @@ class InstallFeatureForSCCM {
 
         Write-Status "Installing Windows Features for Role $_Role"
 
-        # Install on all devices
+        # Install on all devices. This read "dism / online / Enable-Feature / FeatureName:..."
+        # for years: PowerShell tokenizes each bare "/" as its own argument, so dism got
+        # garbage -- and a native exe returns an exit code instead of throwing, so the
+        # try/catch could never see it. Report a bad exit code instead of swallowing it.
+        Write-Status "Installing Windows Feature TelnetClient"
         try {
-            Write-Status "Installing Windows Feature TelnetClient"
-            dism / online / Enable-Feature / FeatureName:TelnetClient
+            $dismOutput = & dism.exe /online /Enable-Feature /FeatureName:TelnetClient /NoRestart /Quiet 2>&1
+            if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) {
+                Write-Status "TelnetClient enable returned exit code $LASTEXITCODE (continuing): $($dismOutput | Select-Object -Last 1)"
+            }
         }
-        catch {}
+        catch {
+            Write-Status "TelnetClient enable failed (continuing): $($_.Exception.Message)"
+        }
 
         # Required server features for this role (empty on client OS). Re-query here
         # because Test() may have found only one missing feature; submitting the full
