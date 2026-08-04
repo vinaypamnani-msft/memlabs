@@ -7019,6 +7019,28 @@ function Get-VmPipelineFailureAutopsy {
                 if ($sre) { $parts += "err$i-remote=[$($sre.GetType().Name): $("$($sre.Message)" -replace '\s+', ' ')]" }
             }
             catch { }
+            # err-at stayed EMPTY across 810 samples: a deserialized record has no live
+            # InvocationInfo, and CategoryInfo.Activity/TargetName come back blank -- which
+            # is the only reason "something inside the scriptblock" was ever ruled out.
+            # ScriptStackTrace and SerializedRemoteInvocationInfo DO survive serialization
+            # and name the guest-side line.
+            try {
+                $sst = "$($e.ScriptStackTrace)" -replace '\s+', ' '
+                if ($sst.Trim()) {
+                    if ($sst.Length -gt 220) { $sst = $sst.Substring(0, 220) }
+                    $parts += "err$i-stack=[$($sst.Trim())]"
+                }
+            }
+            catch { }
+            try {
+                $rii = $e.Exception.SerializedRemoteInvocationInfo
+                if ($rii) {
+                    $rLine = "$($rii.Line)" -replace '\s+', ' '
+                    if ($rLine.Length -gt 140) { $rLine = $rLine.Substring(0, 140) }
+                    $parts += "err$i-remote-at=[cmd='$($rii.MyCommand)' line=$($rii.ScriptLineNumber) offset=$($rii.OffsetInLine) src='$($rLine.Trim())']"
+                }
+            }
+            catch { }
         }
         if ($i -eq 0 -and $CaughtException) {
             $parts += "caught=[type=$($CaughtException.Exception.GetType().FullName) fqeid=$($CaughtException.FullyQualifiedErrorId)]"

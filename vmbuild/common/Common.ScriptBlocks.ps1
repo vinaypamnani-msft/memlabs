@@ -2308,8 +2308,14 @@ $global:VM_Config = {
                 # so the caller logs and continues without rebooting.
                 $deferredFor = $null
                 try {
-                    $wsusFeature = Get-WindowsFeature -Name UpdateServices-Services -ErrorAction SilentlyContinue
-                    if ($wsusFeature -and $wsusFeature.Installed) {
+                    # Registry, not Get-WindowsFeature: that cmdlet ships only in
+                    # ServerManager, so it is missing outright on client SKUs and on a PS7
+                    # guest it loads through the WinPS-compat proxy, which opens a session of
+                    # its own -- impossible from inside this PSDirect pipeline, and the guest
+                    # raises "An error occurred while creating the pipeline". Same key the
+                    # WSUS stall collector already uses.
+                    $wsusInstalled = Test-Path 'HKLM:\SOFTWARE\Microsoft\Update Services\Server\Setup'
+                    if ($wsusInstalled) {
                         [void][reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
                         $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
                         $sub = $wsus.GetSubscription()
