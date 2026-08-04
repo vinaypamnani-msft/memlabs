@@ -7193,11 +7193,26 @@ function Get-VmSessionStats { [System.AppDomain]::CurrentDomain.GetData('MemLabs
 
 function Get-VmSessionCallerTag {
     # Name the code path that owns a session, so the end-of-run report can say WHICH
-    # caller leaks rather than just how many. Skips this module's own plumbing.
+    # caller leaks rather than just how many. Skips this module's own plumbing --
+    # including Invoke-VmCommand, which every caller funnels through and which
+    # therefore attributes 100% of sessions to itself (the first reading was a
+    # useless "Invoke-VmCommand=6"). The frame above it is the actual feature.
     try {
+        $skip = @(
+            'Get-VmSessionCallerTag', 'New-PSSessionWithTimeout', 'Get-VmSession',
+            'Remove-VmSession', 'Clear-VmSessionCache', 'Invoke-VmCommand',
+            'Invoke-VmCommandWithRetry'
+        )
         foreach ($fr in @(Get-PSCallStack | Select-Object -Skip 1)) {
             $fn = "$($fr.FunctionName)"
-            if ($fn -in @('Get-VmSessionCallerTag', 'New-PSSessionWithTimeout', 'Get-VmSession', 'Remove-VmSession', 'Clear-VmSessionCache', '<ScriptBlock>')) { continue }
+            if ($fn -in $skip) { continue }
+            # An anonymous frame is useless on its own; qualify it with its script.
+            if ($fn -match '^<') {
+                $sn = ''
+                try { if ($fr.ScriptName) { $sn = Split-Path $fr.ScriptName -Leaf } } catch { }
+                if ($sn) { return "$sn$fn" }
+                continue
+            }
             if ($fn) { return $fn }
         }
     }
