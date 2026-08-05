@@ -406,7 +406,7 @@ Function Get-SiteCodeForWSUS {
 
     )
 
-    $siteCodes = Get-ValidSiteCodesForWSUS
+    $siteCodes = Get-ValidSiteCodesForWSUS -Config $Config
 
     $result = $null
     $Options = [ordered]@{ "X" = "StandAlone WSUS" }

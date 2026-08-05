@@ -2419,6 +2419,21 @@ function Wait-Phase {
             $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and $_.State -ne "Failed" } | Sort-Object -Property Id
 
             foreach ($job in $runningJobs) {
+                # A job enters Blocked only when its host is being asked for input, and a
+                # background job has no interactive host -- so it never leaves that state,
+                # never reaches Completed/Failed, and would hold this loop's `until`
+                # forever. A single bare Get-VM2 (missing a Mandatory parameter, which makes
+                # PowerShell prompt) cost two builds 5h and 10h exactly this way. Measured:
+                # Stop-Job clears a Blocked job in ~39ms, so tearing down inline is safe.
+                if ($job.State -eq 'Blocked') {
+                    Write-Log "[Phase $Phase]: $($job.Name): STOPPING this job -- it is BLOCKED waiting for host input, which never arrives in a background job. The usual cause is a call missing a Mandatory parameter, so PowerShell is prompting for it; the last thing this job logged names the code that did it." -Failure -OutputStream
+                    try { $jobs.Remove($job) } catch { }
+                    try { Stop-Job $job -ErrorAction SilentlyContinue } catch { }
+                    try { Remove-Job $job -Force -ErrorAction SilentlyContinue } catch { }
+                    $return.Failed++
+                    continue
+                }
+
                 Write-JobProgress -Job $job -AdditionalData $AdditionalData
 
                 # Diagnostic: record progress-stream volume/last-record for this job.
