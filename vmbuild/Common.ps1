@@ -1624,7 +1624,13 @@ function Copy-ItemSafe {
 
     $retries = 3
     while ($retries -gt 0) {
+        $existingChildProcessIds = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $PID AND Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty ProcessId)
         $job = Start-Job -ScriptBlock $CopyItemScript
+        $copyJobProcessId = Get-CimInstance Win32_Process -Filter "ParentProcessId = $PID AND Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $existingChildProcessIds -notcontains $_.ProcessId } |
+            Sort-Object CreationDate -Descending |
+            Select-Object -First 1 -ExpandProperty ProcessId
         $attemptStart = Get-Date
         $lastProgressFingerprint = ''
         $lastProgressTime = $attemptStart
@@ -1745,8 +1751,22 @@ function Copy-ItemSafe {
         }
 
         if ($timedOut) {
-            Stop-Job $job | Out-Null
-            Remove-Job -Job $job | Out-Null
+            # Stop-Job can block forever when Copy-Item -ToSession is wedged.
+            # Kill this process job's worker first, then let PowerShell observe
+            # the exit before removing the job and starting the next attempt.
+            try {
+                if ($copyJobProcessId) {
+                    Stop-Process -Id $copyJobProcessId -Force -ErrorAction SilentlyContinue
+                }
+            }
+            catch { }
+            try { $job.StopJobAsync() } catch { }
+            if ($job.State -ne 'Running') {
+                Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            }
+            else {
+                Write-Log "[Copy-ItemSafe] [$VMName] Abandoning stale job object after terminating stalled copy worker PID $copyJobProcessId." -LogOnly
+            }
             $retries--
             continue
         }
@@ -6637,29 +6657,18 @@ function Invoke-VmCommand {
                     try {
                         $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
 
-                        # EXPERIMENT CONCLUDED -- the retry is gone, the autopsy stays.
-                        #
-                        # The bounded retry added here was there to decide between three
-                        # hypotheses. Across the Mega-A / mpreplica runs it fired 1,364 times
-                        # and RECOVERED 0. 456 of those retries ran on a brand-new session and
-                        # failed identically, in 27-42ms, with the session reporting
-                        # state=Opened avail=Available rsState=Opened rsAvail=Available. So it
-                        # is not a teardown race and not a dead cached session -- the third
-                        # branch: not a session problem at all.
-                        #
-                        # The error type settles it: System.Management.Automation.RemoteException
-                        # with fqeid=RuntimeException. RemoteException means the record was
-                        # serialized back FROM the guest, so the pipeline to the guest was
-                        # created and something INSIDE $Test_PendingReboot produced it. The
-                        # likely emitters are the calls that spin up their own pipeline in the
-                        # guest -- Invoke-CimMethod against root\ccm\ClientSDK, and
-                        # Get-WindowsFeature, whose ServerManager module loads through the
-                        # WinPS-compat implicit-remoting proxy on a PS7 guest.
-                        #
-                        # Retrying cost ~1.5s plus a session rebuild per occurrence (268 in one
-                        # pass) and those 456 rebuilds each created a runspace, feeding the very
-                        # runspace churn we are trying to remove. Keep the autopsy, which is what
-                        # will name the offending cmdlet.
+                        # History, so this is not re-litigated a third time:
+                        # * The first retry here EVICTED and rebuilt the session. It fired
+                        #   1,364 times and recovered 0 -- 456 on a brand-new session, failing
+                        #   in 27-42ms -- which read as "not transient at all".
+                        # * That pointed at something inside $Test_PendingReboot, since the
+                        #   error arrives as a RemoteException (serialized back FROM the guest).
+                        #   Removing Get-WindowsFeature -- its only ServerManager/WinPS-compat
+                        #   cmdlet -- did NOT help: the error persists on plain member servers
+                        #   that never reach that branch.
+                        # * err-stack and err-remote-at come back EMPTY, so the guest names no
+                        #   line, which fits the scriptblock never running at all.
+                        # What was never tried is a retry that leaves the session alone.
                         $createSig = $global:ps_pipelineCreateSignature
                         if (-not $createSig) { $createSig = 'An error occurred while creating the pipeline|The pipeline is not available|availability is Busy|is not available to run commands' }
                         if ($null -eq $return.ScriptBlockOutput -and $Err2 -and $Err2.Count -gt 0 -and
@@ -6667,6 +6676,29 @@ function Invoke-VmCommand {
                             # -LogOnly, so safe to emit even for -SuppressLog callers (the
                             # post-phase pending-reboot check is one).
                             Write-Log "$VmName`: '$DisplayName' pipeline-create autopsy -- $(Get-VmPipelineFailureAutopsy -Session $ps -Errors $Err2)" -LogOnly
+
+                            # Retry on THIS session -- no eviction, no rebuild. The retry that
+                            # used to live here evicted first and recovered 0 of 1,364, which
+                            # read as "not transient". postFailTrivial then ran a trivial
+                            # round-trip on the unchanged session at the moment of failure and
+                            # got 810 successes out of 810, ~12-20ms later. So the rebuild is
+                            # what never recovered; a same-session retry was never tried.
+                            $Err3 = $null
+                            $retryOut = $null
+                            try {
+                                Start-Sleep -Milliseconds 200
+                                $retryOut = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err3 -ErrorAction SilentlyContinue
+                            }
+                            catch { $Err3 = @($_) }
+                            if ($Err3 -and $Err3.Count -gt 0) {
+                                Write-Log "$VmName`: '$DisplayName' same-session retry ALSO failed: $("$($Err3[0])" -replace '\s+', ' ')" -LogOnly
+                            }
+                            else {
+                                # null + no error is a valid answer here (no reboot pending).
+                                $return.ScriptBlockOutput = $retryOut
+                                $Err2 = @()
+                                Write-Log "$VmName`: '$DisplayName' recovered on same-session retry (no rebuild)." -LogOnly
+                            }
                         }
                     }
                     finally {
