@@ -5713,7 +5713,21 @@ $global:VM_Config = {
                         }
                         elseif ($staleMins -ge $staleWarningMinutes -and ([DateTime]::UtcNow - $lastStaleWarningTime).TotalMinutes -ge 5) {
                             $idleNote = if ($lcmIdleSince) { " (LCM idle ${idleMins}m)" } elseif ($lcmRebootPendingSince) { " (LCM reboot-pending ${rebootMins}m)" } elseif ($lcmPendingNoRebootSince) { " (LCM PendingConfiguration ${pendingMins}m)" } else { " (LCM busy/applying)" }
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m${idleNote} ('$($currentStatus.Trim())')" -Warning
+                            # A busy LCM with a frozen status is normally a resource mid-work, but it is
+                            # also exactly what a DEAD ScriptWorkflow looks like: WaitForEvent keeps the
+                            # LCM busy polling a json nothing is writing any more. The idle branch above
+                            # already probes the task; this is the blind spot, so name it here.
+                            $workflowNote = ''
+                            if (-not $lcmIdleSince -and -not $lcmRebootPendingSince -and -not $lcmPendingNoRebootSince) {
+                                $swStale = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
+                                    $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
+                                    if ($t) { "$($t.State)" } else { $null }
+                                } -SuppressLog
+                                if (-not $swStale.ScriptBlockFailed -and $swStale.ScriptBlockOutput -and $swStale.ScriptBlockOutput -ne 'Running') {
+                                    $workflowNote = " -- ScriptWorkflow task is '$($swStale.ScriptBlockOutput)', NOT Running: the workflow exited without finishing, so this wait cannot clear on its own."
+                                }
+                            }
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m${idleNote} ('$($currentStatus.Trim())')${workflowNote}" -Warning
                             $lastStaleWarningTime = [DateTime]::UtcNow
                         }
                     }

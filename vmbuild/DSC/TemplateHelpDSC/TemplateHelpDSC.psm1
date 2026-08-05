@@ -1821,6 +1821,21 @@ class WaitForEvent {
             $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
         }
 
+        # Liveness watchdog. Nothing but the scheduled task advances this json, so if
+        # the task stops without reaching $ReadNodeValue (process killed, crashed, or
+        # Task Scheduler ended it) the wait below can never finish and the LCM spins
+        # forever on a frozen status. Only armed when we are waiting on OUR OWN
+        # machine's task -- the remote WaitPrimary usage must not touch a local task
+        # of the same name. A restart resumes: ScriptWorkflow.json step states make
+        # completed work a no-op, which is exactly what a phase re-run relies on.
+        $watchTask = $null
+        if ($this.MachineName -eq $env:COMPUTERNAME -and (Get-ScheduledTask -TaskName $_FileName -ErrorAction SilentlyContinue)) {
+            $watchTask = $_FileName
+        }
+        $taskRestarts = 0
+        $maxTaskRestarts = 3
+        $deadPolls = 0
+
         $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
         Write-Verbose "Attempting to acquire '$_FileName' Mutex"
         [void]$mtx.WaitOne()
@@ -1846,6 +1861,37 @@ class WaitForEvent {
             finally {
                 [void]$mtx.ReleaseMutex()
                 [void]$mtx.Dispose()
+            }
+
+            if ($watchTask -and $Configuration.$($this.ReadNode).Status -ne $this.ReadNodeValue) {
+                $taskState = $null
+                try { $taskState = (Get-ScheduledTask -TaskName $watchTask -ErrorAction Stop).State } catch { }
+                if ($taskState -and $taskState -ne 'Running') {
+                    # Require two consecutive dead polls so we never race a task that is mid-start.
+                    $deadPolls++
+                    if ($deadPolls -ge 2) {
+                        $deadPolls = 0
+                        $lastResult = 'unknown'
+                        try { $lastResult = "0x{0:X8}" -f (Get-ScheduledTaskInfo -TaskName $watchTask -ErrorAction Stop).LastTaskResult } catch { }
+                        if ($taskRestarts -lt $maxTaskRestarts) {
+                            $taskRestarts++
+                            Write-Status "$watchTask is '$taskState' (last result $lastResult) but [$($this.ReadNode)] is '$($Configuration.$($this.ReadNode).Status)' -- it exited without finishing. Restarting it (attempt $taskRestarts/$maxTaskRestarts)."
+                            try { Start-ScheduledTask -TaskName $watchTask -ErrorAction Stop }
+                            catch { Write-Status "Could not restart ${watchTask}: $($_.Exception.Message)" }
+                            Start-Sleep -Seconds 30
+                        }
+                        else {
+                            $msg = "JOBFAILURE: $watchTask kept exiting without setting [$($this.ReadNode)] to '$($this.ReadNodeValue)' (last result $lastResult); gave up after $maxTaskRestarts restarts. See C:\staging\DSC\InstallCMLog.log."
+                            # Written directly: Write-Status suppresses writes while the status
+                            # file holds the CM-setup sentinel, and the host keys on JOBFAILURE.
+                            try { $msg | Out-File -FilePath "C:\staging\DSC\DSC_Status.txt" -Force } catch { }
+                            throw $msg
+                        }
+                    }
+                }
+                else {
+                    $deadPolls = 0
+                }
             }
         }
         Write-Status "Step: [$($this.ReadNode)] Finished on $($this.MachineName)"
