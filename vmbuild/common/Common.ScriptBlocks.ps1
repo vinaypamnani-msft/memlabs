@@ -286,6 +286,21 @@ $global:Phase11Job = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
         Write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)"
     }
+    finally {
+        # Phase 11 runs as a ThreadJob, so its PSDirect sessions survive
+        # Remove-Job unless the worker disposes its runspace-local cache.
+        try {
+            if (Get-Command Clear-VmSessionCache -ErrorAction SilentlyContinue) {
+                $null = Clear-VmSessionCache
+            }
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Clear-VmSessionCache NOT FOUND -- this worker's PSDirect sessions will leak. Common.ps1 in this runspace is stale." -Warning -LogOnly
+            }
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Clear-VmSessionCache threw: $($_.Exception.Message)" -Warning -LogOnly
+        }
+    }
 }
 
 # Initialize disks
@@ -1625,8 +1640,8 @@ $global:VM_Create = {
         Write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)"
     }
     finally {
-        # Phase 11 is dispatched as a ThreadJob per VM; its sessions outlive
-        # Remove-Job, so without this each validated VM leaks a runspace pair.
+        # VM creation can also run as a ThreadJob, so dispose its runspace-local
+        # PSDirect cache before the worker exits.
         try {
             if (Get-Command Clear-VmSessionCache -ErrorAction SilentlyContinue) {
                 $null = Clear-VmSessionCache
