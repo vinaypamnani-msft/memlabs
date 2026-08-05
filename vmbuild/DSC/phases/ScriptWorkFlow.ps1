@@ -652,12 +652,23 @@ if ($containsPassive) {
         # overlapped. Join it now. The job ran with -SkipStatusFileUpdate, so the
         # main thread owns the InstallPassive status (Running stamped at launch;
         # Completed stamped below, gated on the role actually being present).
+        # InstallPassiveSiteServer.ps1 is internally bounded (75-min stall
+        # watchdog + 2 RetryInstallation attempts), so 4h is pure backstop: it
+        # only fires when the JOB itself is wedged, which an unbounded Wait-Job
+        # would turn into a permanently hung phase. Completion is verified from
+        # the site (Get-CMSiteRole) below regardless of how the join ended.
+        $passiveJobTimeout = 14400
         Write-DscStatus "Waiting for parallel InstallPassiveSiteServer.ps1 job to complete"
         try {
-            Wait-Job -Job $passiveJob | Out-Null
-            # The job writes its own status/log to disk via Write-DscStatus; just
-            # drain the pipeline. A terminating failure rethrows on Receive-Job.
-            Receive-Job -Job $passiveJob | Out-Null
+            if (Wait-Job -Job $passiveJob -Timeout $passiveJobTimeout) {
+                # The job writes its own status/log to disk via Write-DscStatus; just
+                # drain the pipeline. A terminating failure rethrows on Receive-Job.
+                Receive-Job -Job $passiveJob | Out-Null
+            }
+            else {
+                Write-DscStatus "Parallel passive job did not finish within $passiveJobTimeout s (state=$($passiveJob.State)) -- abandoning it; the role check below decides whether to stamp Completed." -Warning
+                Stop-Job -Job $passiveJob -ErrorAction SilentlyContinue
+            }
         }
         catch {
             Write-DscStatus "Parallel passive job: $_" -Warning
@@ -906,17 +917,31 @@ $installProviderJob = Start-Job -Name "InstallProvider" -ScriptBlock {
 Write-DscStatus "Started InstallProvider.ps1 job (after perfloading)"
 
   # Install Providers — join the background job started above.
-  Write-DscStatus "Waiting for InstallProvider.ps1 job to complete"
+  # InstallProvider.ps1 self-bounds every provider it installs (10m wait on a
+  # stale setupwpf + 30m setupwpf cap + 5m drain), so budget that per provider
+  # over a floor. An unbounded join hung Phase 8 for hours on a re-run whose
+  # config has NO InstallSMSProv VMs at all -- the job is a guaranteed no-op
+  # there, so it can only ever be the job itself that failed to run.
+  $installProviderCount = @($deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true }).Count
+  $installProviderTimeout = 300 + (2700 * $installProviderCount)
+  Write-DscStatus "Waiting for InstallProvider.ps1 job to complete (up to $([int]($installProviderTimeout / 60)) min)"
   try {
-      Wait-Job -Job $installProviderJob | Out-Null
-      # Write-DscStatus writes status/log to disk from the job runspace, so the
-      # pipeline output isn't needed here; discard it. A terminating failure in
-      # the job still rethrows on Receive-Job and is caught below.
-      Receive-Job -Job $installProviderJob | Out-Null
-      Remove-Job -Job $installProviderJob -Force -ErrorAction SilentlyContinue
+      if (Wait-Job -Job $installProviderJob -Timeout $installProviderTimeout) {
+          # Write-DscStatus writes status/log to disk from the job runspace, so the
+          # pipeline output isn't needed here; discard it. A terminating failure in
+          # the job still rethrows on Receive-Job and is caught below.
+          Receive-Job -Job $installProviderJob | Out-Null
+      }
+      else {
+          Write-DscStatus "InstallProvider.ps1 job did not finish within $installProviderTimeout s (state=$($installProviderJob.State)) -- abandoning it and continuing." -Warning
+          Stop-Job -Job $installProviderJob -ErrorAction SilentlyContinue
+      }
   }
   catch {
       Write-DscStatus "InstallProvider.ps1 failed: $_" -Warning
+  }
+  finally {
+      Remove-Job -Job $installProviderJob -Force -ErrorAction SilentlyContinue
   }
   
 # CAS already marked JSON Completed above to unblock DSC phases.

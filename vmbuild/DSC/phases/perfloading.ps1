@@ -1237,9 +1237,20 @@ Write-DscStatus "$Tag Starting perfloading"
     # work above. Join it now and create the ConfigMgr applications. Guarded to
     # Primary/standalone (non-CAS) — matching where the job was started.
     if ($CurrentRole -ne "CAS" -and $officeDownloadJob) {
+        # The job's ODT `setup.exe /download` runs under Start-Process -Wait with
+        # no cap of its own, so bound the join: a wedged CDN fetch (or a dead job
+        # runspace) must not hang Phase 8 forever. On overrun we fall through with
+        # no result and the Office applications are simply skipped this pass.
+        $officeDownloadTimeout = 5400
         Write-DscStatus "$Tag Waiting for background Office source download job to complete..."
-        Wait-Job -Job $officeDownloadJob | Out-Null
-        $officeDownloadResult = Receive-Job -Job $officeDownloadJob
+        $officeDownloadResult = $null
+        if (Wait-Job -Job $officeDownloadJob -Timeout $officeDownloadTimeout) {
+            $officeDownloadResult = Receive-Job -Job $officeDownloadJob
+        }
+        else {
+            Write-DscStatus "$Tag WARNING: Office source download job did not finish within $officeDownloadTimeout s (state=$($officeDownloadJob.State)); skipping Office application creation this pass."
+            Stop-Job -Job $officeDownloadJob -ErrorAction SilentlyContinue
+        }
         Remove-Job -Job $officeDownloadJob -Force -ErrorAction SilentlyContinue
 
         # Replay the job's log messages through Write-DscStatus (the job ran silently)
