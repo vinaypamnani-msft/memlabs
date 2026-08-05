@@ -6666,7 +6666,14 @@ function Invoke-VmCommand {
                         #   that never reach that branch.
                         # * err-stack and err-remote-at come back EMPTY, so the guest names no
                         #   line, which fits the scriptblock never running at all.
-                        # What was never tried is a retry that leaves the session alone.
+                        # * a retry on the UNCHANGED session (no eviction) -- the one thing
+                        #   left untried, and the thing postFailTrivial appeared to promise --
+                        #   recovered 0 of 7. So postFailTrivial's 810/810 does NOT generalise:
+                        #   a trivial `{1}` succeeds where the real payload still fails, on the
+                        #   same session, milliseconds apart.
+                        # No retry here any more: none of the three ever recovered a single
+                        # call, and re-issuing would double-execute a caller's scriptblock,
+                        # which is unsafe for anything non-idempotent. Autopsy only.
                         $createSig = $global:ps_pipelineCreateSignature
                         if (-not $createSig) { $createSig = 'An error occurred while creating the pipeline|The pipeline is not available|availability is Busy|is not available to run commands' }
                         if ($null -eq $return.ScriptBlockOutput -and $Err2 -and $Err2.Count -gt 0 -and
@@ -6674,29 +6681,6 @@ function Invoke-VmCommand {
                             # -LogOnly, so safe to emit even for -SuppressLog callers (the
                             # post-phase pending-reboot check is one).
                             Write-Log "$VmName`: '$DisplayName' pipeline-create autopsy -- $(Get-VmPipelineFailureAutopsy -Session $ps -Errors $Err2)" -LogOnly
-
-                            # Retry on THIS session -- no eviction, no rebuild. The retry that
-                            # used to live here evicted first and recovered 0 of 1,364, which
-                            # read as "not transient". postFailTrivial then ran a trivial
-                            # round-trip on the unchanged session at the moment of failure and
-                            # got 810 successes out of 810, ~12-20ms later. So the rebuild is
-                            # what never recovered; a same-session retry was never tried.
-                            $Err3 = $null
-                            $retryOut = $null
-                            try {
-                                Start-Sleep -Milliseconds 200
-                                $retryOut = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err3 -ErrorAction SilentlyContinue
-                            }
-                            catch { $Err3 = @($_) }
-                            if ($Err3 -and $Err3.Count -gt 0) {
-                                Write-Log "$VmName`: '$DisplayName' same-session retry ALSO failed: $("$($Err3[0])" -replace '\s+', ' ')" -LogOnly
-                            }
-                            else {
-                                # null + no error is a valid answer here (no reboot pending).
-                                $return.ScriptBlockOutput = $retryOut
-                                $Err2 = @()
-                                Write-Log "$VmName`: '$DisplayName' recovered on same-session retry (no rebuild)." -LogOnly
-                            }
                         }
                     }
                     finally {
