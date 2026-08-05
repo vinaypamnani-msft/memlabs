@@ -118,11 +118,26 @@ function Install-HyperV {
 
 function Get-VM2 {
     param (
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
         [string]$Name,
         [Parameter(Mandatory = $false)]
         [switch]$Fallback
     )
+
+    # Deliberately NOT Mandatory. A missing mandatory parameter makes PowerShell prompt,
+    # and a prompt inside a background job never returns -- the job sits in state=Blocked
+    # and the phase waits on it forever. That is exactly how a bare `Get-VM2` in the
+    # copy-stall diagnostics hung two builds for 5h and 10h. Fail loudly instead.
+    if (-not $Name) {
+        $caller = ''
+        try {
+            $cs = @(Get-PSCallStack)
+            if ($cs.Count -gt 1) { $caller = " (called from $($cs[1].Location))" }
+        }
+        catch { }
+        Write-Log "Get-VM2 requires -Name$caller -- use Get-VM to enumerate all VMs." -Failure
+        return [System.Management.Automation.Internal.AutomationNull]::Value
+    }
 
     # In job workers (Start-Job = separate process), skip Get-List entirely.
     # Get-List's cold path does Get-VM + Get-VMNetworkAdapter -All to build
@@ -417,7 +432,9 @@ function Write-HostMemoryPressureDiag {
         $totalGB = if ($os) { [Math]::Round($os.TotalVisibleMemorySize / 1MB, 1) } else { 0 }
         Write-MemDiagLine ("host total={0}GB available={1}GB" -f $totalGB, $(if ($availMB) { [Math]::Round($availMB / 1024, 1) } else { '?' }))
 
-        $running = @(Get-VM2 -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' })
+        # Get-VM, not Get-VM2: the latter requires -Name, and a missing mandatory
+        # parameter prompts, which never returns inside a job.
+        $running = @(Get-VM -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' })
         $assignedGB = 0
         foreach ($v in $running) { try { $assignedGB += $v.MemoryAssigned } catch { } }
         $assignedGB = [Math]::Round($assignedGB / 1GB, 1)
