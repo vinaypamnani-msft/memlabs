@@ -9914,6 +9914,24 @@ Function Set-TitleBar {
 # RemoveOnly profile: load only the files needed for Remove-VirtualMachine.
 # Saves ~2-3s per ThreadJob worker during domain removal (skips ~20 files).
 $removeOnlyProfile = ($StartupProfile -eq 'RemoveOnly')
+
+# PS5.1 stub so callers can reference Test-VmIsLinux without loading Common.Linux.ps1,
+# which uses PS7-only syntax. PS7 dot-sources the real implementation instead.
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    function Test-VmIsLinux {
+        param ([Parameter(Mandatory = $false, ValueFromPipeline = $true)] [object]$Vm)
+        if (-not $Vm) { return $false }
+        if ($Vm.PSObject.Properties.Name -contains 'osFamily' -and $Vm.osFamily -eq 'Linux') { return $true }
+        foreach ($prop in @('operatingSystem', 'deployedOS')) {
+            if ($Vm.PSObject.Properties.Name -contains $prop) {
+                $val = $Vm.$prop
+                if ($val -and ($val -like 'Ubuntu*' -or $val -like 'Debian*' -or $val -like 'Linux*')) { return $true }
+            }
+        }
+        return $false
+    }
+}
+
 if ($removeOnlyProfile) {
     . $PSScriptRoot\common\Common.StorageToken.ps1
     . $PSScriptRoot\common\Common.Colors.ps1
@@ -9923,20 +9941,6 @@ if ($removeOnlyProfile) {
     . $PSScriptRoot\common\Common.Remove.ps1
     if ($PSVersionTable.PSVersion.Major -ge 7) {
         . $PSScriptRoot\common\Common.Linux.ps1
-    }
-    else {
-        function Test-VmIsLinux {
-            param ([Parameter(Mandatory = $false, ValueFromPipeline = $true)] [object]$Vm)
-            if (-not $Vm) { return $false }
-            if ($Vm.PSObject.Properties.Name -contains 'osFamily' -and $Vm.osFamily -eq 'Linux') { return $true }
-            foreach ($prop in @('operatingSystem', 'deployedOS')) {
-                if ($Vm.PSObject.Properties.Name -contains $prop) {
-                    $val = $Vm.$prop
-                    if ($val -and ($val -like 'Ubuntu*' -or $val -like 'Debian*' -or $val -like 'Linux*')) { return $true }
-                }
-            }
-            return $false
-        }
     }
 }
 else {
@@ -9973,22 +9977,6 @@ else {
 . $PSScriptRoot\common\Common.HyperV.ps1
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     . $PSScriptRoot\common\Common.Linux.ps1
-}
-else {
-    # Stub so callers (e.g. Common.Validation.ps1) can reference Test-VmIsLinux under PS5.1
-    # without loading the full Common.Linux.ps1 which uses PS7-only syntax.
-    function Test-VmIsLinux {
-        param ([Parameter(Mandatory = $false, ValueFromPipeline = $true)] [object]$Vm)
-        if (-not $Vm) { return $false }
-        if ($Vm.PSObject.Properties.Name -contains 'osFamily' -and $Vm.osFamily -eq 'Linux') { return $true }
-        foreach ($prop in @('operatingSystem', 'deployedOS')) {
-            if ($Vm.PSObject.Properties.Name -contains $prop) {
-                $val = $Vm.$prop
-                if ($val -and ($val -like 'Ubuntu*' -or $val -like 'Debian*' -or $val -like 'Linux*')) { return $true }
-            }
-        }
-        return $false
-    }
 }
 . $PSScriptRoot\common\Common.snapshots.ps1
 . $PSScriptRoot\common\Common.PKI.ps1
