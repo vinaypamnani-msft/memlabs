@@ -1447,8 +1447,6 @@ function Write-CopyStallDiag {
         if ($os) {
             Write-CopyDiagLine "host freePhysical=$([math]::Round($os.FreePhysicalMemory/1KB))MB totalVisible=$([math]::Round($os.TotalVisibleMemorySize/1KB))MB"
         }
-        $runningVms = @(Get-VM2 -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' })
-        Write-CopyDiagLine "host runningVMs=$($runningVms.Count)"
     }
     catch { }
 
