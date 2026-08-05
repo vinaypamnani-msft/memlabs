@@ -24,6 +24,9 @@ _fileList_develop.json
 /vmbuild/azureFiles
 /vmbuild/cache
 
+# Repo-root scratch. Anything worth keeping belongs in vmbuild/tools instead.
+/temp
+
 # Local cache written by Check-FilelistUpdates.ps1 (per-environment state)
 /vmbuild/.lastResolvedFilename.json
 
