@@ -1249,9 +1249,15 @@ Write-DscStatus "$Tag Starting perfloading"
     # policy being purged and the projection refilling, so a bigger set = a wider
     # window = a landable repro.
     #
-    # The stock baselines.zip CIs are deliberately NOT reused: 5 of 7 have broken
-    # discovery (Exit codes, no stdout) and most carry no remediation script at
-    # all, so un-intending them produces nothing observable.
+    # The stock baselines.zip CIs are not used as the PRIMARY vehicle, but they are
+    # a valid secondary signal. Since the 2026-06 repair (manifest md5 7EB476C8...)
+    # all 7 emit their value to stdout and discover correctly; however only 2 of
+    # them ("Check windows firewall", "Check Windows update") carry a remediation
+    # script, and both remediate by starting a real service -- which leaves no
+    # attributable trace and has side effects on the lab. The CIs below instead
+    # give a controllable count, a remediation on EVERY CI, and a timestamped
+    # audit log, so "the remediation ran because the setting was un-intended" is
+    # directly observable rather than inferred.
     $bulkCount = 0
     $tattooCount = 0
     if ($cmo.ReproPolicyBulkCount) { $bulkCount = [int]$cmo.ReproPolicyBulkCount }
