@@ -5467,36 +5467,88 @@ $global:VM_Config = {
                                 # (C:\Windows\System32\Configuration\ConfigurationStatus\*.json -- the actual last
                                 # LCM run, what Get-DscConfigurationStatus reads) so the build log shows which
                                 # resource the last apply died on before we resume it.
-                                $dscEventsTail = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
-                                    $scPath = Join-Path $env:windir 'System32\Configuration\ConfigurationStatus'
-                                    $f = Get-ChildItem -Path $scPath -Filter *.json -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                                    if (-not $f) { return $null }
-                                    $lines = $null
-                                    try {
-                                        # The LCM may hold the file open; open shared read/write so we can still read it.
-                                        $fs = [System.IO.File]::Open($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-                                        try {
-                                            $sr = New-Object System.IO.StreamReader($fs)
-                                            $lines = ($sr.ReadToEnd() -split "`r?`n")
-                                            $sr.Dispose()
-                                        }
-                                        finally { $fs.Dispose() }
-                                    }
-                                    catch {
-                                        $lines = Get-Content -Path $f.FullName -ErrorAction SilentlyContinue
-                                    }
-                                    $tail = ($lines | Select-Object -Last 10) -join "`r`n"
-                                    [pscustomobject]@{ File = $f.Name; LastWrite = $f.LastWriteTime; Tail = $tail }
-                                } -SuppressLog
-                                if (-not $dscEventsTail.ScriptBlockFailed -and $dscEventsTail.ScriptBlockOutput) {
-                                    $sbo = $dscEventsTail.ScriptBlockOutput
-                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: last ConfigurationStatus record $($sbo.File) (written $($sbo.LastWrite)); last 10 lines:`r`n$($sbo.Tail)" -LogOnly
-                                }
-                                else {
-                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: could not read the last ConfigurationStatus record at stranded point." -LogOnly
-                                }
+                                # Stop FIRST, then read the status records. The LCM holds
+                                # ConfigurationStatus\*.json open while it runs, so reading before the stop
+                                # only ever yields a partial record (which is why this used to need a
+                                # FileShare::ReadWrite open and still got a truncated tail). Once the config
+                                # is stopped the files are released, and this is the ONLY chance to learn
+                                # which resource was actually stuck before the resume overwrites the record.
                                 $null = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -ScriptBlock {
                                     Stop-DscConfiguration -Force -ErrorAction SilentlyContinue
+                                } -SuppressLog
+
+                                $dscEventsTail = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
+                                    Start-Sleep -Seconds 3   # let the LCM release its handles after the stop
+                                    $sb = New-Object System.Text.StringBuilder
+                                    $add = { param($t) $null = $sb.AppendLine($t) }
+
+                                    $scPath = Join-Path $env:windir 'System32\Configuration\ConfigurationStatus'
+                                    $f = Get-ChildItem -Path $scPath -Filter '*.details.json' -ErrorAction SilentlyContinue |
+                                        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                                    if (-not $f) {
+                                        $f = Get-ChildItem -Path $scPath -Filter '*.json' -ErrorAction SilentlyContinue |
+                                            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                                    }
+                                    if (-not $f) { & $add "ConfigurationStatus: no records found under $scPath" }
+                                    else {
+                                        & $add "ConfigurationStatus record: $($f.Name) (written $($f.LastWriteTime), $([Math]::Round($f.Length/1KB))KB)"
+                                        $raw = $null
+                                        try { $raw = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop }
+                                        catch { & $add "  read failed even after stop: $($_.Exception.Message)" }
+                                        if ($raw) {
+                                            $recs = @()
+                                            # PS5.1's ConvertFrom-Json emits the whole array as ONE pipeline
+                                            # object, so @(...) yields a single Object[] and every property access
+                                            # then returns an array ("Cannot convert System.Object[] to Double").
+                                            # foreach enumerates correctly on both 5.1 and 7; this runs in-guest
+                                            # under 5.1.
+                                            try { foreach ($item in ($raw | ConvertFrom-Json)) { $recs += $item } }
+                                            catch { & $add "  parse failed: $($_.Exception.Message)" }
+                                            if ($recs.Count -gt 0) {
+                                                $dur = {
+                                                    param($r)
+                                                    $d = 0.0
+                                                    $v = $r.DurationInSeconds
+                                                    if ($null -ne $v -and [double]::TryParse([string]$v, [ref]$d)) { return $d }
+                                                    return 0.0
+                                                }
+                                                & $add "  $($recs.Count) resource record(s)."
+                                                # Slowest resources name what the LCM was actually grinding on.
+                                                & $add "  --- slowest ---"
+                                                foreach ($r in @($recs | Sort-Object { & $dur $_ } -Descending | Select-Object -First 5)) {
+                                                    & $add ("    {0,8:N1}s  {1}  InDesiredState={2}" -f (& $dur $r), $r.ResourceId, $r.InDesiredState)
+                                                }
+                                                $bad = @($recs | Where-Object { $_.InDesiredState -eq $false -or $_.Error })
+                                                if ($bad.Count -gt 0) {
+                                                    & $add "  --- not in desired state / errored ($($bad.Count)) ---"
+                                                    foreach ($r in @($bad | Select-Object -First 8)) {
+                                                        & $add ("    {0}  {1}" -f $r.ResourceId, ("" + $r.Error))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    # The operational channel names the resource that was executing, which the
+                                    # status record does not show for an apply that never finished.
+                                    & $add "--- Microsoft-Windows-DSC/Operational (last 25) ---"
+                                    try {
+                                        foreach ($e in @(Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 25 -ErrorAction Stop)) {
+                                            $m = ($e.Message -replace '\s+', ' ').Trim()
+                                            if ($m.Length -gt 200) { $m = $m.Substring(0, 200) }
+                                            & $add ("    {0:HH:mm:ss} [{1}] {2}" -f $e.TimeCreated, $e.LevelDisplayName, $m)
+                                        }
+                                    }
+                                    catch { & $add "    Get-WinEvent failed: $($_.Exception.Message)" }
+                                    $sb.ToString()
+                                } -SuppressLog
+                                if (-not $dscEventsTail.ScriptBlockFailed -and $dscEventsTail.ScriptBlockOutput) {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC evidence captured at the stranded point (post-stop, files unlocked):`r`n$($dscEventsTail.ScriptBlockOutput)" -LogOnly
+                                }
+                                else {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: could not capture ConfigurationStatus/event evidence at stranded point." -LogOnly
+                                }
+                                $null = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -ScriptBlock {
                                     Start-DscConfiguration -UseExisting -Force -ErrorAction SilentlyContinue
                                 } -SuppressLog
                                 $lcmPendingNoRebootSince = [DateTime]::UtcNow   # give the resume a window to apply before escalating
