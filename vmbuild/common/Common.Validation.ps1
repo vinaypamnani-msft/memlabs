@@ -884,6 +884,20 @@ function Test-ValidVmMemory {
                 Add-ValidationMessage -Message "$vmRole Validation: [$vmName] Windows 11 memory [$vmMemory] raised to 4GB. A 2GB Win11 client exhausts commit under the deploy load and can BSOD (0xEF, Windows OS bug 56918928); 4GB is the safe floor." -ReturnObject $ReturnObject -Warning
             }
         }
+        # Linux memory floor: 2GB. At 1GB a Linux guest sharing a host with 20+
+        # booting Windows VMs can fail to reach userspace at all -- PL-OREGANO
+        # started its kernel and never wrote a single log line to its disk, so
+        # cloud-init never ran and the hostname was still the base image's.
+        # Repair in place like the Win11 floor above so old configs self-heal.
+        if ($vmMemory -is [string] -and ($vmMemory.ToUpperInvariant().EndsWith("MB") -or $vmMemory.ToUpperInvariant().EndsWith("GB")) `
+                -and (Test-VmIsLinux -Vm $VM)) {
+            $memBytes = 0
+            try { $memBytes = [int64]($vmMemory / 1) } catch { $memBytes = 0 }
+            if ($memBytes -gt 0 -and $memBytes -lt 2GB) {
+                $VM.memory = "2GB"
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] Linux memory [$vmMemory] raised to 2GB. Below this a Linux VM can fail to boot under deploy-time host contention." -ReturnObject $ReturnObject -Warning
+            }
+        }
     }
 
 }
@@ -956,6 +970,12 @@ function Test-ValidVmProcs {
         $virtualProcs = $VM.virtualProcs
         if ([int]$virtualProcs -gt 16 -or [int]$virtualProcs -lt 1) {
             Add-ValidationMessage -Message "$vmRole Validation: [$vmName] virtualProcs value [$virtualProcs] is invalid. Specify a value from 1-16." -ReturnObject $ReturnObject -Failure
+        }
+        elseif ([int]$virtualProcs -lt 2 -and (Test-VmIsLinux -Vm $VM)) {
+            # A single vCPU is what turned a slow Linux boot into one that never
+            # finished; repair in place to match the 2GB memory floor.
+            $VM.virtualProcs = 2
+            Add-ValidationMessage -Message "$vmRole Validation: [$vmName] Linux virtualProcs [$virtualProcs] raised to 2. A single vCPU cannot reliably complete boot under deploy-time host contention." -ReturnObject $ReturnObject -Warning
         }
     }
 

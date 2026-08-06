@@ -267,8 +267,8 @@
       "role": "Proxy",
       "operatingSystem": "Ubuntu Server 24.04 LTS",
       "osFamily": "Linux",
-      "memory": "1GB",
-      "virtualProcs": 1
+      "memory": "2GB",
+      "virtualProcs": 2
     },
     {
       "vmName": "SOURDOUGH",

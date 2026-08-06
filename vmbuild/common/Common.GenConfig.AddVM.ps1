@@ -282,11 +282,13 @@ function Add-NewVMForRole {
     }
 
     if ($role -eq "Proxy") {
-        # Linux VM: no TPM, fixed lightweight footprint, osFamily marker so
+        # Linux VM: no TPM, lightweight footprint, osFamily marker so
         # Test-VmIsLinux short-circuits the Windows create/validation paths.
+        # 2GB/2vCPU is the floor: at 1GB/1vCPU a Proxy booting alongside 20+
+        # Windows VMs could fail to reach userspace at all.
         $virtualMachine.PSObject.Properties.Remove('tpmEnabled')
-        $virtualMachine.memory = "1GB"
-        $virtualMachine.virtualProcs = 1
+        $virtualMachine.memory = "2GB"
+        $virtualMachine.virtualProcs = 2
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osFamily' -Value 'Linux' -Force
         # Optional xrdp + lightweight desktop for graphical login. When true,
         # New-LinuxVirtualMachine installs xrdp/xfce4 via cloud-init and the
