@@ -5632,8 +5632,25 @@ function Wait-ForVm {
                     Write-Log "$VmName`: OOBE not responding after $failures poll failures. Power-cycling VM (attempt $powerCycles/$maxPowerCycles)." -Warning
                     $vmState = if ($vmCheck) { $vmCheck.State } else { "Unknown" }
                     Write-Log "$VmName`: VM state before power-cycle: $vmState" -Warning
-                    stop-vm2 -name $VmName -TurnOff
+                    $stopOk = stop-vm2 -name $VmName -TurnOff -Passthru
                     start-sleep -seconds 8
+
+                    # Stop-VM2 swallows a vmms fault and returns false. Under a loaded
+                    # host it does throw ("statusDescription cannot be null or empty",
+                    # "Object reference not set"), and without this check the VM was
+                    # never cycled at all -- the wedged guest then sat until the next
+                    # poll threshold, ~21min later, with nothing saying the recovery
+                    # had been a no-op.
+                    $postStop = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+                    if (-not $stopOk -or ($postStop -and $postStop.State -ne 'Off')) {
+                        Write-Log "$VmName`: power-cycle FAILED to stop the VM (state=$(if ($postStop) { $postStop.State } else { 'unknown' })); retrying once." -Warning
+                        $null = stop-vm2 -name $VmName -TurnOff -Passthru
+                        start-sleep -seconds 8
+                        $postStop = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+                        if ($postStop -and $postStop.State -ne 'Off') {
+                            Write-Log "$VmName`: VM is still $($postStop.State) after two stop attempts -- Hyper-V is refusing to stop it, so this power-cycle recovered nothing." -Failure
+                        }
+                    }
 
                     # After the first power-cycle, if heartbeat was NoContact (OS never
                     # loaded into a usable state), attempt an offline registry fix for
