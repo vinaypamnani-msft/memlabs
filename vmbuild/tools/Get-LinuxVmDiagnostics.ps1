@@ -96,7 +96,10 @@ function Copy-LinuxRootLogViaWsl {
         return
     }
     $wslDest = '/mnt/' + $WindowsDestination.Substring(0, 1).ToLower() + ($WindowsDestination.Substring(2) -replace '\\', '/')
-    $mountPoint = '/mnt/memlabs-diag'
+    # Per-VM mount point: two of these running at once would otherwise stack on the
+    # same path and one script's umount would yank the other's filesystem.
+    $tag = (Split-Path $WindowsDestination -Leaf) -replace '[^A-Za-z0-9._-]', '_'
+    $mountPoint = "/mnt/memlabs-diag-$tag"
     $attached = $false
     try {
         & wsl.exe --mount "$VhdPath" --vhd --bare 2>&1 | ForEach-Object { Write-Host "  wsl> $_" -ForegroundColor DarkGray }
@@ -155,8 +158,9 @@ mkdir -p "$OUT/loose"
 for d in etc var/log var/lib/cloud root home boot; do
   if [ -e "$MP/$d" ]; then
     n=$(echo "$d" | tr / -)
+    printf '  %-14s %6s ... ' "$d" "$(du -sh "$MP/$d" 2>/dev/null | cut -f1)"
     tar czf "$OUT/$n.tar.gz" -C "$MP" "$d" 2>/dev/null
-    echo "  tar $d -> $n.tar.gz $(du -h "$OUT/$n.tar.gz" 2>/dev/null | cut -f1)"
+    echo "-> $n.tar.gz $(du -h "$OUT/$n.tar.gz" 2>/dev/null | cut -f1)"
   fi
 done
 
@@ -171,8 +175,9 @@ echo "  loose files: $(ls -1 "$OUT/loose" 2>/dev/null | wc -l)"
 '@
             $shPath = Join-Path $WindowsDestination 'collect.sh'
             [System.IO.File]::WriteAllText($shPath, ($sh -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding $false))
-            & wsl.exe -d $Distro -u root -- sh "$wslDest/collect.sh" "$mountPoint" "$wslDest" 2>&1 |
-                ForEach-Object { if ("$_".Trim()) { Write-Host "  $_" -ForegroundColor Gray } }
+            # Deliberately NOT piped: through a pipe sh block-buffers stdout and the
+            # whole (slow) collection looks hung until it finishes.
+            & wsl.exe -d $Distro -u root -- sh "$wslDest/collect.sh" "$mountPoint" "$wslDest"
             Remove-Item $shPath -ErrorAction SilentlyContinue
         }
         finally {
