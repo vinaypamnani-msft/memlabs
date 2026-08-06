@@ -662,6 +662,16 @@ $global:VM_Create = {
             }
 
             # Create VM
+            # Hold Windows creates back so Linux VMs get a clean run at the host.
+            # The DC is exempt: it gates Phase 2 and the whole build behind it.
+            if (-not (Test-VmIsLinux -Vm $currentItem) -and $currentItem.role -ne 'DC') {
+                $headStart = Get-LinuxHeadStartSeconds -DeployConfig $deployConfig
+                if ($headStart -gt 0) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Holding ${headStart}s so Linux VMs boot first ($($deployConfig.virtualMachines.Count) VMs in deploy)." -LogOnly
+                    Write-Progress2 "Create VM" -Status "$($currentItem.vmName): letting Linux VMs boot first (${headStart}s)" -force
+                    Start-Sleep -Seconds $headStart
+                }
+            }
             $vmSwitch = Get-VMSwitch2 -NetworkName $network
 
             # Linux VMs follow a separate create path: Gen2 with cloud-init

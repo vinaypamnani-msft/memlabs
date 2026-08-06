@@ -1646,6 +1646,47 @@ function Get-LinuxVmWaitTimeout {
     return $base
 }
 
+function Get-LinuxHeadStartSeconds {
+    <#
+    .SYNOPSIS
+        Seconds to hold back Windows VM creation so Linux VMs boot first.
+
+    .DESCRIPTION
+        Widening the SSH-ready timeout (Get-LinuxVmWaitTimeout) treats the
+        symptom; this reduces the contention itself. A small Linux guest
+        (Proxy is 1GB/1vCPU) that boots alongside 20+ Windows VMs can be
+        starved of host CPU/IO badly enough that it never reaches userspace
+        -- PL-OREGANO booted the kernel and never wrote a single log line.
+
+        Linux VMs finish Phase 1 and then sit idle (no DSC phases 3-9), so
+        a head start costs little: the Windows VMs it delays go on to run
+        far longer phases anyway.
+
+        Returns 0 when there is nothing to protect (no Linux VMs) or the
+        deploy is small enough that contention is not a factor.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [psobject]$DeployConfig,
+
+        # Deploys at or below this many VMs get no delay.
+        [Parameter(Mandatory = $false)]
+        [int]$Threshold = 8,
+
+        [Parameter(Mandatory = $false)]
+        [int]$SecondsPerVm = 10,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxSeconds = 300
+    )
+
+    $vms = @($DeployConfig.virtualMachines)
+    if ($vms.Count -le $Threshold) { return 0 }
+    if (-not ($vms | Where-Object { Test-VmIsLinux -Vm $_ })) { return 0 }
+    return [Math]::Min(($vms.Count - $Threshold) * $SecondsPerVm, $MaxSeconds)
+}
+
 function Get-LinuxVmIPAddress {
     <#
     .SYNOPSIS
