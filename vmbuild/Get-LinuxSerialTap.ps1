@@ -40,10 +40,16 @@ param (
     [string]$LogFile,
 
     [Parameter(Mandatory = $false)]
-    [switch]$NoLog
+    [switch]$NoLog,
+
+    # Exit on its own after N minutes. 0 = run forever (interactive use).
+    # The build starts this unattended, so it must not outlive the VM wait.
+    [Parameter(Mandatory = $false)]
+    [int]$ExitAfterMinutes = 0
 )
 
 $pipeName = "memlabs-$VmName-com1"
+$deadline = if ($ExitAfterMinutes -gt 0) { (Get-Date).AddMinutes($ExitAfterMinutes) } else { [datetime]::MaxValue }
 
 if (-not $NoLog) {
     if (-not $LogFile) {
@@ -59,9 +65,8 @@ Write-Host "Start (or restart) the VM now. Ctrl-C to detach." -ForegroundColor D
 
 # Loop so the tap keeps running across VM reboots (cloud-init reboots after
 # first-boot config; we want to capture both boots without restarting this).
-while ($true) {
+while ((Get-Date) -lt $deadline) {
     $server = $null
-    $reader = $null
     try {
         $server = New-Object System.IO.Pipes.NamedPipeServerStream(
             $pipeName,
@@ -70,22 +75,34 @@ while ($true) {
             [System.IO.Pipes.PipeTransmissionMode]::Byte,
             [System.IO.Pipes.PipeOptions]::Asynchronous)
 
-        $server.WaitForConnection()
+        # Bounded wait so an unattended tap with no VM attached still exits.
+        $connectTask = $server.BeginWaitForConnection($null, $null)
+        while (-not $connectTask.AsyncWaitHandle.WaitOne(2000)) {
+            if ((Get-Date) -ge $deadline) { break }
+        }
+        if (-not $connectTask.IsCompleted) { break }
+        $server.EndWaitForConnection($connectTask)
         Write-Host "[connected $(Get-Date -Format HH:mm:ss)]" -ForegroundColor Green
         if (-not $NoLog) {
             "`n=== connected $(Get-Date -Format o) ===" | Out-File -FilePath $LogFile -Append -Encoding utf8
         }
 
         $buffer = New-Object byte[] 4096
+        $readTask = $null
         while ($server.IsConnected) {
-            $count = $server.Read($buffer, 0, $buffer.Length)
-            if ($count -le 0) { break }
-            $text = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $count)
-            [Console]::Write($text)
-            if (-not $NoLog) {
-                # Append-AllText keeps existing bytes verbatim; preserves \r\n etc.
-                [System.IO.File]::AppendAllText($LogFile, $text, [System.Text.Encoding]::UTF8)
+            if (-not $readTask) { $readTask = $server.ReadAsync($buffer, 0, $buffer.Length) }
+            if ($readTask.Wait(2000)) {
+                $count = $readTask.Result
+                $readTask = $null
+                if ($count -le 0) { break }
+                $text = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $count)
+                [Console]::Write($text)
+                if (-not $NoLog) {
+                    # Append-AllText keeps existing bytes verbatim; preserves \r\n etc.
+                    [System.IO.File]::AppendAllText($LogFile, $text, [System.Text.Encoding]::UTF8)
+                }
             }
+            if ((Get-Date) -ge $deadline) { break }
         }
         Write-Host "`n[disconnected $(Get-Date -Format HH:mm:ss)]" -ForegroundColor Yellow
     }

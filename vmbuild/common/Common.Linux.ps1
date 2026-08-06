@@ -1372,6 +1372,24 @@ function New-LinuxVirtualMachine {
         try {
             Set-VMComPort -VMName $VmName -Number 1 -Path $serialPipe -ErrorAction Stop
             Write-Log "$VmName`: COM1 -> $serialPipe (attach with Get-LinuxSerialTap.ps1)"
+
+            # Start the tap NOW, before Start-VM. Hyper-V is the pipe CLIENT, so with
+            # no server listening the whole cloud-init console stream is discarded --
+            # capturing at the SSH-readiness timeout 30min later would get nothing.
+            # Separate process (not a job) so it cannot leak a runspace into ours, and
+            # -ExitAfterMinutes so nothing has to chase it if we die first.
+            try {
+                $tapScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'Get-LinuxSerialTap.ps1'
+                if (Test-Path $tapScript) {
+                    $tapProc = Start-Process -FilePath (Get-Process -Id $PID).Path `
+                        -ArgumentList @('-NoProfile', '-File', "`"$tapScript`"", '-VmName', $VmName, '-ExitAfterMinutes', '60') `
+                        -WindowStyle Hidden -PassThru -ErrorAction Stop
+                    Write-Log "$VmName`: serial console recorder started (pid $($tapProc.Id)) -> logs\linux-serial\$VmName.log" -LogOnly
+                }
+            }
+            catch {
+                Write-Log "$VmName`: could not start serial console recorder: $($_.Exception.Message)" -Warning -LogOnly
+            }
         }
         catch {
             Write-Log "$VmName`: Set-VMComPort failed: $_" -Warning
@@ -2019,6 +2037,31 @@ function Wait-LinuxVmReady {
     }
 
     Write-Log "$VmName`: Timeout waiting for Linux VM SSH readiness (${TimeoutSeconds}s)" -Failure
+
+    # The SSH autopsy below can only say sshd never answered. WHY it never
+    # answered is on the serial console -- cloud-init writes its failures there
+    # and nowhere the host can reach once the lab is torn down.
+    try {
+        $serialLog = Join-Path (Split-Path $PSScriptRoot -Parent) "logs\linux-serial\$VmName.log"
+        if (Test-Path $serialLog) {
+            $serialTail = @(Get-Content $serialLog -Tail 80 -ErrorAction SilentlyContinue |
+                    Where-Object { "$_".Trim() })
+            Write-Log "$VmName`: serial console capture ($serialLog, last $($serialTail.Count) non-blank lines):" -LogOnly
+            foreach ($sl in $serialTail) {
+                Write-Log "$VmName`:   serial> $("$sl" -replace '\x1b\[[0-9;?]*[A-Za-z]', '' -replace '[^\x20-\x7E]', '')" -LogOnly
+            }
+            $cloudInitFail = @($serialTail | Where-Object { $_ -match 'cloud-init.*(fail|error|Traceback)|Failed to start|dependency failed' })
+            if ($cloudInitFail) {
+                Write-Log "$VmName`: serial console shows cloud-init/systemd failure -- see 'serial>' lines above. First: $($cloudInitFail[0])" -Warning
+            }
+        }
+        else {
+            Write-Log "$VmName`: no serial console capture at $serialLog (recorder did not start, or Hyper-V never attached)" -LogOnly
+        }
+    }
+    catch {
+        Write-Log "$VmName`: serial console capture failed: $($_.Exception.Message)" -LogOnly
+    }
 
     # Final autopsy: capture verbose ssh output so the next run's log tells
     # us *why* SSH never came up (auth failure, no banner, conn refused,
