@@ -464,7 +464,7 @@ function Run-Test {
             $global:removedomains = @($global:removedomains | Select-Object -Unique)
 
             $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
-            Write-Host "Starting test ($passLabel) for $testjson.  Adding $domainName to $($global:removeddomains -join ',')"
+            Write-Host "Starting test ($passLabel) for $testjson.  Added $domainName to the cleanup list: $($global:removedomains -join ', ')"
 
             $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
             Write-Host "$exitCode was returned from $testjson ($passLabel)"
