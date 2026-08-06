@@ -1231,6 +1231,62 @@ Write-DscStatus "$Tag Starting perfloading"
     }
     } # end if baselineFolder exists
 
+    ### Repro-only policy bulk
+    # Widens the window during which a client's policy set is INCOMPLETE after a
+    # purge-and-re-request (site upgrade, client reinstall, ResetPolicy). The
+    # Policy Platform decides a setting is orphaned by comparing what it
+    # previously intended against what it can currently see projected; while the
+    # projection is still filling, previously-intended settings look orphaned and
+    # get reverted -- which executes their remediation scripts. A small lab
+    # repopulates too fast to catch that, so pad the policy set.
+    #
+    # Packages are created WITHOUT a source path on purpose: no content, no DP
+    # distribution, no disk cost -- but each deployment still projects real
+    # machine policy, which is the only property that matters here.
+    #
+    # Opt-in only: set cmOptions.ReproPolicyBulkCount in the lab config. Absent
+    # or 0 (every normal lab) skips this entirely.
+    $bulkCount = 0
+    if ($cmo.ReproPolicyBulkCount) { $bulkCount = [int]$cmo.ReproPolicyBulkCount }
+
+    if ($CurrentRole -eq "CAS" -and $bulkCount -gt 0) {
+        Write-DscStatus "$Tag Skipping repro policy bulk on CAS (client policy is projected from the Primary)"
+    }
+    elseif ($bulkCount -gt 0) {
+        Write-DscStatus "$Tag Repro policy bulk: creating $bulkCount contentless package deployment(s) to pad the machine policy set"
+        $bulkMade = 0
+        $bulkSkipped = 0
+        $bulkFailed = 0
+
+        for ($i = 1; $i -le $bulkCount; $i++) {
+            $bulkName = "MEMLABS-PolicyBulk-{0:D4}" -f $i
+            try {
+                if (Get-CMPackage -Name $bulkName -Fast -ErrorAction SilentlyContinue) {
+                    $bulkSkipped++
+                    continue
+                }
+
+                $bulkPkg = New-CMPackage -Name $bulkName -Description "MEMLABS repro: policy padding only, no content" -ErrorAction Stop
+                New-CMProgram -PackageId $bulkPkg.PackageID -StandardProgramName "NoOp" -CommandLine "cmd.exe /c exit 0" -ErrorAction Stop | Out-Null
+                New-CMPackageDeployment -StandardProgram -PackageId $bulkPkg.PackageID -ProgramName "NoOp" -CollectionName "All Systems" -DeployPurpose Available -ErrorAction Stop | Out-Null
+                $bulkMade++
+
+                if (($bulkMade % 25) -eq 0) {
+                    Write-DscStatus "$Tag Repro policy bulk: $bulkMade created so far (of $bulkCount)"
+                }
+            }
+            catch {
+                $bulkFailed++
+                # Only surface the first few; a systemic failure repeats N times.
+                if ($bulkFailed -le 3) {
+                    Write-DscStatus "$Tag WARNING: Repro policy bulk failed on '$bulkName': $($_.Exception.Message)"
+                }
+            }
+        }
+
+        Write-DscStatus "$Tag Repro policy bulk complete: $bulkMade created, $bulkSkipped already present, $bulkFailed failed"
+    }
+
     #region Microsoft 365 Apps — join background download + create applications
     # The Office source download was started as a background job at the top of the
     # apps/packages section so it could run concurrently with the OSD/TS/baseline
