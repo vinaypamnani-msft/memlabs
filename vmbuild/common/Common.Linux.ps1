@@ -1382,7 +1382,7 @@ function New-LinuxVirtualMachine {
                 $tapScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'Get-LinuxSerialTap.ps1'
                 if (Test-Path $tapScript) {
                     $tapProc = Start-Process -FilePath (Get-Process -Id $PID).Path `
-                        -ArgumentList @('-NoProfile', '-File', "`"$tapScript`"", '-VmName', $VmName, '-ExitAfterMinutes', '60') `
+                        -ArgumentList @('-NoProfile', '-File', "`"$tapScript`"", '-VmName', $VmName, '-ExitAfterMinutes', '60', '-NoConsoleEcho') `
                         -WindowStyle Hidden -PassThru -ErrorAction Stop
                     Write-Log "$VmName`: serial console recorder started (pid $($tapProc.Id)) -> logs\linux-serial\$VmName.log" -LogOnly
                 }
