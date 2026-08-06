@@ -51,6 +51,99 @@ param (
 
 $ErrorActionPreference = 'Stop'
 
+function Get-WslMountCapability {
+    # wsl.exe ships with Windows as a stub even when WSL is not installed, so its
+    # mere presence proves nothing -- `wsl --mount` needs a real WSL2 distro to
+    # mount into. Report a reason either way so a skip is never mysterious.
+    $r = [pscustomobject]@{ Available = $false; Reason = '' }
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        $r.Reason = 'wsl.exe not present'; return $r
+    }
+    # Without this wsl emits UTF-16 and every captured string looks empty.
+    $env:WSL_UTF8 = '1'
+    try {
+        $help = & wsl.exe --help 2>&1
+        if (("$help" -join ' ') -notmatch '--mount') { $r.Reason = 'this wsl.exe has no --mount support'; return $r }
+        $distros = @(& wsl.exe -l -q 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        if ($distros.Count -eq 0) { $r.Reason = 'WSL present but no distro installed (--mount mounts INTO a distro)'; return $r }
+        $r.Available = $true
+        $r.Reason = "distro '$($distros[0])'"
+    }
+    catch { $r.Reason = "wsl probe failed: $($_.Exception.Message)" }
+    return $r
+}
+
+function Copy-LinuxRootLogViaWsl {
+    # Reads the ext4 root that Windows cannot: attach the VHDX bare, mount the
+    # biggest ext4 partition read-only, copy the logs the ESP loggrab never gets
+    # when cloud-init dies before runcmd.
+    param([string]$VhdPath, [string]$WindowsDestination)
+
+    # Pin this off: with it on (PS7.4+ hosts can default it on, or a profile can set
+    # it), a non-zero wsl.exe exit throws past the explicit $LASTEXITCODE checks below
+    # and turns a precise "mount failed, needs elevation" into a generic catch.
+    $PSNativeCommandUseErrorActionPreference = $false
+
+    # WSL auto-mounts local drives under /mnt/<letter>; a UNC destination has no
+    # such mapping, so bail rather than build a path that silently goes nowhere.
+    if ($WindowsDestination -notmatch '^[A-Za-z]:\\') {
+        Write-Host "  destination '$WindowsDestination' is not a local drive path; skipping ext4 collection." -ForegroundColor Yellow
+        return
+    }
+    $wslDest = '/mnt/' + $WindowsDestination.Substring(0, 1).ToLower() + ($WindowsDestination.Substring(2) -replace '\\', '/')
+    $mountPoint = '/mnt/memlabs-diag'
+    $attached = $false
+    try {
+        & wsl.exe --mount "$VhdPath" --vhd --bare 2>&1 | ForEach-Object { Write-Host "  wsl> $_" -ForegroundColor DarkGray }
+        if ($LASTEXITCODE -ne 0) { Write-Host "  wsl --mount failed (needs an elevated shell); skipping ext4 collection." -ForegroundColor Yellow; return }
+        $attached = $true
+
+        # Pick the largest ext4 partition -- that is the root fs on the cloud image.
+        $lsblk = @(& wsl.exe -u root -- lsblk -rno NAME,FSTYPE,SIZE 2>$null)
+        $toBytes = {
+            param($s)
+            # lsblk prints 20G / 512M / 1.5T -- a plain string sort puts "9G" above "20G".
+            if ("$s" -notmatch '^([\d.]+)([KMGTP]?)') { return 0 }
+            $mult = @{ '' = 1; 'K' = 1KB; 'M' = 1MB; 'G' = 1GB; 'T' = 1TB; 'P' = 1PB }[$Matches[2]]
+            return [double]$Matches[1] * $mult
+        }
+        $root = $lsblk | Where-Object { $_ -match '\sext4\s' } |
+            Sort-Object { & $toBytes ([regex]::Match($_, 'ext4\s+(\S+)').Groups[1].Value) } -Descending |
+            Select-Object -First 1
+        if (-not $root) {
+            Write-Host "  no ext4 partition found on the attached disk; skipping." -ForegroundColor Yellow
+            $lsblk | Select-Object -First 12 | ForEach-Object { Write-Host "    lsblk> $_" -ForegroundColor DarkGray }
+            return
+        }
+        $dev = '/dev/' + ($root -split '\s+')[0]
+        Write-Host "  ext4 root: $dev" -ForegroundColor Green
+
+        & wsl.exe -u root -- mkdir -p $mountPoint 2>&1 | Out-Null
+        & wsl.exe -u root -- mount -o ro,noload $dev $mountPoint 2>&1 | ForEach-Object { Write-Host "  wsl> $_" -ForegroundColor DarkGray }
+        if ($LASTEXITCODE -ne 0) { Write-Host "  mount failed; skipping ext4 collection." -ForegroundColor Yellow; return }
+
+        try {
+            & wsl.exe -u root -- mkdir -p "$wslDest/rootfs" 2>&1 | Out-Null
+            foreach ($src in @('var/log/cloud-init.log', 'var/log/cloud-init-output.log', 'var/log/syslog', 'var/log/memlabs-dpkg-guard.log')) {
+                & wsl.exe -u root -- sh -c "test -f $mountPoint/$src && cp -f $mountPoint/$src $wslDest/rootfs/ && echo copied $src" 2>&1 |
+                    ForEach-Object { if ("$_".Trim()) { Write-Host "    $_" -ForegroundColor Gray } }
+            }
+            # cloud-init's own verdict, if it got far enough to write one.
+            & wsl.exe -u root -- sh -c "test -d $mountPoint/run/cloud-init && cp -f $mountPoint/run/cloud-init/*.json $wslDest/rootfs/ 2>/dev/null; true" 2>&1 | Out-Null
+            & wsl.exe -u root -- sh -c "test -d $mountPoint/var/log/journal && tar czf $wslDest/rootfs/journal.tar.gz -C $mountPoint/var/log journal 2>/dev/null; true" 2>&1 | Out-Null
+        }
+        finally {
+            & wsl.exe -u root -- umount $mountPoint 2>&1 | Out-Null
+        }
+    }
+    catch {
+        Write-Host "  ext4 collection failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+    finally {
+        if ($attached) { & wsl.exe --unmount "$VhdPath" 2>&1 | Out-Null }
+    }
+}
+
 $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
 if (-not $vm) { throw "VM '$VmName' not found." }
 
@@ -136,6 +229,20 @@ finally {
     if ($mounted) {
         try { Dismount-VHD -Path $vhdPath -ErrorAction Stop } catch { Write-Host "Dismount failed: $_" -ForegroundColor Red }
     }
+
+    # The ESP copy above only works if loggrab ran, which needs cloud-init to reach
+    # runcmd -- exactly what fails in the case worth diagnosing. The real logs are on
+    # the ext4 root, which Windows cannot read, so use WSL when it is usable. Must
+    # come AFTER Dismount-VHD: Windows and WSL cannot both hold the VHDX.
+    $wsl = Get-WslMountCapability
+    if (-not $wsl.Available) {
+        Write-Host "Skipping ext4 log collection -- $($wsl.Reason)." -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host "Collecting ext4 root logs via WSL ($($wsl.Reason)) ..." -ForegroundColor Cyan
+        Copy-LinuxRootLogViaWsl -VhdPath $vhdPath -WindowsDestination $Destination
+    }
+
     if ($weStopped -and $RestartAfter) {
         Write-Host "Restarting $VmName ..." -ForegroundColor Yellow
         Start-VM -Name $VmName
