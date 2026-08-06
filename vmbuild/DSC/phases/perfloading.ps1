@@ -1231,60 +1231,175 @@ Write-DscStatus "$Tag Starting perfloading"
     }
     } # end if baselineFolder exists
 
-    ### Repro-only policy bulk
-    # Widens the window during which a client's policy set is INCOMPLETE after a
-    # purge-and-re-request (site upgrade, client reinstall, ResetPolicy). The
-    # Policy Platform decides a setting is orphaned by comparing what it
-    # previously intended against what it can currently see projected; while the
-    # projection is still filling, previously-intended settings look orphaned and
-    # get reverted -- which executes their remediation scripts. A small lab
-    # repopulates too fast to catch that, so pad the policy set.
+    ### Repro-only policy bulk + purpose-built tattoo CIs
+    # Reproduces case 2608010010000636. Two independent knobs, both opt-in via
+    # cmOptions; absent or 0 (every normal lab) skips the whole region.
     #
-    # Packages are created WITHOUT a source path on purpose: no content, no DP
-    # distribution, no disk cost -- but each deployment still projects real
-    # machine policy, which is the only property that matters here.
+    #   ReproPolicyBulkCount  - contentless packages, purely to PAD the policy set
+    #   ReproTattooCICount    - OS script CIs + registry CIs that can actually be
+    #                           orphaned and reverted (the mechanism itself)
     #
-    # Opt-in only: set cmOptions.ReproPolicyBulkCount in the lab config. Absent
-    # or 0 (every normal lab) skips this entirely.
+    # Why this shape, from the real client logs: of 1333 UnintendInstance calls,
+    # 1309 were OperatingSystem CIs and 24 were CCM_RegistryValue_Setting_Integer.
+    # NOTHING else ever got reverted -- not Applications, not DeploymentTypes, not
+    # Baselines. So the tattoo vehicle must be an OS CI (New-CMConfigurationItem
+    # -CreationType WindowsOS maps to ConfigurationItemType.OperatingSystem) plus
+    # a registry value setting. The rest of the policy set only matters as volume,
+    # which is what the packages are for: the orphan window is the time between
+    # policy being purged and the projection refilling, so a bigger set = a wider
+    # window = a landable repro.
+    #
+    # The stock baselines.zip CIs are deliberately NOT reused: 5 of 7 have broken
+    # discovery (Exit codes, no stdout) and most carry no remediation script at
+    # all, so un-intending them produces nothing observable.
     $bulkCount = 0
+    $tattooCount = 0
     if ($cmo.ReproPolicyBulkCount) { $bulkCount = [int]$cmo.ReproPolicyBulkCount }
+    if ($cmo.ReproTattooCICount) { $tattooCount = [int]$cmo.ReproTattooCICount }
 
-    if ($CurrentRole -eq "CAS" -and $bulkCount -gt 0) {
-        Write-DscStatus "$Tag Skipping repro policy bulk on CAS (client policy is projected from the Primary)"
+    if ($CurrentRole -eq "CAS" -and ($bulkCount -gt 0 -or $tattooCount -gt 0)) {
+        Write-DscStatus "$Tag Skipping repro objects on CAS (client policy is projected from the Primary)"
     }
-    elseif ($bulkCount -gt 0) {
-        Write-DscStatus "$Tag Repro policy bulk: creating $bulkCount contentless package deployment(s) to pad the machine policy set"
-        $bulkMade = 0
-        $bulkSkipped = 0
-        $bulkFailed = 0
+    else {
+        # --- 1. Volume: contentless packages -----------------------------------
+        # No source path on purpose: no content, no DP distribution, no disk cost,
+        # but each deployment still projects real machine policy.
+        if ($bulkCount -gt 0) {
+            Write-DscStatus "$Tag Repro policy bulk: creating $bulkCount contentless package deployment(s) to pad the machine policy set"
+            $bulkMade = 0
+            $bulkSkipped = 0
+            $bulkFailed = 0
 
-        for ($i = 1; $i -le $bulkCount; $i++) {
-            $bulkName = "MEMLABS-PolicyBulk-{0:D4}" -f $i
-            try {
-                if (Get-CMPackage -Name $bulkName -Fast -ErrorAction SilentlyContinue) {
-                    $bulkSkipped++
-                    continue
+            for ($i = 1; $i -le $bulkCount; $i++) {
+                $bulkName = "MEMLABS-PolicyBulk-{0:D4}" -f $i
+                try {
+                    if (Get-CMPackage -Name $bulkName -Fast -ErrorAction SilentlyContinue) {
+                        $bulkSkipped++
+                        continue
+                    }
+
+                    $bulkPkg = New-CMPackage -Name $bulkName -Description "MEMLABS repro: policy padding only, no content" -ErrorAction Stop
+                    New-CMProgram -PackageId $bulkPkg.PackageID -StandardProgramName "NoOp" -CommandLine "cmd.exe /c exit 0" -ErrorAction Stop | Out-Null
+                    New-CMPackageDeployment -StandardProgram -PackageId $bulkPkg.PackageID -ProgramName "NoOp" -CollectionName "All Systems" -DeployPurpose Available -ErrorAction Stop | Out-Null
+                    $bulkMade++
+
+                    if (($bulkMade % 25) -eq 0) {
+                        Write-DscStatus "$Tag Repro policy bulk: $bulkMade created so far (of $bulkCount)"
+                    }
                 }
+                catch {
+                    $bulkFailed++
+                    # Only surface the first few; a systemic failure repeats N times.
+                    if ($bulkFailed -le 3) {
+                        Write-DscStatus "$Tag WARNING: Repro policy bulk failed on '$bulkName': $($_.Exception.Message)"
+                    }
+                }
+            }
+            Write-DscStatus "$Tag Repro policy bulk complete: $bulkMade created, $bulkSkipped already present, $bulkFailed failed"
+        }
 
-                $bulkPkg = New-CMPackage -Name $bulkName -Description "MEMLABS repro: policy padding only, no content" -ErrorAction Stop
-                New-CMProgram -PackageId $bulkPkg.PackageID -StandardProgramName "NoOp" -CommandLine "cmd.exe /c exit 0" -ErrorAction Stop | Out-Null
-                New-CMPackageDeployment -StandardProgram -PackageId $bulkPkg.PackageID -ProgramName "NoOp" -CollectionName "All Systems" -DeployPurpose Available -ErrorAction Stop | Out-Null
-                $bulkMade++
+        # --- 2. Mechanism: OS script CIs + registry CIs -------------------------
+        if ($tattooCount -gt 0) {
+            Write-DscStatus "$Tag Repro tattoo CIs: creating $tattooCount script CI(s) + $tattooCount registry CI(s)"
 
-                if (($bulkMade % 25) -eq 0) {
-                    Write-DscStatus "$Tag Repro policy bulk: $bulkMade created so far (of $bulkCount)"
+            $reproDir = 'C:\ProgramData\MEMLABS-PolicyChurn'
+            $reproKey = 'SOFTWARE\MEMLABS\PolicyChurn'
+            $reproBaseline = 'MEMLABS-PolicyChurn-Repro'
+            $ciMade = 0
+            $ciSkipped = 0
+            $ciFailed = 0
+            $ciIds = @()
+
+            for ($i = 1; $i -le $tattooCount; $i++) {
+                $n = "{0:D3}" -f $i
+                $scriptCiName = "MEMLABS-Repro-Script-$n"
+                $regCiName = "MEMLABS-Repro-Registry-$n"
+
+                # Discovery MUST emit the value on STDOUT -- ConfigMgr uses stdout as
+                # the discovered value and IGNORES the exit code. Returning only an
+                # exit code yields DiscoveryFailure and the CI never establishes
+                # intent, so it can never be orphaned either.
+                $discoveryScript = @"
+`$marker = '$reproDir\marker-$n.txt'
+if (Test-Path `$marker) { Write-Output `$true } else { Write-Output `$false }
+"@
+
+                # Deliberately harmless: creates a marker and appends one audit line.
+                # It must NOT reboot or stop ccmexec -- that is the customer's bug, and
+                # doing it here would truncate the evaluation pass and hide the very
+                # signal we are trying to observe. The audit log is the proof the
+                # remediation ran because the setting was UN-INTENDED.
+                $remediationScript = @"
+`$dir = '$reproDir'
+if (-not (Test-Path `$dir)) { New-Item -ItemType Directory -Path `$dir -Force | Out-Null }
+Set-Content -Path "`$dir\marker-$n.txt" -Value 'present' -Force
+Add-Content -Path "`$dir\remediation-audit.log" -Value ("{0}`tremediation ran`t$scriptCiName" -f (Get-Date -Format 'o'))
+Write-Output `$true
+"@
+
+                try {
+                    # -- script CI (OperatingSystem type: the one that tattoos) --
+                    if (Get-CMConfigurationItem -Name $scriptCiName -Fast -ErrorAction SilentlyContinue) {
+                        $ciSkipped++
+                    }
+                    else {
+                        $sci = New-CMConfigurationItem -Name $scriptCiName -CreationType WindowsOS -Description "MEMLABS repro: orphan/tattoo observable" -ErrorAction Stop
+                        $sci | Add-CMComplianceSettingScript -Name "MarkerPresent-$n" -DataType Boolean `
+                            -DiscoveryScriptLanguage PowerShell -DiscoveryScriptText $discoveryScript `
+                            -RemediationScriptLanguage PowerShell -RemediationScriptText $remediationScript -Remediate `
+                            -ValueRule -ExpectedValue 'True' -ExpressionOperator IsEquals `
+                            -RuleName "MarkerPresent-$n" -NoncomplianceSeverity Informational -ErrorAction Stop | Out-Null
+                        $ciMade++
+                    }
+                    $sciObj = Get-CMConfigurationItem -Name $scriptCiName -Fast -ErrorAction SilentlyContinue
+                    if ($sciObj) { $ciIds += $sciObj.CI_ID }
+
+                    # -- registry value CI (CCM_RegistryValue_Setting_Integer) --
+                    if (Get-CMConfigurationItem -Name $regCiName -Fast -ErrorAction SilentlyContinue) {
+                        $ciSkipped++
+                    }
+                    else {
+                        $rci = New-CMConfigurationItem -Name $regCiName -CreationType WindowsOS -Description "MEMLABS repro: registry tattoo observable" -ErrorAction Stop
+                        $rci | Add-CMComplianceSettingRegistryKeyValue -Name "ReproValue-$n" -DataType Integer `
+                            -Hive LocalMachine -KeyName $reproKey -ValueName "ReproValue$n" `
+                            -ValueRule -ExpectedValue '1' -ExpressionOperator IsEquals -Remediate `
+                            -RuleName "ReproValue-$n" -NoncomplianceSeverity Informational -ErrorAction Stop | Out-Null
+                        $ciMade++
+                    }
+                    $rciObj = Get-CMConfigurationItem -Name $regCiName -Fast -ErrorAction SilentlyContinue
+                    if ($rciObj) { $ciIds += $rciObj.CI_ID }
+                }
+                catch {
+                    $ciFailed++
+                    if ($ciFailed -le 3) {
+                        Write-DscStatus "$Tag WARNING: Repro tattoo CI failed on '$scriptCiName': $($_.Exception.Message)"
+                    }
+                }
+            }
+
+            # One baseline carrying every repro CI. -AddOSConfigurationItem is the
+            # correct linker here because these ARE OS CIs (CreationType WindowsOS).
+            try {
+                if (-not (Get-CMBaseline -Fast -Name $reproBaseline -ErrorAction SilentlyContinue)) {
+                    New-CMBaseline -Name $reproBaseline -Description "MEMLABS repro: policy-churn orphan/tattoo observables" -ErrorAction Stop | Out-Null
+                    Write-DscStatus "$Tag Created baseline $reproBaseline"
+                }
+                foreach ($id in $ciIds) {
+                    try { Set-CMBaseline -Name $reproBaseline -AddOSConfigurationItem $id -ErrorAction Stop }
+                    catch { }   # already linked on a rerun
+                }
+                if (-not (Get-CMBaselineDeployment -Name $reproBaseline -ErrorAction SilentlyContinue)) {
+                    New-CMBaselineDeployment -Name $reproBaseline -CollectionName "All Systems" -EnableEnforcement $true -ErrorAction Stop | Out-Null
+                    Write-DscStatus "$Tag Deployed baseline $reproBaseline to All Systems with enforcement"
                 }
             }
             catch {
-                $bulkFailed++
-                # Only surface the first few; a systemic failure repeats N times.
-                if ($bulkFailed -le 3) {
-                    Write-DscStatus "$Tag WARNING: Repro policy bulk failed on '$bulkName': $($_.Exception.Message)"
-                }
+                Write-DscStatus "$Tag WARNING: Repro baseline setup failed: $($_.Exception.Message)"
             }
-        }
 
-        Write-DscStatus "$Tag Repro policy bulk complete: $bulkMade created, $bulkSkipped already present, $bulkFailed failed"
+            Write-DscStatus "$Tag Repro tattoo CIs complete: $ciMade created, $ciSkipped already present, $ciFailed failed, $($ciIds.Count) linked to $reproBaseline"
+            Write-DscStatus "$Tag Watch for remediation on clients: $reproDir\remediation-audit.log"
+        }
     }
 
     #region Microsoft 365 Apps — join background download + create applications

@@ -134,6 +134,8 @@ $clientSB = {
         LastUnintend  = $null
         ScriptReads   = 0
         ScriptRuns    = 0
+        AuditLines    = 0
+        LastAudit     = $null
         RebootBy      = $null
         RebootInUtc   = $null
         LastBootTime  = $null
@@ -195,6 +197,15 @@ $clientSB = {
                 if ($line -match 'Script host returned exit code') { $out.ScriptRuns++ }
             }
         }
+
+        # --- repro remediation audit: direct proof a remediation executed ----
+        # Written only by the CIs perfloading creates from cmOptions.ReproTattooCICount.
+        $auditLog = 'C:\ProgramData\MEMLABS-PolicyChurn\remediation-audit.log'
+        if (Test-Path $auditLog) {
+            $alines = @(Get-Content -Path $auditLog -ErrorAction SilentlyContinue)
+            $out.AuditLines = $alines.Count
+            if ($alines.Count -gt 0) { $out.LastAudit = $alines[-1] }
+        }
     }
     catch {
         $out.Error = "$($_.Exception.Message)"
@@ -204,6 +215,8 @@ $clientSB = {
 
 # Steady-state policy count per client, learned from the first clean reading.
 $baseline = @{}
+# Repro remediation-audit line count per client, so a RISE can be called out.
+$auditSeen = @{}
 $rows = New-Object System.Collections.Generic.List[object]
 $endTime = if ($DurationMinutes -gt 0) { (Get-Date).AddMinutes($DurationMinutes) } else { [datetime]::MaxValue }
 
@@ -249,6 +262,14 @@ while ((Get-Date) -lt $endTime) {
         if ($d.ReifyStart -gt $d.ReifyDone) { $note += "TRUNCATED x$($d.ReifyStart - $d.ReifyDone)" }
         if ($d.NotFound -gt 0) { $note += "0x80041002 x$($d.NotFound)" }
         if ($d.RebootBy -and $d.RebootBy -ne '0') { $note += "REBOOTBY=$($d.RebootBy)" }
+
+        # Rising audit count = a repro remediation actually executed this cycle.
+        if (-not $auditSeen.ContainsKey($vmn)) { $auditSeen[$vmn] = 0 }
+        if ($d.AuditLines -gt $auditSeen[$vmn]) {
+            $note += "REMEDIATION RAN x$($d.AuditLines - $auditSeen[$vmn])"
+            $auditSeen[$vmn] = $d.AuditLines
+        }
+
         if ($d.LastUnintend) { $note += "last unintend: $($d.LastUnintend)" }
 
         $colour = 'Gray'
@@ -276,6 +297,8 @@ while ((Get-Date) -lt $endTime) {
                 NotFound      = $d.NotFound
                 ScriptReads   = $d.ScriptReads
                 ScriptRuns    = $d.ScriptRuns
+                AuditLines    = $d.AuditLines
+                LastAudit     = $d.LastAudit
                 RebootBy      = $d.RebootBy
                 RebootInUtc   = $d.RebootInUtc
                 LastBootTime  = $d.LastBootTime

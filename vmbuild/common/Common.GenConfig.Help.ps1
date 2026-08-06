@@ -56,6 +56,7 @@ function Get-GenericHelp {
         # Not seeded into any default cmOptions block on purpose -- it only appears here if a
         # config already carries it, which keeps it out of every normal lab's menu.
         "ReproPolicyBulkCount" { "REPRO ONLY. Creates this many contentless packages + Available deployments to All Systems during perfloading, purely to pad the machine policy set. Widens the window during which a client's policy is INCOMPLETE after a purge-and-re-request (site upgrade, client reinstall, ResetPolicy) -- which is when the Policy Platform can wrongly treat previously-intended settings as orphaned and revert them, running their remediation scripts. Requires PrePopulateObjects. Leave unset (or 0) for normal labs. See tools\Watch-PolicyChurn.ps1." }
+        "ReproTattooCICount" { "REPRO ONLY. Creates this many pairs of purpose-built Configuration Items (an OS script CI with both discovery and remediation, plus a registry-value CI), linked into the MEMLABS-PolicyChurn-Repro baseline and deployed to All Systems with enforcement. These are the objects that can actually be orphaned and reverted -- in the real incident 1309 of 1333 reverts were OperatingSystem CIs and the rest were registry values, so nothing else reproduces it. The remediation is harmless: it writes a marker and appends to C:\ProgramData\MEMLABS-PolicyChurn\remediation-audit.log, which is your proof it ran. Requires PrePopulateObjects. Leave unset (or 0) for normal labs." }
 
         # VM
 
