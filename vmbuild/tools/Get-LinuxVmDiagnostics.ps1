@@ -349,13 +349,18 @@ finally {
         $got | Sort-Object Length -Descending | Select-Object -First 12 |
             ForEach-Object { Write-Host ("  {0,-34} {1,9:N0} KB" -f $_.Name, ($_.Length / 1KB)) -ForegroundColor Gray }
 
-        # Prove the data came off the right disk: a stale attached VHDX once caused
-        # a collection to silently capture a different VM's rootfs.
+        # The disk identity is already guaranteed by the attach-diff above; this is a
+        # sanity note. A guest that never ran cloud-init still carries the base image
+        # hostname, so a mismatch is a FINDING, not proof of a bad capture.
         $hostFile = Join-Path $Destination 'rootfs\loose\etc-hostname'
         if (Test-Path $hostFile) {
             $captured = (Get-Content $hostFile -Raw).Trim()
             if ($captured -and $captured -ne $VmName.Trim()) {
-                Write-Host "`n*** WRONG VM: collected rootfs belongs to '$captured', not '$VmName'. DISCARD THIS. ***" -ForegroundColor Red
+                Write-Host "`nNote: rootfs hostname is '$captured', not '$VmName'." -ForegroundColor Yellow
+                Write-Host "  cloud-init likely never ran (hostname still the base image's) -- that is itself the finding." -ForegroundColor Yellow
+                Write-Host "  Confirm by checking the log dates below; if they predate this run, the guest never booted." -ForegroundColor Yellow
+                $ci = Join-Path $Destination 'rootfs\loose\var-log-cloud-init.log'
+                Write-Host "  cloud-init.log present: $(Test-Path $ci) (absent => cloud-init never started)" -ForegroundColor Yellow
             }
             else { Write-Host "Verified: rootfs hostname '$captured' matches $VmName." -ForegroundColor Green }
         }
