@@ -106,8 +106,11 @@ function Copy-LinuxRootLogViaWsl {
         if ($LASTEXITCODE -ne 0) { Write-Host "  wsl --mount failed (needs an elevated shell); skipping ext4 collection." -ForegroundColor Yellow; return }
         $attached = $true
 
-        # Pick the largest ext4 partition -- that is the root fs on the cloud image.
-        $lsblk = @(& wsl.exe -d $Distro -u root -- lsblk -rno NAME,FSTYPE,SIZE 2>$null)
+        # lsblk lists the WSL distro's OWN disks alongside the attached VHDX, and
+        # WSL's root is a large ext4 -- picking "largest ext4" grabs /dev/sd? that is
+        # already mounted on /. Require an unmounted partition. -P is used because
+        # raw mode collapses the empty MOUNTPOINT field and misaligns the columns.
+        $rows = @(& wsl.exe -d $Distro -u root -- lsblk -Pno NAME,FSTYPE,SIZE,MOUNTPOINT,TYPE 2>$null)
         $toBytes = {
             param($s)
             # lsblk prints 20G / 512M / 1.5T -- a plain string sort puts "9G" above "20G".
@@ -115,16 +118,21 @@ function Copy-LinuxRootLogViaWsl {
             $mult = @{ '' = 1; 'K' = 1KB; 'M' = 1MB; 'G' = 1GB; 'T' = 1TB; 'P' = 1PB }[$Matches[2]]
             return [double]$Matches[1] * $mult
         }
-        $root = $lsblk | Where-Object { $_ -match '\sext4\s' } |
-            Sort-Object { & $toBytes ([regex]::Match($_, 'ext4\s+(\S+)').Groups[1].Value) } -Descending |
-            Select-Object -First 1
+        $cands = foreach ($row in $rows) {
+            $f = @{}
+            foreach ($m in [regex]::Matches("$row", '(\w+)="([^"]*)"')) { $f[$m.Groups[1].Value] = $m.Groups[2].Value }
+            if ($f['FSTYPE'] -ne 'ext4') { continue }
+            if ($f['MOUNTPOINT']) { continue }
+            [pscustomobject]@{ Name = $f['NAME']; Type = $f['TYPE']; Bytes = (& $toBytes $f['SIZE']) }
+        }
+        $root = $cands | Sort-Object @{ e = { $_.Type -eq 'part' } }, Bytes -Descending | Select-Object -First 1
         if (-not $root) {
-            Write-Host "  no ext4 partition found on the attached disk; skipping." -ForegroundColor Yellow
-            $lsblk | Select-Object -First 12 | ForEach-Object { Write-Host "    lsblk> $_" -ForegroundColor DarkGray }
+            Write-Host "  no unmounted ext4 partition found on the attached disk; skipping." -ForegroundColor Yellow
+            $rows | Select-Object -First 14 | ForEach-Object { Write-Host "    lsblk> $_" -ForegroundColor DarkGray }
             return
         }
-        $dev = '/dev/' + ($root -split '\s+')[0]
-        Write-Host "  ext4 root: $dev" -ForegroundColor Green
+        $dev = '/dev/' + $root.Name
+        Write-Host "  ext4 root: $dev ($($root.Type), $([math]::Round($root.Bytes / 1GB, 1)) GB)" -ForegroundColor Green
 
         & wsl.exe -d $Distro -u root -- mkdir -p $mountPoint 2>&1 | Out-Null
         # noload skips journal replay on a fs that was force-stopped mid-write.
@@ -247,31 +255,25 @@ try {
     }
 
     if (-not $espDrive) {
-        Write-Host "Could not locate ESP. Listing all drive contents:" -ForegroundColor Red
-        foreach ($p in $parts) {
-            $vol = $p | Get-Volume -ErrorAction SilentlyContinue
-            if ($vol -and $vol.DriveLetter) {
-                Write-Host "  $($vol.DriveLetter):\ ->" -ForegroundColor Yellow
-                Get-ChildItem "$($vol.DriveLetter):\" -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object { Write-Host "    $($_.Name)" }
-            }
-        }
-        throw "ESP not found on mounted VHDX."
-    }
-
-    Write-Host "ESP: $espDrive" -ForegroundColor Green
-    $memlabsDir = Join-Path $espDrive 'memlabs'
-    if (-not (Test-Path $memlabsDir)) {
-        Write-Host "No \memlabs\ folder on ESP -- loggrab never ran (cloud-init likely failed before runcmd)." -ForegroundColor Red
-        Write-Host "Copying \EFI\ layout instead for reference:" -ForegroundColor Yellow
-        Get-ChildItem $espDrive | ForEach-Object { Write-Host "  $($_.Name)" }
+        # Not fatal: Windows only sees the ESP if it got a drive letter, and the ext4
+        # collection is the real payload anyway.
+        Write-Host "ESP not readable from Windows (FAT32 partition got no drive letter)." -ForegroundColor Yellow
+        Write-Host "Continuing -- the WSL ext4 collection below is the real payload." -ForegroundColor Yellow
     }
     else {
-        Write-Host "Copying $memlabsDir -> $Destination" -ForegroundColor Cyan
-        Copy-Item -Path (Join-Path $memlabsDir '*') -Destination $Destination -Recurse -Force
-        Get-ChildItem $Destination | ForEach-Object {
-            Write-Host ("  {0,-30} {1,10:N0} bytes" -f $_.Name, $_.Length) -ForegroundColor Gray
+        Write-Host "ESP: $espDrive" -ForegroundColor Green
+        $memlabsDir = Join-Path $espDrive 'memlabs'
+        if (-not (Test-Path $memlabsDir)) {
+            Write-Host "No \memlabs\ folder on ESP -- loggrab never ran (cloud-init likely failed before runcmd)." -ForegroundColor Red
+            Get-ChildItem $espDrive | ForEach-Object { Write-Host "  $($_.Name)" }
         }
-        Write-Host "`nDone. Logs at: $Destination" -ForegroundColor Green
+        else {
+            Write-Host "Copying $memlabsDir -> $Destination" -ForegroundColor Cyan
+            Copy-Item -Path (Join-Path $memlabsDir '*') -Destination $Destination -Recurse -Force
+            Get-ChildItem $Destination | ForEach-Object {
+                Write-Host ("  {0,-30} {1,10:N0} bytes" -f $_.Name, $_.Length) -ForegroundColor Gray
+            }
+        }
     }
 }
 finally {
@@ -314,4 +316,13 @@ finally {
         Write-Host "Restarting $VmName ..." -ForegroundColor Yellow
         Start-VM -Name $VmName
     }
+
+    $got = @(Get-ChildItem $Destination -Recurse -File -ErrorAction SilentlyContinue)
+    $mb = [math]::Round((($got | Measure-Object Length -Sum).Sum / 1MB), 1)
+    if ($got.Count) {
+        Write-Host "`nCollected $($got.Count) file(s), $mb MB -> $Destination" -ForegroundColor Green
+        $got | Sort-Object Length -Descending | Select-Object -First 12 |
+            ForEach-Object { Write-Host ("  {0,-34} {1,9:N0} KB" -f $_.Name, ($_.Length / 1KB)) -ForegroundColor Gray }
+    }
+    else { Write-Host "`nNOTHING COLLECTED -> $Destination" -ForegroundColor Red }
 }
