@@ -236,6 +236,14 @@ function Test-VmFunctionality {
         }
     }
 
+    # A buffered failure is authoritative. Some tests enrich a remoted result
+    # collection after the role check; an unsuppressed Add() can emit its index
+    # alongside $false, making the multi-item result truthy in PowerShell. Do not
+    # let a later optional check overwrite a role failure with its own success.
+    if ($script:Phase11OutputBuffer | Where-Object { $_.Level -eq 'Failure' } | Select-Object -First 1) {
+        $testsPassed = $false
+    }
+
     # If the VM has installRP, also test reporting services
     if ($testsPassed -and $CurrentItem.installRP) {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Reporting Services"
@@ -4699,6 +4707,41 @@ function Test-SiteSystemFunctionality {
             # Check SMS_MP IIS virtual directory exists via WebAdministration (retry up to 5 times, 60s apart)
             try {
                 Import-Module WebAdministration -ErrorAction Stop
+                $addPoolDiagnostics = {
+                    param([string]$Name)
+                    try {
+                        $cfg = Get-Item "IIS:\AppPools\$Name" -ErrorAction SilentlyContinue
+                        if ($cfg) {
+                            $results.Details.Add("DIAG: App pool '$Name' config: autoStart=$($cfg.autoStart), startMode=$($cfg.startMode), rapidFailProtection=$($cfg.failure.rapidFailProtection), maxCrashes=$($cfg.failure.rapidFailProtectionMaxCrashes), interval=$($cfg.failure.rapidFailProtectionInterval)")
+                        }
+                    }
+                    catch { $results.Details.Add("DIAG: Could not read app-pool configuration: $($_.Exception.Message)") }
+
+                    try {
+                        $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = (Get-Date).AddHours(-6) } -MaxEvents 300 -ErrorAction SilentlyContinue |
+                                Where-Object { $_.ProviderName -match 'WAS|W3SVC|IIS' -and $_.Message -match [regex]::Escape($Name) } |
+                                Select-Object -First 8)
+                        if ($events.Count -eq 0) {
+                            $results.Details.Add("DIAG: No WAS/W3SVC System events naming '$Name' in the last 6h")
+                        }
+                        foreach ($eventRecord in $events) {
+                            $eventText = (($eventRecord.Message -replace '\s+', ' ').Trim())
+                            $results.Details.Add("DIAG: WAS/W3SVC $($eventRecord.TimeCreated.ToString('HH:mm:ss')) id=$($eventRecord.Id): $eventText")
+                        }
+                    }
+                    catch { $results.Details.Add("DIAG: WAS/W3SVC event query failed: $($_.Exception.Message)") }
+
+                    try {
+                        $appEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddHours(-6) } -MaxEvents 300 -ErrorAction SilentlyContinue |
+                                Where-Object { $_.ProviderName -match 'IIS|W3SVC|Application Error|\.NET Runtime' -and $_.Message -match [regex]::Escape($Name) } |
+                                Select-Object -First 8)
+                        foreach ($eventRecord in $appEvents) {
+                            $eventText = (($eventRecord.Message -replace '\s+', ' ').Trim())
+                            $results.Details.Add("DIAG: Application $($eventRecord.TimeCreated.ToString('HH:mm:ss')) [$($eventRecord.ProviderName)] id=$($eventRecord.Id): $eventText")
+                        }
+                    }
+                    catch { $results.Details.Add("DIAG: Application event query failed: $($_.Exception.Message)") }
+                }
                 $mpApp = $null
                 $maxAttempts = 5
                 for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
@@ -4747,9 +4790,28 @@ function Test-SiteSystemFunctionality {
                     $results.Details.Add("OK: App pool '$poolName' is Started")
                 }
                 else {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: App pool '$poolName' is $( if ($pool) { $pool.Value } else { 'not found' } )")
-                    return $results
+                    $initialPoolState = if ($pool) { $pool.Value } else { 'not found' }
+                    $results.Details.Add("REMEDIATE: App pool '$poolName' is $initialPoolState; capturing IIS evidence and attempting one start")
+                    & $addPoolDiagnostics $poolName
+                    if ($pool) {
+                        try {
+                            $null = Start-WebAppPool -Name $poolName -ErrorAction Stop
+                            Start-Sleep -Seconds 10
+                            $pool = Get-WebAppPoolState -Name $poolName -ErrorAction SilentlyContinue
+                        }
+                        catch {
+                            $results.Details.Add("DIAG: Start-WebAppPool failed: $($_.Exception.Message)")
+                        }
+                    }
+                    if ($pool -and $pool.Value -eq 'Started') {
+                        $results.Details.Add("RECOVERED: App pool '$poolName' was $initialPoolState; started successfully")
+                    }
+                    else {
+                        $results.Passed = $false
+                        $finalPoolState = if ($pool) { $pool.Value } else { 'not found' }
+                        $results.Details.Add("FAIL: App pool '$poolName' is still $finalPoolState after one start attempt")
+                        return $results
+                    }
                 }
             }
             catch {
@@ -4819,11 +4881,19 @@ function Test-SiteSystemFunctionality {
                 }
             }
             if (-not $mpProbed) {
-                # Don't fail the build -- if W3SVC + SMS_MP app pool are OK, the MP is
-                # installed and normally starts serving once MP Control Manager validates
-                # it. Warn with the last probe result so the WARN is actionable.
                 $waitedMin = [Math]::Round((($maxProbeAttempts - 1) * 30) / 60, 1)
-                $results.Details.Add("WARN: MP HTTP probe did not succeed after $maxProbeAttempts attempts over ~$waitedMin min (last: $lastProbeDetail). App is configured but not serving as expected; check mpcontrol.log and the SMS_MP_CONTROL_MANAGER component status on the site server.")
+                $poolAfterProbe = Get-WebAppPoolState -Name $poolName -ErrorAction SilentlyContinue
+                if (-not $poolAfterProbe -or $poolAfterProbe.Value -ne 'Started') {
+                    $results.Passed = $false
+                    $poolAfterState = if ($poolAfterProbe) { $poolAfterProbe.Value } else { 'not found' }
+                    $results.Details.Add("FAIL: MP HTTP probe failed for ~$waitedMin min and app pool '$poolName' is now $poolAfterState (last probe: $lastProbeDetail)")
+                    & $addPoolDiagnostics $poolName
+                }
+                else {
+                    # Don't fail if IIS + the pool remain healthy. A freshly installed
+                    # MP can return 500 while MP Control Manager validates the role.
+                    $results.Details.Add("WARN: MP HTTP probe did not succeed after $maxProbeAttempts attempts over ~$waitedMin min (last: $lastProbeDetail). App pool remains Started; check mpcontrol.log and SMS_MP_CONTROL_MANAGER on the site server.")
+                }
             }
 
             return $results
@@ -7856,18 +7926,19 @@ function Test-DomainMemberFunctionality {
                 catch {}
                 $elapsedTxt = if ($null -ne $elapsedMin) { "${elapsedMin}m" } else { 'unknown time' }
 
-                # Is ccmsetup wedged in a GetDPLocations retry? That means the MP
-                # returned NO DP location records for the CM client package (empty
-                # <LocationRecords/>, error 0x87d00215) -- the client package isn't on
-                # a DP reachable by this client's boundary group at the expected
-                # version -- and with AllowFallbackToUnprotectedDP=0 the client loops
-                # every 30 min forever. That is a genuine content-distribution FAILURE,
-                # not a slow install, so FAIL it and name the cause (a 'Retrying in N
-                # minutes' as the current activity means it is parked, not progressing).
+                # Is ccmsetup wedged in a GetDPLocations retry? Distinguish an MP
+                # availability failure (HTTP 503 / 0x87d0027e) from a successful MP
+                # response containing no DP locations (0x87d00215). Both park ccmsetup
+                # in a retry loop, but they have different owners and remediations.
                 $ccmTail = Get-Content 'C:\Windows\ccmsetup\Logs\ccmsetup.log' -Tail 60 -ErrorAction SilentlyContinue
-                $dpStuck = $ccmTail | Where-Object { $_ -match "didn't return DP locations|Failed to get DP locations|Retrying in \d+ minute|0x87d00215" } | Select-Object -Last 1
+                $mpUnavailable = $ccmTail | Where-Object { $_ -match '0x87d0027e|status code 503|Service Unavailable' } | Select-Object -Last 1
+                $noDpLocations = $ccmTail | Where-Object { $_ -match "didn't return DP locations|Failed to find DP locations|0x87d00215|<LocationRecords\s*/>" } | Select-Object -Last 1
 
-                if ($dpStuck) {
+                if ($mpUnavailable) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt because its Management Point is returning HTTP 503 Service Unavailable (0x87d0027e). This is an MP/IIS availability failure, not an empty DP-location response. Check the named MP's 'SMS Management Point Pool', W3SVC, and MP health.")
+                }
+                elseif ($noDpLocations) {
                     $results.Passed = $false
                     $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt in a GetDPLocations retry loop -- the MP returned NO DP locations for the CM client package (empty LocationRecords / 0x87d00215). The Configuration Manager client package is not on a DP in this client's boundary group at the expected version, and fallback to unprotected DP is disabled, so it retries every 30 min indefinitely. Fix: distribute the client package to a reachable DP (or ensure the pull DP has finished pulling it).")
                 }
@@ -7947,9 +8018,9 @@ function Test-DomainMemberFunctionality {
     if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.NeedsPushCheck) {
         if ($pushExpected) {
             $pushSite = if ($CurrentItem.pushClient -is [string]) { $CurrentItem.pushClient } else { "the site" }
-            $result.ScriptBlockOutput.Details.Add("  WARN: pushClient=$($CurrentItem.pushClient) in config but no ccmsetup evidence on VM — push from $pushSite may have failed or still be in progress on the site server side")
+            $null = $result.ScriptBlockOutput.Details.Add("  WARN: pushClient=$($CurrentItem.pushClient) in config but no ccmsetup evidence on VM — push from $pushSite may have failed or still be in progress on the site server side")
             $pushTarget = if ($isExternallyManaged -and $externalSiteServer) { "the REMOTE managing site server $externalSiteServer (site $expectedSiteCode)" } else { "the site server for $pushSite" }
-            $result.ScriptBlockOutput.Details.Add("  Check ccmsetup on ${pushTarget}: Get-CMDevice -Name '$VMName' | Select IsClient,ClientActiveStatus")
+            $null = $result.ScriptBlockOutput.Details.Add("  Check ccmsetup on ${pushTarget}: Get-CMDevice -Name '$VMName' | Select IsClient,ClientActiveStatus")
         }
         else {
             if (-not $cmManagesDomain) {
@@ -8097,13 +8168,13 @@ function Test-DomainMemberFunctionality {
                 -AsJob -TimeoutSeconds 180
             if ($regResult.ScriptBlockOutput -is [hashtable] -and $regResult.ScriptBlockOutput.Details) {
                 foreach ($detail in $regResult.ScriptBlockOutput.Details) {
-                    $result.ScriptBlockOutput.Details.Add($detail)
+                    $null = $result.ScriptBlockOutput.Details.Add($detail)
                 }
             }
         }
         else {
             $mgmtServerNote = if ($externalSiteServer) { " ($externalSiteServer)" } else { '' }
-            $result.ScriptBlockOutput.Details.Add("WARN: This domain is managed by remote CM site '$expectedSiteCode'$mgmtServerNote but the ConfigMgr client isn't running, so remote-site registration can't be verified")
+            $null = $result.ScriptBlockOutput.Details.Add("WARN: This domain is managed by remote CM site '$expectedSiteCode'$mgmtServerNote but the ConfigMgr client isn't running, so remote-site registration can't be verified")
         }
     }
 
@@ -8119,7 +8190,7 @@ function Test-DomainMemberFunctionality {
         $clientRunningForOffice = [bool]($result.ScriptBlockOutput.Details | Where-Object { $_ -match '^OK: CcmExec' })
     }
     if ($officeWanted -and -not $clientRunningForOffice) {
-        $result.ScriptBlockOutput.Details.Add("WARN: Skipping Office deployment policy check -- ConfigMgr client (CcmExec) is not installed/running, so the Office deployment can't be received. Resolve the client install first (see the ccmsetup WARN above).")
+        $null = $result.ScriptBlockOutput.Details.Add("WARN: Skipping Office deployment policy check -- ConfigMgr client (CcmExec) is not installed/running, so the Office deployment can't be received. Resolve the client install first (see the ccmsetup WARN above).")
     }
     if ($officeWanted -and $clientRunningForOffice) {
         $officeCheckBlock = {
@@ -8225,7 +8296,7 @@ function Test-DomainMemberFunctionality {
             -AsJob -TimeoutSeconds 300 -PollProgress
         if ($officeResult.ScriptBlockOutput -is [hashtable] -and $officeResult.ScriptBlockOutput.Details) {
             foreach ($detail in $officeResult.ScriptBlockOutput.Details) {
-                $result.ScriptBlockOutput.Details.Add($detail)
+                $null = $result.ScriptBlockOutput.Details.Add($detail)
             }
         }
 
@@ -8263,7 +8334,7 @@ function Test-DomainMemberFunctionality {
                 $diagPrimary = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'Primary' } | Select-Object -First 1
             }
             if ($diagPrimary -and $diagPrimary.siteCode) {
-                $result.ScriptBlockOutput.Details.Add("DIAG: collecting server-side Office projection state for $VMName from Primary $($diagPrimary.vmName) [site $($diagPrimary.siteCode)]...")
+                $null = $result.ScriptBlockOutput.Details.Add("DIAG: collecting server-side Office projection state for $VMName from Primary $($diagPrimary.vmName) [site $($diagPrimary.siteCode)]...")
                 $officeServerDiag = {
                     param($sc, $clientName)
                     $d = [System.Collections.Generic.List[string]]::new()
@@ -8391,14 +8462,14 @@ function Test-DomainMemberFunctionality {
                         -ScriptBlock $officeServerDiag -ArgumentList $diagPrimary.siteCode, $VMName `
                         -DisplayName "Phase11-Office-ServerDiag" -SuppressLog -AsJob -TimeoutSeconds 180
                     if ($srvDiag.ScriptBlockOutput) {
-                        foreach ($ln in @($srvDiag.ScriptBlockOutput)) { $result.ScriptBlockOutput.Details.Add($ln) }
+                        foreach ($ln in @($srvDiag.ScriptBlockOutput)) { $null = $result.ScriptBlockOutput.Details.Add($ln) }
                     }
                     else {
-                        $result.ScriptBlockOutput.Details.Add("DIAG: server-side Office diagnostic on $($diagPrimary.vmName) returned no output (see build log)")
+                        $null = $result.ScriptBlockOutput.Details.Add("DIAG: server-side Office diagnostic on $($diagPrimary.vmName) returned no output (see build log)")
                     }
                 }
                 catch {
-                    $result.ScriptBlockOutput.Details.Add("DIAG: server-side Office diagnostic on $($diagPrimary.vmName) failed: $($_.Exception.Message)")
+                    $null = $result.ScriptBlockOutput.Details.Add("DIAG: server-side Office diagnostic on $($diagPrimary.vmName) failed: $($_.Exception.Message)")
                 }
             }
         }
@@ -8454,7 +8525,7 @@ function Test-DomainMemberFunctionality {
             -AsJob -TimeoutSeconds 120
         if ($activationResult.ScriptBlockOutput -is [hashtable] -and $activationResult.ScriptBlockOutput.Details) {
             foreach ($detail in $activationResult.ScriptBlockOutput.Details) {
-                $result.ScriptBlockOutput.Details.Add($detail)
+                $null = $result.ScriptBlockOutput.Details.Add($detail)
             }
         }
     }
