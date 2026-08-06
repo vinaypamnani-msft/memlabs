@@ -312,18 +312,21 @@ function Invoke-NewLab {
     #  2. Zeroing $LASTEXITCODE first -- New-Lab.ps1 only calls exit when it FAILS, so on
     #     success $LASTEXITCODE is whatever the last native command left (e.g. the git pull
     #     above, whose non-zero exit we deliberately tolerate).
+    #  3. -KeepFailedVMs -- without it New-Lab deletes every Phase 1 VM on failure, which
+    #     flatly contradicts the "left intact for investigation" message the harness prints
+    #     next and makes the offered Retry-after-repair impossible.
     param(
         [string]$ConfigFile
     )
 
     $global:LASTEXITCODE = 0
-    & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot | Out-Host
+    & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs | Out-Host
     $code = [int]$LASTEXITCODE
 
     # 55 = New-Lab rebuilt DSC.zip and needs a restart to pick it up.
     if ($code -eq 55) {
         $global:LASTEXITCODE = 0
-        & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot | Out-Host
+        & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs | Out-Host
         $code = [int]$LASTEXITCODE
     }
 

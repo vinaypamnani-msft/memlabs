@@ -1255,6 +1255,10 @@ function Stop-VM2 {
         [int]$RetryCount = 1,
         [Parameter(Mandatory = $false)]
         [int]$RetrySeconds = 10,
+        # Bounds each graceful Stop-VM attempt. A wedged guest never acknowledges
+        # the shutdown request and an unbounded Stop-VM simply never returns.
+        [Parameter(Mandatory = $false)]
+        [int]$GracefulTimeoutSeconds = 120,
         [Parameter(Mandatory = $false)]
         [switch]$TurnOff,
         # Accepted but intentionally ignored. Stop-VM2 always force-stops
@@ -1321,12 +1325,34 @@ function Stop-VM2 {
                 }
                 Write-Log "${Name}: VM still in '$($vm.State)' after TurnOff, escalating..." -Warning
             }
+            # Bound the graceful stop. Unbounded, Stop-VM on a wedged guest never
+            # returns, so the TurnOff + worker-process escalation below -- the only
+            # things that can actually recover it -- were unreachable exactly when
+            # they were needed. A timeout is treated as a failed attempt.
             do {
                 $i++
                 if ($i -gt 1) {
                     Start-Sleep -Seconds $RetrySeconds
                 }
-                Stop-VM -VM $vm -force:$force -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                $StopError = @()
+                $gracefulJob = Stop-VM -VM $vm -force:$force -WarningAction SilentlyContinue -AsJob
+                $null = $gracefulJob | Wait-Job -Timeout $GracefulTimeoutSeconds
+                if ($gracefulJob.State -eq 'Running') {
+                    Write-Log "${Name}: Graceful stop did not complete within ${GracefulTimeoutSeconds}s; escalating." -Warning
+                    Stop-Job $gracefulJob -ErrorAction SilentlyContinue
+                    $StopError = @("Stop-VM did not complete within ${GracefulTimeoutSeconds}s")
+                }
+                elseif ($gracefulJob.State -eq 'Failed') {
+                    $StopError = @("$($gracefulJob.ChildJobs[0].JobStateInfo.Reason.Message)")
+                }
+                Remove-Job $gracefulJob -Force -ErrorAction SilentlyContinue
+                if ($StopError.Count -eq 0) {
+                    $vm = Get-VM2 -Name $Name -Fallback
+                    # A VM that no longer exists is stopped; don't fall through to
+                    # escalation and hand Stop-VM a null -VM.
+                    if (-not $vm) { break }
+                    if ($vm.State -ne 'Off') { $StopError = @("VM still '$($vm.State)' after Stop-VM") }
+                }
             }
             until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
