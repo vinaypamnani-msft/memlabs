@@ -55,7 +55,7 @@ function Get-WslMountCapability {
     # wsl.exe ships with Windows as a stub even when WSL is not installed, so its
     # mere presence proves nothing -- `wsl --mount` needs a real WSL2 distro to
     # mount into. Report a reason either way so a skip is never mysterious.
-    $r = [pscustomobject]@{ Available = $false; Reason = '' }
+    $r = [pscustomobject]@{ Available = $false; Reason = ''; Distro = $null }
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
         $r.Reason = 'wsl.exe not present'; return $r
     }
@@ -64,10 +64,15 @@ function Get-WslMountCapability {
     try {
         $help = & wsl.exe --help 2>&1
         if (("$help" -join ' ') -notmatch '--mount') { $r.Reason = 'this wsl.exe has no --mount support'; return $r }
-        $distros = @(& wsl.exe -l -q 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-        if ($distros.Count -eq 0) { $r.Reason = 'WSL present but no distro installed (--mount mounts INTO a distro)'; return $r }
+        $all = @(& wsl.exe -l -q 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        if ($all.Count -eq 0) { $r.Reason = 'WSL present but no distro installed (--mount mounts INTO a distro)'; return $r }
+        # docker-desktop* are the default distro on many hosts but ship a busybox
+        # userland with no usable tar/lsblk; prefer a real distro when one exists.
+        $real = $all | Where-Object { $_ -notmatch '^docker-desktop' } | Select-Object -First 1
+        if (-not $real) { $r.Reason = "only docker-desktop distro(s) present ($($all -join ', ')); no usable userland"; return $r }
         $r.Available = $true
-        $r.Reason = "distro '$($distros[0])'"
+        $r.Distro = $real
+        $r.Reason = "distro '$real'"
     }
     catch { $r.Reason = "wsl probe failed: $($_.Exception.Message)" }
     return $r
@@ -77,7 +82,7 @@ function Copy-LinuxRootLogViaWsl {
     # Reads the ext4 root that Windows cannot: attach the VHDX bare, mount the
     # biggest ext4 partition read-only, copy the logs the ESP loggrab never gets
     # when cloud-init dies before runcmd.
-    param([string]$VhdPath, [string]$WindowsDestination)
+    param([string]$VhdPath, [string]$WindowsDestination, [string]$Distro)
 
     # Pin this off: with it on (PS7.4+ hosts can default it on, or a profile can set
     # it), a non-zero wsl.exe exit throws past the explicit $LASTEXITCODE checks below
@@ -99,7 +104,7 @@ function Copy-LinuxRootLogViaWsl {
         $attached = $true
 
         # Pick the largest ext4 partition -- that is the root fs on the cloud image.
-        $lsblk = @(& wsl.exe -u root -- lsblk -rno NAME,FSTYPE,SIZE 2>$null)
+        $lsblk = @(& wsl.exe -d $Distro -u root -- lsblk -rno NAME,FSTYPE,SIZE 2>$null)
         $toBytes = {
             param($s)
             # lsblk prints 20G / 512M / 1.5T -- a plain string sort puts "9G" above "20G".
@@ -118,22 +123,60 @@ function Copy-LinuxRootLogViaWsl {
         $dev = '/dev/' + ($root -split '\s+')[0]
         Write-Host "  ext4 root: $dev" -ForegroundColor Green
 
-        & wsl.exe -u root -- mkdir -p $mountPoint 2>&1 | Out-Null
-        & wsl.exe -u root -- mount -o ro,noload $dev $mountPoint 2>&1 | ForEach-Object { Write-Host "  wsl> $_" -ForegroundColor DarkGray }
-        if ($LASTEXITCODE -ne 0) { Write-Host "  mount failed; skipping ext4 collection." -ForegroundColor Yellow; return }
+        & wsl.exe -d $Distro -u root -- mkdir -p $mountPoint 2>&1 | Out-Null
+        # noload skips journal replay on a fs that was force-stopped mid-write.
+        & wsl.exe -d $Distro -u root -- mount -o ro,noload $dev $mountPoint 2>&1 | ForEach-Object { Write-Host "  wsl> $_" -ForegroundColor DarkGray }
+        if ($LASTEXITCODE -ne 0) {
+            & wsl.exe -d $Distro -u root -- mount -o ro $dev $mountPoint 2>&1 | ForEach-Object { Write-Host "  wsl> $_" -ForegroundColor DarkGray }
+            if ($LASTEXITCODE -ne 0) { Write-Host "  mount failed; skipping ext4 collection." -ForegroundColor Yellow; return }
+        }
 
         try {
-            & wsl.exe -u root -- mkdir -p "$wslDest/rootfs" 2>&1 | Out-Null
-            foreach ($src in @('var/log/cloud-init.log', 'var/log/cloud-init-output.log', 'var/log/syslog', 'var/log/memlabs-dpkg-guard.log')) {
-                & wsl.exe -u root -- sh -c "test -f $mountPoint/$src && cp -f $mountPoint/$src $wslDest/rootfs/ && echo copied $src" 2>&1 |
-                    ForEach-Object { if ("$_".Trim()) { Write-Host "    $_" -ForegroundColor Gray } }
-            }
-            # cloud-init's own verdict, if it got far enough to write one.
-            & wsl.exe -u root -- sh -c "test -d $mountPoint/run/cloud-init && cp -f $mountPoint/run/cloud-init/*.json $wslDest/rootfs/ 2>/dev/null; true" 2>&1 | Out-Null
-            & wsl.exe -u root -- sh -c "test -d $mountPoint/var/log/journal && tar czf $wslDest/rootfs/journal.tar.gz -C $mountPoint/var/log journal 2>/dev/null; true" 2>&1 | Out-Null
+            # Generated as a file rather than passed to `sh -c`: the quoting survives
+            # intact, and it must be LF -- CRLF makes sh fail on every line.
+            $sh = @'
+#!/bin/sh
+MP="$1"; OUT="$2/rootfs"
+mkdir -p "$OUT/loose"
+{
+  echo "collected(UTC): $(date -u)"
+  echo "=== os-release ==="; cat "$MP/etc/os-release" 2>/dev/null
+  echo "=== lsblk ==="; lsblk -f 2>/dev/null
+  echo "=== cloud-init modules that COMPLETED (sem) ==="; ls -la "$MP/var/lib/cloud/sem" 2>/dev/null
+  echo "=== cloud-init instance dir ==="; ls -la "$MP/var/lib/cloud/instance/" 2>/dev/null
+  echo "=== netplan ==="; ls -la "$MP/etc/netplan" 2>/dev/null; cat "$MP"/etc/netplan/* 2>/dev/null
+  echo "=== ssh host keys (absent => sshd cannot start) ==="; ls -la "$MP/etc/ssh" 2>/dev/null
+  echo "=== authorized_keys ==="; find "$MP/home" "$MP/root" -name authorized_keys -exec ls -la {} \; -exec cat {} \; 2>/dev/null
+  echo "=== fstab ==="; cat "$MP/etc/fstab" 2>/dev/null
+  echo "=== hostname/hosts/resolv ==="; cat "$MP/etc/hostname" "$MP/etc/hosts" "$MP/etc/resolv.conf" 2>/dev/null
+  echo "=== enabled units ==="; ls -la "$MP/etc/systemd/system/multi-user.target.wants" 2>/dev/null
+} > "$OUT/00-manifest.txt" 2>&1
+
+for d in etc var/log var/lib/cloud root home boot; do
+  if [ -e "$MP/$d" ]; then
+    n=$(echo "$d" | tr / -)
+    tar czf "$OUT/$n.tar.gz" -C "$MP" "$d" 2>/dev/null
+    echo "  tar $d -> $n.tar.gz $(du -h "$OUT/$n.tar.gz" 2>/dev/null | cut -f1)"
+  fi
+done
+
+for f in var/log/cloud-init.log var/log/cloud-init-output.log var/log/syslog \
+         var/log/kern.log var/log/auth.log var/log/dpkg.log var/log/dmesg \
+         etc/hostname etc/fstab etc/resolv.conf etc/ssh/sshd_config; do
+  [ -f "$MP/$f" ] && cp -f "$MP/$f" "$OUT/loose/$(echo "$f" | tr / -)" 2>/dev/null
+done
+cp -f "$MP"/var/lib/cloud/instance/user-data.txt "$OUT/loose/" 2>/dev/null
+find "$MP/var/lib/cloud/seed" -type f -exec cp -f {} "$OUT/loose/" \; 2>/dev/null
+echo "  loose files: $(ls -1 "$OUT/loose" 2>/dev/null | wc -l)"
+'@
+            $shPath = Join-Path $WindowsDestination 'collect.sh'
+            [System.IO.File]::WriteAllText($shPath, ($sh -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding $false))
+            & wsl.exe -d $Distro -u root -- sh "$wslDest/collect.sh" "$mountPoint" "$wslDest" 2>&1 |
+                ForEach-Object { if ("$_".Trim()) { Write-Host "  $_" -ForegroundColor Gray } }
+            Remove-Item $shPath -ErrorAction SilentlyContinue
         }
         finally {
-            & wsl.exe -u root -- umount $mountPoint 2>&1 | Out-Null
+            & wsl.exe -d $Distro -u root -- umount $mountPoint 2>&1 | Out-Null
         }
     }
     catch {
@@ -154,7 +197,8 @@ $vhdPath = $osDisk.Path
 Write-Host "OS disk: $vhdPath" -ForegroundColor DarkGray
 
 if (-not $Destination) {
-    $Destination = Join-Path $PSScriptRoot "logs\linux-diag\$VmName"
+    # Script lives in vmbuild\tools, logs live in vmbuild\logs.
+    $Destination = Join-Path (Split-Path $PSScriptRoot -Parent) "logs\linux-diag\$VmName"
 }
 if (-not (Test-Path $Destination)) { New-Item -ItemType Directory -Path $Destination -Force | Out-Null }
 Write-Host "Destination: $Destination" -ForegroundColor DarkGray
@@ -230,6 +274,24 @@ finally {
         try { Dismount-VHD -Path $vhdPath -ErrorAction Stop } catch { Write-Host "Dismount failed: $_" -ForegroundColor Red }
     }
 
+    # Host-side artifacts die with the VM too, so bank them regardless of WSL.
+    try {
+        $serial = Join-Path (Split-Path $PSScriptRoot -Parent) "logs\linux-serial\$VmName.log"
+        if (Test-Path $serial) {
+            Copy-Item $serial (Join-Path $Destination "serial-console.log") -Force
+            Write-Host "Saved serial console capture ($((Get-Item $serial).Length) bytes)." -ForegroundColor Green
+        }
+        else { Write-Host "No serial capture at $serial." -ForegroundColor DarkGray }
+
+        $vmNow = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+        if ($vmNow) {
+            $vmNow | Select-Object * | Format-List | Out-File (Join-Path $Destination 'vm-config.txt') -Encoding utf8
+            $vmNow | Get-VMNetworkAdapter | Format-List * | Out-File (Join-Path $Destination 'vm-config.txt') -Append -Encoding utf8
+            $vmNow.Notes | Out-File (Join-Path $Destination 'vm-notes.txt') -Encoding utf8
+        }
+    }
+    catch { Write-Host "Host-side artifact collection failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+
     # The ESP copy above only works if loggrab ran, which needs cloud-init to reach
     # runcmd -- exactly what fails in the case worth diagnosing. The real logs are on
     # the ext4 root, which Windows cannot read, so use WSL when it is usable. Must
@@ -240,7 +302,7 @@ finally {
     }
     else {
         Write-Host "Collecting ext4 root logs via WSL ($($wsl.Reason)) ..." -ForegroundColor Cyan
-        Copy-LinuxRootLogViaWsl -VhdPath $vhdPath -WindowsDestination $Destination
+        Copy-LinuxRootLogViaWsl -VhdPath $vhdPath -WindowsDestination $Destination -Distro $wsl.Distro
     }
 
     if ($weStopped -and $RestartAfter) {
