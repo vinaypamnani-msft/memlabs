@@ -1439,7 +1439,29 @@ finally {
         if ($rsLeft.Count -gt 0) {
             $byState = ($rsLeft | Group-Object { "$($_.RunspaceStateInfo.State)/$($_.RunspaceAvailability)" } |
                     ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
-            Write-Log "[JobLeak] after session cleanup: $($rsLeft.Count) runspace(s) still open besides the default [$byState]; $(@($global:ps_orphanRunspaces).Count) parked awaiting reclaim. Each carries its own command + format tables (~8MB)." -Warning
+
+            # This block was the scaffold that found the Phase 11 session leak, and it
+            # shouted because the counts were in the hundreds. Post-fix the launcher
+            # still legitimately holds ONE out-of-process runspace for the engine-event
+            # log-flush handler (the same PSEventJob that Write-PowerShellJobLeakDiag
+            # already excludes as a phantom leak), so warning on it trains people to
+            # ignore the whole family. Warn only when the numbers are actionable:
+            # disposal is demonstrably failing, something is parked, or there is more
+            # than that one known-benign runspace. Otherwise keep the full detail at
+            # LogOnly so a regression is still reconstructable from the log.
+            $ledger = $null
+            try { $ledger = Get-VmSessionStats } catch { }
+            $disposalFailing = $false
+            if ($ledger) {
+                $disposalFailing = ([int]$ledger['disposeLeftOpen'] -gt 0) -or
+                                   ([int]$ledger['disposeThrew'] -gt 0) -or
+                                   ([int]$ledger['disposeNoOwner'] -gt 0)
+            }
+            $parked = @($global:ps_orphanRunspaces).Count
+            $actionable = $disposalFailing -or ($parked -gt 0) -or ($rsLeft.Count -gt 1)
+            $sev = if ($actionable) { @{ Warning = $true } } else { @{ LogOnly = $true } }
+
+            Write-Log "[JobLeak] after session cleanup: $($rsLeft.Count) runspace(s) still open besides the default [$byState]; $parked parked awaiting reclaim. Each carries its own command + format tables (~8MB)." @sev
 
             # State alone was not enough: the count climbed 162 -> 182 -> 186 across
             # consecutive builds in one launcher while "parked" stayed 0, so these are
@@ -1450,13 +1472,13 @@ finally {
             if ($inv.Count -gt 0) {
                 $byKind = ($inv | Group-Object { "$($_.Kind)/$($_.Origin)" } | Sort-Object Count -Descending |
                         ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
-                Write-Log "[JobLeak] runspace owners: $byKind" -Warning
+                Write-Log "[JobLeak] runspace owners: $byKind" @sev
                 $byName = ($inv | Group-Object { ($_.Name -replace '\d+$', '#') } | Sort-Object Count -Descending |
                         Select-Object -First 8 | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
                 Write-Log "[JobLeak] runspace names: $byName" -LogOnly
                 $topTargets = ($inv | Where-Object { $_.Target } | Group-Object Target | Sort-Object Count -Descending |
                         Select-Object -First 10 | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
-                if ($topTargets) { Write-Log "[JobLeak] runspace targets: $topTargets" -Warning }
+                if ($topTargets) { Write-Log "[JobLeak] runspace targets: $topTargets" @sev }
                 $liveSessions = 0
                 try { $liveSessions = @(Get-PSSession -ErrorAction SilentlyContinue).Count } catch { }
                 $jobSummary = ''
@@ -1465,7 +1487,7 @@ finally {
                             ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
                 }
                 catch { }
-                Write-Log "[JobLeak] cross-check: Get-PSSession=$liveSessions ps_cache=$(@($global:ps_cache.Keys).Count) jobs=[$jobSummary]" -Warning
+                Write-Log "[JobLeak] cross-check: Get-PSSession=$liveSessions ps_cache=$(@($global:ps_cache.Keys).Count) jobs=[$jobSummary]" @sev
                 # created vs disposed separates the two remaining explanations:
                 #   created >> disposeCalls          -> some path drops sessions without
                 #                                       ever handing them to Remove-VmSession
@@ -1475,7 +1497,7 @@ finally {
                 # the workers are not running Clear-VmSessionCache at all.
                 try {
                     $st = Get-VmSessionStats
-                    Write-Log "[JobLeak] session ledger: created=$($st['created']) disposeCalls=$($st['disposeCalls']) leftOpen=$($st['disposeLeftOpen']) noOwner=$($st['disposeNoOwner']) threw=$($st['disposeThrew']) workerCleanups=$($st['workerCleanups']) workerDisposed=$($st['workerDisposed'])" -Warning
+                    Write-Log "[JobLeak] session ledger: created=$($st['created']) disposeCalls=$($st['disposeCalls']) leftOpen=$($st['disposeLeftOpen']) noOwner=$($st['disposeNoOwner']) threw=$($st['disposeThrew']) workerCleanups=$($st['workerCleanups']) workerDisposed=$($st['workerDisposed'])" @sev
                     # Net undisposed per creating caller -- names the leaking path.
                     $bc = $st['byCaller']
                     $net = @($bc.Keys | Where-Object { [int]$bc[$_] -gt 0 } | Sort-Object { - [int]$bc[$_] } | Select-Object -First 8 |
