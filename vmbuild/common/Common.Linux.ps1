@@ -1809,6 +1809,33 @@ function Wait-LinuxVmReady {
     # restarts the cold-boot clock — exactly the wrong move under load.
     # We only power-cycle VMs that have NEVER shown sshd listening.
     $sawSignOfLife = $false
+
+    # Emit the serial console tail into the build log. Called at the power-cycle
+    # decision as well as the final timeout: the 08-06 stress run cycled OREGANO at
+    # 954s and the job ended before the 1800s timeout, so a timeout-only harvest
+    # captured nothing on the one run where the capture was actually running.
+    $emitSerialTail = {
+        param([string]$Reason)
+        try {
+            $serialLog = Join-Path (Split-Path $PSScriptRoot -Parent) "logs\linux-serial\$VmName.log"
+            if (-not (Test-Path $serialLog)) {
+                Write-Log "$VmName`: no serial console capture at $serialLog ($Reason)" -LogOnly
+                return
+            }
+            $info = Get-Item $serialLog
+            $ageMin = [int]((Get-Date) - $info.LastWriteTime).TotalMinutes
+            Write-Log "$VmName`: serial console capture at $Reason -- $($info.Length) bytes, last written $($info.LastWriteTime.ToString('HH:mm:ss')) (${ageMin}m ago)" -LogOnly
+            $tail = @(Get-Content $serialLog -Tail 60 -ErrorAction SilentlyContinue | Where-Object { "$_".Trim() })
+            foreach ($sl in $tail) {
+                Write-Log "$VmName`:   serial> $("$sl" -replace '\x1b\[[0-9;?]*[A-Za-z]', '' -replace '[^\x20-\x7E]', '')" -LogOnly
+            }
+            $bad = @($tail | Where-Object { $_ -match 'cloud-init.*(fail|error|Traceback)|Failed to start|dependency failed' })
+            if ($bad) { Write-Log "$VmName`: serial console shows cloud-init/systemd failure: $($bad[0])" -Warning }
+        }
+        catch {
+            Write-Log "$VmName`: serial console capture failed: $($_.Exception.Message)" -LogOnly
+        }
+    }
     while ((Get-Date) -lt $deadline) {
         $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
         $ip = Get-LinuxVmIPAddress -VmName $VmName
@@ -2002,6 +2029,9 @@ function Wait-LinuxVmReady {
             }
             else {
                 Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s and no sign of life (heartbeat='$hb') — power-cycling and retrying" -Warning
+                # Capture BEFORE the stop: this is the moment we declare the guest dead,
+                # and a TurnOff destroys whatever the console was about to tell us.
+                & $emitSerialTail 'power-cycle decision'
                 write-progress2 "Wait for Linux VM" -Status "$VmName`: restarting VM (no SSH after ${restartAfterSec}s)..." -force
                 try {
                     # Try a GRACEFUL shutdown first (systemd stops apt/dpkg
@@ -2041,27 +2071,7 @@ function Wait-LinuxVmReady {
     # The SSH autopsy below can only say sshd never answered. WHY it never
     # answered is on the serial console -- cloud-init writes its failures there
     # and nowhere the host can reach once the lab is torn down.
-    try {
-        $serialLog = Join-Path (Split-Path $PSScriptRoot -Parent) "logs\linux-serial\$VmName.log"
-        if (Test-Path $serialLog) {
-            $serialTail = @(Get-Content $serialLog -Tail 80 -ErrorAction SilentlyContinue |
-                    Where-Object { "$_".Trim() })
-            Write-Log "$VmName`: serial console capture ($serialLog, last $($serialTail.Count) non-blank lines):" -LogOnly
-            foreach ($sl in $serialTail) {
-                Write-Log "$VmName`:   serial> $("$sl" -replace '\x1b\[[0-9;?]*[A-Za-z]', '' -replace '[^\x20-\x7E]', '')" -LogOnly
-            }
-            $cloudInitFail = @($serialTail | Where-Object { $_ -match 'cloud-init.*(fail|error|Traceback)|Failed to start|dependency failed' })
-            if ($cloudInitFail) {
-                Write-Log "$VmName`: serial console shows cloud-init/systemd failure -- see 'serial>' lines above. First: $($cloudInitFail[0])" -Warning
-            }
-        }
-        else {
-            Write-Log "$VmName`: no serial console capture at $serialLog (recorder did not start, or Hyper-V never attached)" -LogOnly
-        }
-    }
-    catch {
-        Write-Log "$VmName`: serial console capture failed: $($_.Exception.Message)" -LogOnly
-    }
+    & $emitSerialTail 'SSH-readiness timeout'
 
     # Final autopsy: capture verbose ssh output so the next run's log tells
     # us *why* SSH never came up (auth failure, no banner, conn refused,
