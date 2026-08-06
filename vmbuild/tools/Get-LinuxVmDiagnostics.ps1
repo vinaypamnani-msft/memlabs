@@ -101,15 +101,39 @@ function Copy-LinuxRootLogViaWsl {
     $tag = (Split-Path $WindowsDestination -Leaf) -replace '[^A-Za-z0-9._-]', '_'
     $mountPoint = "/mnt/memlabs-diag-$tag"
     $attached = $false
+    $listDisks = {
+        param($D)
+        @(& wsl.exe -d $D -u root -- lsblk -Pdno NAME 2>$null |
+            ForEach-Object { if ("$_" -match 'NAME="([^"]+)"') { $Matches[1] } })
+    }
     try {
+        # Snapshot disks before attaching. Selecting "largest unmounted ext4" across
+        # every device collected the WRONG VM's disk when another VHDX was already
+        # attached -- the only safe identification is the disk that appears now.
+        $before = & $listDisks $Distro
+
         & wsl.exe --mount "$VhdPath" --vhd --bare 2>&1 | ForEach-Object { Write-Host "  wsl> $_" -ForegroundColor DarkGray }
         if ($LASTEXITCODE -ne 0) { Write-Host "  wsl --mount failed (needs an elevated shell); skipping ext4 collection." -ForegroundColor Yellow; return }
         $attached = $true
 
-        # lsblk lists the WSL distro's OWN disks alongside the attached VHDX, and
-        # WSL's root is a large ext4 -- picking "largest ext4" grabs /dev/sd? that is
-        # already mounted on /. Require an unmounted partition. -P is used because
-        # raw mode collapses the empty MOUNTPOINT field and misaligns the columns.
+        $ourDisk = $null
+        foreach ($try in 1..5) {
+            $new = @((& $listDisks $Distro) | Where-Object { $_ -notin $before })
+            if ($new.Count -eq 1) { $ourDisk = $new[0]; break }
+            if ($new.Count -gt 1) {
+                Write-Host "  ambiguous: $($new.Count) new disks appeared ($($new -join ', ')); refusing to guess." -ForegroundColor Red
+                return
+            }
+            Start-Sleep -Seconds 1
+        }
+        if (-not $ourDisk) {
+            Write-Host "  attached disk never appeared in WSL; skipping rather than risk reading another VM's disk." -ForegroundColor Red
+            return
+        }
+        Write-Host "  attached as /dev/$ourDisk" -ForegroundColor DarkGray
+
+        # Only partitions ON OUR DISK, unmounted (WSL's own root is a large ext4).
+        # -P because raw mode collapses the empty MOUNTPOINT field and misaligns columns.
         $rows = @(& wsl.exe -d $Distro -u root -- lsblk -Pno NAME,FSTYPE,SIZE,MOUNTPOINT,TYPE 2>$null)
         $toBytes = {
             param($s)
@@ -123,12 +147,13 @@ function Copy-LinuxRootLogViaWsl {
             foreach ($m in [regex]::Matches("$row", '(\w+)="([^"]*)"')) { $f[$m.Groups[1].Value] = $m.Groups[2].Value }
             if ($f['FSTYPE'] -ne 'ext4') { continue }
             if ($f['MOUNTPOINT']) { continue }
+            if ($f['NAME'] -notlike "$ourDisk*") { continue }
             [pscustomobject]@{ Name = $f['NAME']; Type = $f['TYPE']; Bytes = (& $toBytes $f['SIZE']) }
         }
         $root = $cands | Sort-Object @{ e = { $_.Type -eq 'part' } }, Bytes -Descending | Select-Object -First 1
         if (-not $root) {
-            Write-Host "  no unmounted ext4 partition found on the attached disk; skipping." -ForegroundColor Yellow
-            $rows | Select-Object -First 14 | ForEach-Object { Write-Host "    lsblk> $_" -ForegroundColor DarkGray }
+            Write-Host "  no unmounted ext4 partition on /dev/$ourDisk; skipping." -ForegroundColor Yellow
+            $rows | Where-Object { $_ -like "*$ourDisk*" } | ForEach-Object { Write-Host "    lsblk> $_" -ForegroundColor DarkGray }
             return
         }
         $dev = '/dev/' + $root.Name
@@ -323,6 +348,17 @@ finally {
         Write-Host "`nCollected $($got.Count) file(s), $mb MB -> $Destination" -ForegroundColor Green
         $got | Sort-Object Length -Descending | Select-Object -First 12 |
             ForEach-Object { Write-Host ("  {0,-34} {1,9:N0} KB" -f $_.Name, ($_.Length / 1KB)) -ForegroundColor Gray }
+
+        # Prove the data came off the right disk: a stale attached VHDX once caused
+        # a collection to silently capture a different VM's rootfs.
+        $hostFile = Join-Path $Destination 'rootfs\loose\etc-hostname'
+        if (Test-Path $hostFile) {
+            $captured = (Get-Content $hostFile -Raw).Trim()
+            if ($captured -and $captured -ne $VmName.Trim()) {
+                Write-Host "`n*** WRONG VM: collected rootfs belongs to '$captured', not '$VmName'. DISCARD THIS. ***" -ForegroundColor Red
+            }
+            else { Write-Host "Verified: rootfs hostname '$captured' matches $VmName." -ForegroundColor Green }
+        }
     }
     else { Write-Host "`nNOTHING COLLECTED -> $Destination" -ForegroundColor Red }
 }
