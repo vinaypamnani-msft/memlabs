@@ -516,6 +516,15 @@ function Write-PowerShellJobLeakDiag {
             try { if ($global:ps_inflight) { $cacheCounts += "ps_inflight=$(@($global:ps_inflight.Keys).Count)" } } catch { }
             Write-Log "[JobLeak] $Context`: this process age=${selfAge}m ws=$($result.SelfMB)MB private=$([Math]::Round($self.PrivateMemorySize64/1MB))MB clrHeap=${gcMB}MB handles=$($self.HandleCount) threads=$($self.Threads.Count) $($cacheCounts -join ' ')" -LogOnly
 
+            # ps_cache is drained by the LATER session cleanup, so this is the only
+            # point where the census still has entries to describe.
+            try {
+                if ($global:ps_cache -and $global:ps_cache.Count -gt 0) {
+                    Write-Log "[JobLeak] $Context`: $(Get-VmSessionCacheCensus)" -LogOnly
+                }
+            }
+            catch { }
+
             # Log buffers retain StringBuilder CAPACITY across flushes -- Length=0
             # does not release chunks -- and Start-Test keeps one entry per log
             # path for every lab it has ever built in this shell.

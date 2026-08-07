@@ -7303,6 +7303,74 @@ if (-not [System.AppDomain]::CurrentDomain.GetData('MemLabs_SessionStats')) {
 }
 function Get-VmSessionStats { [System.AppDomain]::CurrentDomain.GetData('MemLabs_SessionStats') }
 
+# Usage stamps on each cached PSDirect session. `ps_cache=19` alone cannot tell a
+# WORKING cache (one warm session per live VM, reused every phase) from dead
+# weight (created once, never touched again) -- and the two want opposite fixes.
+# Measurement only; nothing here reaps.
+function Set-VmSessionCacheStamp {
+    param(
+        [object] $Session,
+        [string] $VmName,
+        [switch] $Hit
+    )
+    if (-not $Session) { return }
+    try {
+        $now = Get-Date
+        if ($Hit) {
+            $Session | Add-Member -MemberType NoteProperty -Name '_CacheHits' -Value (1 + [int]$Session._CacheHits) -Force
+        }
+        else {
+            $Session | Add-Member -MemberType NoteProperty -Name '_CachedAt' -Value $now -Force
+            $Session | Add-Member -MemberType NoteProperty -Name '_CacheHits' -Value 0 -Force
+            $Session | Add-Member -MemberType NoteProperty -Name '_CachedVm' -Value $VmName -Force
+        }
+        $Session | Add-Member -MemberType NoteProperty -Name '_LastUsed' -Value $now -Force
+    }
+    catch { }
+}
+
+# One-line census of $global:ps_cache for the phase-boundary and end-of-run
+# reports. Deliberately local-only (no Get-VM / no round-trip to any guest) so
+# it is safe to call from inside the phase wait loop.
+function Get-VmSessionCacheCensus {
+    try {
+        if (-not $global:ps_cache -or $global:ps_cache.Count -eq 0) { return 'ps_cache census: empty' }
+        $now = Get-Date
+        $rows = foreach ($key in @($global:ps_cache.Keys)) {
+            $s = $global:ps_cache[$key]
+            if (-not $s) { continue }
+            $rsState = ''
+            try { $rsState = "$($s.Runspace.RunspaceStateInfo.State)" } catch { }
+            [pscustomobject]@{
+                Vm      = if ($s._CachedVm) { [string]$s._CachedVm } else { [string]$key }
+                Avail   = "$($s.Availability)"
+                Runspace = $rsState
+                Hits    = [int]$s._CacheHits
+                AgeMin  = if ($s._CachedAt) { [int]($now - [datetime]$s._CachedAt).TotalMinutes } else { -1 }
+                IdleMin = if ($s._LastUsed) { [int]($now - [datetime]$s._LastUsed).TotalMinutes } else { -1 }
+            }
+        }
+        $rows = @($rows)
+        if ($rows.Count -eq 0) { return 'ps_cache census: empty' }
+        # Entries stamped before this build's Common.ps1 loaded report Age/Idle -1;
+        # exclude them from the aging stats rather than skewing them to 0.
+        $timed = @($rows | Where-Object { $_.IdleMin -ge 0 })
+        $never = @($rows | Where-Object { $_.Hits -eq 0 }).Count
+        $byAvail = (@($rows | Group-Object Avail | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
+        $byRs = (@($rows | Group-Object Runspace | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
+        $idleMax = if ($timed.Count) { ($timed | Measure-Object IdleMin -Maximum).Maximum } else { -1 }
+        $ageMax = if ($timed.Count) { ($timed | Measure-Object AgeMin -Maximum).Maximum } else { -1 }
+        $hitsTotal = ($rows | Measure-Object Hits -Sum).Sum
+        $worst = (@($rows | Sort-Object IdleMin -Descending | Select-Object -First 5 |
+                    ForEach-Object {
+                        if ($_.IdleMin -lt 0) { "$($_.Vm)=unstamped/hits$($_.Hits)" }
+                        else { "$($_.Vm)=idle$($_.IdleMin)m/age$($_.AgeMin)m/hits$($_.Hits)" }
+                    }) -join ' ')
+        return "ps_cache census: $($rows.Count) entries; neverReused=$never totalHits=$hitsTotal; idleMax=${idleMax}m ageMax=${ageMax}m; avail [$byAvail]; runspace [$byRs]; oldest-idle: $worst"
+    }
+    catch { return "ps_cache census failed: $($_.Exception.Message)" }
+}
+
 function Get-VmSessionCallerTag {
     # Name the code path that owns a session, so the end-of-run report can say WHICH
     # caller leaks rather than just how many. Skips this module's own plumbing --
@@ -7749,6 +7817,7 @@ function Get-VmSession {
         $ps = $global:ps_cache[$cacheKey]
         if ($ps.Availability -eq "Available") {
             Write-Log "$VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
+            Set-VmSessionCacheStamp -Session $ps -VmName $VmName -Hit
             return $ps
         }
         else {
@@ -7767,6 +7836,7 @@ function Get-VmSession {
             $existingPs = $global:ps_cache[$existingKey]
             if ($existingPs.Availability -eq "Available") {
                 Write-Log "$VmName`: Reusing existing session from key '$existingKey' (caller asked for '$cacheKey')." -Verbose
+                Set-VmSessionCacheStamp -Session $existingPs -VmName $VmName -Hit
                 return $existingPs
             }
             else {
@@ -7875,6 +7945,7 @@ function Get-VmSession {
                 $global:ps_lastGoodCred[$VmName] = $entry.Tag
                 Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
                 $global:ps_cache[$cacheKey] = $ps
+                Set-VmSessionCacheStamp -Session $ps -VmName $VmName
                 Set-VmSessionPipelineEvent -Session $ps -Kind 'created'
                 return $ps
             }

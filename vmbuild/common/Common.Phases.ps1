@@ -3065,6 +3065,9 @@ function Wait-Phase {
             $cacheCount = if ($global:ps_cache) { $global:ps_cache.Count } else { 0 }
             $threadJobMode = [bool](Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)
             Write-Log "[Phase $Phase] PSDirect leak diag (pid $PID, ThreadJobMode=$threadJobMode): PSRemotingJobs=$($remoteJobs.Count) [$byState]; AllJobsByType [$byType]; PSSessions=$($sessions.Count) [$sessByAvail]; ps_cache=$cacheCount" -LogOnly
+            # ps_cache=N alone cannot separate "one warm session per live VM, reused
+            # every phase" from "created once, never touched again".
+            if ($cacheCount -gt 0) { Write-Log "[Phase $Phase] $(Get-VmSessionCacheCensus)" -LogOnly }
         }
         catch { Write-Log "[Phase $Phase] PSDirect leak diag failed: $_" -LogOnly -Verbose }
 
