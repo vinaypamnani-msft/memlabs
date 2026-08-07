@@ -929,8 +929,7 @@ $global:VM_Create = {
                     $vmMac = Get-VMMacIsolated -VmName $currentItem.vmName
                     if ($vmMac) {
                         $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
-                        Remove-DHCPReservation -mac $vmMac -vmName $currentItem.vmName
-                        Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $linuxIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName) (Linux)"
+                        Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $linuxIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName) (Linux)" -PurgeMacFirst
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $linuxIP" -LogOnly
                     }
                 }
@@ -2598,8 +2597,7 @@ $global:VM_Config = {
                                         elseif ($currentItem.network) { $realnetwork = $currentItem.network }
                                         else { $realnetwork = $deployConfig.vmOptions.network }
                                     }
-                                    Remove-DHCPReservation -mac $vmMac -vmName $currentItem.vmName
-                                    Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $resolvedIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName)"
+                                    Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $resolvedIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName)" -PurgeMacFirst
                                 }
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $resolvedIP" -LogOnly
                             }

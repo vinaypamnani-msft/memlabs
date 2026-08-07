@@ -4186,34 +4186,67 @@ function Get-AllDHCPReservationsIsolated {
 # ... on DHCP server ..." errors that swallowed all root-cause detail. The
 # Global\ prefix makes the mutex visible across PowerShell processes / jobs
 # on the host (matches the pattern used by Global\MemlabsImapi2fsLock in
-# Common.Linux.ps1). Failures to acquire fall through after the timeout so a
+# Common.Linux.ps1). Failures to acquire fall through after the ceiling so a
 # single stuck holder can't deadlock a whole deploy -- the operation runs
 # anyway and any race-induced error gets caught/retried by the caller.
+#
+# $TimeoutSeconds is a REPORTING interval, not the give-up point. A 25-VM
+# Phase 1 legitimately queues every VM behind this one mutex, and each holder
+# spends ~3s per Invoke-IsolatedCim just creating a runspace and autoloading
+# the DhcpServer CDXML module -- so one expired WaitOne means "the queue is
+# long", not "a holder is stuck". Treating it as give-up ran the DHCP writes
+# UNSERIALIZED, which is the exact race this mutex exists to prevent (32-40
+# such fall-throughs per 25-VM run, i.e. the mutex was silently off for most
+# of Phase 1). Keep waiting to $CeilingSeconds instead.
 function Invoke-WithDhcpMutex {
     param(
         [Parameter(Mandatory = $true)] [scriptblock] $ScriptBlock,
-        [int] $TimeoutSeconds = 120
+        [int] $TimeoutSeconds = 120,
+        [int] $CeilingSeconds = 900
     )
     $mtx = $null
     $acquired = $false
+    $waitSw = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         try {
             $mtx = [System.Threading.Mutex]::new($false, 'Global\MemLabs_DHCP')
-            $acquired = $mtx.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
-        }
-        catch [System.Threading.AbandonedMutexException] {
-            # Prior holder died without releasing; ownership is now ours.
-            $acquired = $true
         }
         catch {
             # Mutex creation itself failed (rare: ACL / WaitHandleCannotBeOpenedException
             # under unusual session conditions). Run unguarded rather than fail the deploy.
             Write-Log "Invoke-WithDhcpMutex: mutex unavailable, running unguarded ($($_.Exception.GetType().FullName)): $($_.Exception.Message)" -LogOnly
         }
-        if (-not $acquired -and $mtx) {
-            Write-Log "Invoke-WithDhcpMutex: timed out after $TimeoutSeconds s; proceeding without serialization" -LogOnly
+        if ($mtx) {
+            # The wait loop gets its own try/catch: folding it into the creation
+            # catch above would misreport any failure here as "mutex unavailable".
+            $ceiling = [TimeSpan]::FromSeconds([Math]::Max($CeilingSeconds, $TimeoutSeconds))
+            while (-not $acquired -and $waitSw.Elapsed -lt $ceiling) {
+                try {
+                    $acquired = $mtx.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
+                }
+                catch [System.Threading.AbandonedMutexException] {
+                    # Prior holder died without releasing; ownership is now ours.
+                    $acquired = $true
+                }
+                if (-not $acquired) {
+                    Write-Log "Invoke-WithDhcpMutex: still queued after $([int]$waitSw.Elapsed.TotalSeconds)s (ceiling $([int]$ceiling.TotalSeconds)s)" -LogOnly
+                }
+            }
+            if (-not $acquired) {
+                Write-Log "Invoke-WithDhcpMutex: gave up after $([int]$waitSw.Elapsed.TotalSeconds)s; proceeding without serialization" -Warning
+            }
         }
-        & $ScriptBlock
+        $waitSw.Stop()
+        $holdSw = [System.Diagnostics.Stopwatch]::StartNew()
+        try { & $ScriptBlock }
+        finally {
+            $holdSw.Stop()
+            # Hold time is the only number that explains queue depth; log it when it
+            # is large enough to matter so the next sweep can attribute the wait.
+            if ($holdSw.Elapsed.TotalSeconds -ge 10) {
+                Write-Log "Invoke-WithDhcpMutex: held the mutex for $([int]$holdSw.Elapsed.TotalSeconds)s (waited $([int]$waitSw.Elapsed.TotalSeconds)s)" -LogOnly
+            }
+        }
     }
     finally {
         if ($mtx) {
@@ -4232,6 +4265,14 @@ function Invoke-WithDhcpMutex {
 # bare cmdlet failing. Throws with full exception chain detail (type, message,
 # every InnerException) on final failure so the caller's log line carries the
 # actual root cause instead of a stringified ErrorRecord.
+#
+# -PurgeMacFirst drops any OTHER reservation this MAC holds (in any scope)
+# before adding. That used to be a separate Remove-DHCPReservation call, i.e. a
+# second mutex acquisition and a second Invoke-IsolatedCim -- and each isolated
+# runspace costs ~3s just to autoload the DhcpServer CDXML module, all of it
+# spent holding the host-wide mutex. Folding it in here halves the mutex traffic
+# per VM and closes the window where a parallel job could take the IP between
+# our remove and our add.
 function Add-DHCPReservationIsolated {
     param(
         [Parameter(Mandatory = $true)][string] $ScopeId,
@@ -4239,18 +4280,38 @@ function Add-DHCPReservationIsolated {
         [Parameter(Mandatory = $true)][string] $Mac,
         [string] $Description,
         [int] $MaxAttempts = 4,
-        [string] $LogContext
+        [string] $LogContext,
+        [switch] $PurgeMacFirst
     )
 
     $tag = if ($LogContext) { "$LogContext`: " } else { '' }
+    $purgeMac = $PurgeMacFirst.IsPresent
     $attempt = 0
     $lastError = $null
     while ($attempt -lt $MaxAttempts) {
         $attempt++
         try {
             Invoke-WithDhcpMutex -ScriptBlock {
-                Invoke-IsolatedCim -ArgumentList $ScopeId, $IPAddress, $Mac, $Description -ScriptBlock {
-                    param($scopeId, $ip, $mac, $desc)
+                Invoke-IsolatedCim -ArgumentList $ScopeId, $IPAddress, $Mac, $Description, $purgeMac -ScriptBlock {
+                    param($scopeId, $ip, $mac, $desc, $purgeMac)
+
+                    # Drop stale reservations this MAC still holds elsewhere (a VM that
+                    # moved subnets, or a rerun against a changed config). Anything already
+                    # pointing at $ip is left alone -- the add below is idempotent for it.
+                    if ($purgeMac) {
+                        foreach ($s in @((Get-DhcpServerv4Scope -ErrorAction SilentlyContinue).ScopeId)) {
+                            if (-not $s) { continue }
+                            $stale = $null
+                            try { $stale = Get-DhcpServerv4Reservation -ScopeId $s -ClientId $mac -ErrorAction SilentlyContinue } catch { }
+                            foreach ($one in @($stale)) {
+                                if (-not $one) { continue }
+                                $staleIp = [string]$one.IPAddress
+                                if ($staleIp -eq $ip) { continue }
+                                Remove-DhcpServerv4Reservation -ScopeId $s -ClientId $mac -ErrorAction SilentlyContinue | Out-Null
+                                try { Remove-DhcpServerv4Lease -IPAddress $staleIp -ErrorAction SilentlyContinue | Out-Null } catch { }
+                            }
+                        }
+                    }
 
                     # Pre-clean: a reservation OR active lease already sitting on
                     # this IP under a DIFFERENT client is the most common cause of
@@ -5222,8 +5283,7 @@ function New-VirtualMachine {
                             if ($existing) {
                                 Write-Log "$VmName`: DHCP reservation for MAC=$vmMac points to $existing but AssignedIP is $assignedIP; correcting to avoid an address collision" -LogOnly
                             }
-                            Remove-DHCPReservation -mac $vmMac -vmName $VmName
-                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName"
+                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName" -PurgeMacFirst
                             Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
                         }
                     }
@@ -5419,8 +5479,7 @@ function New-VirtualMachine {
                             if ($existing2) {
                                 Write-Log "$VmName`: DHCP reservation for MAC=$vmMac2 points to $existing2 but AssignedIP is $($thisVmConfig2.AssignedIP); correcting to avoid an address collision" -LogOnly
                             }
-                            Remove-DHCPReservation -mac $vmMac2 -vmName $VmName
-                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName" -LogContext $VmName
+                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName" -LogContext $VmName -PurgeMacFirst
                             Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
                         }
                         $thisVmConfig2 | Add-Member -MemberType NoteProperty -Name 'ReservationCreated' -Value $true -Force

@@ -1309,8 +1309,7 @@ function New-LinuxVirtualMachine {
                             if ($existing) {
                                 Write-Log "$VmName`: DHCP reservation for MAC=$vmMac points to $existing but AssignedIP is $assignedIP; correcting to avoid an address collision" -LogOnly
                             }
-                            Remove-DHCPReservation -mac $vmMac -vmName $VmName
-                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName (Linux)"
+                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName (Linux)" -PurgeMacFirst
                             Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
                             $thisVmConfig | Add-Member -MemberType NoteProperty -Name 'ReservationCreated' -Value $true -Force
                         }
@@ -1526,8 +1525,7 @@ function New-LinuxVirtualMachine {
                             if ($existing2) {
                                 Write-Log "$VmName`: DHCP reservation for MAC=$vmMac2 points to $existing2 but AssignedIP is $($thisVmConfig2.AssignedIP); correcting to avoid an address collision" -LogOnly
                             }
-                            Remove-DHCPReservation -mac $vmMac2 -vmName $VmName
-                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName (Linux)" -LogContext $VmName
+                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName (Linux)" -LogContext $VmName -PurgeMacFirst
                             Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
                         }
                     }
