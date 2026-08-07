@@ -4726,15 +4726,43 @@ function Test-SiteSystemFunctionality {
                         }
                         foreach ($eventRecord in $events) {
                             $eventText = (($eventRecord.Message -replace '\s+', ' ').Trim())
-                            $results.Details.Add("DIAG: WAS/W3SVC $($eventRecord.TimeCreated.ToString('HH:mm:ss')) id=$($eventRecord.Id): $eventText")
+                            $errorDetail = ''
+                            try {
+                                [xml]$eventXml = $eventRecord.ToXml()
+                                $binaryHex = "$($eventXml.Event.EventData.Binary)".Trim()
+                                if ($binaryHex -match '^[0-9A-Fa-f]{8,}$') {
+                                    [byte[]]$errorBytes = @()
+                                    for ($byteIndex = 0; $byteIndex -lt $binaryHex.Length; $byteIndex += 2) {
+                                        $errorBytes += [Convert]::ToByte($binaryHex.Substring($byteIndex, 2), 16)
+                                    }
+                                    if ($errorBytes.Count -ge 4) {
+                                        $hresult = [BitConverter]::ToUInt32($errorBytes, 0)
+                                        $errorDetail = " binary=$binaryHex hresult=0x$($hresult.ToString('X8'))"
+                                        $facility = [int](($hresult -shr 16) -band 0x1FFF)
+                                        if ($facility -eq 7) {
+                                            $win32Code = [int]($hresult -band 0xFFFF)
+                                            $win32Text = (New-Object System.ComponentModel.Win32Exception -ArgumentList $win32Code).Message
+                                            $errorDetail += " win32=$win32Code ($win32Text)"
+                                        }
+                                    }
+                                }
+                            }
+                            catch { $errorDetail = " event-data-read-failed=$($_.Exception.Message)" }
+                            $results.Details.Add("DIAG: WAS/W3SVC $($eventRecord.TimeCreated.ToString('HH:mm:ss')) id=$($eventRecord.Id): $eventText$errorDetail")
                         }
                     }
                     catch { $results.Details.Add("DIAG: WAS/W3SVC event query failed: $($_.Exception.Message)") }
 
                     try {
-                        $appEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddHours(-6) } -MaxEvents 300 -ErrorAction SilentlyContinue |
-                                Where-Object { $_.ProviderName -match 'IIS|W3SVC|Application Error|\.NET Runtime' -and $_.Message -match [regex]::Escape($Name) } |
-                                Select-Object -First 8)
+                        $latestFailure = $events | Where-Object { $_.Id -eq 5139 } | Select-Object -First 1
+                        $windowStart = if ($latestFailure) { $latestFailure.TimeCreated.AddMinutes(-2) } else { (Get-Date).AddHours(-6) }
+                        $windowEnd = if ($latestFailure) { $latestFailure.TimeCreated.AddMinutes(2) } else { Get-Date }
+                        $appEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $windowStart; EndTime = $windowEnd } -MaxEvents 500 -ErrorAction SilentlyContinue |
+                                Where-Object { $_.ProviderName -match 'IIS|W3SVC|Application Error|\.NET Runtime|Windows Error Reporting' } |
+                                Select-Object -First 20)
+                        if ($appEvents.Count -eq 0) {
+                            $results.Details.Add("DIAG: No IIS/w3wp Application events found within two minutes of the latest WAS 5139")
+                        }
                         foreach ($eventRecord in $appEvents) {
                             $eventText = (($eventRecord.Message -replace '\s+', ' ').Trim())
                             $results.Details.Add("DIAG: Application $($eventRecord.TimeCreated.ToString('HH:mm:ss')) [$($eventRecord.ProviderName)] id=$($eventRecord.Id): $eventText")
@@ -4791,20 +4819,23 @@ function Test-SiteSystemFunctionality {
                 }
                 else {
                     $initialPoolState = if ($pool) { $pool.Value } else { 'not found' }
-                    $results.Details.Add("REMEDIATE: App pool '$poolName' is $initialPoolState; capturing IIS evidence and attempting one start")
+                    $results.Details.Add("REMEDIATE: App pool '$poolName' is $initialPoolState; capturing IIS evidence and resetting the WAS/W3SVC listener stack")
                     & $addPoolDiagnostics $poolName
                     if ($pool) {
                         try {
+                            Stop-Service -Name W3SVC -Force -ErrorAction SilentlyContinue
+                            Restart-Service -Name WAS -Force -ErrorAction Stop
+                            Start-Service -Name W3SVC -ErrorAction Stop
                             $null = Start-WebAppPool -Name $poolName -ErrorAction Stop
-                            Start-Sleep -Seconds 10
+                            Start-Sleep -Seconds 15
                             $pool = Get-WebAppPoolState -Name $poolName -ErrorAction SilentlyContinue
                         }
                         catch {
-                            $results.Details.Add("DIAG: Start-WebAppPool failed: $($_.Exception.Message)")
+                            $results.Details.Add("DIAG: WAS/W3SVC reset or Start-WebAppPool failed: $($_.Exception.Message)")
                         }
                     }
                     if ($pool -and $pool.Value -eq 'Started') {
-                        $results.Details.Add("RECOVERED: App pool '$poolName' was $initialPoolState; started successfully")
+                        $results.Details.Add("RECOVERED: App pool '$poolName' was $initialPoolState; WAS/W3SVC reset and pool started successfully")
                     }
                     else {
                         $results.Passed = $false

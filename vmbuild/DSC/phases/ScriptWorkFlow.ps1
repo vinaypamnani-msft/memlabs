@@ -1084,6 +1084,117 @@ if ($ThisVM.role -ne "CAS") {
             }
             try { Set-Content -Path $mpBounceFlag -Value "bounced $(Get-Date -Format s)" -Force -Encoding ASCII } catch {}
         }
+
+        # The one-shot TLS bounce flag survives later phase reruns, and W3SVC can
+        # be Running while an MP pool is rapid-fail disabled. Exercise the real
+        # MPLIST endpoint every time we are about to push a not-yet-client VM.
+        # If unhealthy, reset the shared WAS/W3SVC listener stack once and retry.
+        # Do not launch client push into a known-broken MP: ccmsetup otherwise
+        # parks every target in an HTTP 503 retry loop for ten minutes at a time.
+        if ($needCertPulse) {
+            $probeMpEndpoint = {
+                param([string]$PoolName)
+                try { Import-Module WebAdministration -ErrorAction Stop | Out-Null }
+                catch { return "UNHEALTHY|WebAdministration import failed: $($_.Exception.Message)" }
+
+                $pool = Get-WebAppPoolState -Name $PoolName -ErrorAction SilentlyContinue
+                $poolState = if ($pool) { "$($pool.Value)" } else { 'not found' }
+                if ($poolState -ne 'Started') { return "UNHEALTHY|pool=$poolState" }
+
+                $domain = (Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue).Domain
+                $fqdn = if ($domain) { "$env:COMPUTERNAME.$domain" } else { $env:COMPUTERNAME }
+                $lastResult = 'no response'
+                foreach ($scheme in @('https')) {
+                    $url = "$scheme`://$fqdn/sms_mp/.sms_aut?MPLIST"
+                    try {
+                        if ($scheme -eq 'https') {
+                            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                        }
+                        $request = [System.Net.HttpWebRequest]::Create($url)
+                        $request.Timeout = 15000
+                        $request.UseDefaultCredentials = $true
+                        $request.AllowAutoRedirect = $false
+                        $response = $request.GetResponse()
+                        $statusCode = [int]$response.StatusCode
+                        $response.Close()
+                        return "HEALTHY|$url returned HTTP $statusCode"
+                    }
+                    catch [System.Net.WebException] {
+                        $statusCode = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                        if ($statusCode -in 401, 403) {
+                            return "HEALTHY|$url returned HTTP $statusCode (serving; authentication required)"
+                        }
+                        $lastResult = if ($statusCode) { "$url returned HTTP $statusCode" } else { "$url failed: $($_.Exception.Message)" }
+                    }
+                    catch { $lastResult = "$url failed: $($_.Exception.Message)" }
+                }
+
+                $pool = Get-WebAppPoolState -Name $PoolName -ErrorAction SilentlyContinue
+                $poolState = if ($pool) { "$($pool.Value)" } else { 'not found' }
+                return "UNHEALTHY|pool=$poolState; $lastResult"
+            }
+
+            $resetMpListener = {
+                param([string]$PoolName)
+                try {
+                    Import-Module WebAdministration -ErrorAction Stop | Out-Null
+                    Stop-Service -Name W3SVC -Force -ErrorAction SilentlyContinue
+                    Restart-Service -Name WAS -Force -ErrorAction Stop
+                    Start-Service -Name W3SVC -ErrorAction Stop
+                    $null = Start-WebAppPool -Name $PoolName -ErrorAction Stop
+                    Start-Sleep -Seconds 15
+                    $pool = Get-WebAppPoolState -Name $PoolName -ErrorAction SilentlyContinue
+                    $poolState = if ($pool) { "$($pool.Value)" } else { 'not found' }
+                    return "RESET|pool=$poolState"
+                }
+                catch { return "RESET-FAILED|$($_.Exception.Message)" }
+            }
+
+            $siteMPsForHealth = @($deployConfig.virtualMachines | Where-Object { $_.installMP -and $_.siteCode -eq $ThisVM.siteCode })
+            foreach ($mp in $siteMPsForHealth) {
+                $endpointHealthy = $false
+                $lastHealth = 'UNHEALTHY|not probed'
+                for ($healthAttempt = 1; $healthAttempt -le 10; $healthAttempt++) {
+                    try {
+                        if ($mp.vmName -eq $ThisVM.vmName) {
+                            $healthOutput = @(& $probeMpEndpoint 'SMS Management Point Pool')
+                        }
+                        else {
+                            $healthOutput = @(Invoke-Command -ComputerName $mp.vmName -ScriptBlock $probeMpEndpoint -ArgumentList 'SMS Management Point Pool' -ErrorAction Stop)
+                        }
+                        if ($healthOutput.Count -gt 0) { $lastHealth = "$($healthOutput[-1])" }
+                    }
+                    catch { $lastHealth = "UNHEALTHY|probe threw: $($_.Exception.Message)" }
+
+                    if ($lastHealth -like 'HEALTHY|*') {
+                        Write-DscStatus "MP pre-push health: $($mp.vmName) $lastHealth (attempt $healthAttempt)"
+                        $endpointHealthy = $true
+                        break
+                    }
+
+                    if ($healthAttempt -eq 1) {
+                        Write-DscStatus "MP pre-push health: $($mp.vmName) $lastHealth; resetting WAS/W3SVC listener stack" -Warning
+                        try {
+                            if ($mp.vmName -eq $ThisVM.vmName) {
+                                $resetOutput = @(& $resetMpListener 'SMS Management Point Pool')
+                            }
+                            else {
+                                $resetOutput = @(Invoke-Command -ComputerName $mp.vmName -ScriptBlock $resetMpListener -ArgumentList 'SMS Management Point Pool' -ErrorAction Stop)
+                            }
+                            if ($resetOutput.Count -gt 0) {
+                                Write-DscStatus "MP pre-push health: $($mp.vmName) $($resetOutput[-1])"
+                            }
+                        }
+                        catch { Write-DscStatus "MP pre-push health: $($mp.vmName) listener reset threw: $($_.Exception.Message)" -Warning }
+                    }
+                    Start-Sleep -Seconds 15
+                }
+
+                if (-not $endpointHealthy) {
+                    throw "MP pre-push health failed for $($mp.vmName) after 10 attempts: $lastHealth"
+                }
+            }
+        }
     }
     Write-DscStatus "Always Running PushClients.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
