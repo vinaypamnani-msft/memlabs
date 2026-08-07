@@ -62,6 +62,24 @@ param (
 )
 
 $global:NoSnapshot = $NoSnapshot
+$global:NewLabResumeCommand = $null
+
+function Write-NewLabResumeCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Configuration,
+        [Parameter(Mandatory = $true)]
+        [int]$Phase,
+        [switch]$Restore
+    )
+
+    $resumeCommand = "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $Phase"
+    if ($Restore.IsPresent) { $resumeCommand += " -restore" }
+    $global:NewLabResumeCommand = $resumeCommand
+    Write-Log $resumeCommand
+    Add-CmdHistory $resumeCommand
+}
 
 # Give the user immediate visible feedback. Everything below this point (the
 # shortcut creation, dot-sourcing Common.ps1, and Initialize-Common) can take
@@ -1108,17 +1126,13 @@ try {
             if ($offerRestore) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
-                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
-
-                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
+                Write-NewLabResumeCommand -Configuration $Configuration -Phase $currentPhase -Restore
 
             }
             else {
                 Write-Host
                 Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
-                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
-
-                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase" 
+                Write-NewLabResumeCommand -Configuration $Configuration -Phase $currentPhase
 
             }
 
@@ -1316,14 +1330,12 @@ finally {
             if ($offerRestore) {
                 write-host
                 Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
-                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
-                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
+                Write-NewLabResumeCommand -Configuration $Configuration -Phase $currentPhase -Restore
             }
             else {
                 write-host
                 Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
-                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
-                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
+                Write-NewLabResumeCommand -Configuration $Configuration -Phase $currentPhase
             }
         }
         Write-Host

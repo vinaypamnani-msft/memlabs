@@ -424,15 +424,20 @@ function Invoke-NewLab {
         [string]$ConfigFile
     )
 
+    $script:LastNewLabResumeCommand = $null
+    $global:NewLabResumeCommand = $null
     $global:LASTEXITCODE = 0
     & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs | Out-Host
     $code = [int]$LASTEXITCODE
+    $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
 
     # 55 = New-Lab rebuilt DSC.zip and needs a restart to pick it up.
     if ($code -eq 55) {
+        $global:NewLabResumeCommand = $null
         $global:LASTEXITCODE = 0
         & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs | Out-Host
         $code = [int]$LASTEXITCODE
+        $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
     }
 
     # New-Lab runs INSIDE this process, so its job workers are children of the
@@ -464,14 +469,22 @@ function Get-TestFailureAction {
     param(
         [string]$ConfigFile,
         [string]$DomainName,
-        [int]$ExitCode
+        [int]$ExitCode,
+        [string]$ResumeCommand
     )
 
     Write-Host
     Write-Host "  BUILD FAILED (exit $ExitCode). The lab has been left intact for investigation." -ForegroundColor Red
     Write-Host "  Config : $ConfigFile" -ForegroundColor DarkGray
     Write-Host "  Domain : $DomainName" -ForegroundColor DarkGray
-    Write-Host "  Repair it from another window (New-Lab printed a '-startPhase' resume command above), then choose Retry." -ForegroundColor DarkGray
+    if ($ResumeCommand) {
+        Write-Host "  Resume : $ResumeCommand" -ForegroundColor DarkGray
+        Write-Host "  Repair or resume it from another window, then choose Retry." -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host "  No -StartPhase command was produced; the failure occurred before a resumable phase was identified." -ForegroundColor DarkGray
+        Write-Host "  Correct the validation or startup issue above, then choose Retry." -ForegroundColor DarkGray
+    }
     Write-Host
 
     if (-not [Environment]::UserInteractive) {
@@ -580,7 +593,7 @@ function Run-Test {
             while ($exitCode -ne 0) {
                 Write-Host "$testjson Failed ($passLabel)"
                 Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
-                $action = Get-TestFailureAction -ConfigFile $ModifiedtestFile -DomainName $domainName -ExitCode $exitCode
+                $action = Get-TestFailureAction -ConfigFile $ModifiedtestFile -DomainName $domainName -ExitCode $exitCode -ResumeCommand $script:LastNewLabResumeCommand
                 if ($action -ne 'Retry') { break }
                 Write-Host "Retrying $testjson ($passLabel)..." -ForegroundColor Cyan
                 $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
