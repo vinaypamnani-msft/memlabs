@@ -4724,6 +4724,23 @@ function Test-SiteSystemFunctionality {
                 if ($missingModules.Count -gt 0) {
                     $results.Passed = $false
                     $results.Details.Add("FAIL: $($missingModules.Count) of $($globalModules.Count) IIS globalModule DLL(s) are missing from disk, so every w3wp for this pool dies at startup: $($missingModules -join '; '). sfc/DISM will NOT restore a module whose owning component is not installed (CBS considers the system correct); either install the owning feature (validcfg.dll ships with Microsoft-Windows-IIS-NetFxExtensibility = Web-Net-Ext45) or drop the stale registration with '%windir%\system32\inetsrv\appcmd.exe uninstall module <name>'.")
+                    # iis.log holds the appcmd that registered the module and the rollback that
+                    # failed to unregister it; the gap between those two IS the diagnosis.
+                    $iisLog = Join-Path $env:windir 'iis.log'
+                    if (Test-Path -LiteralPath $iisLog) {
+                        foreach ($missingModule in $missingModules) {
+                            $moduleName = ($missingModule -split ' -> ')[0]
+                            $moduleHits = @(Select-String -LiteralPath $iisLog -Pattern "iissetup\.exe.*$([regex]::Escape($moduleName))" -Context 0, 2 -ErrorAction SilentlyContinue | Select-Object -Last 4)
+                            foreach ($moduleHit in $moduleHits) {
+                                $results.Details.Add("  iis.log: $($moduleHit.Line.Trim())")
+                                foreach ($postLine in $moduleHit.Context.PostContext) { $results.Details.Add("  iis.log:   $($postLine.Trim())") }
+                            }
+                        }
+                        $sharingHits = @(Select-String -LiteralPath $iisLog -Pattern 'LaunchCommand result=0x80070020' -ErrorAction SilentlyContinue)
+                        if ($sharingHits.Count -gt 0) {
+                            $results.Details.Add("  iis.log: $($sharingHits.Count) x 'LaunchCommand result=0x80070020' (ERROR_SHARING_VIOLATION on applicationHost.config) -- IIS servicing and ConfigMgr setup were writing that file at the same time. A rollback that cannot unregister a module still goes on to delete the module's DLL, which is how the registration outlives its image.")
+                        }
+                    }
                 }
                 else {
                     $results.Details.Add("OK: all $($globalModules.Count) IIS globalModule DLL(s) present on disk")
