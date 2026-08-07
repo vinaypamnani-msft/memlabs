@@ -8,6 +8,22 @@ param(
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
 
+# There was no top-level handler, so any unhandled terminating error below exited
+# the scheduled task silently and the host saw only 'last result 0x00000001'.
+# Log what killed it, then let it die -- the guest watchdog owns the restart /
+# JOBFAILURE decision, so do not pre-empt it by stamping a status here.
+trap {
+    try {
+        "ScriptWorkflow TERMINATING ERROR: $($_.Exception.Message)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+        "  Type  : $($_.Exception.GetType().FullName)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+        "  At    : $($_.InvocationInfo.ScriptName) line $($_.InvocationInfo.ScriptLineNumber)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+        "  Line  : $("$($_.InvocationInfo.Line)".Trim())" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+        "  Stack : $($_.ScriptStackTrace)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+    }
+    catch { }
+    break
+}
+
 # Banner: emit a clearly-delimited start-of-run marker into InstallCMLog.log
 # so multiple ScriptWorkflow invocations on the same VM (reruns, retries,
 # DSC re-applies) are easy to tell apart when scrolling the log.
@@ -1104,7 +1120,38 @@ if ($ThisVM.role -ne "CAS") {
 
                 $pool = Get-WebAppPoolState -Name $PoolName -ErrorAction SilentlyContinue
                 $poolState = if ($pool) { "$($pool.Value)" } else { 'not found' }
-                if ($poolState -ne 'Started') { return "UNHEALTHY|pool=$poolState" }
+                if ($poolState -ne 'Started') {
+                    # A stopped pool IS the fault, so capture the cause HERE. Phase 11 owns
+                    # the full WAS/5139 forensics but never runs if Phase 8 fails first, and
+                    # a bare 'pool=Stopped' says nothing about why WAS killed it.
+                    $wasWhy = @()
+                    try {
+                        $wasEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = (Get-Date).AddHours(-2) } -MaxEvents 200 -ErrorAction SilentlyContinue |
+                                Where-Object { $_.ProviderName -match 'WAS|W3SVC' -and $_.Message -match [regex]::Escape($PoolName) } |
+                                Select-Object -First 6)
+                        foreach ($ev in $wasEvents) {
+                            $errText = ''
+                            try {
+                                [xml]$evXml = $ev.ToXml()
+                                $hex = "$($evXml.Event.EventData.Binary)".Trim()
+                                if ($hex.Length -ge 8 -and $hex -match '^[0-9A-Fa-f]+$') {
+                                    $bytes = [byte[]]@(0, 2, 4, 6 | ForEach-Object { [Convert]::ToByte($hex.Substring($_, 2), 16) })
+                                    $hr = [BitConverter]::ToUInt32($bytes, 0)
+                                    $errText = " err=0x$($hr.ToString('X8'))"
+                                    if ((($hr -shr 16) -band 0x1FFF) -eq 7) {
+                                        $win32 = [int]($hr -band 0xFFFF)
+                                        $errText += " ($((New-Object System.ComponentModel.Win32Exception -ArgumentList $win32).Message))"
+                                    }
+                                }
+                            }
+                            catch { }
+                            $wasWhy += "$($ev.TimeCreated.ToString('HH:mm:ss')) id=$($ev.Id)$errText"
+                        }
+                    }
+                    catch { $wasWhy += "WAS event read failed: $($_.Exception.Message)" }
+                    $wasSummary = if ($wasWhy.Count) { "; WAS: $($wasWhy -join ' | ')" } else { '; no WAS/W3SVC events naming the pool in 2h' }
+                    return "UNHEALTHY|pool=$poolState$wasSummary"
+                }
 
                 $domain = (Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue).Domain
                 $fqdn = if ($domain) { "$env:COMPUTERNAME.$domain" } else { $env:COMPUTERNAME }
@@ -1191,6 +1238,11 @@ if ($ThisVM.role -ne "CAS") {
                             }
                         }
                         catch { Write-DscStatus "MP pre-push health: $($mp.vmName) listener reset threw: $($_.Exception.Message)" -Warning }
+                    }
+                    elseif ($healthAttempt -eq 10) {
+                        # Attempts 2..9 are deliberately quiet; the last one records what the
+                        # endpoint still looked like after the reset had 2+ minutes to hold.
+                        Write-DscStatus "MP pre-push health: $($mp.vmName) still $lastHealth on final attempt $healthAttempt" -Warning
                     }
                     Start-Sleep -Seconds 15
                 }
