@@ -1305,21 +1305,22 @@ function Stop-VM2 {
         # Clearing here avoids a 30s timeout trying stale credentials on
         # the next Get-VmSession call.
         #
-        # Evicting must NOT dispose. Stopping a VM breaks its VMBus, and a PSDirect
-        # job that completed moments ago has already been Remove-Job'd locally while
-        # its server-side pipeline is still tearing down. Disposing the runspace here
-        # lets that teardown's callback land on the disposed job on a threadpool
-        # thread -> unhandled PSObjectDisposedException that kills the whole phase
-        # child process. That is what killed PL-HOAGIE in Phase 2 (two probe jobs
-        # reaped at 11:02:57, TurnOff at 11:02:58, child dead with no stack). Every
-        # other caller already uses the -LeakSession contract; this one predated it.
-        # -LeakSession parks the session/runspace for later reaping, it is not a leak.
-        if ($global:ps_cache -and (Get-Command Remove-VmSessionFromCache -ErrorAction SilentlyContinue)) {
-            Remove-VmSessionFromCache -VmName $Name -LeakSession
-        }
-        elseif ($global:ps_cache) {
+        # Dispose, do NOT park. -LeakSession keeps the RemoteRunspace CONNECTED for
+        # up to 120s, so the power-off below would race a live VMBus channel; trying
+        # that produced "Exception stopping VM Object reference not set to an instance
+        # of an object" twice in one run and left the hard reset unrecovered. The
+        # disposed-job hazard that -LeakSession exists for is handled in the caller,
+        # by settling before power is touched -- not by holding the channel open.
+        if ($global:ps_cache) {
             foreach ($key in @($global:ps_cache.Keys)) {
-                if ($key -like "$Name-*") { $global:ps_cache.Remove($key) }
+                if ($key -like "$Name-*") {
+                    if (Get-Command Remove-VmSession -ErrorAction SilentlyContinue) {
+                        Remove-VmSession $global:ps_cache[$key]
+                    } else {
+                        try { Remove-PSSession $global:ps_cache[$key] -ErrorAction SilentlyContinue } catch {}
+                    }
+                    $global:ps_cache.Remove($key)
+                }
             }
         }
         if ($global:ps_lastGoodCred) {
@@ -1487,12 +1488,14 @@ function Restart-VM2Smart {
     # 1) Graceful guest-OS shutdown first, bounded so a hung guest can't block.
     $gracefulNote = ''
     if ($vm.State -eq 'Running') {
-        # This path calls Stop-VM directly, so it never reaches Stop-VM2's eviction --
-        # yet a graceful guest shutdown breaks the VMBus just as surely as a TurnOff.
-        # Evict (never dispose) before the transport dies. See Stop-VM2 for the crash.
-        if ($global:ps_cache -and (Get-Command Remove-VmSessionFromCache -ErrorAction SilentlyContinue)) {
-            try { Remove-VmSessionFromCache -VmName $Name -LeakSession } catch { }
-        }
+        # Let just-reaped PSDirect jobs finish tearing down server-side before power is
+        # touched. Remove-Job disposes the local job object while the in-guest pipeline
+        # is still unwinding (Common.ps1 documents the same race for synchronous reuse);
+        # break the VMBus inside that window and the teardown callback lands on a
+        # disposed job on a threadpool thread -> unhandled PSObjectDisposedException that
+        # kills the whole phase child process. PL-HOAGIE died that way in Phase 2 with
+        # exactly 1s between the $lcmCheck/$swCheck reap and the TurnOff.
+        Start-Sleep -Seconds 5
         Write-Log "${Name}: Restart ($Reason): attempting graceful shutdown (up to ${GracefulTimeoutSeconds}s)..." -LogOnly
         $gracefulStart = [DateTime]::UtcNow
         try {
