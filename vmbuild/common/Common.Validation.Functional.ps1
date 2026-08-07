@@ -4704,6 +4704,33 @@ function Test-SiteSystemFunctionality {
             }
             $results.Details.Add("OK: IIS service (W3SVC) is Running")
 
+            # Every globalModule DLL must exist or w3wp dies at startup with
+            # ERROR_MOD_NOT_FOUND -> 5x WAS 5139 -> 5002 disables the pool -> HTTP 503.
+            # Check this DIRECTLY rather than inferring it from pool state: an OnDemand
+            # pool that has not been asked for a worker yet still reports 'Started' while
+            # being fatally broken (PL-PATTYDP's 'SMS Windows Auth Management Point Pool'
+            # read Started the whole time validcfg.dll was missing).
+            try {
+                $ahcPath = Join-Path $env:windir 'system32\inetsrv\config\applicationHost.config'
+                $ahcXml = [xml](Get-Content $ahcPath -Raw -ErrorAction Stop)
+                $globalModules = @($ahcXml.configuration.'system.webServer'.globalModules.add)
+                $missingModules = @()
+                foreach ($globalModule in $globalModules) {
+                    $moduleImage = [Environment]::ExpandEnvironmentVariables("$($globalModule.image)")
+                    if ($moduleImage -and -not (Test-Path -LiteralPath $moduleImage)) {
+                        $missingModules += "$($globalModule.name) -> $moduleImage"
+                    }
+                }
+                if ($missingModules.Count -gt 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: $($missingModules.Count) of $($globalModules.Count) IIS globalModule DLL(s) are missing from disk, so every w3wp for this pool dies at startup: $($missingModules -join '; '). Repair with 'DISM /Online /Cleanup-Image /RestoreHealth' then 'sfc /scannow' on this VM.")
+                }
+                else {
+                    $results.Details.Add("OK: all $($globalModules.Count) IIS globalModule DLL(s) present on disk")
+                }
+            }
+            catch { $results.Details.Add("INFO: could not read applicationHost.config globalModules: $($_.Exception.Message)") }
+
             # Check SMS_MP IIS virtual directory exists via WebAdministration (retry up to 5 times, 60s apart)
             try {
                 Import-Module WebAdministration -ErrorAction Stop
