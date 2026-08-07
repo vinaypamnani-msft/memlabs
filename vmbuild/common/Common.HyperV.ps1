@@ -1512,14 +1512,16 @@ function Restart-VM2Smart {
 
     # 1) Graceful guest-OS shutdown first, bounded so a hung guest can't block.
     $gracefulNote = ''
+    $shutdownInProgress = $false
+    $uptimeBefore = $null
     if ($vm.State -eq 'Running') {
+        try { $uptimeBefore = $vm.Uptime } catch { }
         # Let just-reaped PSDirect jobs finish tearing down server-side before power is
         # touched. Remove-Job disposes the local job object while the in-guest pipeline
         # is still unwinding (Common.ps1 documents the same race for synchronous reuse);
         # break the VMBus inside that window and the teardown callback lands on a
         # disposed job on a threadpool thread -> unhandled PSObjectDisposedException that
-        # kills the whole phase child process. PL-HOAGIE died that way in Phase 2 with
-        # exactly 1s between the $lcmCheck/$swCheck reap and the TurnOff.
+        # kills the whole phase child process.
         Start-Sleep -Seconds 5
         Write-Log "${Name}: Restart ($Reason): attempting graceful shutdown (up to ${GracefulTimeoutSeconds}s)..." -LogOnly
         $gracefulStart = [DateTime]::UtcNow
@@ -1549,6 +1551,10 @@ function Restart-VM2Smart {
             if ($jobDetails.Count -gt 0) {
                 $jobError = ((@($jobDetails) | Select-Object -Unique) -join ' | ')
             }
+            # ERROR_SHUTDOWN_IN_PROGRESS. Hyper-V refuses the stop because the guest is
+            # ALREADY going down -- on the DSC reboot-pending path, that is the very reboot
+            # this call exists to force.
+            $shutdownInProgress = [bool]($jobError -match '0x8007045B|shutdown is in progress')
             $gracefulSeconds = [int][Math]::Floor(([DateTime]::UtcNow - $gracefulStart).TotalSeconds)
             $gracefulNote = " (job=$jobState after ${gracefulSeconds}s"
             if ($jobError) { $gracefulNote += "; error: $jobError" }
@@ -1564,6 +1570,33 @@ function Restart-VM2Smart {
 
     # 2) Did graceful bring it down? If not, escalate only when permitted.
     $vm = Get-VM2 -Name $Name -Fallback
+
+    # The guest is already restarting itself. Forcing power off now is exactly the
+    # fragile-window corruption this function's header warns about, it breaks the VMBus
+    # under in-flight PSDirect jobs (which kills the phase child process with a disposed-job
+    # exception), and it buys nothing -- the reboot we wanted is already happening. Wait.
+    if ($shutdownInProgress -and -not ($vm -and $vm.State -eq 'Off')) {
+        Write-Log "${Name}: Restart ($Reason): the guest is already shutting down$gracefulNote. Waiting for its own restart instead of forcing a power-off." -Warning
+        $rebootDeadline = (Get-Date).AddSeconds($GracefulTimeoutSeconds)
+        while ((Get-Date) -lt $rebootDeadline) {
+            Start-Sleep -Seconds 10
+            $vm = Get-VM2 -Name $Name -Fallback
+            if (-not $vm -or $vm.State -eq 'Off') { break }
+            # A guest-initiated RESTART never reports 'Off' in Hyper-V, so the uptime
+            # resetting is the only proof it actually came back around.
+            if ($uptimeBefore -and $vm.Uptime -lt $uptimeBefore) {
+                Write-Log "${Name}: Restart ($Reason): guest completed its own restart (uptime reset)." -LogOnly
+                if ($Stopwatch -and $Timespan) {
+                    Wait-ForHeartbeat -VmName $Name -Stopwatch $Stopwatch -Timespan $Timespan | Out-Null
+                }
+                else {
+                    Wait-ForHeartbeat -VmName $Name | Out-Null
+                }
+                return $true
+            }
+        }
+    }
+
     if (-not ($vm -and $vm.State -eq 'Off')) {
         if ($AllowTurnOff) {
             Write-Log "${Name}: Restart ($Reason): graceful shutdown did not complete$gracefulNote; escalating to a hard TurnOff (last resort)." -Warning
