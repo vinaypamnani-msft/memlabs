@@ -4708,8 +4708,26 @@ class InstallFeatureForSCCM {
         }
 
         if ($_Role -contains "Distribution point") {
-            # Web-Net-Ext/45: see the Management point block below.
-            foreach ($f in @("Web-WMI", "Web-Metabase", "Web-Net-Ext", "Web-Net-Ext45")) {
+            # This list is DistMgr's, not ours. CDistributionManager::ConfigureOSFeatures
+            # (distmgr.cpp) shells out to `dism.exe /online /norestart /enable-feature /ignorecheck`
+            # with exactly these whenever the SCF InstallIIS bit is set -- and it does NOT first
+            # check whether they are already present. Having them on before Phase 8 turns that into
+            # a no-op instead of a live CBS transaction rewriting applicationHost.config while CM
+            # is creating its own virtual directories in the same file.
+            # DISM name -> ServerManager name: IIS-WebServerRole/Web-Server,
+            # IIS-WebServer/Web-WebServer, IIS-CommonHttpFeatures/Web-Common-Http,
+            # IIS-StaticContent, IIS-DefaultDocument, IIS-DirectoryBrowsing, IIS-HttpErrors,
+            # IIS-HttpRedirect, IIS-WebServerManagementTools/Web-Mgmt-Tools,
+            # IIS-IIS6ManagementCompatibility/Web-Mgmt-Compat, IIS-Metabase, IIS-WindowsAuthentication,
+            # IIS-WMICompatibility/Web-WMI, IIS-ISAPIExtensions/Web-ISAPI-Ext,
+            # IIS-ManagementScriptingTools/Web-Scripting-Tools, MSRDC-Infrastructure/Rdc,
+            # IIS-ManagementService/Web-Mgmt-Service.
+            # Web-Net-Ext/45 are NOT in DistMgr's list -- see the Management point block for those.
+            foreach ($f in @("Web-Server", "Web-WebServer", "Web-Common-Http", "Web-Static-Content",
+                    "Web-Default-Doc", "Web-Dir-Browsing", "Web-Http-Errors", "Web-Http-Redirect",
+                    "Web-Mgmt-Tools", "Web-Mgmt-Compat", "Web-Metabase", "Web-Windows-Auth",
+                    "Web-WMI", "Web-ISAPI-Ext", "Web-Scripting-Tools", "Rdc", "Web-Mgmt-Service",
+                    "Web-Net-Ext", "Web-Net-Ext45")) {
                 [void]$features.Add($f)
             }
         }
