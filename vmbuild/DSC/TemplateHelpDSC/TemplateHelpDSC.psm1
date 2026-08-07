@@ -4463,9 +4463,11 @@ class InstallFeatureForSCCM {
         $featureList = @($this.GetRequiredFeatures())
         if ($featureList.Count -gt 0) {
             $featureState = @($this.GetFeatureState($featureList))
-            $pendingFeatures = @($featureState | Where-Object { ([string]$_.InstallState) -like "*Pending" } | ForEach-Object { $_.Name })
+            $pendingFeatures = @($featureState | Where-Object { ([string]$_.InstallState) -like "*Pending" } | ForEach-Object { "$($_.Name)=$($_.InstallState)" })
             if ($pendingFeatures.Count -gt 0) {
-                Write-Status "Windows Feature servicing is pending restart: $($pendingFeatures -join ', ')"
+                # Name the servicing flag that owes the reboot -- without it the log records
+                # only that SOMETHING is pending, and the originating operation is unknowable.
+                Write-Status "Windows Feature servicing is pending restart: $($pendingFeatures -join ', ') [reboot owed by: $($this.RebootPendingReasons())]"
                 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
                 return
@@ -4633,7 +4635,49 @@ class InstallFeatureForSCCM {
         # Join the role array deterministically so the filename is stable across runs
         # regardless of how the role[] is ordered/stringified.
         $roleTag = ($this.Role -join '-')
+        # The CA flags MUST be part of the name. Phase2DC declares two resources that both
+        # carry Role='DC' -- InstallFeature (InstallCA=$false) and InstallCAFeature
+        # (InstallCA=$true) -- with different required feature sets. Keyed on Role alone they
+        # share one file and overwrite each other's signature, so neither can ever take the
+        # fast path and every re-run pays two full Get-WindowsFeature calls (40.7s measured on
+        # a DC+CA). That is also what exposes a pending servicing state on a DC and nowhere else.
+        if ($this.IsOfflineRootCA) { $roleTag += '-RootCA' }
+        elseif ($this.InstallCA) { $roleTag += '-CA' }
         return "C:\staging\InstallFeatureStatus$roleTag$($this.Version).txt"
+    }
+
+    # Which servicing flag is holding the reboot. Get-WindowsFeature only reports that a
+    # feature is *Pending; this says why, so the write can be traced back to its source.
+    [string] RebootPendingReasons() {
+        $reasons = @()
+        try {
+            $cbs = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing'
+            foreach ($key in @('RebootPending', 'RebootInProgress', 'PackagesPending')) {
+                if (Test-Path -Path "$cbs\$key") { $reasons += "CBS\$key" }
+            }
+            if (Test-Path -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
+                $reasons += 'WindowsUpdate\RebootRequired'
+            }
+            $pfro = @((Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
+            if ($pfro.Count -gt 0) {
+                # Flat [source, dest, source, dest, ...]; an empty dest means delete-on-reboot.
+                $renames = 0
+                for ($i = 1; $i -lt $pfro.Count; $i += 2) {
+                    if ($pfro[$i]) { $renames++ }
+                }
+                $reasons += "PendingFileRename($renames renames of $([Math]::Ceiling($pfro.Count / 2)) ops)"
+            }
+            $activeName = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
+            $stagedName = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
+            if ($activeName -and $stagedName -and $activeName -ne $stagedName) {
+                $reasons += "ComputerRename($activeName -> $stagedName)"
+            }
+        }
+        catch {
+            return "probe failed: $($_.Exception.Message)"
+        }
+        if ($reasons.Count -eq 0) { return 'no reboot flag found' }
+        return ($reasons -join ' + ')
     }
 
     [string[]] GetRequiredFeatures() {
