@@ -12,6 +12,9 @@ $global:Phase10Job = {
     # Suppress CIM cmdlet progress in child process (see VM_Create comment).
     # Safe for ThreadJob too: Write-Progress2 -force overrides when needed.
     $Global:ProgressPreference = 'SilentlyContinue'
+    # Only the job can see its own startup cost; the host just sees silence after
+    # 'Created job N for VM X'.
+    $sbBootStart = [DateTime]::UtcNow
        
     try {
         $global:ScriptBlockName = "Phase10Job"
@@ -35,6 +38,7 @@ $global:Phase10Job = {
         }
         if ($domainNameForLogging) {
             $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+            Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] JobBootstrap completed in $([Math]::Round(([DateTime]::UtcNow - $sbBootStart).TotalSeconds,1)) seconds" -LogOnly
         }
 
         if ($FreshDeployOnly) {
@@ -121,6 +125,7 @@ $global:Phase11Job = {
     )
     # Suppress CIM cmdlet progress (see VM_Create comment).
     $Global:ProgressPreference = 'SilentlyContinue'
+    $sbBootStart = [DateTime]::UtcNow
 
     try {
         $global:ScriptBlockName = "Phase11Job"
@@ -141,6 +146,7 @@ $global:Phase11Job = {
         try { Flush-LogBuffer -All } catch { }
         $domainNameForLogging = $deployConfig.vmOptions.domainName
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+        Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] JobBootstrap completed in $([Math]::Round(([DateTime]::UtcNow - $sbBootStart).TotalSeconds,1)) seconds" -LogOnly
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting functional validation for role '$($currentItem.role)'" -LogOnly
 
@@ -365,6 +371,7 @@ $global:VM_Create = {
     # parent's terminal. Write-Progress2 -force overrides this for
     # our managed progress bars.
     $Global:ProgressPreference = 'SilentlyContinue'
+    $sbBootStart = [DateTime]::UtcNow
 
     try {
         $global:ScriptBlockName = "VM_Create"
@@ -401,6 +408,7 @@ $global:VM_Create = {
         try { Flush-LogBuffer -All } catch { }
         $domainNameForLogging = $deployConfig.vmOptions.domainName
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+        Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] JobBootstrap completed in $([Math]::Round(([DateTime]::UtcNow - $sbBootStart).TotalSeconds,1)) seconds" -LogOnly
 
         # VM Network Switch
         $isInternet = ($currentItem.role -eq "InternetClient") -or ($currentItem.role -eq "AADClient")
@@ -1792,6 +1800,7 @@ function Save-CMSetupLogsFromVm {
 $global:VM_Config = {
     # Suppress CIM cmdlet progress in child process (see VM_Create comment).
     $Global:ProgressPreference = 'SilentlyContinue'
+    $sbBootStart = [DateTime]::UtcNow
 
     try {
         $global:ScriptBlockName = "VM_Config"
@@ -1847,6 +1856,7 @@ $global:VM_Config = {
         try { Flush-LogBuffer -All } catch { }
         $domainNameForLogging = $deployConfig.vmOptions.domainName
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+        Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] JobBootstrap completed in $([Math]::Round(([DateTime]::UtcNow - $sbBootStart).TotalSeconds,1)) seconds" -LogOnly
 
         # Set domain name, depending on whether we need to create new VM or use existing one
         if ($currentItem.hidden -or ($currentItem.role -in ("DC", "BDC")) -or $Phase -gt 2) {
@@ -5631,6 +5641,58 @@ $global:VM_Config = {
                                 $lastStatusChangeTime = [DateTime]::UtcNow
                                 $lcmIdleSince = $null
                                 $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                        }
+                        elseif (($staleRestartCount -ge $staleRestartMax) -and ($dscResumeTotal -ge $dscResumeTotalMax) -and
+                            (($lcmPendingNoRebootSince -and $pendingMins -ge $rebootStuckMinutes) -or ($lcmIdleSince -and $idleMins -ge $staleRestartMinutes))) {
+                            # Every recovery avenue is spent -- $dscResumeTotalMax in-place resumes AND
+                            # $staleRestartMax VM restarts -- and the LCM is parked on the same config again.
+                            # Nothing else is going to run, so the rest of the phase budget is dead time we
+                            # spend politely polling a failure that cannot clear: Phase 6 ConfigureWSUS burned
+                            # ~5h per affected run re-applying a config that threw on the same missing
+                            # WebServer cert every cycle. A running ScriptWorkflow can legitimately park the
+                            # LCM (Phase 8/9), so re-arm and keep waiting in that case; otherwise name the
+                            # resource that died and fail the VM now.
+                            $swTaskRunning = $false
+                            $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
+                                $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
+                                if ($t -and $t.State -eq 'Running') { 'Running' } else { $null }
+                            } -SuppressLog
+                            if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput -eq 'Running') {
+                                $swTaskRunning = $true
+                            }
+                            if ($swTaskRunning) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: recovery budget exhausted ($dscResumeTotal resume(s), $staleRestartCount restart(s)) but ScriptWorkflow task is still running. Continuing to wait." -Warning
+                                if ($lcmPendingNoRebootSince) { $lcmPendingNoRebootSince = [DateTime]::UtcNow }
+                                if ($lcmIdleSince) { $lcmIdleSince = [DateTime]::UtcNow }
+                                $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                            else {
+                                $failedResource = ''
+                                $errProbe = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -ScriptBlock {
+                                    try {
+                                        $st = Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1
+                                        foreach ($r in @($st.ResourcesNotInDesiredState)) {
+                                            if (-not $r.Error) { continue }
+                                            $e = "" + $r.Error
+                                            try {
+                                                $o = $r.Error | ConvertFrom-Json -ErrorAction Stop
+                                                if ($o.Exception.Message) { $e = "" + $o.Exception.Message }
+                                            }
+                                            catch { }
+                                            return ("{0}: {1}" -f $r.ResourceId, ($e -replace '\s+', ' ').Trim())
+                                        }
+                                    }
+                                    catch { }
+                                    return $null
+                                } -SuppressLog
+                                if (-not $errProbe.ScriptBlockFailed -and $errProbe.ScriptBlockOutput) {
+                                    $detail = "" + $errProbe.ScriptBlockOutput
+                                    if ($detail.Length -gt 400) { $detail = $detail.Substring(0, 400) + '...' }
+                                    $failedResource = " Last DSC error -- $detail"
+                                }
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: DSC recovery exhausted after $dscResumeTotal in-place resume(s) and $staleRestartCount VM restart(s); the LCM is parked on the same configuration again ('$($currentStatus.Trim())').$failedResource Every remaining minute of the phase budget would re-apply the identical failure -- fix the error above and re-run Phase $Phase." -Failure -OutputStream
+                                break
                             }
                         }
                         elseif ($staleMins -ge $staleWarningMinutes -and ([DateTime]::UtcNow - $lastStaleWarningTime).TotalMinutes -ge 5) {

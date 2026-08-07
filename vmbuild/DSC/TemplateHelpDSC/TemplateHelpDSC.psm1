@@ -6385,6 +6385,7 @@ class ConfigureWSUS {
 
         if ($this.HTTPSUrl) {
             Write-Status "Configuring HTTPS for WSUS"
+            $enrollError = ""
             $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
             if (-not $cert) {
                 # The friendly-named WebServer cert is missing. This happens when
@@ -6431,6 +6432,13 @@ class ConfigureWSUS {
                 $fqdn = "$env:COMPUTERNAME.$env:USERDNSDOMAIN"
                 Write-Status "WebServer cert '$_FriendlyName' not present; enrolling ConfigMgrWebServerCertificate for $fqdn"
                 try {
+                    # Enroll rights on ConfigMgrWebServerCertificate come from the 'ConfigMgr IIS
+                    # Servers' AD group the DC put this computer in during Phase 2. Unlike Phase 8,
+                    # Phase 6 has no guaranteed reboot after that, so the machine's cached TGT can
+                    # still lack the group SID and the CA denies the request. Purge the SYSTEM LUID
+                    # (0x3e7) ticket cache first (mirrors Phase 8 PkiRefreshGroupToken).
+                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+                    try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
                     # Trigger autoenrollment + drop the template-cache timestamp so the
                     # template resolves (mirrors Phase 8 PkiRefreshTemplateCache).
                     try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
@@ -6451,12 +6459,16 @@ class ConfigureWSUS {
                     $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
                 }
                 catch {
+                    $enrollError = "$_"
                     Write-Status "Failed to enroll WebServer cert (template ConfigMgrWebServerCertificate): $_"
                 }
             }
             if (-not $cert) {
-                Write-Status "Could not find cert with friendly Name $_FriendlyName"
-                throw "Could not find cert with friendly Name $_FriendlyName"
+                # Every resume re-runs Set() from the top and dies here again, so the status
+                # text is all the operator gets -- carry the enrollment error in it.
+                $why = if ($enrollError) { " Enrollment failed: $enrollError" } else { "" }
+                Write-Status "Could not find cert with friendly Name $_FriendlyName.$why"
+                throw "Could not find cert with friendly Name $_FriendlyName.$why"
             }
             Write-Status "Removing web binding for port 8531"
             (Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https") | Remove-WebBinding
