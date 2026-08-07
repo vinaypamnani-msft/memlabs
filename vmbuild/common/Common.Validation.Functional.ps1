@@ -7856,32 +7856,29 @@ function Test-DomainMemberFunctionality {
                 }
                 Start-Sleep -Seconds 10
             }
-            # Wait up to 5 minutes for ccmsetup to finish
+            # Poll for the OUTCOME (CcmExec Running), not for the ccmsetup PROCESS. The old
+            # loop broke as soon as ccmsetup was not running -- which is equally true BEFORE
+            # the retry task has spawned it, so it bailed almost immediately: PL-SOURDOUGH was
+            # declared failed ~66s in while client.msi was still at CcmSetObjectSecurity.
+            # Same overall budget, correct exit condition.
             $waitStart = Get-Date
-            for ($w = 0; $w -lt 30; $w++) {
+            $waitBudget = 300
+            while (((Get-Date) - $waitStart).TotalSeconds -lt $waitBudget) {
+                $svc = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -eq 'Running') { break }
+                if ($svc) { try { Start-Service -Name 'CcmExec' -ErrorAction SilentlyContinue } catch {} }
                 $elapsed = [int]((Get-Date) - $waitStart).TotalSeconds
+                $busy = @(Get-Process -Name 'ccmsetup', 'msiexec' -ErrorAction SilentlyContinue).Count
                 $tail = & $tailCcmLine
-                $msg = "ccmsetup retry: waiting for ccmsetup to finish (${elapsed}s)"
+                $msg = "ccmsetup retry: waiting for CcmExec (${elapsed}s, $busy setup process(es) running)"
                 if ($tail) { $msg += " -- last log: $tail" }
                 Write-Progress -Activity $progressActivity -Status $msg
                 Start-Sleep -Seconds 10
-                if (-not (Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue)) { break }
             }
-            Start-Sleep -Seconds 10
             $svc = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
             if ($svc -and $svc.Status -eq 'Running') {
-                $results.Details.Add("OK: CcmExec is Running after ccmsetup retry")
+                $results.Details.Add("OK: CcmExec is Running after ccmsetup retry ($([int]((Get-Date) - $waitStart).TotalSeconds)s)")
                 return $true
-            }
-            # Still not running — try Start-Service in case the service was just installed
-            if ($svc) {
-                try { Start-Service -Name 'CcmExec' -ErrorAction SilentlyContinue } catch {}
-                Start-Sleep -Seconds 10
-                $svc = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
-                if ($svc -and $svc.Status -eq 'Running') {
-                    $results.Details.Add("OK: CcmExec is Running after ccmsetup retry + manual start")
-                    return $true
-                }
             }
             return $false
         }
@@ -8061,20 +8058,38 @@ function Test-DomainMemberFunctionality {
                         $results.Details.Add("WARN: ccmsetup succeeded but CcmExec still not Running")
                     }
                 }
-                elseif ($exitLine) {
+                # Hold the failure detail until the retry has run. ccmsetup.log is CUMULATIVE
+                # and never rolls, so this line is routinely a failure from hours ago that the
+                # retry then fixes -- emitting it as a live WARN before retrying (and again
+                # after) made an already-repaired MP look broken for the rest of the morning.
+                $pendingFailure = New-Object System.Collections.Generic.List[string]
+                if ($exitLine -and -not $isSuccess) {
+                    $failAge = ''
+                    $stamp = [regex]::Match($exitLine, 'time="(?<h>\d\d:\d\d:\d\d)[^"]*"\s+date="(?<d>[\d\-]+)"')
+                    if ($stamp.Success) {
+                        $parsed = [datetime]::MinValue
+                        if ([datetime]::TryParse("$($stamp.Groups['d'].Value) $($stamp.Groups['h'].Value)", [ref]$parsed)) {
+                            $failAge = " [logged $([int]((Get-Date) - $parsed).TotalMinutes) min ago]"
+                        }
+                    }
                     $meaning = & $decodeCcmError $exitLine
-                    if ($meaning) {
-                        $results.Details.Add("WARN: CcmExec not installed; ccmsetup failed: $($exitLine.Trim()) -- $meaning")
-                    }
-                    else {
-                        $results.Details.Add("WARN: CcmExec not installed; ccmsetup failed: $($exitLine.Trim())")
-                    }
-                    foreach ($d in (& $grabCcmDiag 'C:\Windows\ccmsetup\Logs\ccmsetup.log')) { $results.Details.Add("  ccmsetup.log: $d") }
+                    $headline = "ccmsetup failed: $($exitLine.Trim())$failAge"
+                    if ($meaning) { $headline += " -- $meaning" }
+                    $pendingFailure.Add($headline)
+                    foreach ($d in (& $grabCcmDiag 'C:\Windows\ccmsetup\Logs\ccmsetup.log')) { $pendingFailure.Add("  ccmsetup.log: $d") }
+                }
+                elseif ($isSuccess) {
+                    $pendingFailure.Add("ccmsetup reported success but CcmExec did not start")
                 }
                 else {
-                    $results.Details.Add("WARN: CcmExec not installed; ccmsetup.log exists but no success/failure line found")
+                    $pendingFailure.Add("ccmsetup.log exists but no success/failure line found")
                 }
-                if (-not (& $retryCcmSetup $results)) {
+                if (& $retryCcmSetup $results) {
+                    $results.Details.Add("INFO: ccmsetup.log also records an earlier failure ($($pendingFailure[0])); the log is cumulative so that entry is historical, not current.")
+                }
+                else {
+                    $results.Details.Add("WARN: CcmExec not installed; $($pendingFailure[0])")
+                    for ($pf = 1; $pf -lt $pendingFailure.Count; $pf++) { $results.Details.Add($pendingFailure[$pf]) }
                     $results.Details.Add("WARN: CcmExec still not installed after ccmsetup retry")
                 }
             }
