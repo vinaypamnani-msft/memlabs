@@ -110,6 +110,9 @@ else {
     foreach ($file in $files) {
         $parseErrors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$parseErrors)
+        # A broken file still yields a PARTIAL ast: assignments past the error are
+        # missing, so every read of those names becomes a false "typo" finding.
+        if ($parseErrors.Count -gt 0) { continue }
         $sources += [pscustomobject]@{ Name = $file.FullName; Ast = $ast }
     }
 }
