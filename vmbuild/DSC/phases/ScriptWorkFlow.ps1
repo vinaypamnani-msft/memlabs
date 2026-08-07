@@ -925,12 +925,17 @@ Write-DscStatus "Started InstallProvider.ps1 job (after perfloading)"
   $installProviderCount = @($deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true }).Count
   $installProviderTimeout = 300 + (2700 * $installProviderCount)
   Write-DscStatus "Waiting for InstallProvider.ps1 job to complete (up to $([int]($installProviderTimeout / 60)) min)"
+  $installProviderWaitStart = Get-Date
   try {
       if (Wait-Job -Job $installProviderJob -Timeout $installProviderTimeout) {
           # Write-DscStatus writes status/log to disk from the job runspace, so the
           # pipeline output isn't needed here; discard it. A terminating failure in
           # the job still rethrows on Receive-Job and is caught below.
           Receive-Job -Job $installProviderJob | Out-Null
+          # Close the "Waiting ..." line out. Without it the last thing in the log is
+          # an open-ended wait with a 5-min cap, which reads as a stall no matter how
+          # fast the join actually was.
+          Write-DscStatus "InstallProvider.ps1 job finished (state=$($installProviderJob.State)) in $([math]::Round(((Get-Date) - $installProviderWaitStart).TotalSeconds, 1))s"
       }
       else {
           Write-DscStatus "InstallProvider.ps1 job did not finish within $installProviderTimeout s (state=$($installProviderJob.State)) -- abandoning it and continuing." -Warning

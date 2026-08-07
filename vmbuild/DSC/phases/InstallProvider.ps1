@@ -14,6 +14,18 @@ $NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 
+# Announce the workload up front. Without this the no-op path (no VM flagged
+# InstallSMSProv, i.e. every re-run of a config that has no additional provider)
+# emitted ZERO lines, so "job ran and did nothing in 0.4s" was indistinguishable
+# from "job never started" or "job hung" in ConfigMgrSetup.log.
+$installProvStart = Get-Date
+$provList = @($deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true })
+if ($provList.Count -eq 0) {
+    Write-DscStatus "[InstallProv] Nothing to do: no VM in this config has InstallSMSProv=true"
+    return
+}
+Write-DscStatus "[InstallProv] Starting: $($provList.Count) VM(s) flagged InstallSMSProv ($(($provList.vmName) -join ', '))"
+
 # bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
 #$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
 
@@ -47,7 +59,7 @@ if (-not (Test-Path $setupWPF)) {
     return $false
 }
 
-foreach ($prov in $deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true } ) {
+foreach ($prov in $provList) {
     $machine = "$($prov.VMname).$DomainFullName"
     Write-DscStatus "[InstallProv] Installing provider on $machine"
     $Install = $true
@@ -127,4 +139,6 @@ foreach ($prov in $deployConfig.virtualMachines | Where-Object { $_.InstallSMSPr
     }
 
 }
+
+Write-DscStatus "[InstallProv] Finished: $($provList.Count) provider VM(s) in $([math]::Round(((Get-Date) - $installProvStart).TotalSeconds, 1))s"
 
