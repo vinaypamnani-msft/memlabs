@@ -1804,6 +1804,7 @@ $global:VM_Config = {
         $ConfigurationData = $using:ConfigurationData
         $multiNodeDsc = $using:multiNodeDsc
         $reservation = $using:reservation
+        $phaseDhcpHint = $using:phaseDhcpHint
         $alreadyCopiedDSC = $using:alreadyCopiedDSC
         $phaseRunGuid = $using:phaseRunGuid
         $quietWUThisRun = $using:quietWUThisRun
@@ -2461,17 +2462,35 @@ $global:VM_Config = {
                 $resolvedIP = $null
                 $ipSource = 'none'
                 $reservationIP = $null
+                $vmMac = $null
+                $scopeId = if ($currentItem.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network } }
 
                 # 1. DHCP reservation — most authoritative.
                 # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
                 try {
-                    $vmMac = Get-VMMacIsolated -VmName $currentItem.vmName -ExcludeCluster
-                    if ($vmMac) {
-                        $scopeId = if ($currentItem.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network } }
-                        $reservationIP = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
-                        if ($reservationIP) {
+                    if ($phaseDhcpHint) {
+                        if ($phaseDhcpHint.Mac) {
+                            $vmMac = [string]$phaseDhcpHint.Mac
+                        }
+                        if ($phaseDhcpHint.ScopeId -eq $scopeId -and $phaseDhcpHint.ReservationIP) {
+                            $reservationIP = [string]$phaseDhcpHint.ReservationIP
                             $resolvedIP = $reservationIP
-                            $ipSource = 'DHCP'
+                            $ipSource = 'DHCP(cache)'
+                        }
+                    }
+
+                    # AssignedIP is preallocated in Phase 1 and is stable across reruns.
+                    # If we already have it, skip the expensive isolated DHCP lookup.
+                    if (-not $resolvedIP -and -not $currentItem.AssignedIP) {
+                        if (-not $vmMac) {
+                            $vmMac = Get-VMMacIsolated -VmName $currentItem.vmName -ExcludeCluster
+                        }
+                        if ($vmMac) {
+                            $reservationIP = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
+                            if ($reservationIP) {
+                                $resolvedIP = $reservationIP
+                                $ipSource = 'DHCP'
+                            }
                         }
                     }
                 }
@@ -2543,7 +2562,14 @@ $global:VM_Config = {
                         else {
                             # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
                             try {
-                                $vmMac = Get-VMMacIsolated -VmName $currentItem.vmName
+                                if (-not $vmMac) {
+                                    if ($phaseDhcpHint -and $phaseDhcpHint.Mac) {
+                                        $vmMac = [string]$phaseDhcpHint.Mac
+                                    }
+                                    else {
+                                        $vmMac = Get-VMMacIsolated -VmName $currentItem.vmName
+                                    }
+                                }
                                 if ($vmMac) {
                                     if ($currentItem.role -in "InternetClient", "AADClient") {
                                         $realnetwork = "172.31.250.0"

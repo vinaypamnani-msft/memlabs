@@ -2008,6 +2008,38 @@ function Start-PhaseJobs {
         $vmDispatchList = @($phase2Tagged | Sort-Object Pri, Idx | ForEach-Object { $_.Vm })
     }
 
+    # Phase 2/3 hot path: seed one host-side snapshot of VM MACs and DHCP
+    # reservations, then hand each VM_Config job a tiny per-VM hint object.
+    # This avoids spawning isolated Hyper-V/DHCP runspaces per VM just to find
+    # the same lookup data repeatedly.
+    $phaseDhcpHintEnabled = ($Phase -in @(2, 3) -and -not $WhatIf)
+    $phaseVmMacMap = @{}
+    $phaseDhcpReservationMap = @{}
+    if ($phaseDhcpHintEnabled) {
+        try {
+            $phaseVmMacMap = Get-AllVMMacsIsolated -ExcludeCluster
+            Write-Log "[Phase $Phase] Pre-cached VM MACs: $($phaseVmMacMap.Count)" -LogOnly
+        }
+        catch {
+            Write-Log "[Phase $Phase] Could not pre-cache VM MACs; VM jobs will fall back to per-VM lookup. $_" -LogOnly
+            $phaseVmMacMap = @{}
+        }
+
+        try {
+            foreach ($r in (Get-AllDHCPReservationsIsolated)) {
+                $normMac = (([string]$r.Mac) -replace '[-:]', '').ToUpper()
+                if ($normMac) {
+                    $phaseDhcpReservationMap["$($r.ScopeId)|$normMac"] = [string]$r.Ip
+                }
+            }
+            Write-Log "[Phase $Phase] Pre-cached DHCP reservations: $($phaseDhcpReservationMap.Count)" -LogOnly
+        }
+        catch {
+            Write-Log "[Phase $Phase] Could not pre-cache DHCP reservations; VM jobs will fall back to per-VM lookup. $_" -LogOnly
+            $phaseDhcpReservationMap = @{}
+        }
+    }
+
     foreach ($currentItem in $vmDispatchList) {
 
         $global:preparePhasePercent++
@@ -2227,6 +2259,40 @@ function Start-PhaseJobs {
             # ... has not been set in the local session").
             [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Read in $global:VM_Config via $using:reservation')]
             $reservation = $null
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Read in $global:VM_Config via $using:phaseDhcpHint')]
+            $phaseDhcpHint = $null
+
+            if ($phaseDhcpHintEnabled -and -not (Test-VmIsLinux -Vm $currentItem) -and $currentItem.role -ne 'OSDClient') {
+                $hintScopeId = if ($currentItem.role -in @('InternetClient', 'AADClient')) {
+                    '172.31.250.0'
+                }
+                elseif ($currentItem.network) {
+                    [string]$currentItem.network
+                }
+                else {
+                    [string]$deployConfig.vmOptions.network
+                }
+
+                $hintMac = $null
+                if ($phaseVmMacMap.ContainsKey($currentItem.vmName)) {
+                    $hintMac = (([string]$phaseVmMacMap[$currentItem.vmName]) -replace '[-:]', '').ToUpper()
+                }
+
+                $hintReservationIp = $null
+                if ($hintMac) {
+                    $hintKey = "$hintScopeId|$hintMac"
+                    if ($phaseDhcpReservationMap.ContainsKey($hintKey)) {
+                        $hintReservationIp = [string]$phaseDhcpReservationMap[$hintKey]
+                    }
+                }
+
+                $phaseDhcpHint = [pscustomobject]@{
+                    ScopeId       = $hintScopeId
+                    Mac           = $hintMac
+                    ReservationIP = $hintReservationIp
+                }
+            }
+
             #Phase 5 is for SQL Always on.. So if we are in this phase, it is a SQLAO node
             $alreadyCopiedDSC = $false
             if (-not $global:DSC_Copied) {
