@@ -27,6 +27,7 @@
 $script:MemlabsCacheTier1Keys = @('DotNet', 'SSMS', 'ODBC', 'OleDB', 'SQLClient', 'VCredist', 'VCredistX86', 'ReportBuilder', 'PMPC')
 $script:MemlabsCacheVolumeLabel = 'MEMLABSCACHE'
 $script:MemlabsDscVolumeLabel = 'MEMLABSDSC'
+$script:MemlabsToolsVolumeLabel = 'MEMLABSTOOLS'
 
 function Test-MemlabsDownloadCacheEnabled {
     # Kill switch.
@@ -764,8 +765,8 @@ function Dismount-AllManagedIsosFromVm {
     # Guaranteed, idempotent end-of-build teardown of EVERY memlabs-managed ISO
     # from one VM's DVD drives. "Managed" = any mounted ISO whose file lives under
     # our azureFiles tree (OS install / SQL / CM media) PLUS the transient
-    # cache-<hash>.iso and dsc-<hash>.iso. Ejects media only (leaves the empty DVD
-    # drive); touches nothing that isn't ours; never throws.
+    # cache-<hash>.iso, dsc-<hash>.iso, and tools-<hash>.iso. Ejects media only
+    # (leaves the empty DVD drive); touches nothing that isn't ours; never throws.
     #
     # This is the safety net that makes the whole ISO lifecycle reliable regardless
     # of which per-phase eject ran. The per-phase ejects (Dismount-SqlIsoForPhase,
@@ -791,7 +792,7 @@ function Dismount-AllManagedIsosFromVm {
             if (-not $d.Path) { continue }
             $name = [System.IO.Path]::GetFileName($d.Path)
             $isManaged = $false
-            if ($name -like 'cache-*.iso' -or $name -like 'dsc-*.iso') {
+            if ($name -like 'cache-*.iso' -or $name -like 'dsc-*.iso' -or $name -like 'tools-*.iso') {
                 $isManaged = $true
             }
             elseif ($azureRoot) {
@@ -966,6 +967,122 @@ function Remove-StaleMemlabsDscIso {
             if ((New-TimeSpan -Start $iso.LastWriteTime -End (Get-Date)).TotalDays -lt 1) { continue }
             Remove-Item $iso.FullName -Force -ErrorAction SilentlyContinue
             Write-Log "DownloadCache: evicted stale DSC ISO $($iso.Name)." -LogOnly
+        }
+    }
+    catch {}
+}
+
+function Get-MemlabsToolsIsoForBundles {
+    # Build one immutable ISO containing the already-created common/role tools
+    # zip bundles. The bundle hash is the content address and is also written
+    # inside the ISO so the guest can verify it mounted the expected payload.
+    # Returns $null on any failure; Copy-ToolToVM then uses its direct-copy path.
+    param(
+        [string[]]$ZipPaths,
+        [string]$BundleHash
+    )
+
+    try {
+        $bundles = @($ZipPaths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)
+        if ($bundles.Count -eq 0 -or [string]::IsNullOrWhiteSpace($BundleHash)) { return $null }
+
+        $hash = $BundleHash.ToLowerInvariant().Substring(0, [Math]::Min(12, $BundleHash.Length))
+        $isoPath = Join-Path (Get-MemlabsCacheIsoDir) "tools-$hash.iso"
+        if (Test-Path $isoPath) { return $isoPath }
+
+        $mutex = [System.Threading.Mutex]::new($false, "Global\MemlabsToolsIsoBuild-$hash")
+        $lockTaken = $false
+        try {
+            try { $lockTaken = $mutex.WaitOne(600000) }
+            catch [System.Threading.AbandonedMutexException] { $lockTaken = $true }
+            if (-not $lockTaken) { throw 'Timed out waiting for the tools ISO build lock' }
+            if (Test-Path $isoPath) { return $isoPath }
+
+            $stage = Join-Path $Common.TempPath "tools-iso-$hash-$PID"
+            $tmpIso = "$isoPath.$PID.tmp"
+            try {
+                if (Test-Path $stage) { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+                if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
+                New-Item -Path $stage -ItemType Directory -Force | Out-Null
+
+                $bundleNames = @()
+                foreach ($bundle in $bundles) {
+                    $leaf = Split-Path $bundle -Leaf
+                    $dest = Join-Path $stage $leaf
+                    try {
+                        New-Item -Path $dest -ItemType HardLink -Target $bundle -ErrorAction Stop | Out-Null
+                    }
+                    catch {
+                        Copy-Item -Path $bundle -Destination $dest -Force -ErrorAction Stop
+                    }
+                    $bundleNames += $leaf
+                }
+
+                $BundleHash | Set-Content -Path (Join-Path $stage 'Tools.Bundle.md5') -Encoding ascii -Force
+                $bundleNames | Set-Content -Path (Join-Path $stage 'Tools.Bundles.txt') -Encoding ascii -Force
+
+                New-NoCloudSeedIsoWithImapi -SourceDir $stage -OutputIsoPath $tmpIso -VolumeLabel $script:MemlabsToolsVolumeLabel
+                if (-not (Test-Path $tmpIso)) { throw "Tools ISO build produced no output for $isoPath" }
+                Move-Item -Path $tmpIso -Destination $isoPath -Force
+                Write-Log "DownloadCache: built $([System.IO.Path]::GetFileName($isoPath)) ($($bundles.Count) tools bundle(s))." -LogOnly
+            }
+            finally {
+                if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
+                if (Test-Path $stage) { Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+        }
+        finally {
+            if ($lockTaken) { $mutex.ReleaseMutex() }
+            $mutex.Dispose()
+        }
+        return $isoPath
+    }
+    catch {
+        Write-Log "DownloadCache: Get-MemlabsToolsIsoForBundles failed: $($_.Exception.Message). Caller will direct-copy tools." -Warning
+        return $null
+    }
+}
+
+function Mount-MemlabsToolsIsoToVm {
+    param([string]$VmName, [string]$IsoPath)
+    return (Mount-IsoOnVm -VmName $VmName -IsoPath $IsoPath -Context 'tools')
+}
+
+function Dismount-MemlabsToolsIsoFromVm {
+    # Eject only tools-*.iso and invalidate the pre-eject optical session view.
+    param([string]$VmName)
+    $changed = $false
+    try {
+        foreach ($drive in @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue)) {
+            if ($drive.Path -and ([System.IO.Path]::GetFileName($drive.Path)) -like 'tools-*.iso') {
+                Set-VMDvdDrive -VMName $VmName -ControllerNumber $drive.ControllerNumber -ControllerLocation $drive.ControllerLocation -Path $null -ErrorAction SilentlyContinue
+                $changed = $true
+            }
+        }
+    }
+    catch {}
+    if ($changed) { Invoke-VmSessionRefreshAfterMediaChange -VmName $VmName }
+}
+
+function Remove-StaleMemlabsToolsIso {
+    # Keep the newest tools ISO and any mounted ISO. Retire older content only
+    # after a day so concurrent and recently interrupted deployments can retry.
+    try {
+        $all = @(Get-ChildItem -Path (Get-MemlabsCacheIsoDir) -Filter 'tools-*.iso' -File -ErrorAction SilentlyContinue)
+        if ($all.Count -le 1) { return }
+
+        $mounted = @{}
+        foreach ($drive in (Get-VM | Get-VMDvdDrive -ErrorAction SilentlyContinue)) {
+            if ($drive.Path) { $mounted[$drive.Path.ToLowerInvariant()] = $true }
+        }
+
+        $newest = $all | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        foreach ($iso in $all) {
+            if ($iso.FullName -eq $newest.FullName) { continue }
+            if ($mounted.ContainsKey($iso.FullName.ToLowerInvariant())) { continue }
+            if ((New-TimeSpan -Start $iso.LastWriteTime -End (Get-Date)).TotalDays -lt 1) { continue }
+            Remove-Item $iso.FullName -Force -ErrorAction SilentlyContinue
+            Write-Log "DownloadCache: evicted stale tools ISO $($iso.Name)." -LogOnly
         }
     }
     catch {}

@@ -2628,31 +2628,22 @@ $global:VM_Config = {
             if (-not $injectedOk) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning -OutputStream
 
-                # The VM may be wedged (PSDirect OutOfMemoryException, "remote session might have
-                # ended", repeated Get-VmSession failures all indicate the guest is dead). Probe
-                # the session; if it's gone, hard reset and retry Install-Tools once before we
-                # fall through to DSC module detection, which would otherwise also fail.
-                $probeSession = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
-                if (-not $probeSession) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No session after Install-Tools failure. VM appears wedged; performing hard reset." -Warning -OutputStream
-                    Write-Progress2 $Activity -Status "VM unresponsive after Install-Tools, hard resetting" -percentcomplete 12 -force
-                    try { Stop-VM2 -Name $currentItem.vmName -TurnOff } catch { Stop-VM2 -Name $currentItem.vmName }
-                    Start-Sleep -Seconds 10
-                    Start-VM2 -Name $currentItem.vmName
-                    Start-Sleep -Seconds 20
-
-                    $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest
-                    if (-not $connected) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): VM did not come back after hard reset. Exiting." -Failure -OutputStream
-                        return
-                    }
-
-                    Write-Progress2 $Activity -Status "Retrying tool injection after reboot" -percentcomplete 13 -force
+                # Use the shared readiness/recovery ladder instead of treating every
+                # session miss as a dead guest. It waits through ordinary reboots and
+                # only power-cycles on NoContact heartbeat or repeated ChannelBroken
+                # evidence; healthy-heartbeat authentication failures are left intact.
+                Write-Progress2 $Activity -Status "Waiting for guarded guest recovery before retrying tools" -percentcomplete 12 -force
+                $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest -TimeoutMinutes 10
+                if ($connected) {
+                    Write-Progress2 $Activity -Status "Retrying tool injection after guest recovery" -percentcomplete 13 -force
                     $injected = Install-Tools -VmName $currentItem.vmName -ShowProgress -SkipAutoDeploy:$SkipAutoDeploy
                     $injectedOk = ((@($injected) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true)
                     if (-not $injectedOk) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection still failing after hard reset." -Warning -OutputStream
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection still failing after guarded guest recovery." -Warning -OutputStream
                     }
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Guest did not become ready during the guarded 10-minute tool recovery window." -Warning -OutputStream
                 }
                 if (-not $injectedOk) {
                     # Surface it to the phase tally. Tools are a hard dependency for later

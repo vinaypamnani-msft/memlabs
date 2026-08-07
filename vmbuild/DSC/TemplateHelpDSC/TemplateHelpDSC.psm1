@@ -2735,6 +2735,30 @@ class DownloadFile {
     }
 }
 
+function Test-DomainControllerReady {
+    param(
+        [Parameter(Mandatory)]
+        [string] $DCName,
+        [Parameter(Mandatory)]
+        [string] $DomainName
+    )
+
+    try {
+        $nltest = Join-Path $env:SystemRoot 'System32\nltest.exe'
+        if (-not (Test-Path $nltest)) { return $false }
+
+        # /PDC makes this stronger than ping or an open LDAP socket: Netlogon
+        # must be ready and DC Locator must be able to discover the domain PDC.
+        $null = & $nltest "/dsgetdc:$DomainName" /force /pdc 2>&1
+        if ($LASTEXITCODE -eq 0) { return $true }
+        Write-Verbose "DC Locator cannot find PDC '$DCName' for '$DomainName'."
+    }
+    catch {
+        Write-Verbose "DC Locator readiness check failed for '$DCName': $($_.Exception.Message)"
+    }
+    return $false
+}
+
 [DscResource()]
 class WaitForDomainReady {
     [DscProperty(key)]
@@ -2756,34 +2780,24 @@ class WaitForDomainReady {
         $_DCName = $this.DCName
         $_DomainName = $this.DomainName
         $_WaitSeconds = $this.WaitSeconds
-        $_DCFullName = "$_DCName.$_DomainName"
         Write-Verbose "Domain Controller is: $_DCName"
-        $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
-        while (!$testconnection) {
-            Write-Status "Waiting for Domain ready. Trying to ping $_DCName, will try again in $_WaitSeconds seconds..."
+        $domainReady = Test-DomainControllerReady -DCName $_DCName -DomainName $_DomainName
+        while (-not $domainReady) {
+            Write-Status "Waiting for domain services. DC Locator cannot find PDC $_DCName yet; retrying in $_WaitSeconds seconds..."
             Clear-DnsClientCache -ErrorAction SilentlyContinue
-            ipconfig /renew
+            ipconfig /renew 2>&1 | Out-Null
             Register-DnsClient -ErrorAction SilentlyContinue
             Start-Sleep -Seconds $_WaitSeconds
-            $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
+            $domainReady = Test-DomainControllerReady -DCName $_DCName -DomainName $_DomainName
         }
-        Write-Status "Domain is ready now."
+        Write-Status "Domain services are ready now."
     }
 
     [bool] Test() {
         $_DCName = $this.DCName
         $_DomainName = $this.DomainName
-        $_DCFullName = "$_DCName.$_DomainName"
-        Write-Verbose "Domain computer is: $_DCFullName"
-        $testconnection = test-connection -ComputerName $_DCFullName -ErrorAction Ignore
-
-        if (!$testconnection) {
-            ipconfig /renew
-            return $false
-        }
-
-        Register-DnsClient -ErrorAction SilentlyContinue
-        return $true
+        Write-Verbose "Testing domain services on PDC: $_DCName"
+        return (Test-DomainControllerReady -DCName $_DCName -DomainName $_DomainName)
     }
 
     [WaitForDomainReady] Get() {
@@ -3935,14 +3949,13 @@ class TestDomainJoin {
     # to AD with a broken secure channel.
     #
     # Self-heal strategy:
-    #   0. Verify DNS + DC connectivity first. If the DC is unreachable, the
-    #      secure channel test is meaningless — fix DNS and retry before
-    #      anything destructive.
+    #   0. Require DC Locator to discover the PDC first. Ping and an open LDAP
+    #      socket are insufficient while Netlogon/AD is still starting.
     #   1. Test-ComputerSecureChannel -Repair (resets password, no reboot).
     #   2. Reset-ComputerMachinePassword against the named DC.
-    #   3. Only as absolute last resort: Remove-Computer + reboot.
-    #      This is destructive (breaks SPNs, Kerberos, cluster membership)
-    #      and should almost never be needed.
+    #   3. Reconfirm that the PDC stays ready and the secure channel stays broken.
+    #   4. Only then, perform a full unjoin + reboot; JoinDomain re-adds the
+    #      computer on the next DSC pass.
     [DscProperty(Key)]
     [string] $DomainName
 
@@ -3982,60 +3995,33 @@ class TestDomainJoin {
         $_DCName = $this.DCName
         $_credential = $this.Credential
 
-        # Step 0: Verify we can actually reach the DC before attempting any
-        # repair. A broken secure channel test when DNS is wrong or the DC
-        # is unreachable is a false positive — the machine account is fine,
-        # it's just a connectivity issue. Doing Remove-Computer in that
-        # state would be catastrophically wrong.
-        $dcReachable = $false
-        Write-Status "Verifying DC connectivity before secure channel repair."
-        for ($attempt = 1; $attempt -le 6; $attempt++) {
-            # Try DNS flush + re-register on each attempt
+        # Step 0: Require the PDC's Netlogon/DC Locator path before attempting
+        # repair. A DC can answer ping and accept TCP 389 before it is ready to
+        # authenticate machine accounts.
+        $dcReady = $false
+        Write-Status "Verifying PDC readiness before secure channel repair."
+        for ($attempt = 1; $attempt -le 40; $attempt++) {
             try {
                 ipconfig /flushdns 2>&1 | Out-Null
                 ipconfig /registerdns 2>&1 | Out-Null
             } catch {}
 
-            # Check if DC resolves and is reachable on LDAP (389)
-            try {
-                $dcIP = [System.Net.Dns]::GetHostAddresses($_DCName) |
-                    Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
-                    Select-Object -First 1
-                if ($dcIP) {
-                    $tcp = New-Object System.Net.Sockets.TcpClient
-                    try {
-                        $tcp.Connect($dcIP.IPAddressToString, 389)
-                        if ($tcp.Connected) {
-                            $dcReachable = $true
-                            Write-Status "DC '$_DCName' reachable at $($dcIP.IPAddressToString):389 (attempt $attempt)."
-                        }
-                    }
-                    catch {
-                        Write-Status "DC '$_DCName' resolved to $($dcIP.IPAddressToString) but LDAP port 389 unreachable (attempt $attempt)."
-                    }
-                    finally { $tcp.Dispose() }
-                }
-                else {
-                    Write-Status "DC '$_DCName' DNS resolution returned no IPv4 addresses (attempt $attempt)."
-                }
-            }
-            catch {
-                Write-Status "DC '$_DCName' DNS resolution failed (attempt $attempt): $($_.Exception.Message)"
+            if (Test-DomainControllerReady -DCName $_DCName -DomainName $_DomainName) {
+                $dcReady = $true
+                Write-Status "DC Locator found PDC '$_DCName' (attempt $attempt)."
+                break
             }
 
-            if ($dcReachable) { break }
-            if ($attempt -lt 6) {
-                $delay = $attempt * 10
-                Write-Status "Waiting ${delay}s before retry..."
-                Start-Sleep -Seconds $delay
+            if ($attempt -lt 40) {
+                Write-Status "DC Locator cannot find PDC '$_DCName' yet (attempt $attempt/40). Waiting 15s before retry."
+                Start-Sleep -Seconds 15
             }
         }
 
-        if (-not $dcReachable) {
-            Write-Status "DC '$_DCName' is not reachable after 6 attempts. Secure channel cannot be verified or repaired. Requesting reboot to reset network stack."
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-            $global:DSCMachineStatus = 1
-            return
+        if (-not $dcReady) {
+            $msg = "DC Locator could not find PDC '$_DCName' after 10 minutes. Leaving domain membership unchanged for a later retry."
+            Write-Status "ERROR: $msg"
+            throw $msg
         }
 
         # Step 1: Test-ComputerSecureChannel -Repair. This does a password
@@ -4073,10 +4059,34 @@ class TestDomainJoin {
             if ($i -lt 3) { Start-Sleep -Seconds 15 }
         }
 
-        # Step 3: Last resort — Remove-Computer + reboot. This is destructive
-        # (breaks SPNs, Kerberos tickets, cluster membership, SQL AG) and
-        # should almost never fire if Steps 0-2 are working correctly.
-        Write-Status "WARNING: All non-destructive repairs failed. Performing Remove-Computer + reboot (rejoin on next DSC pass). This will break SPNs and cluster membership."
+        # Step 3: Before destructive escalation, require five consecutive
+        # observations where DC Locator still finds the PDC but the secure
+        # channel remains broken. Any PDC-readiness lapse aborts the escalation.
+        Write-Status "Non-destructive repairs failed. Confirming stable PDC readiness before full rejoin."
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+            if (-not (Test-DomainControllerReady -DCName $_DCName -DomainName $_DomainName)) {
+                $msg = "PDC '$_DCName' lost DC Locator readiness during rejoin confirmation. Leaving domain membership unchanged for a later retry."
+                Write-Status "ERROR: $msg"
+                throw $msg
+            }
+
+            try {
+                if (Test-ComputerSecureChannel -ErrorAction Stop) {
+                    Write-Status "Secure channel recovered during rejoin confirmation (attempt $attempt)."
+                    return
+                }
+            }
+            catch {
+                $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
+                Write-Status "Secure channel confirmation attempt $attempt remained broken: $msg"
+            }
+            if ($attempt -lt 5) { Start-Sleep -Seconds 15 }
+        }
+
+        # Step 4: The PDC remained discoverable throughout confirmation and both
+        # non-destructive repair methods failed. Preserve the proven recovery:
+        # unjoin now, reboot, and let JoinDomain re-add on the next DSC pass.
+        Write-Status "WARNING: Secure channel remains broken with a stable PDC. Performing full domain unjoin/rejoin recovery."
         try {
             Remove-Computer -UnjoinDomainCredential $_credential -PassThru -Force -ErrorAction Stop | Out-Null
             Write-Status "Remove-Computer succeeded. Requesting reboot so JoinDomain can re-add."

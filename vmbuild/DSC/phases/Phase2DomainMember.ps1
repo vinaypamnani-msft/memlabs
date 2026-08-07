@@ -218,9 +218,9 @@
 
         # Validate secure channel after the post-JoinDomain reboot. If the machine
         # secret drifted (e.g. JoinDomain's retry loop fired Add-Computer twice
-        # against a half-promoted DC), Reset-ComputerMachinePassword or a full
-        # rejoin recovers automatically before any downstream resource depends on
-        # AD auth.
+        # against a half-promoted DC), try non-destructive password repairs before
+        # any downstream resource depends on AD auth. A full rejoin remains the
+        # final recovery after stable PDC readiness and repeated failure checks.
         TestDomainJoin TestDomainJoin {
             DomainName = $DomainName
             DCName     = $DCName

@@ -9067,33 +9067,112 @@ function Copy-ToolToVM {
     Write-Log "$vmName`: Copying tools bundle (${totalSizeMB} MB, $totalItems items) to VM..."
     Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${totalSizeMB} MB) to $VMName" -Log -force
 
-    # --- Copy each zip to the VM and expand ---
-    $success = $true
+    # --- Prefer a content-addressed ISO, then fall back to PSDirect copy ---
+    $success = $false
+    $isoDelivered = $false
+    $isoAttempted = $false
     $progressPref = $ProgressPreference
     try {
         $ProgressPreference = "SilentlyContinue"
-        foreach ($zp in $zipPaths) {
-            $vmZipPath = "C:\Windows\Temp\tools-bundle.zip"
+        if (-not $WhatIf -and -not $env:MEMLABS_NO_TOOLS_ISO) {
+            try {
+                $toolsVm = Get-VM -Name $vm.vmName -ErrorAction SilentlyContinue
+                if ($toolsVm -and $toolsVm.Generation -ne 1) {
+                    $isoAttempted = $true
+                    $toolsIso = Get-MemlabsToolsIsoForBundles -ZipPaths $zipPaths -BundleHash $bundleHash
+                    if ($toolsIso -and (Mount-MemlabsToolsIsoToVm -VmName $vm.vmName -IsoPath $toolsIso)) {
+                        try {
+                            $visible = Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $vm.domain -MarkerRelativePath 'Tools.Bundle.md5' -Context 'tools' -TimeoutSeconds 90 -Phase 2
+                            if ($visible) {
+                                $isoResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ArgumentList @($bundleHash, $script:MemlabsToolsVolumeLabel) -DisplayName 'Tools: Expand bundles from mounted ISO' -ScriptBlock {
+                                    param($expectedHash, $volumeLabel)
 
-            if ($Fast) {
-                Copy-Item -ToSession $ps -Path $zp -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
-            }
-            else {
-                $copyResult = Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $zp -Destination $vmZipPath -Force -WhatIf:$WhatIf
-                if ($copyResult -eq $false) {
-                    throw "Copy-ItemSafe exhausted retries copying tools bundle to VM"
+                                    $volume = Get-Volume -FileSystemLabel $volumeLabel -ErrorAction SilentlyContinue |
+                                        Where-Object { $_.DriveLetter } | Select-Object -First 1
+                                    if (-not $volume) {
+                                        return [PSCustomObject]@{ Ok = $false; Reason = "$volumeLabel volume not found" }
+                                    }
+
+                                    $root = "$($volume.DriveLetter):\"
+                                    $actualHash = Get-Content -Path (Join-Path $root 'Tools.Bundle.md5') -ErrorAction SilentlyContinue | Select-Object -First 1
+                                    if ($actualHash -ne $expectedHash) {
+                                        return [PSCustomObject]@{ Ok = $false; Reason = "bundle hash mismatch (expected $expectedHash, found $actualHash)" }
+                                    }
+
+                                    $bundleNames = @(Get-Content -Path (Join-Path $root 'Tools.Bundles.txt') -ErrorAction SilentlyContinue | Where-Object { $_ })
+                                    if ($bundleNames.Count -eq 0) {
+                                        return [PSCustomObject]@{ Ok = $false; Reason = 'bundle manifest is empty' }
+                                    }
+
+                                    foreach ($bundleName in $bundleNames) {
+                                        $bundlePath = Join-Path $root $bundleName
+                                        if (-not (Test-Path $bundlePath)) {
+                                            return [PSCustomObject]@{ Ok = $false; Reason = "bundle '$bundleName' is missing" }
+                                        }
+                                        Expand-Archive -Path $bundlePath -DestinationPath 'C:\' -Force -ErrorAction Stop
+                                    }
+                                    return [PSCustomObject]@{ Ok = $true; Reason = '' }
+                                }
+                                if (-not $isoResult.ScriptBlockFailed -and $isoResult.ScriptBlockOutput -and $isoResult.ScriptBlockOutput.Ok) {
+                                    $isoDelivered = $true
+                                    $success = $true
+                                    Write-Log "$vmName`: Expanded tools bundle from $([System.IO.Path]::GetFileName($toolsIso))." -Success
+                                }
+                                else {
+                                    $reason = if ($isoResult.ScriptBlockOutput) { $isoResult.ScriptBlockOutput.Reason } else { 'in-guest ISO extraction failed' }
+                                    Write-Log "$vmName`: Tools ISO delivery did not complete ($reason). Falling back to direct copy." -Warning
+                                }
+                            }
+                            else {
+                                Write-Log "$vmName`: Tools ISO was not visible in the guest. Falling back to direct copy." -Warning
+                            }
+                        }
+                        finally {
+                            Dismount-MemlabsToolsIsoFromVm -VmName $vm.vmName
+                        }
+                    }
                 }
             }
+            catch {
+                Write-Log "$vmName`: Tools ISO delivery failed: $($_.Exception.Message). Falling back to direct copy." -Warning
+                try { Dismount-MemlabsToolsIsoFromVm -VmName $vm.vmName } catch {}
+            }
+        }
 
-            if (-not $WhatIf) {
-                $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock {
-                    Expand-Archive -Path $using:vmZipPath -DestinationPath "C:\" -Force
-                    Remove-Item -Path $using:vmZipPath -Force -ErrorAction SilentlyContinue
+        if (-not $isoDelivered) {
+            if ($isoAttempted) {
+                Write-Log "$vmName`: Using direct tools transfer fallback." -LogOnly
+            }
+
+            # Mount/eject invalidates the old optical-view session. Always reacquire
+            # here so the fallback never uses a session disposed by ISO handling.
+            $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+            if (-not $ps) { throw 'Could not acquire a guest session for direct tools transfer' }
+
+            $success = $true
+            foreach ($zp in $zipPaths) {
+                $vmZipPath = "C:\Windows\Temp\tools-bundle.zip"
+
+                if ($Fast) {
+                    Copy-Item -ToSession $ps -Path $zp -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
                 }
-                if ($expandResult.ScriptBlockFailed) {
-                    Write-Log "$vmName`: Failed to expand tools bundle inside VM. $($expandResult.ScriptBlockOutput)" -Failure
-                    $success = $false
-                    break
+                else {
+                    $copyResult = Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $zp -Destination $vmZipPath -Force -WhatIf:$WhatIf
+                    if ($copyResult -eq $false) {
+                        throw "Copy-ItemSafe exhausted retries copying tools bundle to VM"
+                    }
+                }
+
+                if (-not $WhatIf) {
+                    $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock {
+                        Expand-Archive -Path $using:vmZipPath -DestinationPath "C:\" -Force
+                        Remove-Item -Path $using:vmZipPath -Force -ErrorAction SilentlyContinue
+                    }
+                    if ($expandResult.ScriptBlockFailed) {
+                        Write-Log "$vmName`: Failed to expand tools bundle inside VM. $($expandResult.ScriptBlockOutput)" -Failure
+                        $success = $false
+                        break
+                    }
                 }
             }
         }

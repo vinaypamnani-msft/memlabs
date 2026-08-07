@@ -1273,16 +1273,17 @@ finally {
     $global:mutexes = @()
     $global:BuildStats = $null
 
-    # Eject the download-cache DVD from THIS deployment's VMs and evict stale
-    # cache ISOs. Per-VM and scoped to our own VMs only, so a concurrently-running
-    # deployment's mounts are never disturbed. Eviction never deletes an ISO any
-    # VM on the host still has mounted.
+    # Eject generated cache/DSC/tools media from THIS deployment's VMs and evict
+    # stale payload ISOs. Per-VM and scoped to our own VMs only, so a concurrently-
+    # running deployment's mounts are never disturbed. Eviction never deletes an
+    # ISO any VM on the host still has mounted.
     if ($deployConfig -and $deployConfig.virtualMachines) {
         try {
             foreach ($cacheVm in $deployConfig.virtualMachines) {
                 if ($cacheVm.vmName) {
                     Dismount-MemlabsCacheIsoFromVm -VmName $cacheVm.vmName
                     Dismount-MemlabsDscIsoFromVm -VmName $cacheVm.vmName
+                    Dismount-MemlabsToolsIsoFromVm -VmName $cacheVm.vmName
                     # On a SUCCESSFUL build, also strip any SQL / CM / OS install
                     # media that a per-phase eject left behind (the per-phase ejects
                     # are gated on whole-phase success, so a sibling VM's failure can
@@ -1300,6 +1301,7 @@ finally {
             }
             Remove-StaleMemlabsCacheIso
             Remove-StaleMemlabsDscIso
+            Remove-StaleMemlabsToolsIso
         }
         catch {
             Write-Log "Download cache cleanup failed (non-fatal): $_" -LogOnly
