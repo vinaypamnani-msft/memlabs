@@ -4488,29 +4488,29 @@ class InstallFeatureForSCCM {
             }
         }
 
-        # A globalModule DLL deleted out of band is FILE-level damage while CBS still has
-        # the component registered, so re-running Install-WindowsFeature is a no-op here.
-        # sfc re-projects the file from the local WinSxS store: works offline (unlike DISM
-        # /RestoreHealth, which may want a source the lab has no route to) and keeps
-        # applicationHost.config, the SMS_MP/SMS_DP vdirs, bindings and the 443 cert
-        # binding intact -- all of which an IIS uninstall/reinstall would destroy.
+        # A globalModule whose DLL is absent kills EVERY w3wp on the box, so the
+        # registration has to go. sfc/DISM cannot help: per the Windows manifests
+        # (inetsrv/iis/setup/manifests/IIS-NetFxExtensibility*.man) the DLL and its appcmd
+        # registration ship in the same component, so when that component is not installed
+        # CBS considers the system correct and restores nothing -- measured on PL-PATTYDP,
+        # where DISM /RestoreHealth and sfc both reported success and validcfg.dll stayed
+        # missing. Dropping the registration is verbatim the uninstall action from
+        # IIS-NetFxExtensibilityCommon-GC.man, and re-installing the feature puts it back.
         $missingModules = @($this.MissingGlobalModules())
         if ($missingModules.Count -gt 0) {
-            Write-Status "Repairing $($missingModules.Count) missing IIS globalModule DLL(s) with sfc: $($missingModules -join '; ')"
-            try {
-                $sfc = Start-Process -FilePath "$env:windir\system32\sfc.exe" -ArgumentList '/scannow' -PassThru -WindowStyle Hidden -ErrorAction Stop
-                if (-not $sfc.WaitForExit(900000)) {
-                    Write-Status "sfc /scannow did not finish within 15 min; killing it"
-                    try { $sfc.Kill() } catch {}
+            $appcmd = Join-Path $env:windir 'system32\inetsrv\appcmd.exe'
+            foreach ($missingModule in $missingModules) {
+                $moduleName = ($missingModule -split ' -> ')[0]
+                Write-Status "IIS globalModule '$moduleName' has no DLL on disk; unregistering it so w3wp can start"
+                try {
+                    $out = & $appcmd uninstall module $moduleName 2>&1
+                    Write-Status "appcmd uninstall module $moduleName -> $($out -join ' ')"
                 }
+                catch { Write-Status "appcmd uninstall module $moduleName failed: $($_.Exception.Message)" }
             }
-            catch { Write-Status "sfc /scannow could not be started: $($_.Exception.Message)" }
             $stillMissing = @($this.MissingGlobalModules())
             if ($stillMissing.Count -gt 0) {
-                Write-Status "IIS globalModule DLL(s) STILL missing after sfc: $($stillMissing -join '; '). Run 'DISM /Online /Cleanup-Image /RestoreHealth' then 'sfc /scannow' on this VM; IIS will keep returning HTTP 503 until it is restored."
-            }
-            else {
-                Write-Status "sfc restored the missing IIS globalModule DLL(s)"
+                Write-Status "IIS globalModule DLL(s) STILL registered without a file: $($stillMissing -join '; '). IIS will keep returning HTTP 503 until this is resolved."
             }
         }
 

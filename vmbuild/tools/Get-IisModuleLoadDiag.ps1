@@ -137,7 +137,53 @@ $probe = {
     }
     else {
         "  MISSING FROM DISK"
-        "  => repair/reinstall the IIS feature that provides it (or drop its globalModules entry)"
+        # Windows source (Os.2020 br_current) says which component owns each module, which
+        # decides the fix. inetsrv/iis/setup/manifests/IIS-NetFxExtensibility.man ships
+        # validcfg.dll to $(runtime.system32)\inetsrv\, and IIS-NetFxExtensibilityCommon-GC.man
+        # is what registers/unregisters it via appcmd.
+        $owner = switch -Regex ($TargetModule) {
+            'validcfg\.dll$' { @{ Module = 'ConfigurationValidationModule'; Component = 'Microsoft-Windows-IIS-NetFxExtensibility'; Feature = 'Web-Net-Ext45'; Optional = 'IIS-NetFxExtensibility45' } }
+            default { $null }
+        }
+        if ($owner) {
+            "  owning component : $($owner.Component)  (feature $($owner.Feature) / optional-feature $($owner.Optional))"
+            $featureInstalled = $null
+            try {
+                if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+                    $featureInstalled = [bool]((Get-WindowsFeature -Name $owner.Feature -ErrorAction SilentlyContinue).Installed)
+                }
+            }
+            catch { }
+            "  feature installed: $featureInstalled"
+            if ($featureInstalled -eq $false) {
+                "  ==> THE REGISTRATION IS STALE. applicationHost.config still registers"
+                "      '$($owner.Module)' but the component that ships the DLL is NOT installed."
+                "      sfc/DISM CANNOT restore it -- CBS considers the system correct, because"
+                "      the owning component was never/no longer installed. Two supported fixes:"
+                "        1. Install the owner:  Install-WindowsFeature $($owner.Feature)"
+                "        2. Drop the registration, which is verbatim the uninstall action from"
+                "           IIS-NetFxExtensibilityCommon-GC.man:"
+                "           %windir%\system32\inetsrv\appcmd.exe uninstall module $($owner.Module)"
+            }
+            else {
+                "  ==> the owning component IS installed but its file is gone: genuine file loss,"
+                "      so 'DISM /Online /Cleanup-Image /RestoreHealth' then 'sfc /scannow' applies."
+            }
+        }
+        else {
+            "  => identify the component that ships this DLL; if that component is not installed,"
+            "     sfc/DISM will NOT restore it and the registration must be dropped instead"
+        }
+
+        Show 'IIS setup / servicing log evidence for this module'
+        foreach ($log in "$env:windir\iis7.log", "$env:windir\iis.log", "$env:windir\iis_gather.log") {
+            if (-not (Test-Path -LiteralPath $log)) { "  (absent) $log"; continue }
+            $moduleName = if ($owner) { $owner.Module } else { [IO.Path]::GetFileNameWithoutExtension($TargetModule) }
+            $hits = @(Select-String -LiteralPath $log -Pattern $moduleName -ErrorAction SilentlyContinue | Select-Object -Last 6)
+            "  $log ($(( Get-Item $log).Length) bytes, modified $((Get-Item $log).LastWriteTime))"
+            if ($hits.Count) { $hits | ForEach-Object { "      L$($_.LineNumber): $($_.Line.Trim())" } }
+            else { "      (no '$moduleName' lines)" }
+        }
     }
 
     Show 'every globalModule image in applicationHost.config'

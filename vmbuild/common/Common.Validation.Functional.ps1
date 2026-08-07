@@ -4723,7 +4723,7 @@ function Test-SiteSystemFunctionality {
                 }
                 if ($missingModules.Count -gt 0) {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: $($missingModules.Count) of $($globalModules.Count) IIS globalModule DLL(s) are missing from disk, so every w3wp for this pool dies at startup: $($missingModules -join '; '). Repair with 'DISM /Online /Cleanup-Image /RestoreHealth' then 'sfc /scannow' on this VM.")
+                    $results.Details.Add("FAIL: $($missingModules.Count) of $($globalModules.Count) IIS globalModule DLL(s) are missing from disk, so every w3wp for this pool dies at startup: $($missingModules -join '; '). sfc/DISM will NOT restore a module whose owning component is not installed (CBS considers the system correct); either install the owning feature (validcfg.dll ships with Microsoft-Windows-IIS-NetFxExtensibility = Web-Net-Ext45) or drop the stale registration with '%windir%\system32\inetsrv\appcmd.exe uninstall module <name>'.")
                 }
                 else {
                     $results.Details.Add("OK: all $($globalModules.Count) IIS globalModule DLL(s) present on disk")
