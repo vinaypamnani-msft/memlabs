@@ -304,6 +304,111 @@ function Set-FeatureOverrides {
     if ($applyOffice) { Enable-Office -Config $Config }
 }
 
+function Resolve-TestConfigNetworks {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Config,
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigName
+    )
+
+    $domainName = "$($Config.vmOptions.domainName)"
+    $defaultNetwork = "$($Config.vmOptions.network)"
+    if ([string]::IsNullOrWhiteSpace($domainName) -or [string]::IsNullOrWhiteSpace($defaultNetwork)) {
+        return
+    }
+
+    if ($null -eq $script:TestNetworkMap) {
+        $script:TestNetworkMap = @{}
+    }
+
+    $existingVMs = @(Get-List -Type VM -SmartUpdate)
+    $networkUses = @([PSCustomObject]@{ Source = $defaultNetwork; VM = $null })
+    foreach ($vm in @($Config.virtualMachines)) {
+        $vmNetwork = $defaultNetwork
+        if ($vm.network) { $vmNetwork = "$($vm.network)" }
+        $networkUses += [PSCustomObject]@{ Source = $vmNetwork; VM = $vm }
+    }
+
+    $declaredNetworks = @()
+    foreach ($networkUse in $networkUses) {
+        if ($networkUse.Source -and $declaredNetworks -notcontains $networkUse.Source) {
+            $declaredNetworks += $networkUse.Source
+        }
+    }
+
+    foreach ($sourceNetwork in $declaredNetworks) {
+        $mapKey = "$($domainName.ToLowerInvariant())|$($sourceNetwork.ToLowerInvariant())"
+        if ($script:TestNetworkMap.ContainsKey($mapKey)) { continue }
+
+        # A prior run may already have created this config on a remapped subnet.
+        # Matching VM names are authoritative; existing VMs cannot be moved safely.
+        $matchingNetworks = @()
+        foreach ($networkUse in @($networkUses | Where-Object { $_.Source -eq $sourceNetwork -and $_.VM })) {
+            $configVM = $networkUse.VM
+            if ($configVM.Hidden -or $configVM.role -in @('InternetClient', 'AADClient')) { continue }
+            $expectedName = "$($configVM.vmName)"
+            $prefix = "$($Config.vmOptions.prefix)"
+            if ($prefix -and -not $expectedName.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $expectedName = $prefix + $expectedName
+            }
+            $existingVM = $existingVMs | Where-Object {
+                $_.vmName -ieq $expectedName -and $_.Domain -ieq $domainName
+            } | Select-Object -First 1
+            if ($existingVM -and $existingVM.Network) {
+                $matchingNetworks += "$($existingVM.Network)"
+            }
+        }
+        $matchingNetworks = @($matchingNetworks | Sort-Object -Unique)
+
+        if ($matchingNetworks.Count -eq 1) {
+            $targetNetwork = $matchingNetworks[0]
+            $script:TestNetworkMap[$mapKey] = $targetNetwork
+            if ($targetNetwork -ne $sourceNetwork) {
+                Write-Host "  [Network] $ConfigName`: reusing $targetNetwork for fixture subnet $sourceNetwork (matching $domainName VM already exists)." -ForegroundColor DarkCyan
+            }
+            continue
+        }
+        if ($matchingNetworks.Count -gt 1) {
+            throw "$ConfigName maps fixture subnet $sourceNetwork to multiple existing $domainName networks: $($matchingNetworks -join ', ')."
+        }
+
+        $owners = @($existingVMs | Where-Object {
+            $_.Network -eq $sourceNetwork -and -not [string]::IsNullOrWhiteSpace("$($_.Domain)")
+        } | ForEach-Object { "$($_.Domain)" } | Sort-Object -Unique)
+
+        if ($owners -contains $domainName -or $owners.Count -eq 0) {
+            $script:TestNetworkMap[$mapKey] = $sourceNetwork
+            continue
+        }
+
+        $reservedTargets = @($script:TestNetworkMap.Values)
+        $targetNetwork = @(Get-ValidSubnets -ConfigToCheck $Config -ExcludeList $reservedTargets | Select-Object -First 1)[0]
+        if ([string]::IsNullOrWhiteSpace("$targetNetwork")) {
+            throw "$ConfigName cannot replace fixture subnet $sourceNetwork, which is owned by [$($owners -join ', ')]: no unused subnet is available."
+        }
+
+        $script:TestNetworkMap[$mapKey] = "$targetNetwork"
+        Write-Host "  [Network] $ConfigName`: fixture subnet $sourceNetwork is owned by [$($owners -join ', ')]; using $targetNetwork for $domainName." -ForegroundColor Yellow
+    }
+
+    $defaultMapKey = "$($domainName.ToLowerInvariant())|$($defaultNetwork.ToLowerInvariant())"
+    $Config.vmOptions.network = $script:TestNetworkMap[$defaultMapKey]
+    foreach ($networkUse in @($networkUses | Where-Object { $_.VM -and $_.VM.network })) {
+        $mapKey = "$($domainName.ToLowerInvariant())|$($networkUse.Source.ToLowerInvariant())"
+        $networkUse.VM.network = $script:TestNetworkMap[$mapKey]
+    }
+
+    if ($Config.domainDefaults -and $Config.domainDefaults.Network) {
+        $domainDefaultsNetwork = "$($Config.domainDefaults.Network)"
+        $mapKey = "$($domainName.ToLowerInvariant())|$($domainDefaultsNetwork.ToLowerInvariant())"
+        if ($script:TestNetworkMap.ContainsKey($mapKey)) {
+            $Config.domainDefaults.Network = $script:TestNetworkMap[$mapKey]
+        }
+    }
+}
+
 function Invoke-NewLab {
     # Run one deployment and hand back ONLY its exit code. Two things here are load-bearing:
     #  1. '| Out-Host' -- New-Lab.ps1 leaks objects onto the success stream. Un-piped they
@@ -402,6 +507,7 @@ function Run-Test {
     Write-Host "Starting all tests for $Test"
     $Test = $Test.ToLowerInvariant()
     $Tests = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name } | Where-Object { $_.Name.ToLowerInvariant().StartsWith($Test) }
+    $script:TestNetworkMap = @{}
 
     # Run the entire prefix group twice before the domain is torn down: pass 1 deploys
     # every matching config in order, then pass 2 starts over at the first config and
@@ -459,6 +565,7 @@ function Run-Test {
                 }    
             }
             Set-FeatureOverrides -Config $config -ConfigName $outputFile
+            Resolve-TestConfigNetworks -Config $config -ConfigName $outputFile
             $domainName = $config.vmOptions.domainName
             $global:removedomains += $domainName
             $global:removedomains = @($global:removedomains | Select-Object -Unique)
