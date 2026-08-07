@@ -4488,6 +4488,32 @@ class InstallFeatureForSCCM {
             }
         }
 
+        # A globalModule DLL deleted out of band is FILE-level damage while CBS still has
+        # the component registered, so re-running Install-WindowsFeature is a no-op here.
+        # sfc re-projects the file from the local WinSxS store: works offline (unlike DISM
+        # /RestoreHealth, which may want a source the lab has no route to) and keeps
+        # applicationHost.config, the SMS_MP/SMS_DP vdirs, bindings and the 443 cert
+        # binding intact -- all of which an IIS uninstall/reinstall would destroy.
+        $missingModules = @($this.MissingGlobalModules())
+        if ($missingModules.Count -gt 0) {
+            Write-Status "Repairing $($missingModules.Count) missing IIS globalModule DLL(s) with sfc: $($missingModules -join '; ')"
+            try {
+                $sfc = Start-Process -FilePath "$env:windir\system32\sfc.exe" -ArgumentList '/scannow' -PassThru -WindowStyle Hidden -ErrorAction Stop
+                if (-not $sfc.WaitForExit(900000)) {
+                    Write-Status "sfc /scannow did not finish within 15 min; killing it"
+                    try { $sfc.Kill() } catch {}
+                }
+            }
+            catch { Write-Status "sfc /scannow could not be started: $($_.Exception.Message)" }
+            $stillMissing = @($this.MissingGlobalModules())
+            if ($stillMissing.Count -gt 0) {
+                Write-Status "IIS globalModule DLL(s) STILL missing after sfc: $($stillMissing -join '; '). Run 'DISM /Online /Cleanup-Image /RestoreHealth' then 'sfc /scannow' on this VM; IIS will keep returning HTTP 503 until it is restored."
+            }
+            else {
+                Write-Status "sfc restored the missing IIS globalModule DLL(s)"
+            }
+        }
+
         # Durable completion breadcrumb (diagnostics + client-OS fast-path + the Test()
         # fast path). Lives under C:\staging so it survives reboots and %windir%\temp
         # cleanup -- the old %windir%\temp marker was being purged between runs (Phase 10
@@ -4523,6 +4549,16 @@ class InstallFeatureForSCCM {
         # installed, so a set change (or a Version bump, which is in the file name) falls
         # through to the real query instead of being masked.
         $signature = $this.FeatureSignature($featureList)
+        # Checked BEFORE the marker fast-path on purpose. The marker records that the
+        # feature SET is installed, which stays true after a module DLL is deleted out of
+        # band -- so a check behind the fast path would be skipped on exactly the re-runs
+        # that need it (PL-PATTYDP lost validcfg.dll on a long-lived VM whose features
+        # were already complete, and every later run sailed past on the marker).
+        $missingModules = @($this.MissingGlobalModules())
+        if ($missingModules.Count -gt 0) {
+            Write-Status "IIS globalModule DLL(s) missing, w3wp cannot start: $($missingModules -join '; ')"
+            return $false
+        }
         try {
             $recorded = Get-Content -Path $this.MarkerPath() -TotalCount 1 -ErrorAction Stop
             if ($recorded -and ([string]$recorded).Trim() -eq $signature) { return $true }
@@ -4542,6 +4578,27 @@ class InstallFeatureForSCCM {
 
     [string] FeatureSignature([string[]] $featureList) {
         return (($featureList | Sort-Object -Unique) -join ',')
+    }
+
+    # Every DLL applicationHost.config registers as a globalModule must exist or EVERY
+    # w3wp dies at startup with ERROR_MOD_NOT_FOUND -> 5x WAS 5139 -> 5002 disables the
+    # pool -> HTTP 503. Cheap: one file read + XML parse, versus the 214-251s
+    # Get-WindowsFeature call this sits in front of. Returns @() when IIS is absent.
+    [string[]] MissingGlobalModules() {
+        $missing = @()
+        try {
+            $ahcPath = Join-Path $env:windir 'system32\inetsrv\config\applicationHost.config'
+            if (-not (Test-Path -LiteralPath $ahcPath)) { return @() }
+            $ahcXml = [xml](Get-Content -LiteralPath $ahcPath -Raw -ErrorAction Stop)
+            foreach ($globalModule in @($ahcXml.configuration.'system.webServer'.globalModules.add)) {
+                $moduleImage = [Environment]::ExpandEnvironmentVariables("$($globalModule.image)")
+                if ($moduleImage -and -not (Test-Path -LiteralPath $moduleImage)) {
+                    $missing += "$($globalModule.name) -> $moduleImage"
+                }
+            }
+        }
+        catch { return @() }
+        return $missing
     }
 
     [void] WriteMarker([string] $content) {
