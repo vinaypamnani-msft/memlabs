@@ -3020,6 +3020,7 @@ $global:VM_Config = {
                         if ($dscIso -and (Mount-MemlabsDscIsoToVm -VmName $currentItem.vmName -IsoPath $dscIso)) {
                             Write-Progress2 $Activity -Status "Copying DSC files from mounted ISO" -percentcomplete 35 -force
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files from mounted ISO $([System.IO.Path]::GetFileName($dscIso))."
+                            $swIsoCopy = [System.Diagnostics.Stopwatch]::StartNew()
                             try {
                                 $isoCopy = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
                                     # Locate the MEMLABSDSC volume and copy its contents into C:\staging\DSC.
@@ -3036,6 +3037,8 @@ $global:VM_Config = {
                                 } -DisplayName "DSC: Copy payload from mounted ISO"
                                 if (-not $isoCopy.ScriptBlockFailed -and $isoCopy.ScriptBlockOutput -and $isoCopy.ScriptBlockOutput.Ok) {
                                     $copyResults = $true
+                                    $swIsoCopy.Stop()
+                                    Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] DscIsoPayloadCopy completed in $([Math]::Round($swIsoCopy.Elapsed.TotalSeconds,1)) seconds" -LogOnly
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC payload delivered via ISO." -LogOnly
                                 }
                                 else {
@@ -3346,15 +3349,20 @@ $global:VM_Config = {
         if ($needsInstall) {
             Write-Progress2 $Activity -Status "Expanding and installing modules" -percentcomplete 40 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding and installing DSC modules inside the VM."
+            $swExpand = [System.Diagnostics.Stopwatch]::StartNew()
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ExpandAndInstall -DisplayName "DSC: Expand and Install Modules"
             if ($result.ScriptBlockFailed) {
                 Start-Sleep -Seconds 15
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ExpandAndInstall -DisplayName "DSC: Expand and Install Modules"
                 if ($result.ScriptBlockFailed) {
+                    $swExpand.Stop()
+                    Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] ExpandAndInstallModules FAILED after $([Math]::Round($swExpand.Elapsed.TotalSeconds,1)) seconds" -LogOnly
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to expand and install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     return
                 }
             }
+            $swExpand.Stop()
+            Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] ExpandAndInstallModules completed in $([Math]::Round($swExpand.Elapsed.TotalSeconds,1)) seconds" -LogOnly
         }
         else {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Skipped expanding and installing modules since DSC.zip is not newer."
@@ -4724,6 +4732,12 @@ $global:VM_Config = {
                     }
 
                     $minutesSinceDcReady = if ($dcReadySince) { ([DateTime]::UtcNow - $dcReadySince).TotalMinutes } else { 0 }
+                    # The recovery countdown is otherwise completely silent -- 'recovery timer starts
+                    # now' was the single largest unobserved stretch in the log corpus (1270 gaps
+                    # across 91 runs). Emit progress so the wait is attributable.
+                    if ($dcReadySince -and $minutesSinceDcReady -le $recoveryMinutes -and ($dscStatusPolls % 20) -eq 0) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Waiting for the DC's DSC push to produce a first status ($([Math]::Round($minutesSinceDcReady, 1)) of $([Math]::Round($recoveryMinutes, 1)) min before local-compile recovery)." -LogOnly
+                    }
                     if ($dcReadySince -and $minutesSinceDcReady -gt $recoveryMinutes) {
                         # "No status yet" only means the GUEST hasn't written DSC_Status.txt -- NOT that the
                         # DC's push failed. A long first resource (Phase 4's SQL install) keeps the LCM busy

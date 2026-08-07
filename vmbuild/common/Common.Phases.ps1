@@ -2627,16 +2627,32 @@ function Wait-Phase {
                     }
                                    
                     $jobJson = $job | convertTo-Json -depth 5 -WarningAction SilentlyContinue
+
+                    # Attribute the failure to a VM in PLAIN TEXT before the JSON dump. Without
+                    # this the only place the VM is named is inside $jobJson, so a failed re-run
+                    # cannot be triaged without hand-parsing it. Mirrors the success line format.
+                    # Capture the groups immediately -- $Matches is clobbered by any later -match.
+                    $fvmName = $null
+                    $fRole = $null
+                    if ($job.Name -match '^(.+?)\s+\[(.+?)\]') {
+                        $fvmName = $Matches[1]
+                        $fRole = $Matches[2]
+                    }
+                    $fStart = if ($job.PSBeginTime) { $job.PSBeginTime } else { $StartTime }
+                    $fEnd = if ($job.PSEndTime) { $job.PSEndTime } else { Get-Date }
+                    if ($fvmName) {
+                        Write-Log ("[Phase {0}]: {1} [{2}] : Failed after {3}" -f $Phase, $fvmName, $fRole, ($fEnd - $fStart).ToString('hh\:mm\:ss')) -Failure
+                    }
+                    else {
+                        Write-Log "[Phase $Phase] Job '$($job.Name)' failed and could not be attributed to a VM (unexpected job name)." -Failure
+                    }
+
                     Write-Log "[Phase $Phase] Job failed: $jobJson" -LogOnly
                     Write-RedX "[Phase $Phase] Job failed: $jobOutput" -ForegroundColor Red
                     Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
 
                     # Capture per-VM timing for failed jobs too
-                    if ($global:BuildStats -and $job.Name -match '^(.+?)\s+\[(.+?)\]') {
-                        $fvmName = $Matches[1]
-                        $fRole = $Matches[2]
-                        $fStart = if ($job.PSBeginTime) { $job.PSBeginTime } else { $StartTime }
-                        $fEnd = if ($job.PSEndTime) { $job.PSEndTime } else { Get-Date }
+                    if ($global:BuildStats -and $fvmName) {
                         if (-not $global:BuildStats.VMs.ContainsKey($fvmName)) {
                             $global:BuildStats.VMs[$fvmName] = @{ Role = $fRole; Phases = @{} }
                         }
@@ -2743,13 +2759,26 @@ function Wait-Phase {
                                 if ($resAll.Count -eq 0) {
                                     $statusPath = "$env:SystemRoot\System32\Configuration\ConfigurationStatus"
                                     if (-not (Test-Path $statusPath)) { return $null }
+                                    # '*.details.json' is a different shape (per-resource detail array) and
+                                    # is often the newest file; parsing it yields 'Invalid JSON primitive'
+                                    # and loses the whole timing record.
                                     $f = Get-ChildItem -Path $statusPath -Filter '*.json' -ErrorAction SilentlyContinue |
+                                        Where-Object { $_.Name -notlike '*.details.json' } |
                                         Sort-Object LastWriteTime -Descending | Select-Object -First 1
                                     if (-not $f) { return $null }
                                     try {
                                         $obj = [System.IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json
                                     }
-                                    catch { return @{ ErrorLine = "json parse failed: $($_.Exception.Message)"; File = $f.Name } }
+                                    catch {
+                                        # Say WHAT failed to parse, not just that something did.
+                                        $head = ''
+                                        try {
+                                            $raw = [System.IO.File]::ReadAllText($f.FullName)
+                                            $head = ($raw.Substring(0, [Math]::Min(160, $raw.Length)) -replace '\s+', ' ')
+                                        }
+                                        catch { $head = '(unreadable)' }
+                                        return @{ ErrorLine = "json parse failed on $($f.Name) ($([int]($f.Length / 1KB))KB): $($_.Exception.Message) | head: $head"; File = $f.Name }
+                                    }
                                     $meta.Source = $f.Name
                                     $meta.Reboot = $obj.RebootRequested
                                     $meta.Start = $obj.StartDate

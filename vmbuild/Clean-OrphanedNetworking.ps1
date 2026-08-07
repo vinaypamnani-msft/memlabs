@@ -91,7 +91,7 @@ function Confirm-Removal {
     param([string]$Description)
     if (-not $Remove) { return $false }
     if ($Force) { return $true }
-    $response = Read-Host "  Remove $Description? [y/N]"
+    $response = Read-Host "  Remove ${Description}? [y/N]"
     return ($response -and $response.Trim().ToLowerInvariant() -eq 'y')
 }
 

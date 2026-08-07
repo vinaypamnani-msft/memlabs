@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    Flag $global:/$script: variables that are READ but never ASSIGNED, when the
-    name looks like a typo of one that IS assigned.
+    Flag variables that are READ but never ASSIGNED when the name looks like a
+    typo of one that IS assigned.
 
 .DESCRIPTION
     Reading an unassigned variable is silent in PowerShell without Set-StrictMode,
@@ -14,12 +14,14 @@
     flags the opposite case (assigned, never read), and $global: scope opts out
     of that rule entirely.
 
-    "Never assigned" alone is far too noisy -- it hits automatic variables,
-    deliberately console-settable debug toggles, and the very common pattern of
-    assigning unqualified at script level then reading with an explicit $script:
-    prefix. So the report is narrowed to the signal that actually means "typo":
-    the unassigned name is within a small edit distance of a name that IS
-    assigned. A genuine external toggle resembles nothing and stays silent.
+    All $global:/$script: reads are checked. Unqualified/local reads are checked
+    when they occur inside an expandable string, where an undefined name silently
+    removes user-visible text. "Never assigned" alone is far too noisy -- it hits
+    automatic variables, deliberately console-settable debug toggles, and values
+    supplied by dot-sourced caller scope. So the report is narrowed to the signal
+    that actually means "typo": the unassigned name is within a small edit distance
+    of a name that IS assigned. A genuine external toggle resembles nothing and
+    stays silent.
 #>
 [CmdletBinding()]
 param (
@@ -35,7 +37,10 @@ param (
 
     # Short names collide by chance; only consider names at least this long.
     [Parameter(Mandatory = $false)]
-    [int]$MinLength = 5
+    [int]$MinLength = 5,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$SelfTest
 )
 
 # Automatic variables are provided by the engine and never assigned by us.
@@ -73,16 +78,44 @@ function Get-EditDistance {
     return $prev[$lb]
 }
 
+function Get-BareVariableName {
+    param([System.Management.Automation.Language.VariableExpressionAst]$Variable)
+
+    $userPath = $Variable.VariablePath.UserPath
+    if ($userPath -match '^(env|variable|function|alias|using|workflow):' -or $userPath -match '^[A-Za-z]:') {
+        return $null
+    }
+    return ($userPath -replace '^(global|script|local|private):', '')
+}
+
 $assigned = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $readHits = @{}
 
-$files = @(Get-ChildItem $Path -Recurse -Include *.ps1, *.psm1 -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch '\\(logs|azureFiles)\\' })
-
-foreach ($file in $files) {
+$sources = @()
+if ($SelfTest.IsPresent) {
+    $fixture = @'
+$global:removedomains = @()
+$Description = 'network'
+"Cleanup list: $($global:removeddomains -join ', ')"
+"Remove $Description?"
+'@
+    $tokens = $null
     $parseErrors = $null
-    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$parseErrors)
-    if ($parseErrors.Count -gt 0) { continue }
+    $fixtureAst = [System.Management.Automation.Language.Parser]::ParseInput($fixture, [ref]$tokens, [ref]$parseErrors)
+    $sources = @([pscustomobject]@{ Name = '<self-test>'; Ast = $fixtureAst })
+}
+else {
+    $files = @(Get-ChildItem $Path -Recurse -Include *.ps1, *.psm1 -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\(logs|azureFiles)\\' })
+    foreach ($file in $files) {
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$parseErrors)
+        $sources += [pscustomobject]@{ Name = $file.FullName; Ast = $ast }
+    }
+}
+
+foreach ($source in $sources) {
+    $ast = $source.Ast
 
     # Any assignment establishes the name. Scope is deliberately ignored: a
     # script-level "$out = ..." is what later "$script:out" reads, and treating
@@ -108,9 +141,17 @@ foreach ($file in $files) {
         $null = $assigned.Add(($node.Name.VariablePath.UserPath -replace '^(global|script|local|private):', ''))
     }
     foreach ($node in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true)) {
-        $cmd = $node.GetCommandName()
-        if ($cmd -in @('Set-Variable', 'New-Variable')) {
-            $elems = $node.CommandElements
+        $elems = $node.CommandElements
+        for ($i = 1; $i -lt $elems.Count - 1; $i++) {
+            $element = $elems[$i]
+            if ($element -isnot [System.Management.Automation.Language.CommandParameterAst]) { continue }
+            if ($element.ParameterName -notin @('ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'PipelineVariable')) { continue }
+            $valueElement = $elems[$i + 1]
+            if ($valueElement -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+                $null = $assigned.Add(($valueElement.Value -replace '^\+', '' -replace '^(global|script|local|private):', ''))
+            }
+        }
+        if ($node.GetCommandName() -in @('Set-Variable', 'New-Variable')) {
             for ($i = 1; $i -lt $elems.Count; $i++) {
                 if ($elems[$i] -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
                     $null = $assigned.Add(($elems[$i].Value -replace '^(global|script|local|private):', ''))
@@ -120,18 +161,33 @@ foreach ($file in $files) {
         }
     }
 
+    $interpolatedOffsets = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($expandableString in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ExpandableStringExpressionAst] }, $true)) {
+        foreach ($nestedExpression in $expandableString.NestedExpressions) {
+            if ($nestedExpression -is [System.Management.Automation.Language.VariableExpressionAst]) {
+                $null = $interpolatedOffsets.Add($nestedExpression.Extent.StartOffset)
+            }
+            foreach ($variable in $nestedExpression.FindAll({ $args[0] -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+                $null = $interpolatedOffsets.Add($variable.Extent.StartOffset)
+            }
+        }
+    }
+
     foreach ($v in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
         $p = $v.VariablePath
-        if (-not ($p.IsGlobal -or $p.IsScript)) { continue }
-        $bare = $p.UserPath -replace '^(global|script|local|private):', ''
+        if (-not ($p.IsGlobal -or $p.IsScript) -and -not $interpolatedOffsets.Contains($v.Extent.StartOffset)) { continue }
+        $bare = Get-BareVariableName -Variable $v
+        if (-not $bare) { continue }
         if (-not $readHits.ContainsKey($bare)) { $readHits[$bare] = @() }
-        $readHits[$bare] += "$($file.FullName):$($v.Extent.StartLineNumber)"
+        $readHits[$bare] += "$($source.Name):$($v.Extent.StartLineNumber)"
     }
 }
 
 $assignedList = @($assigned)
 $findings = @()
-foreach ($name in ($readHits.Keys | Sort-Object)) {
+# Hashtable keys named Keys or Count shadow the adapted properties; PSBase
+# guarantees that the collector cannot hide its own contents.
+foreach ($name in ($readHits.PSBase.Keys | Sort-Object)) {
     if ($assigned.Contains($name)) { continue }
     if ($automatic -contains $name) { continue }
     if ($name.Length -lt $MinLength) { continue }
@@ -154,21 +210,21 @@ foreach ($name in ($readHits.Keys | Sort-Object)) {
 }
 
 if (-not $Quiet) {
-    Write-Host "Scanned $($files.Count) file(s); $($readHits.Keys.Count) global/script name(s) read, $($assigned.Count) assigned."
+    Write-Host "Scanned $($sources.Count) source(s); $($readHits.PSBase.Count) scoped/interpolated name(s) read, $($assigned.Count) assigned."
 }
 
 if ($findings.Count -eq 0) {
-    if (-not $Quiet) { Write-Host "OK - no global/script variable is read under a name that looks like a typo." }
+    if (-not $Quiet) { Write-Host "OK - no scoped/interpolated variable is read under a name that looks like a typo." }
     exit 0
 }
 
 Write-Host ""
-Write-Host "ERROR: global/script variable read but never assigned, and the name closely matches one that is:" -ForegroundColor Red
+Write-Host "ERROR: variable read but never assigned, and the name closely matches one that is:" -ForegroundColor Red
 foreach ($f in $findings) {
     Write-Host ""
-    Write-Host ("  `$$($f.Name)  ->  did you mean `$$($f.LooksLike)?  (edit distance $($f.Distance))") -ForegroundColor Red
+    Write-Host ("  `$$($f.Name)  ->  closest assigned name: `$$($f.LooksLike)  (edit distance $($f.Distance))") -ForegroundColor Red
     foreach ($r in ($f.References | Select-Object -First 5)) { Write-Host "      $r" -ForegroundColor DarkGray }
 }
 Write-Host ""
-Write-Host "Reading an unassigned variable is silent -- it yields `$null, so strings render empty." -ForegroundColor Yellow
+Write-Host "Reading an unassigned variable is silent -- it yields `$null and can erase interpolated text." -ForegroundColor Yellow
 exit 1

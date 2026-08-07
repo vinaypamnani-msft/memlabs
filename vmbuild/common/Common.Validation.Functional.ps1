@@ -49,6 +49,9 @@ function Test-VmFunctionality {
 
     # Reset the output buffer for this VM's test run
     $script:Phase11OutputBuffer = [System.Collections.Generic.List[hashtable]]::new()
+    # Drop any step timer left open by a previous VM that threw mid-check.
+    $script:ValStepWatch = $null
+    $script:ValStepName = $null
 
     Write-Log "[Phase $Phase] $VMName [$role]: Starting functional validation" -LogOnly
 
@@ -145,87 +148,87 @@ function Test-VmFunctionality {
 
     switch ($role) {
         'DC' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying AD DS / DNS / Netlogon"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying AD DS / DNS / Netlogon"
             $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain -DeployConfig $DeployConfig
         }
         'BDC' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying AD DS / DNS / Netlogon (BDC)"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying AD DS / DNS / Netlogon (BDC)"
             $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain -IsBDC -DeployConfig $DeployConfig
         }
         'CAS' {
             if (-not $CurrentItem.remoteSQLVM) {
-                Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL Server"
+                Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying SQL Server"
                 $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
             else {
                 Write-Log "[Phase $Phase] $VMName [$role]: SQL is remote ($($CurrentItem.remoteSQLVM)); SQL test runs against that VM" -LogOnly
             }
             if ($testsPassed) {
-                Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying ConfigMgr site"
+                Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying ConfigMgr site"
                 $testsPassed = Test-CMSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
             # Always verify client-package distribution (collects diagnostics +
             # pulls distmgr/PkgXferMgr logs on failure) and fold the result in.
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying client package distribution"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying client package distribution"
             $pkgOk = Test-CMClientPackageDistribution -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             $testsPassed = $testsPassed -and $pkgOk
         }
         'Primary' {
             if (-not $CurrentItem.remoteSQLVM) {
-                Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL Server"
+                Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying SQL Server"
                 $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
             else {
                 Write-Log "[Phase $Phase] $VMName [$role]: SQL is remote ($($CurrentItem.remoteSQLVM)); SQL test runs against that VM" -LogOnly
             }
             if ($testsPassed) {
-                Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying ConfigMgr site"
+                Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying ConfigMgr site"
                 $testsPassed = Test-CMSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
             # Always verify client-package distribution (collects diagnostics +
             # pulls distmgr/PkgXferMgr logs on failure) and fold the result in.
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying client package distribution"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying client package distribution"
             $pkgOk = Test-CMClientPackageDistribution -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             $testsPassed = $testsPassed -and $pkgOk
         }
         'Secondary' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Secondary site"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Secondary site"
             $testsPassed = Test-SecondaryFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'SiteSystem' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying site system roles"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying site system roles"
             $testsPassed = Test-SiteSystemFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'SQLAO' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL Always On"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying SQL Always On"
             $testsPassed = Test-SQLAOFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'WSUS' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying WSUS"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying WSUS"
             $testsPassed = Test-WSUSFunctionality -VMName $VMName -Domain $domain
         }
         'FileServer' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying file server"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying file server"
             $testsPassed = Test-FileServerFunctionality -VMName $VMName -Domain $domain
         }
         'StandaloneRootCA' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Standalone Root CA"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Standalone Root CA"
             $testsPassed = Test-StandaloneRootCAFunctionality -VMName $VMName -Domain $domain
         }
         'PassiveSite' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying passive site server"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying passive site server"
             $testsPassed = Test-PassiveSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'DomainMember' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying domain member"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying domain member"
             $testsPassed = Test-DomainMemberFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'WorkgroupMember' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying workgroup member"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying workgroup member"
             $testsPassed = Test-WorkgroupMemberFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'InternetClient' {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying internet client"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying internet client"
             $testsPassed = Test-InternetClientFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         default {
@@ -235,6 +238,9 @@ function Test-VmFunctionality {
             Write-Log "[Phase $Phase] $VMName [$role]: No role-specific tests defined; skipping" -LogOnly
         }
     }
+    # Flush here: the checks below still call Write-Progress2 directly, so without
+    # this the role check would absorb all of their time.
+    Stop-ValidationStep -VMName $VMName -RoleLabel $role
 
     # A buffered failure is authoritative. Some tests enrich a remoted result
     # collection after the role check; an unsuppressed Add() can emit its index
@@ -11916,6 +11922,43 @@ echo '=== realm-join echoes (cloud-init-output.log) ==='; grep -a 'memlabs-realm
 #endregion
 
 #region Helper Functions
+
+function Write-ValidationStep {
+    <#
+    .SYNOPSIS
+        Marks a Phase 11 step boundary and logs the duration of the step that just ended.
+    .DESCRIPTION
+        Phase 11 recorded no per-check timing at all -- only the per-VM total -- so
+        "which check is slow" could not be answered from the log. Each call stamps the
+        previous step as '[TestTiming] <vm> [<role>] <step> <sec>s' and starts the clock
+        for the new one. Stop-ValidationStep flushes the final step.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [string]$RoleLabel,
+        [Parameter(Mandatory)][string]$Activity,
+        [Parameter(Mandatory)][string]$Status
+    )
+    Stop-ValidationStep -VMName $VMName -RoleLabel $RoleLabel
+    $script:ValStepName = $Status
+    $script:ValStepWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-Progress2 -PercentComplete 0 -Activity $Activity -Status $Status
+}
+
+function Stop-ValidationStep {
+    [CmdletBinding()]
+    param(
+        [string]$VMName,
+        [string]$RoleLabel
+    )
+    if (-not $script:ValStepWatch) { return }
+    $script:ValStepWatch.Stop()
+    Write-Log ("[TestTiming] {0} [{1}] {2} {3}s" -f $VMName, $RoleLabel, $script:ValStepName,
+        [Math]::Round($script:ValStepWatch.Elapsed.TotalSeconds, 1)) -LogOnly
+    $script:ValStepWatch = $null
+    $script:ValStepName = $null
+}
 
 function Format-TestResult {
     <#

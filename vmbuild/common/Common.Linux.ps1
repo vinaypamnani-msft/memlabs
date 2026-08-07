@@ -3451,7 +3451,7 @@ echo "APT_CLEANUP_DONE"
         return $false
     }
 
-    Write-Log "[Proxy] $vmName`: Squid listening on ${ip}:3128 (ACLs: $($subnets -join ', '))"
+    Write-Log "[Proxy] $vmName`: Squid listening on ${ip}:3128 (outbound access enforced by Hyper-V port ACLs)"
 
     # ---- Proxy Admin web UI ----
     # A lightweight Flask app that manages /etc/squid/blocklist.txt and
