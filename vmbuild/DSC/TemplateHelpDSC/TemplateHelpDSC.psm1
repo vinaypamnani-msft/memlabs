@@ -4749,13 +4749,18 @@ class InstallFeatureForSCCM {
         }
 
         if ($_Role -contains "Management point") {
-            # Web-Net-Ext/45 are here for validcfg.dll, not for ASP.NET. Both features install the
-            # shared Microsoft-Windows-IIS-NetFxExtensibility component that IIS's unconditional
-            # ConfigurationValidationModule registration points at, and the appcmd that writes that
-            # registration is what collided with CM's DP install on PL-PATTYDP. Taking them in
-            # Phase 3 gets CBS out of applicationHost.config long before CM opens it, and leaves
-            # two holders on the shared component so one rolling back cannot delete the DLL.
-            foreach ($f in @("BITS", "BITS-IIS-Ext", "Web-WMI", "Web-Metabase", "Web-Net-Ext", "Web-Net-Ext45")) {
+            # Web-Asp-Net45 is the load-bearing one. RoleSetup::AddAspNet45PreReq (rolesetup.cpp)
+            # shells `dism /online /norestart /enable-feature /ignorecheck /featurename:IIS-ASPNET45
+            # /all` during role setup unless CheckASPNET40Or45() finds HKLM\SOFTWARE\Microsoft\
+            # InetStp\Components\ASPNET45 already set. On PL-PATTYDP that DISM ran mid-Phase-8, its
+            # advanced installers lost applicationHost.config to a concurrent writer (0x80070020 x10),
+            # CBS failed 0x800f0922 and rolled back -- and the rollback deleted validcfg.dll while
+            # failing to remove its globalModule entry, which took the whole lab down with 503s.
+            # Installing it in Phase 3 sets that registry value so the prereq never runs at all.
+            # Web-Net-Ext/45 then keep the shared Microsoft-Windows-IIS-NetFxExtensibility component
+            # refcounted above zero, so a rollback elsewhere still cannot delete the DLL.
+            foreach ($f in @("BITS", "BITS-IIS-Ext", "Web-WMI", "Web-Metabase",
+                    "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45")) {
                 [void]$features.Add($f)
             }
         }
