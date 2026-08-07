@@ -4763,9 +4763,31 @@ function Test-SiteSystemFunctionality {
                         if ($appEvents.Count -eq 0) {
                             $results.Details.Add("DIAG: No IIS/w3wp Application events found within two minutes of the latest WAS 5139")
                         }
+                        # IIS repeats 2280 once per worker attempt, so 20 identical lines say
+                        # nothing 1 line doesn't. Collapse on message text, newest first.
+                        $seenAppEvent = @{}
                         foreach ($eventRecord in $appEvents) {
                             $eventText = (($eventRecord.Message -replace '\s+', ' ').Trim())
+                            $eventKey = "$($eventRecord.Id)|$eventText"
+                            if ($seenAppEvent.ContainsKey($eventKey)) { $seenAppEvent[$eventKey]++; continue }
+                            $seenAppEvent[$eventKey] = 1
                             $results.Details.Add("DIAG: Application $($eventRecord.TimeCreated.ToString('HH:mm:ss')) [$($eventRecord.ProviderName)] id=$($eventRecord.Id): $eventText")
+                            # 2280 names the DLL but not whether it is missing outright or is
+                            # present with an unresolvable dependency -- opposite fixes, so say which.
+                            $dllMatch = [regex]::Match($eventText, 'Module DLL ([A-Za-z]:\\[^ ]+\.dll)')
+                            if ($dllMatch.Success) {
+                                $dllPath = $dllMatch.Groups[1].Value
+                                if (Test-Path -LiteralPath $dllPath) {
+                                    $dllInfo = Get-Item -LiteralPath $dllPath -ErrorAction SilentlyContinue
+                                    $results.Details.Add("DIAG: -> '$dllPath' EXISTS ($($dllInfo.Length) bytes, $($dllInfo.VersionInfo.FileVersion), modified $($dllInfo.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))) -- so a DEPENDENCY of it is what cannot be found, not the module itself")
+                                }
+                                else {
+                                    $results.Details.Add("DIAG: -> '$dllPath' IS MISSING from disk -- repair/reinstall the IIS feature that provides it, or drop its globalModules entry from applicationHost.config")
+                                }
+                            }
+                        }
+                        foreach ($dupKey in ($seenAppEvent.Keys | Where-Object { $seenAppEvent[$_] -gt 1 })) {
+                            $results.Details.Add("DIAG: (the id=$(($dupKey -split '\|')[0]) event above repeated $($seenAppEvent[$dupKey]) times in this window)")
                         }
                     }
                     catch { $results.Details.Add("DIAG: Application event query failed: $($_.Exception.Message)") }
