@@ -2455,15 +2455,27 @@ function Wait-Phase {
                     $deadStatus = ''
                     try {
                         $hist = $global:JobProgressHistory[$job.Id]
+                        $statusText = if ($hist) { "$($hist.Status)" } else { '' }
+                        # [regex]::Match, not -match: a nested -match would clobber $Matches.
+                        $waitCandidates = @()
                         # WaitFor is joined with ',' so the status can name several VMs.
-                        if ($hist -and $hist.Status -match 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)') {
-                            foreach ($w in ($Matches[1] -split ',')) {
-                                $waitedOn = "$w".Trim().ToUpper()
-                                if ($waitedOn -and $failedVmNames.ContainsKey($waitedOn)) {
-                                    $deadDep = $waitedOn
-                                    $deadStatus = "$($hist.Status)"
-                                    break
-                                }
+                        $waitMatch = [regex]::Match($statusText, 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)')
+                        if ($waitMatch.Success) { $waitCandidates += ($waitMatch.Groups[1].Value -split ',') }
+                        # A remote Write-DscStatus -MachineName stamps "Setting up ConfigMgr.
+                        # [<writer>]: ..." into this VM's status file, so the writer owns this
+                        # job's progress (a Primary driving its Secondary's install). If the
+                        # writer died this job is just as stranded, and in that state its
+                        # status never contains the word "Waiting" -- PL-PICKLE held Phase 8
+                        # for 55m+ on "[PL-MELT]: Secondary site replication link is 'Active'"
+                        # after PL-MELT had already failed.
+                        $ownerMatch = [regex]::Match($statusText, 'Setting up ConfigMgr\. \[([A-Za-z0-9\-]+)\]:')
+                        if ($ownerMatch.Success) { $waitCandidates += $ownerMatch.Groups[1].Value }
+                        foreach ($w in $waitCandidates) {
+                            $waitedOn = "$w".Trim().ToUpper()
+                            if ($waitedOn -and $failedVmNames.ContainsKey($waitedOn)) {
+                                $deadDep = $waitedOn
+                                $deadStatus = $statusText
+                                break
                             }
                         }
                     }
