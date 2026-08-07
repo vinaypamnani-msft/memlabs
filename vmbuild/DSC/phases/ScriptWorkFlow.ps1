@@ -1196,19 +1196,29 @@ if ($ThisVM.role -ne "CAS") {
                 }
 
                 if (-not $endpointHealthy) {
-                    throw "MP pre-push health failed for $($mp.vmName) after 10 attempts: $lastHealth"
+                    # NEVER throw here. This is top-level in the scheduled-task script, so a
+                    # throw exits ScriptWorkflow, the liveness watchdog restarts it, and the
+                    # entire post-install sequence replays -- forever, because a rapid-fail
+                    # disabled MP pool never recovers on its own.
+                    $mpPrePushHealthy = $false
+                    Write-DscStatus "MP pre-push health failed for $($mp.vmName) after 10 attempts: $lastHealth" -Warning
                 }
             }
         }
     }
-    Write-DscStatus "Always Running PushClients.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
-    Set-Location $LogPath
-    try {
-        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    if ($mpPrePushHealthy -eq $false) {
+        Write-DscStatus "Skipping PushClients.ps1: no healthy MP endpoint in site $($ThisVM.siteCode). ccmsetup would park every target in an HTTP 503 retry loop; fix the MP and re-run Phase 8." -Warning
     }
-    catch {
-        Write-DscStatus "PushClients.ps1 failed: $_" -Warning
+    else {
+        Write-DscStatus "Always Running PushClients.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
+        Set-Location $LogPath
+        try {
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        }
+        catch {
+            Write-DscStatus "PushClients.ps1 failed: $_" -Warning
+        }
     }
 }
 
