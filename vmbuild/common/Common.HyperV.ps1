@@ -1332,11 +1332,23 @@ function Stop-VM2 {
         if ($vm) {
             $i = 0
             if ($TurnOff) {
-                # Use -AsJob so a wedged VM doesn't block forever
-                $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
-                $null = $stopJob | Wait-Job -Timeout 15
-                if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
-                Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
+                # Isolated on purpose. This rung has thrown twice in the field
+                # ("statusDescription cannot be null or empty", and a bare
+                # NullReferenceException) ~15s in, i.e. as Wait-Job pumped the Hyper-V
+                # job's forwarded records. Reaching the outer catch skipped the graceful
+                # retry, the second TurnOff AND the vmwp kill -- the whole escalation
+                # ladder -- and returned as though the VM had been stopped, so the
+                # caller's hard reset silently never happened on the one VM that needed it.
+                try {
+                    # -AsJob so a wedged VM doesn't block forever
+                    $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
+                    $null = $stopJob | Wait-Job -Timeout 15
+                    if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
+                    Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
+                }
+                catch {
+                    Write-Log "${Name}: TurnOff attempt threw $($_.Exception.GetType().Name): $_ | $($_.ScriptStackTrace -replace '\s+', ' '); continuing to escalation." -Warning
+                }
                 Start-Sleep -Seconds 5
                 $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Off") {
@@ -1358,17 +1370,22 @@ function Stop-VM2 {
                     Start-Sleep -Seconds $RetrySeconds
                 }
                 $StopError = @()
-                $gracefulJob = Stop-VM -VM $vm -force:$force -WarningAction SilentlyContinue -AsJob
-                $null = $gracefulJob | Wait-Job -Timeout $GracefulTimeoutSeconds
-                if ($gracefulJob.State -eq 'Running') {
-                    Write-Log "${Name}: Graceful stop did not complete within ${GracefulTimeoutSeconds}s; escalating." -Warning
-                    Stop-Job $gracefulJob -ErrorAction SilentlyContinue
-                    $StopError = @("Stop-VM did not complete within ${GracefulTimeoutSeconds}s")
+                try {
+                    $gracefulJob = Stop-VM -VM $vm -force:$force -WarningAction SilentlyContinue -AsJob
+                    $null = $gracefulJob | Wait-Job -Timeout $GracefulTimeoutSeconds
+                    if ($gracefulJob.State -eq 'Running') {
+                        Write-Log "${Name}: Graceful stop did not complete within ${GracefulTimeoutSeconds}s; escalating." -Warning
+                        Stop-Job $gracefulJob -ErrorAction SilentlyContinue
+                        $StopError = @("Stop-VM did not complete within ${GracefulTimeoutSeconds}s")
+                    }
+                    elseif ($gracefulJob.State -eq 'Failed') {
+                        $StopError = @("$($gracefulJob.ChildJobs[0].JobStateInfo.Reason.Message)")
+                    }
+                    Remove-Job $gracefulJob -Force -ErrorAction SilentlyContinue
                 }
-                elseif ($gracefulJob.State -eq 'Failed') {
-                    $StopError = @("$($gracefulJob.ChildJobs[0].JobStateInfo.Reason.Message)")
+                catch {
+                    $StopError = @("graceful Stop-VM threw $($_.Exception.GetType().Name): $_")
                 }
-                Remove-Job $gracefulJob -Force -ErrorAction SilentlyContinue
                 if ($StopError.Count -eq 0) {
                     $vm = Get-VM2 -Name $Name -Fallback
                     # A VM that no longer exists is stopped; don't fall through to
@@ -1382,10 +1399,15 @@ function Stop-VM2 {
             if ($StopError.Count -ne 0) {
 
                 # Escalation: TurnOff via -AsJob with timeout
-                $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
-                $null = $stopJob | Wait-Job -Timeout 15
-                if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
-                Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
+                try {
+                    $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
+                    $null = $stopJob | Wait-Job -Timeout 15
+                    if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
+                    Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
+                }
+                catch {
+                    Write-Log "${Name}: escalation TurnOff threw $($_.Exception.GetType().Name): $_; falling through to the worker-process kill." -Warning
+                }
                 Start-Sleep -Seconds $RetrySeconds
                 $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Off") {
@@ -1439,12 +1461,15 @@ function Stop-VM2 {
         }
     }
     catch {
+        # Name the type and the line. Four field occurrences were logged as bare text
+        # ("Object reference not set to an instance of an object") with no origin, which
+        # is unattributable to any call in this function.
         if ($Passthru) {
-            Write-Log "$Name`: Exception stopping VM $_" -Failure
+            Write-Log "$Name`: Exception stopping VM $($_.Exception.GetType().Name): $_ | $($_.ScriptStackTrace -replace '\s+', ' ')" -Failure
             return $false
         }
         else {
-            Write-Log "$Name`: Exception stopping VM $_" -Failure -LogOnly
+            Write-Log "$Name`: Exception stopping VM $($_.Exception.GetType().Name): $_ | $($_.ScriptStackTrace -replace '\s+', ' ')" -Failure -LogOnly
         }
     }
 }
