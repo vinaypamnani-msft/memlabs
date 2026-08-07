@@ -6403,18 +6403,16 @@ function Invoke-VmCommand {
                             Write-Log "$VmName`: Job '$DisplayName' Succeeded" -LogOnly
                         }
                         $failed = $false
-                        # Remove the completed job NOW. Leaving it leaks a PSRemotingJob still
-                        # bound to the cached session's runspace. Wait-ForVm polls via this path
-                        # every few seconds, so a long wait accumulates dozens of leaked completed
-                        # jobs against one VM's session. When that session is later evicted/disposed
-                        # (Remove-VmSessionFromCache on timeout) or the VM is turned off (stop-vm2
-                        # -TurnOff in the channel-broken recovery), every leaked job's transport
-                        # breaks at once and a late state-change/transport callback fires on a
-                        # threadpool thread against an already-disposed job -> unhandled
-                        # PSObjectDisposedException ('object "PSJob" has already been disposed')
-                        # that kills the whole phase child process. Receive-Job already drained the
-                        # output, so removing it here is safe and closes that race.
-                        Remove-Job $job -Force -ErrorAction SilentlyContinue
+                        # Do NOT Remove-Job here. Receive-Job has drained the output, but the
+                        # job is still bound to the cached session's runspace, and disposing it
+                        # while that runspace can still break is what fires a late teardown
+                        # callback against a disposed object on a threadpool thread -- an
+                        # unhandled exception no try/catch can reach, which kills this whole
+                        # per-VM child process and fails the phase. Park it; Clear-ParkedJobs
+                        # disposes it once the runspace is no longer Opened (break already
+                        # happened, no further callback possible) or at end of run.
+                        Add-ParkedJob -Job $job -Runspace $ps.Runspace -VmName $VmName
+                        $null = Clear-ParkedJobs
 
                         # The PSRemotingJob above ran ON the cached session's runspace
                         # (Invoke-Command -Session $ps -AsJob). Wait-Job + Remove-Job return as
@@ -7470,6 +7468,77 @@ function Clear-OrphanRunspaces {
     return $reclaimed
 }
 
+# Completed PSDirect jobs waiting for a safe moment to be disposed.
+#
+# Remove-Job DISPOSES a PSRemotingJob that is still bound to the cached session's
+# runspace. If that runspace's transport later breaks -- the VM is powered off, the
+# guest reboots, the channel drops -- the teardown callback fires on a THREADPOOL
+# thread against the disposed object. An unhandled exception on a threadpool thread
+# cannot be caught by any try/catch, so it takes the whole per-VM phase child process
+# with it, and the phase discards every healthy VM alongside it.
+#
+# This codebase already answers that for runspaces (Add-OrphanRunspace) and for
+# abandoned jobs (StopJobAsync, never Remove-Job). This is the same answer for the
+# COMPLETED path, which was the one place still disposing inline. Safe to dispose ==
+# the runspace is no longer Opened: the break has already happened by then, so no
+# further callback can arrive.
+$global:ps_parkedJobs = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+
+function Add-ParkedJob {
+    param($Job, $Runspace, [string]$VmName)
+    if (-not $Job) { return }
+    try {
+        [void]$global:ps_parkedJobs.Add([pscustomobject]@{
+                Job = $Job; Rs = $Runspace; At = (Get-Date); VmName = $VmName
+            })
+    }
+    catch {
+        # Parking is the safer default, but never leak if the list is unavailable.
+        try { Remove-Job $Job -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
+function Clear-ParkedJobs {
+    [CmdletBinding()]
+    param(
+        # End of run / cache teardown: the sessions are going away anyway.
+        [switch]$Force,
+        [int]$MaxParked = 200
+    )
+
+    $reclaimed = 0
+    $overCap = 0
+    try {
+        if (-not $global:ps_parkedJobs) { return 0 }
+        foreach ($entry in @($global:ps_parkedJobs)) {
+            if (-not $entry) { continue }
+            $safe = $Force.IsPresent
+            if (-not $safe) {
+                $state = $null
+                try { $state = "$($entry.Rs.RunspaceStateInfo.State)" } catch { }
+                $safe = [bool]($state -and $state -ne 'Opened')
+            }
+            if (-not $safe) { continue }
+            try { Remove-Job $entry.Job -Force -ErrorAction SilentlyContinue } catch { }
+            [void]$global:ps_parkedJobs.Remove($entry)
+            $reclaimed++
+        }
+        # Bound it. A drained job is cheap but not free, and Wait-ForVm polls through
+        # this path every few seconds for the length of a phase.
+        while ($global:ps_parkedJobs.Count -gt $MaxParked) {
+            $oldest = $global:ps_parkedJobs[0]
+            try { Remove-Job $oldest.Job -Force -ErrorAction SilentlyContinue } catch { }
+            [void]$global:ps_parkedJobs.Remove($oldest)
+            $overCap++
+        }
+    }
+    catch { }
+    if ($overCap -gt 0) {
+        try { Write-Log "Parked-job cap ($MaxParked) exceeded: disposed $overCap oldest job(s) whose runspace was still open." -LogOnly } catch { }
+    }
+    return ($reclaimed + $overCap)
+}
+
 function Get-RunspaceInventory {
     <#
     .SYNOPSIS
@@ -7536,6 +7605,9 @@ function Clear-VmSessionCache {
     }
     catch { }
     try { $null = Clear-OrphanRunspaces -Force } catch { }
+    # After, not before: closing the runspaces is what makes the jobs parked against them
+    # safe to dispose. Disposing first would fire the very callback this defers.
+    try { $null = Clear-ParkedJobs } catch { }
     # Counted on the AppDomain so the launcher can see that thread-job workers really
     # did run this -- the fix it verifies is otherwise completely silent.
     try {
