@@ -1193,7 +1193,15 @@ if ($ThisVM.role -ne "CAS") {
                 $domain = (Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue).Domain
                 $fqdn = if ($domain) { "$env:COMPUTERNAME.$domain" } else { $env:COMPUTERNAME }
                 $lastResult = 'no response'
-                foreach ($scheme in @('https')) {
+                # http is NOT optional here. On a PKI site the SMS_MP vdir carries
+                # sslFlags=Ssl,SslNegotiateCert, and .NET Framework's HttpWebRequest cannot do
+                # mid-request client-cert negotiation over TLS 1.3 (renegotiation does not exist
+                # in 1.3), so HTTPS throws a connection-level error against a PERFECTLY HEALTHY
+                # MP. Measured on PL-PATTYDP: a raw SslStream handshake succeeded (Tls13/Aes256)
+                # with the expected cert bound while Invoke-WebRequest reported "the underlying
+                # connection was closed", and http answered 403 (SSL required) from a live
+                # worker. Probing https only would fail the gate on every healthy PKI lab.
+                foreach ($scheme in @('https', 'http')) {
                     $url = "$scheme`://$fqdn/sms_mp/.sms_aut?MPLIST"
                     try {
                         if ($scheme -eq 'https') {
@@ -1210,8 +1218,10 @@ if ($ThisVM.role -ne "CAS") {
                     }
                     catch [System.Net.WebException] {
                         $statusCode = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-                        if ($statusCode -in 401, 403) {
-                            return "HEALTHY|$url returned HTTP $statusCode (serving; authentication required)"
+                        # Any status at all proves a worker answered. 503 is the one fault this
+                        # gate exists for (rapid-fail-disabled pool), so only 503 stays unhealthy.
+                        if ($statusCode -and $statusCode -ne 503) {
+                            return "HEALTHY|$url returned HTTP $statusCode (a worker answered)"
                         }
                         $lastResult = if ($statusCode) { "$url returned HTTP $statusCode" } else { "$url failed: $($_.Exception.Message)" }
                     }
