@@ -4708,7 +4708,8 @@ class InstallFeatureForSCCM {
         }
 
         if ($_Role -contains "Distribution point") {
-            foreach ($f in @("Web-WMI", "Web-Metabase")) {
+            # Web-Net-Ext/45: see the Management point block below.
+            foreach ($f in @("Web-WMI", "Web-Metabase", "Web-Net-Ext", "Web-Net-Ext45")) {
                 [void]$features.Add($f)
             }
         }
@@ -4730,7 +4731,13 @@ class InstallFeatureForSCCM {
         }
 
         if ($_Role -contains "Management point") {
-            foreach ($f in @("BITS", "BITS-IIS-Ext", "Web-WMI", "Web-Metabase")) {
+            # Web-Net-Ext/45 are here for validcfg.dll, not for ASP.NET. Both features install the
+            # shared Microsoft-Windows-IIS-NetFxExtensibility component that IIS's unconditional
+            # ConfigurationValidationModule registration points at, and the appcmd that writes that
+            # registration is what collided with CM's DP install on PL-PATTYDP. Taking them in
+            # Phase 3 gets CBS out of applicationHost.config long before CM opens it, and leaves
+            # two holders on the shared component so one rolling back cannot delete the DLL.
+            foreach ($f in @("BITS", "BITS-IIS-Ext", "Web-WMI", "Web-Metabase", "Web-Net-Ext", "Web-Net-Ext45")) {
                 [void]$features.Add($f)
             }
         }
