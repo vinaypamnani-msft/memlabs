@@ -161,13 +161,23 @@ function Write-JobProgress {
                     $lastEntry = $global:JobProgressHistory[$jobKey]
                     $changed = (-not $lastEntry) -or ($lastEntry.Line -ne $HistoryLine)
                     $stale = $lastEntry -and (($now - $lastEntry.Time).TotalSeconds -ge 10)
+                    # "Elapsed" in the activity is the VM's TOTAL time in the phase, so pairing
+                    # it with a status reads as "this step has taken 8 minutes" when the step
+                    # actually took 4 seconds and something later went quiet. Track when the
+                    # status text last changed so the bar can say which it is.
+                    $statusSince = if ($lastEntry -and $lastEntry.StatusSince -and $lastEntry.Status -eq $latestStatus) { $lastEntry.StatusSince } else { $now }
                     if ($changed -or $stale) {
                         # Status is kept unconcatenated (Line mixes in id/activity/percent) so
                         # Wait-Phase can read "Waiting on <VM> to Complete" and spot a wait on a
                         # dependency that has already failed.
-                        $global:JobProgressHistory[$jobKey] = @{ Line = $HistoryLine; Time = $now; Status = $latestStatus; JobName = $jobName }
+                        $global:JobProgressHistory[$jobKey] = @{ Line = $HistoryLine; Time = $now; Status = $latestStatus; JobName = $jobName; StatusSince = $statusSince }
                         if ($secondsRemaining -gt 0) {
                             $latestStatus += " (Remaining: $($secondsRemaining)s)"
+                        }
+                        $held = $now - $statusSince
+                        if ($held.TotalSeconds -ge 60) {
+                            # Floor, not [int]: [int](90/60) banker's-rounds to 2, printing 1m30s as 2m30s.
+                            $latestStatus += " [{0}m{1:00}s on this step]" -f [Math]::Floor($held.TotalMinutes), $held.Seconds
                         }
                         Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
                         write-host -NoNewline "$hideCursor"
