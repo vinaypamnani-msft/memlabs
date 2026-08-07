@@ -73,7 +73,7 @@ function Test-VmFunctionality {
     # fast step before the full check chain runs. On a healthy VM this is a ~1s
     # no-op. Skip Linux and powered-off / non-PSDirect roles.
     if (-not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "PSDirect liveness check"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "PSDirect liveness check"
         $liveGate = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock { $env:COMPUTERNAME } -DisplayName "Phase11-LivenessGate" `
             -SuppressLog -AsJob -TimeoutSeconds 60 -RebootIfUnresponsive
@@ -92,7 +92,7 @@ function Test-VmFunctionality {
         # liveness OK, the Get-CimInstance uptime probe timed out). Probe CIM with
         # a bounded job; when it's wedged, repair it (restart winmgmt in-guest via
         # PSDirect, reboot only if that's not enough) BEFORE the checks run.
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "WMI/CIM liveness check"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "WMI/CIM liveness check"
         $cimProbe = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock { (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).CSName } `
             -DisplayName "Phase11-CimGate" -SuppressLog -AsJob -TimeoutSeconds 60
@@ -116,7 +116,7 @@ function Test-VmFunctionality {
     # delay; only a freshly-rebooted VM waits, and only for the time remaining.
     if (-not $vmIsLinux) {
         $minUptimeMinutes = 3
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Checking uptime (settle gate)"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Checking uptime (settle gate)"
         $uptimeResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock { (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime | Select-Object -ExpandProperty TotalMinutes } `
             -DisplayName "Phase11-UptimeGate" -SuppressLog -AsJob -TimeoutSeconds 60
@@ -125,7 +125,7 @@ function Test-VmFunctionality {
             if ($uptimeMin -lt $minUptimeMinutes) {
                 $waitSec = [int][math]::Ceiling(($minUptimeMinutes - $uptimeMin) * 60)
                 Write-Log "[Phase $Phase] $VMName [$role]: Uptime $([int]$uptimeMin)min < ${minUptimeMinutes}min — waiting ${waitSec}s for the VM to settle before validating" -LogOnly
-                Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Waiting ${waitSec}s for VM to settle after reboot"
+                Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Waiting ${waitSec}s for VM to settle after reboot"
                 Start-Sleep -Seconds $waitSec
             }
             else {
@@ -142,7 +142,7 @@ function Test-VmFunctionality {
     $hasLocalSql = ($CurrentItem.sqlVersion -and -not $CurrentItem.remoteSQLVM) -or
                    $role -in @('Secondary', 'SQLAO')
     if ($hasLocalSql) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Ensuring SQL services are running"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Ensuring SQL services are running"
         $testsPassed = Repair-StoppedSQLServices -VMName $VMName -Domain $domain
     }
 
@@ -238,9 +238,6 @@ function Test-VmFunctionality {
             Write-Log "[Phase $Phase] $VMName [$role]: No role-specific tests defined; skipping" -LogOnly
         }
     }
-    # Flush here: the checks below still call Write-Progress2 directly, so without
-    # this the role check would absorb all of their time.
-    Stop-ValidationStep -VMName $VMName -RoleLabel $role
 
     # A buffered failure is authoritative. Some tests enrich a remoted result
     # collection after the role check; an unsuppressed Add() can emit its index
@@ -252,13 +249,13 @@ function Test-VmFunctionality {
 
     # If the VM has installRP, also test reporting services
     if ($testsPassed -and $CurrentItem.installRP) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Reporting Services"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Reporting Services"
         $testsPassed = Test-ReportingFunctionality -VMName $VMName -Domain $domain -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # If the VM has InstallCA, test Certificate Authority
     if ($testsPassed -and $CurrentItem.InstallCA) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Certificate Authority"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Certificate Authority"
         $testsPassed = Test-CAFunctionality -VMName $VMName -Domain $domain
     }
 
@@ -273,19 +270,19 @@ function Test-VmFunctionality {
                     $CurrentItem.InstallSUP -or $CurrentItem.InstallMP -or
                     $CurrentItem.InstallDP -or $CurrentItem.InstallRP
     if ($testsPassed -and $cmo.UsePKI -and $needsIISCert) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying PKI certificates"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying PKI certificates"
         $testsPassed = Test-PKICertificatesOnVM -VMName $VMName -Domain $domain -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # If the VM has SQL but is not a Primary/CAS/SQLAO (standalone SQL server)
     if ($testsPassed -and $CurrentItem.sqlVersion -and $role -notin @('CAS', 'Primary', 'SQLAO')) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL Server"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying SQL Server"
         $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # SSMS install check (any role with installSSMS=$true)
     if ($testsPassed -and $CurrentItem.installSSMS) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SSMS install"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying SSMS install"
         $testsPassed = Test-SSMSInstall -VMName $VMName -Domain $domain
     }
 
@@ -293,31 +290,31 @@ function Test-VmFunctionality {
     # Phase 4 mounts the SQL ISO and ejects it on success; by Phase 11 a healthy
     # SQL VM should have an empty DVD drive.
     if ($testsPassed -and $CurrentItem.sqlVersion -and -not $CurrentItem.remoteSQLVM) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL ISO is not mounted"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying SQL ISO is not mounted"
         $testsPassed = Test-SqlIsoNotMounted -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # SMS Provider role check (remote SMS provider, not on the site server itself)
     if ($testsPassed -and $CurrentItem.InstallSMSProv -and $role -ne 'CAS' -and $role -ne 'Primary') {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SMS Provider"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying SMS Provider"
         $testsPassed = Test-SMSProviderRole -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # Pull-DP configuration (verified from parent Primary)
     if ($testsPassed -and $CurrentItem.enablePullDP) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Pull-DP"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Pull-DP"
         $testsPassed = Test-PullDPConfiguration -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # Additional data disks (E:, F:, ...) per additionalDisks config
     if ($testsPassed -and $CurrentItem.additionalDisks) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying additional disks"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying additional disks"
         $testsPassed = Test-AdditionalDisks -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # BitLocker volume state on member VMs flagged for encryption
     if ($testsPassed -and $CurrentItem.BitLocker -eq $true -and $role -notin @('DC', 'BDC')) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying BitLocker"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying BitLocker"
         $testsPassed = Test-BitLockerProtection -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
@@ -326,7 +323,7 @@ function Test-VmFunctionality {
     # when only VMs have BitLocker=true (TPM-only, no ConfigMgr BLM policy management).
     $cmo = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
     if ($testsPassed -and $cmo.EnableBLM -and $role -eq 'Primary') {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying BitLocker Management"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying BitLocker Management"
         $testsPassed = Test-BLMFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
@@ -337,7 +334,7 @@ function Test-VmFunctionality {
     if ($testsPassed -and $role -eq 'Primary') {
         $replicaMPsInSite = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' -and $_.installMP -and $_.useDatabaseReplica -and $_.siteCode -eq $CurrentItem.siteCode })
         if ($replicaMPsInSite.Count -gt 0) {
-            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying MP database replicas"
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying MP database replicas"
             $testsPassed = Test-MPReplicaFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
     }
@@ -349,7 +346,7 @@ function Test-VmFunctionality {
     # emits a spurious 'scheduled-task check skipped (probe timed out)' WARN, so gate
     # it behind -not $vmIsLinux like the DSC LCM check below.
     if ($testsPassed -and -not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying maintenance tasks"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying maintenance tasks"
         $testsPassed = Test-MaintenanceTasks -VMName $VMName -Domain $domain
     }
 
@@ -359,7 +356,7 @@ function Test-VmFunctionality {
     # fails the VM, so it is intentionally not assigned to $testsPassed). Skip
     # powered-off / non-PSDirect roles and Linux VMs (no DSC).
     if ($testsPassed -and -not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying DSC LCM is idle"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying DSC LCM is idle"
         $null = Test-DscIdle -VMName $VMName -Domain $domain
     }
 
@@ -372,7 +369,7 @@ function Test-VmFunctionality {
     # the DC, but the WARN lines surface the real cross-forest gaps (esp. the
     # missing reverse DNS forwarder).
     if ($testsPassed -and -not $vmIsLinux -and $role -in @('DC', 'BDC') -and $CurrentItem.ForestTrust -and $CurrentItem.ForestTrust -ne 'NONE') {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying cross-forest trust"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying cross-forest trust"
         $null = Test-ForestTrustFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
@@ -381,10 +378,12 @@ function Test-VmFunctionality {
     # Ping fail → restart. SSH down + SMB down → restart (both services dead).
     # SSH down + SMB up → read logs via SMB share to diagnose, warn only.
     if ($testsPassed -and $vmIsLinux) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Checking Linux VM health (ping + SSH)"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Checking Linux VM health (ping + SSH)"
         $healthResult = Test-LinuxVmHealth -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig -IsRetry:$IsRetry
         if ($healthResult -eq 'Restarted') {
             # VM was restarted and recovered — re-run all tests from scratch
+            # Flush first: the recursive call resets the step timer.
+            Stop-ValidationStep -VMName $VMName -RoleLabel $role
             $script:Phase11OutputBuffer = [System.Collections.Generic.List[hashtable]]::new()
             $testsPassed = Test-VmFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig -IsRetry
             return $testsPassed
@@ -400,7 +399,7 @@ function Test-VmFunctionality {
     # This runs from the host side — no SSH needed — so it validates the backup
     # file-access channel that works when SSH is down.
     if ($testsPassed -and $vmIsLinux) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Samba (SMB) access"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Samba (SMB) access"
         $testsPassed = Test-LinuxSmbAccess -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
@@ -409,19 +408,19 @@ function Test-VmFunctionality {
     # lab AD domain. Informational (WARN, never fails the VM) with full
     # diagnostics on failure -- the usual root cause is DNS not pointing at the DC.
     if ($testsPassed -and $vmIsLinux -and ($CurrentItem.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$CurrentItem.joinDomain) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying AD domain join"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying AD domain join"
         $null = Test-LinuxDomainJoin -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # ---- Proxy validation ----
     # 1) For the Proxy VM itself: verify Squid is listening on TCP 3128.
     if ($testsPassed -and $role -eq 'Proxy') {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Squid proxy"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Squid proxy"
         $testsPassed = Test-ProxyListening -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
     # 1b) Verify the Proxy Admin web UI is listening on TCP 8443.
     if ($testsPassed -and $role -eq 'Proxy') {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Proxy Admin web UI"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Proxy Admin web UI"
         $testsPassed = Test-ProxyAdminWebUI -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
     # 2) For any opted-in client/CM-role VM: verify it's pointed at the proxy.
@@ -429,7 +428,7 @@ function Test-VmFunctionality {
     #    Get-CMSiteSystemServer UseProxy=$true. Linux: guest env/apt proxy config
     #    (the deny-ACL is stamped post-Phase-11, so egress-blocked isn't tested here).
     if ($testsPassed -and (Test-VmUsesProxy -Vm $CurrentItem -DeployConfig $DeployConfig)) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying proxy configuration"
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying proxy configuration"
         if ($vmIsLinux) {
             if (-not (Test-LinuxProxyConfig -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
                 $testsPassed = $false
@@ -450,6 +449,7 @@ function Test-VmFunctionality {
         }
     }
 
+    Stop-ValidationStep -VMName $VMName -RoleLabel $role
     Write-Progress2 -Activity $validationActivity -Completed
 
     # If tests failed on a Windows VM, check whether PSDirect itself is broken.
@@ -7908,6 +7908,12 @@ function Test-DomainMemberFunctionality {
 
         Write-Progress -Activity $progressActivity -Status "Checking ConfigMgr client (CcmExec)"
         $ccm = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+        # Snapshot taken BEFORE any remediation below: only an established client
+        # (service already present, no install in flight) has had time to be
+        # discovered, land in a collection and pull application policy. Everything
+        # this function does after this point can turn a brand-new client into a
+        # Running one, which is why the arrival state has to be recorded here.
+        $results.ClientPreexisting = [bool]($ccm -and -not (Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue))
         if ($ccm) {
             if ($ccm.Status -ne 'Running') {
                 # Client push may still be finishing — try to start and wait.
@@ -8081,10 +8087,11 @@ function Test-DomainMemberFunctionality {
                         $results.Details.Add("WARN: ccmsetup succeeded but CcmExec still not Running")
                     }
                 }
-                # Hold the failure detail until the retry has run. ccmsetup.log is CUMULATIVE
-                # and never rolls, so this line is routinely a failure from hours ago that the
-                # retry then fixes -- emitting it as a live WARN before retrying (and again
-                # after) made an already-repaired MP look broken for the rest of the morning.
+                # Hold the failure detail until the retry has run. ccmsetup.log rolls to
+                # ccmsetup-<stamp>.log on a new install but is never truncated, so this line
+                # is routinely a failure from hours ago that the retry then fixes -- emitting
+                # it as a live WARN before retrying (and again after) made an already-repaired
+                # MP look broken for the rest of the morning.
                 $pendingFailure = New-Object System.Collections.Generic.List[string]
                 if ($exitLine -and -not $isSuccess) {
                     $failAge = ''
@@ -8155,7 +8162,12 @@ function Test-DomainMemberFunctionality {
     # (these live only on the guest and are otherwise lost on VHD compaction).
     if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Details) {
         $ccmFailed = $result.ScriptBlockOutput.Details | Where-Object { $_ -match 'ccmsetup failed' }
-        if ($ccmFailed) {
+        # ccmsetup.log rolls but is never truncated, so a failure line from an
+        # outage hours ago survives the repair. If CcmExec is Running now, that
+        # entry is history and pulling ~1MB of guest logs per VM over PSDirect
+        # buys nothing -- on pushlab that was 27 files across 8 healthy clients.
+        $ccmRunning = $result.ScriptBlockOutput.Details | Where-Object { $_ -match '^OK: CcmExec' }
+        if ($ccmFailed -and -not $ccmRunning) {
             Save-CcmSetupLog -VMName $VMName -DomainName $domain
         }
     }
@@ -8307,10 +8319,19 @@ function Test-DomainMemberFunctionality {
     if ($officeWanted -and $result.ScriptBlockOutput.Details) {
         $clientRunningForOffice = [bool]($result.ScriptBlockOutput.Details | Where-Object { $_ -match '^OK: CcmExec' })
     }
+    # A client this run just brought online cannot hold the Office assignment yet:
+    # it still has to be discovered, land in MEMLABS-Office Install Targets, have
+    # the site project the assignment, and then pull machine policy. Polling it for
+    # 3 min and then collecting server-side projection state is a guaranteed WARN
+    # that costs ~5 min on Phase 11's critical path (pushlab PL-PRETZEL).
+    $clientBrandNew = ($clientRunningForOffice -and -not $result.ScriptBlockOutput.ClientPreexisting)
     if ($officeWanted -and -not $clientRunningForOffice) {
         $null = $result.ScriptBlockOutput.Details.Add("WARN: Skipping Office deployment policy check -- ConfigMgr client (CcmExec) is not installed/running, so the Office deployment can't be received. Resolve the client install first (see the ccmsetup WARN above).")
     }
-    if ($officeWanted -and $clientRunningForOffice) {
+    elseif ($officeWanted -and $clientBrandNew) {
+        $null = $result.ScriptBlockOutput.Details.Add("INFO: Skipping Office deployment policy check -- the ConfigMgr client only came online during this Phase 11 run, so discovery, collection membership and policy projection have not had a cycle yet. Re-run Phase 11 to check the Office deployment.")
+    }
+    if ($officeWanted -and $clientRunningForOffice -and -not $clientBrandNew) {
         $officeCheckBlock = {
             $officeResults = @{ Details = [System.Collections.Generic.List[string]]::new() }
             $progressActivity = "$env:COMPUTERNAME [DomainMember]"

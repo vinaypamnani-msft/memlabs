@@ -723,6 +723,9 @@ function Start-VM2 {
         if ($vm) {
             $i = 0
             $running = $false
+            # The retry loop can absorb minutes in OOM back-off and stray-mount sweeps
+            # without ever reporting how long the start itself took.
+            $swStart = [System.Diagnostics.Stopwatch]::StartNew()
             do {
                 $i++
                 if ($i -gt 1) {
@@ -887,6 +890,8 @@ function Start-VM2 {
                 # Invalidate the Get-List cache so the next SmartUpdate
                 # sees the updated state without waiting for the throttle.
                 $global:vm_List_LastUpdate = $null
+                $swStart.Stop()
+                Write-Log "[StepTiming] ${Name} StartVm completed in $([Math]::Round($swStart.Elapsed.TotalSeconds,1)) seconds (attempt $i of $RetryCount)" -LogOnly
                 Write-Log "${Name}: VM was started." -LogOnly
                 if ($Passthru.IsPresent) {
                     return $true
@@ -910,6 +915,8 @@ function Start-VM2 {
             else {
                 $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Running") {
+                    $swStart.Stop()
+                    Write-Log "[StepTiming] ${Name} StartVm completed in $([Math]::Round($swStart.Elapsed.TotalSeconds,1)) seconds (attempt $i of $RetryCount)" -LogOnly
                     Write-Log "${Name}: VM was started." -LogOnly
                     if ($Passthru.IsPresent) {
                         return $true
