@@ -1150,7 +1150,44 @@ if ($ThisVM.role -ne "CAS") {
                     }
                     catch { $wasWhy += "WAS event read failed: $($_.Exception.Message)" }
                     $wasSummary = if ($wasWhy.Count) { "; WAS: $($wasWhy -join ' | ')" } else { '; no WAS/W3SVC events naming the pool in 2h' }
-                    return "UNHEALTHY|pool=$poolState$wasSummary"
+
+                    # 5139 err=0x8007007E (ERROR_MOD_NOT_FOUND) means w3wp could not load a
+                    # DLL. IIS names the offending path itself in Application event 2280
+                    # ("The Module DLL <path> failed to load"), so read that rather than
+                    # guess; only if nothing named it, fall back to proving every registered
+                    # globalModule image still exists. Pool bitness is included because a
+                    # bitness64 module in a 32-bit pool fails the same way.
+                    $modWhy = @()
+                    try {
+                        $poolCfg = Get-Item "IIS:\AppPools\$PoolName" -ErrorAction SilentlyContinue
+                        if ($poolCfg) { $modWhy += "pool runtime=$($poolCfg.managedRuntimeVersion) 32bit=$($poolCfg.enable32BitAppOnWin64) identity=$($poolCfg.processModel.identityType)" }
+                    }
+                    catch { }
+                    $namedDll = @()
+                    try {
+                        $appEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddHours(-2) } -MaxEvents 300 -ErrorAction SilentlyContinue |
+                                Where-Object { $_.ProviderName -match 'IIS|W3SVC|Application Error' -and $_.Id -in 2280, 2282, 2214, 1000 } |
+                                Select-Object -First 3)
+                        foreach ($ev in $appEvents) {
+                            $msg = (($ev.Message -replace '\s+', ' ').Trim())
+                            $namedDll += "$($ev.TimeCreated.ToString('HH:mm:ss')) id=$($ev.Id): $($msg.Substring(0, [Math]::Min(140, $msg.Length)))"
+                        }
+                    }
+                    catch { }
+                    if ($namedDll.Count -eq 0) {
+                        try {
+                            $ahc = [xml](Get-Content "$env:windir\system32\inetsrv\config\applicationHost.config" -Raw -ErrorAction Stop)
+                            foreach ($gm in $ahc.configuration.'system.webServer'.globalModules.add) {
+                                $img = [Environment]::ExpandEnvironmentVariables("$($gm.image)")
+                                if ($img -and -not (Test-Path -LiteralPath $img)) { $namedDll += "globalModule '$($gm.name)' image MISSING: $img" }
+                            }
+                            if ($namedDll.Count -eq 0) { $namedDll += 'no IIS 2280/2282 event and every globalModule image exists on disk' }
+                        }
+                        catch { $namedDll += "applicationHost.config read failed: $($_.Exception.Message)" }
+                    }
+                    $modWhy += $namedDll
+                    $modSummary = if ($modWhy.Count) { "; MODULES: $($modWhy -join ' | ')" } else { '' }
+                    return "UNHEALTHY|pool=$poolState$wasSummary$modSummary"
                 }
 
                 $domain = (Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue).Domain
