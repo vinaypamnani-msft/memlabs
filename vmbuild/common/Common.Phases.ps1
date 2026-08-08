@@ -1103,7 +1103,7 @@ function Start-Phase {
             $result.Failed = [Math]::Max(0, $result.Failed - $crashedVMs.Count) + $retryResult.Failed
             $result.Success += $retryResult.Success
             $result.Warning += $retryResult.Warning
-            $null = Write-Log "[Phase $Phase] Re-dispatch finished; $($retryResult.Success) success, $($retryResult.Failed) failures." -OutputStream
+            $null = Write-Log "[Phase $Phase] Re-dispatch finished; $($retryResult.Success) success, $($retryResult.Warning) warnings, $($retryResult.Failed) failures." -OutputStream
         }
         else {
             $null = Write-Log "[Phase $Phase] Re-dispatch produced no jobs; leaving the original failure in place." -Warning
