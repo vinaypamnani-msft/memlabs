@@ -6700,9 +6700,9 @@ function Invoke-VmCommand {
                             # PSObjectDisposedException ('object "PSJob" has already
                             # been disposed') that crashes the whole phase child
                             # process. Evict the cache ENTRY but LEAK the session object
-                            # (reaped at process exit); the wedged channel is no longer
-                            # reachable via the cache anyway.
-                            Remove-VmSessionFromCache -VmName $VmName -LeakSession
+                            # (reaped once the abandoned job below reaches a terminal state);
+                            # the wedged channel is no longer reachable via the cache anyway.
+                            Remove-VmSessionFromCache -VmName $VmName -LeakSession -AbandonedJob $job
                             if ($RebootIfUnresponsive) {
                                 $recovery = Invoke-VmLivenessRecovery -VmName $VmName -VmDomainName $VmDomainName -Quiet:$SuppressLog
                                 $return.Rebooted = [bool]$recovery.Rebooted
@@ -6716,7 +6716,7 @@ function Invoke-VmCommand {
                             # imminent VM reboot/TurnOff can't crash the process via this
                             # session's transport break.
                             $return.ChannelBroken = $true
-                            Remove-VmSessionFromCache -VmName $VmName -LeakSession
+                            Remove-VmSessionFromCache -VmName $VmName -LeakSession -AbandonedJob $job
                         }
                     }
                 }
@@ -7205,9 +7205,15 @@ function New-PSSessionWithTimeout {
     # timeout (channel hung) from auth/connection errors.
     $result = @{ Session = $null; TimedOut = $false; ErrorMessage = $null }
 
-    # Cheap amortised sweep: reclaim anything parked by an earlier abandon that has
-    # since gone quiet.
-    $null = Clear-OrphanRunspaces
+    # NO sweep here. This runs on every new PSDirect session, i.e. constantly MID-PHASE,
+    # and it silently broke the contract the abandon paths depend on: they StopJobAsync a
+    # job and leak its session specifically so a later transport break finds a LIVE object,
+    # documented as "reaped at process exit". Once parking existed, this call reaped them
+    # 120s later instead -- disposing a session with a still-running abandoned job riding
+    # it, which is the disposed-object crash those paths were written to avoid. Its only
+    # guard, RunspaceAvailability -ne 'Busy', is documented in this same file as a
+    # false-ready signal. Reaping happens where it is safe: Clear-VmSessionCache in each
+    # worker's finally (that VM's phase work is over) and the -Force pass at end of run.
 
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
     $rs.Open()
@@ -7399,11 +7405,11 @@ function Get-VmSessionCallerTag {
 }
 
 function Add-OrphanRunspace {
-    param($Runspace, $PowerShell, $Session, [string]$Reason, [string]$VmName)
+    param($Runspace, $PowerShell, $Session, [string]$Reason, [string]$VmName, $Job)
     try {
         if (-not $Runspace -and -not $PowerShell -and -not $Session) { return }
         [void]$global:ps_orphanRunspaces.Add([pscustomobject]@{
-                Rs = $Runspace; Ps = $PowerShell; Sess = $Session; At = (Get-Date); Reason = $Reason; VmName = $VmName
+                Rs = $Runspace; Ps = $PowerShell; Sess = $Session; At = (Get-Date); Reason = $Reason; VmName = $VmName; Job = $Job
             })
     }
     catch { }
@@ -7428,6 +7434,17 @@ function Clear-OrphanRunspaces {
             if (-not $Force -and $age -lt $MinAgeSeconds) { continue }
             # Still executing: leave it. A Dispose() here is the documented crash.
             if (-not $Force) {
+                # An ABANDONED JOB is still riding this session. Invoke-VmCommand's timeout /
+                # channel-broken paths StopJobAsync the job and leak the session precisely so a
+                # later transport break finds a LIVE object; disposing here re-creates the crash
+                # they were avoiding, and turns "leaked, reaped at process exit" into "disposed
+                # 120s later". RunspaceAvailability cannot see this -- it is a documented
+                # false-ready signal that reads Available while the server-side pipeline lives.
+                if ($entry.Job) {
+                    $jobState = $null
+                    try { $jobState = "$($entry.Job.State)" } catch { }
+                    if ($jobState -notin @('Completed', 'Failed', 'Stopped')) { continue }
+                }
                 $avail = $null
                 try { $avail = $entry.Rs.RunspaceAvailability } catch { }
                 if ("$avail" -eq 'Busy') { continue }
@@ -7457,6 +7474,9 @@ function Clear-OrphanRunspaces {
                 }
             }
             catch { }
+            # Last, and only now: the transport is closed, so disposing the job it was
+            # abandoned onto can no longer be reached by a teardown callback.
+            try { if ($entry.Job) { Remove-Job $entry.Job -Force -ErrorAction SilentlyContinue } } catch { }
             [void]$global:ps_orphanRunspaces.Remove($entry)
             $reclaimed++
         }
@@ -7507,7 +7527,6 @@ function Clear-ParkedJobs {
     )
 
     $reclaimed = 0
-    $overCap = 0
     try {
         if (-not $global:ps_parkedJobs) { return 0 }
         foreach ($entry in @($global:ps_parkedJobs)) {
@@ -7523,20 +7542,17 @@ function Clear-ParkedJobs {
             [void]$global:ps_parkedJobs.Remove($entry)
             $reclaimed++
         }
-        # Bound it. A drained job is cheap but not free, and Wait-ForVm polls through
-        # this path every few seconds for the length of a phase.
-        while ($global:ps_parkedJobs.Count -gt $MaxParked) {
-            $oldest = $global:ps_parkedJobs[0]
-            try { Remove-Job $oldest.Job -Force -ErrorAction SilentlyContinue } catch { }
-            [void]$global:ps_parkedJobs.Remove($oldest)
-            $overCap++
+        # Deliberately NOT trimmed to the cap here. Disposing a job whose runspace is still
+        # Opened is the crash; the only safe points are the per-worker sweep at the end of
+        # this VM's phase work and the -Force pass at end of run. Report accumulation rather
+        # than trading a crash for a shorter list.
+        if (-not $Force -and $global:ps_parkedJobs.Count -gt $MaxParked -and -not $global:ps_parkedJobsWarned) {
+            $global:ps_parkedJobsWarned = $true
+            try { Write-Log "Parked PSDirect jobs passed $MaxParked (now $($global:ps_parkedJobs.Count)); held until this VM's phase work completes." -LogOnly } catch { }
         }
     }
     catch { }
-    if ($overCap -gt 0) {
-        try { Write-Log "Parked-job cap ($MaxParked) exceeded: disposed $overCap oldest job(s) whose runspace was still open." -LogOnly } catch { }
-    }
-    return ($reclaimed + $overCap)
+    return $reclaimed
 }
 
 function Get-RunspaceInventory {
@@ -7677,7 +7693,10 @@ function Remove-VmSessionFromCache {
         # -> unhandled PSObjectDisposedException that kills the phase child
         # process. Leaking the session object (reaped at process exit) is the safe
         # trade -- the channel is dead and is no longer reachable via the cache.
-        [switch]$LeakSession
+        [switch]$LeakSession,
+        # The job StopJobAsync'd onto this session. Parked with it so the reaper can tell
+        # a quiet session from one that still has a live pipeline riding it.
+        $AbandonedJob
     )
     if (-not $VmName) { return }
     $VmName = $VmName.Split('.')[0]
@@ -7692,7 +7711,7 @@ function Remove-VmSessionFromCache {
                 # it does not have to mean never. Passing the session matters -- parking
                 # the runspace alone left the PSSession's RemoteRunspace open for the
                 # life of the launcher, which is the bulk of the measured leak.
-                try { Add-OrphanRunspace -Runspace $sess._OwnerRunspace -Session $sess -Reason 'session leaked (abandoned job)' -VmName $VmName } catch { }
+                try { Add-OrphanRunspace -Runspace $sess._OwnerRunspace -Session $sess -Reason 'session leaked (abandoned job)' -VmName $VmName -Job $AbandonedJob } catch { }
             }
             $dispNote = if ($LeakSession) { 'leaked (abandoned job may still ride it)' } else { 'disposed' }
             Write-Log "$VmName`: Evicted cached PSDirect session '$key' ($dispNote; timed out / unresponsive)" -Verbose
