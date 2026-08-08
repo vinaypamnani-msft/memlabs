@@ -26,6 +26,11 @@ if ($provList.Count -eq 0) {
 }
 Write-DscStatus "[InstallProv] Starting: $($provList.Count) VM(s) flagged InstallSMSProv ($(($provList.vmName) -join ', '))"
 
+# Providers we tried and could not prove are installed. A killed/failed setupwpf used to fall
+# straight through to "setupWPF has completed" + "Finished", so Phase 8 went green while root\SMS
+# never existed on the target and only Phase 11 (hours later) noticed.
+$failedProviders = [System.Collections.Generic.List[string]]::new()
+
 # bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
 #$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
 
@@ -105,18 +110,23 @@ foreach ($prov in $provList) {
         # followed by an unbounded poll loop).
         $installCap = 1800   # 30 min
         $proc = $null
+        $installFailed = $false
         try {
             $proc = Start-Process -FilePath $setupWPF -ArgumentList @('/HIDDEN', '/SDKINST', $machine) -PassThru -WindowStyle Hidden -ErrorAction Stop
         }
         catch {
             Write-DscStatus "[InstallProv] Failed to start setupWPF: $($_.Exception.Message)" -Failure
+            $installFailed = $true
         }
 
         if ($proc) {
             if (-not $proc.WaitForExit($installCap * 1000)) {
-                Write-DscStatus "[InstallProv] setupWPF did not finish within $installCap s on $machine -- killing it" -Failure
+                # /SDKINST stops the site's services to modify the site, so a kill here leaves the site
+                # mid-maintenance. Say so -- that outage is what the rest of Phase 8 then runs against.
+                Write-DscStatus "[InstallProv] setupWPF did not finish within $installCap s on $machine -- killing it. The provider is NOT installed and the site may be left mid-maintenance (services stopped); see ConfigMgrSetup.log" -Failure
                 try { $proc.Kill() } catch { }
                 Get-Process "setupwpf" -ErrorAction SilentlyContinue | ForEach-Object { try { $_.Kill() } catch { } }
+                $installFailed = $true
             }
         }
 
@@ -135,10 +145,48 @@ foreach ($prov in $provList) {
             $postWaited += 60
             $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue
         }
-        Write-DscStatus "[InstallProv] setupWPF has completed"
+
+        if ($installFailed) {
+            $failedProviders.Add($machine)
+            continue
+        }
+
+        # setupwpf exiting 0 is not proof the provider registered. Confirm it landed in
+        # SMS_ProviderLocation before calling this VM done -- the SMS Provider host is recycling
+        # right after /SDKINST, so give the query a few tries.
+        $verified = $false
+        for ($v = 1; $v -le 10; $v++) {
+            try {
+                $verified = [bool](Get-CimInstance -Class "SMS_ProviderLocation" -Namespace "root\SMS" -ErrorAction Stop |
+                        Where-Object { $_.Machine -and $_.Machine.ToLowerInvariant() -eq $machine.ToLowerInvariant() })
+            }
+            catch {
+                $verified = $false
+            }
+            if ($verified) { break }
+            if ($v -lt 10) { Start-Sleep -Seconds 30 }
+        }
+
+        if ($verified) {
+            Write-DscStatus "[InstallProv] setupWPF has completed; $machine is registered in SMS_ProviderLocation"
+        }
+        else {
+            Write-DscStatus "[InstallProv] setupWPF exited but $machine never appeared in SMS_ProviderLocation -- provider install did not take"
+            $failedProviders.Add($machine)
+        }
     }
 
 }
 
-Write-DscStatus "[InstallProv] Finished: $($provList.Count) provider VM(s) in $([math]::Round(((Get-Date) - $installProvStart).TotalSeconds, 1))s"
+$installProvElapsed = [math]::Round(((Get-Date) - $installProvStart).TotalSeconds, 1)
+if ($failedProviders.Count -gt 0) {
+    # Throw rather than write another JOBFAILURE status: the host breaks Phase 8 the instant it polls
+    # one, so a second status here would make "does Phase 8 fail?" a poll-timing coin flip. The throw
+    # reaches ScriptWorkFlow's join, which logs it deterministically.
+    $msg = "[InstallProv] FAILED on $($failedProviders.Count) of $($provList.Count) provider VM(s): $($failedProviders -join ', '). root\SMS will not exist there, so Phase 11 SMSProv will fail. Elapsed $($installProvElapsed)s"
+    Write-DscStatus $msg
+    throw $msg
+}
+
+Write-DscStatus "[InstallProv] Finished: $($provList.Count) provider VM(s) in $($installProvElapsed)s"
 

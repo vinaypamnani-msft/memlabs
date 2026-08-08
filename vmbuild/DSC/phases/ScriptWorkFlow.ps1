@@ -956,13 +956,20 @@ Write-DscStatus "Started InstallProvider.ps1 job (after perfloading)"
   try {
       if (Wait-Job -Job $installProviderJob -Timeout $installProviderTimeout) {
           # Write-DscStatus writes status/log to disk from the job runspace, so the
-          # pipeline output isn't needed here; discard it. A terminating failure in
-          # the job still rethrows on Receive-Job and is caught below.
-          Receive-Job -Job $installProviderJob | Out-Null
+          # pipeline output isn't needed here; discard it. -ErrorAction Stop is what
+          # actually turns a throw inside the job into a catchable terminating error;
+          # by default Receive-Job only emits it as a non-terminating error record.
+          Receive-Job -Job $installProviderJob -ErrorAction Stop | Out-Null
           # Close the "Waiting ..." line out. Without it the last thing in the log is
           # an open-ended wait with a 5-min cap, which reads as a stall no matter how
           # fast the join actually was.
-          Write-DscStatus "InstallProvider.ps1 job finished (state=$($installProviderJob.State)) in $([math]::Round(((Get-Date) - $installProviderWaitStart).TotalSeconds, 1))s"
+          $installProviderElapsed = [math]::Round(((Get-Date) - $installProviderWaitStart).TotalSeconds, 1)
+          if ($installProviderJob.State -eq 'Failed') {
+              Write-DscStatus "InstallProvider.ps1 job FAILED (state=Failed) after $($installProviderElapsed)s -- see the [InstallProv] lines above; any flagged provider is NOT installed."
+          }
+          else {
+              Write-DscStatus "InstallProvider.ps1 job finished (state=$($installProviderJob.State)) in $($installProviderElapsed)s"
+          }
       }
       else {
           Write-DscStatus "InstallProvider.ps1 job did not finish within $installProviderTimeout s (state=$($installProviderJob.State)) -- abandoning it and continuing." -Warning
