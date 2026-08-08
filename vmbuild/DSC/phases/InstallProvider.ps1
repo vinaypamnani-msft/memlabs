@@ -106,9 +106,10 @@ foreach ($prov in $provList) {
         }
 
         Write-DscStatus "[InstallProv] Running & $setupWPF /HIDDEN /SDKINST $machine"
-        # Run under a hard timeout so a wedged setupwpf can't hang the phase forever (was a bare '&' call
-        # followed by an unbounded poll loop).
-        $installCap = 1800   # 30 min
+        # /SDKINST modifies the site, so setup first does a full StopServices() cycle. On a CAS+Primary
+        # hierarchy that shutdown took 34 min and wrote NOTHING to ConfigMgrSetup.log while it ran, so
+        # the old 30-min cap killed setup ~5 min short and left the site mid-shutdown.
+        $installCap = 5400   # 90 min
         $proc = $null
         $installFailed = $false
         try {
@@ -120,9 +121,19 @@ foreach ($prov in $provList) {
         }
 
         if ($proc) {
-            if (-not $proc.WaitForExit($installCap * 1000)) {
-                # /SDKINST stops the site's services to modify the site, so a kill here leaves the site
-                # mid-maintenance. Say so -- that outage is what the rest of Phase 8 then runs against.
+            # Heartbeat rather than one blind WaitForExit: setup is silent for half an hour inside
+            # StopServices(), so the site service state is the only liveness signal available -- and a
+            # moving status keeps the host from reading this as a frozen LCM.
+            $waited = 0
+            $beat = 300
+            while ($waited -lt $installCap -and -not $proc.WaitForExit($beat * 1000)) {
+                $waited += $beat
+                $exeState = (Get-Service -Name 'SMS_EXECUTIVE' -ErrorAction SilentlyContinue).Status
+                Write-DscStatus "[InstallProv] setupWPF running $([int]($waited / 60))m of $([int]($installCap / 60))m on $machine (SMS_EXECUTIVE=$exeState) -- /SDKINST stops and restarts the site, this is expected to be slow"
+            }
+
+            if (-not $proc.HasExited) {
+                # Killing here leaves the site mid-maintenance; the rest of Phase 8 then runs against it.
                 Write-DscStatus "[InstallProv] setupWPF did not finish within $installCap s on $machine -- killing it. The provider is NOT installed and the site may be left mid-maintenance (services stopped); see ConfigMgrSetup.log" -Failure
                 try { $proc.Kill() } catch { }
                 Get-Process "setupwpf" -ErrorAction SilentlyContinue | ForEach-Object { try { $_.Kill() } catch { } }

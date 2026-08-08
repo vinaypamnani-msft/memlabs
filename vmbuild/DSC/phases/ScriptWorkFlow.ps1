@@ -945,12 +945,12 @@ Write-DscStatus "Started InstallProvider.ps1 job (after perfloading)"
 
   # Install Providers — join the background job started above.
   # InstallProvider.ps1 self-bounds every provider it installs (10m wait on a
-  # stale setupwpf + 30m setupwpf cap + 5m drain), so budget that per provider
-  # over a floor. An unbounded join hung Phase 8 for hours on a re-run whose
-  # config has NO InstallSMSProv VMs at all -- the job is a guaranteed no-op
-  # there, so it can only ever be the job itself that failed to run.
+  # stale setupwpf + 90m setupwpf cap + 5m drain + 5m registration verify), so
+  # budget that per provider over a floor. An unbounded join hung Phase 8 for
+  # hours on a re-run whose config has NO InstallSMSProv VMs at all -- the job is
+  # a guaranteed no-op there, so it can only ever be the job itself that failed.
   $installProviderCount = @($deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true }).Count
-  $installProviderTimeout = 300 + (2700 * $installProviderCount)
+  $installProviderTimeout = 600 + (6600 * $installProviderCount)
   Write-DscStatus "Waiting for InstallProvider.ps1 job to complete (up to $([int]($installProviderTimeout / 60)) min)"
   $installProviderWaitStart = Get-Date
   try {
