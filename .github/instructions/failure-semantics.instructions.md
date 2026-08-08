@@ -17,12 +17,19 @@ improvement. Audit the entire file before shipping it, not the lines you touched
 `3e597e9b` added `trap { ...; break }` to a 1200-line ScriptWorkFlow.ps1. That turned a
 2022 typo into a fatal exit and hung a ConfigMgr hierarchy for 80+ silent minutes (`77fe21ed`).
 
-## If your change delegates failure reporting, open the reporter and confirm it covers the new path
+## A diagnostic must be reachable in the failure mode it describes
 
-Do not write "X owns the failure decision" in a comment without reading X. The watchdog
-that trap delegated to armed only *after* a `while (!(Test-Path $json))` pre-loop, so a
-death *before* the json was written was the one case it could never see. Two correct-looking
-pieces, one uncovered seam.
+Two questions, not one. **Who acts on it?** Do not write "X owns the failure decision" in a
+comment without reading X. The watchdog that trap delegated to armed only *after* a
+`while (!(Test-Path $json))` pre-loop, so a death *before* the json was written was the one
+case it could never see.
+
+**And how does the text travel?** The same trap wrote its error to
+`C:\staging\DSC\InstallCMLog.log` -- a file the host pulls only when the phase *ends*, and
+a dead workflow is exactly what stops the phase from ending. 106 minutes in, the answer was
+still on the VM, unread. Writing to a log is not reporting. Trace the evidence all the way
+to a human under the failure you just created; if the only path runs through the thing that
+is broken, add one that does not (`0adaf631`: a breadcrumb file the host polls directly).
 
 ## Proof that a wait can never clear must FAIL, not warn
 
