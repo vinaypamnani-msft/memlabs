@@ -315,7 +315,7 @@ if (-not $Configuration) {
                     StartTime = ''
                     EndTime   = ''
                 }
-                $propName = propName = "PSReadyToUse" + $psvm.VmName
+                $propName = "PSReadyToUse" + $psvm.VmName
                 $Actions.Add($propName, $PSReadytoUse)
             }
         }

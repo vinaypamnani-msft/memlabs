@@ -1815,19 +1815,15 @@ class WaitForEvent {
         $_FilePath = "\\$($this.MachineName)\$($this.LogFolder)"
         $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
 
-        while (!(Test-Path $ConfigurationFile)) {
-            Write-Verbose "Wait for configuration file to exist on $($this.MachineName), will try again in 30 seconds..."
-            Start-Sleep -Seconds 30
-            $ConfigurationFile = Join-Path -Path $_FilePath -ChildPath "$_FileName.json"
-        }
-
         # Liveness watchdog. Nothing but the scheduled task advances this json, so if
-        # the task stops without reaching $ReadNodeValue (process killed, crashed, or
+        # the task stops before reaching $ReadNodeValue (process killed, crashed, or
         # Task Scheduler ended it) the wait below can never finish and the LCM spins
-        # forever on a frozen status. Only armed when we are waiting on OUR OWN
-        # machine's task -- the remote WaitPrimary usage must not touch a local task
-        # of the same name. A restart resumes: ScriptWorkflow.json step states make
-        # completed work a no-op, which is exactly what a phase re-run relies on.
+        # forever on a frozen status. This must cover the "json does not exist yet"
+        # window too: a workflow that dies before its first write leaves no file at
+        # all, and an unwatched Test-Path loop there waits forever. Only armed when we
+        # are waiting on OUR OWN machine's task -- the remote WaitPrimary usage must
+        # not touch a local task of the same name. A restart resumes: ScriptWorkflow.json
+        # step states make completed work a no-op, which is what a phase re-run relies on.
         $watchTask = $null
         if ($this.MachineName -eq $env:COMPUTERNAME -and (Get-ScheduledTask -TaskName $_FileName -ErrorAction SilentlyContinue)) {
             $watchTask = $_FileName
@@ -1836,34 +1832,32 @@ class WaitForEvent {
         $maxTaskRestarts = 3
         $deadPolls = 0
 
-        $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
-        Write-Verbose "Attempting to acquire '$_FileName' Mutex"
-        [void]$mtx.WaitOne()
-        Write-Verbose "Acquired '$_FileName' Mutex"
         $Configuration = $null
-        try {
-            $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-        }
-        finally {
-            [void]$mtx.ReleaseMutex()
-            [void]$mtx.Dispose()
-        }
-        while ($Configuration.$($this.ReadNode).Status -ne $this.ReadNodeValue) {
-            Write-Verbose "Wait for step: [$($this.ReadNode)] to finish on $($this.MachineName), will try again in 30 seconds..."
-            Start-Sleep -Seconds 30
-            $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
-            Write-Verbose "Attempting to acquire '$_FileName' Mutex"
-            [void]$mtx.WaitOne()
-            Write-Verbose "Acquired '$_FileName' Mutex"
-            try {
-                $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+        while ($true) {
+            $stuckOn = "$_FileName.json does not exist yet"
+            if (Test-Path $ConfigurationFile) {
+                $mtx = New-Object System.Threading.Mutex($false, "$_FileName")
+                Write-Verbose "Attempting to acquire '$_FileName' Mutex"
+                [void]$mtx.WaitOne()
+                Write-Verbose "Acquired '$_FileName' Mutex"
+                try {
+                    $Configuration = Get-Content -Path $ConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
+                }
+                finally {
+                    [void]$mtx.ReleaseMutex()
+                    [void]$mtx.Dispose()
+                }
+                if ($Configuration.$($this.ReadNode).Status -eq $this.ReadNodeValue) {
+                    break
+                }
+                $stuckOn = "[$($this.ReadNode)] is '$($Configuration.$($this.ReadNode).Status)'"
+                Write-Verbose "Wait for step: [$($this.ReadNode)] to finish on $($this.MachineName), will try again in 30 seconds..."
             }
-            finally {
-                [void]$mtx.ReleaseMutex()
-                [void]$mtx.Dispose()
+            else {
+                Write-Verbose "Wait for configuration file to exist on $($this.MachineName), will try again in 30 seconds..."
             }
 
-            if ($watchTask -and $Configuration.$($this.ReadNode).Status -ne $this.ReadNodeValue) {
+            if ($watchTask) {
                 $taskState = $null
                 try { $taskState = (Get-ScheduledTask -TaskName $watchTask -ErrorAction Stop).State } catch { }
                 if ($taskState -and $taskState -ne 'Running') {
@@ -1875,13 +1869,13 @@ class WaitForEvent {
                         try { $lastResult = "0x{0:X8}" -f (Get-ScheduledTaskInfo -TaskName $watchTask -ErrorAction Stop).LastTaskResult } catch { }
                         if ($taskRestarts -lt $maxTaskRestarts) {
                             $taskRestarts++
-                            Write-Status "$watchTask is '$taskState' (last result $lastResult) but [$($this.ReadNode)] is '$($Configuration.$($this.ReadNode).Status)' -- it exited without finishing. Restarting it (attempt $taskRestarts/$maxTaskRestarts)."
+                            Write-Status "$watchTask is '$taskState' (last result $lastResult) but $stuckOn -- it exited without finishing. Restarting it (attempt $taskRestarts/$maxTaskRestarts)."
                             try { Start-ScheduledTask -TaskName $watchTask -ErrorAction Stop }
                             catch { Write-Status "Could not restart ${watchTask}: $($_.Exception.Message)" }
                             Start-Sleep -Seconds 30
                         }
                         else {
-                            $msg = "JOBFAILURE: $watchTask kept exiting without setting [$($this.ReadNode)] to '$($this.ReadNodeValue)' (last result $lastResult); gave up after $maxTaskRestarts restarts. See C:\staging\DSC\InstallCMLog.log."
+                            $msg = "JOBFAILURE: $watchTask kept exiting without setting [$($this.ReadNode)] to '$($this.ReadNodeValue)' ($stuckOn, last result $lastResult); gave up after $maxTaskRestarts restarts. See C:\staging\DSC\InstallCMLog.log."
                             # Written directly: Write-Status suppresses writes while the status
                             # file holds the CM-setup sentinel, and the host keys on JOBFAILURE.
                             try { $msg | Out-File -FilePath "C:\staging\DSC\DSC_Status.txt" -Force } catch { }
@@ -1893,6 +1887,8 @@ class WaitForEvent {
                     $deadPolls = 0
                 }
             }
+
+            Start-Sleep -Seconds 30
         }
         Write-Status "Step: [$($this.ReadNode)] Finished on $($this.MachineName)"
     }
@@ -8200,12 +8196,37 @@ class GpUpdate {
 
     [void] Set() {
         Write-Status "Forcing a gpupdate"
-        gpupdate.exe /force
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            # /target:computer skips the user-policy pass (this lab publishes no user-side GPO),
+            # and gpupdate can block for many minutes on a settling/loaded DC -- bound it so a
+            # wedged refresh can never stall the phase for this node.
+            $gp = Start-Process -FilePath gpupdate.exe -ArgumentList '/target:computer', '/force', '/wait:120' -PassThru -WindowStyle Hidden -ErrorAction Stop
+            if (-not $gp.WaitForExit(150000)) {
+                try { $gp.Kill() } catch {}
+                Write-Status "gpupdate exceeded 150s -- killed, continuing"
+                return
+            }
+            if ($gp.ExitCode -ne 0) {
+                Write-Status "gpupdate exited $($gp.ExitCode) after $([int]$sw.Elapsed.TotalSeconds)s"
+            }
+        }
+        catch {
+            Write-Status "gpupdate could not be started: $($_.Exception.Message)"
+        }
     }
 
     [bool] Test() {
-
-        return $false
+        # The only GPO this lab publishes is "Certificate AutoEnrollment" (Phase2DC), a
+        # machine-side registry policy. If AEPolicy is already applied the GPO has landed
+        # (boot-time apply or an earlier run) and a forced refresh buys nothing.
+        try {
+            $ae = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment' -Name 'AEPolicy' -ErrorAction Stop
+            return ($ae.AEPolicy -eq 7)
+        }
+        catch {
+            return $false
+        }
     }
 
     [GpUpdate] Get() {
