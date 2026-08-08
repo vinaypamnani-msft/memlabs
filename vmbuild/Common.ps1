@@ -8400,12 +8400,16 @@ function Install-Tools {
     )
 
     Write-Log "Install-Tools called. $($VmName) $($ToolName -join ",")"
+    $swToolList = [System.Diagnostics.Stopwatch]::StartNew()
     if ($VmName) {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -in $VmName }
     }
     else {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
     }
+    $swToolList.Stop()
+    Write-Log ("[StepTiming] {0} ToolInject-GetList completed in {1} seconds ({2} VM(s) matched)" -f `
+        ($VmName -join ','), [Math]::Round($swToolList.Elapsed.TotalSeconds, 1), @($allVMs).Count) -LogOnly
 
     $success = $true
 
@@ -8419,13 +8423,25 @@ function Install-Tools {
         )
 
         #$rootPath = Split-Path $ScriptRoot -Parent
-        if (test-path $ScriptRoot\Common.ps1) {
-            . $ScriptRoot\Common.ps1 -InJob
+        # Single-VM callers reach this via .Invoke() from a phase job that ALREADY loaded
+        # Common.ps1. Re-dot-sourcing it buys nothing and costs ~2.4s solo -- 12.6s median,
+        # 48.9s worst under 22-way Phase 2 concurrency -- once per VM.
+        $swBoot = [System.Diagnostics.Stopwatch]::StartNew()
+        $commonAlreadyLoaded = $false
+        try {
+            $commonAlreadyLoaded = [bool]($Common -and $Common.Initialized -and (Get-Command Write-Log -ErrorAction SilentlyContinue))
         }
-        else {
-            $rootPath = Split-Path $ScriptRoot -Parent
-            . $rootPath\Common.ps1 -InJob
+        catch { $commonAlreadyLoaded = $false }
+        if (-not $commonAlreadyLoaded) {
+            if (test-path $ScriptRoot\Common.ps1) {
+                . $ScriptRoot\Common.ps1 -InJob
+            }
+            else {
+                $rootPath = Split-Path $ScriptRoot -Parent
+                . $rootPath\Common.ps1 -InJob
+            }
         }
+        $swBoot.Stop()
 
         $ToolName = $ToolName | ForEach-Object { $_ }
         $TotalCount = $ToolName.Count
@@ -8435,6 +8451,9 @@ function Install-Tools {
         if ($vm.vmbuild -eq $false) { return $true } # don't touch VM's we didn't create
 
         $vmName = $vm.vmName
+        Write-Log ("[StepTiming] {0} ToolInject-Bootstrap completed in {1} seconds ({2})" -f `
+                $vmName, [Math]::Round($swBoot.Elapsed.TotalSeconds, 1),
+            $(if ($commonAlreadyLoaded) { 'reused already-loaded Common' } else { 'dot-sourced Common.ps1 -InJob' })) -LogOnly
         Write-Log "$vmName`: Injecting Tools $($ToolName -join ",") to C:\tools directory inside the VM" -Activity
 
         # Get VM Session
@@ -8443,7 +8462,10 @@ function Install-Tools {
             return $false
         }
 
+        $swSession = [System.Diagnostics.Stopwatch]::StartNew()
         $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
+        $swSession.Stop()
+        Write-Log ("[StepTiming] {0} ToolInject-GetSession completed in {1} seconds" -f $vmName, [Math]::Round($swSession.Elapsed.TotalSeconds, 1)) -LogOnly
         if (-not $ps) {
             Write-Log "$vmName`: Failed to get a session with the VM." -Failure
             return $false
