@@ -1092,7 +1092,9 @@ function Start-Phase {
     # once; every phase is already idempotent (that is what -startPhase resume relies on).
     $crashedVMs = @($result.Crashed | Sort-Object -Unique)
     if ($crashedVMs.Count -gt 0) {
-        Write-Log "[Phase $Phase] $($crashedVMs.Count) worker process(es) died without reporting a failure ($($crashedVMs -join ', ')). Re-dispatching those VMs once." -Warning -OutputStream
+        # $null = on every one of these: Start-Phase's return value is the phase pass/fail
+        # gate and -OutputStream writes to the success stream, which turns it into an array.
+        $null = Write-Log "[Phase $Phase] $($crashedVMs.Count) worker process(es) died without reporting a failure ($($crashedVMs -join ', ')). Re-dispatching those VMs once." -Warning -OutputStream
         $retry = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig -OnlyVMs $crashedVMs
         if ($retry -and $retry.Applicable -and @($retry.Jobs).Count -gt 0) {
             $retryResult = Wait-Phase -Phase $Phase -Jobs $retry.Jobs -AdditionalData $retry.AdditionalData -DeployConfig $deployConfig
@@ -1101,10 +1103,10 @@ function Start-Phase {
             $result.Failed = [Math]::Max(0, $result.Failed - $crashedVMs.Count) + $retryResult.Failed
             $result.Success += $retryResult.Success
             $result.Warning += $retryResult.Warning
-            Write-Log "[Phase $Phase] Re-dispatch finished; $($retryResult.Success) success, $($retryResult.Failed) failures." -OutputStream
+            $null = Write-Log "[Phase $Phase] Re-dispatch finished; $($retryResult.Success) success, $($retryResult.Failed) failures." -OutputStream
         }
         else {
-            Write-Log "[Phase $Phase] Re-dispatch produced no jobs; leaving the original failure in place." -Warning
+            $null = Write-Log "[Phase $Phase] Re-dispatch produced no jobs; leaving the original failure in place." -Warning
         }
     }
 

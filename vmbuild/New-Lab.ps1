@@ -1444,7 +1444,6 @@ finally {
     # evicted with -LeakSession). -Force because every job is gone by now, so the
     # late-transport-callback hazard that made immediate disposal unsafe is over.
     try { $null = Clear-OrphanRunspaces -Force } catch { }
-    try { $null = Clear-ParkedJobs -Force } catch { }
 
     # Runspaces are the launcher's dominant memory cost (~8MB each, and the reason a
     # 5.5h build ended at 121 of them). Break down whatever is left by state so the

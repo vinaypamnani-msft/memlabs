@@ -6406,17 +6406,16 @@ function Invoke-VmCommand {
                             Write-Log "$VmName`: Job '$DisplayName' Succeeded" -LogOnly
                         }
                         $failed = $false
-                        # Do NOT Remove-Job here. Receive-Job has drained the output, but the
-                        # job is still bound to the cached session's runspace, and disposing it
-                        # while that runspace can still break is what fires a late teardown
-                        # callback against a disposed object on a threadpool thread -- an
-                        # unhandled exception no try/catch can reach, which kills this whole
-                        # per-VM child process and fails the phase. Park it; Clear-ParkedJobs
-                        # disposes it once the runspace is no longer Opened (break already
-                        # happened, no further callback possible) or at end of run.
-                        Add-ParkedJob -Job $job -Runspace $ps.Runspace -VmName $VmName
-                        Write-VmJobLedger -Op 'parked' -Job $job -VmName $VmName -DisplayName $DisplayName
-                        $null = Clear-ParkedJobs
+                        # Dispose here. Parking these instead (so a later transport break would
+                        # find a live object) was measured and is worse: one Phase 4 worker
+                        # reached parkedJobs=538 / live jobs=539 on a single VM, and the
+                        # scavenger's "safe" rule -- runspace no longer Opened -- fires exactly
+                        # WHILE the transport is breaking across all of them, which is the
+                        # window it was meant to avoid. The ledger also shows disposal was never
+                        # the trigger: the crash census recorded parked=672 reaped=134 and ZERO
+                        # disposed/abandoned, with the last ledger op 24 minutes earlier.
+                        Write-VmJobLedger -Op 'disposed' -Job $job -VmName $VmName -DisplayName $DisplayName -Detail 'reason=completed-drained'
+                        Remove-Job $job -Force -ErrorAction SilentlyContinue
 
                         # The PSRemotingJob above ran ON the cached session's runspace
                         # (Invoke-Command -Session $ps -AsJob). Wait-Job + Remove-Job return as
@@ -7501,74 +7500,6 @@ function Clear-OrphanRunspaces {
     return $reclaimed
 }
 
-# Completed PSDirect jobs waiting for a safe moment to be disposed.
-#
-# Remove-Job DISPOSES a PSRemotingJob that is still bound to the cached session's
-# runspace. If that runspace's transport later breaks -- the VM is powered off, the
-# guest reboots, the channel drops -- the teardown callback fires on a THREADPOOL
-# thread against the disposed object. An unhandled exception on a threadpool thread
-# cannot be caught by any try/catch, so it takes the whole per-VM phase child process
-# with it, and the phase discards every healthy VM alongside it.
-#
-# This codebase already answers that for runspaces (Add-OrphanRunspace) and for
-# abandoned jobs (StopJobAsync, never Remove-Job). This is the same answer for the
-# COMPLETED path, which was the one place still disposing inline. Safe to dispose ==
-# the runspace is no longer Opened: the break has already happened by then, so no
-# further callback can arrive.
-$global:ps_parkedJobs = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
-
-function Add-ParkedJob {
-    param($Job, $Runspace, [string]$VmName)
-    if (-not $Job) { return }
-    try {
-        [void]$global:ps_parkedJobs.Add([pscustomobject]@{
-                Job = $Job; Rs = $Runspace; At = (Get-Date); VmName = $VmName
-            })
-    }
-    catch {
-        # Parking is the safer default, but never leak if the list is unavailable.
-        try { Remove-Job $Job -Force -ErrorAction SilentlyContinue } catch { }
-    }
-}
-
-function Clear-ParkedJobs {
-    [CmdletBinding()]
-    param(
-        # End of run / cache teardown: the sessions are going away anyway.
-        [switch]$Force,
-        [int]$MaxParked = 200
-    )
-
-    $reclaimed = 0
-    try {
-        if (-not $global:ps_parkedJobs) { return 0 }
-        foreach ($entry in @($global:ps_parkedJobs)) {
-            if (-not $entry) { continue }
-            $safe = $Force.IsPresent
-            if (-not $safe) {
-                $state = $null
-                try { $state = "$($entry.Rs.RunspaceStateInfo.State)" } catch { }
-                $safe = [bool]($state -and $state -ne 'Opened')
-            }
-            if (-not $safe) { continue }
-            Write-VmJobLedger -Op 'reaped' -Job $entry.Job -VmName $entry.VmName -DisplayName 'parked' -Detail "force=$($Force.IsPresent)"
-            try { Remove-Job $entry.Job -Force -ErrorAction SilentlyContinue } catch { }
-            [void]$global:ps_parkedJobs.Remove($entry)
-            $reclaimed++
-        }
-        # Deliberately NOT trimmed to the cap here. Disposing a job whose runspace is still
-        # Opened is the crash; the only safe points are the per-worker sweep at the end of
-        # this VM's phase work and the -Force pass at end of run. Report accumulation rather
-        # than trading a crash for a shorter list.
-        if (-not $Force -and $global:ps_parkedJobs.Count -gt $MaxParked -and -not $global:ps_parkedJobsWarned) {
-            $global:ps_parkedJobsWarned = $true
-            try { Write-Log "Parked PSDirect jobs passed $MaxParked (now $($global:ps_parkedJobs.Count)); held until this VM's phase work completes." -LogOnly } catch { }
-        }
-    }
-    catch { }
-    return $reclaimed
-}
-
 # Lifetime ledger for every job this process creates against a VM.
 #
 # The crash being chased is an unhandled PSObjectDisposedException on a THREADPOOL
@@ -7615,38 +7546,38 @@ function Write-VmJobLedger {
 
 # Everything needed to identify the disposed object, rendered at the moment it matters:
 # immediately before a Hyper-V power operation breaks a VM's transport.
-function Get-VmJobLedgerCensus {
+# Emits ONE Write-Log per line: a multi-line string embeds raw newlines in the JSONL
+# record, which split the first census across lines and made it unreadable there.
+function Write-VmJobLedgerCensus {
     param([string]$VmName, [string]$Context)
     try {
-        $lines = @()
-        $lines += "[JobLedger] CENSUS ($Context) vm=$VmName pid=$PID"
+        Write-Log "[JobLedger] CENSUS ($Context) vm=$VmName pid=$PID" -LogOnly
 
         $live = @()
         try { $live = @(Get-Job -ErrorAction SilentlyContinue) } catch { }
-        $liveDesc = @($live | ForEach-Object {
-                $rs = ''
-                try { $rs = "$($_.ChildJobs[0].Runspace.RunspaceStateInfo.State)" } catch { }
-                $sid = 'n/a'
-                try { $sid = "$($_.InstanceId)".Substring(0, 8) } catch { }
-                "$sid/$($_.Name)/$($_.State)/rs=$rs"
-            })
-        $lines += "[JobLedger]   live jobs ($($live.Count)): $(if ($liveDesc) { $liveDesc -join ' | ' } else { '<none>' })"
+        # Summarise. One run reached 539 live jobs, and listing them produced a line no
+        # one could read and nothing could parse.
+        $byState = (@($live | Group-Object State | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
+        $rsStates = @()
+        foreach ($lj in $live) {
+            try { $rsStates += "$($lj.ChildJobs[0].Runspace.RunspaceStateInfo.State)" } catch { $rsStates += 'unknown' }
+        }
+        $byRs = (@($rsStates | Group-Object | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
+        Write-Log "[JobLedger]   live jobs=$($live.Count) state [$byState] runspace [$byRs]" -LogOnly
 
         $entries = @($global:ps_jobLedger)
         $byOp = (@($entries | Group-Object Op | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
-        $lines += "[JobLedger]   ledger totals: $byOp"
+        Write-Log "[JobLedger]   ledger totals: $byOp" -LogOnly
 
         # These are the candidates. A disposed job whose transport is about to break is
         # exactly the crash, so print them youngest-first with age.
         $risky = @($entries | Where-Object { $_.Op -in @('disposed', 'abandoned', 'reaped') } | Sort-Object At -Descending | Select-Object -First 10)
         foreach ($r in $risky) {
             $age = [int]((Get-Date) - $r.At).TotalSeconds
-            $lines += "[JobLedger]   ${age}s ago $($r.Op) id=$($r.Id) vm=$($r.Vm) job='$($r.Name)' state=$($r.State) rs=$($r.RsState) $($r.Detail) at $($r.Site)"
+            Write-Log "[JobLedger]   ${age}s ago $($r.Op) id=$($r.Id) vm=$($r.Vm) job='$($r.Name)' state=$($r.State) rs=$($r.RsState) $($r.Detail) at $($r.Site)" -LogOnly
         }
-        if ($risky.Count -eq 0) { $lines += "[JobLedger]   no disposed/abandoned/reaped jobs recorded" }
+        if ($risky.Count -eq 0) { Write-Log "[JobLedger]   no disposed/abandoned/reaped jobs recorded" -LogOnly }
 
-        $parked = 0
-        try { $parked = @($global:ps_parkedJobs).Count } catch { }
         $orphans = 0
         try { $orphans = @($global:ps_orphanRunspaces).Count } catch { }
         $cacheRs = ''
@@ -7659,10 +7590,11 @@ function Get-VmJobLedgerCensus {
                     }) -join ' ')
         }
         catch { }
-        $lines += "[JobLedger]   parkedJobs=$parked orphanRunspaces=$orphans cacheRunspaces [$cacheRs]"
-        return ($lines -join "`n")
+        Write-Log "[JobLedger]   orphanRunspaces=$orphans cacheRunspaces [$cacheRs]" -LogOnly
     }
-    catch { return "[JobLedger] census failed: $($_.Exception.Message)" }
+    catch {
+        try { Write-Log "[JobLedger] census failed: $($_.Exception.Message)" -LogOnly } catch { }
+    }
 }
 
 function Get-RunspaceInventory {
@@ -7731,9 +7663,6 @@ function Clear-VmSessionCache {
     }
     catch { }
     try { $null = Clear-OrphanRunspaces -Force } catch { }
-    # After, not before: closing the runspaces is what makes the jobs parked against them
-    # safe to dispose. Disposing first would fire the very callback this defers.
-    try { $null = Clear-ParkedJobs } catch { }
     # Counted on the AppDomain so the launcher can see that thread-job workers really
     # did run this -- the fix it verifies is otherwise completely silent.
     try {
