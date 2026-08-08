@@ -4673,6 +4673,8 @@ $global:VM_Config = {
         $staleRestartCount = 0
         $staleRestartMax = 2
         $lastStaleWarningTime = [DateTime]::MinValue
+        $deadWorkflowConfirmations = 0     # consecutive stale checks that proved the ScriptWorkflow task is not running
+        $deadWorkflowMax = 3               # after this many, the wait is provably unclearable -- fail instead of warning forever
         $lcmIdleSince = $null              # when the DSC LCM was FIRST seen continuously idle (null = not idle / unknown)
         $lcmRebootPendingSince = $null     # when the DSC LCM was FIRST seen parked reboot-pending (null = not parked / unknown)
         $lcmProbeStartMinutes = 5          # begin sampling the guest LCM once the status has been frozen this long
@@ -5230,6 +5232,7 @@ $global:VM_Config = {
                         $previousStatus = $currentStatus
                         $lastStatusChangeTime = [DateTime]::UtcNow
                         $lastStaleWarningTime = [DateTime]::MinValue
+                        $deadWorkflowConfirmations = 0
                         $lcmIdleSince = $null   # status advanced -> work is progressing; reset every stuck clock
                         $lcmRebootPendingSince = $null
                         $lcmPendingNoRebootSince = $null
@@ -5700,15 +5703,40 @@ $global:VM_Config = {
                             # LCM busy polling a json nothing is writing any more. The idle branch above
                             # already probes the task; this is the blind spot, so name it here.
                             $workflowNote = ''
+                            $workflowDead = $false
+                            $workflowLastError = ''
                             if (-not $lcmIdleSince -and -not $lcmRebootPendingSince -and -not $lcmPendingNoRebootSince) {
                                 $swStale = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
                                     $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
-                                    if ($t) { "$($t.State)" } else { $null }
+                                    if (-not $t) { return $null }
+                                    $crumb = ''
+                                    try { $crumb = (Get-Content 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Raw -ErrorAction Stop).Trim() } catch { }
+                                    return [pscustomobject]@{ State = "$($t.State)"; LastError = $crumb }
                                 } -SuppressLog
-                                if (-not $swStale.ScriptBlockFailed -and $swStale.ScriptBlockOutput -and $swStale.ScriptBlockOutput -ne 'Running') {
-                                    $workflowNote = " -- ScriptWorkflow task is '$($swStale.ScriptBlockOutput)', NOT Running: the workflow exited without finishing, so this wait cannot clear on its own."
+                                if (-not $swStale.ScriptBlockFailed -and $swStale.ScriptBlockOutput -and $swStale.ScriptBlockOutput.State -and $swStale.ScriptBlockOutput.State -ne 'Running') {
+                                    $workflowDead = $true
+                                    $workflowLastError = "" + $swStale.ScriptBlockOutput.LastError
+                                    $workflowNote = " -- ScriptWorkflow task is '$($swStale.ScriptBlockOutput.State)', NOT Running: the workflow exited without finishing, so this wait cannot clear on its own."
                                 }
                             }
+                            if ($workflowDead) {
+                                $deadWorkflowConfirmations++
+                                if ($workflowLastError) { $workflowNote += " It died at: $workflowLastError" }
+                            }
+                            else {
+                                $deadWorkflowConfirmations = 0
+                            }
+
+                            if ($deadWorkflowConfirmations -ge $deadWorkflowMax) {
+                                # Proven terminal: the status has not moved for ${staleMins}m and the only
+                                # thing that can move it has been confirmed stopped $deadWorkflowMax times
+                                # in a row. Warning about that every 5 minutes for the rest of the phase
+                                # budget is how a CAS typo cost a whole hierarchy 80+ idle minutes.
+                                $deadDetail = if ($workflowLastError) { " ScriptWorkflow died at: $workflowLastError" } else { " No terminating error was recorded; see C:\staging\DSC\InstallCMLog.log on the VM." }
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: status frozen ${staleMins}m at '$($currentStatus.Trim())' and the ScriptWorkflow task has been confirmed NOT Running $deadWorkflowConfirmations times in a row -- nothing left can advance this wait.$deadDetail" -Failure -OutputStream
+                                break
+                            }
+
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m${idleNote} ('$($currentStatus.Trim())')${workflowNote}" -Warning
                             $lastStaleWarningTime = [DateTime]::UtcNow
                         }

@@ -1867,15 +1867,23 @@ class WaitForEvent {
                         $deadPolls = 0
                         $lastResult = 'unknown'
                         try { $lastResult = "0x{0:X8}" -f (Get-ScheduledTaskInfo -TaskName $watchTask -ErrorAction Stop).LastTaskResult } catch { }
+                        # The workflow's own trap records what killed it; without this the
+                        # failure reads only as "it kept exiting".
+                        $lastErr = ''
+                        try {
+                            $crumb = (Get-Content 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Raw -ErrorAction Stop).Trim()
+                            if ($crumb) { $lastErr = " It died at: $crumb" }
+                        }
+                        catch { }
                         if ($taskRestarts -lt $maxTaskRestarts) {
                             $taskRestarts++
-                            Write-Status "$watchTask is '$taskState' (last result $lastResult) but $stuckOn -- it exited without finishing. Restarting it (attempt $taskRestarts/$maxTaskRestarts)."
+                            Write-Status "$watchTask is '$taskState' (last result $lastResult) but $stuckOn -- it exited without finishing.$lastErr Restarting it (attempt $taskRestarts/$maxTaskRestarts)."
                             try { Start-ScheduledTask -TaskName $watchTask -ErrorAction Stop }
                             catch { Write-Status "Could not restart ${watchTask}: $($_.Exception.Message)" }
                             Start-Sleep -Seconds 30
                         }
                         else {
-                            $msg = "JOBFAILURE: $watchTask kept exiting without setting [$($this.ReadNode)] to '$($this.ReadNodeValue)' ($stuckOn, last result $lastResult); gave up after $maxTaskRestarts restarts. See C:\staging\DSC\InstallCMLog.log."
+                            $msg = "JOBFAILURE: $watchTask kept exiting without setting [$($this.ReadNode)] to '$($this.ReadNodeValue)' ($stuckOn, last result $lastResult); gave up after $maxTaskRestarts restarts.$lastErr See C:\staging\DSC\InstallCMLog.log."
                             # Written directly: Write-Status suppresses writes while the status
                             # file holds the CM-setup sentinel, and the host keys on JOBFAILURE.
                             try { $msg | Out-File -FilePath "C:\staging\DSC\DSC_Status.txt" -Force } catch { }

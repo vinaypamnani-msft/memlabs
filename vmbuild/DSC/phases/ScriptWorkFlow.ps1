@@ -21,8 +21,19 @@ trap {
         "  Stack : $($_.ScriptStackTrace)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
     }
     catch { }
+    # A death before ScriptWorkflow.json exists leaves no evidence the DSC watchdog
+    # (TemplateHelpDSC WaitForEvent) or the host can reach, so drop one here.
+    try {
+        $crumbScript = try { Split-Path "$($_.InvocationInfo.ScriptName)" -Leaf } catch { 'ScriptWorkflow.ps1' }
+        $crumbText = "{0} line {1}: {2}" -f $crumbScript, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message
+        ($crumbText -replace '\s+', ' ').Trim() | Out-File -FilePath 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Force
+    }
+    catch { }
     break
 }
+
+# The breadcrumb must describe the MOST RECENT run, not an earlier one.
+Remove-Item 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Force -ErrorAction SilentlyContinue
 
 # Banner: emit a clearly-delimited start-of-run marker into InstallCMLog.log
 # so multiple ScriptWorkflow invocations on the same VM (reruns, retries,
