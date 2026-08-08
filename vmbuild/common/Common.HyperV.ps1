@@ -1328,6 +1328,15 @@ function Stop-VM2 {
         }
 
         Write-Log "${Name}: Stopping VM" -LogOnly
+        # The last thing written before every one of these crashes has been "Stopping VM".
+        # Powering off breaks the VMBus, so this is the instant that turns a disposed job
+        # into a dead process -- record what exists NOW, while there is still a process.
+        try {
+            if (Get-Command Get-VmJobLedgerCensus -ErrorAction SilentlyContinue) {
+                Write-Log (Get-VmJobLedgerCensus -VmName $Name -Context 'pre Stop-VM2') -LogOnly
+            }
+        }
+        catch { }
 
         if ($vm) {
             $i = 0
@@ -1524,6 +1533,12 @@ function Restart-VM2Smart {
         # kills the whole phase child process.
         Start-Sleep -Seconds 5
         Write-Log "${Name}: Restart ($Reason): attempting graceful shutdown (up to ${GracefulTimeoutSeconds}s)..." -LogOnly
+        try {
+            if (Get-Command Get-VmJobLedgerCensus -ErrorAction SilentlyContinue) {
+                Write-Log (Get-VmJobLedgerCensus -VmName $Name -Context "pre Restart-VM2Smart ($Reason)") -LogOnly
+            }
+        }
+        catch { }
         $gracefulStart = [DateTime]::UtcNow
         try {
             $gracefulJob = Stop-VM -VM $vm -Force -WarningAction SilentlyContinue -AsJob

@@ -1760,6 +1760,7 @@ function Copy-ItemSafe {
             catch { }
             try { $job.StopJobAsync() } catch { }
             if ($job.State -ne 'Running') {
+                Write-VmJobLedger -Op 'disposed' -Job $job -VmName $VMName -DisplayName 'Copy-ItemSafe' -Detail 'reason=copy-timeout-terminal'
                 Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
             }
             else {
@@ -1772,6 +1773,7 @@ function Copy-ItemSafe {
         if ($job.State -eq "Completed") {
             $result = Receive-Job $job
             Write-Log "[Copy-ItemSafe] returned: $result" -LogOnly
+            Write-VmJobLedger -Op 'disposed' -Job $job -VmName $VMName -DisplayName 'Copy-ItemSafe' -Detail 'reason=copy-completed'
             Remove-Job $job | Out-Null
             if ($result -eq $false) {
                 Write-Log "[Copy-ItemSafe] [$VMName] Job completed but scriptblock returned failure. Retries left: $($retries - 1)" -Warning
@@ -1783,6 +1785,7 @@ function Copy-ItemSafe {
         else {
             Write-Log "[Copy-ItemSafe] [$VMName] Job ended with state '$($job.State)' copying $Path. Retries left: $($retries - 1)" -Warning
             Stop-Job $job | Out-Null
+            Write-VmJobLedger -Op 'disposed' -Job $job -VmName $VMName -DisplayName 'Copy-ItemSafe' -Detail "reason=copy-ended-$($job.State)"
             Remove-Job -Job $job | Out-Null
             $retries--
         }
@@ -6412,6 +6415,7 @@ function Invoke-VmCommand {
                         # disposes it once the runspace is no longer Opened (break already
                         # happened, no further callback possible) or at end of run.
                         Add-ParkedJob -Job $job -Runspace $ps.Runspace -VmName $VmName
+                        Write-VmJobLedger -Op 'parked' -Job $job -VmName $VmName -DisplayName $DisplayName
                         $null = Clear-ParkedJobs
 
                         # The PSRemotingJob above ran ON the cached session's runspace
@@ -6657,6 +6661,7 @@ function Invoke-VmCommand {
                             # produced output and a forced remove would block on the same dead
                             # transport.)
                             try { $job.StopJobAsync() } catch {}
+                            Write-VmJobLedger -Op 'abandoned' -Job $job -VmName $VmName -DisplayName $DisplayName -Detail 'reason=timeout-still-running'
                         }
                         else {
                             # Job is in a terminal state (Failed / Stopped). Inspect WHY before
@@ -6675,9 +6680,11 @@ function Invoke-VmCommand {
                             # a later callback then finds a live object) and leak its session.
                             if ($jobChannelBroken) {
                                 try { $job.StopJobAsync() } catch {}
+                                Write-VmJobLedger -Op 'abandoned' -Job $job -VmName $VmName -DisplayName $DisplayName -Detail 'reason=channel-broken'
                             }
                             else {
                                 Stop-Job $job -ErrorAction SilentlyContinue | Out-Null
+                                Write-VmJobLedger -Op 'disposed' -Job $job -VmName $VmName -DisplayName $DisplayName -Detail 'reason=terminal-failure-not-channel-broken'
                                 Remove-Job $job -Force -ErrorAction SilentlyContinue
                             }
                         }
@@ -7476,7 +7483,13 @@ function Clear-OrphanRunspaces {
             catch { }
             # Last, and only now: the transport is closed, so disposing the job it was
             # abandoned onto can no longer be reached by a teardown callback.
-            try { if ($entry.Job) { Remove-Job $entry.Job -Force -ErrorAction SilentlyContinue } } catch { }
+            try {
+                if ($entry.Job) {
+                    Write-VmJobLedger -Op 'reaped' -Job $entry.Job -VmName $entry.VmName -DisplayName 'orphan-session' -Detail "force=$($Force.IsPresent) reason=$($entry.Reason)"
+                    Remove-Job $entry.Job -Force -ErrorAction SilentlyContinue
+                }
+            }
+            catch { }
             [void]$global:ps_orphanRunspaces.Remove($entry)
             $reclaimed++
         }
@@ -7538,6 +7551,7 @@ function Clear-ParkedJobs {
                 $safe = [bool]($state -and $state -ne 'Opened')
             }
             if (-not $safe) { continue }
+            Write-VmJobLedger -Op 'reaped' -Job $entry.Job -VmName $entry.VmName -DisplayName 'parked' -Detail "force=$($Force.IsPresent)"
             try { Remove-Job $entry.Job -Force -ErrorAction SilentlyContinue } catch { }
             [void]$global:ps_parkedJobs.Remove($entry)
             $reclaimed++
@@ -7553,6 +7567,102 @@ function Clear-ParkedJobs {
     }
     catch { }
     return $reclaimed
+}
+
+# Lifetime ledger for every job this process creates against a VM.
+#
+# The crash being chased is an unhandled PSObjectDisposedException on a THREADPOOL
+# thread. It carries no stack, no try/catch can see it, and the process is simply gone --
+# four investigations have failed to name the object from the logs because nothing ever
+# recorded which jobs existed, how each was let go of, or from where. So write it down
+# BEFORE the power operation that breaks the transport.
+$global:ps_jobLedger = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+
+function Write-VmJobLedger {
+    param(
+        [ValidateSet('created', 'parked', 'disposed', 'abandoned', 'reaped')]
+        [string]$Op,
+        $Job,
+        [string]$VmName,
+        [string]$DisplayName,
+        [string]$Detail
+    )
+    try {
+        $id = 'n/a'
+        try { $id = "$($Job.InstanceId)".Substring(0, 8) } catch { }
+        $state = ''
+        try { $state = "$($Job.State)" } catch { }
+        $rsState = ''
+        try { $rsState = "$($Job.ChildJobs[0].Runspace.RunspaceStateInfo.State)" } catch { }
+        $site = ''
+        # Only for the ops that can actually cause the crash; Get-PSCallStack is not free
+        # and 'created'/'parked' happen on every single Invoke-VmCommand.
+        if ($Op -in @('disposed', 'abandoned')) {
+            try { $site = ((Get-PSCallStack | Select-Object -Skip 1 -First 2 | ForEach-Object { $_.Location }) -join ' <- ') } catch { }
+        }
+        [void]$global:ps_jobLedger.Add([pscustomobject]@{
+                At = (Get-Date); Op = $Op; Id = $id; Vm = $VmName; Name = $DisplayName
+                State = $state; RsState = $rsState; Site = $site; Detail = $Detail
+            })
+        # Disposal is the only operation that can manufacture the crash, so it is written
+        # to disk the instant it happens rather than waiting for a census that may never run.
+        if ($Op -in @('disposed', 'abandoned')) {
+            Write-Log "[JobLedger] $Op id=$id vm=$VmName job='$DisplayName' state=$state rs=$rsState $Detail at $site" -LogOnly
+        }
+    }
+    catch { }
+}
+
+# Everything needed to identify the disposed object, rendered at the moment it matters:
+# immediately before a Hyper-V power operation breaks a VM's transport.
+function Get-VmJobLedgerCensus {
+    param([string]$VmName, [string]$Context)
+    try {
+        $lines = @()
+        $lines += "[JobLedger] CENSUS ($Context) vm=$VmName pid=$PID"
+
+        $live = @()
+        try { $live = @(Get-Job -ErrorAction SilentlyContinue) } catch { }
+        $liveDesc = @($live | ForEach-Object {
+                $rs = ''
+                try { $rs = "$($_.ChildJobs[0].Runspace.RunspaceStateInfo.State)" } catch { }
+                $sid = 'n/a'
+                try { $sid = "$($_.InstanceId)".Substring(0, 8) } catch { }
+                "$sid/$($_.Name)/$($_.State)/rs=$rs"
+            })
+        $lines += "[JobLedger]   live jobs ($($live.Count)): $(if ($liveDesc) { $liveDesc -join ' | ' } else { '<none>' })"
+
+        $entries = @($global:ps_jobLedger)
+        $byOp = (@($entries | Group-Object Op | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
+        $lines += "[JobLedger]   ledger totals: $byOp"
+
+        # These are the candidates. A disposed job whose transport is about to break is
+        # exactly the crash, so print them youngest-first with age.
+        $risky = @($entries | Where-Object { $_.Op -in @('disposed', 'abandoned', 'reaped') } | Sort-Object At -Descending | Select-Object -First 10)
+        foreach ($r in $risky) {
+            $age = [int]((Get-Date) - $r.At).TotalSeconds
+            $lines += "[JobLedger]   ${age}s ago $($r.Op) id=$($r.Id) vm=$($r.Vm) job='$($r.Name)' state=$($r.State) rs=$($r.RsState) $($r.Detail) at $($r.Site)"
+        }
+        if ($risky.Count -eq 0) { $lines += "[JobLedger]   no disposed/abandoned/reaped jobs recorded" }
+
+        $parked = 0
+        try { $parked = @($global:ps_parkedJobs).Count } catch { }
+        $orphans = 0
+        try { $orphans = @($global:ps_orphanRunspaces).Count } catch { }
+        $cacheRs = ''
+        try {
+            $cacheRs = (@(@($global:ps_cache.Keys) | ForEach-Object {
+                        $s = $global:ps_cache[$_]
+                        $st = ''
+                        try { $st = "$($s.Runspace.RunspaceStateInfo.State)" } catch { }
+                        "$_=$st"
+                    }) -join ' ')
+        }
+        catch { }
+        $lines += "[JobLedger]   parkedJobs=$parked orphanRunspaces=$orphans cacheRunspaces [$cacheRs]"
+        return ($lines -join "`n")
+    }
+    catch { return "[JobLedger] census failed: $($_.Exception.Message)" }
 }
 
 function Get-RunspaceInventory {

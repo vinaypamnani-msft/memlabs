@@ -1086,6 +1086,28 @@ function Start-Phase {
 
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig
 
+    # A worker process that DIED is not a VM that failed. The disposed-PSJob callback
+    # fires on a threadpool thread, so no try/catch in the worker can survive it, and one
+    # dead worker was discarding a whole phase of healthy VMs. Re-dispatch just those VMs
+    # once; every phase is already idempotent (that is what -startPhase resume relies on).
+    $crashedVMs = @($result.Crashed | Sort-Object -Unique)
+    if ($crashedVMs.Count -gt 0) {
+        Write-Log "[Phase $Phase] $($crashedVMs.Count) worker process(es) died without reporting a failure ($($crashedVMs -join ', ')). Re-dispatching those VMs once." -Warning -OutputStream
+        $retry = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig -OnlyVMs $crashedVMs
+        if ($retry -and $retry.Applicable -and @($retry.Jobs).Count -gt 0) {
+            $retryResult = Wait-Phase -Phase $Phase -Jobs $retry.Jobs -AdditionalData $retry.AdditionalData -DeployConfig $deployConfig
+            # The retry supersedes the crash: drop those from the original failure count
+            # and fold in whatever the second attempt actually produced.
+            $result.Failed = [Math]::Max(0, $result.Failed - $crashedVMs.Count) + $retryResult.Failed
+            $result.Success += $retryResult.Success
+            $result.Warning += $retryResult.Warning
+            Write-Log "[Phase $Phase] Re-dispatch finished; $($retryResult.Success) success, $($retryResult.Failed) failures." -OutputStream
+        }
+        else {
+            Write-Log "[Phase $Phase] Re-dispatch produced no jobs; leaving the original failure in place." -Warning
+        }
+    }
+
     # Phase 2 builds tool zips keyed by fingerprint. Clean up any stale
     # zips from previous runs that are no longer referenced.
     if ($Phase -eq 2) {
@@ -1315,7 +1337,9 @@ function Start-PhaseJobs {
         Justification = 'devBranchValue and phaseRunGuid are consumed via $using: inside Start-Job/Start-ThreadJob scriptblocks, which PSScriptAnalyzer cannot trace.')]
     param (
         [int]$Phase,
-        [object]$deployConfig
+        [object]$deployConfig,
+        # Re-dispatch pass: restrict to these VMs and leave every other one alone.
+        [string[]]$OnlyVMs
     )
 
     # Detect if DSC source files changed since last copy; if so, force re-copy
@@ -2042,6 +2066,8 @@ function Start-PhaseJobs {
 
     foreach ($currentItem in $vmDispatchList) {
 
+        if ($OnlyVMs -and $currentItem.vmName -notin $OnlyVMs) { continue }
+
         $global:preparePhasePercent++
         Write-Progress2 "Preparing Phase $Phase" -Status "Evaluating virtual machine $($currentItem.vmName)" -PercentComplete $global:preparePhasePercent
 
@@ -2463,6 +2489,9 @@ function Wait-Phase {
             Success = 0
             Warning = 0
             Elapsed = $null
+            # VMs whose per-VM CHILD PROCESS died rather than whose configuration failed.
+            # Nothing about the VM is known to be wrong, so the caller may re-dispatch it.
+            Crashed = [System.Collections.ArrayList]@()
         }
 
         $global:JobProgressHistory = @{}
@@ -2716,6 +2745,15 @@ function Wait-Phase {
                     Write-Log "[Phase $Phase] Job failed: $jobJson" -LogOnly
                     Write-RedX "[Phase $Phase] Job failed: $jobOutput" -ForegroundColor Red
                     Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
+
+                    # The WORKER PROCESS died, it did not report a configuration failure --
+                    # an unhandled exception on a threadpool thread (the disposed-PSJob
+                    # callback) bypasses every try/catch and takes the process with it. That
+                    # says nothing about the VM, so it is retryable; a real DSC failure is not.
+                    if ($fvmName -and $jobOutput -match 'background process reported an error|Unhandled exception') {
+                        [void]$return.Crashed.Add($fvmName)
+                        Write-Log "[Phase $Phase]: ${fvmName}: worker process died rather than reporting a failure; eligible for one re-dispatch." -Warning
+                    }
 
                     # Capture per-VM timing for failed jobs too
                     if ($global:BuildStats -and $fvmName) {
