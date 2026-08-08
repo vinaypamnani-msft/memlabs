@@ -5104,7 +5104,16 @@ $global:VM_Config = {
                     }
                 }
                 else {
-                    start-sleep -seconds 3
+                    # Back off while the status is static. A 3s poll issues one PSDirect job
+                    # per tick for the whole phase -- 672 measured on a 35-minute Phase 4 --
+                    # and a single DSC step routinely holds one status for many minutes.
+                    # Derived from $lastStatusChangeTime, which every progress and restart path
+                    # already resets, so a status change drops straight back to 3s with no
+                    # extra state. Stall detection is unaffected: its thresholds are minutes
+                    # and the LCM probe is throttled to once a minute regardless.
+                    $staticSeconds = ([DateTime]::UtcNow - $lastStatusChangeTime).TotalSeconds
+                    $pollInterval = if ($staticSeconds -lt 30) { 3 } elseif ($staticSeconds -lt 120) { 6 } else { 12 }
+                    start-sleep -Seconds $pollInterval
                     [int]$failedHeartbeats = 0
                 }
 
