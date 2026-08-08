@@ -7535,6 +7535,11 @@ function Write-VmJobLedger {
                 At = (Get-Date); Op = $Op; Id = $id; Vm = $VmName; Name = $DisplayName
                 State = $state; RsState = $rsState; Site = $site; Detail = $Detail
             })
+        # Cheapest way to give the crash handler a VM name; it cannot reach $currentItem.
+        if ($VmName) { $global:ps_crashVm = $VmName }
+        # A static string write, so the compiled crash handler can report the last job
+        # operation without touching any PowerShell state on a dying threadpool thread.
+        try { [MemLabsCrash]::Context = "vm=$VmName lastOp=$Op id=$id job='$DisplayName' state=$state rs=$rsState $Detail" } catch { }
         # Disposal is the only operation that can manufacture the crash, so it is written
         # to disk the instant it happens rather than waiting for a census that may never run.
         if ($Op -in @('disposed', 'abandoned')) {
@@ -7596,6 +7601,79 @@ function Write-VmJobLedgerCensus {
         try { Write-Log "[JobLedger] census failed: $($_.Exception.Message)" -LogOnly } catch { }
     }
 }
+
+# The one thing that can actually name the disposed object.
+#
+# An unhandled exception on a threadpool thread cannot be caught by try/catch and kills
+# the process -- but the CLR still raises AppDomain.UnhandledException FIRST, and that
+# handler runs with the live exception in hand, including the StackTrace the serialized
+# job error reports as null.
+#
+# The handler MUST be compiled, not a PowerShell scriptblock. A scriptblock-as-delegate
+# needs an available Runspace to execute; on an arbitrary threadpool thread during
+# process teardown there is none, so it is never invoked -- measured: the child died and
+# wrote nothing. A C# delegate has no such dependency and writes with File.AppendAllText,
+# which is synchronous and needs no PowerShell state.
+function Register-VmCrashHandler {
+    if ($global:ps_crashHandlerRegistered) { return }
+    try {
+        if (-not ('MemLabsCrash' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+public static class MemLabsCrash {
+    public static string LogPath = "";
+    public static string Context = "";
+    private static bool _hooked;
+    public static void Register(string logPath) {
+        LogPath = logPath;
+        if (_hooked) { return; }
+        _hooked = true;
+        AppDomain.CurrentDomain.UnhandledException += OnUnhandled;
+    }
+    private static void OnUnhandled(object sender, UnhandledExceptionEventArgs e) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("==== UNHANDLED EXCEPTION " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
+                + " pid=" + System.Diagnostics.Process.GetCurrentProcess().Id
+                + " terminating=" + e.IsTerminating + " ====");
+            sb.AppendLine("CONTEXT: " + Context);
+            Exception ex = e.ExceptionObject as Exception;
+            if (ex != null) {
+                sb.AppendLine("TYPE : " + ex.GetType().FullName);
+                sb.AppendLine("MSG  : " + ex.Message);
+                sb.AppendLine("FULL : " + ex.ToString());
+                Exception inner = ex.InnerException;
+                int depth = 0;
+                while (inner != null && depth < 5) {
+                    sb.AppendLine("INNER" + depth + ": " + inner.GetType().FullName + ": " + inner.Message);
+                    inner = inner.InnerException;
+                    depth++;
+                }
+            } else {
+                sb.AppendLine("RAW  : " + Convert.ToString(e.ExceptionObject));
+            }
+            File.AppendAllText(LogPath, sb.ToString());
+        } catch { }
+    }
+}
+'@ -ErrorAction Stop
+        }
+        $crashPath = Join-Path ([System.IO.Path]::GetTempPath()) "VMBuild.crash.$PID.log"
+        try {
+            if ($Common -and $Common.LogPath) { $crashPath = ($Common.LogPath -replace '\.log$', '') + '.crash.log' }
+        }
+        catch { }
+        [MemLabsCrash]::Register($crashPath)
+        $global:ps_crashHandlerRegistered = $true
+    }
+    catch { }
+}
+
+# Every per-VM worker dot-sources this file, so registering here covers all of them
+# without touching each job scriptblock.
+Register-VmCrashHandler
 
 function Get-RunspaceInventory {
     <#
