@@ -1917,6 +1917,11 @@ $global:VM_Config = {
         # Params for child script blocks
         $DscFolder = "phases"
 
+        # Per-run MOF output folder. Nothing else writes here, so clearing a previous
+        # run's leftovers can never race, lock, or archive away this run's compile.
+        $mofRunToken = if ($phaseRunGuid) { "$phaseRunGuid" } else { [guid]::NewGuid().ToString() }
+        $mofFolderName = "DSCConfiguration_$mofRunToken"
+
         # Don't start DSC on any node except DC, for multi-DSC
         $skipStartDsc = $false
         if ($multiNodeDsc -and $currentItem.role -ne "DC") {
@@ -3697,13 +3702,9 @@ $global:VM_Config = {
                     Remove-Item $dscLog -Force -Confirm:$false -ErrorAction SilentlyContinue                    
                 }
 
-                # Rename previous MOF path
-                $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
-                if (Test-Path $dscConfigPath) {
-                    $newName = $dscConfigPath -replace "DSCConfiguration", ("DSCConfiguration" + (get-date).ToString("_yyyyMMdd_HHmmss"))
-                    "Renaming $dscConfigPath to $newName" | Out-File $log -Append
-                    Rename-Item -Path $dscConfigPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
-                }
+                # No MOF archive step: the output folder is per-run (DSCConfiguration_<runGuid>),
+                # so this run's compile cannot collide with a previous one. The rename that stood
+                # here was -ErrorAction Stop, so a lock on the folder aborted the entire phase.
 
                 $SccmLogFilePath = "C:\ConfigMgrSetup.log"
                 if (Test-Path $SccmLogFilePath) {
@@ -3809,8 +3810,12 @@ $global:VM_Config = {
                 }
 
                 # Define DSC variables
+                $mofFolderName = $using:mofFolderName
+                # Empty would collapse the output path to the phases root, where StartConfig
+                # would then apply whatever stray MOF it finds. Fail here instead.
+                if ([string]::IsNullOrWhiteSpace($mofFolderName)) { throw "DSC_CreateSingleConfig: per-run MOF folder name did not resolve from the host." }
                 $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole).ps1"
-                $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+                $dscConfigPath = "C:\staging\DSC\$DscFolder\$mofFolderName"
                 $deployConfigPath = "C:\staging\DSC\deployConfig.json"
 
                 # Update init log
@@ -3930,8 +3935,10 @@ $global:VM_Config = {
                 }
 
                 # Define DSC variables
+                $mofFolderName = $using:mofFolderName
+                if ([string]::IsNullOrWhiteSpace($mofFolderName)) { throw "DSC_CreateMultiConfig: per-run MOF folder name did not resolve from the host." }
                 $dscConfigScript = "C:\staging\DSC\$DscFolder\$($dscRole).ps1"
-                $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+                $dscConfigPath = "C:\staging\DSC\$DscFolder\$mofFolderName"
                 $deployConfigPath = "C:\staging\DSC\deployConfig.json"
 
                 # Update init log
@@ -4130,9 +4137,11 @@ $global:VM_Config = {
                 $currentItem = $using:currentItem
                 $ConfigurationData = $using:ConfigurationData
                 $Phase = $using:Phase
+                $mofFolderName = $using:mofFolderName
+                if ([string]::IsNullOrWhiteSpace($mofFolderName)) { throw "DSC_StartConfig: per-run MOF folder name did not resolve from the host." }
 
                 # Define DSC variables
-                $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+                $dscConfigPath = "C:\staging\DSC\$DscFolder\$mofFolderName"
                 # Update init log
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
@@ -4898,8 +4907,13 @@ $global:VM_Config = {
                         $Phase = $using:Phase
                         $deployConfig = Get-Content 'C:\staging\DSC\deployConfig.json' -Force | ConvertFrom-Json
                         $dscRole = "Phase$Phase"
+                        $mofFolderName = $using:mofFolderName
+                        if ([string]::IsNullOrWhiteSpace($mofFolderName)) {
+                            "per-run MOF folder name did not resolve from the host" | Out-File $log -Append
+                            return "MOF_FOLDER_UNRESOLVED"
+                        }
                         $dscConfigScript = "C:\staging\DSC\$DscFolder\$dscRole.ps1"
-                        $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+                        $dscConfigPath = "C:\staging\DSC\$DscFolder\$mofFolderName"
                         $deployConfigPath = 'C:\staging\DSC\deployConfig.json'
 
                         if (-not (Test-Path $dscConfigScript)) {
