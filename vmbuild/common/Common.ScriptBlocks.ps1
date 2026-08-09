@@ -4549,6 +4549,26 @@ $global:VM_Config = {
         }
         else {
             Write-Progress2 $Activity -Status "Starting DSC" -percentcomplete 75 -force
+
+            # Compile BEFORE the multi-node wait below. The MOFs are a pure function of
+            # deployConfig + ConfigurationData -- verified with temp/Test-CompileTimeQueries.ps1,
+            # which found 24 live-state queries in the phase configs and ALL of them inside
+            # resource script blocks (apply time, on the node), none at compile time. So the
+            # compile cannot observe anything the members are still changing, and running it
+            # first hides it inside the wait: measured 10.8s mean wait vs 8.1s mean compile
+            # over 12 pushes, ~7.4s recoverable per push.
+            # Compiling first also fails a broken configuration before spending the wait.
+            Write-Progress2 "Creating DSC" -status "Invoking DSC_CreateConfig" -PercentComplete 0 -force
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Creating DSC configuration."
+            $dscCreateStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
+            $dscCreateStopWatch.Stop()
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration after $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC configuration creation completed in $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds."
+
             if ($multiNodeDsc) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) Starting"
                 # Wait until every member node has written THIS run's GUID to
@@ -4700,17 +4720,6 @@ $global:VM_Config = {
 
             }
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished waiting on all nodes"
-
-            Write-Progress2 "Creating DSC" -status "Invoking DSC_CreateConfig" -PercentComplete 0 -force
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Creating DSC configuration."
-            $dscCreateStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
-            $dscCreateStopWatch.Stop()
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration after $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                return
-            }
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC configuration creation completed in $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds."
 
             Write-Progress2 "Starting DSC" -status "Invoking DSC_StartConfig" -PercentComplete 50 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting DSC configuration."
