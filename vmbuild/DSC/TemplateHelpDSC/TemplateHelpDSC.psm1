@@ -6005,10 +6005,18 @@ class ClusterRemoveUnwantedIPs {
 function Test-ModuleAvailable {
     # Quick, network-free "is this module installed and usable?" check. Reads the
     # module manifest via Get-Module -ListAvailable (no PowerShellGet dependency,
-    # no PSGallery round-trip) and confirms it actually exposes commands, so a
-    # half-copied/partial module folder doesn't read as a good install. Falls
-    # back to a bounded Import-Module only when the manifest declares its exports
-    # lazily (wildcards). Returns $true/$false, never throws.
+    # no PSGallery round-trip) and confirms the module payload is actually on
+    # disk, so a half-copied/partial module folder doesn't read as a good install.
+    # Returns $true/$false, never throws.
+    #
+    # This must NEVER call Import-Module. -ListAvailable reports ExportedCommands
+    # as EMPTY for any manifest that exports via wildcards -- which SqlServer does
+    # -- so an Import-Module fallback here is not the rare path, it is the normal
+    # one for exactly the biggest module we check. Measured 2026-08-09: importing
+    # SqlServer (loads SMO) took 274s, and because ModuleAdd.Test() calls this on
+    # BOTH the marker fast path and the on-disk path, every Phase 4/5/7 re-run paid
+    # it while reporting InDesiredState=True -- ~4.5 minutes to decide there was
+    # nothing to do.
     param([Parameter(Mandatory)][string] $Name)
 
     $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
@@ -6016,11 +6024,22 @@ function Test-ModuleAvailable {
         $m = Get-Module -ListAvailable -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $m) { return $false }
         if ($m.ExportedCommands -and $m.ExportedCommands.Count -gt 0) { return $true }
-        try {
-            Import-Module $Name -ErrorAction Stop -WarningAction SilentlyContinue
-            return [bool](Get-Module -Name $Name)
+
+        # Lazy/wildcard exports: prove the implementation exists on disk instead.
+        $base = $m.ModuleBase
+        if (-not $base -or -not (Test-Path -LiteralPath $base)) { return $false }
+        if ($m.RootModule) {
+            $root = Join-Path $base $m.RootModule
+            if (Test-Path -LiteralPath $root) { return $true }
         }
-        catch { return $false }
+        # Depth-bounded so a large module tree cannot turn this back into a slow call.
+        # Filter on Extension, NOT -Include: with -LiteralPath, -Include does not filter
+        # and the manifest itself matches, so a manifest-only (half-copied) folder would
+        # read as a good install.
+        $impl = Get-ChildItem -LiteralPath $base -Recurse -Depth 2 -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -eq '.psm1' -or $_.Extension -eq '.dll' } |
+            Select-Object -First 1
+        return [bool]$impl
     }
     catch { return $false }
     finally { $global:VerbosePreference = $savedVP }
