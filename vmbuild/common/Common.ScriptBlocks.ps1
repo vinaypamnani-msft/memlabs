@@ -1888,6 +1888,10 @@ $global:VM_Config = {
         $alreadyCopiedDSC = $using:alreadyCopiedDSC
         $phaseRunGuid = $using:phaseRunGuid
         $quietWUThisRun = $using:quietWUThisRun
+        # Re-exposed as a local because the nested DSC scriptblocks resolve
+        # $using:mofFolderName a SECOND time, against this scope, when
+        # Invoke-VmCommand dispatches them to the guest.
+        $mofFolderName = $using:mofFolderName
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
