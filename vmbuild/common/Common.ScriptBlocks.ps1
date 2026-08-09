@@ -1917,11 +1917,6 @@ $global:VM_Config = {
         # Params for child script blocks
         $DscFolder = "phases"
 
-        # Per-run MOF output folder. Nothing else writes here, so clearing a previous
-        # run's leftovers can never race, lock, or archive away this run's compile.
-        $mofRunToken = if ($phaseRunGuid) { "$phaseRunGuid" } else { [guid]::NewGuid().ToString() }
-        $mofFolderName = "DSCConfiguration_$mofRunToken"
-
         # Don't start DSC on any node except DC, for multi-DSC
         $skipStartDsc = $false
         if ($multiNodeDsc -and $currentItem.role -ne "DC") {

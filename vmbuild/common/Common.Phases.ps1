@@ -1336,7 +1336,7 @@ function Get-MissingDscDispatchNodes {
 
 function Start-PhaseJobs {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '',
-        Justification = 'devBranchValue and phaseRunGuid are consumed via $using: inside Start-Job/Start-ThreadJob scriptblocks, which PSScriptAnalyzer cannot trace.')]
+        Justification = 'devBranchValue, phaseRunGuid and mofFolderName are consumed via $using: inside Start-Job/Start-ThreadJob scriptblocks, which PSScriptAnalyzer cannot trace.')]
     param (
         [int]$Phase,
         [object]$deployConfig,
@@ -1751,6 +1751,15 @@ function Start-PhaseJobs {
     # DSC_Status.txt -- both of which defeated the old "DSC_Status.txt absent"
     # readiness signal and dead-waited the loop.
     $phaseRunGuid = [guid]::NewGuid().ToString()
+
+    # Per-run MOF output folder, consumed as $using:mofFolderName by the DSC
+    # compile/start/recover scriptblocks. It MUST be built here, not inside
+    # VM_Config: Start-Job resolves every $using: in the whole scriptblock tree
+    # -- nested blocks included -- against THIS scope, at dispatch time. Defining
+    # it in VM_Config throws "the value of the using variable ... has not been
+    # set in the local session" before the job ever starts. Same rule as
+    # $devBranchValue above.
+    $mofFolderName = "DSCConfiguration_$phaseRunGuid"
 
     $global:preparePhasePercent = 50
     Write-Progress2 "Preparing Phase $Phase" -Status "Updating VM List" -PercentComplete $global:preparePhasePercent
