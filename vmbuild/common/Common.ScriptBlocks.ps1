@@ -2138,6 +2138,7 @@ $global:VM_Config = {
             # can only ever degrade to today's behaviour.
             $preLcmState = 'Unknown'
             $preLcmDetail = ''
+            $preLcmMode = ''
             try {
                 $mc = Invoke-CimMethod -Namespace 'root/Microsoft/Windows/DesiredStateConfiguration' `
                     -ClassName 'MSFT_DSCLocalConfigurationManager' -MethodName 'GetMetaConfiguration' `
@@ -2148,6 +2149,7 @@ $global:VM_Config = {
                     # the difference between "we killed idle housekeeping" and "we killed
                     # a 40-minute SQL install".
                     $preLcmDetail = "$($mc.MetaConfiguration.LCMStateDetail)"
+                    $preLcmMode = "$($mc.MetaConfiguration.ConfigurationMode)"
                 }
             }
             catch { $preLcmState = 'Unreadable' }
@@ -2157,18 +2159,33 @@ $global:VM_Config = {
                 if (Test-Path -LiteralPath "C:\Windows\System32\Configuration\$d") { $preDocs += $d }
             }
 
-            if ($preLcmState -eq 'Idle' -and $preDocs.Count -eq 0) {
-                # Provably nothing to stop: no apply is running and there is no
-                # document for a respawned provider host to resume from. Skip the
-                # purge and the 30s stop. The final WmiPrvSE kill still happens
-                # below -- a later phase relies on it to pick up machine.config
+            # Provably nothing to stop, on three independent conditions:
+            #   Idle           -- no apply is in flight.
+            #   no Pending.mof -- nothing for a respawned provider host to RESUME.
+            #                     Current.mof is only the last-applied baseline; it is
+            #                     not a resumable document. Pending.mof is the
+            #                     interrupted apply, and is the actual hazard.
+            #   ApplyOnly      -- the LCM runs NO consistency check, so a surviving
+            #                     Current.mof can never be re-applied behind this
+            #                     phase's push. This condition is NOT redundant:
+            #                     Phase3.ps1 sets ApplyAndAutoCorrect for the language
+            #                     -pack config and the meta config PERSISTS, so those
+            #                     nodes must still take the full purge+stop below.
+            # An unreadable meta config leaves $preLcmMode empty and falls through, so a
+            # wrong or missing answer can still only ever degrade to the original path.
+            #
+            # Requiring ZERO documents (the original gate) never fired even once: 71 of
+            # 71 observed re-run states were Idle with Current.mof present.
+            if ($preLcmState -eq 'Idle' -and $preLcmMode -eq 'ApplyOnly' -and $preDocs -notcontains 'Pending.mof') {
+                # Skip the purge and the 30s stop. The final WmiPrvSE kill still happens
+                # here -- a later phase relies on it to pick up machine.config
                 # <defaultProxy> changes in a fresh AppDomain.
                 try {
                     Get-Process WmiPrvSE -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
                     Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
                 }
                 catch {}
-                return [PSCustomObject]@{ Stopped = $true; LCMState = 'Idle'; PreLCMState = 'Idle'; PreLCMDetail = $preLcmDetail; PreDocs = ''; Action = 'skipped-nothing-to-stop' }
+                return [PSCustomObject]@{ Stopped = $true; LCMState = 'Idle'; PreLCMState = 'Idle'; PreLCMDetail = $preLcmDetail; PreLCMMode = $preLcmMode; PreDocs = ($preDocs -join ','); Action = 'skipped-nothing-to-stop' }
             }
 
             # 1. Try a clean stop first (flushes DSC logs so they're readable).
@@ -2295,7 +2312,7 @@ $global:VM_Config = {
                 } catch {}
                 Start-Sleep -Seconds 2
             }
-            return [PSCustomObject]@{ Stopped = $stopped; LCMState = $lcmState; PreLCMState = $preLcmState; PreLCMDetail = $preLcmDetail; PreDocs = ($preDocs -join ','); Action = 'stopped' }
+            return [PSCustomObject]@{ Stopped = $stopped; LCMState = $lcmState; PreLCMState = $preLcmState; PreLCMDetail = $preLcmDetail; PreLCMMode = $preLcmMode; PreDocs = ($preDocs -join ','); Action = 'stopped' }
         }
 
         Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 5 -force
@@ -2318,7 +2335,9 @@ $global:VM_Config = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): LCM was ACTIVELY APPLYING at phase start$what (docs: $($sbo.PreDocs)) -- forcing it down. A previous phase's configuration did not finish." -Warning
             }
             else {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): pre-stop LCM='$($sbo.PreLCMState)' docs='$($sbo.PreDocs)' -> $($sbo.Action)" -LogOnly
+                # mode= is what decides the fast path, so log it: if the skip stops
+                # firing, this line says whether it was the mode or a Pending.mof.
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): pre-stop LCM='$($sbo.PreLCMState)' mode='$($sbo.PreLCMMode)' docs='$($sbo.PreDocs)' -> $($sbo.Action)" -LogOnly
             }
         }
         # Escalate not only on a job timeout/failure, but also when the in-guest
