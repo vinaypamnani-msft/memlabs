@@ -2159,24 +2159,30 @@ $global:VM_Config = {
                 if (Test-Path -LiteralPath "C:\Windows\System32\Configuration\$d") { $preDocs += $d }
             }
 
-            # Provably nothing to stop, on three independent conditions:
-            #   Idle           -- no apply is in flight.
-            #   no Pending.mof -- nothing for a respawned provider host to RESUME.
-            #                     Current.mof is only the last-applied baseline; it is
-            #                     not a resumable document. Pending.mof is the
-            #                     interrupted apply, and is the actual hazard.
-            #   ApplyOnly      -- the LCM runs NO consistency check, so a surviving
-            #                     Current.mof can never be re-applied behind this
-            #                     phase's push. This condition is NOT redundant:
-            #                     Phase3.ps1 sets ApplyAndAutoCorrect for the language
-            #                     -pack config and the meta config PERSISTS, so those
-            #                     nodes must still take the full purge+stop below.
-            # An unreadable meta config leaves $preLcmMode empty and falls through, so a
-            # wrong or missing answer can still only ever degrade to the original path.
+            # Provably nothing to stop. Idle is required either way -- no apply is in
+            # flight -- plus ONE of two independently sufficient conditions:
             #
-            # Requiring ZERO documents (the original gate) never fired even once: 71 of
-            # 71 observed re-run states were Idle with Current.mof present.
-            if ($preLcmState -eq 'Idle' -and $preLcmMode -eq 'ApplyOnly' -and $preDocs -notcontains 'Pending.mof') {
+            # 1. No documents at all. Nothing on disk can be resumed OR re-applied, so
+            #    ConfigurationMode is irrelevant. This is the FIRST-BUILD / first-phase
+            #    case and it MUST stay mode-independent: the LCM default on a node that
+            #    has never had a config pushed is not ApplyOnly, so folding this into
+            #    the mode test below would stop skipping where the original gate did.
+            #
+            # 2. ApplyOnly with no Pending.mof. Pending.mof is the interrupted apply a
+            #    respawned provider host could RESUME; Current.mof is only the
+            #    last-applied baseline and is not resumable. Letting Current.mof survive
+            #    is safe only while the LCM runs no consistency check, hence ApplyOnly.
+            #    That is NOT redundant: Phase3.ps1 sets ApplyAndAutoCorrect for the
+            #    language-pack config (non-en-US labs) and the meta config PERSISTS on
+            #    the node, so those nodes keep taking the full purge+stop.
+            #
+            # Condition 1 alone -- the original gate -- never fired on a re-run: 71 of 71
+            # observed states were Idle with Current.mof present. An unreadable meta
+            # config leaves $preLcmMode empty, which only costs condition 2, so a wrong
+            # or missing answer still only ever degrades to the original path.
+            $noDocsAtAll = ($preDocs.Count -eq 0)
+            $noResumableDoc = ($preLcmMode -eq 'ApplyOnly' -and $preDocs -notcontains 'Pending.mof')
+            if ($preLcmState -eq 'Idle' -and ($noDocsAtAll -or $noResumableDoc)) {
                 # Skip the purge and the 30s stop. The final WmiPrvSE kill still happens
                 # here -- a later phase relies on it to pick up machine.config
                 # <defaultProxy> changes in a fresh AppDomain.
