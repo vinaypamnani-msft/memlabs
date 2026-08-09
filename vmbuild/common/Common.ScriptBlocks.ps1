@@ -3596,6 +3596,22 @@ $global:VM_Config = {
                     $log = $fallbackLog
                 }
 
+                # Write the new deployConfig FIRST. The MOF compile takes it as
+                # -DeployConfigPath, so it is the compile's only input from this
+                # scriptblock; producing it before the LCM drain below is what lets the
+                # two stop being sequential. Archiving the old copy is diagnostic only,
+                # so that rename is best-effort -- the write overwrites in place anyway,
+                # and it used to be -ErrorAction Stop, i.e. a lock aborted the phase.
+                $deployConfig = $using:deployConfig
+                $deployConfigPath = "C:\staging\DSC\deployConfig.json"
+                "Writing DSC config to $deployConfigPath" | Out-File $log -Append
+                if (Test-Path $deployConfigPath) {
+                    $newName = $deployConfigPath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
+                    "Renaming $deployConfigPath to $newName" | Out-File $log -Append
+                    Rename-Item -Path $deployConfigPath -NewName $newName -Force -Confirm:$false -ErrorAction SilentlyContinue
+                }
+                $deployConfig | ConvertTo-Json -Depth 5 | Out-File $deployConfigPath -Force -Confirm:$false
+
                 # Remove DSC_Status.txt EARLY, and only once DSC is confirmed
                 # stopped. The DC's multi-node monitoring loop treats this
                 # file's disappearance as the signal that this node has cleared
@@ -3716,19 +3732,8 @@ $global:VM_Config = {
 
                 # DSC_Status.txt is removed early (and LCM-gated) near the top
                 # of this scriptblock so a rename failure above cannot strand
-                # the DC's multi-node monitoring loop.
-
-                # Write config to file
-                $deployConfig = $using:deployConfig
-                $deployConfigPath = "C:\staging\DSC\deployConfig.json"
-
-                "Writing DSC config to $deployConfigPath" | Out-File $log -Append
-                if (Test-Path $deployConfigPath) {
-                    $newName = $deployConfigPath -replace ".json", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".json")
-                    "Renaming $deployConfigPath to $newName" | Out-File $log -Append
-                    Rename-Item -Path $deployConfigPath -NewName $newName -Force -Confirm:$false -ErrorAction Stop
-                }
-                $deployConfig | ConvertTo-Json -Depth 5 | Out-File $deployConfigPath -Force -Confirm:$false
+                # the DC's multi-node monitoring loop. deployConfig.json is
+                # written up there too -- see the note at the top.
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
