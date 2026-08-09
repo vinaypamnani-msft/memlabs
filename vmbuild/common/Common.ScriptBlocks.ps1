@@ -1796,6 +1796,78 @@ function Save-CMSetupLogsFromVm {
     }
 }
 
+function Save-CMClientPackagePrestageLogsFromVm {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$DomainName,
+        [Parameter(Mandatory)][int]$Phase,
+        [Parameter(Mandatory)][string]$RoleLabel
+    )
+
+    $collector = {
+        $out = @{}
+        $diag = @()
+        $smsDir = $null
+        foreach ($key in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+            try { $smsDir = (Get-ItemProperty -Path $key -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
+            if ($smsDir) { $diag += "SMS install dir from '$key' = '$smsDir'"; break }
+        }
+        if (-not $smsDir -or -not (Test-Path $smsDir)) {
+            $diag += 'No SMS installation directory found.'
+            $out['_collector-diag.txt'] = ($diag -join "`r`n")
+            return $out
+        }
+
+        foreach ($name in @('distmgr.log', 'distmgr.lo_', 'sender.log', 'despool.log', 'rcmctrl.log', 'rcmctrl.lo_')) {
+            $path = Join-Path $smsDir "Logs\$name"
+            if (-not (Test-Path $path)) { $diag += "'$name' not present at $path"; continue }
+            try {
+                $content = Get-Content -LiteralPath $path -Tail 4000 -ErrorAction Stop
+                if ($content) { $out[$name] = ($content -join "`r`n") }
+                else { $diag += "'$name' read returned no content" }
+            }
+            catch { $diag += "'$name' read threw: $($_.Exception.Message)" }
+        }
+        $out['_collector-diag.txt'] = ($diag -join "`r`n")
+        return $out
+    }
+
+    try {
+        $result = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -ScriptBlock $collector `
+            -SuppressLog -AsJob -TimeoutSeconds 150 -DisplayName "Pull client package pre-stage $RoleLabel logs"
+    }
+    catch {
+        Write-Log "[Phase $Phase]: $VmName [$RoleLabel]: client package pre-stage log capture threw: $($_.Exception.Message)" -Warning
+        return
+    }
+    if (-not $result -or $result.ScriptBlockFailed -or -not ($result.ScriptBlockOutput -is [hashtable]) -or $result.ScriptBlockOutput.Count -eq 0) {
+        $outputType = if ($result -and $null -ne $result.ScriptBlockOutput) { $result.ScriptBlockOutput.GetType().FullName } else { '<null>' }
+        $detail = if ($result) { "failed=$($result.ScriptBlockFailed) channelBroken=$($result.ChannelBroken) timedOut=$($result.TimedOut) outputType=$outputType" } else { 'Invoke-VmCommand returned no result' }
+        Write-Log "[Phase $Phase]: $VmName [$RoleLabel]: client package pre-stage log capture produced nothing ($detail)" -Warning
+        return
+    }
+
+    $logDir = if ($Common -and $Common.LogPath) { Split-Path $Common.LogPath -Parent } else { $null }
+    if (-not $logDir -or -not (Test-Path $logDir)) {
+        Write-Log "[Phase $Phase]: $VmName [$RoleLabel]: client package pre-stage log dir not resolvable ($logDir)" -Warning
+        return
+    }
+
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    foreach ($name in $result.ScriptBlockOutput.Keys) {
+        $content = $result.ScriptBlockOutput[$name]
+        if (-not $content) { continue }
+        $safeName = $name -replace '[^\w.\-]', '_'
+        $destination = Join-Path $logDir "$VmName-Phase$Phase-$stamp-ClientPkgPrestage-$RoleLabel-$safeName"
+        try {
+            Set-Content -LiteralPath $destination -Value $content -Encoding UTF8 -ErrorAction Stop
+            Write-Log "[Phase $Phase]: $VmName [$RoleLabel]: Pulled $name -> $destination" -OutputStream
+        }
+        catch { Write-Log "[Phase $Phase]: $VmName [$RoleLabel]: failed to write ${name}: $($_.Exception.Message)" -Warning }
+    }
+}
+
 $global:VM_Config = {
     # Suppress CIM cmdlet progress in child process (see VM_Create comment).
     $Global:ProgressPreference = 'SilentlyContinue'
@@ -5225,6 +5297,23 @@ $global:VM_Config = {
 
                         if ($currentStatusTrimmed.Contains("JOBFAILURE: ")) {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $currentStatusTrimmed" -Failure -OutputStream
+                            if ($using:Phase -eq 8 -and $currentStatusTrimmed -match 'Client package pre-stage: parent site .* still cannot see|Client package pre-stage on .* failed') {
+                                Save-CMClientPackagePrestageLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -RoleLabel 'ChildPrimary'
+                                $parentSiteCode = "$($currentItem.parentSiteCode)"
+                                $parentVm = $deployConfig.virtualMachines | Where-Object {
+                                    $_.role -eq 'CAS' -and $parentSiteCode -and $_.siteCode -eq $parentSiteCode
+                                } | Select-Object -First 1
+                                if (-not $parentVm -and $currentItem.thisParams.ParentSiteServer) {
+                                    $parentName = "$($currentItem.thisParams.ParentSiteServer)".Split('.')[0]
+                                    $parentVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $parentName } | Select-Object -First 1
+                                }
+                                if ($parentVm) {
+                                    Save-CMClientPackagePrestageLogsFromVm -VmName $parentVm.vmName -DomainName $domainName -Phase $using:Phase -RoleLabel 'ParentCAS'
+                                }
+                                else {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): client package pre-stage log capture could not resolve parent CAS from deployConfig (parentSiteCode='$parentSiteCode')." -Warning
+                                }
+                            }
                             break
                         }
 

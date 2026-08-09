@@ -113,7 +113,12 @@ $flushClientPackageTargetingToParent = {
 $verifyClientPackageTargetAtParent = {
     param([string]$PackageId, [string]$DistributionPointFqdn, [datetime]$NotBeforeUtc, [int]$TimeoutSeconds = 120)
 
-    $result = [pscustomobject]@{ Verified = $false; Error = $null; DataSource = $null; Database = $null; Rows = 0; LastRefresh = $null }
+    $result = [pscustomobject]@{
+        Verified = $false; Error = $null; DataSource = $null; Database = $null; Rows = 0
+        NALPath = $null; LastRefresh = $null; RefreshTrigger = $null; UpdateMask = $null; Action = $null
+        GlobalNALPath = $null; GlobalLastRefresh = $null; GlobalRefreshTrigger = $null; GlobalUpdateMask = $null; GlobalAction = $null
+        NotificationCount = $null; NotificationTime = $null
+    }
     if (-not $ThisVM -or $ThisVM.role -ne 'Primary' -or -not $ThisVM.parentSiteCode) {
         $result.Verified = $true
         return $result
@@ -138,8 +143,10 @@ $verifyClientPackageTargetAtParent = {
         $needle = "\\$DistributionPointFqdn\"
         for ($poll = 1; $poll -le $polls; $poll++) {
             $command = $connection.CreateCommand()
-            # PkgServers_G (PkgID/NALPath/SiteCode/LastRefresh) is source-verified ConfigMgr schema.
-            $command.CommandText = 'SELECT NALPath, LastRefresh FROM dbo.PkgServers_G WHERE PkgID = @pkg AND SiteCode = @site'
+            # DistMgr clears Action and advances LastRefresh in PkgServers_L after
+            # processing a remote site's target. PkgServers projects those local
+            # operational fields; PkgServers_G retains the replicated input row.
+            $command.CommandText = 'SELECT NALPath, LastRefresh, RefreshTrigger, UpdateMask, Action FROM dbo.PkgServers WHERE PkgID = @pkg AND SiteCode = @site'
             $command.CommandTimeout = 30
             [void]$command.Parameters.AddWithValue('@pkg', $PackageId)
             [void]$command.Parameters.AddWithValue('@site', $SiteCode)
@@ -151,9 +158,13 @@ $verifyClientPackageTargetAtParent = {
                     $rowCount++
                     $nalPath = "$($reader['NALPath'])"
                     if ($nalPath.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        $result.NALPath = $nalPath
                         $lastRefresh = $null
                         if ($reader['LastRefresh'] -isnot [System.DBNull]) { $lastRefresh = [datetime]$reader['LastRefresh'] }
                         $result.LastRefresh = $lastRefresh
+                        if ($reader['RefreshTrigger'] -isnot [System.DBNull]) { $result.RefreshTrigger = [int]$reader['RefreshTrigger'] }
+                        if ($reader['UpdateMask'] -isnot [System.DBNull]) { $result.UpdateMask = [int]$reader['UpdateMask'] }
+                        if ($reader['Action'] -isnot [System.DBNull]) { $result.Action = [int]$reader['Action'] }
                         if ($lastRefresh -and $lastRefresh -ge $NotBeforeUtc) { $found = $true }
                     }
                 }
@@ -166,10 +177,102 @@ $verifyClientPackageTargetAtParent = {
             }
             if ($poll -lt $polls) { Start-Sleep -Seconds $pollSeconds }
         }
+
+        $globalCommand = $connection.CreateCommand()
+        $globalCommand.CommandText = 'SELECT NALPath, LastRefresh, RefreshTrigger, UpdateMask, Action FROM dbo.PkgServers_G WHERE PkgID = @pkg AND SiteCode = @site'
+        $globalCommand.CommandTimeout = 30
+        [void]$globalCommand.Parameters.AddWithValue('@pkg', $PackageId)
+        [void]$globalCommand.Parameters.AddWithValue('@site', $SiteCode)
+        $globalReader = $globalCommand.ExecuteReader()
+        try {
+            while ($globalReader.Read()) {
+                $globalNalPath = "$($globalReader['NALPath'])"
+                if ($globalNalPath.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+                $result.GlobalNALPath = $globalNalPath
+                if ($globalReader['LastRefresh'] -isnot [System.DBNull]) { $result.GlobalLastRefresh = [datetime]$globalReader['LastRefresh'] }
+                if ($globalReader['RefreshTrigger'] -isnot [System.DBNull]) { $result.GlobalRefreshTrigger = [int]$globalReader['RefreshTrigger'] }
+                if ($globalReader['UpdateMask'] -isnot [System.DBNull]) { $result.GlobalUpdateMask = [int]$globalReader['UpdateMask'] }
+                if ($globalReader['Action'] -isnot [System.DBNull]) { $result.GlobalAction = [int]$globalReader['Action'] }
+            }
+        }
+        finally { $globalReader.Close() }
+
+        $notificationCommand = $connection.CreateCommand()
+        $notificationCommand.CommandText = 'SELECT COUNT(*) AS NotificationCount, MAX(TimeKey) AS NotificationTime FROM dbo.PkgNotification WHERE PkgID = @pkg AND Type = 4'
+        $notificationCommand.CommandTimeout = 30
+        [void]$notificationCommand.Parameters.AddWithValue('@pkg', $PackageId)
+        $notificationReader = $notificationCommand.ExecuteReader()
+        try {
+            if ($notificationReader.Read()) {
+                $result.NotificationCount = [int]$notificationReader['NotificationCount']
+                if ($notificationReader['NotificationTime'] -isnot [System.DBNull]) { $result.NotificationTime = [datetime]$notificationReader['NotificationTime'] }
+            }
+        }
+        finally { $notificationReader.Close() }
     }
     catch { $result.Error = $_.Exception.Message }
     finally { if ($connection) { $connection.Dispose() } }
     return $result
+}
+
+$writeClientPackageTargetingDiagnostics = {
+    param([string]$PackageId, [string]$DistributionPointFqdn, $ParentVerification)
+
+    if ($ParentVerification) {
+        Write-DscStatus "Client package pre-stage diag [parent effective]: SQL=$($ParentVerification.DataSource)/$($ParentVerification.Database); rows=$($ParentVerification.Rows); NALPath='$($ParentVerification.NALPath)'; LastRefresh=$($ParentVerification.LastRefresh); RefreshTrigger=$($ParentVerification.RefreshTrigger); UpdateMask=$($ParentVerification.UpdateMask); Action=$($ParentVerification.Action); PkgNotification(type4)=$($ParentVerification.NotificationCount) latest=$($ParentVerification.NotificationTime); error='$($ParentVerification.Error)'" -NoStatus
+        Write-DscStatus "Client package pre-stage diag [parent global]: NALPath='$($ParentVerification.GlobalNALPath)'; LastRefresh=$($ParentVerification.GlobalLastRefresh); RefreshTrigger=$($ParentVerification.GlobalRefreshTrigger); UpdateMask=$($ParentVerification.GlobalUpdateMask); Action=$($ParentVerification.GlobalAction)" -NoStatus
+    }
+
+    $connection = $null
+    try {
+        $dataSource = & $getSiteSqlDataSource $ThisVM
+        $database = "CM_$SiteCode"
+        $connectionString = "Data Source=$dataSource;Initial Catalog=$database;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+        $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
+        $connection.Open()
+
+        $targetCommand = $connection.CreateCommand()
+        $targetCommand.CommandText = 'SELECT NALPath, LastRefresh, RefreshTrigger, UpdateMask, Action FROM dbo.PkgServers_G WHERE PkgID = @pkg AND SiteCode = @site'
+        $targetCommand.CommandTimeout = 30
+        [void]$targetCommand.Parameters.AddWithValue('@pkg', $PackageId)
+        [void]$targetCommand.Parameters.AddWithValue('@site', $SiteCode)
+        $targetReader = $targetCommand.ExecuteReader()
+        $localTargetFound = $false
+        $needle = "\\$DistributionPointFqdn\"
+        try {
+            while ($targetReader.Read()) {
+                $nalPath = "$($targetReader['NALPath'])"
+                if ($nalPath.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+                $localTargetFound = $true
+                Write-DscStatus "Client package pre-stage diag [local target]: SQL=$dataSource/$database; NALPath='$nalPath'; LastRefresh=$($targetReader['LastRefresh']); RefreshTrigger=$($targetReader['RefreshTrigger']); UpdateMask=$($targetReader['UpdateMask']); Action=$($targetReader['Action'])" -NoStatus
+            }
+        }
+        finally { $targetReader.Close() }
+        if (-not $localTargetFound) { Write-DscStatus "Client package pre-stage diag [local target]: no exact $PackageId / $SiteCode / $DistributionPointFqdn row in $dataSource/$database" -NoStatus }
+
+        $drsCommand = $connection.CreateCommand()
+        $drsCommand.CommandText = @'
+SELECT s.SiteCode, s.LastVersionSent, s.LastSendStartTime, s.LastSendEndTime,
+       s.LastSendResult, s.Active, s.LastSyncProcessedTime
+FROM dbo.DRS_MessageActivity_Send AS s
+INNER JOIN dbo.ReplicationData AS r ON r.ID = s.ReplicationID
+WHERE r.ReplicationGroup = @group
+'@
+        $drsCommand.CommandTimeout = 30
+        [void]$drsCommand.Parameters.AddWithValue('@group', 'Configuration Data')
+        $drsReader = $drsCommand.ExecuteReader()
+        $drsRows = 0
+        try {
+            while ($drsReader.Read()) {
+                $drsRows++
+                Write-DscStatus "Client package pre-stage diag [local DRS Configuration Data -> $($drsReader['SiteCode'])]: LastVersionSent=$($drsReader['LastVersionSent']); Start=$($drsReader['LastSendStartTime']); End=$($drsReader['LastSendEndTime']); Result=$($drsReader['LastSendResult']); Active=$($drsReader['Active']); LastProcessed=$($drsReader['LastSyncProcessedTime'])" -NoStatus
+            }
+        }
+        finally { $drsReader.Close() }
+        if ($drsRows -eq 0) { Write-DscStatus "Client package pre-stage diag [local DRS]: no Configuration Data send rows in $dataSource/$database" -NoStatus }
+    }
+    catch { Write-DscStatus "Client package pre-stage diag query failed: $($_.Exception.Message)" -NoStatus }
+    finally { if ($connection) { $connection.Dispose() } }
 }
 
 $startClientPackagePrestage = {
@@ -265,10 +368,12 @@ $startClientPackagePrestage = {
         }
 
         $finalDetail = if ($lastVerification -and $lastVerification.Error) { $lastVerification.Error } else { "fresh target absent; observed LastRefresh=$($lastVerification.LastRefresh); matching-site rows=$($lastVerification.Rows)" }
+        & $writeClientPackageTargetingDiagnostics $packageId $DistributionPointFqdn $lastVerification
         Write-DscStatus "Client package pre-stage: parent site $($ThisVM.parentSiteCode) still cannot see $packageId targeting for $DistributionPointFqdn after 2 DRS attempts ($finalDetail). Stopping before the blind client-package wait; re-run Phase 8 after correcting DRS/SQL access." -Failure
         return $false
     }
     catch {
+        if ($packageId) { & $writeClientPackageTargetingDiagnostics $packageId $DistributionPointFqdn $lastVerification }
         Write-DscStatus "Client package pre-stage on $DistributionPointFqdn failed: $($_.Exception.Message). Stopping before the blind client-package wait; re-run Phase 8 after correcting the targeting path." -Failure
         return $false
     }
