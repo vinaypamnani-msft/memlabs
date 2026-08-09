@@ -58,6 +58,47 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 # the package is owned by the CAS and cannot start replicating down until this
 # durable SMS_DistributionPoint row exists. Waiting until InstallBoundaryGroups
 # runs serializes that parent hop behind MP installation and MP-replica setup.
+$flushClientPackageTargetingToParent = {
+    param([string]$PackageId)
+
+    # PkgServers_G belongs to the global "Configuration Data" replication group.
+    # Ask the same stored procedure used by the native DRS message builder to send
+    # that group now; otherwise this targeting row can sit at the Primary for ~32m.
+    if (-not $ThisVM -or $ThisVM.role -ne 'Primary' -or (-not $ThisVM.parentSiteCode -and -not $ThisVM.thisParams.ParentSiteServer)) { return }
+    $connection = $null
+    try {
+        $sqlVmName = if ($ThisVM.remoteSQLVM) { "$($ThisVM.remoteSQLVM)" } else { "$($ThisVM.vmName)" }
+        $sqlVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlVmName } | Select-Object -First 1
+        $sqlServer = $sqlVmName
+        $sqlInstance = if ($sqlVm) { "$($sqlVm.sqlInstanceName)" } else { '' }
+        $sqlPort = $null
+        if ($sqlVm -and $sqlVm.AlwaysOnListenerName) {
+            $sqlServer = "$($sqlVm.AlwaysOnListenerName)"
+            if ($sqlVm.thisParams -and $sqlVm.thisParams.SQLAO -and $sqlVm.thisParams.SQLAO.SQLAOPort) {
+                $sqlPort = $sqlVm.thisParams.SQLAO.SQLAOPort
+            }
+        }
+        $sqlServerFqdn = if ($sqlServer -like '*.*') { $sqlServer } else { "$sqlServer.$DomainFullName" }
+        $dataSource = if ($sqlPort) { "$sqlServerFqdn,$sqlPort" } elseif ($sqlInstance -and $sqlInstance.ToUpper() -ne 'MSSQLSERVER') { "$sqlServerFqdn\$sqlInstance" } else { $sqlServerFqdn }
+        $database = "CM_$SiteCode"
+        $connectionString = "Data Source=$dataSource;Initial Catalog=$database;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+        $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        $command.CommandText = 'EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup = @rg'
+        $command.CommandTimeout = 120
+        [void]$command.Parameters.AddWithValue('@rg', 'Configuration Data')
+        [void]$command.ExecuteNonQuery()
+        Write-DscStatus "Client package pre-stage: requested immediate DRS Configuration Data send for $PackageId after DP targeting (SQL=$dataSource/$database)."
+    }
+    catch {
+        Write-DscStatus "Client package pre-stage: immediate DRS Configuration Data send for $PackageId failed: $($_.Exception.Message). Normal DRS processing and the later coverage gate remain in place." -Warning
+    }
+    finally {
+        if ($connection) { $connection.Dispose() }
+    }
+}
+
 $startClientPackagePrestage = {
     param([string]$DistributionPointFqdn)
 
@@ -88,10 +129,12 @@ $startClientPackagePrestage = {
                 })
         if ($targeting.Count -gt 0) {
             Write-DscStatus "Client package pre-stage: $packageId is already targeted to $DistributionPointFqdn."
+            & $flushClientPackageTargetingToParent $packageId
             return
         }
         Start-CMContentDistribution -PackageId $packageId -DistributionPointName $DistributionPointFqdn -ErrorAction Stop
         Write-DscStatus "Client package pre-stage: targeted $packageId to $DistributionPointFqdn immediately after DP registration so parent replication overlaps remaining role setup."
+        & $flushClientPackageTargetingToParent $packageId
     }
     catch {
         Write-DscStatus "Client package pre-stage on $DistributionPointFqdn failed: $($_.Exception.Message). The later coverage gate will retry." -Warning
