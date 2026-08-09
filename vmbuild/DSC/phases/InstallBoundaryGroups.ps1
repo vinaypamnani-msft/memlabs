@@ -364,7 +364,8 @@ $ensureClientPkgCoverage = {
                 $sw = if (-not $state.ContainsKey($uw)) { 'no-row' } elseif ($stateName.ContainsKey("$($state[$uw])")) { $stateName["$($state[$uw])"] } else { "State$($state[$uw])" }
                 "$_ ($sw)"
             })
-        Write-DscStatus "Client pkg coverage: waiting for client package on: $($waitDesc -join ', ') [$try/$maxTries]"
+        $siteContentState = if ($contentPendingFromParent) { 'PENDING FROM PARENT' } else { 'LOCAL' }
+        Write-DscStatus "Client pkg coverage: waiting for client package on: $($waitDesc -join ', '); site $SiteCode content=$siteContentState (StoredPkgVersion=$storedVer) [$try/$maxTries]"
         Start-Sleep -Seconds 30
     }
 

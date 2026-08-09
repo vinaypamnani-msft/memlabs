@@ -54,6 +54,50 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
     return $false
 }
 
+# Target the client package as soon as a DP role is registered. In a hierarchy,
+# the package is owned by the CAS and cannot start replicating down until this
+# durable SMS_DistributionPoint row exists. Waiting until InstallBoundaryGroups
+# runs serializes that parent hop behind MP installation and MP-replica setup.
+$startClientPackagePrestage = {
+    param([string]$DistributionPointFqdn)
+
+    try {
+        $clientPackage = Get-CMPackage -Fast -Name 'Configuration Manager Client Package' | Select-Object -First 1
+        if (-not $clientPackage) {
+            Write-DscStatus "Client package pre-stage: package not found; the later coverage gate will retry."
+            return
+        }
+        $packageId = "$($clientPackage.PackageID)"
+        $namespace = "root\SMS\site_$SiteCode"
+        $packageState = Get-WmiObject -Namespace $namespace -Class SMS_Package -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $packageState) {
+            Write-DscStatus "Client package pre-stage: could not read SMS_Package state for $packageId; the later coverage gate will retry."
+            return
+        }
+        if ([int]$packageState.StoredPkgVersion -ge 1) {
+            # Local content could hit a newly registered DP before smsdpprov has
+            # finished creating its virtual directories, causing a 30-minute
+            # InstallRetrying backoff. The later coverage gate runs after role setup.
+            Write-DscStatus "Client package pre-stage: $packageId content is already local; deferring DP targeting until role setup finishes."
+            return
+        }
+        $targeting = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $targetFqdn = if ("$($_.ServerNALPath)" -match '\\([^\\"\]]+)') { $Matches[1] } else { '' }
+                    $targetFqdn -ieq $DistributionPointFqdn
+                })
+        if ($targeting.Count -gt 0) {
+            Write-DscStatus "Client package pre-stage: $packageId is already targeted to $DistributionPointFqdn."
+            return
+        }
+        Start-CMContentDistribution -PackageId $packageId -DistributionPointName $DistributionPointFqdn -ErrorAction Stop
+        Write-DscStatus "Client package pre-stage: targeted $packageId to $DistributionPointFqdn immediately after DP registration so parent replication overlaps remaining role setup."
+    }
+    catch {
+        Write-DscStatus "Client package pre-stage on $DistributionPointFqdn failed: $($_.Exception.Message). The later coverage gate will retry." -Warning
+    }
+}
+
 
 $DPs = @()
 $MPs = @()
@@ -212,6 +256,11 @@ if ($allInstalled) {
             }
         }
     }
+    foreach ($DP in @($DPs) + @($PullDPs)) {
+        if ([string]::IsNullOrWhiteSpace($DP.ServerName)) { continue }
+        $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
+        $null = & $startClientPackagePrestage $DPFQDN
+    }
     Write-DscStatus "All DP/MP roles already installed. Skipping InstallDPMPClient."
     $Configuration.InstallDP.Status = 'Completed'
     $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
@@ -253,6 +302,9 @@ foreach ($DP in $DPs) {
     if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
         $dpInstallFailed = $true
     }
+    else {
+        $null = & $startClientPackagePrestage $DPFQDN
+    }
 }
 
 foreach ($MP in $MPs) {
@@ -288,6 +340,9 @@ foreach ($PDP in $PullDPs) {
         if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
             $dpInstallFailed = $true
         }
+        else {
+            $null = & $startClientPackagePrestage $SourceDPFQDN
+        }
     }
 }
 
@@ -308,6 +363,9 @@ foreach ($PDP in $PullDPs) {
     $dpInstallResult = @(Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN -usePKI:$usePKI)
     if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
         $dpInstallFailed = $true
+    }
+    else {
+        $null = & $startClientPackagePrestage $DPFQDN
     }
 }
 
@@ -331,6 +389,9 @@ if ($dpCount -eq 0) {
         $dpInstallResult = @(Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI)
         if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
             $dpInstallFailed = $true
+        }
+        else {
+            $null = & $startClientPackagePrestage ($ThisMachineName + "." + $DomainFullName)
         }
     }
     else {
