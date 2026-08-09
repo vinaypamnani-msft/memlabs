@@ -686,6 +686,27 @@ if ($scenario -eq "Hierarchy") {
     }
 }
 
+# Off the site PSDrive, a CM cmdlet throws a TERMINATING "This command cannot be
+# run from the current drive" that -ErrorAction cannot suppress, so the top-level
+# trap kills the workflow (CT1-CS1SITE, Phase 8: died at the Get-CMSiteRole
+# below). Nothing above leaves us on that drive: every branch ends with
+# Set-Location $LogPath, and the dot-sourced scripts that would connect it
+# (InstallRoles / ConfigureCMProxy) early-return when they have no work to do.
+function Get-PassiveSiteServerRole {
+    param([string]$Fqdn)
+
+    try {
+        # Child scope so a 'return' inside Connect-CMSite.ps1 (drive never came up)
+        # exits the script block instead of returning from ScriptWorkflow itself.
+        # Out-Null: New-PSDrive writes the drive object to the pipeline.
+        & { . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[PassiveCheck]" } | Out-Null
+        Get-CMSiteRole -SiteSystemServerName $Fqdn -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-DscStatus "Passive check: could not query the SMS Site Server role on $Fqdn ($($_.Exception.Message)); treating it as not present." -Warning
+    }
+}
+
 if ($containsPassive) {
     $passiveRan = $false
 
@@ -723,7 +744,7 @@ if ($containsPassive) {
         # != Completed and a re-run retries it.
         $DomainFullName = $deployConfig.vmOptions.domainName
         $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
-        $passiveExists = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+        $passiveExists = Get-PassiveSiteServerRole -Fqdn $passiveFQDN
         if ($passiveExists) {
             $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Completed' -StampEndTime
             Write-DscStatus "Parallel passive: InstallPassiveSiteServer.ps1 completed; passive role present on $($containsPassive.vmName)."
@@ -737,7 +758,7 @@ if ($containsPassive) {
         $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
         $DomainFullName = $deployConfig.vmOptions.domainName
         $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
-        $passiveExists = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+        $passiveExists = Get-PassiveSiteServerRole -Fqdn $passiveFQDN
 
         # The role existing + InstallPassive=Completed is NOT sufficient: CM can
         # report a transient Ready state (so the first install stamped Completed)
@@ -813,7 +834,7 @@ if ($containsPassive) {
     $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
 
     $passiveHealthy = {
-        $role = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+        $role = Get-PassiveSiteServerRole -Fqdn $passiveFQDN
         if (-not $role) { return $false }
         # CM-authoritative failure gate. Role present + SMS_EXECUTIVE Running is
         # NECESSARY but NOT SUFFICIENT: CM can report the passive add "Installation
