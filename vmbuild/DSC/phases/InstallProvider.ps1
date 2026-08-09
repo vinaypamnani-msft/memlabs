@@ -209,6 +209,9 @@ public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lp
 [DllImport("user32.dll", CharSet = CharSet.Auto)]
 public static extern int GetDlgItemText(IntPtr hDlg, int nIDDlgItem, System.Text.StringBuilder lpString, int nMaxCount);
 
+[DllImport("user32.dll")]
+public static extern int GetDlgCtrlID(IntPtr hWnd);
+
 [DllImport("user32.dll", SetLastError = true)]
 public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 '@
@@ -219,10 +222,11 @@ catch {
     Write-DscStatus "[InstallProv] Could not load the window API ($($_.Exception.Message)) -- a setup prompt can be reported but not answered, and would hang the install"
 }
 
+# hwnd -> times we have answered it. A handle that keeps coming back means our click is not
+# landing, which is very different from setup raising a series of different prompts.
+$answeredDialogs = @{}
+
 function Resolve-SetupPrompt {
-    # Answers IGNORE, which is exactly what setup's own non-interactive branch picks for a
-    # primary site (secondary sites get ABORT). Returns a description of what it dismissed;
-    # the dialog body names the component that would not stop, so it is worth logging.
     # Walks the desktop rather than using FindWindowEx: PowerShell marshals a $null class name
     # as an empty string, so FindWindowEx just fails with Win32 123 ERROR_INVALID_NAME.
     param([int] $ProcessId)
@@ -244,14 +248,56 @@ function Resolve-SetupPrompt {
                 $cap = New-Object System.Text.StringBuilder 512
                 [void][MemLabs.SetupPrompt]::GetWindowText($h, $cap, $cap.Capacity)
                 # 0xFFFF is the static control a MessageBox puts its body text in.
-                $body = New-Object System.Text.StringBuilder 2048
+                $body = New-Object System.Text.StringBuilder 4096
                 [void][MemLabs.SetupPrompt]::GetDlgItemText($h, 0xFFFF, $body, $body.Capacity)
-
                 $text = ($body.ToString() -replace '\s+', ' ').Trim()
-                if ($text.Length -gt 300) { $text = $text.Substring(0, 300) + '...' }
 
-                [void][MemLabs.SetupPrompt]::PostMessage($h, 0x0111, [IntPtr]5, [IntPtr]::Zero)   # WM_COMMAND, IDIGNORE
-                $answered.Add("caption='$($cap.ToString().Trim())' text='$text'")
+                # Enumerate the real buttons. A MessageBox button's control ID *is* its IDOK/
+                # IDIGNORE/... constant, so this tells us exactly which answers are legal --
+                # posting IDIGNORE to an OK-only box does nothing and hangs us for the full cap.
+                $buttons = New-Object System.Collections.Generic.List[object]
+                $ccls = New-Object System.Text.StringBuilder 256
+                $child = [MemLabs.SetupPrompt]::GetWindow($h, 5)
+                while ($child -ne [IntPtr]::Zero) {
+                    [void]$ccls.Clear()
+                    [void][MemLabs.SetupPrompt]::GetClassName($child, $ccls, $ccls.Capacity)
+                    if ($ccls.ToString() -eq 'Button') {
+                        $btxt = New-Object System.Text.StringBuilder 128
+                        [void][MemLabs.SetupPrompt]::GetWindowText($child, $btxt, $btxt.Capacity)
+                        $bid = [MemLabs.SetupPrompt]::GetDlgCtrlID($child)
+                        $buttons.Add([pscustomobject]@{ Id = $bid; Text = ($btxt.ToString() -replace '&', '') })
+                    }
+                    $child = [MemLabs.SetupPrompt]::GetWindow($child, 2)
+                }
+
+                # Prefer answers that let setup carry on. IGNORE is what setup's own
+                # non-interactive branch picks for a primary; ABORT/CANCEL/NO would cancel the
+                # install, and RETRY only after setup has already auto-retried once.
+                # A single-button box (MB_OK) has nothing to choose, and its lone button reports
+                # control ID 2 even though it is labelled OK -- so press it rather than trusting the ID.
+                $chosen = $null
+                if ($buttons.Count -eq 1) {
+                    $chosen = $buttons[0]
+                }
+                else {
+                    foreach ($p in @(5, 11, 6, 1, 4)) {
+                        $match = $buttons | Where-Object { $_.Id -eq $p } | Select-Object -First 1
+                        if ($match) { $chosen = $match; break }
+                    }
+                }
+
+                $btnList = (($buttons | ForEach-Object { "$($_.Id)=$($_.Text)" }) -join ',')
+                if ($null -eq $chosen) {
+                    $answered.Add("UNANSWERABLE caption='$($cap.ToString().Trim())' buttons=[$btnList] text='$text'")
+                }
+                else {
+                    $posted = [MemLabs.SetupPrompt]::PostMessage($h, 0x0111, [IntPtr]$chosen.Id, [IntPtr]::Zero)   # WM_COMMAND
+                    $seen = 0
+                    if ($answeredDialogs.ContainsKey($h)) { $seen = $answeredDialogs[$h] }
+                    $answeredDialogs[$h] = $seen + 1
+                    $repeat = if ($seen -gt 0) { " REPEAT x$($seen + 1) -- the click is NOT landing" } else { '' }
+                    $answered.Add("hwnd=$h caption='$($cap.ToString().Trim())' buttons=[$btnList] answered='$($chosen.Text)'(id=$($chosen.Id)) posted=$posted$repeat text='$text'")
+                }
             }
         }
 
