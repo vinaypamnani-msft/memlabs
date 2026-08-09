@@ -8518,15 +8518,41 @@ function Install-Tools {
 
     Write-Log "Install-Tools called. $($VmName) $($ToolName -join ",")"
     $swToolList = [System.Diagnostics.Stopwatch]::StartNew()
+    $toolListPath = 'full SmartUpdate'
+    $staleState = 0
     if ($VmName) {
-        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -in $VmName }
+        # -SmartUpdate refreshes EVERY VM (Get-VM, then Update-VMFromHyperV per VM, then a
+        # disk-cache write) just to select one, and its 3s throttle is per-process so a job
+        # per VM never shares it: 46.6s median on an 18-VM lab vs 2.4s on a 6-VM one. Same
+        # vmms logjam Get-VM2 already dodges for job workers. Take the cached entry and
+        # refresh only this VM's State, the one field acted on below.
+        $allVMs = @(Get-List -Type VM | Where-Object { $_.vmName -in $VmName })
+        $toolListPath = 'cached + per-VM state'
+        if ($allVMs.Count -ne @($VmName).Count) {
+            # Cache miss (e.g. a VM created earlier in this run): pay for the full refresh.
+            $allVMs = @(Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -in $VmName })
+            $toolListPath = 'cache miss -> full SmartUpdate'
+        }
+        foreach ($vmEntry in $allVMs) {
+            $liveVm = Get-VM -Name $vmEntry.vmName -ErrorAction SilentlyContinue
+            if ($liveVm) {
+                $vmEntry | Add-Member -MemberType NoteProperty -Name 'state' -Value ($liveVm.State.ToString()) -Force
+            }
+            else {
+                # Falling back to the cached state is a correctness risk (the caller refuses to
+                # inject unless State is Running), so never let it pass unremarked.
+                $staleState++
+                Write-Log "Install-Tools: could not read live state for $($vmEntry.vmName); using cached state '$($vmEntry.state)'." -Warning
+            }
+        }
     }
     else {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
     }
     $swToolList.Stop()
-    Write-Log ("[StepTiming] {0} ToolInject-GetList completed in {1} seconds ({2} VM(s) matched)" -f `
-        ($VmName -join ','), [Math]::Round($swToolList.Elapsed.TotalSeconds, 1), @($allVMs).Count) -LogOnly
+    Write-Log ("[StepTiming] {0} ToolInject-GetList completed in {1} seconds ({2} VM(s) matched, {3}{4})" -f `
+            ($VmName -join ','), [Math]::Round($swToolList.Elapsed.TotalSeconds, 1), @($allVMs).Count, $toolListPath,
+        $(if ($staleState -gt 0) { ", $staleState stale state" } else { '' })) -LogOnly
 
     $success = $true
 
