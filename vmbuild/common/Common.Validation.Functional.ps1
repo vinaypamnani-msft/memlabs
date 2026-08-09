@@ -9415,21 +9415,57 @@ function Test-CMClientPackageDistribution {
     if (($result.ScriptBlockOutput -is [hashtable]) -and (($result.ScriptBlockOutput.Passed -eq $false) -or ($failing.Count -gt 0))) {
         Write-Log "[Phase $Phase] $VMName [ClientPkg]: distribution failed or a DP is behind -- collecting distmgr/PkgXferMgr logs into the logs folder" -OutputStream
         $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'ClientPkg' -Collector $Phase11SmsSiteLogCollector
+
+        # The summarizer is HIERARCHY-wide, so the failing DP routinely belongs to a
+        # site this run never touched (re-running a subset config still reports it).
+        # Resolving only against $DeployConfig.virtualMachines silently skipped those
+        # DPs, leaving the validating site server's distmgr -- which never mentions
+        # another site's content path -- as the only evidence collected.
+        $domainVms = @()
+        try { $domainVms = @(Get-List -Type VM -DomainName $domain) }
+        catch { Write-Log "[Phase $Phase] $VMName [ClientPkg]: could not enumerate VMs in domain '$domain' to resolve failing DP(s): $($_.Exception.Message)" -Warning -OutputStream }
+        $collectedFrom = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+        [void]$collectedFrom.Add($VMName)
+
         foreach ($dpShort in ($failing | Select-Object -Unique)) {
             $dpVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$dpShort".ToUpper()) } | Select-Object -First 1
-            if (-not $dpVm) { continue }
-            Write-Log "[Phase $Phase] $VMName [ClientPkg]: collecting DP logs from behind/failing DP '$($dpVm.vmName)'" -OutputStream
-            $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11CcmClientLogCollector
-            $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11SmsSiteLogCollector
-            # A Secondary DP that never gets the client package is often wedged in
-            # distmgr on "site exchange certificate is not found / Failed to decrypt
-            # cert PFX data" -- its site DB lost the SiteExchangeCertificate, so it
-            # can't decrypt the DP identity cert and distributes NOTHING. Probe the
-            # Secondary's site DB directly so the ROOT cause is captured, not just
-            # the symptom.
-            if ("$($dpVm.role)" -eq 'Secondary') {
-                Write-Log "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is a Secondary DP -- probing its site DB for the site exchange certificate (distmgr PFX-decrypt wedge)" -OutputStream
-                $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-SecCert' -Collector $Phase11SecondaryCertDiagCollector -TimeoutSeconds 180
+            if (-not $dpVm) { $dpVm = $domainVms | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$dpShort".ToUpper()) } | Select-Object -First 1 }
+            if (-not $dpVm) {
+                Write-Log "[Phase $Phase] $VMName [ClientPkg]: failing DP '$dpShort' matches no VM in domain '$domain' -- no DP-side logs collected, triage it by hand." -Warning -OutputStream
+                continue
+            }
+            if ($collectedFrom.Add($dpVm.vmName)) {
+                Write-Log "[Phase $Phase] $VMName [ClientPkg]: collecting DP logs from behind/failing DP '$($dpVm.vmName)'" -OutputStream
+                $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11CcmClientLogCollector
+                $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11SmsSiteLogCollector
+                # A Secondary DP that never gets the client package is often wedged in
+                # distmgr on "site exchange certificate is not found / Failed to decrypt
+                # cert PFX data" -- its site DB lost the SiteExchangeCertificate, so it
+                # can't decrypt the DP identity cert and distributes NOTHING. Probe the
+                # Secondary's site DB directly so the ROOT cause is captured, not just
+                # the symptom.
+                if ("$($dpVm.role)" -eq 'Secondary') {
+                    Write-Log "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is a Secondary DP -- probing its site DB for the site exchange certificate (distmgr PFX-decrypt wedge)" -OutputStream
+                    $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-SecCert' -Collector $Phase11SecondaryCertDiagCollector -TimeoutSeconds 180
+                }
+            }
+
+            # Content reaches a DP in another site over THAT site's inter-site hop,
+            # which only the sending parent logs ("Created minijob to send compressed
+            # copy ... to site X" / "is NOT an active site, ignore it"). Without this
+            # the pulled logs cannot explain the DP they were pulled for.
+            $ownerCode = if ("$($dpVm.role)" -eq 'Secondary') { "$($dpVm.parentSiteCode)" } else { "$($dpVm.siteCode)" }
+            if ($ownerCode -and $ownerCode -ne $siteCode) {
+                $ownerVm = @(@($DeployConfig.virtualMachines) + @($domainVms) | Where-Object {
+                        $_.vmName -and "$($_.siteCode)" -eq $ownerCode -and "$($_.role)" -in @('CAS', 'Primary', 'Secondary')
+                    }) | Select-Object -First 1
+                if ($ownerVm -and $collectedFrom.Add($ownerVm.vmName)) {
+                    Write-Log "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is fed by site $ownerCode -- collecting the sending side from '$($ownerVm.vmName)'" -OutputStream
+                    $null = Save-Phase11GuestLogs -VMName $ownerVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-Parent' -Collector $Phase11SmsSiteLogCollector
+                }
+                elseif (-not $ownerVm) {
+                    Write-Log "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is fed by site $ownerCode but no site server for that site exists in domain '$domain' -- sending-side logs NOT collected." -Warning -OutputStream
+                }
             }
         }
     }
