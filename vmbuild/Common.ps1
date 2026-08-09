@@ -4350,6 +4350,16 @@ function Invoke-WithDhcpMutex {
 # spent holding the host-wide mutex. Folding it in here halves the mutex traffic
 # per VM and closes the window where a parallel job could take the IP between
 # our remove and our add.
+function ConvertTo-IpSortable {
+    # IPv4 as a comparable UInt32; $null when the text is not a v4 address.
+    param([string] $IPAddress)
+    $parsed = [System.Net.IPAddress]::None
+    if (-not [System.Net.IPAddress]::TryParse($IPAddress, [ref]$parsed)) { return $null }
+    $bytes = $parsed.GetAddressBytes()
+    if ($bytes.Length -ne 4) { return $null }
+    return ([uint32]$bytes[0] -shl 24) -bor ([uint32]$bytes[1] -shl 16) -bor ([uint32]$bytes[2] -shl 8) -bor [uint32]$bytes[3]
+}
+
 function Add-DHCPReservationIsolated {
     param(
         [Parameter(Mandatory = $true)][string] $ScopeId,
@@ -4473,6 +4483,37 @@ function Add-DHCPReservationIsolated {
                 $inner = $inner.InnerException
             }
             Write-Log "${tag}Add-DHCPReservationIsolated: attempt $attempt/$MaxAttempts failed for $IPAddress (Scope=$ScopeId, MAC=$Mac): [$exType] $exMsg$innerStr" -LogOnly
+
+            # An address outside the scope's pool can never be reserved, so retrying is
+            # provably pointless -- prove it once and stop. The DC sits on <network>.1 by
+            # convention (thisParams.DCIPAddress, set statically by Phase2DC) while the pool
+            # is .20-.199, so every re-run of any lab with a DC burned 4 attempts and ~20s
+            # here and then logged a WARN that nothing could ever act on.
+            if ($attempt -eq 1) {
+                $scopeBounds = $null
+                try {
+                    $scopeBounds = Invoke-IsolatedCim -ArgumentList $ScopeId -ScriptBlock {
+                        param($sid)
+                        $s = Get-DhcpServerv4Scope -ScopeId $sid -ErrorAction SilentlyContinue
+                        if ($s) { "$($s.StartRange)|$($s.EndRange)" }
+                    }
+                }
+                catch { }
+                $bounds = @("$scopeBounds" -split '\|')
+                if ($bounds.Count -eq 2) {
+                    $ipVal = ConvertTo-IpSortable $IPAddress
+                    $loVal = ConvertTo-IpSortable $bounds[0]
+                    $hiVal = ConvertTo-IpSortable $bounds[1]
+                    if ($null -ne $ipVal -and $null -ne $loVal -and $null -ne $hiVal -and
+                        ($ipVal -lt $loVal -or $ipVal -gt $hiVal)) {
+                        Write-Log ("${tag}Add-DHCPReservationIsolated: $IPAddress is OUTSIDE scope $ScopeId's pool " +
+                            "($($bounds[0]) - $($bounds[1])), so no reservation is possible and retrying cannot help. " +
+                            "A VM addressed outside the pool is statically configured; skipping the reservation.") -LogOnly
+                        return
+                    }
+                }
+            }
+
             if ($attempt -lt $MaxAttempts) {
                 # 500ms, 1s, 2s
                 Start-Sleep -Milliseconds ([int](500 * [math]::Pow(2, $attempt - 1)))
