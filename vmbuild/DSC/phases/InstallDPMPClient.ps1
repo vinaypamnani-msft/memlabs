@@ -58,28 +58,37 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 # the package is owned by the CAS and cannot start replicating down until this
 # durable SMS_DistributionPoint row exists. Waiting until InstallBoundaryGroups
 # runs serializes that parent hop behind MP installation and MP-replica setup.
+$getSiteSqlDataSource = {
+    param($SiteVm)
+
+    $sqlVmName = if ($SiteVm.remoteSQLVM) { "$($SiteVm.remoteSQLVM)" } else { "$($SiteVm.vmName)" }
+    $sqlVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlVmName } | Select-Object -First 1
+    $sqlServer = $sqlVmName
+    $sqlInstance = if ($sqlVm) { "$($sqlVm.sqlInstanceName)" } else { '' }
+    $sqlPort = $null
+    if ($sqlVm -and $sqlVm.AlwaysOnListenerName) {
+        $sqlServer = "$($sqlVm.AlwaysOnListenerName)"
+        if ($sqlVm.thisParams -and $sqlVm.thisParams.SQLAO -and $sqlVm.thisParams.SQLAO.SQLAOPort) {
+            $sqlPort = $sqlVm.thisParams.SQLAO.SQLAOPort
+        }
+    }
+    $sqlServerFqdn = if ($sqlServer -like '*.*') { $sqlServer } else { "$sqlServer.$DomainFullName" }
+    if ($sqlPort) { return "$sqlServerFqdn,$sqlPort" }
+    if ($sqlInstance -and $sqlInstance.ToUpper() -ne 'MSSQLSERVER') { return "$sqlServerFqdn\$sqlInstance" }
+    return $sqlServerFqdn
+}
+
 $flushClientPackageTargetingToParent = {
     param([string]$PackageId)
 
     # PkgServers_G belongs to the global "Configuration Data" replication group.
     # Ask the same stored procedure used by the native DRS message builder to send
     # that group now; otherwise this targeting row can sit at the Primary for ~32m.
-    if (-not $ThisVM -or $ThisVM.role -ne 'Primary' -or (-not $ThisVM.parentSiteCode -and -not $ThisVM.thisParams.ParentSiteServer)) { return }
+    if (-not $ThisVM -or $ThisVM.role -ne 'Primary' -or (-not $ThisVM.parentSiteCode -and -not $ThisVM.thisParams.ParentSiteServer)) { return $true }
     $connection = $null
+    $succeeded = $false
     try {
-        $sqlVmName = if ($ThisVM.remoteSQLVM) { "$($ThisVM.remoteSQLVM)" } else { "$($ThisVM.vmName)" }
-        $sqlVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlVmName } | Select-Object -First 1
-        $sqlServer = $sqlVmName
-        $sqlInstance = if ($sqlVm) { "$($sqlVm.sqlInstanceName)" } else { '' }
-        $sqlPort = $null
-        if ($sqlVm -and $sqlVm.AlwaysOnListenerName) {
-            $sqlServer = "$($sqlVm.AlwaysOnListenerName)"
-            if ($sqlVm.thisParams -and $sqlVm.thisParams.SQLAO -and $sqlVm.thisParams.SQLAO.SQLAOPort) {
-                $sqlPort = $sqlVm.thisParams.SQLAO.SQLAOPort
-            }
-        }
-        $sqlServerFqdn = if ($sqlServer -like '*.*') { $sqlServer } else { "$sqlServer.$DomainFullName" }
-        $dataSource = if ($sqlPort) { "$sqlServerFqdn,$sqlPort" } elseif ($sqlInstance -and $sqlInstance.ToUpper() -ne 'MSSQLSERVER') { "$sqlServerFqdn\$sqlInstance" } else { $sqlServerFqdn }
+        $dataSource = & $getSiteSqlDataSource $ThisVM
         $database = "CM_$SiteCode"
         $connectionString = "Data Source=$dataSource;Initial Catalog=$database;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
         $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
@@ -89,6 +98,7 @@ $flushClientPackageTargetingToParent = {
         $command.CommandTimeout = 120
         [void]$command.Parameters.AddWithValue('@rg', 'Configuration Data')
         [void]$command.ExecuteNonQuery()
+        $succeeded = $true
         Write-DscStatus "Client package pre-stage: requested immediate DRS Configuration Data send for $PackageId after DP targeting (SQL=$dataSource/$database)."
     }
     catch {
@@ -97,6 +107,69 @@ $flushClientPackageTargetingToParent = {
     finally {
         if ($connection) { $connection.Dispose() }
     }
+    return $succeeded
+}
+
+$verifyClientPackageTargetAtParent = {
+    param([string]$PackageId, [string]$DistributionPointFqdn, [datetime]$NotBeforeUtc, [int]$TimeoutSeconds = 120)
+
+    $result = [pscustomobject]@{ Verified = $false; Error = $null; DataSource = $null; Database = $null; Rows = 0; LastRefresh = $null }
+    if (-not $ThisVM -or $ThisVM.role -ne 'Primary' -or -not $ThisVM.parentSiteCode) {
+        $result.Verified = $true
+        return $result
+    }
+
+    $parentSiteCode = "$($ThisVM.parentSiteCode)"
+    $parentVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'CAS' -and $_.siteCode -eq $parentSiteCode } | Select-Object -First 1
+    if (-not $parentVm) {
+        $result.Error = "parent CAS VM for site $parentSiteCode was not found in deployConfig"
+        return $result
+    }
+
+    $connection = $null
+    try {
+        $result.DataSource = & $getSiteSqlDataSource $parentVm
+        $result.Database = "CM_$parentSiteCode"
+        $connectionString = "Data Source=$($result.DataSource);Initial Catalog=$($result.Database);Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+        $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
+        $connection.Open()
+        $pollSeconds = 10
+        $polls = [Math]::Max(1, [int][Math]::Ceiling($TimeoutSeconds / $pollSeconds))
+        $needle = "\\$DistributionPointFqdn\"
+        for ($poll = 1; $poll -le $polls; $poll++) {
+            $command = $connection.CreateCommand()
+            # PkgServers_G (PkgID/NALPath/SiteCode/LastRefresh) is source-verified ConfigMgr schema.
+            $command.CommandText = 'SELECT NALPath, LastRefresh FROM dbo.PkgServers_G WHERE PkgID = @pkg AND SiteCode = @site'
+            $command.CommandTimeout = 30
+            [void]$command.Parameters.AddWithValue('@pkg', $PackageId)
+            [void]$command.Parameters.AddWithValue('@site', $SiteCode)
+            $reader = $command.ExecuteReader()
+            $rowCount = 0
+            $found = $false
+            try {
+                while ($reader.Read()) {
+                    $rowCount++
+                    $nalPath = "$($reader['NALPath'])"
+                    if ($nalPath.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        $lastRefresh = $null
+                        if ($reader['LastRefresh'] -isnot [System.DBNull]) { $lastRefresh = [datetime]$reader['LastRefresh'] }
+                        $result.LastRefresh = $lastRefresh
+                        if ($lastRefresh -and $lastRefresh -ge $NotBeforeUtc) { $found = $true }
+                    }
+                }
+            }
+            finally { $reader.Close() }
+            $result.Rows = $rowCount
+            if ($found) {
+                $result.Verified = $true
+                return $result
+            }
+            if ($poll -lt $polls) { Start-Sleep -Seconds $pollSeconds }
+        }
+    }
+    catch { $result.Error = $_.Exception.Message }
+    finally { if ($connection) { $connection.Dispose() } }
+    return $result
 }
 
 $startClientPackagePrestage = {
@@ -106,22 +179,23 @@ $startClientPackagePrestage = {
         $clientPackage = Get-CMPackage -Fast -Name 'Configuration Manager Client Package' | Select-Object -First 1
         if (-not $clientPackage) {
             Write-DscStatus "Client package pre-stage: package not found; the later coverage gate will retry."
-            return
+            return $true
         }
         $packageId = "$($clientPackage.PackageID)"
         $namespace = "root\SMS\site_$SiteCode"
         $packageState = Get-WmiObject -Namespace $namespace -Class SMS_Package -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $packageState) {
             Write-DscStatus "Client package pre-stage: could not read SMS_Package state for $packageId; the later coverage gate will retry."
-            return
+            return $true
         }
         if ([int]$packageState.StoredPkgVersion -ge 1) {
             # Local content could hit a newly registered DP before smsdpprov has
             # finished creating its virtual directories, causing a 30-minute
             # InstallRetrying backoff. The later coverage gate runs after role setup.
             Write-DscStatus "Client package pre-stage: $packageId content is already local; deferring DP targeting until role setup finishes."
-            return
+            return $true
         }
+        if (-not $ThisVM.parentSiteCode) { return $true }
         $targeting = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
                 Where-Object {
                     $targetFqdn = if ("$($_.ServerNALPath)" -match '\\([^\\"\]]+)') { $Matches[1] } else { '' }
@@ -133,20 +207,70 @@ $startClientPackagePrestage = {
             # update, then flush that group. Without this, the sproc runs successfully
             # but has no actionable delta; CAS wakes, sees no changed DP, and sends
             # nothing until HMAN refreshes the row much later.
-            foreach ($target in $targeting) {
-                $target.RefreshNow = $true
-                [void]$target.Put()
-            }
-            Write-DscStatus "Client package pre-stage: $packageId is already targeted to $DistributionPointFqdn; re-armed RefreshNow to create a fresh parent-visible targeting change."
-            & $flushClientPackageTargetingToParent $packageId
-            return
+            Write-DscStatus "Client package pre-stage: $packageId is already targeted to $DistributionPointFqdn."
         }
-        Start-CMContentDistribution -PackageId $packageId -DistributionPointName $DistributionPointFqdn -ErrorAction Stop
-        Write-DscStatus "Client package pre-stage: targeted $packageId to $DistributionPointFqdn immediately after DP registration so parent replication overlaps remaining role setup."
-        & $flushClientPackageTargetingToParent $packageId
+        else {
+            Start-CMContentDistribution -PackageId $packageId -DistributionPointName $DistributionPointFqdn -ErrorAction Stop
+            $targeting = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $targetFqdn = if ("$($_.ServerNALPath)" -match '\\([^\\"\]]+)') { $Matches[1] } else { '' }
+                        $targetFqdn -ieq $DistributionPointFqdn
+                    })
+            if ($targeting.Count -eq 0) { throw "Start-CMContentDistribution returned but no targeting row exists for $DistributionPointFqdn" }
+            Write-DscStatus "Client package pre-stage: targeted $packageId to $DistributionPointFqdn immediately after DP registration so parent replication overlaps remaining role setup."
+        }
+
+        $targetChangeUtc = [datetime]::UtcNow.AddSeconds(-15)
+        foreach ($target in $targeting) {
+            $target.RefreshNow = $true
+            [void]$target.Put()
+        }
+        Write-DscStatus "Client package pre-stage: re-armed $packageId on $DistributionPointFqdn to create a fresh parent-visible targeting change."
+        $lastVerification = $null
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            if ($attempt -gt 1) {
+                $retryTargeting = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
+                        Where-Object {
+                            $targetFqdn = if ("$($_.ServerNALPath)" -match '\\([^\\"\]]+)') { $Matches[1] } else { '' }
+                            $targetFqdn -ieq $DistributionPointFqdn
+                        })
+                if ($retryTargeting.Count -eq 0) {
+                    Start-CMContentDistribution -PackageId $packageId -DistributionPointName $DistributionPointFqdn -ErrorAction Stop
+                    $retryTargeting = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
+                            Where-Object {
+                                $targetFqdn = if ("$($_.ServerNALPath)" -match '\\([^\\"\]]+)') { $Matches[1] } else { '' }
+                                $targetFqdn -ieq $DistributionPointFqdn
+                            })
+                    if ($retryTargeting.Count -eq 0) { throw "retry distribution returned but no targeting row exists for $DistributionPointFqdn" }
+                }
+                $targetChangeUtc = [datetime]::UtcNow.AddSeconds(-15)
+                foreach ($target in $retryTargeting) {
+                    $target.RefreshNow = $true
+                    [void]$target.Put()
+                }
+                Write-DscStatus "Client package pre-stage: parent still did not see $packageId targeting for $DistributionPointFqdn; re-armed and retrying DRS once."
+            }
+
+            $flushResult = @(& $flushClientPackageTargetingToParent $packageId)
+            $flushSucceeded = ($flushResult.Count -gt 0 -and [bool]$flushResult[-1])
+            $lastVerification = & $verifyClientPackageTargetAtParent $packageId $DistributionPointFqdn $targetChangeUtc 120
+            if ($lastVerification -and $lastVerification.Verified) {
+                Write-DscStatus "Client package pre-stage: verified parent site $($ThisVM.parentSiteCode) sees the fresh $packageId targeting change for $DistributionPointFqdn (LastRefresh=$($lastVerification.LastRefresh), SQL=$($lastVerification.DataSource)/$($lastVerification.Database), attempt $attempt/2)."
+                return $true
+            }
+            if ($attempt -lt 2) {
+                $verifyDetail = if ($lastVerification -and $lastVerification.Error) { $lastVerification.Error } else { "fresh target absent; observed LastRefresh=$($lastVerification.LastRefresh); matching-site rows=$($lastVerification.Rows)" }
+                Write-DscStatus "Client package pre-stage: DRS attempt $attempt/2 not verified at parent (flushSucceeded=$flushSucceeded; $verifyDetail)." -Warning
+            }
+        }
+
+        $finalDetail = if ($lastVerification -and $lastVerification.Error) { $lastVerification.Error } else { "fresh target absent; observed LastRefresh=$($lastVerification.LastRefresh); matching-site rows=$($lastVerification.Rows)" }
+        Write-DscStatus "Client package pre-stage: parent site $($ThisVM.parentSiteCode) still cannot see $packageId targeting for $DistributionPointFqdn after 2 DRS attempts ($finalDetail). Stopping before the blind client-package wait; re-run Phase 8 after correcting DRS/SQL access." -Failure
+        return $false
     }
     catch {
-        Write-DscStatus "Client package pre-stage on $DistributionPointFqdn failed: $($_.Exception.Message). The later coverage gate will retry." -Warning
+        Write-DscStatus "Client package pre-stage on $DistributionPointFqdn failed: $($_.Exception.Message). Stopping before the blind client-package wait; re-run Phase 8 after correcting the targeting path." -Failure
+        return $false
     }
 }
 
@@ -236,6 +360,7 @@ foreach ($DP in $DPs) {
         break
     }
 }
+$dpInstallFailed = $false
 if ($allInstalled) {
     foreach ($PDP in $PullDPs) {
         if ([string]::IsNullOrWhiteSpace($PDP.ServerName)) { continue }
@@ -311,7 +436,14 @@ if ($allInstalled) {
     foreach ($DP in @($DPs) + @($PullDPs)) {
         if ([string]::IsNullOrWhiteSpace($DP.ServerName)) { continue }
         $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
-        $null = & $startClientPackagePrestage $DPFQDN
+        $prestageResult = @(& $startClientPackagePrestage $DPFQDN)
+        if ($prestageResult.Count -eq 0 -or -not [bool]$prestageResult[-1]) { $dpInstallFailed = $true; break }
+    }
+    if ($dpInstallFailed) {
+        $Configuration.InstallDP.Status = 'NotStart'
+        $Configuration.InstallDP.EndTime = ''
+        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        return
     }
     Write-DscStatus "All DP/MP roles already installed. Skipping InstallDPMPClient."
     $Configuration.InstallDP.Status = 'Completed'
@@ -325,7 +457,6 @@ if ($allInstalled) {
 Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
 Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
 Write-DscStatus "Pull DP role to be installed on '$($PullDPNames -join ',')'"
-$dpInstallFailed = $false
 
 # Register bare site systems (no DP/MP/SUP/RP) in the console so roles can
 # be added manually after deployment (e.g. Reporting Services Point).
@@ -355,7 +486,8 @@ foreach ($DP in $DPs) {
         $dpInstallFailed = $true
     }
     else {
-        $null = & $startClientPackagePrestage $DPFQDN
+        $prestageResult = @(& $startClientPackagePrestage $DPFQDN)
+        if ($prestageResult.Count -eq 0 -or -not [bool]$prestageResult[-1]) { $dpInstallFailed = $true }
     }
 }
 
@@ -393,7 +525,8 @@ foreach ($PDP in $PullDPs) {
             $dpInstallFailed = $true
         }
         else {
-            $null = & $startClientPackagePrestage $SourceDPFQDN
+            $prestageResult = @(& $startClientPackagePrestage $SourceDPFQDN)
+            if ($prestageResult.Count -eq 0 -or -not [bool]$prestageResult[-1]) { $dpInstallFailed = $true }
         }
     }
 }
@@ -417,7 +550,8 @@ foreach ($PDP in $PullDPs) {
         $dpInstallFailed = $true
     }
     else {
-        $null = & $startClientPackagePrestage $DPFQDN
+        $prestageResult = @(& $startClientPackagePrestage $DPFQDN)
+        if ($prestageResult.Count -eq 0 -or -not [bool]$prestageResult[-1]) { $dpInstallFailed = $true }
     }
 }
 
@@ -443,7 +577,8 @@ if ($dpCount -eq 0) {
             $dpInstallFailed = $true
         }
         else {
-            $null = & $startClientPackagePrestage ($ThisMachineName + "." + $DomainFullName)
+            $prestageResult = @(& $startClientPackagePrestage ($ThisMachineName + "." + $DomainFullName))
+            if ($prestageResult.Count -eq 0 -or -not [bool]$prestageResult[-1]) { $dpInstallFailed = $true }
         }
     }
     else {
@@ -462,7 +597,7 @@ if ($mpCount -eq 0) {
 }
 
 if ($dpInstallFailed) {
-    Write-DscStatus "One or more Distribution Point roles failed to register. Leaving InstallDP incomplete so Phase 8 retries before boundary-group and client-package validation." -Failure
+    Write-DscStatus "One or more Distribution Point roles or client-package targeting checks failed. Leaving InstallDP incomplete so Phase 8 retries before boundary-group and client-package validation." -Failure
     $Configuration.InstallDP.Status = 'NotStart'
     $Configuration.InstallDP.EndTime = ''
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
