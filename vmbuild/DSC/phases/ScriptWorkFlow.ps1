@@ -1395,10 +1395,10 @@ if ($CurrentRole -eq "Primary") {
 # dependencies were ready (SMS_DATABASE_NOTIFICATION_MONITOR,
 # SMS_DISCOVERY_DATA_MANAGER, etc.). Once the site is fully wired these
 # components are healthy but their status counters still show the startup
-# noise, which Phase 11 validation flags as WARN. This is equivalent to
-# right-clicking each component in the console and choosing "Reset Counts".
+# noise, which Phase 11 validation flags as WARN. This is the same request the
+# console's "Reset Counts" action and Clear-CMComponentStatusMessageCount send.
 # Run it once per site: repeating it on every Phase 8 pass would erase real
-# post-install evidence. The flag is written only when every needed reset works.
+# post-install evidence.
 if ($CurrentRole -in @("Primary", "CAS", "Secondary")) {
     try {
         $svrSiteCode = $ThisVM.siteCode
@@ -1408,31 +1408,40 @@ if ($CurrentRole -in @("Primary", "CAS", "Secondary")) {
                 Write-DscStatus "SMS component startup counts were already reset for site $svrSiteCode -- skipping"
             }
             else {
-                Write-DscStatus "Resetting SMS component startup status counts for site $svrSiteCode"
                 $ns = "root\sms\site_$svrSiteCode"
                 $sums = @(Get-WmiObject -Namespace $ns -Class SMS_ComponentSummarizer -ErrorAction Stop)
                 $sumsToReset = @($sums | Where-Object { [int]$_.Errors -gt 0 -or [int]$_.Warnings -gt 0 -or [int]$_.Infos -gt 0 })
-                $resetCount = 0
-                $resetFailed = 0
-                foreach ($s in $sumsToReset) {
-                    try {
-                        # SMS_ComponentSummarizer exposes DeleteStatistics();
-                        # ResetCounts() is not a method on this WMI class.
-                        $resetResult = $s.DeleteStatistics()
-                        $returnValueProperty = if ($null -ne $resetResult) { $resetResult.PSObject.Properties['ReturnValue'] } else { $null }
-                        $returnValue = if ($returnValueProperty) { [int]$returnValueProperty.Value } elseif ($resetResult -is [int]) { [int]$resetResult } else { 0 }
-                        if ($returnValue -eq 0) { $resetCount++ }
-                        else { $resetFailed++; Write-DscStatus "  DeleteStatistics failed for $($s.ComponentName) on $($s.MachineName): return $returnValue" -Warning }
-                    }
-                    catch {
-                        $resetFailed++
-                        Write-DscStatus "  DeleteStatistics threw for $($s.ComponentName) on $($s.MachineName): $($_.Exception.Message)" -Warning
-                    }
-                }
-                if ($resetFailed -eq 0) {
+                if ($sumsToReset.Count -eq 0) {
+                    Write-DscStatus "No SMS component startup counts to reset for site $svrSiteCode"
                     Set-Content -LiteralPath $componentResetFlag -Value (Get-Date -Format o) -Encoding ASCII -Force
                 }
-                Write-DscStatus "Reset component counts on $resetCount of $($sumsToReset.Count) non-empty summarizer entries; failures=$resetFailed"
+                else {
+                    Write-DscStatus "Requesting SMS component status count reset for site $svrSiteCode ($($sumsToReset.Count) summarizer rows carry startup noise)"
+                    # SMS_COMPONENT_STATUS_SUMMARIZER owns these counters and only honors a
+                    # "Reset SMS_COMPONENT_STATUS_SUMMARIZER:<epochSeconds>" property list in the
+                    # proposed site control file. Values[0..3] identify the requester (status
+                    # message text only); Values[4..] are the targets, where C/M/T accept "*".
+                    # SMS_ComponentSummarizer.DeleteStatistics() is NOT this: it is declared
+                    # static (so it is absent from Get-WmiObject instances) and its provider
+                    # body only stamps Summarizer_Components.Replicate = -1.
+                    $resetEpoch = [int64]([datetime]::UtcNow - [datetime]::new(1970, 1, 1, 0, 0, 0, [System.DateTimeKind]::Utc)).TotalSeconds
+                    $propList = ([wmiclass]("\\.\{0}:SMS_SCI_PropertyList" -f $ns)).CreateInstance()
+                    $propList.PropertyListName = "Reset SMS_COMPONENT_STATUS_SUMMARIZER:$resetEpoch"
+                    $propList.SiteCode = $svrSiteCode
+                    $propList.FileType = 2   # proposed site control file
+                    $propList.Values = [string[]]@(
+                        $svrSiteCode
+                        $env:COMPUTERNAME
+                        "$env:USERDOMAIN\$env:USERNAME"
+                        'MemLabs Phase 8'
+                        'C=*,M=*,T=*,I=0,W=0,E=0'
+                    )
+                    $putPath = $propList.Put()
+                    Set-Content -LiteralPath $componentResetFlag -Value (Get-Date -Format o) -Encoding ASCII -Force
+                    # Applied on the summarizer's next cycle, not by this call. If it never
+                    # lands, Phase 11 validation still reports the counts it was meant to clear.
+                    Write-DscStatus "Queued component count reset for site $svrSiteCode in the proposed site control file ($($putPath.RelativePath)); the summarizer applies it on its next cycle"
+                }
             }
         }
     }
