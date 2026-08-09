@@ -5,6 +5,12 @@ param(
     [bool]$firstRun
 )
 
+$flagFile = "C:\staging\DSC\EnableEHTTPorHTTPS.flag"
+if (Test-Path -LiteralPath $flagFile) {
+    Write-DscStatus "EHTTP already enabled. Flag file exists. Skipping execution."
+    return
+}
+
 # Read config json
 $deployConfig = Get-Content $configFilePath | ConvertFrom-Json
 
@@ -90,9 +96,8 @@ Set-Location "$($siteCode):\" @initParams
 
 $prop = Get-CMSiteComponent -SiteCode $siteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
 
-$flagFile = "C:\staging\DSC\EnableEHTTPorHTTPS.flag"
-
-# Check if the flag file exists
+# Re-check after provider initialization in case another workflow invocation
+# completed EHTTP while this one was connecting.
 if (Test-Path $flagFile) {
     Write-DscStatus "EHTTP already enabled. Flag file exists. Skipping execution."
 }

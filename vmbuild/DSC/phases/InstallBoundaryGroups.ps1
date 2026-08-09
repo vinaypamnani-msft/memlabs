@@ -101,6 +101,26 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
     return $false
 }
 
+$boundaryNamespace = "root\SMS\site_$SiteCode"
+$getMissingBoundaryGroupSiteSystems = {
+    param($BoundaryGroup, [string[]]$DesiredSiteSystems)
+
+    if (-not $BoundaryGroup -or -not $DesiredSiteSystems -or $DesiredSiteSystems.Count -eq 0) { return @() }
+    try {
+        $currentSiteSystems = @{}
+        foreach ($siteSystemLink in @(Get-WmiObject -Namespace $boundaryNamespace -Class SMS_BoundaryGroupSiteSystems -Filter "GroupID='$($BoundaryGroup.GroupID)'" -ErrorAction Stop)) {
+            if ("$($siteSystemLink.ServerNALPath)" -match '\\([^\\"\]]+)') {
+                $currentSiteSystems[$Matches[1].ToUpper()] = $true
+            }
+        }
+        return @($DesiredSiteSystems | Where-Object { -not $currentSiteSystems.ContainsKey("$_".ToUpper()) })
+    }
+    catch {
+        Write-DscStatus "Could not read current site-system membership for Boundary Group '$($BoundaryGroup.Name)'; falling back to idempotent adds: $($_.Exception.Message)" -Warning
+        return @($DesiredSiteSystems)
+    }
+}
+
 # Ensure the client package is Installed (State 0) on EVERY DP that serves a client
 # boundary group -- not just "at least one". A client whose boundary group's only DP
 # is still validating/pending/failed (e.g. a Secondary DP stuck at ContentValidating)
@@ -545,8 +565,13 @@ $ensureClientPkgCoverage = {
         }
     }
 
-    Invoke-CMSystemDiscovery
-    Invoke-CMDeviceCollectionUpdate -Name "All Systems"
+    if ($pushClients) {
+        Invoke-CMSystemDiscovery
+        Invoke-CMDeviceCollectionUpdate -Name "All Systems"
+    }
+    else {
+        Write-DscStatus "Client pkg coverage: skipping post-coverage discovery refresh because there are no client-push targets."
+    }
 }
 
 # Ensure every CHILD (secondary) boundary group also lists the parent primary's
@@ -560,10 +585,17 @@ $ensureChildBgFallbackDps = {
         $parentDps = @((Get-CMDistributionPoint -SiteCode $SiteCode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", "" | Where-Object { $_ -and $_.Trim() })
         if ($parentDps.Count -eq 0) { return }
         foreach ($childSite in ($bgs.SiteCode | Select-Object -Unique | Where-Object { $_ -and $_ -ne $SiteCode })) {
-            if (-not (Get-CMBoundaryGroup -Name $childSite -ErrorAction SilentlyContinue)) { continue }
+            $childBoundaryGroup = Get-CMBoundaryGroup -Name $childSite -ErrorAction SilentlyContinue
+            if (-not $childBoundaryGroup) { continue }
             try {
-                Set-CMBoundaryGroup -Name $childSite -AddSiteSystemServerName $parentDps -ErrorAction Stop
-                Write-DscStatus "Ensured parent DP(s) $($parentDps -join ',') are fallback content sources in child Boundary Group '$childSite'"
+                $missingParentDps = @(& $getMissingBoundaryGroupSiteSystems $childBoundaryGroup $parentDps)
+                if ($missingParentDps.Count -gt 0) {
+                    Set-CMBoundaryGroup -Name $childSite -AddSiteSystemServerName $missingParentDps -ErrorAction Stop
+                    Write-DscStatus "Added parent DP fallback(s) $($missingParentDps -join ',') to child Boundary Group '$childSite'"
+                }
+                else {
+                    Write-DscStatus "Child Boundary Group '$childSite' already contains all parent DP fallback(s) -- skipping provider write"
+                }
             }
             catch { Write-DscStatus "Could not add parent DP(s) to child BG '$childSite': $($_.Exception.Message)" }
         }
@@ -594,14 +626,25 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
 }
 if ($allBGsExist) {
     foreach ($bg in $bgs) {
-        $boundary = Get-CMBoundary -BoundaryName $bg.Subnet -ErrorAction SilentlyContinue
+        $IPBits = [int[]]$bg.Subnet.Split('.')
+        $MaskBits = [int[]]'255.255.255.0'.Split('.')
+        $NetworkIDBits = 0..3 | ForEach-Object { $IPBits[$_] -band $MaskBits[$_] }
+        $BroadcastBits = 0..3 | ForEach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+        $NetworkID = $NetworkIDBits -join '.'
+        $NetworkIDBits[3] = 1
+        $BroadcastBits[3] = 254
+        $rangeValue = "$(($NetworkIDBits -join '.'))-$(($BroadcastBits -join '.'))"
+        $boundaryName = "$DomainFullName/$($bg.SiteCode)/$NetworkID/24"
+        $boundary = Get-CMBoundary -BoundaryName $boundaryName -ErrorAction SilentlyContinue
+        if (-not $boundary) { $boundary = Get-CMBoundary -BoundaryName $bg.Subnet -ErrorAction SilentlyContinue }
+        if (-not $boundary) { $boundary = Get-CMBoundary | Where-Object { $_.BoundaryType -eq 3 -and $_.Value -eq $rangeValue } }
         if (-not $boundary) {
             $allBGsExist = $false
             break
         }
         # Verify boundary is actually in its group
-        $memberOf = Get-CMBoundary -BoundaryGroupName $bg.SiteCode -ErrorAction SilentlyContinue
-        if (-not ($memberOf | Where-Object { $_.DisplayName -eq $bg.Subnet })) {
+        $memberOf = @(Get-CMBoundary -BoundaryGroupName $bg.SiteCode -ErrorAction SilentlyContinue)
+        if (-not ($memberOf | Where-Object { $_.BoundaryID -eq $boundary.BoundaryID -or $_.DisplayName -eq $boundary.DisplayName })) {
             $allBGsExist = $false
             break
         }
@@ -618,6 +661,8 @@ if ($allBGsExist) {
         # the BG and the client-package coverage gate could neither see nor target
         # it. Add every currently registered site system before checking content.
         foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
+            $boundaryGroup = Get-CMBoundaryGroup -Name $bgsitecode -ErrorAction SilentlyContinue
+            if (-not $boundaryGroup) { continue }
             $sitesystems = @()
             $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
             $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
@@ -625,8 +670,14 @@ if ($allBGsExist) {
             $sitesystems = @($sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
             if ($sitesystems.Count -eq 0) { continue }
             try {
-                Set-CMBoundaryGroup -Name $bgsitecode -AddSiteSystemServerName $sitesystems -ErrorAction Stop
-                Write-DscStatus "Reconciled Boundary Group '$bgsitecode' with registered Site Systems $($sitesystems -join ',')"
+                $missingSiteSystems = @(& $getMissingBoundaryGroupSiteSystems $boundaryGroup $sitesystems)
+                if ($missingSiteSystems.Count -gt 0) {
+                    Set-CMBoundaryGroup -Name $bgsitecode -AddSiteSystemServerName $missingSiteSystems -ErrorAction Stop
+                    Write-DscStatus "Added missing Site Systems to Boundary Group '$bgsitecode': $($missingSiteSystems -join ',')"
+                }
+                else {
+                    Write-DscStatus "Boundary Group '$bgsitecode' already contains all registered Site Systems -- skipping provider write"
+                }
             }
             catch {
                 Write-DscStatus "Could not reconcile Site Systems in Boundary Group '$bgsitecode': $($_.Exception.Message)" -Warning
@@ -696,13 +747,21 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
     # child BG's default site is the running primary. For the primary's own BG
     # this is identical ($SiteCode -eq $bgsitecode).
     $bgDefaultSite = $SiteCode
+    $boundaryGroupChanged = $false
 
     try {
         $exists = Get-CMBoundaryGroup -Name $bgsitecode -ErrorAction SilentlyContinue
         if ($exists) {
             if ($sitesystems) {
-                Write-DscStatus "Updating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
-                Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $sitesystems -ErrorAction Stop
+                $missingSiteSystems = @(& $getMissingBoundaryGroupSiteSystems $exists $sitesystems)
+                if ($missingSiteSystems.Count -gt 0) {
+                    Write-DscStatus "Adding missing Site Systems to Boundary Group '$bgsitecode': $($missingSiteSystems -join ',')"
+                    Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $missingSiteSystems -ErrorAction Stop
+                    $boundaryGroupChanged = $true
+                }
+                else {
+                    Write-DscStatus "Boundary Group '$bgsitecode' already contains all registered Site Systems -- skipping provider write"
+                }
             }
             else {
                 Write-DscStatus "Boundary Group '$bgsitecode' already exists; no site systems registered yet to add (site '$bgsitecode' still installing)"
@@ -712,6 +771,7 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
             if ($sitesystems) {
                 Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
                 New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgDefaultSite -AddSiteSystemServerName $sitesystems -ErrorAction Stop
+                $boundaryGroupChanged = $true
             }
             else {
                 # Site row exists but no site systems registered yet (secondary
@@ -719,13 +779,14 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
                 # the DP is added when it comes online (later pass / re-run).
                 Write-DscStatus "Creating Boundary Group '$bgsitecode' (site '$bgsitecode' still installing - no site systems yet; DP added on a later pass) in sitecode $SiteCode"
                 New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgDefaultSite -ErrorAction Stop
+                $boundaryGroupChanged = $true
             }
         }
     }
     catch {
         Write-DscStatus "Failed to create Boundary Group '$bgsitecode' in sitecode $SiteCode. Error: $_"
     }
-    Start-Sleep -Seconds 5
+    if ($boundaryGroupChanged) { Start-Sleep -Seconds 5 }
 }
 
 # Create Boundaries for each subnet and add to BG
@@ -759,21 +820,31 @@ foreach ($bg in $bgs) {
     if (-not $exists) {
         $exists = Get-CMBoundary | Where-Object { $_.BoundaryType -eq 3 -and $_.Value -eq $rangeValue }
     }
+    $boundaryChanged = $false
     if ($exists) {
-        try {
-            Write-DscStatus "Adding Boundary '$($exists.DisplayName)' ($rangeValue) to Boundary Group $($bg.SiteCode)"
-            Add-CMBoundaryToGroup -BoundaryName $exists.DisplayName -BoundaryGroupName $bg.SiteCode
+        $boundaryGroupMembers = @(Get-CMBoundary -BoundaryGroupName $bg.SiteCode -ErrorAction SilentlyContinue)
+        $alreadyMember = @($boundaryGroupMembers | Where-Object { $_.BoundaryID -eq $exists.BoundaryID -or $_.DisplayName -eq $exists.DisplayName }).Count -gt 0
+        if ($alreadyMember) {
+            Write-DscStatus "Boundary '$($exists.DisplayName)' is already in Boundary Group $($bg.SiteCode) -- skipping provider write"
         }
-        catch {
-            Write-DscStatus "Failed to add boundary '$($exists.DisplayName)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+        else {
+            try {
+                Write-DscStatus "Adding Boundary '$($exists.DisplayName)' ($rangeValue) to Boundary Group $($bg.SiteCode)"
+                Add-CMBoundaryToGroup -BoundaryName $exists.DisplayName -BoundaryGroupName $bg.SiteCode -ErrorAction Stop
+                $boundaryChanged = $true
+            }
+            catch {
+                Write-DscStatus "Failed to add boundary '$($exists.DisplayName)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+            }
         }
     }
     else {
         try {
             Write-DscStatus "Creating Boundary '$boundaryName' with range $rangeValue"
-            New-CMBoundary -Type IPRange -Name $boundaryName -Value $rangeValue
+            New-CMBoundary -Type IPRange -Name $boundaryName -Value $rangeValue -ErrorAction Stop
+            $boundaryChanged = $true
             try {
-                Add-CMBoundaryToGroup -BoundaryName $boundaryName -BoundaryGroupName $bg.SiteCode
+                Add-CMBoundaryToGroup -BoundaryName $boundaryName -BoundaryGroupName $bg.SiteCode -ErrorAction Stop
             }
             catch {
                 Write-DscStatus "Failed to add boundary '$boundaryName' to Boundary Group '$($bg.SiteCode)'. Error: $_"
@@ -784,7 +855,7 @@ foreach ($bg in $bgs) {
         }
     }
 
-    Start-Sleep -Seconds 5
+    if ($boundaryChanged) { Start-Sleep -Seconds 5 }
 }
 
 # Setup System Discovery
@@ -825,7 +896,12 @@ do {
 # Run discovery
 Write-DscStatus "Invoking AD system discovery"
 Invoke-CMSystemDiscovery
-Start-Sleep -Seconds 5
+if ($pushClients) {
+    Start-Sleep -Seconds 5
+}
+else {
+    Write-DscStatus "No client-push targets -- skipping the 5s discovery grace period"
+}
 
 # Ensure the client package is present on every client-serving boundary-group DP
 # BEFORE the no-push short-circuit below. Phase 11's ClientPkg check hard-fails if a

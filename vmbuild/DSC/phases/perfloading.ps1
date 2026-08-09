@@ -5,6 +5,7 @@ param(
 )
 
 $Tag = "[perfloading]"
+$perfloadingTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 Write-DscStatus "$Tag Starting perfloading"
 
@@ -294,11 +295,37 @@ Write-DscStatus "$Tag Starting perfloading"
     # image call surfaced it; the app/package calls use -ErrorAction
     # SilentlyContinue and swallowed the same failure.)
     # Add-CMDistributionPointToGroup is idempotent here: a DP already in the
-    # group throws and is logged-and-skipped.
+    # group may return success without changing anything, so resolve current
+    # membership first and call it only for missing DPs.
+    $serverFromNal = {
+        param($NalPath)
+        if ("$NalPath" -match '\\([^\\"\]]+)') { return $Matches[1] }
+        return $null
+    }
     $DistributionPoints = @(Get-CMDistributionPoint -AllSite)
     Write-DscStatus "$Tag Reconciling '$DPGroupName' membership against $($DistributionPoints.Count) distribution point(s)"
+    $existingAllDpMemberKeys = @{}
+    try {
+        $allGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$DPGroupName'" -ErrorAction Stop
+        if ($allGrpWmi) {
+            foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($allGrpWmi.GroupID)'" -ErrorAction Stop)) {
+                $memberHostName = & $serverFromNal $memberRow.DPNALPath
+                if (-not $memberHostName) { continue }
+                $existingAllDpMemberKeys[$memberHostName.ToUpper()] = $true
+                $existingAllDpMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
+            }
+        }
+    }
+    catch {
+        Write-DscStatus "$Tag Could not read existing '$DPGroupName' membership; falling back to idempotent adds: $($_.Exception.Message)"
+    }
     foreach ($dp in $DistributionPoints) {
         $DPName = ($dp.NetworkOSPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
+        $dpShortName = ($DPName -split '\.')[0]
+        if ($existingAllDpMemberKeys.ContainsKey($DPName.ToUpper()) -or $existingAllDpMemberKeys.ContainsKey($dpShortName.ToUpper())) {
+            Write-DscStatus "$Tag Distribution Point '$DPName' is already in '$DPGroupName' -- skipping add"
+            continue
+        }
         try {
             Add-CMDistributionPointToGroup -DistributionPointGroupName $DPGroupName -DistributionPointName $DPName -ErrorAction Stop
             Write-DscStatus "$Tag Added Distribution Point '$DPName' to group '$DPGroupName'"
@@ -342,17 +369,34 @@ Write-DscStatus "$Tag Starting perfloading"
 
     $apps = $deployconfig.Tools | where-object { $_.Appinstall -eq $True }
     $apps | ForEach-Object {
-    
-        Write-DscStatus "$Tag Creating a directory under c:\apps for the application $($_.Name)"
-        #create a directory for the application source files
-        new-item -ItemType Directory -Path "c:\Apps\$($_.Name)" -force
-        Write-DscStatus "$Tag Successfully created directory under c:\apps for the application $($_.Name)"
 
+        $appSourceDirectory = "C:\Apps\$($_.Name)"
+        $appSourceFile = "C:\tools\$($_.AppMsi)"
+        $appLinkPath = Join-Path $appSourceDirectory $_.AppMsi
+        if (-not (Test-Path -LiteralPath $appSourceDirectory)) {
+            New-Item -ItemType Directory -Path $appSourceDirectory -Force | Out-Null
+            Write-DscStatus "$Tag Created application source directory: $appSourceDirectory"
+        }
 
-        Write-DscStatus "$Tag Creating a Hardlink under c:\apps for the application $($_.Name) "
-        #create a hardlink for the source file (this is to save space on the C drive)
-        new-item -ItemType HardLink -Value "c:\tools\$($_.AppMsi)" -Path "C:\Apps\$($_.Name)\$($_.AppMsi)" -force
-        Write-DscStatus "$Tag Successfully created Hardlink under c:\apps for the application $($_.Name)"
+        $appLinkIsCurrent = $false
+        if (Test-Path -LiteralPath $appLinkPath) {
+            try {
+                $appLinkItem = Get-Item -LiteralPath $appLinkPath
+                $appLinkIsCurrent = $appLinkItem.LinkType -eq "HardLink" -and
+                    (Get-FileHash -LiteralPath $appSourceFile -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $appLinkPath -Algorithm SHA256).Hash
+            }
+            catch {
+                Write-DscStatus "$Tag Could not verify the application source hardlink for $($_.Name); recreating it: $($_.Exception.Message)"
+            }
+        }
+        if ($appLinkIsCurrent) {
+            Write-DscStatus "$Tag Application source link is already current for $($_.Name) -- skipping filesystem write"
+        }
+        else {
+            if (Test-Path -LiteralPath $appLinkPath) { Remove-Item -LiteralPath $appLinkPath -Force }
+            New-Item -ItemType HardLink -Value $appSourceFile -Path $appLinkPath -Force | Out-Null
+            Write-DscStatus "$Tag Created application source hardlink for $($_.Name)"
+        }
 
         #creating an application
         $appname = "MEMLABS-" + "$($_.Name)"
@@ -587,17 +631,17 @@ Write-DscStatus "$Tag Starting perfloading"
         for ($i = 0; $i -lt $propsArray.Length; $i++) {
             if ($propsArray[$i].PropertyName -eq "TwoKeyApproval") {
                 $propertyFound = $true
-                Write-DscStatus "$Tag Current property name is: $propsArray[$i].PropertyName and its value is $propsArray[$i].Value"
-                Write-DscStatus "$Tag Setting the value to 0 to override the self-approval for author."
-                $propsArray[$i].Value = 0 # Set your desired value here
-
-                # Update the Props array in the instance
-                $instance.Props = $propsArray
-
-                # Save the modified instance back to the class
-                Set-CimInstance -InputObject $instance
-
-                Write-DscStatus "$Tag TwoKeyApproval value updated successfully."
+                Write-DscStatus "$Tag Current property name is: $($propsArray[$i].PropertyName) and its value is $($propsArray[$i].Value)"
+                if ([int]$propsArray[$i].Value -eq 0) {
+                    Write-DscStatus "$Tag TwoKeyApproval is already 0 -- skipping provider write"
+                }
+                else {
+                    Write-DscStatus "$Tag Setting TwoKeyApproval to 0 to allow author self-approval."
+                    $propsArray[$i].Value = 0
+                    $instance.Props = $propsArray
+                    Set-CimInstance -InputObject $instance
+                    Write-DscStatus "$Tag TwoKeyApproval value updated successfully."
+                }
                 break
             }
         }
@@ -618,39 +662,66 @@ Write-DscStatus "$Tag Starting perfloading"
     else {
         Write-DscStatus "$Tag Instance not found. Manually approve the scripts"
     }
-    Write-DscStatus "$Tag New instance created with TwoKeyApproval set to 0."
+    Write-DscStatus "$Tag TwoKeyApproval reconciliation complete."
 
 
     ## Scripts ( used our scripts from Wiki)
 
     # Get all PowerShell script files (.ps1) in the folder and its sub folders
-    $ScriptFiles = Get-ChildItem -Path C:\tools\Scripts -Recurse -Filter *.ps1
+    $scriptReconcileTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $ScriptFiles = @(Get-ChildItem -Path C:\tools\Scripts -Recurse -Filter *.ps1)
+    $existingScriptNames = @{}
+    $scriptInventoryLoaded = $false
+    try {
+        foreach ($existingScript in @(Get-CMScript -Fast -ErrorAction Stop)) {
+            if ($existingScript.ScriptName) { $existingScriptNames["$($existingScript.ScriptName)"] = $true }
+        }
+        $scriptInventoryLoaded = $true
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Could not load the script library in one query; falling back to per-script checks: $($_.Exception.Message)"
+    }
+    $scriptsImported = 0
+    $scriptsSkipped = 0
+    $scriptsFailed = 0
 
     # Loop through each script file and import it into SCCM
     foreach ($ScriptFile in $ScriptFiles) {
         $ScriptName = "MEMLABS-" + [System.IO.Path]::GetFileNameWithoutExtension($ScriptFile.FullName)
-        $ScriptContent = Get-Content -Path $ScriptFile.FullName -Raw
 
         # Create a new script in SCCM using New-CMScript
         try {
+            $scriptExists = if ($scriptInventoryLoaded) {
+                $existingScriptNames.ContainsKey($ScriptName)
+            }
+            else {
+                $null -ne (Get-CMScript -ScriptName $ScriptName -Fast -ErrorAction Stop)
+            }
+            if ($scriptExists) {
+                $scriptsSkipped++
+                continue
+            }
 
-            #check if script already exists or else create it
-            if (-not (Get-CMScript -ScriptName $ScriptName -Fast)) {
-                $script = New-CMScript -ScriptName "$ScriptName" -ScriptText $ScriptContent -Fast
-                if ($script -and $script.ScriptGuid) {
-                    Write-DscStatus "$Tag Successfully imported: $ScriptName"
-                    # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesn't have that feature yet) Tim help needed here
-                    Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved"
-                }
-                else {
-                    Write-DscStatus "$Tag Imported $ScriptName but New-CMScript returned no ScriptGuid — skipping auto-approve"
-                }
+            $ScriptContent = Get-Content -Path $ScriptFile.FullName -Raw
+            $script = New-CMScript -ScriptName "$ScriptName" -ScriptText $ScriptContent -Fast
+            $scriptsImported++
+            $existingScriptNames[$ScriptName] = $true
+            if ($script -and $script.ScriptGuid) {
+                Write-DscStatus "$Tag Successfully imported: $ScriptName"
+                # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesn't have that feature yet) Tim help needed here
+                Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved"
+            }
+            else {
+                Write-DscStatus "$Tag Imported $ScriptName but New-CMScript returned no ScriptGuid — skipping auto-approve"
             }
         }
         catch {
+            $scriptsFailed++
             Write-DscStatus "$Tag Failed to import: $ScriptName. Error: $_"
         }
     }
+    $scriptReconcileTimer.Stop()
+    Write-DscStatus "$Tag Script library reconcile: $scriptsImported imported, $scriptsSkipped already present, $scriptsFailed failed in $([math]::Round($scriptReconcileTimer.Elapsed.TotalSeconds, 1))s"
 
     } # end Primary-only TwoKeyApproval + CM-script library block
 
@@ -705,14 +776,36 @@ Write-DscStatus "$Tag Starting perfloading"
                 $null = New-CMDistributionPointGroup -Name $OsdDpGroupName -Description "DPs on an OSDClient subnet (OSD content + PXE)" -ErrorAction SilentlyContinue
                 Write-DscStatus "$Tag Created DP group '$OsdDpGroupName'"
             }
+            $osdMemberKeys = @{}
+            $osdMembershipRead = $false
+            try {
+                $osdGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$OsdDpGroupName'" -ErrorAction Stop
+                if ($osdGrpWmi) {
+                    foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction Stop)) {
+                        $memberHostName = & $serverFromNal $memberRow.DPNALPath
+                        if (-not $memberHostName) { continue }
+                        $osdMemberKeys[$memberHostName.ToUpper()] = $true
+                        $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
+                    }
+                    $osdMembershipRead = $true
+                }
+            }
+            catch {
+                Write-DscStatus "$Tag Could not read existing '$OsdDpGroupName' membership; falling back to idempotent adds: $($_.Exception.Message)"
+            }
             foreach ($d in $osdDps) {
                 # Add the DP to the group by its FQDN, NOT its short name. Add-CMDistributionPointToGroup
                 # resolves -DistributionPointName against the DP's ServerName (FQDN); passing the short
                 # name ('PL-PANCETTA') fails to match, the error is swallowed, and the group is left EMPTY
                 # -- so every Start-CMContentDistribution to 'OSD DPS' becomes a no-op and OSD content never
                 # lands (the Phase 11 'not on any DP' WARN). This mirrors the working 'ALL DPS' block above.
-                try { Add-CMDistributionPointToGroup -DistributionPointGroupName $OsdDpGroupName -DistributionPointName $d.Fqdn -ErrorAction Stop; Write-DscStatus "$Tag Added OSD DP '$($d.Fqdn)' to '$OsdDpGroupName'" }
-                catch { Write-DscStatus "$Tag OSD DP '$($d.Fqdn)' not added to '$OsdDpGroupName' (likely already a member): $($_.Exception.Message)" }
+                if ($osdMembershipRead -and ($osdMemberKeys.ContainsKey($d.Fqdn.ToUpper()) -or $osdMemberKeys.ContainsKey($d.Short.ToUpper()))) {
+                    Write-DscStatus "$Tag OSD DP '$($d.Fqdn)' is already in '$OsdDpGroupName' -- skipping add"
+                }
+                else {
+                    try { Add-CMDistributionPointToGroup -DistributionPointGroupName $OsdDpGroupName -DistributionPointName $d.Fqdn -ErrorAction Stop; Write-DscStatus "$Tag Added OSD DP '$($d.Fqdn)' to '$OsdDpGroupName'" }
+                    catch { Write-DscStatus "$Tag OSD DP '$($d.Fqdn)' not added to '$OsdDpGroupName' (likely already a member): $($_.Exception.Message)" }
+                }
                 # Enable PXE. Prefer the NonWDS PXE responder (no separate WDS role);
                 # fall back to plain EnablePxe if this build lacks -EnableNonWdsPxe.
                 try {
@@ -733,9 +826,17 @@ Write-DscStatus "$Tag Starting perfloading"
             # partial failure is caught, not just a fully-empty group.
             try {
                 $osdGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$OsdDpGroupName'" -ErrorAction SilentlyContinue
-                $osdMemberNals = if ($osdGrpWmi) { @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction SilentlyContinue | ForEach-Object { "$($_.DPNALPath)" }) } else { @() }
+                $osdMemberKeys = @{}
+                if ($osdGrpWmi) {
+                    foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction SilentlyContinue)) {
+                        $memberHostName = & $serverFromNal $memberRow.DPNALPath
+                        if (-not $memberHostName) { continue }
+                        $osdMemberKeys[$memberHostName.ToUpper()] = $true
+                        $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
+                    }
+                }
                 foreach ($d in $osdDps) {
-                    if (@($osdMemberNals | Where-Object { $_ -match [regex]::Escape($d.Fqdn) }).Count -eq 0) {
+                    if (-not ($osdMemberKeys.ContainsKey($d.Fqdn.ToUpper()) -or $osdMemberKeys.ContainsKey($d.Short.ToUpper()))) {
                         Write-DscStatus "$Tag WARNING: OSD DP '$($d.Fqdn)' is NOT a member of '$OsdDpGroupName' after add -- OSD content distribution to the group will miss it"
                     }
                     else {
@@ -776,12 +877,17 @@ Write-DscStatus "$Tag Starting perfloading"
         $packageId = $BootImage.PackageID
 
         # Enable Command Support (F8 debug shell in WinPE)
-        try {
-            Set-CMBootImage -Id $packageId -EnableCommandSupport $true
-            Write-DscStatus "$Tag Enabled command support for boot image: $biName ($packageId)"
+        if ([bool]$BootImage.EnableLabShell) {
+            Write-DscStatus "$Tag Command support already enabled for boot image: $biName ($packageId) -- skipping provider write"
         }
-        catch {
-            Write-DscStatus "$Tag WARNING: Failed to enable command support for boot image: $biName ($packageId). Error: $_"
+        else {
+            try {
+                Set-CMBootImage -Id $packageId -EnableCommandSupport $true
+                Write-DscStatus "$Tag Enabled command support for boot image: $biName ($packageId)"
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: Failed to enable command support for boot image: $biName ($packageId). Error: $_"
+            }
         }
 
         # memlabs OSDClients are all x64 Gen2 VMs -- there is no arm64 PXE target,
@@ -884,9 +990,19 @@ Write-DscStatus "$Tag Starting perfloading"
     # image block below. Get-CMOperatingSystemUpgradePackage is the read-side
     # cmdlet for the upgrade packages New-CMOperatingSystemInstaller creates.)
     try {
-        if (!(Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade")) { New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 }
-        if (!(Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade")) { New-CMOperatingSystemInstaller -Name "Windows 10 upgrade" -Path "\\$ThisMachineName\OSD\Windows 10 22h2" -Version 10.0.19041 }
-        Write-DscStatus "$Tag Windows 10 and 11 OS upgrade packages created"
+        $upgradePackageSpecs = @(
+            @{ Name = "Windows 11 upgrade"; Path = "\\$ThisMachineName\OSD\Windows 11 24h2"; Version = "10.0.26100" },
+            @{ Name = "Windows 10 upgrade"; Path = "\\$ThisMachineName\OSD\Windows 10 22h2"; Version = "10.0.19041" }
+        )
+        foreach ($upgradePackageSpec in $upgradePackageSpecs) {
+            if (Get-CMOperatingSystemUpgradePackage -Name $upgradePackageSpec.Name) {
+                Write-DscStatus "$Tag OS upgrade package '$($upgradePackageSpec.Name)' already exists -- skipping creation"
+            }
+            else {
+                New-CMOperatingSystemInstaller -Name $upgradePackageSpec.Name -Path $upgradePackageSpec.Path -Version $upgradePackageSpec.Version
+                Write-DscStatus "$Tag Created OS upgrade package '$($upgradePackageSpec.Name)'"
+            }
+        }
     }
     catch {
         Write-DscStatus "$Tag WARNING: Failed to create OS upgrade packages: $_"
@@ -894,9 +1010,19 @@ Write-DscStatus "$Tag Starting perfloading"
 
     #get OS package
     try {
-        if (!(Get-CMOperatingSystemImage -Name "windows 11")) { New-CMOperatingSystemImage -Name "Windows 11" -Path "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim" -Version 10.0.26100 }
-        if (!(Get-CMOperatingSystemImage -Name "windows 10")) { New-CMOperatingSystemImage -Name "Windows 10" -Path "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim" -Version 10.0.19041 }
-        Write-DscStatus "$Tag Windows 10 and 11 OS packages created"
+        $osImageSpecs = @(
+            @{ Name = "Windows 11"; Path = "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim"; Version = "10.0.26100" },
+            @{ Name = "Windows 10"; Path = "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim"; Version = "10.0.19041" }
+        )
+        foreach ($osImageSpec in $osImageSpecs) {
+            if (Get-CMOperatingSystemImage -Name $osImageSpec.Name) {
+                Write-DscStatus "$Tag OS image '$($osImageSpec.Name)' already exists -- skipping creation"
+            }
+            else {
+                New-CMOperatingSystemImage -Name $osImageSpec.Name -Path $osImageSpec.Path -Version $osImageSpec.Version
+                Write-DscStatus "$Tag Created OS image '$($osImageSpec.Name)'"
+            }
+        }
     }
     catch {
         Write-DscStatus "$Tag WARNING: Failed to create OS image packages: $_"
@@ -1161,8 +1287,10 @@ Write-DscStatus "$Tag Starting perfloading"
     ### CI and baselines 
 
     #expand archive for importing cab files
+    $baselineReconcileTimer = [System.Diagnostics.Stopwatch]::StartNew()
     $baselinesZip = "C:\tools\baselines.zip"
     $baselineFolder = "C:\tools\baselines"
+    $baselineArchiveStamp = Join-Path $baselineFolder ".source.sha256"
 
     # CIs/baselines are client-facing configuration that MEMLABS stages and
     # imports on the Primary ONLY -- baselines.zip is copied solely to the
@@ -1175,15 +1303,42 @@ Write-DscStatus "$Tag Starting perfloading"
         Write-DscStatus "$Tag Skipping CI/baseline import on CAS (client-facing config is imported on the Primary)"
     }
     elseif (Test-Path $baselinesZip) {
-        Expand-Archive -Path $baselinesZip -DestinationPath "C:\tools\" -Force
+        $baselineZipHash = $null
+        try { $baselineZipHash = (Get-FileHash -LiteralPath $baselinesZip -Algorithm SHA256 -ErrorAction Stop).Hash }
+        catch { Write-DscStatus "$Tag WARNING: Could not hash baselines.zip; it will be expanded again: $($_.Exception.Message)" }
+        $expandedBaselineHash = if (Test-Path -LiteralPath $baselineArchiveStamp) { (Get-Content -LiteralPath $baselineArchiveStamp -Raw).Trim() } else { $null }
+        $haveBaselineCabs = (Test-Path -LiteralPath $baselineFolder) -and @(Get-ChildItem -LiteralPath $baselineFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue).Count -gt 0
+        if ($baselineZipHash -and $haveBaselineCabs -and $expandedBaselineHash -eq $baselineZipHash) {
+            Write-DscStatus "$Tag baselines.zip is already expanded at the current hash -- skipping archive write"
+        }
+        else {
+            Expand-Archive -Path $baselinesZip -DestinationPath "C:\tools\" -Force
+            if ($baselineZipHash) { $baselineZipHash | Set-Content -LiteralPath $baselineArchiveStamp -Encoding ASCII -Force }
+            Write-DscStatus "$Tag Expanded baselines.zip (source changed or extraction was incomplete)"
+        }
     }
     else {
         Write-DscStatus "$Tag WARNING: baselines.zip not found at $baselinesZip — skipping CI/baseline import"
     }
 
+    $baselinesImported = 0
+    $baselinesSkipped = 0
+    $baselinesFailed = 0
+
     # Get all .cab files in the folder (never on CAS -- see the gate above)
     if ($CurrentRole -ne "CAS" -and (Test-Path $baselineFolder)) {
-    $ConfigNames = Get-ChildItem -Path $baselineFolder -Filter "*.cab"
+    $ConfigNames = @(Get-ChildItem -Path $baselineFolder -Filter "*.cab")
+    $existingBaselineNames = @{}
+    $baselineInventoryLoaded = $false
+    try {
+        foreach ($existingBaseline in @(Get-CMBaseline -Fast -ErrorAction Stop)) {
+            if ($existingBaseline.LocalizedDisplayName) { $existingBaselineNames["$($existingBaseline.LocalizedDisplayName)"] = $true }
+        }
+        $baselineInventoryLoaded = $true
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Could not load baselines in one query; falling back to per-baseline checks: $($_.Exception.Message)"
+    }
 
     ForEach ($ConfigName in $ConfigNames) {
 
@@ -1200,7 +1355,13 @@ Write-DscStatus "$Tag Starting perfloading"
         # per-baseline and continue so one flaky baseline can't sink the rest of
         # perfloading.
         try {
-            if (!(Get-CMBaseline -Fast -Name $baselinename)) {
+            $baselineExists = if ($baselineInventoryLoaded) {
+                $existingBaselineNames.ContainsKey($baselinename)
+            }
+            else {
+                $null -ne (Get-CMBaseline -Fast -Name $baselinename -ErrorAction Stop)
+            }
+            if (-not $baselineExists) {
                 # Create a configuration item (we are importing the cab files directly here)
                 $filename = $baselineFolder + "\" + $ConfigName.Name
                 Write-DscStatus "$Tag Importing cab from $filename location"
@@ -1220,16 +1381,23 @@ Write-DscStatus "$Tag Starting perfloading"
                 Write-DscStatus "$Tag Deploying baseline $baselinename to All Systems..."
                 New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" -EnableEnforcement $true
                 Write-DscStatus "$Tag Successfully deployed the baseline $baselinename to All systems"
+                $existingBaselineNames[$baselinename] = $true
+                $baselinesImported++
             }
             else {
-                Write-DscStatus "Baseline $baselinename are already in place"
+                $baselinesSkipped++
             }
         }
         catch {
+            $baselinesFailed++
             Write-DscStatus "$Tag WARNING: Failed to import/deploy baseline '$baselinename': $($_.Exception.Message)"
         }
     }
     } # end if baselineFolder exists
+    $baselineReconcileTimer.Stop()
+    if ($CurrentRole -ne "CAS") {
+        Write-DscStatus "$Tag Baseline reconcile: $baselinesImported imported, $baselinesSkipped already present, $baselinesFailed failed in $([math]::Round($baselineReconcileTimer.Elapsed.TotalSeconds, 1))s"
+    }
 
     ### Repro-only policy bulk + purpose-built tattoo CIs
     # Reproduces case 2608010010000636. Two independent knobs, both opt-in via
@@ -2524,6 +2692,8 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     # this same way; this block was missed and was running on CAS too.
     if ($CurrentRole -ne "CAS") {
 
+    $collectionReconcileTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
         # Check if MEMLABS folder exists under Device Collections
     $folder = Get-CMFolder -FolderPath "\DeviceCollection\MEMLABS"
 
@@ -2544,6 +2714,22 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     # Rule) the collection exists but has no rule, and the old "if (-not Get-
     # CMDeviceCollection)" guard skipped it -- leaving the collection permanently
     # empty. Checking for existence is not a reason to skip populating members.
+    $existingCollectionsByName = @{}
+    $collectionInventoryLoaded = $false
+    try {
+        foreach ($existingCollection in @(Get-CMDeviceCollection -Name "MEMLABS-*" -ErrorAction Stop)) {
+            if ($existingCollection.Name) { $existingCollectionsByName["$($existingCollection.Name)"] = $existingCollection }
+        }
+        $collectionInventoryLoaded = $true
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Could not load MEMLABS collections in one query; falling back to per-collection checks: $($_.Exception.Message)"
+    }
+    $collectionsCreated = 0
+    $collectionsSkipped = 0
+    $collectionRulesAdded = 0
+    $collectionRulesSkipped = 0
+    Write-DscStatus "$Tag Reconciling $($Collections.Count) MEMLABS collection definition(s) against $($existingCollectionsByName.Count) existing collection(s)"
     foreach ($Collection in $Collections) {
         $CollectionName = $Collection.Name
         $Query = $Collection.Query
@@ -2551,15 +2737,22 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
 
         try {
             # Ensure the collection exists.
-            $col = Get-CMDeviceCollection -Name $CollectionName
+            $col = if ($collectionInventoryLoaded) {
+                $existingCollectionsByName[$CollectionName]
+            }
+            else {
+                Get-CMDeviceCollection -Name $CollectionName -ErrorAction Stop
+            }
             if (-not $col) {
                 $col = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
+                $existingCollectionsByName[$CollectionName] = $col
+                $collectionsCreated++
                 Write-DscStatus "$Tag Created collection: $CollectionName"
                 Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $col.CollectionID -ErrorAction SilentlyContinue
                 Write-DscStatus "$Tag Moved collection '$CollectionName' under the folder MEMLABS"
             }
             else {
-                Write-DscStatus "$Tag Collection already exists: $CollectionName (reconciling membership rule)"
+                $collectionsSkipped++
             }
 
             if (-not $col) {
@@ -2573,18 +2766,21 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             $haveRule = @($existingRules | Where-Object { $_.RuleName -eq $ruleName }).Count -gt 0
             if (-not $haveRule) {
                 Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName $ruleName -ErrorAction Stop
+                $collectionRulesAdded++
                 Write-DscStatus "$Tag Added collection query rule: $ruleName"
                 # Force membership evaluation so members appear immediately.
                 Invoke-CMCollectionUpdate -CollectionId $col.CollectionID -ErrorAction SilentlyContinue
             }
             else {
-                Write-DscStatus "$Tag Collection query rule already present: $ruleName"
+                $collectionRulesSkipped++
             }
         }
         catch {
             Write-DscStatus "$Tag WARNING: Failed to fully configure collection '$CollectionName': $($_.Exception.Message)"
         }
     }
+    $collectionReconcileTimer.Stop()
+    Write-DscStatus "$Tag Collection reconcile: $collectionsCreated created, $collectionsSkipped already present; $collectionRulesAdded rules added, $collectionRulesSkipped already present in $([math]::Round($collectionReconcileTimer.Elapsed.TotalSeconds, 1))s"
 
     # Office Install Targets collection: ensure it exists with a current query
     # rule. The collection + deployment + members all belong on the Primary;
@@ -3112,6 +3308,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         try { Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID } catch {}
     }    
 
-    Write-DscStatus "$Tag Completed the perf loading the environment"
+    $perfloadingTimer.Stop()
+    Write-DscStatus "$Tag Completed the perf loading the environment in $($perfloadingTimer.Elapsed.ToString('hh\:mm\:ss'))"
     Write-DscStatus "$Tag ******************************************" -NoStatus
     Write-DscStatus "$Tag ******************************************" -NoStatus

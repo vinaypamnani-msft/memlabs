@@ -108,6 +108,10 @@ if (Test-Path $ExpectedRunIdFile) {
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
 $CurrentRole = $ThisVM.role
+$configuredPushTargets = @()
+if ($ThisVM -and $ThisVM.thisParams -and $ThisVM.thisParams.ClientPush) {
+    $configuredPushTargets = @($ThisVM.thisParams.ClientPush | Where-Object { $_ -and "$_" -ne $ThisVM.vmName })
+}
 
 # -DownloadOnly: Phase 3 "ScriptWorkflow Download" pre-warm. Run ONLY the
 # ConfigMgr setup pre-req download (setupdl.exe) so the redist folder is warm
@@ -491,17 +495,23 @@ if ($scenario -eq "Standalone") {
         Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
     }
 
-    # Start AD Discovery early so DDRs have maximum processing time before PushClients
-    try {
-        Set-Location $LogPath
-        . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
-        $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
-        Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
-        Invoke-CMSystemDiscovery
-        Write-DscStatus "AD System Discovery invoked early (pre-staging for client push)"
+    # Start AD Discovery early only when there are push targets whose DDRs need
+    # processing time before PushClients. No targets means this is duplicate work.
+    if ($configuredPushTargets.Count -gt 0) {
+        try {
+            Set-Location $LogPath
+            . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+            $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
+            Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
+            Invoke-CMSystemDiscovery
+            Write-DscStatus "AD System Discovery invoked early for $($configuredPushTargets.Count) client-push target(s)"
+        }
+        catch {
+            Write-DscStatus "Early AD Discovery: $($_.Exception.Message)"
+        }
     }
-    catch {
-        Write-DscStatus "Early AD Discovery: $($_.Exception.Message)"
+    else {
+        Write-DscStatus "Skipping early AD System Discovery: no client-push targets"
     }
     Set-Location $LogPath
 
@@ -614,17 +624,23 @@ if ($scenario -eq "Hierarchy") {
             Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
         }
 
-        # Start AD Discovery early so DDRs have maximum processing time before PushClients
-        try {
-            Set-Location $LogPath
-            . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
-            $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
-            Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
-            Invoke-CMSystemDiscovery
-            Write-DscStatus "AD System Discovery invoked early (pre-staging for client push)"
+        # Start AD Discovery early only when there are push targets whose DDRs need
+        # processing time before PushClients. No targets means this is duplicate work.
+        if ($configuredPushTargets.Count -gt 0) {
+            try {
+                Set-Location $LogPath
+                . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+                $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
+                Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
+                Invoke-CMSystemDiscovery
+                Write-DscStatus "AD System Discovery invoked early for $($configuredPushTargets.Count) client-push target(s)"
+            }
+            catch {
+                Write-DscStatus "Early AD Discovery: $($_.Exception.Message)"
+            }
         }
-        catch {
-            Write-DscStatus "Early AD Discovery: $($_.Exception.Message)"
+        else {
+            Write-DscStatus "Skipping early AD System Discovery: no client-push targets"
         }
         Set-Location $LogPath
                
@@ -927,13 +943,13 @@ if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateOb
     }
 }
 
-# Additional/remote SMS Provider installs (InstallProvider.ps1) — kicked off
-# AFTER perfloading (NOT overlapping it; see the note above). Still a background
-# job + immediate join so InstallProvider's runspace isolation and the existing
-# failure handling are unchanged. The join completes before PushClients /
-# EnableBLM / the collection re-eval sweep below, all of which also need a
-# stable SMS Provider. When perfloading doesn't run (CAS, or PrePopulate=false)
-# this is reached directly, so those paths are no worse than before.
+# Additional/remote SMS Provider installs (InstallProvider.ps1) run strictly
+# after perfloading. Do not create an isolated job when the config requests none.
+$installProviderCount = @($deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true }).Count
+if ($installProviderCount -eq 0) {
+    Write-DscStatus "Skipping InstallProvider.ps1: no VM in this config has InstallSMSProv=true"
+}
+else {
 $installProviderJob = Start-Job -Name "InstallProvider" -ScriptBlock {
     param($jobConfigFilePath, $jobLogPath, $jobScriptRoot)
     # Dot-source ScriptFunctions.ps1 so InstallProvider.ps1 can call Write-DscStatus.
@@ -947,10 +963,7 @@ Write-DscStatus "Started InstallProvider.ps1 job (after perfloading)"
   # InstallProvider.ps1 self-bounds every provider it installs: 2 attempts of
   # (10m stale-setupwpf + 60m setupwpf + 5m drain + 5m verify) plus 15m of site
   # recovery between them. Budget that per provider over a floor. An unbounded
-  # join hung Phase 8 for hours on a re-run whose config has NO InstallSMSProv
-  # VMs at all -- the job is a guaranteed no-op there, so it can only ever be
-  # the job itself that failed to run.
-  $installProviderCount = @($deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true }).Count
+    # join hung Phase 8 for hours when the job itself failed to run.
   $installProviderTimeout = 600 + (10800 * $installProviderCount)
   Write-DscStatus "Waiting for InstallProvider.ps1 job to complete (up to $([int]($installProviderTimeout / 60)) min)"
   $installProviderWaitStart = Get-Date
@@ -983,6 +996,7 @@ Write-DscStatus "Started InstallProvider.ps1 job (after perfloading)"
   finally {
       Remove-Job -Job $installProviderJob -Force -ErrorAction SilentlyContinue
   }
+}
   
 # CAS already marked JSON Completed above to unblock DSC phases.
 # Signal Complete! now so the host advances CAS past Phase 8 while
@@ -1362,18 +1376,43 @@ if ($CurrentRole -eq "Primary") {
 # components are healthy but their status counters still show the startup
 # noise, which Phase 11 validation flags as WARN. This is equivalent to
 # right-clicking each component in the console and choosing "Reset Counts".
+# Run it once per site: repeating it on every Phase 8 pass would erase real
+# post-install evidence. The flag is written only when every needed reset works.
 if ($CurrentRole -in @("Primary", "CAS", "Secondary")) {
     try {
         $svrSiteCode = $ThisVM.siteCode
         if ($svrSiteCode) {
-            Write-DscStatus "Resetting SMS component status counts for site $svrSiteCode"
-            $ns = "root\sms\site_$svrSiteCode"
-            $sums = @(Get-WmiObject -Namespace $ns -Class SMS_ComponentSummarizer -ErrorAction Stop)
-            $resetCount = 0
-            foreach ($s in $sums) {
-                try { [void]$s.ResetCounts(); $resetCount++ } catch { }
+            $componentResetFlag = "C:\staging\DSC\ComponentStatusCountsReset.$svrSiteCode.flag"
+            if (Test-Path -LiteralPath $componentResetFlag) {
+                Write-DscStatus "SMS component startup counts were already reset for site $svrSiteCode -- skipping"
             }
-            Write-DscStatus "Reset component counts on $resetCount of $($sums.Count) summarizer entries"
+            else {
+                Write-DscStatus "Resetting SMS component startup status counts for site $svrSiteCode"
+                $ns = "root\sms\site_$svrSiteCode"
+                $sums = @(Get-WmiObject -Namespace $ns -Class SMS_ComponentSummarizer -ErrorAction Stop)
+                $sumsToReset = @($sums | Where-Object { [int]$_.Errors -gt 0 -or [int]$_.Warnings -gt 0 -or [int]$_.Infos -gt 0 })
+                $resetCount = 0
+                $resetFailed = 0
+                foreach ($s in $sumsToReset) {
+                    try {
+                        # SMS_ComponentSummarizer exposes DeleteStatistics();
+                        # ResetCounts() is not a method on this WMI class.
+                        $resetResult = $s.DeleteStatistics()
+                        $returnValueProperty = if ($null -ne $resetResult) { $resetResult.PSObject.Properties['ReturnValue'] } else { $null }
+                        $returnValue = if ($returnValueProperty) { [int]$returnValueProperty.Value } elseif ($resetResult -is [int]) { [int]$resetResult } else { 0 }
+                        if ($returnValue -eq 0) { $resetCount++ }
+                        else { $resetFailed++; Write-DscStatus "  DeleteStatistics failed for $($s.ComponentName) on $($s.MachineName): return $returnValue" -Warning }
+                    }
+                    catch {
+                        $resetFailed++
+                        Write-DscStatus "  DeleteStatistics threw for $($s.ComponentName) on $($s.MachineName): $($_.Exception.Message)" -Warning
+                    }
+                }
+                if ($resetFailed -eq 0) {
+                    Set-Content -LiteralPath $componentResetFlag -Value (Get-Date -Format o) -Encoding ASCII -Force
+                }
+                Write-DscStatus "Reset component counts on $resetCount of $($sumsToReset.Count) non-empty summarizer entries; failures=$resetFailed"
+            }
         }
     }
     catch {
@@ -1454,7 +1493,8 @@ if ($CurrentRole -ne "CAS" -and $CurrentRole -in @("Primary", "Secondary")) {
 }
 
 # Force a FULL collection re-evaluation on every MEMLABS-* device collection
-# (plus All Unknown Computers) now that PushClients + auto-push + first-contact
+# (plus All Unknown Computers) when this site has client-push targets and
+# PushClients + auto-push + first-contact
 # Heartbeat Discovery have had time to register the agent and flip
 # SMS_R_System.Client to 1 for every freshly-pushed VM. Without this,
 # SMS_FullCollectionMembership.IsClient is the value colleval snapshotted
@@ -1468,8 +1508,12 @@ if ($CurrentRole -ne "CAS" -and $CurrentRole -in @("Primary", "Secondary")) {
 # membership snapshot was stale. A single RequestRefresh($false) rewrites
 # every IsClient cell on the next colleval pass.
 if ($CurrentRole -in @("Primary", "Secondary")) {
-    $refSiteCode = $ThisVM.siteCode
-    if ($refSiteCode) {
+    if ($configuredPushTargets.Count -eq 0) {
+        Write-DscStatus "Skipping collection IsClient refresh sweep: no client-push targets"
+    }
+    else {
+        $refSiteCode = $ThisVM.siteCode
+        if ($refSiteCode) {
         try {
             $ns = "root\sms\site_$refSiteCode"
             # CollectionType=2 is Device. Filter to MEMLABS-* + All Unknown
@@ -1499,6 +1543,7 @@ if ($CurrentRole -in @("Primary", "Secondary")) {
         }
         catch {
             Write-DscStatus "WARNING: Failed to enumerate collections for refresh sweep: $($_.Exception.Message)"
+        }
         }
     }
 }
