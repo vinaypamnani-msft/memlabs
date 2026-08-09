@@ -128,7 +128,16 @@ $startClientPackagePrestage = {
                     $targetFqdn -ieq $DistributionPointFqdn
                 })
         if ($targeting.Count -gt 0) {
-            Write-DscStatus "Client package pre-stage: $packageId is already targeted to $DistributionPointFqdn."
+            # A target inserted before DRS initialization can exist locally without
+            # an unsent change for the CAS. Re-arm it to create a fresh PkgServers_G
+            # update, then flush that group. Without this, the sproc runs successfully
+            # but has no actionable delta; CAS wakes, sees no changed DP, and sends
+            # nothing until HMAN refreshes the row much later.
+            foreach ($target in $targeting) {
+                $target.RefreshNow = $true
+                [void]$target.Put()
+            }
+            Write-DscStatus "Client package pre-stage: $packageId is already targeted to $DistributionPointFqdn; re-armed RefreshNow to create a fresh parent-visible targeting change."
             & $flushClientPackageTargetingToParent $packageId
             return
         }
