@@ -71,28 +71,40 @@ $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.js
 
 # Wait for ScriptWorkflow.json to exist on CAS
 Write-DscStatus "Waiting for $CSName to begin installation"
+$casBeginStart = Get-Date
 while (!(Test-Path $CSConfigurationFile)) {
-    Write-DscStatus "Waiting for $CSName to begin installation" -RetrySeconds 30
+    # Elapsed goes in the TEXT: the host only records status CHANGES, so a constant
+    # message is indistinguishable from a hang for the whole wait.
+    $casBeginMin = [int]((Get-Date) - $casBeginStart).TotalMinutes
+    Write-DscStatus "Waiting for $CSName to begin installation (${casBeginMin}m elapsed)" -RetrySeconds 30
     Start-Sleep -Seconds 30
 }
 
 # Read CAS actions file, wait for install to finish
 Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr"
+$casInstallStart = Get-Date
 $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
 while ($CSConfiguration.$("InstallSCCM").Status -ne "Completed") {
-    Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr" -NoLog -RetrySeconds 30
+    $casInstallMin = [int]((Get-Date) - $casInstallStart).TotalMinutes
+    $casInstallState = "$($CSConfiguration.InstallSCCM.Status)"
+    Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr (${casInstallMin}m elapsed, CAS InstallSCCM=$casInstallState)" -RetrySeconds 30
     Start-Sleep -Seconds 30
     $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
 }
+Write-DscStatus "$CSName finished installing ConfigMgr ($([int]((Get-Date) - $casInstallStart).TotalMinutes)m elapsed)."
 
 # Read CAS actions file, wait for upgrade to finish
 Write-DscStatus "Checking if $CSName is upgrading ConfigMgr"
+$casUpgradeStart = Get-Date
 $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
 while ($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed") {
-    Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr" -NoLog -RetrySeconds 30
+    $casUpgradeMin = [int]((Get-Date) - $casUpgradeStart).TotalMinutes
+    $casUpgradeState = "$($CSConfiguration.UpgradeSCCM.Status)"
+    Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr (${casUpgradeMin}m elapsed, CAS UpgradeSCCM=$casUpgradeState)" -RetrySeconds 30
     Start-Sleep -Seconds 30
     $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
 }
+Write-DscStatus "$CSName finished upgrading ConfigMgr ($([int]((Get-Date) - $casUpgradeStart).TotalMinutes)m elapsed)."
 
 # Write actions file, wait finished
 $Configuration.WaitingForCASFinishedInstall.Status = 'Completed'

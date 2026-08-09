@@ -2020,12 +2020,17 @@ else {
                 if ($waitList -notcontains $PSVM.vmName) { continue }
                 $PSSiteCode = $PSVM.siteCode
                 $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
-                Write-DscStatus "Waiting for Primary site installation to finish"
+                $psWaitStart = Get-Date
+                Write-DscStatus "Waiting for Primary site $PSSiteCode ($($PSVM.vmName)) installation to finish"
                 while (!$PSSystemServer) {
-                    Write-DscStatus "Waiting for Primary site to show up via Get-CMSiteSystemServer" -NoLog -RetrySeconds 30
+                    # Elapsed goes in the TEXT: the host only records status CHANGES, and this
+                    # poll is also the only guest-log evidence that the wait is still alive.
+                    $psWaitMin = [int]((Get-Date) - $psWaitStart).TotalMinutes
+                    Write-DscStatus "Waiting for Primary site $PSSiteCode ($($PSVM.vmName)) to show up via Get-CMSiteSystemServer (${psWaitMin}m elapsed)" -RetrySeconds 30
                     Start-Sleep -Seconds 30
                     $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
                 }
+                Write-DscStatus "Primary site $PSSiteCode ($($PSVM.vmName)) is visible via Get-CMSiteSystemServer ($([int]((Get-Date) - $psWaitStart).TotalMinutes)m elapsed)."
             }
 
             Write-DscStatus "Primary is installed. Waiting for replication link to be 'Active'"
