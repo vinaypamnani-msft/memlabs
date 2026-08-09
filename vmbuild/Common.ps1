@@ -368,6 +368,7 @@ $Script:LogBufferMaxAgeSeconds = 2       # flush at least this often
 $Script:LogRotateMaxBytes      = 2MB     # rotate when log exceeds this size
 $Script:LogRotateKeep          = 3       # number of historical .1/.2/.3 files
 $Script:LogRotateCheckEverySec = 5       # don't stat the file more than this
+$Script:LogBufferHardCapBytes  = 8MB     # give up buffering past this (leaves a marker)
 $Script:LogRotateExitRegistered = $false
 # Buffer state lives in $global: so the engine-exit Action scriptblock (which
 # runs in its own scope) can still see and flush it.
@@ -427,6 +428,35 @@ function Get-LogBufferEntry {
     return $global:LogBuffers[$Path]
 }
 
+function Add-LogBufferText {
+    # The Builder is the lock object shared with Flush-LogBuffer and the C#
+    # MemLabs.LogFlusher timer callback. StringBuilder is not thread-safe, and an
+    # Append landing between the flusher's ToString() and its clear used to vanish.
+    param([object]$Entry, [string]$Text)
+    [System.Threading.Monitor]::Enter($Entry.Builder)
+    try { [void]$Entry.Builder.Append($Text) }
+    finally { [System.Threading.Monitor]::Exit($Entry.Builder) }
+}
+
+function Add-LogTextToFile {
+    # Keep AppendAllText's exclusive FileShare.Read. Opening with FileShare.ReadWrite
+    # lets several job processes append at once, and FileMode.Append fixes each
+    # writer's offset at OPEN time, so they overwrite each other with no exception --
+    # measured 144 records silently clobbered across 8 writers. Let the OS reject the
+    # second writer and retry: a sharing violation must cost latency, not a record.
+    param([string]$Path, [string]$Text, [int]$Attempts = 12)
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try {
+            [System.IO.File]::AppendAllText($Path, $Text, [System.Text.Encoding]::UTF8)
+            return
+        }
+        catch [System.IO.IOException] {
+            if ($i -eq $Attempts) { throw }
+            Start-Sleep -Milliseconds (10 * $i)
+        }
+    }
+}
+
 function Invoke-LogRotateIfNeeded {
     param([string]$Path)
     # Only rotate the base VMBuild.log (menu log). Domain-specific deploy
@@ -481,18 +511,39 @@ function Flush-LogBuffer {
     if (-not $global:LogBuffers.ContainsKey($Path)) { return }
     $entry = $global:LogBuffers[$Path]
     if ($entry.Builder.Length -eq 0) { return }
-    $text = $entry.Builder.ToString()
-    $entry.Builder.Length = 0
-    $entry.LastFlushUtc = [DateTime]::UtcNow
+    # Hold the lock across drain AND write. Releasing before the write would let the
+    # timer thread and the main thread interleave chunks out of order, and clearing
+    # before the write is what silently lost records: on a sharing violation the text
+    # was already gone. Clear ONLY after the append succeeds.
+    [System.Threading.Monitor]::Enter($entry.Builder)
     try {
-        Invoke-LogRotateIfNeeded -Path $Path
-        [System.IO.File]::AppendAllText($Path, $text, [System.Text.Encoding]::UTF8)
+        if ($entry.Builder.Length -eq 0) { return }
+        $text = $entry.Builder.ToString()
+        $written = $text.Length
+        try {
+            Invoke-LogRotateIfNeeded -Path $Path
+            Add-LogTextToFile -Path $Path -Text $text
+            # Remove only what was written, not Length=0: the C# timer callback cannot
+            # take this lock (Add-Type has no System.Threading) so it may have drained
+            # part of the buffer concurrently.
+            if ($written -gt $entry.Builder.Length) { $written = $entry.Builder.Length }
+            [void]$entry.Builder.Remove(0, $written)
+            $entry.LastFlushUtc = [DateTime]::UtcNow
+        }
+        catch {
+            # Keep the text buffered so the next flush retries it. Only a hard cap
+            # discards, and it leaves a marker so the gap is visible in the file
+            # itself once writes resume -- a dropped chunk must never be silent.
+            if ($entry.Builder.Length -gt $Script:LogBufferHardCapBytes) {
+                $lost = $entry.Builder.Length
+                $entry.Builder.Length = 0
+                [void]$entry.Builder.AppendLine(
+                    "*** MemLabs logging DROPPED $lost buffered chars for $Path : $($_.Exception.Message) ***")
+                $entry.LastFlushUtc = [DateTime]::UtcNow
+            }
+        }
     }
-    catch {
-        # Best-effort retry once with PowerShell's Out-File so transient
-        # sharing-violation paths still get a chance to land.
-        try { $text | Out-File -LiteralPath $Path -Append -Encoding utf8 -ErrorAction SilentlyContinue } catch { }
-    }
+    finally { [System.Threading.Monitor]::Exit($entry.Builder) }
 }
 
 function Register-LogBufferExitFlush {
@@ -519,8 +570,12 @@ function Register-LogBufferExitFlush {
                     $entry = $global:LogBuffers[$p]
                     if ($entry -and $entry.Builder.Length -gt 0) {
                         try {
-                            [System.IO.File]::AppendAllText($p, $entry.Builder.ToString(), [System.Text.Encoding]::UTF8)
-                            $entry.Builder.Length = 0
+                            [System.Threading.Monitor]::Enter($entry.Builder)
+                            try {
+                                Add-LogTextToFile -Path $p -Text $entry.Builder.ToString()
+                                $entry.Builder.Length = 0
+                            }
+                            finally { [System.Threading.Monitor]::Exit($entry.Builder) }
                         } catch { }
                     }
                 }
@@ -570,11 +625,30 @@ namespace MemLabs {
                     if (builderProp == null) continue;
                     var sb = builderProp.Value as StringBuilder;
                     if (sb == null || sb.Length == 0) continue;
+                    // This callback cannot lock (Add-Type's reference set has no
+                    // System.Threading), so it must never race the PowerShell flush:
+                    // both draining the same text duplicates records -- measured 205
+                    // dupes across 20 writers. Its only job is getting data out when the
+                    // main thread is wedged, and PowerShell flushes every couple of
+                    // seconds, so act only on a buffer that has gone stale. In normal
+                    // operation this never fires.
+                    var lastProp = pso.Properties["LastFlushUtc"];
+                    if (lastProp == null || !(lastProp.Value is DateTime)) continue;
+                    if ((DateTime.UtcNow - (DateTime)lastProp.Value).TotalSeconds < 30) continue;
                     string text = sb.ToString();
-                    sb.Length = 0;
-                    var flushProp = pso.Properties["LastFlushUtc"];
-                    if (flushProp != null) flushProp.Value = DateTime.UtcNow;
-                    File.AppendAllText(path, text, Encoding.UTF8);
+                    int written = text.Length;
+                    try {
+                        // Exclusive append (FileShare.Read). Sharing FileShare.ReadWrite
+                        // makes concurrent appenders clobber one another silently.
+                        File.AppendAllText(path, text, Encoding.UTF8);
+                        // Remove only what was written: an append landing mid-flush sits
+                        // past this index and must survive.
+                        if (written > sb.Length) written = sb.Length;
+                        sb.Remove(0, written);
+                        lastProp.Value = DateTime.UtcNow;
+                    } catch {
+                        // Contended: leave it buffered, the PowerShell path retries.
+                    }
                 }
             } catch { }
         }
@@ -897,7 +971,7 @@ function Write-Log {
             $logPath = $Common.LogPath
             if ($logPath) {
                 $entry = Get-LogBufferEntry -Path $logPath
-                [void]$entry.Builder.AppendLine($logText)
+                Add-LogBufferText -Entry $entry -Text ($logText + [Environment]::NewLine)
 
                 $forceFlush = $Warning.IsPresent -or $Failure.IsPresent `
                     -or $Activity.IsPresent -or $SubActivity.IsPresent `
@@ -936,7 +1010,7 @@ function Write-Log {
                     [void]$jb.Append(',"msg":"').Append((Get-JsonLogEscaped $Text)).Append('"}')
 
                     $jsonEntry = Get-LogBufferEntry -Path $jsonPath
-                    [void]$jsonEntry.Builder.Append($jb.ToString()).Append("`n")
+                    Add-LogBufferText -Entry $jsonEntry -Text ($jb.ToString() + "`n")
                     $jsonAge = ([DateTime]::UtcNow - $jsonEntry.LastFlushUtc).TotalSeconds
                     if ($forceFlush -or $jsonEntry.Builder.Length -ge $Script:LogBufferMaxBytes -or $jsonAge -ge $Script:LogBufferMaxAgeSeconds) {
                         Flush-LogBuffer -Path $jsonPath
