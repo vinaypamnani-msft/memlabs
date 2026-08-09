@@ -3241,9 +3241,24 @@ $global:VM_Config = {
             if (Test-MemlabsDownloadCacheEnabled) {
                 $cacheVm = Get-VM -Name $currentItem.vmName -ErrorAction SilentlyContinue
                 if ($cacheVm -and $cacheVm.Generation -ne 1) {
+                    # Resolve and mount are timed separately: the mount is idempotent
+                    # (Mount-IsoOnVm returns early when this exact ISO is attached), but the
+                    # resolve runs per VM per phase and issues a network HEAD per cached key
+                    # to spot a moved 'latest' redirect -- and every VM computes the same
+                    # answer. This says whether hoisting it to once-per-phase is worth it.
+                    $swCacheResolve = [System.Diagnostics.Stopwatch]::StartNew()
                     $cacheIso = Get-MemlabsCacheIsoForDeploy -DeployConfig $deployConfig -StartPhase $Phase
-                    if ($cacheIso -and (Mount-MemlabsCacheIsoToVm -VmName $currentItem.vmName -IsoPath $cacheIso)) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounted download cache $([System.IO.Path]::GetFileName($cacheIso))." -LogOnly
+                    $swCacheResolve.Stop()
+                    $cacheIsoName = if ($cacheIso) { [System.IO.Path]::GetFileName($cacheIso) } else { 'none' }
+                    Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] CacheIsoResolve completed in $([Math]::Round($swCacheResolve.Elapsed.TotalSeconds,1)) seconds (iso=$cacheIsoName)" -LogOnly
+                    if ($cacheIso) {
+                        $swCacheMount = [System.Diagnostics.Stopwatch]::StartNew()
+                        $cacheMounted = Mount-MemlabsCacheIsoToVm -VmName $currentItem.vmName -IsoPath $cacheIso
+                        $swCacheMount.Stop()
+                        Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] CacheIsoMount completed in $([Math]::Round($swCacheMount.Elapsed.TotalSeconds,1)) seconds (mounted=$cacheMounted)" -LogOnly
+                        if ($cacheMounted) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounted download cache $cacheIsoName." -LogOnly
+                        }
                     }
                 }
             }
