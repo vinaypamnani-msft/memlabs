@@ -11011,8 +11011,8 @@ if (-not $Common.Initialized) {
         }
 
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion              = "260808.0"
-            LatestHotfixVersion         = "260808.0"
+            MemLabsVersion              = "260809.0"
+            LatestHotfixVersion         = "260809.0"
             PS7                         = $PS7
             Initialized                 = $true
             InJob                       = $InJob
