@@ -1,4 +1,8 @@
-﻿enum Ensure {
+﻿# Progress records from a pushed DSC run marshal back to the pushing client over
+# WmiPrvSE -> Winmgmt -> WinRM, and block the engine if that client never drains them.
+$ProgressPreference = 'SilentlyContinue'
+
+enum Ensure {
     Absent
     Present
 }
@@ -2961,7 +2965,7 @@ function Write-Status {
 
             $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""Status"" thread=""$tid"" file=""$file"">"
             $logText | Out-File $StatusLog -Append -Encoding utf8
-            Write-Progress -Activity $caller -Status $Text -PercentComplete 50
+            # No Write-Progress here: it blocked the engine ~194s per call waiting on WinRM.
         }
         catch {
             try {
