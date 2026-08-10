@@ -210,9 +210,11 @@ foreach ($name in $scanSettings.Keys) {
 }
 
 # ---------------------------------------------------------------------------
-# Tamper-Protection-owned levers. Set, then re-read: under Tamper Protection
-# Set-MpPreference reports success and changes nothing, so the read-back is the
-# only thing that distinguishes Applied from Blocked.
+# Levers Tamper Protection owns WHEN IT IS ON. Set, then re-read: under Tamper
+# Protection Set-MpPreference reports success and changes nothing, so the
+# read-back is the only thing that distinguishes Applied from Blocked. Do not
+# assume TP is the cause -- these were seen refused with IsTamperProtected=False,
+# so keep whatever Set-MpPreference actually said and report policy overrides.
 # ---------------------------------------------------------------------------
 $protectedSettings = [ordered]@{
     DisableRealtimeMonitoring = $true
@@ -222,19 +224,43 @@ $protectedSettings = [ordered]@{
     MAPSReporting             = 0
     SubmitSamplesConsent      = 2
 }
+$setErrors = @{}
 foreach ($name in $protectedSettings.Keys) {
     try {
         $splat = @{ $name = $protectedSettings[$name] }
         Set-MpPreference @splat -ErrorAction Stop
     }
-    catch { }
+    catch { $setErrors[$name] = ($_.Exception.Message -replace '\s+', ' ').Trim() }
 }
+
+# Group Policy beats the preference API and is the usual cause when TP is off.
+$policyNames = @()
+foreach ($polKey in 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection',
+    'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet') {
+    try {
+        if (Test-Path -LiteralPath $polKey) {
+            $props = Get-ItemProperty -LiteralPath $polKey -ErrorAction Stop
+            foreach ($p in $props.PSObject.Properties) {
+                if ($p.Name -notmatch '^PS(Path|ParentPath|ChildName|Drive|Provider)$') {
+                    $policyNames += "$(Split-Path $polKey -Leaf)\$($p.Name)=$($p.Value)"
+                }
+            }
+        }
+    }
+    catch {}
+}
+
 $afterPreference = Get-MpPreference -ErrorAction SilentlyContinue
 foreach ($name in $protectedSettings.Keys) {
     $wanted = $protectedSettings[$name]
     $actual = if ($afterPreference) { $afterPreference.$name } else { $null }
     if ("$actual" -eq "$wanted") { $applied.Add("$name=$wanted") }
-    else { $blocked.Add("$name (wanted $wanted, still $actual)") }
+    else {
+        $why = ''
+        if ($setErrors.ContainsKey($name)) { $why = " [$($setErrors[$name])]" }
+        $blocked.Add("$name (wanted $wanted, still $actual)$why")
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -255,7 +281,11 @@ catch { $failures.Add("Defender scheduled tasks: $($_.Exception.Message)") }
 $success = ($failures.Count -eq 0)
 $message = "Applied $($applied.Count) setting(s)."
 if ($blocked.Count -gt 0) {
-    $message += " Blocked by Tamper Protection ($($blocked.Count)): $($blocked -join '; ')."
+    $cause = 'unknown cause (TamperProtection is OFF)'
+    if ($tamperProtected) { $cause = 'Tamper Protection' }
+    elseif ($policyNames.Count -gt 0) { $cause = 'Group Policy' }
+    $message += " Refused by ${cause} ($($blocked.Count)): $($blocked -join '; ')."
+    if ($policyNames.Count -gt 0) { $message += " Defender policy values present: $($policyNames -join ', ')." }
     if ($isServer) { $message += ' Use -Remove to uninstall Defender on this server.' }
 }
 if ($failures.Count -gt 0) { $message += " Failed: $($failures -join '; ')." }
