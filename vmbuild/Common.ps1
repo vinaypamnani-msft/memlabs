@@ -11073,8 +11073,8 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
         }
 
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion              = "260809.0"
-            LatestHotfixVersion         = "260809.0"
+            MemLabsVersion              = "260810.0"
+            LatestHotfixVersion         = "260810.0"
             PS7                         = $PS7
             Initialized                 = $true
             InitCapabilities            = $requestedInitCapabilities
