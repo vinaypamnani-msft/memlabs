@@ -172,6 +172,20 @@ if (-not $gotLock) {
 # lsass is here as the LpcReply counterparty suspect, not as a DSC host: the stall
 # parks a DSC thread on a local RPC reply, and lsass serves LSA/Kerberos/LDAP-bind.
 $watchNames = @('WmiPrvSE', 'WmiApSrv', 'msiexec', 'TrustedInstaller', 'TiWorker', 'MsMpEng', 'powershell', 'dsc', 'lsass')
+
+# Winmgmt hosts the RPC server the DSC provider host blocks on (dump showed the
+# OLE endpoint in svchost = Winmgmt). Resolve it with sc.exe, NOT a Win32_Process
+# query: WMI is the thing under investigation and the query would queue behind the
+# very stall being captured.
+function Get-WinmgmtPid {
+    try {
+        foreach ($line in (& sc.exe queryex winmgmt 2>$null)) {
+            if ($line -match 'PID\s*:\s*(\d+)') { return [int]$Matches[1] }
+        }
+    }
+    catch {}
+    return 0
+}
 # Only these actually execute DSC resources. Kept separate from $watchNames so a
 # busy Defender cannot be mistaken for DSC doing work.
 $dscHostNames = @('WmiPrvSE', 'WmiApSrv', 'dsc')
@@ -253,7 +267,7 @@ function Test-IdleStatus {
 # reconstructed afterwards: the wait reasons alone classify a stall, they do not
 # identify it. One text file per stall so it transfers as a string.
 function Write-StallBundle {
-    param([string]$Folder, [string]$Status, [int]$AgeSec, [int[]]$WatchPids, [bool]$WantDump, [string]$DscLogPath, [string[]]$DscHostNames)
+    param([string]$Folder, [string]$Status, [int]$AgeSec, [int[]]$WatchPids, [bool]$WantDump, [string]$DscLogPath, [string[]]$DscHostNames, [int[]]$ExtraDumpPids)
 
     $stamp = ([datetime]::UtcNow).ToString('yyyyMMdd-HHmmssZ')
     $file = Join-Path $Folder "stall-$stamp.txt"
@@ -381,13 +395,25 @@ function Write-StallBundle {
         }
         catch {}
         $b.Add("   target pid $target : $why")
-        $dumpPath = Join-Path $Folder "stall-$stamp-pid$target.dmp"
-        try {
-            & rundll32.exe 'C:\Windows\System32\comsvcs.dll' MiniDump $target $dumpPath full 2>&1 | Out-Null
-            if (Test-Path $dumpPath) { $b.Add("   wrote $dumpPath ($([int]((Get-Item $dumpPath).Length / 1MB))MB) -- open in WinDbg, ~*k for the stacks") }
-            else { $b.Add('   MiniDump produced no file') }
+        # Dump the RPC server too. A stack for the caller alone shows it is waiting;
+        # only the server's stack shows what it is waiting FOR.
+        $dumpTargets = New-Object System.Collections.Generic.List[object]
+        $dumpTargets.Add([pscustomobject]@{ Id = $target; Why = $why })
+        foreach ($ex in @($ExtraDumpPids | Where-Object { $_ -gt 0 -and $_ -ne $target })) {
+            $exName = 'unknown'
+            try { $exName = (Get-Process -Id $ex -ErrorAction Stop).ProcessName } catch {}
+            $dumpTargets.Add([pscustomobject]@{ Id = $ex; Why = "$exName -- the RPC server the DSC host calls into" })
         }
-        catch { $b.Add("   dump failed: $($_.Exception.Message)") }
+        foreach ($dt in $dumpTargets) {
+            $dumpPath = Join-Path $Folder "stall-$stamp-pid$($dt.Id).dmp"
+            $b.Add("   dumping pid $($dt.Id): $($dt.Why)")
+            try {
+                & rundll32.exe 'C:\Windows\System32\comsvcs.dll' MiniDump $dt.Id $dumpPath full 2>&1 | Out-Null
+                if (Test-Path $dumpPath) { $b.Add("     wrote $dumpPath ($([int]((Get-Item $dumpPath).Length / 1MB))MB) -- open in WinDbg, ~*k for the stacks") }
+                else { $b.Add('     MiniDump produced no file') }
+            }
+            catch { $b.Add("     dump failed: $($_.Exception.Message)") }
+        }
     }
 
     $b | Out-File -FilePath $file -Encoding ascii -Force
@@ -463,7 +489,7 @@ while ((Get-Date) -lt $deadline) {
     if (-not $stallAnnounced -and -not $statusIsIdle -and $statusAgeSec -ge $StallAlertSeconds) {
         $stallAnnounced = $true
         $bundlePath = ''
-        try { $bundlePath = Write-StallBundle -Folder $dir -Status $statusText -AgeSec $statusAgeSec -WatchPids $watchPids -WantDump ([bool]$CaptureDump) -DscLogPath $DscLog -DscHostNames $dscHostNames }
+        try { $bundlePath = Write-StallBundle -Folder $dir -Status $statusText -AgeSec $statusAgeSec -WatchPids $watchPids -WantDump ([bool]$CaptureDump) -DscLogPath $DscLog -DscHostNames $dscHostNames -ExtraDumpPids @($winmgmtPid) }
         catch { $bundlePath = "bundle failed: $($_.Exception.Message)" }
         ('{0} {1}s static | {2} | bundle={3}' -f $wall.ToString('o'), $statusAgeSec, $statusText, $bundlePath) |
             Out-File -FilePath $stallFile -Append -Encoding ascii
@@ -500,6 +526,8 @@ while ((Get-Date) -lt $deadline) {
         if ($watchNames -contains $pieces[1]) { $watchPids += [int]$pieces[0] }
     }
     $watchPids = @($watchPids | Sort-Object -Unique)
+    $winmgmtPid = Get-WinmgmtPid
+    if ($winmgmtPid -gt 0 -and $watchPids -notcontains $winmgmtPid) { $watchPids += $winmgmtPid }
     foreach ($e in $deltas) {
         $pieces = $e.K -split '\|'
         if ($watchNames -contains $pieces[1]) { $watchCpu += $e.D }
