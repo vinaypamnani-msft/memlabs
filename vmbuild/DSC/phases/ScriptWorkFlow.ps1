@@ -693,8 +693,9 @@ if ($scenario -eq "Hierarchy") {
 # Set-Location $LogPath, and the dot-sourced scripts that would connect it
 # (InstallRoles / ConfigureCMProxy) early-return when they have no work to do.
 function Get-PassiveSiteServerRole {
-    param([string]$Fqdn)
+    param([string]$Fqdn, [ref]$QueryFailed)
 
+    if ($QueryFailed) { $QueryFailed.Value = $false }
     try {
         # Child scope so a 'return' inside Connect-CMSite.ps1 (drive never came up)
         # exits the script block instead of returning from ScriptWorkflow itself.
@@ -703,7 +704,10 @@ function Get-PassiveSiteServerRole {
         Get-CMSiteRole -SiteSystemServerName $Fqdn -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
     }
     catch {
-        Write-DscStatus "Passive check: could not query the SMS Site Server role on $Fqdn ($($_.Exception.Message)); treating it as not present." -Warning
+        # A role that is genuinely absent returns nothing WITHOUT throwing, so reaching
+        # here means the answer is UNKNOWN -- which is not the same as 'not present'.
+        if ($QueryFailed) { $QueryFailed.Value = $true }
+        Write-DscStatus "Passive check: could not query the SMS Site Server role on $Fqdn ($($_.Exception.Message)); the answer is UNKNOWN." -Warning
     }
 }
 
@@ -758,7 +762,8 @@ if ($containsPassive) {
         $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
         $DomainFullName = $deployConfig.vmOptions.domainName
         $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
-        $passiveExists = Get-PassiveSiteServerRole -Fqdn $passiveFQDN
+        $passiveQueryFailed = $false
+        $passiveExists = Get-PassiveSiteServerRole -Fqdn $passiveFQDN -QueryFailed ([ref]$passiveQueryFailed)
 
         # The role existing + InstallPassive=Completed is NOT sufficient: CM can
         # report a transient Ready state (so the first install stamped Completed)
@@ -781,7 +786,12 @@ if ($containsPassive) {
         }
         catch {}
 
-        if ($Configuration.InstallPassive.Status -ne "Completed" -or -not $passiveExists -or $passiveFailed) {
+        if ($passiveQueryFailed -and $Configuration.InstallPassive.Status -eq "Completed") {
+            Write-DscStatus "ContainsPassive: the passive role query failed on $passiveFQDN, so presence is unknown; InstallPassive is already Completed, so NOT re-running the install on an unknown answer."
+        }
+        $passiveMissing = ((-not $passiveExists) -and (-not $passiveQueryFailed))
+
+        if ($Configuration.InstallPassive.Status -ne "Completed" -or $passiveMissing -or $passiveFailed) {
             Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
             Set-Location $LogPath
