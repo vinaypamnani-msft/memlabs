@@ -231,6 +231,19 @@ function Get-PidConnections {
     return @($out | Select-Object -First 40)
 }
 
+# A status that is static BY DESIGN is not a stall. 'Complete!' is terminal -- the
+# build has finished and the text never changes again -- and Write-Status
+# deliberately refuses to overwrite the ConfigMgrSetup line for the whole of CM
+# setup. Counting either reported a "stall" on all 14 VMs of a finished lab.
+function Test-IdleStatus {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $true }
+    $t = $Text.Trim()
+    if ($t -eq 'Complete!') { return $true }
+    if ($t -like 'Setting up ConfigMgr. See ConfigMgrSetup.log*') { return $true }
+    return $false
+}
+
 # Everything a human needs to name the culprit, captured AT the stall rather than
 # reconstructed afterwards: the wait reasons alone classify a stall, they do not
 # identify it. One text file per stall so it transfers as a string.
@@ -421,11 +434,12 @@ while ((Get-Date) -lt $deadline) {
         $stallAnnounced = $false
     }
     $statusAgeSec = [math]::Round(($mono - $statusChangedMono) / 1000.0, 0)
+    $statusIsIdle = Test-IdleStatus -Text $statusText
 
     # Announce the moment a static period crosses the alert threshold, to a tiny
     # file of its own. Stalls are not predictable, so -Action Status has to be able
     # to answer "has one happened yet" without dragging back a half-megabyte of ticks.
-    if (-not $stallAnnounced -and $statusAgeSec -ge $StallAlertSeconds) {
+    if (-not $stallAnnounced -and -not $statusIsIdle -and $statusAgeSec -ge $StallAlertSeconds) {
         $stallAnnounced = $true
         $bundlePath = ''
         try { $bundlePath = Write-StallBundle -Folder $dir -Status $statusText -AgeSec $statusAgeSec -WatchPids $watchPids -WantDump ([bool]$CaptureDump) -DscLogPath $DscLog }
@@ -478,6 +492,7 @@ while ((Get-Date) -lt $deadline) {
         skewMs     = $skewMs
         workMs     = [math]::Round($prevWorkMs, 0)
         statusAge  = $statusAgeSec
+        idle       = $statusIsIdle
         dscLogSize = $dscLogSize
         watchCpuMs = [math]::Round($watchCpu, 0)
         topCpu     = $top
@@ -499,7 +514,7 @@ while ((Get-Date) -lt $deadline) {
             })
     }
 
-    if ($statusAgeSec -ge $DeepAfterSeconds -and ($mono - $lastDeepMono) -ge ($DeepEverySeconds * 1000)) {
+    if (-not $statusIsIdle -and $statusAgeSec -ge $DeepAfterSeconds -and ($mono - $lastDeepMono) -ge ($DeepEverySeconds * 1000)) {
         $lastDeepMono = $mono
         $threads = @{}
         $probeSw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -878,7 +893,10 @@ function Invoke-StartAction {
             $windows = @()
             $run = $null
             foreach ($t in $ticks) {
-                if ([int]$t.statusAge -ge $StallSeconds) {
+                # 'Complete!' and the ConfigMgrSetup line are static by design, so a
+                # finished lab would otherwise report a stall on every VM.
+                $isIdle = [bool]$t.idle
+                if (-not $isIdle -and [int]$t.statusAge -ge $StallSeconds) {
                     if ($null -eq $run) { $run = @() }
                     $run += $t
                 }
