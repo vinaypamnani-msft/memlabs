@@ -345,8 +345,18 @@ function Invoke-Guest {
     param([string]$Vm, [scriptblock]$Sb, [object[]]$ArgList)
     $r = Invoke-VmCommand -VmName $Vm -VmDomainName $DomainName -ScriptBlock $Sb -ArgumentList $ArgList `
         -SuppressLog -TimeoutSeconds $TimeoutSeconds -AsJob
+    # Invoke-VmCommand returns a bare $false (not the result object) on its own
+    # pre-flight failures, so "no output" must be reported, never treated as quiet success.
+    if ($r -is [bool] -or $null -eq $r) {
+        Write-Host "  $Vm : FAILED -- Invoke-VmCommand refused before dispatch (returned '$r'). Usually a missing vmbuildadmin credential." -ForegroundColor Red
+        return $null
+    }
     if ($r.ScriptBlockFailed -or $r.TimedOut) {
-        Write-Host "  $Vm : FAILED ($($r.ErrorDetails))" -ForegroundColor Red
+        Write-Host "  $Vm : FAILED (timedOut=$($r.TimedOut) channelBroken=$($r.ChannelBroken)) $($r.ErrorDetails)" -ForegroundColor Red
+        return $null
+    }
+    if ($null -eq $r.ScriptBlockOutput) {
+        Write-Host "  $Vm : FAILED -- guest scriptblock returned nothing. $($r.ErrorDetails)" -ForegroundColor Red
         return $null
     }
     return $r.ScriptBlockOutput
@@ -354,7 +364,30 @@ function Invoke-Guest {
 
 if ($Action -ne 'Report' -and $Action -ne 'SelfTest') {
     $commonPath = Join-Path $vmbuildRoot 'Common.ps1'
-    . $commonPath -InJob
+    $bom = [System.IO.File]::ReadAllBytes($commonPath)[0..2]
+    if (-not ($bom[0] -eq 0xEF -and $bom[1] -eq 0xBB -and $bom[2] -eq 0xBF)) {
+        throw "Common.ps1 is missing its UTF-8 BOM. Run: git checkout -- vmbuild/Common.ps1"
+    }
+
+    # Get-VmSession needs $Common.LocalAdmin.Password. Do NOT dot-source with
+    # -InJob: it skips storage init, leaves LocalAdmin null, and Invoke-VmCommand
+    # then returns a bare $false for every VM -- which looks like an empty result,
+    # not an error. A fast init sets Common.Initialized and the whole init block is
+    # gated on that flag, so re-dot-sourcing is a no-op; load the credential directly.
+    function Test-CredLoaded { return ($Common -and $Common.LocalAdmin -and $Common.LocalAdmin.Password) }
+    if (-not (Test-CredLoaded)) { . $commonPath -FastInit }
+    if (-not (Test-CredLoaded) -and (Get-Command Get-LocalAdminCredential -ErrorAction SilentlyContinue)) {
+        if ($Common) { $Common.Initialized = $false }
+        try { $null = Get-LocalAdminCredential } catch {}
+    }
+    if (-not (Test-CredLoaded)) {
+        if ($Common) { $Common.Initialized = $false }
+        . $commonPath
+    }
+    if (-not (Test-CredLoaded)) {
+        throw ("Local admin (vmbuildadmin) credential not loaded; expected cache at {0}. " -f (Join-Path $vmbuildRoot 'cache\vmbuildadmin.txt')) +
+        'Every guest call would fail silently without it.'
+    }
 }
 
 switch ($Action) {
@@ -446,8 +479,9 @@ switch ($Action) {
         }
         foreach ($vm in $targets) {
             $text = Invoke-Guest -Vm $vm -Sb $sb -ArgList @($guestOut)
+            if ($null -eq $text) { continue }
             if ([string]::IsNullOrWhiteSpace($text)) {
-                Write-Host "  $vm : no samples" -ForegroundColor Yellow
+                Write-Host "  $vm : $guestOut is missing or empty -- the sampler never ran there" -ForegroundColor Yellow
                 continue
             }
             $dest = Join-Path $Path ("{0}-{1}.jsonl" -f $vm, $stamp)
