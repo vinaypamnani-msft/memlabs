@@ -1264,7 +1264,7 @@ function ConvertTo-DeployConfigEx {
                     if ($thisVM.externalDomainJoinSiteCode -ne "NONE") {
                         $RemoteSS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.externalDomainJoinSiteCode -DomainName $thisVM.ForestTrust -type VM
                         if (-not $RemoteSS.VmName) {
-                            Write-log "Could not find a site server with SiteCode $($thisVM.externalDomainJoinSiteCode) in domain $($thisVM.ForestTrust)" -Failure -OutputStream
+                            Write-log "Could not find a site server with SiteCode $($thisVM.externalDomainJoinSiteCode) in domain $($thisVM.ForestTrust)" -Failure
                             return $false
                         }
                         $ExternalSiteServer = "$($RemoteSS.VmName).$($thisVM.ForestTrust)"

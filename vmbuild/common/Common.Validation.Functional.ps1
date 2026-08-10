@@ -20,6 +20,30 @@
 # read and emitted by Phase11Job after Test-VmFunctionality returns.
 $script:Phase11OutputBuffer = $null
 
+function Add-Phase11Output {
+    <#
+    .SYNOPSIS
+        Queue a console line for the Phase11Job to emit, without polluting the caller's return.
+    .DESCRIPTION
+        The rule at the top of this file exists because Write-Log -OutputStream calls
+        Write-Output, so the log object joins whatever the caller assigned -- turning a
+        $false result into a truthy array. Use this instead. List.Add() returns void, so
+        nothing reaches the success stream. Falls back to the log when the buffer does not
+        exist (Test-SQLAOPostPhase5 runs from New-Lab, outside the Phase 11 job).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [ValidateSet('Info', 'Warning', 'Success', 'Failure')][string]$Level = 'Info'
+    )
+
+    if ($null -eq $script:Phase11OutputBuffer) {
+        Write-Log $Text -LogOnly
+        return
+    }
+    $script:Phase11OutputBuffer.Add(@{ Text = $Text; Level = $Level })
+}
+
 function Test-VmFunctionality {
     <#
     .SYNOPSIS
@@ -3843,7 +3867,7 @@ function Test-CMSiteFunctionality {
                     )
                 })
             if ($assigned.Count -eq 0) { continue }
-            Write-Log "[Phase $Phase] $VMName [ChildSites ($siteCode)]: secondary '$csc' link NOT Active but $($assigned.Count) push client(s) are assigned to it ($(($assigned | ForEach-Object { $_.vmName }) -join ', ')) -- collecting inter-site content-pipeline diagnostics from parent '$VMName' and secondary '$($childVm.vmName)'" -OutputStream
+            Add-Phase11Output "[Phase $Phase] $VMName [ChildSites ($siteCode)]: secondary '$csc' link NOT Active but $($assigned.Count) push client(s) are assigned to it ($(($assigned | ForEach-Object { $_.vmName }) -join ', ')) -- collecting inter-site content-pipeline diagnostics from parent '$VMName' and secondary '$($childVm.vmName)'"
             $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel "SecondaryLink-Parent ($csc)" -Collector $Phase11SmsSiteLogCollector
             $null = Save-Phase11GuestLogs -VMName $childVm.vmName -DomainName $domain -RoleLabel "SecondaryLink-Secondary ($csc)" -Collector $Phase11SmsSiteLogCollector
         }
@@ -7020,7 +7044,7 @@ function Test-PassiveSiteFunctionality {
     # authoritative logs) plus hman/rcmctrl/ConfigMgrSetup from BOTH the active
     # server and the passive node so the regression reason is captured.
     if (($parentResult.ScriptBlockOutput -is [hashtable]) -and ($parentResult.ScriptBlockOutput.Passed -eq $false)) {
-        Write-Log "[Phase $Phase] $VMName [PassiveSite]: passive node reported in a failed/prereq state -- collecting failovermgr/smsexec/hman/rcmctrl/ConfigMgrSetup logs from the active site server '$($activeVM.vmName)' and the passive node" -OutputStream
+        Add-Phase11Output "[Phase $Phase] $VMName [PassiveSite]: passive node reported in a failed/prereq state -- collecting failovermgr/smsexec/hman/rcmctrl/ConfigMgrSetup logs from the active site server '$($activeVM.vmName)' and the passive node"
         $null = Save-Phase11GuestLogs -VMName $activeVM.vmName -DomainName $domain -RoleLabel 'PassiveSite-Active' -Collector $Phase11PassiveSiteDiagCollector
         $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'PassiveSite-Node' -Collector $Phase11PassiveSiteDiagCollector
     }
@@ -7096,7 +7120,7 @@ function Save-CcmSetupLog {
         try {
             Set-Content -LiteralPath $dest -Value $content -Encoding UTF8 -ErrorAction Stop
             $kb = [math]::Round(([System.Text.Encoding]::UTF8.GetByteCount($content)) / 1KB, 1)
-            Write-Log "[Phase $Phase] $VMName [DomainMember]: Pulled $name (${kb}KB tail) -> $dest" -OutputStream
+            Add-Phase11Output "[Phase $Phase] $VMName [DomainMember]: Pulled $name (${kb}KB tail) -> $dest"
         }
         catch {
             Write-Log "[Phase $Phase] $VMName [DomainMember]: ccmsetup log capture: failed to write ${name}: $_" -Warning -LogOnly
@@ -7179,7 +7203,7 @@ function Save-Phase11GuestLogs {
         try {
             Set-Content -LiteralPath $dest -Value $content -Encoding UTF8 -ErrorAction Stop
             $kb = [math]::Round(([System.Text.Encoding]::UTF8.GetByteCount($content)) / 1KB, 1)
-            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Pulled $name (${kb}KB tail) -> $dest" -OutputStream
+            Add-Phase11Output "[Phase $Phase] $VMName [$RoleLabel]: Pulled $name (${kb}KB tail) -> $dest"
             $saved.Add($dest)
         }
         catch {
@@ -9164,7 +9188,7 @@ function Test-PullDPConfiguration {
     # site server's distmgr/PkgXferMgr logs into the host logs folder, so the pull
     # failure/backlog can be triaged offline without hand-running commands.
     if (($result.ScriptBlockOutput -is [hashtable]) -and (($result.ScriptBlockOutput.Passed -eq $false) -or ($result.ScriptBlockOutput.ContainsKey('CollectLogs') -and $result.ScriptBlockOutput.CollectLogs))) {
-        Write-Log "[Phase $Phase] $VMName [PullDP]: content behind/failed -- collecting pull-DP + source logs into the logs folder" -OutputStream
+        Add-Phase11Output "[Phase $Phase] $VMName [PullDP]: content behind/failed -- collecting pull-DP + source logs into the logs folder"
         $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'PullDP' -Collector $Phase11CcmClientLogCollector
         $null = Save-Phase11GuestLogs -VMName $parentVM.vmName -DomainName $domain -RoleLabel 'PullDP-Source' -Collector $Phase11SmsSiteLogCollector
     }
@@ -9413,7 +9437,7 @@ function Test-CMClientPackageDistribution {
     $failing = @()
     if (($result.ScriptBlockOutput -is [hashtable]) -and $result.ScriptBlockOutput.ContainsKey('FailingDPs')) { $failing = @($result.ScriptBlockOutput.FailingDPs | Where-Object { $_ }) }
     if (($result.ScriptBlockOutput -is [hashtable]) -and (($result.ScriptBlockOutput.Passed -eq $false) -or ($failing.Count -gt 0))) {
-        Write-Log "[Phase $Phase] $VMName [ClientPkg]: distribution failed or a DP is behind -- collecting distmgr/PkgXferMgr logs into the logs folder" -OutputStream
+        Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: distribution failed or a DP is behind -- collecting distmgr/PkgXferMgr logs into the logs folder"
         $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'ClientPkg' -Collector $Phase11SmsSiteLogCollector
 
         # The summarizer is HIERARCHY-wide, so the failing DP routinely belongs to a
@@ -9423,7 +9447,7 @@ function Test-CMClientPackageDistribution {
         # another site's content path -- as the only evidence collected.
         $domainVms = @()
         try { $domainVms = @(Get-List -Type VM -DomainName $domain) }
-        catch { Write-Log "[Phase $Phase] $VMName [ClientPkg]: could not enumerate VMs in domain '$domain' to resolve failing DP(s): $($_.Exception.Message)" -Warning -OutputStream }
+        catch { Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: could not enumerate VMs in domain '$domain' to resolve failing DP(s): $($_.Exception.Message)" -Level Warning }
         $collectedFrom = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
         [void]$collectedFrom.Add($VMName)
 
@@ -9431,11 +9455,11 @@ function Test-CMClientPackageDistribution {
             $dpVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$dpShort".ToUpper()) } | Select-Object -First 1
             if (-not $dpVm) { $dpVm = $domainVms | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$dpShort".ToUpper()) } | Select-Object -First 1 }
             if (-not $dpVm) {
-                Write-Log "[Phase $Phase] $VMName [ClientPkg]: failing DP '$dpShort' matches no VM in domain '$domain' -- no DP-side logs collected, triage it by hand." -Warning -OutputStream
+                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: failing DP '$dpShort' matches no VM in domain '$domain' -- no DP-side logs collected, triage it by hand." -Level Warning
                 continue
             }
             if ($collectedFrom.Add($dpVm.vmName)) {
-                Write-Log "[Phase $Phase] $VMName [ClientPkg]: collecting DP logs from behind/failing DP '$($dpVm.vmName)'" -OutputStream
+                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: collecting DP logs from behind/failing DP '$($dpVm.vmName)'"
                 $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11CcmClientLogCollector
                 $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11SmsSiteLogCollector
                 # A Secondary DP that never gets the client package is often wedged in
@@ -9445,7 +9469,7 @@ function Test-CMClientPackageDistribution {
                 # Secondary's site DB directly so the ROOT cause is captured, not just
                 # the symptom.
                 if ("$($dpVm.role)" -eq 'Secondary') {
-                    Write-Log "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is a Secondary DP -- probing its site DB for the site exchange certificate (distmgr PFX-decrypt wedge)" -OutputStream
+                    Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is a Secondary DP -- probing its site DB for the site exchange certificate (distmgr PFX-decrypt wedge)"
                     $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-SecCert' -Collector $Phase11SecondaryCertDiagCollector -TimeoutSeconds 180
                 }
             }
@@ -9460,11 +9484,11 @@ function Test-CMClientPackageDistribution {
                         $_.vmName -and "$($_.siteCode)" -eq $ownerCode -and "$($_.role)" -in @('CAS', 'Primary', 'Secondary')
                     }) | Select-Object -First 1
                 if ($ownerVm -and $collectedFrom.Add($ownerVm.vmName)) {
-                    Write-Log "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is fed by site $ownerCode -- collecting the sending side from '$($ownerVm.vmName)'" -OutputStream
+                    Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is fed by site $ownerCode -- collecting the sending side from '$($ownerVm.vmName)'"
                     $null = Save-Phase11GuestLogs -VMName $ownerVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-Parent' -Collector $Phase11SmsSiteLogCollector
                 }
                 elseif (-not $ownerVm) {
-                    Write-Log "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is fed by site $ownerCode but no site server for that site exists in domain '$domain' -- sending-side logs NOT collected." -Warning -OutputStream
+                    Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is fed by site $ownerCode but no site server for that site exists in domain '$domain' -- sending-side logs NOT collected." -Level Warning
                 }
             }
         }
@@ -10978,7 +11002,7 @@ function Test-CMSiteWideFunctionality {
             $stallLine = @($result.ScriptBlockOutput.Details | Where-Object { $_ -match 'WARN: SUP sync at .* may be slow or stuck' }) | Select-Object -First 1
         }
         if ($stallLine -and $supVmObj -and $supVmObj.vmName) {
-            Write-Log "[Phase $Phase] $VMName [$siteRoleLabel]: SUP sync appears stuck -- collecting WsusPool/IIS/SoftwareDistribution forensics from '$($supVmObj.vmName)'" -OutputStream
+            Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: SUP sync appears stuck -- collecting WsusPool/IIS/SoftwareDistribution forensics from '$($supVmObj.vmName)'"
             $null = Save-Phase11GuestLogs -VMName $supVmObj.vmName -DomainName $domain -RoleLabel 'SUP-SyncStall' -Collector $Phase11WsusStallCollector -TimeoutSeconds 240
         }
     }
@@ -12186,7 +12210,7 @@ function Test-SQLAOPostPhase5 {
         $witnessShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Witness"
         $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup"
 
-        Write-Log "[Phase $Phase] $VMName [SQLAO]: Running post-Phase-5 validation" -OutputStream
+        Add-Phase11Output "[Phase $Phase] $VMName [SQLAO]: Running post-Phase-5 validation"
 
         $scriptBlock = {
             param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domainName)

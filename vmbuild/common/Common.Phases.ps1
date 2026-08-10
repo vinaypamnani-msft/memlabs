@@ -278,7 +278,7 @@ function Mount-SqlIsoForPhase {
         # across the guest's reboot, re-present it so the guest raises a fresh
         # media-arrival event and the Phase 4 DSC can see the disc.
         if (-not (Mount-IsoOnVm -VmName $vm.vmName -IsoPath $sqlIsoPath -Context "SQL" -Phase 4 -RepresentIfAttached)) {
-            Write-Log "[Phase 4]: $($vm.vmName): Failed mounting SQL ISO $sqlIsoPath as a DVD drive" -Failure -OutputStream
+            Write-Log "[Phase 4]: $($vm.vmName): Failed mounting SQL ISO $sqlIsoPath as a DVD drive" -Failure
             continue
         }
 

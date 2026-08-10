@@ -915,7 +915,7 @@ function Start-VM2 {
                 # A terminal memory failure is the one case where the operator needs
                 # to know what is holding the RAM, not just that it ran out.
                 if ($stopErrText -match '0x8007000E|not enough memory|Insufficient system resources|allocate') {
-                    Write-HostMemoryPressureDiag -Context "$Name Start-VM gave up (out of memory)" -OutputStream
+                    Write-HostMemoryPressureDiag -Context "$Name Start-VM gave up (out of memory)"
                 }
                 if ($Passthru.IsPresent) {
                     return $false

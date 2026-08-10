@@ -5268,7 +5268,7 @@ function New-VirtualMachine {
         Write-Progress2 $Activity -Status "Starting" -percentcomplete 0 -force
         # Test if source file exists
         if (-not (Test-Path $SourceDiskPath) -and (-not $OSDClient.IsPresent)) {
-            Write-Log "$VmName`: $SourceDiskPath not found. Cannot create new VM." -failure -OutputStream
+            Write-Log "$VmName`: $SourceDiskPath not found. Cannot create new VM." -failure
             return $false
         }
 

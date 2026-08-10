@@ -387,7 +387,7 @@ function Start-VMFixes {
 
     $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
     if ($result.ScriptBlockOutput -eq $false) {
-        Write-Log "C:\Staging not found in vm $VMName.  Machine may no longer be managed by MemLabs.  Returning success." -Success -OutputStream
+        Write-Log "C:\Staging not found in vm $VMName.  Machine may no longer be managed by MemLabs.  Returning success." -Success
         return $true
     }
 

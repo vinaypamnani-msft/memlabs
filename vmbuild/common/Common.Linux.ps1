@@ -1218,7 +1218,7 @@ function New-LinuxVirtualMachine {
         }
 
         if (-not (Test-Path $SourceDiskPath)) {
-            Write-Log "$VmName`: Source VHDX $SourceDiskPath not found. It is downloaded from Azure storage via the file list -- ensure file download succeeded before deploying." -Failure -OutputStream
+            Write-Log "$VmName`: Source VHDX $SourceDiskPath not found. It is downloaded from Azure storage via the file list -- ensure file download succeeded before deploying." -Failure
             return $false
         }
 
@@ -1256,7 +1256,7 @@ function New-LinuxVirtualMachine {
                     Remove-Item -Path $vmSubPath -Force -Recurse -ErrorAction Stop
                 }
                 catch {
-                    Write-Log "$VmName`: Could not remove stale VM dir $vmSubPath`: $($_.Exception.Message). Refusing to deploy on top of a stale OS disk." -Failure -OutputStream
+                    Write-Log "$VmName`: Could not remove stale VM dir $vmSubPath`: $($_.Exception.Message). Refusing to deploy on top of a stale OS disk." -Failure
                     return $false
                 }
             }
@@ -1337,7 +1337,7 @@ function New-LinuxVirtualMachine {
                 Remove-Item -Path $osDiskPath -Force -ErrorAction Stop
             }
             catch {
-                Write-Log "$VmName`: Existing OS disk $osDiskPath could not be removed: $($_.Exception.Message)" -Failure -OutputStream
+                Write-Log "$VmName`: Existing OS disk $osDiskPath could not be removed: $($_.Exception.Message)" -Failure
                 return $false
             }
         }
@@ -1354,7 +1354,7 @@ function New-LinuxVirtualMachine {
         $srcLen = (Get-Item -LiteralPath $SourceDiskPath).Length
         $dstLen = (Get-Item -LiteralPath $osDiskPath -ErrorAction SilentlyContinue).Length
         if (-not $dstLen -or $dstLen -lt ($srcLen * 0.5)) {
-            Write-Log "$VmName`: OS disk copy looks suspect (src=$srcLen dst=$dstLen). Refusing to continue." -Failure -OutputStream
+            Write-Log "$VmName`: OS disk copy looks suspect (src=$srcLen dst=$dstLen). Refusing to continue." -Failure
             return $false
         }
 
@@ -3202,7 +3202,7 @@ function Write-LinuxHostStorageDiag {
         }
         catch {}
         if ($lines.Count -eq 0) { $lines.Add("  (no host storage info available)") }
-        Write-Log "[HostStorageDiag] $VmName $Context`n$($lines -join "`n")" -LogOnly -OutputStream
+        Write-Log "[HostStorageDiag] $VmName $Context`n$($lines -join "`n")" -LogOnly
     }
     catch {
         Write-Log "[HostStorageDiag] $VmName`: diag failed: $_" -LogOnly
@@ -3300,7 +3300,7 @@ echo "DNS=$DNS_OK HTTP=$HTTP_OK"
         $diagBash = 'echo "=== resolv.conf ==="; cat /etc/resolv.conf; echo "=== ip route ==="; ip route show; echo "=== resolvectl ==="; resolvectl status 2>/dev/null | head -20'
         $diag = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $diagBash -Sudo -TimeoutSeconds 15 -SuppressLog -DisplayName "Network diagnostics"
         $diagText = if ($diag -and $diag.ScriptBlockOutput) { $diag.ScriptBlockOutput } else { "(no output)" }
-        Write-Log "[Proxy] $vmName`: No internet access after 6 attempts. apt requires DNS + HTTP to archive.ubuntu.com.`n$diagText" -Failure -OutputStream
+        Write-Log "[Proxy] $vmName`: No internet access after 6 attempts. apt requires DNS + HTTP to archive.ubuntu.com.`n$diagText" -Failure
         return $false
     }
 
@@ -3926,7 +3926,7 @@ fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>&1 || echo "no locks
         $i++
         $statusText = "[$i/$($ops.Count)] $($op.Label)"
         Write-Progress2 -Activity $activity -Status $statusText -force
-        Write-Log "[Phase 3]: $vmName`: $statusText" -OutputStream
+        Write-Log "[Phase 3]: $vmName`: $statusText" -LogOnly
 
         # Wrap in `set -e` so any failed command inside the module aborts the
         # module (and the whole script) with non-zero exit; mirrors the old
@@ -3954,7 +3954,7 @@ fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>&1 || echo "no locks
                 }
                 # Retry the same module after reboot.
                 Write-Progress2 -Activity $activity -Status "[$i/$($ops.Count)] $($op.Label) (retry after reboot)" -force
-                Write-Log "[Phase 3]: $vmName`: [$i/$($ops.Count)] $($op.Label) (retry after reboot)" -OutputStream
+                Write-Log "[Phase 3]: $vmName`: [$i/$($ops.Count)] $($op.Label) (retry after reboot)" -LogOnly
                 $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -DisplayName "$($op.Tag)-retry" -TimeoutSeconds $op.TimeoutSec
             }
             if (-not ($result -and $result.CommandResult)) {
