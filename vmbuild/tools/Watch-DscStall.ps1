@@ -169,7 +169,9 @@ if (-not $gotLock) {
 
 # Processes worth naming when something blocks. WmiPrvSE hosts class-based DSC
 # resources; the rest are the usual machine-wide lock holders.
-$watchNames = @('WmiPrvSE', 'WmiApSrv', 'msiexec', 'TrustedInstaller', 'TiWorker', 'MsMpEng', 'powershell', 'dsc')
+# lsass is here as the LpcReply counterparty suspect, not as a DSC host: the stall
+# parks a DSC thread on a local RPC reply, and lsass serves LSA/Kerberos/LDAP-bind.
+$watchNames = @('WmiPrvSE', 'WmiApSrv', 'msiexec', 'TrustedInstaller', 'TiWorker', 'MsMpEng', 'powershell', 'dsc', 'lsass')
 # Only these actually execute DSC resources. Kept separate from $watchNames so a
 # busy Defender cannot be mistaken for DSC doing work.
 $dscHostNames = @('WmiPrvSE', 'WmiApSrv', 'dsc')
@@ -845,6 +847,54 @@ function Invoke-StartAction {
                     $body | Set-Content -LiteralPath $bdest -Encoding UTF8
                     Write-Host "           bundle -> $bdest" -ForegroundColor Magenta
                 }
+            }
+
+            # A dump is binary, so the text channel above cannot carry it. Without
+            # this it would sit in the guest unmentioned -- collected but unreachable.
+            $dumpSb = {
+                param($dir)
+                $o = @()
+                foreach ($d in @(Get-ChildItem -Path $dir -Filter '*.dmp' -File -ErrorAction SilentlyContinue)) {
+                    $o += ("{0}|{1}" -f $d.FullName, $d.Length)
+                }
+                return ($o -join "`n")
+            }
+            $dumpList = Invoke-Guest -Vm $vm -Sb $dumpSb -ArgList @($guestDir)
+            $dumps = @("$dumpList" -split "`n" | Where-Object { $_ -match '\|\d+$' })
+            if ($dumps.Count -gt 0) {
+                $session = $null
+                try { $session = Get-VmSession -VmName $vm -VmDomainName $DomainName -Quiet } catch {}
+                foreach ($d in $dumps) {
+                    $parts = $d -split '\|'
+                    $guestPath = $parts[0]
+                    $bytes = [int64]$parts[1]
+                    $mb = [int]($bytes / 1MB)
+                    $ddest = Join-Path $runFolder ("{0}-{1}" -f $vm, (Split-Path $guestPath -Leaf))
+                    if (-not $session) {
+                        Write-Host "           dump   : NO SESSION for the binary copy -- still in the guest at $guestPath (${mb}MB)" -ForegroundColor Red
+                        continue
+                    }
+                    try {
+                        Copy-Item -Path $guestPath -Destination $ddest -FromSession $session -Force -ErrorAction Stop
+                    }
+                    catch {
+                        Write-Host "           dump   : COPY FAILED ($($_.Exception.Message)) -- still in the guest at $guestPath (${mb}MB)" -ForegroundColor Red
+                        continue
+                    }
+                    # Size-match or it did not arrive. Reporting a truncated dump as
+                    # collected would waste the whole capture.
+                    $local = Get-Item -LiteralPath $ddest -ErrorAction SilentlyContinue
+                    if ($null -eq $local -or $local.Length -ne $bytes) {
+                        $got = 0
+                        if ($local) { $got = $local.Length }
+                        Write-Host "           dump   : SIZE MISMATCH (guest $bytes vs local $got) -- kept in the guest at $guestPath" -ForegroundColor Red
+                        continue
+                    }
+                    Write-Host "           dump   -> $ddest (${mb}MB, size verified)" -ForegroundColor Magenta
+                    # Only now is it safe to reclaim guest disk; several full dumps fill C:.
+                    Invoke-Guest -Vm $vm -Sb { param($p) Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue; return 'ok' } -ArgList @($guestPath) | Out-Null
+                }
+                if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
             }
         }
         Write-Host "`nCollected into $runFolder" -ForegroundColor Yellow
