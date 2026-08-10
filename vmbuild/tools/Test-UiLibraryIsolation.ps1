@@ -30,7 +30,9 @@ function Get-FileAst {
 
 # 1. Which files does Common.ps1 load only when NOT in a job?
 $rootAst = Get-FileAst $commonPs1
-$gated = New-Object System.Collections.Generic.HashSet[string]
+# Ordinal-ignore-case: the dot-source text says Common.menu.ps1 while the file on disk is
+# Common.Menu.ps1, and a case-sensitive set silently treats that file as ungated.
+$gated = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
 foreach ($ifAst in $rootAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.IfStatementAst] }, $true)) {
     foreach ($clause in $ifAst.Clauses) {
         if ($clause.Item1.Extent.Text -notmatch '-not\s+\$InJob') { continue }
