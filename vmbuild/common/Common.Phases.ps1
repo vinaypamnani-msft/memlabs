@@ -842,6 +842,45 @@ function Resolve-PhaseResult {
     return [bool]($bools[-1])
 }
 
+function Resolve-WaitPhaseResult {
+    <#
+    .SYNOPSIS
+    Reduce Wait-Phase's return to the single tally object it meant to return.
+
+    .DESCRIPTION
+    Same defect class as Resolve-PhaseResult, one level down. Every caller reads
+    $result.Failed / .Success / .Warning / .Elapsed / .Crashed, and PowerShell member
+    enumeration turns each of those into an Object[] the moment ANYTHING else lands on
+    Wait-Phase's success stream. A host-side `Write-Log ... -OutputStream` (it calls
+    Write-Output) leaked one object when a job was stopped for waiting on a failed
+    dependency; $result.Elapsed reached $global:BuildStats as an Object[] and
+    Write-BuildSummary died on .ToString("hh\:mm\:ss") at the end of a 90-minute build.
+
+    Take the LAST object carrying the tally's own members -- Wait-Phase's `return` is
+    always last -- and name whatever else was in the stream so the leak gets fixed at
+    its source rather than absorbed here forever.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$Raw,
+        [object]$Phase
+    )
+
+    $items = @($Raw)
+    if ($items.Count -eq 1) { return $Raw }
+
+    $shape = ($items | ForEach-Object { if ($null -eq $_) { '<null>' } else { $_.GetType().Name } }) -join ', '
+    if ($shape.Length -gt 300) { $shape = $shape.Substring(0, 300) + '...' }
+    Write-Log "[Phase $Phase] Wait-Phase returned $($items.Count) object(s) instead of one tally. Shape: [$shape]. Something in it leaked to the success stream; suppress it with `$null = or drop -OutputStream (that switch is for job scriptblocks only)." -Warning
+
+    $tally = @($items | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'Crashed') })
+    if ($tally.Count -eq 0) {
+        Write-Log "[Phase $Phase] Wait-Phase returned no tally object at all; the phase result cannot be judged." -Failure
+        return $Raw
+    }
+    return $tally[-1]
+}
+
 function Start-Phase {
 
     param(
@@ -953,8 +992,10 @@ function Start-Phase {
                     if ($needGB -gt $availGB) {
                         Write-OrangePoint "[Phase 1] Memory pre-flight: creating $($newVMs.Count) VM(s) needs ~$($newStartupGB)GB startup + $($hostReserveGB)GB host reserve = $($needGB)GB, but only $($availGB)GB is currently available. The build may run out of memory mid-phase and roll back." -WriteLog
                         # Name the VMs holding the RAM. Without this the operator sees a
-                        # shortfall with no idea which lab to shut down.
-                        Write-HostMemoryPressureDiag -Context "Phase 1 pre-flight shortfall (need ${needGB}GB, have ${availGB}GB)" -OutputStream
+                        # shortfall with no idea which lab to shut down. NOT -OutputStream:
+                        # that mode is for job scriptblocks and would leak into Start-Phase's
+                        # pass/fail return without printing anything extra to the console.
+                        Write-HostMemoryPressureDiag -Context "Phase 1 pre-flight shortfall (need ${needGB}GB, have ${availGB}GB)"
                         # ...and whether PowerShell itself is part of the problem: leftover
                         # job workers hold ~300MB each and are invisible in the VM totals.
                         $null = Write-PowerShellJobLeakDiag -Context 'Phase 1 pre-flight shortfall'
@@ -1084,7 +1125,7 @@ function Start-Phase {
     }
     $global:PhaseSkipped = $false
 
-    $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig
+    $result = Resolve-WaitPhaseResult -Raw (Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig) -Phase $Phase
 
     # A worker process that DIED is not a VM that failed. The disposed-PSJob callback
     # fires on a threadpool thread, so no try/catch in the worker can survive it, and one
@@ -1097,7 +1138,7 @@ function Start-Phase {
         $null = Write-Log "[Phase $Phase] $($crashedVMs.Count) worker process(es) died without reporting a failure ($($crashedVMs -join ', ')). Re-dispatching those VMs once." -Warning -OutputStream
         $retry = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig -OnlyVMs $crashedVMs
         if ($retry -and $retry.Applicable -and @($retry.Jobs).Count -gt 0) {
-            $retryResult = Wait-Phase -Phase $Phase -Jobs $retry.Jobs -AdditionalData $retry.AdditionalData -DeployConfig $deployConfig
+            $retryResult = Resolve-WaitPhaseResult -Raw (Wait-Phase -Phase $Phase -Jobs $retry.Jobs -AdditionalData $retry.AdditionalData -DeployConfig $deployConfig) -Phase $Phase
             # The retry supersedes the crash: drop those from the original failure count
             # and fold in whatever the second attempt actually produced.
             $result.Failed = [Math]::Max(0, $result.Failed - $crashedVMs.Count) + $retryResult.Failed
@@ -2554,7 +2595,9 @@ function Wait-Phase {
                 # PowerShell prompt) cost two builds 5h and 10h exactly this way. Measured:
                 # Stop-Job clears a Blocked job in ~39ms, so tearing down inline is safe.
                 if ($job.State -eq 'Blocked') {
-                    Write-Log "[Phase $Phase]: $($job.Name): STOPPING this job -- it is BLOCKED waiting for host input, which never arrives in a background job. The usual cause is a call missing a Mandatory parameter, so PowerShell is prompting for it; the last thing this job logged names the code that did it." -Failure -OutputStream
+                    # Plain -Failure, never -OutputStream: this runs on the HOST, so -OutputStream
+                    # would Write-Output into Wait-Phase's own return value (see below).
+                    Write-Log "[Phase $Phase]: $($job.Name): STOPPING this job -- it is BLOCKED waiting for host input, which never arrives in a background job. The usual cause is a call missing a Mandatory parameter, so PowerShell is prompting for it; the last thing this job logged names the code that did it." -Failure
                     try { $jobs.Remove($job) } catch { }
                     try { Stop-Job $job -ErrorAction SilentlyContinue } catch { }
                     try { Remove-Job $job -Force -ErrorAction SilentlyContinue } catch { }
@@ -2613,7 +2656,7 @@ function Wait-Phase {
                         # $jobs: the reaping below handles Failed/Completed only, so a
                         # Stopped job left in the list keeps $runningJobs non-empty and
                         # Wait-Phase's `until` never fires.
-                        Write-Log "[Phase $Phase]: $($job.Name): STOPPING this job -- it is waiting on '$deadDep', which FAILED at $($failedVmNames[$deadDep].ToString('HH:mm:ss')). Its DSC WaitForAll can never be satisfied and would otherwise hold the phase for up to 10h. Status: '$deadStatus'" -Failure -OutputStream
+                        Write-Log "[Phase $Phase]: $($job.Name): STOPPING this job -- it is waiting on '$deadDep', which FAILED at $($failedVmNames[$deadDep].ToString('HH:mm:ss')). Its DSC WaitForAll can never be satisfied and would otherwise hold the phase for up to 10h. Status: '$deadStatus'" -Failure
                         try { Stop-Job $job -ErrorAction SilentlyContinue } catch { }
                         try { $jobs.Remove($job) } catch { }
                         try { Remove-Job $job -Force -ErrorAction SilentlyContinue } catch { }
