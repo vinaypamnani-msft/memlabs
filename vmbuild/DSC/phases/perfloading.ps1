@@ -2857,6 +2857,56 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         New-CMClientSettingDeployment -Name MEMLABS-Updates -CollectionId SMS00001
         Write-DscStatus "$Tag Client setting to support O365 patching is enabled"
     }
+
+    # Once the EP agent lands it owns HKLM\SOFTWARE\Policies\...\Windows Defender
+    # and sets LocalSettingOverride*=0 + DisableLocalAdminMerge=1, so everything
+    # Optimize-Defender.ps1 does locally stops taking effect. Put the same intent
+    # in the policy the agent honours. Every parameter below is an absolute set,
+    # so re-running perfloading converges instead of accumulating.
+    $amDefault = @(Get-CMAntimalwarePolicy -ErrorAction SilentlyContinue) |
+        Where-Object { $_.ObjectClass -eq 'SMS_AntimalwareSettingsDefault' -or $_.SmsProviderObjectPath -like 'SMS_AntimalwareSettingsDefault*' } |
+        Select-Object -First 1
+    if (-not $amDefault) {
+        Write-DscStatus "$Tag WARNING: Default antimalware policy not found; Defender stays at CM defaults and will override the local tuning"
+    }
+    else {
+        # One call per parameter set -- Set-CMAntimalwarePolicy will not mix them.
+        $amEdits = @(
+            @{ Label = 'real-time protection off'; Args = @{ RealTimeProtectionOn = $false } }
+            @{ Label = 'scan scope reduced'; Args = @{ ScanArchive = $false; ScanEmail = $false; ScanNetworkDrive = $false; ScanRemovableStorage = $false } }
+            @{ Label = 'scheduled scan off'; Args = @{ EnableScheduledScan = $false } }
+            @{
+                Label = 'exclusions'
+                Args  = @{
+                    ExcludeFilePath = @(
+                        'C:\staging', 'C:\temp', 'C:\tools', 'C:\CMCB', 'C:\inetpub',
+                        'C:\Windows\System32\Configuration', 'C:\Windows\System32\inetsrv',
+                        'C:\Windows\CCM', 'C:\Windows\ccmcache', 'C:\Windows\ccmsetup',
+                        'C:\Windows\SoftwareDistribution\Download'
+                    )
+                    ExcludeFileType = @('mdf', 'ldf', 'ndf', 'bak', 'trn', 'vhd', 'vhdx')
+                    ExcludeProcess  = @(
+                        'sqlservr.exe', 'sqlagent.exe', 'sqlwriter.exe', 'sqlceip.exe', 'fdhost.exe', 'fdlauncher.exe',
+                        'ReportingServicesService.exe',
+                        'smsexec.exe', 'sitecomp.exe', 'cmupdate.exe', 'smsdbmon.exe', 'smswriter.exe', 'smssqlbkup.exe',
+                        'smsdpmon.exe', 'CmRcService.exe',
+                        'CcmExec.exe', 'ccmsetup.exe', 'CcmRepair.exe', 'PolicyPv.exe',
+                        'w3wp.exe', 'WsusService.exe', 'wsusutil.exe'
+                    )
+                }
+            }
+        )
+        foreach ($amEdit in $amEdits) {
+            $amArgs = $amEdit.Args
+            try {
+                Set-CMAntimalwarePolicy -Name $amDefault.Name @amArgs -ErrorAction Stop
+                Write-DscStatus "$Tag Default antimalware policy: $($amEdit.Label)"
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: Default antimalware policy '$($amEdit.Label)' failed: $($_.Exception.Message)"
+            }
+        }
+    }
     } # end top-level client settings
     
     # Now wait for WSUS sync that was triggered earlier (ran during collection creation)

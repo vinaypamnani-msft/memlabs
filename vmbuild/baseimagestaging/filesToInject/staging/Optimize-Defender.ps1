@@ -251,6 +251,26 @@ foreach ($polKey in 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender',
     catch {}
 }
 
+# That branch is written by Group Policy, the ConfigMgr Endpoint Protection
+# agent, or MDM -- name the writers actually present instead of guessing.
+$policyWriters = @()
+if ($policyNames.Count -gt 0) {
+    if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\CCM\EPAgent') {
+        $policyWriters += 'ConfigMgr Endpoint Protection'
+    }
+    try {
+        $gpoHistory = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History'
+        if (Test-Path -LiteralPath $gpoHistory) {
+            $gpoNames = @(Get-ChildItem -Path $gpoHistory -Recurse -ErrorAction SilentlyContinue |
+                ForEach-Object { (Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue).DisplayName } |
+                Where-Object { $_ } | Sort-Object -Unique)
+            if ($gpoNames.Count -gt 0) { $policyWriters += "Group Policy [$($gpoNames -join '; ')]" }
+        }
+    }
+    catch {}
+    if ($policyWriters.Count -eq 0) { $policyWriters += 'an unidentified policy writer' }
+}
+
 $afterPreference = Get-MpPreference -ErrorAction SilentlyContinue
 foreach ($name in $protectedSettings.Keys) {
     $wanted = $protectedSettings[$name]
@@ -283,7 +303,7 @@ $message = "Applied $($applied.Count) setting(s)."
 if ($blocked.Count -gt 0) {
     $cause = 'unknown cause (TamperProtection is OFF)'
     if ($tamperProtected) { $cause = 'Tamper Protection' }
-    elseif ($policyNames.Count -gt 0) { $cause = 'Group Policy' }
+    elseif ($policyWriters.Count -gt 0) { $cause = 'policy from ' + ($policyWriters -join ' and ') }
     $message += " Refused by ${cause} ($($blocked.Count)): $($blocked -join '; ')."
     if ($policyNames.Count -gt 0) { $message += " Defender policy values present: $($policyNames -join ', ')." }
     if ($isServer) { $message += ' Use -Remove to uninstall Defender on this server.' }
