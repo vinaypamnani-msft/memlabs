@@ -4276,10 +4276,10 @@ $global:VM_Config = {
 
                     try {
                         "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
-                        Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop
+                        Start-DscConfiguration -Wait -Path $dscConfigPath -Force -ErrorAction Stop
                     }
                     catch {
-                        $data = "Could not run Start-DscConfiguration -Wait -Path $dscConfigPath -Force -Verbose -ErrorAction Stop"
+                        $data = "Could not run Start-DscConfiguration -Wait -Path $dscConfigPath -Force -ErrorAction Stop"
                         $data | Out-File $log -Append      
                         $_ | Out-File $log -Append              
                         $dscDetail = Get-DscFailureDetail -ErrorRecord $_
@@ -4347,7 +4347,10 @@ $global:VM_Config = {
                     }
 
                     "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append
-                    $null = Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
+                    # No -Verbose: it makes every Write-Verbose in every resource on every node a
+                    # synchronous DCOM round-trip to this job's sink, which nothing drains while the
+                    # job is Running. Resource timings come from the guest's ConfigurationStatus.
+                    $null = Start-DscConfiguration -Path $dscConfigPath -Force -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
 
                     # A healthy push stays Running for the whole apply, so Wait-Job -Timeout 30
                     # always burned its full timeout. Poll instead: leave as soon as every child
@@ -5115,7 +5118,7 @@ $global:VM_Config = {
 
                         Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
                         "Starting DSC locally from $dscConfigPath" | Out-File $log -Append
-                        $null = Start-DscConfiguration -Path $dscConfigPath -Force -Verbose
+                        $null = Start-DscConfiguration -Path $dscConfigPath -Force
                         return "STARTED"
                     }
                     $recoveryResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_RecoverLocal -ArgumentList $DscFolder -DisplayName "DSC: Local Recovery" -AsJob -TimeoutSeconds 300
