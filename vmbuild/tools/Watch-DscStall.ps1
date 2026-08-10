@@ -119,6 +119,8 @@ $ErrorActionPreference = 'Stop'
 
 $toolsRoot = $PSScriptRoot
 $vmbuildRoot = Split-Path -Parent $toolsRoot
+# Captured here: inside a function $PSBoundParameters is the FUNCTION's, not the script's.
+$PathWasExplicit = $PSBoundParameters.ContainsKey('Path')
 if (-not $Path) { $Path = Join-Path $vmbuildRoot 'logs\dscstall' }
 
 $guestDir = 'C:\staging\DSC\StallWatch'
@@ -762,6 +764,10 @@ function Invoke-StartAction {
         $targets = Get-Targets
         if (-not (Test-Path $Path)) { New-Item -Path $Path -ItemType Directory -Force | Out-Null }
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        # Each collection gets its own folder. A single bad collection used to poison
+        # every later report, because Report globs the whole tree.
+        $runFolder = Join-Path $Path $stamp
+        New-Item -Path $runFolder -ItemType Directory -Force | Out-Null
         $sb = {
             param($outFile)
             if (-not (Test-Path $outFile)) { return '' }
@@ -774,7 +780,7 @@ function Invoke-StartAction {
                 Write-Host "  $vm : $guestOut is missing or empty -- the sampler never ran there" -ForegroundColor Yellow
                 continue
             }
-            $dest = Join-Path $Path ("{0}-{1}.jsonl" -f $vm, $stamp)
+            $dest = Join-Path $runFolder ("{0}.jsonl" -f $vm)
             $text | Set-Content -LiteralPath $dest -Encoding UTF8
             Write-Host "  $vm : $((@($text -split "`n")).Count) line(s) -> $dest" -ForegroundColor Green
 
@@ -796,21 +802,40 @@ function Invoke-StartAction {
                     if ($nl -lt 0) { continue }
                     $name = $chunk.Substring(0, $nl).TrimEnd('>', "`r")
                     $body = $chunk.Substring($nl + 1)
-                    $bdest = Join-Path $Path ("{0}-{1}" -f $vm, $name)
+                    $bdest = Join-Path $runFolder ("{0}-{1}" -f $vm, $name)
                     $body | Set-Content -LiteralPath $bdest -Encoding UTF8
                     Write-Host "           bundle -> $bdest" -ForegroundColor Magenta
                 }
             }
         }
-        Write-Host "`nAnalyse with: .\tools\Watch-DscStall.ps1 -Action Report" -ForegroundColor Yellow
+        Write-Host "`nCollected into $runFolder" -ForegroundColor Yellow
+        Write-Host "Analyse with: .\tools\Watch-DscStall.ps1 -Action Report" -ForegroundColor Yellow
     }
 
     function Invoke-ReportAction {
         if (-not (Test-Path $Path)) { throw "No collected samples at $Path" }
-        $files = @(Get-ChildItem $Path -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending)
-        if ($files.Count -eq 0) { throw "No .jsonl files in $Path" }
 
-        $reportFile = Join-Path $Path ("report-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        # Default to the NEWEST collection, not every file ever collected -- otherwise
+        # one bad run keeps reappearing in every report forever. An explicit -Path wins.
+        $reportRoot = $Path
+        if (-not $PathWasExplicit) {
+            $runs = @(Get-ChildItem $Path -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { @(Get-ChildItem $_.FullName -Filter '*.jsonl' -File -ErrorAction SilentlyContinue).Count -gt 0 } |
+                    Sort-Object Name -Descending)
+            if ($runs.Count -gt 0) {
+                $reportRoot = $runs[0].FullName
+                $older = $runs.Count - 1
+                Write-Host "Reporting on the newest collection: $($runs[0].Name)" -ForegroundColor Cyan
+                if ($older -gt 0) { Write-Host "  ($older older collection(s) ignored -- pass -Path to pick one)" -ForegroundColor DarkGray }
+                $loose = @(Get-ChildItem $Path -Filter '*.jsonl' -File -ErrorAction SilentlyContinue)
+                if ($loose.Count -gt 0) { Write-Host "  ($($loose.Count) loose file(s) from an older layout ignored)" -ForegroundColor DarkGray }
+            }
+        }
+
+        $files = @(Get-ChildItem $reportRoot -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending)
+        if ($files.Count -eq 0) { throw "No .jsonl files in $reportRoot" }
+
+        $reportFile = Join-Path $reportRoot ("report-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
         $reportLines = New-Object System.Collections.Generic.List[string]
         $verdictTally = @{}
 
