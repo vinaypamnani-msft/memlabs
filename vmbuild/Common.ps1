@@ -6360,6 +6360,8 @@ function Invoke-VmCommand {
         [switch]$SkipDomainFallback,
         [Parameter(Mandatory = $false, HelpMessage = "Max retries for Get-VmSession (default 3). Reduce for tight polling loops.")]
         [int]$SessionMaxRetries = 3,
+        [Parameter(Mandatory = $false, HelpMessage = 'With -AsJob, treat non-terminating errors the remote scriptblock wrote (Write-Error) as a failure. The synchronous path gets this free via -ErrorVariable, but under -AsJob those errors land on the CHILD job and $Err2 stays empty, so a scriptblock that reports failure with Write-Error + return completes as "Succeeded". Set this when converting a sync caller to -AsJob for a timeout, so its existing failure/retry handling keeps working.')]
+        [switch]$FailOnRemoteError,
         [Parameter(Mandatory = $false, HelpMessage = "On an -AsJob timeout, after evicting the wedged session run a 30s liveness probe (hostname); if the guest still does not answer, reboot the VM to recover. Default OFF -- only set where the VM is expected to be responsive (e.g. post-build Phase 11 checks), NEVER in readiness/OOBE polling loops where a timeout is normal and the VM may be intentionally mid-reboot.")]
         [switch]$RebootIfUnresponsive,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
@@ -6516,11 +6518,33 @@ function Invoke-VmCommand {
                         $job | Wait-Job -Timeout $TimeoutSeconds
                     }
                     if ($job.State -eq "Completed") {
-                        $return.ScriptBlockOutput = (Receive-Job $job)
-                        if (-not $SuppressLog) {
-                            Write-Log "$VmName`: Job '$DisplayName' Succeeded" -LogOnly
+                        # Read the child's error stream BEFORE Receive-Job drains it.
+                        $remoteErrors = @()
+                        if ($FailOnRemoteError) {
+                            try {
+                                foreach ($cj in @($job.ChildJobs)) {
+                                    if ($cj.Error -and $cj.Error.Count -gt 0) {
+                                        $remoteErrors += @($cj.Error | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+                                    }
+                                }
+                            }
+                            catch { }
                         }
-                        $failed = $false
+                        $return.ScriptBlockOutput = (Receive-Job $job)
+                        if ($remoteErrors.Count -gt 0) {
+                            $failed = $true
+                            $return.ScriptBlockFailed = $true
+                            $return.ErrorDetails = $remoteErrors
+                            if (-not $SuppressLog) {
+                                Write-Log "$VmName`: Job '$DisplayName' completed but the guest reported an error: $($remoteErrors -join '; ')" -Failure
+                            }
+                        }
+                        else {
+                            if (-not $SuppressLog) {
+                                Write-Log "$VmName`: Job '$DisplayName' Succeeded" -LogOnly
+                            }
+                            $failed = $false
+                        }
                         # Dispose here. Parking these instead (so a later transport break would
                         # find a live object) was measured and is worse: one Phase 4 worker
                         # reached parkedJobs=538 / live jobs=539 on a single VM, and the

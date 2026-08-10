@@ -4724,18 +4724,42 @@ $global:VM_Config = {
             Write-Progress2 "Starting DSC" -status "Invoking DSC_StartConfig" -PercentComplete 50 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting DSC configuration."
             $dscStartStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
+            # -AsJob (and therefore a deadline) is mandatory here, not an optimisation.
+            # The single-node branch of DSC_StartConfig runs Start-DscConfiguration -Wait,
+            # so this call spans the guest's whole apply; without -AsJob Invoke-VmCommand
+            # takes the synchronous Invoke-Command path, which has NO timeout. CS2-FS1 sat
+            # on this line for 1792 minutes (Phase 2, 08-07) and the retry ladder below --
+            # which is the recovery -- can only run if the call returns. Observed healthy
+            # starts on that run: 15.4-23.8s across 8 VMs.
+            # -FailOnRemoteError because -AsJob leaves $Err2 empty: DSC_StartConfig reports
+            # its failures with Write-Error + return (non-terminating), which would
+            # otherwise complete the job as "Succeeded" and skip the ladder entirely.
+            $dscStartTimeoutSeconds = 1800
+            $dscStartArgs = @{
+                VmDomainName      = $domainName
+                ScriptBlock       = $DSC_StartConfig
+                ArgumentList      = $DscFolder
+                DisplayName       = "DSC: Start $($currentItem.role) Configuration"
+                AsJob             = $true
+                TimeoutSeconds    = $dscStartTimeoutSeconds
+                FailOnRemoteError = $true
+            }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName @dscStartArgs
             if ($result.ScriptBlockFailed) {
                 Start-Sleep -Seconds 15
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying. $($result.ScriptBlockOutput)" -Warning
-                # Retry once before exiting
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
+                $dscStartWhy = if ($result.TimedOut) { "timed out after ${dscStartTimeoutSeconds}s" } else { "$($result.ScriptBlockOutput)" }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying. $dscStartWhy" -Warning
+                # Retry once before exiting. On a timeout Invoke-VmCommand has already
+                # evicted the wedged session, so this attempt builds a fresh channel.
+                $result = Invoke-VmCommand -VmName $currentItem.vmName @dscStartArgs
                 if ($result.ScriptBlockFailed) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Rebooting. $($result.ScriptBlockOutput)" -Warning
+                    $dscStartWhy = if ($result.TimedOut) { "timed out after ${dscStartTimeoutSeconds}s" } else { "$($result.ScriptBlockOutput)" }
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Rebooting. $dscStartWhy" -Warning
                     Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "DSC start retry" | Out-Null
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName @dscStartArgs
                     if ($result.ScriptBlockFailed) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                        $dscStartWhy = if ($result.TimedOut) { "timed out after ${dscStartTimeoutSeconds}s" } else { "$($result.ScriptBlockOutput)" }
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $dscStartWhy" -Failure -OutputStream
                         return
                     }
                                         

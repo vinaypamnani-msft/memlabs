@@ -2526,6 +2526,18 @@ function Wait-Phase {
         $dscDiagIntervalMinutes = 15
         $dscDiagSkipRoles = @('Proxy', 'LinuxServer', 'LinuxClient', 'OSDClient', 'AADClient', 'InternetClient')
 
+        # Nothing else in this loop logs on a schedule -- every other line is
+        # event-driven -- so a worker wedged inside an unbounded call leaves the
+        # build log completely silent while the loop keeps spinning. CS2-FS1 held
+        # 'Invoking DSC_StartConfig' for 1792 minutes (Phase 2, 08-07) and produced
+        # ZERO log lines; the only evidence was the on-screen progress bar, which
+        # dies with the console. Write-JobProgress already records when each job's
+        # status text last changed (JobProgressHistory.StatusSince) -- publish it.
+        $stallHeartbeatLastUtc = [DateTime]::UtcNow
+        $stallHeartbeatEverySec = 600
+        $stallHeartbeatFileMinutes = 10
+        $stallHeartbeatConsoleMinutes = 30
+
         $FailRetry = 0
         do {
             # Begin synchronized output so Windows Terminal buffers all progress
@@ -3107,6 +3119,20 @@ function Wait-Phase {
                             break :dscDiag  # one VM per iteration
                         }
                     }
+                }
+            }
+
+            # Periodic liveness record for jobs that are stuck on one step.
+            if ($runningJobs.Count -gt 0 -and ([DateTime]::UtcNow - $stallHeartbeatLastUtc).TotalSeconds -ge $stallHeartbeatEverySec) {
+                $stallHeartbeatLastUtc = [DateTime]::UtcNow
+                $phaseHeldMin = [Math]::Floor(((Get-Date) - $StartTime).TotalMinutes)
+                foreach ($hbJob in $runningJobs) {
+                    $hbEntry = $global:JobProgressHistory[$hbJob.Id]
+                    if (-not $hbEntry -or -not $hbEntry.StatusSince) { continue }
+                    $hbHeldMin = [Math]::Floor(([DateTime]::UtcNow - $hbEntry.StatusSince).TotalMinutes)
+                    if ($hbHeldMin -lt $stallHeartbeatFileMinutes) { continue }
+                    $hbLine = "[Phase $Phase] STILL WAITING: $("$($hbEntry.JobName)".Trim()) has held '$("$($hbEntry.Status)".Trim())' for ${hbHeldMin}m (${phaseHeldMin}m into the phase)."
+                    if ($hbHeldMin -ge $stallHeartbeatConsoleMinutes) { Write-Log $hbLine -Warning } else { Write-Log $hbLine -LogOnly }
                 }
             }
 
