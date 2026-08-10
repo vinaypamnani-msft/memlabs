@@ -2903,6 +2903,30 @@ function Wait-Phase {
                                     }
                                 }
                                 if ($resAll.Count -eq 0) { return $null }
+                                # Class-based resources execute inside WmiPrvSE. A provider host that
+                                # started inside the config window means the resource running at that
+                                # moment reloaded TemplateHelpDSC (443KB / 53 classes), so its recorded
+                                # duration reflects the reload rather than its own work. Several
+                                # unrelated WmiPrvSE hosts normally exist, so this reports rather than
+                                # concludes.
+                                $hostInfo = @()
+                                $knownStart = 0
+                                try {
+                                    foreach ($p in @(Get-CimInstance -ClassName Win32_Process -Filter "Name='WmiPrvSE.exe'" -ErrorAction SilentlyContinue)) {
+                                        $stamp = '?'
+                                        $flag = ''
+                                        if ($p.CreationDate) {
+                                            $knownStart++
+                                            $started = [datetime]$p.CreationDate
+                                            $stamp = $started.ToString('HH:mm:ss')
+                                            if ($meta.Start -and $started -gt $meta.Start) { $flag = ' <-started-during-config' }
+                                        }
+                                        $hostInfo += ('pid={0} started={1}{2}' -f $p.ProcessId, $stamp, $flag)
+                                    }
+                                }
+                                catch { }
+                                # Never let an unreadable start time look like "no respawn".
+                                if ($hostInfo.Count -gt 0 -and $knownStart -eq 0) { $hostInfo += 'START-TIMES-UNAVAILABLE - cannot tell when hosts started' }
                                 $top = $resAll | Sort-Object Dur -Descending | Select-Object -First $topN
                                 $total = ($resAll | Measure-Object Dur -Sum).Sum
                                 return @{
@@ -2910,6 +2934,8 @@ function Wait-Phase {
                                     Reboot          = $meta.Reboot
                                     ResourceCount   = $resAll.Count
                                     TotalSec        = [math]::Round([double]$total, 1)
+                                    ConfigStart     = $(if ($meta.Start) { $meta.Start.ToString('HH:mm:ss') } else { '?' })
+                                    WmiHosts        = @($hostInfo)
                                     Top             = @($top | ForEach-Object { '{0,7:N1}s  {1}  [InDesiredState={2}]' -f $_.Dur, $_.Id, $_.Ok })
                                 }
                             } -ArgumentList 8
@@ -2918,6 +2944,7 @@ function Wait-Phase {
                                 $dtOutsideSec = [int]($dtElapsedSec - $dt.TotalSec)
                                 if ($dtOutsideSec -lt 0) { $dtOutsideSec = 0 }
                                 Write-Log "[DscTiming] $dtVmName [$dtRole] Phase $Phase job=${dtElapsedSec}s; record '$($dt.Source)': $($dt.ResourceCount) resources, applied-sum $($dt.TotalSec)s, ~${dtOutsideSec}s outside resources (host push/copy + LCM warmup), reboot=$($dt.Reboot). Slowest resources:" -LogOnly
+                                Write-Log "[DscTiming]   $dtVmName - config started $($dt.ConfigStart); WmiPrvSE: $(if ($dt.WmiHosts -and @($dt.WmiHosts).Count -gt 0) { @($dt.WmiHosts) -join ' | ' } else { 'none' })" -LogOnly
                                 foreach ($tl in $dt.Top) {
                                     Write-Log "[DscTiming]   $dtVmName - $tl" -LogOnly
                                 }
