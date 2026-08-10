@@ -10657,7 +10657,12 @@ else {
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
 . $PSScriptRoot\common\Common.Phases.ps1
-. $PSScriptRoot\common\Common.Validation.ps1
+# Config validation is entry-point work (New-Lab, genconfig); no function in it is
+# reachable from a job scriptblock. Common.Validation.Functional.ps1 is the opposite --
+# 50 of its 51 functions are job-reachable -- so it stays.
+if (-not $InJob) {
+    . $PSScriptRoot\common\Common.Validation.ps1
+}
 . $PSScriptRoot\common\Common.Validation.Functional.ps1
 if (-not $InJob) {
     . $PSScriptRoot\common\Common.RdcMan.ps1
@@ -10691,8 +10696,9 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
     . $PSScriptRoot\common\Common.Linux.ps1
 }
 . $PSScriptRoot\common\Common.snapshots.ps1
-. $PSScriptRoot\common\Common.PKI.ps1
+# Host-side PKI is driven from New-Lab (Install-PKI); the in-guest PKI work is DSC.
 if (-not $InJob) {
+    . $PSScriptRoot\common\Common.PKI.ps1
     . $PSScriptRoot\common\Common.menu.ps1
 }
 
