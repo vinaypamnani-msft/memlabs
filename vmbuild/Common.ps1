@@ -10659,34 +10659,42 @@ else {
 . $PSScriptRoot\common\Common.Phases.ps1
 . $PSScriptRoot\common\Common.Validation.ps1
 . $PSScriptRoot\common\Common.Validation.Functional.ps1
-. $PSScriptRoot\common\Common.RdcMan.ps1
-. $PSScriptRoot\common\Common.mRemoteNG.ps1
+if (-not $InJob) {
+    . $PSScriptRoot\common\Common.RdcMan.ps1
+    . $PSScriptRoot\common\Common.mRemoteNG.ps1
+}
 . $PSScriptRoot\common\Common.Remove.ps1
 . $PSScriptRoot\common\Common.Maintenance.ps1
 . $PSScriptRoot\common\Common.DownloadCache.ps1
 . $PSScriptRoot\common\Common.ScriptBlocks.ps1
-. $PSScriptRoot\common\Common.GenConfig.ps1
-. $PSScriptRoot\common\Common.GenConfig.NewDomain.ps1
-. $PSScriptRoot\common\Common.GenConfig.CmMenus.ps1
-. $PSScriptRoot\common\Common.GenConfig.PKIMenus.ps1
-. $PSScriptRoot\common\Common.GenConfig.Existing.ps1
-. $PSScriptRoot\common\Common.GenConfig.ConfigFiles.ps1
-. $PSScriptRoot\common\Common.GenConfig.Summary.ps1
-. $PSScriptRoot\common\Common.GenConfig.RoleMenus.ps1
-. $PSScriptRoot\common\Common.GenConfig.Validation.ps1
-. $PSScriptRoot\common\Common.GenConfig.AddVM.ps1
-. $PSScriptRoot\common\Common.GenConfig.VMList.ps1
-. $PSScriptRoot\common\Common.GenConfig.DiskMenu.ps1
-. $PSScriptRoot\common\Common.GenConfig.Help.ps1
+# Config wizard, menus and RDP-client writers are host-only: no function in them is
+# reachable from a job scriptblock, so a job spends ~376ms compiling code it cannot call.
+if (-not $InJob) {
+    . $PSScriptRoot\common\Common.GenConfig.ps1
+    . $PSScriptRoot\common\Common.GenConfig.NewDomain.ps1
+    . $PSScriptRoot\common\Common.GenConfig.CmMenus.ps1
+    . $PSScriptRoot\common\Common.GenConfig.PKIMenus.ps1
+    . $PSScriptRoot\common\Common.GenConfig.Existing.ps1
+    . $PSScriptRoot\common\Common.GenConfig.ConfigFiles.ps1
+    . $PSScriptRoot\common\Common.GenConfig.Summary.ps1
+    . $PSScriptRoot\common\Common.GenConfig.RoleMenus.ps1
+    . $PSScriptRoot\common\Common.GenConfig.Validation.ps1
+    . $PSScriptRoot\common\Common.GenConfig.AddVM.ps1
+    . $PSScriptRoot\common\Common.GenConfig.VMList.ps1
+    . $PSScriptRoot\common\Common.GenConfig.DiskMenu.ps1
+    . $PSScriptRoot\common\Common.GenConfig.Help.ps1
+    . $PSScriptRoot\common\Common.Layout.ps1
+}
 . $PSScriptRoot\common\Common.Health.ps1
-. $PSScriptRoot\common\Common.Layout.ps1
 . $PSScriptRoot\common\Common.HyperV.ps1
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     . $PSScriptRoot\common\Common.Linux.ps1
 }
 . $PSScriptRoot\common\Common.snapshots.ps1
 . $PSScriptRoot\common\Common.PKI.ps1
-. $PSScriptRoot\common\Common.menu.ps1
+if (-not $InJob) {
+    . $PSScriptRoot\common\Common.menu.ps1
+}
 
 
 if ($PSVersionTable.PSVersion -ge [Version]'7.4') {
@@ -10694,7 +10702,11 @@ if ($PSVersionTable.PSVersion -ge [Version]'7.4') {
     $PSStyle.Progress.Style = "`e[38;5;123m"
     $psstyle.Formatting.TableHeader = "`e[3;38;5;195m"
     $psstyle.Formatting.Warning = "`e[33m"
-    . $PSScriptRoot\common\Common.NewMenu.ps1
+    # Set-PS7ProgressWidth is the only job-reachable caller and already guards with
+    # Get-Command plus a [Console]::WindowWidth fallback.
+    if (-not $InJob) {
+        . $PSScriptRoot\common\Common.NewMenu.ps1
+    }
     . $PSScriptRoot\common\Common.PS7.ps1
 }
 
