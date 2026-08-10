@@ -251,7 +251,7 @@ function Test-IdleStatus {
 # reconstructed afterwards: the wait reasons alone classify a stall, they do not
 # identify it. One text file per stall so it transfers as a string.
 function Write-StallBundle {
-    param([string]$Folder, [string]$Status, [int]$AgeSec, [int[]]$WatchPids, [bool]$WantDump, [string]$DscLogPath)
+    param([string]$Folder, [string]$Status, [int]$AgeSec, [int[]]$WatchPids, [bool]$WantDump, [string]$DscLogPath, [string[]]$DscHostNames)
 
     $stamp = ([datetime]::UtcNow).ToString('yyyyMMdd-HHmmssZ')
     $file = Join-Path $Folder "stall-$stamp.txt"
@@ -357,12 +357,28 @@ function Write-StallBundle {
         $b.Add('')
         $b.Add('== process dump ==')
         $target = $WatchPids[0]
+        $why = 'first watched pid'
         try {
-            $best = Get-Process -Id $WatchPids -ErrorAction SilentlyContinue |
-                Sort-Object { $_.Threads.Count } -Descending | Select-Object -First 1
-            if ($best) { $target = $best.Id }
+            # Ranking by thread count picks MsMpEng (43 threads vs the DSC host's 17).
+            # Only a DSC host is worth a dump, and the blocked one most of all.
+            $procs = @(Get-Process -Id $WatchPids -ErrorAction SilentlyContinue)
+            $dscProcs = @($procs | Where-Object { $DscHostNames -contains $_.ProcessName })
+            $blocked = @($dscProcs | Where-Object {
+                    @($_.Threads | Where-Object { "$($_.ThreadState)" -eq 'Wait' -and "$($_.WaitReason)" -eq 'LpcReply' }).Count -gt 0
+                })
+            if ($blocked.Count -gt 0) {
+                $target = $blocked[0].Id
+                $why = "$($blocked[0].ProcessName) -- DSC host with a thread parked on LpcReply"
+            }
+            elseif ($dscProcs.Count -gt 0) {
+                $pick = $dscProcs | Sort-Object { $_.Threads.Count } -Descending | Select-Object -First 1
+                $target = $pick.Id
+                $why = "$($pick.ProcessName) -- largest DSC host (no LpcReply thread found)"
+            }
+            else { $why = 'no DSC host among the watched pids' }
         }
         catch {}
+        $b.Add("   target pid $target : $why")
         $dumpPath = Join-Path $Folder "stall-$stamp-pid$target.dmp"
         try {
             & rundll32.exe 'C:\Windows\System32\comsvcs.dll' MiniDump $target $dumpPath full 2>&1 | Out-Null
@@ -445,7 +461,7 @@ while ((Get-Date) -lt $deadline) {
     if (-not $stallAnnounced -and -not $statusIsIdle -and $statusAgeSec -ge $StallAlertSeconds) {
         $stallAnnounced = $true
         $bundlePath = ''
-        try { $bundlePath = Write-StallBundle -Folder $dir -Status $statusText -AgeSec $statusAgeSec -WatchPids $watchPids -WantDump ([bool]$CaptureDump) -DscLogPath $DscLog }
+        try { $bundlePath = Write-StallBundle -Folder $dir -Status $statusText -AgeSec $statusAgeSec -WatchPids $watchPids -WantDump ([bool]$CaptureDump) -DscLogPath $DscLog -DscHostNames $dscHostNames }
         catch { $bundlePath = "bundle failed: $($_.Exception.Message)" }
         ('{0} {1}s static | {2} | bundle={3}' -f $wall.ToString('o'), $statusAgeSec, $statusText, $bundlePath) |
             Out-File -FilePath $stallFile -Append -Encoding ascii
