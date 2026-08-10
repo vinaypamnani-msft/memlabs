@@ -34,13 +34,30 @@
     Guest side is read-only apart from its own JSONL under C:\staging\DSC.
 
 .PARAMETER Action
+    Watch    The whole thing in one command: start the samplers, poll until a
+             stall is announced, then collect and report. This is the one to use --
+             stalls are not predictable, so leave it running alongside the build.
     Start    Deploy the sampler into each target VM as a SYSTEM scheduled task and
              run it. The task carries an AtStartup trigger, so it survives the
              reboots Phase 8/9 perform; the sampler self-terminates at its deadline.
+    Status   Ask every guest whether the sampler is alive and whether it has caught
+             a stall yet. Cheap -- reads a one-line-per-stall summary file, not the
+             samples. Safe to run repeatedly during a build.
     Stop     Stop and unregister the sampler task in each target VM.
     Collect  Pull each guest's JSONL back to vmbuild\logs\dscstall\.
     Report   Analyse collected JSONL and print stall windows + a verdict each.
     SelfTest Run the sampler locally with an injected freeze and assert it fires.
+
+.PARAMETER PollSeconds
+    -Action Watch: seconds between stall checks. Default 60.
+
+.PARAMETER WatchMinutes
+    -Action Watch: give up waiting after this long. Default 240. The samplers keep
+    running either way, so a give-up is not a loss.
+
+.PARAMETER KeepRunning
+    -Action Watch: leave the samplers in place after collecting, to catch another
+    stall in the same build.
 
 .PARAMETER DomainName
     Lab domain (e.g. cstest1.com). Required for Start/Stop/Collect.
@@ -64,6 +81,10 @@
     console too. They always go to the report log regardless.
 
 .EXAMPLE
+    # One command: start, watch, detect, collect, report. Run it alongside the build.
+    .\tools\Watch-DscStall.ps1 -Action Watch -DomainName cstest1.com
+
+.EXAMPLE
     # Before starting the phase you expect to stall
     .\tools\Watch-DscStall.ps1 -Action Start -DomainName cstest1.com
 
@@ -78,7 +99,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Start', 'Stop', 'Collect', 'Report', 'SelfTest')]
+    [ValidateSet('Watch', 'Start', 'Stop', 'Status', 'Collect', 'Report', 'SelfTest')]
     [string]$Action,
     [string]$DomainName,
     [string[]]$VMName,
@@ -86,6 +107,11 @@ param(
     [int]$DurationMinutes = 480,
     [int]$StallSeconds = 60,
     [int]$TimeoutSeconds = 180,
+    [int]$StallAlertSeconds = 150,
+    [int]$PollSeconds = 60,
+    [int]$WatchMinutes = 240,
+    [switch]$CaptureDump,
+    [switch]$KeepRunning,
     [switch]$Detailed
 )
 
@@ -113,6 +139,8 @@ param(
     [int]$DurationMinutes = 480,
     [int]$DeepAfterSeconds = 15,
     [int]$DeepEverySeconds = 10,
+    [int]$StallAlertSeconds = 150,
+    [switch]$CaptureDump,
     [int]$InjectStallSeconds = 0
 )
 
@@ -201,6 +229,135 @@ function Get-PidConnections {
     return @($out | Select-Object -First 40)
 }
 
+# Everything a human needs to name the culprit, captured AT the stall rather than
+# reconstructed afterwards: the wait reasons alone classify a stall, they do not
+# identify it. One text file per stall so it transfers as a string.
+function Write-StallBundle {
+    param([string]$Folder, [string]$Status, [int]$AgeSec, [int[]]$WatchPids, [bool]$WantDump, [string]$DscLogPath)
+
+    $stamp = ([datetime]::UtcNow).ToString('yyyyMMdd-HHmmssZ')
+    $file = Join-Path $Folder "stall-$stamp.txt"
+    $b = New-Object System.Collections.Generic.List[string]
+    $b.Add("== STALL BUNDLE == $stamp computer=$env:COMPUTERNAME staticFor=${AgeSec}s")
+    $b.Add("frozen status: $Status")
+
+    $b.Add('')
+    $b.Add('== threads of watched processes (state/waitReason/cpuMs/startAddress) ==')
+    foreach ($wp in $WatchPids) {
+        try {
+            $proc = Get-Process -Id $wp -ErrorAction Stop
+            # A protected process (MsMpEng, PPL) does not THROW on these reads -- it
+            # silently yields null/0. Detect that and say so, because printing cpuMs=0
+            # would claim the thread burned no CPU, which is the whole question here.
+            $ptime = $null
+            try { $ptime = $proc.TotalProcessorTime } catch {}
+            $denied = ($null -eq $ptime)
+            $pcpu = '?'
+            if (-not $denied) { $pcpu = '{0:n0}' -f $ptime.TotalMilliseconds }
+            $pws = '?'
+            try { $pws = [int]($proc.WorkingSet64 / 1MB) } catch {}
+            $note = ''
+            if ($denied) { $note = '  [per-thread CPU/start denied -- protected process or insufficient rights]' }
+            $b.Add(("-- pid {0} {1} cpuMs={2} ws={3}MB threads={4}{5}" -f $wp, $proc.ProcessName, $pcpu, $pws, $proc.Threads.Count, $note))
+            foreach ($th in $proc.Threads) {
+                $state = 'Unknown'
+                try { $state = "$($th.ThreadState)" } catch {}
+                $reason = ''
+                if ($state -eq 'Wait') { try { $reason = "/$($th.WaitReason)" } catch {} }
+                # StartAddress 0 is never real -- it means this thread's detail was
+                # denied, even when the process total was readable.
+                $rawAddr = 0
+                try { $rawAddr = [int64]$th.StartAddress } catch {}
+                $cpu = '?'
+                $addr = '?'
+                if (-not $denied -and $rawAddr -ne 0) {
+                    $addr = '0x{0:X}' -f $rawAddr
+                    try { $cpu = [int]$th.TotalProcessorTime.TotalMilliseconds } catch {}
+                }
+                $b.Add(("   tid={0,-8} {1}{2} cpuMs={3} start={4}" -f $th.Id, $state, $reason, $cpu, $addr))
+            }
+        }
+        catch { $b.Add("-- pid $wp unreadable: $($_.Exception.Message)") }
+    }
+
+    $b.Add('')
+    $b.Add('== top 25 processes by CPU ==')
+    try {
+        $procRows = @()
+        foreach ($pr in (Get-Process -ErrorAction SilentlyContinue)) {
+            $ms = -1
+            try { $ms = $pr.TotalProcessorTime.TotalMilliseconds } catch {}
+            $procRows += [pscustomobject]@{ P = $pr; Ms = $ms }
+        }
+        foreach ($row in ($procRows | Sort-Object Ms -Descending | Select-Object -First 25)) {
+            $cpuText = '?'
+            if ($row.Ms -ge 0) { $cpuText = '{0:n0}' -f $row.Ms }
+            $wsText = '?'
+            try { $wsText = [int]($row.P.WorkingSet64 / 1MB) } catch {}
+            $b.Add(("   {0,-28} pid={1,-8} cpuMs={2,-12} ws={3}MB" -f $row.P.ProcessName, $row.P.Id, $cpuText, $wsText))
+        }
+    }
+    catch { $b.Add("   process list failed: $($_.Exception.Message)") }
+
+    $b.Add('')
+    $b.Add('== netstat -ano (non-listening) ==')
+    try {
+        $ns = & netstat.exe -ano 2>$null
+        foreach ($l in $ns) {
+            if ($l -match '\s(SYN_SENT|ESTABLISHED|CLOSE_WAIT|FIN_WAIT|TIME_WAIT|LAST_ACK)\s') { $b.Add("   $($l.Trim())") }
+        }
+    }
+    catch { $b.Add("   netstat failed: $($_.Exception.Message)") }
+
+    $b.Add('')
+    $b.Add("== $DscLogPath (last 120 lines) ==")
+    try {
+        if (Test-Path $DscLogPath) { Get-Content -Path $DscLogPath -Tail 120 -ErrorAction Stop | ForEach-Object { $b.Add("   $_") } }
+        else { $b.Add('   (not present)') }
+    }
+    catch { $b.Add("   read failed: $($_.Exception.Message)") }
+
+    $b.Add('')
+    $b.Add('== events in the last 15 minutes ==')
+    $since = (Get-Date).AddMinutes(-15)
+    foreach ($logName in @('System', 'Application', 'Microsoft-Windows-DSC/Operational', 'Microsoft-Windows-WMI-Activity/Operational')) {
+        $b.Add("-- $logName")
+        try {
+            $evts = Get-WinEvent -FilterHashtable @{ LogName = $logName; StartTime = $since } -MaxEvents 40 -ErrorAction Stop
+            foreach ($ev in $evts) {
+                $msg = "$($ev.Message)"
+                if ($msg.Length -gt 240) { $msg = $msg.Substring(0, 240) + '...' }
+                $b.Add(("   {0:HH:mm:ss} {1,-6} id={2,-6} {3}" -f $ev.TimeCreated, $ev.LevelDisplayName, $ev.Id, ($msg -replace '\s+', ' ')))
+            }
+        }
+        catch { $b.Add("   (none, or log unavailable: $($_.Exception.Message))") }
+    }
+
+    # Opt-in: a full dump is the only artifact that yields a real call stack, but it
+    # briefly suspends the target -- which is the thing under investigation.
+    if ($WantDump -and $WatchPids.Count -gt 0) {
+        $b.Add('')
+        $b.Add('== process dump ==')
+        $target = $WatchPids[0]
+        try {
+            $best = Get-Process -Id $WatchPids -ErrorAction SilentlyContinue |
+                Sort-Object { $_.Threads.Count } -Descending | Select-Object -First 1
+            if ($best) { $target = $best.Id }
+        }
+        catch {}
+        $dumpPath = Join-Path $Folder "stall-$stamp-pid$target.dmp"
+        try {
+            & rundll32.exe 'C:\Windows\System32\comsvcs.dll' MiniDump $target $dumpPath full 2>&1 | Out-Null
+            if (Test-Path $dumpPath) { $b.Add("   wrote $dumpPath ($([int]((Get-Item $dumpPath).Length / 1MB))MB) -- open in WinDbg, ~*k for the stacks") }
+            else { $b.Add('   MiniDump produced no file') }
+        }
+        catch { $b.Add("   dump failed: $($_.Exception.Message)") }
+    }
+
+    $b | Out-File -FilePath $file -Encoding ascii -Force
+    return $file
+}
+
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $deadline = (Get-Date).AddMinutes($DurationMinutes)
 $prevMono = 0.0
@@ -211,6 +368,8 @@ $seq = 0
 $lastDeepMono = -100000.0
 $statusText = ''
 $statusChangedMono = 0.0
+$stallAnnounced = $false
+$stallFile = Join-Path $dir 'stalls.txt'
 $injected = $false
 
 Write-Sample ([pscustomobject]@{
@@ -257,8 +416,29 @@ while ((Get-Date) -lt $deadline) {
     if ($newStatus -ne $statusText) {
         $statusText = $newStatus
         $statusChangedMono = $mono
+        $stallAnnounced = $false
     }
     $statusAgeSec = [math]::Round(($mono - $statusChangedMono) / 1000.0, 0)
+
+    # Announce the moment a static period crosses the alert threshold, to a tiny
+    # file of its own. Stalls are not predictable, so -Action Status has to be able
+    # to answer "has one happened yet" without dragging back a half-megabyte of ticks.
+    if (-not $stallAnnounced -and $statusAgeSec -ge $StallAlertSeconds) {
+        $stallAnnounced = $true
+        $bundlePath = ''
+        try { $bundlePath = Write-StallBundle -Folder $dir -Status $statusText -AgeSec $statusAgeSec -WatchPids $watchPids -WantDump ([bool]$CaptureDump) -DscLogPath $DscLog }
+        catch { $bundlePath = "bundle failed: $($_.Exception.Message)" }
+        ('{0} {1}s static | {2} | bundle={3}' -f $wall.ToString('o'), $statusAgeSec, $statusText, $bundlePath) |
+            Out-File -FilePath $stallFile -Append -Encoding ascii
+        Write-Sample ([pscustomobject]@{
+                type      = 'stallhit'
+                seq       = $seq
+                utc       = $wall.ToString('o')
+                statusAge = $statusAgeSec
+                status    = $statusText
+                bundle    = $bundlePath
+            })
+    }
 
     $dscLogSize = -1
     try { $dscLogSize = (Get-Item -Path $DscLog -ErrorAction SilentlyContinue).Length } catch {}
@@ -409,18 +589,28 @@ if ($Action -ne 'Report' -and $Action -ne 'SelfTest') {
     }
 }
 
-switch ($Action) {
-
-    'Start' {
+function Invoke-StartAction {
         $targets = Get-Targets
         Write-Host "Starting DSC stall sampler on $($targets.Count) VM(s): $($targets -join ', ')" -ForegroundColor Cyan
         $sb = {
-            param($dir, $script, $outFile, $stopFile, $payload, $minutes, $taskName)
+            param($dir, $script, $outFile, $stopFile, $payload, $minutes, $taskName, $alertSeconds, $wantDump)
             $ev = New-Object System.Collections.Generic.List[string]
             try {
                 if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+
+                # Kill leftovers BEFORE wiping the file, or the orphan appends into the
+                # fresh one between the delete and the kill.
+                $leftovers = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+                        Where-Object { "$($_.CommandLine)" -like "*Watch-Stall.ps1*" })
+                foreach ($lp in $leftovers) { Stop-Process -Id $lp.ProcessId -Force -ErrorAction SilentlyContinue }
+                if ($leftovers.Count -gt 0) {
+                    $ev.Add("killedLeftovers=$($leftovers.Count)")
+                    Start-Sleep -Seconds 2
+                }
+
                 Remove-Item -Path $stopFile -Force -ErrorAction SilentlyContinue
                 Remove-Item -Path $outFile -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path (Join-Path $dir 'stalls.txt') -Force -ErrorAction SilentlyContinue
                 $payload | Out-File -FilePath $script -Encoding ascii -Force
 
                 $bytes = 0
@@ -444,14 +634,8 @@ switch ($Action) {
                 # Unregistering a task does NOT kill an instance already running,
                 # and a leftover sampler would interleave its ticks into the same file.
                 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-                $leftovers = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-                        Where-Object { "$($_.CommandLine)" -like "*Watch-Stall.ps1*" })
-                foreach ($lp in $leftovers) { Stop-Process -Id $lp.ProcessId -Force -ErrorAction SilentlyContinue }
-                if ($leftovers.Count -gt 0) {
-                    $ev.Add("killedLeftovers=$($leftovers.Count)")
-                    Start-Sleep -Seconds 2
-                }
-                $argLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -OutFile "{1}" -StopFile "{2}" -DurationMinutes {3}' -f $script, $outFile, $stopFile, $minutes
+                $argLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -OutFile "{1}" -StopFile "{2}" -DurationMinutes {3} -StallAlertSeconds {4}' -f $script, $outFile, $stopFile, $minutes, $alertSeconds
+                if ($wantDump) { $argLine = $argLine + ' -CaptureDump' }
                 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argLine
                 $trigger = New-ScheduledTaskTrigger -AtStartup
                 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
@@ -474,7 +658,7 @@ switch ($Action) {
             }
         }
         foreach ($vm in $targets) {
-            $o = Invoke-Guest -Vm $vm -Sb $sb -ArgList @($guestDir, $guestScript, $guestOut, $guestStopFile, $guestPayload, $DurationMinutes, $guestTaskName)
+            $o = Invoke-Guest -Vm $vm -Sb $sb -ArgList @($guestDir, $guestScript, $guestOut, $guestStopFile, $guestPayload, $DurationMinutes, $guestTaskName, $StallAlertSeconds, [bool]$CaptureDump)
             if ($null -ne $o) {
                 $color = 'Green'
                 if ("$o" -like '*ERROR=*') { $color = 'Red' }
@@ -508,7 +692,7 @@ switch ($Action) {
         Write-Host "`nSampler writes $guestOut in each guest. Collect with -Action Collect." -ForegroundColor Yellow
     }
 
-    'Stop' {
+    function Invoke-StopAction {
         $targets = Get-Targets
         $sb = {
             param($stopFile, $taskName)
@@ -529,7 +713,52 @@ switch ($Action) {
         }
     }
 
-    'Collect' {
+    function Invoke-StatusAction {
+        $targets = Get-Targets
+        Write-Host "Sampler status across $($targets.Count) VM(s):" -ForegroundColor Cyan
+        $sb = {
+            param($dir, $outFile, $taskName)
+            $state = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).State
+            if (-not $state) { $state = 'no-task' }
+            $alive = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+                    Where-Object { "$($_.CommandLine)" -like "*Watch-Stall.ps1*" }).Count
+            $lines = 0
+            if (Test-Path $outFile) { $lines = @(Get-Content $outFile -ErrorAction SilentlyContinue).Count }
+            $stallFile = Join-Path $dir 'stalls.txt'
+            $stalls = @()
+            if (Test-Path $stallFile) { $stalls = @(Get-Content $stallFile -ErrorAction SilentlyContinue) }
+            $last = ''
+            if ($stalls.Count -gt 0) { $last = $stalls[$stalls.Count - 1] }
+            return "task=$state procs=$alive lines=$lines stalls=$($stalls.Count)|$last"
+        }
+        $totalStalls = 0
+        foreach ($vm in $targets) {
+            $o = Invoke-Guest -Vm $vm -Sb $sb -ArgList @($guestDir, $guestOut, $guestTaskName)
+            if ($null -eq $o) { continue }
+            $parts = "$o" -split '\|', 2
+            $head = $parts[0]
+            $last = ''
+            if ($parts.Count -gt 1) { $last = $parts[1] }
+            $n = 0
+            if ($head -match 'stalls=(\d+)') { $n = [int]$Matches[1] }
+            $totalStalls += $n
+            $color = 'Gray'
+            if ($n -gt 0) { $color = 'Magenta' }
+            elseif ($head -like '*procs=0*') { $color = 'Red' }
+            Write-Host ("  {0,-16} {1}" -f $vm, $head) -ForegroundColor $color
+            if ($last) { Write-Host ("                   last: {0}" -f $last) -ForegroundColor Magenta }
+        }
+        Write-Host ""
+        if ($totalStalls -gt 0) {
+            Write-Host "$totalStalls stall(s) caught -- run -Action Collect then -Action Report." -ForegroundColor Green
+        }
+        else {
+            Write-Host "No stall of >= ${StallAlertSeconds}s seen yet. Leave the sampler running and check again." -ForegroundColor Yellow
+        }
+        return $totalStalls
+    }
+
+    function Invoke-CollectAction {
         $targets = Get-Targets
         if (-not (Test-Path $Path)) { New-Item -Path $Path -ItemType Directory -Force | Out-Null }
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -548,11 +777,35 @@ switch ($Action) {
             $dest = Join-Path $Path ("{0}-{1}.jsonl" -f $vm, $stamp)
             $text | Set-Content -LiteralPath $dest -Encoding UTF8
             Write-Host "  $vm : $((@($text -split "`n")).Count) line(s) -> $dest" -ForegroundColor Green
+
+            # The bundles are the part a human reads: thread stacks-by-wait-reason,
+            # events, DSC log tail, captured AT the stall.
+            $bundleSb = {
+                param($dir)
+                $out = @()
+                foreach ($bf in @(Get-ChildItem -Path $dir -Filter 'stall-*.txt' -File -ErrorAction SilentlyContinue)) {
+                    $out += ("<<<FILE {0}>>>`n{1}" -f $bf.Name, (Get-Content -Path $bf.FullName -Raw -ErrorAction SilentlyContinue))
+                }
+                return ($out -join "`n")
+            }
+            $bundles = Invoke-Guest -Vm $vm -Sb $bundleSb -ArgList @($guestDir)
+            if (-not [string]::IsNullOrWhiteSpace($bundles)) {
+                foreach ($chunk in ("$bundles" -split '<<<FILE ')) {
+                    if ([string]::IsNullOrWhiteSpace($chunk)) { continue }
+                    $nl = $chunk.IndexOf("`n")
+                    if ($nl -lt 0) { continue }
+                    $name = $chunk.Substring(0, $nl).TrimEnd('>', "`r")
+                    $body = $chunk.Substring($nl + 1)
+                    $bdest = Join-Path $Path ("{0}-{1}" -f $vm, $name)
+                    $body | Set-Content -LiteralPath $bdest -Encoding UTF8
+                    Write-Host "           bundle -> $bdest" -ForegroundColor Magenta
+                }
+            }
         }
         Write-Host "`nAnalyse with: .\tools\Watch-DscStall.ps1 -Action Report" -ForegroundColor Yellow
     }
 
-    'Report' {
+    function Invoke-ReportAction {
         if (-not (Test-Path $Path)) { throw "No collected samples at $Path" }
         $files = @(Get-ChildItem $Path -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending)
         if ($files.Count -eq 0) { throw "No .jsonl files in $Path" }
@@ -683,7 +936,7 @@ switch ($Action) {
         if (-not $Detailed) { Write-Host "Re-run with -Detailed to see all of it on screen." -ForegroundColor DarkGray }
     }
 
-    'SelfTest' {
+    function Invoke-SelfTestAction {
         # P2: a diagnostic is not real until you have made it fire.
         $tmp = Join-Path $env:TEMP ('DscStallSelfTest-' + [guid]::NewGuid().ToString('N'))
         New-Item -Path $tmp -ItemType Directory -Force | Out-Null
@@ -727,5 +980,45 @@ switch ($Action) {
             exit 1
         }
         Write-Host 'SELFTEST PASSED -- the lateness detector and the deep sampler both fired.' -ForegroundColor Green
+    }
+
+switch ($Action) {
+    'Start' { Invoke-StartAction }
+    'Stop' { Invoke-StopAction }
+    'Status' { $null = Invoke-StatusAction }
+    'Collect' { Invoke-CollectAction }
+    'Report' { Invoke-ReportAction }
+    'SelfTest' { Invoke-SelfTestAction }
+
+    'Watch' {
+        # The whole loop in one command: start, poll until a stall is announced,
+        # then collect and report. Stalls are not predictable, so the only workable
+        # shape is to leave this running alongside the build.
+        Invoke-StartAction
+        $deadline = (Get-Date).AddMinutes($WatchMinutes)
+        $found = 0
+        Write-Host ""
+        Write-Host ("Watching until a stall of >= {0}s appears, or {1:HH:mm:ss} (-WatchMinutes {2}). Ctrl-C is safe -- the samplers keep running." -f $StallAlertSeconds, $deadline, $WatchMinutes) -ForegroundColor Cyan
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds $PollSeconds
+            Write-Host ""
+            Write-Host ("[{0:HH:mm:ss}] poll" -f (Get-Date)) -ForegroundColor DarkGray
+            $found = Invoke-StatusAction
+            if ($found -gt 0) { break }
+        }
+        if ($found -le 0) {
+            Write-Host ""
+            Write-Host "No stall seen before the watch deadline. The samplers are still running -- re-run -Action Watch or -Action Status." -ForegroundColor Yellow
+            return
+        }
+        Write-Host ""
+        Write-Host "Stall detected. Collecting..." -ForegroundColor Green
+        Invoke-CollectAction
+        Invoke-ReportAction
+        if (-not $KeepRunning) {
+            Write-Host ""
+            Write-Host "Stopping samplers (-KeepRunning to leave them in place)..." -ForegroundColor Cyan
+            Invoke-StopAction
+        }
     }
 }
