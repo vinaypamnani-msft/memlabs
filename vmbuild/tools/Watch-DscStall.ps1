@@ -59,6 +59,10 @@
     A window is reported once the DSC status text has been static this long.
     Default 60 (well under the 195s we are hunting, well over normal churn).
 
+.PARAMETER Detailed
+    Print the per-window thread-wait histograms and connection lists to the
+    console too. They always go to the report log regardless.
+
 .EXAMPLE
     # Before starting the phase you expect to stall
     .\tools\Watch-DscStall.ps1 -Action Start -DomainName cstest1.com
@@ -81,7 +85,8 @@ param(
     [string]$Path,
     [int]$DurationMinutes = 480,
     [int]$StallSeconds = 60,
-    [int]$TimeoutSeconds = 180
+    [int]$TimeoutSeconds = 180,
+    [switch]$Detailed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -524,8 +529,21 @@ switch ($Action) {
         if (-not (Test-Path $Path)) { throw "No collected samples at $Path" }
         $files = @(Get-ChildItem $Path -Filter '*.jsonl' -File | Sort-Object LastWriteTime -Descending)
         if ($files.Count -eq 0) { throw "No .jsonl files in $Path" }
+
+        $reportFile = Join-Path $Path ("report-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        $reportLines = New-Object System.Collections.Generic.List[string]
+        $verdictTally = @{}
+
+        # Everything lands in the log; the console gets the short version unless -Detailed.
+        function Write-Report {
+            param([string]$Text = '', [string]$Color = 'Gray', [switch]$FileOnly)
+            $reportLines.Add($Text)
+            if ($Detailed -or -not $FileOnly) { Write-Host $Text -ForegroundColor $Color }
+        }
+
         foreach ($f in $files) {
-            Write-Host "`n=== $($f.Name) ===" -ForegroundColor Cyan
+            Write-Report ""
+            Write-Report "=== $($f.Name) ===" -Color Cyan
             $recs = @()
             foreach ($line in [System.IO.File]::ReadLines($f.FullName)) {
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
@@ -534,9 +552,9 @@ switch ($Action) {
             $ticks = @($recs | Where-Object { $_.type -eq 'tick' })
             $gaps = @($recs | Where-Object { $_.type -eq 'gap' })
             $deeps = @($recs | Where-Object { $_.type -eq 'deep' })
-            if ($ticks.Count -eq 0) { Write-Host '  no ticks' -ForegroundColor Yellow; continue }
+            if ($ticks.Count -eq 0) { Write-Report '  no ticks' -Color Yellow; continue }
             $span = ([datetime]$ticks[-1].utc) - ([datetime]$ticks[0].utc)
-            Write-Host ("  ticks={0} span={1:hh\:mm\:ss} gaps={2} deep={3}" -f $ticks.Count, $span, $gaps.Count, $deeps.Count)
+            Write-Report ("  ticks={0} span={1:hh\:mm\:ss} gaps={2} deep={3}" -f $ticks.Count, $span, $gaps.Count, $deeps.Count)
 
             # Windows where the DSC status text never moved.
             $windows = @()
@@ -554,7 +572,7 @@ switch ($Action) {
             if ($null -ne $run) { $windows += , $run }
 
             if ($windows.Count -eq 0) {
-                Write-Host "  no window with status static >= ${StallSeconds}s" -ForegroundColor Green
+                Write-Report "  no window with status static >= ${StallSeconds}s" -Color Green
             }
             foreach ($w in $windows) {
                 $start = [datetime]$w[0].utc
@@ -578,27 +596,51 @@ switch ($Action) {
                     $verdict = 'DSC BUSY: real CPU was burned -- the resource was working, not stuck'
                 }
                 elseif (@($winDeep | Where-Object { @($_.conns).Count -gt 0 }).Count -gt 0) {
-                    $verdict = 'BLOCKED, possibly on the network -- see conns below'
+                    $verdict = 'BLOCKED, possibly on the network -- see conns in the log'
                 }
+                $tag = ($verdict -split ':')[0]
+                if ($verdictTally.ContainsKey($tag)) { $verdictTally[$tag] = $verdictTally[$tag] + 1 } else { $verdictTally[$tag] = 1 }
 
-                Write-Host ("`n  window {0:HH:mm:ss} -> {1:HH:mm:ss}  ~{2}s static" -f $start, $end, $sec) -ForegroundColor Yellow
-                Write-Host ("    frozen status : {0}" -f $(if ($winDeep.Count -gt 0) { "$($winDeep[0].status)" } else { '(unknown)' }))
-                Write-Host ("    sampler late  : max {0} ms   clock skew max {1} ms   sampler own work max {2} ms" -f $maxLate, $maxSkew, (($w | Measure-Object workMs -Maximum).Maximum))
-                Write-Host ("    watched CPU   : {0} ms over the window   DSC_Log grew: {1}" -f $cpuMs, $logGrew)
-                Write-Host ("    VERDICT       : {0}" -f $verdict) -ForegroundColor Magenta
+                $frozen = '(unknown)'
+                if ($winDeep.Count -gt 0) { $frozen = "$($winDeep[0].status)" }
+                $frozenShort = $frozen
+                if ($frozenShort.Length -gt 72) { $frozenShort = $frozenShort.Substring(0, 72) + '...' }
+
+                Write-Report ""
+                Write-Report ("  window {0:HH:mm:ss} -> {1:HH:mm:ss}  ~{2}s static" -f $start, $end, $sec) -Color Yellow
+                Write-Report ("    frozen status : {0}" -f $frozenShort)
+                Write-Report ("    frozen full   : {0}" -f $frozen) -FileOnly
+                Write-Report ("    sampler late  : max {0} ms   clock skew max {1} ms   sampler own work max {2} ms" -f $maxLate, $maxSkew, (($w | Measure-Object workMs -Maximum).Maximum))
+                Write-Report ("    watched CPU   : {0} ms over the window   DSC_Log grew: {1}" -f $cpuMs, $logGrew)
+                Write-Report ("    VERDICT       : {0}" -f $verdict) -Color Magenta
                 if ($winDeep.Count -gt 0) {
                     $last = $winDeep[-1]
                     $tp = @()
                     foreach ($p in $last.threads.PSObject.Properties) { $tp += ('{0}={1}' -f $p.Name, $p.Value) }
-                    Write-Host ("    thread waits  : {0}" -f (($tp | Sort-Object) -join '  '))
+                    Write-Report ("    thread waits  : {0}" -f (($tp | Sort-Object) -join '  ')) -FileOnly
                     if (@($last.conns).Count -gt 0) {
-                        Write-Host ("    conns         : {0}" -f ((@($last.conns) | Select-Object -First 8) -join '  '))
+                        Write-Report ("    conns         : {0}" -f ((@($last.conns)) -join '  ')) -FileOnly
                     }
-                    Write-Host ("    top cpu       : {0}" -f ((@($last.topCpu)) -join '  '))
-                    Write-Host ("    probe cost    : {0} ms (high = the thread probe itself was starved)" -f $last.probeMs)
+                    Write-Report ("    top cpu       : {0}" -f ((@($last.topCpu)) -join '  ')) -FileOnly
+                    Write-Report ("    probe cost    : {0} ms (high = the thread probe itself was starved)" -f $last.probeMs) -FileOnly
                 }
             }
         }
+
+        Write-Report ""
+        Write-Report "--- verdict summary across $($files.Count) file(s) ---" -Color Cyan
+        if ($verdictTally.Count -eq 0) {
+            Write-Report '  no stall windows found' -Color Green
+        }
+        else {
+            foreach ($k in ($verdictTally.Keys | Sort-Object)) {
+                Write-Report ("  {0,-22} {1} window(s)" -f $k, $verdictTally[$k])
+            }
+        }
+        $reportLines | Set-Content -LiteralPath $reportFile -Encoding UTF8
+        Write-Host ""
+        Write-Host "Full report (thread waits, connections, top CPU): $reportFile" -ForegroundColor Yellow
+        if (-not $Detailed) { Write-Host "Re-run with -Detailed to see all of it on screen." -ForegroundColor DarkGray }
     }
 
     'SelfTest' {
