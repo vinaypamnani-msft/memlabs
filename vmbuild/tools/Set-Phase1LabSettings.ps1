@@ -100,7 +100,16 @@ Write-Host ''
 # One round trip per VM: read both values, optionally write, always read back.
 $regSb = {
     param($doApply, $doRestart)
-    $r = [ordered]@{ Arb = ''; Wsman = ''; Restart = '' }
+    $r = [ordered]@{ Arb = ''; Wsman = ''; Restart = ''; Defender = '' }
+
+    # Optimize-Defender reports a setting as Applied whenever the final value matches
+    # what was wanted, which cannot distinguish "I changed it" from "it was already
+    # right under Tamper Protection". This is what actually separates the two.
+    try {
+        $ms = Get-MpComputerStatus -ErrorAction Stop
+        $r.Defender = "TamperProtected=$($ms.IsTamperProtected) RunningMode=$($ms.AMRunningMode) RealTime=$($ms.RealTimeProtectionEnabled)"
+    }
+    catch { $r.Defender = "Get-MpComputerStatus failed: $($_.Exception.Message)" }
 
     $arbKey = 'HKLM:\SOFTWARE\Microsoft\WBEM\CIMOM'
     if (-not (Test-Path -LiteralPath $arbKey)) { $r.Arb = 'CIMOM key absent' }
@@ -160,7 +169,7 @@ foreach ($vm in $running) {
     $dom = "$($vm.domain)"
     Write-Host "$name" -ForegroundColor White
 
-    $row = [ordered]@{ VM = $name; Defender = 'skipped'; Arb = ''; Wsman = ''; Restart = '' }
+    $row = [ordered]@{ VM = $name; Defender = 'skipped'; DefenderState = ''; Arb = ''; Wsman = ''; Restart = '' }
 
     if (-not $SkipDefender -and -not $CheckOnly) {
         $src = Join-Path $Common.StagingInjectPath 'staging\Optimize-Defender.ps1'
@@ -200,9 +209,10 @@ foreach ($vm in $running) {
         $row.Arb = $rr.ScriptBlockOutput.Arb
         $row.Wsman = $rr.ScriptBlockOutput.Wsman
         $row.Restart = $rr.ScriptBlockOutput.Restart
+        $row.DefenderState = $rr.ScriptBlockOutput.Defender
     }
 
-    foreach ($k in 'Defender', 'Arb', 'Wsman', 'Restart') {
+    foreach ($k in 'Defender', 'DefenderState', 'Arb', 'Wsman', 'Restart') {
         if ($row.$k) {
             $colour = if ("$($row.$k)" -match 'fail|FAILED|absent|missing') { 'Red' } else { 'Green' }
             Write-Host ("    {0,-9} {1}" -f $k, $row.$k) -ForegroundColor $colour
@@ -213,7 +223,7 @@ foreach ($vm in $running) {
 
 Write-Host ''
 Write-Host '=== summary ===' -ForegroundColor Cyan
-$rows | Format-Table -AutoSize VM, Arb, Wsman, Restart
+$rows | Format-Table -AutoSize VM, DefenderState, Arb, Wsman, Restart
 
 $failed = @($rows | Where-Object { "$($_.Arb)$($_.Wsman)$($_.Defender)" -match 'fail|FAILED|absent' })
 if ($failed.Count -gt 0) {
