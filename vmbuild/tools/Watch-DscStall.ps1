@@ -119,6 +119,24 @@ param(
 $dir = Split-Path -Parent $OutFile
 if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
 
+# Single instance, enforced in the guest. Two samplers appending to one file
+# interleave their ticks, which silently multiplies the apparent tick rate and
+# makes every statusAge-derived window meaningless. An abandoned mutex (previous
+# owner killed) still grants ownership, which is what we want after a hard reset.
+$stallMutex = $null
+$gotLock = $false
+try {
+    $stallMutex = New-Object System.Threading.Mutex($false, 'Global\MemLabsDscStallWatch')
+    $gotLock = $stallMutex.WaitOne(0)
+}
+catch [System.Threading.AbandonedMutexException] { $gotLock = $true }
+catch { $gotLock = $false }
+if (-not $gotLock) {
+    ([pscustomobject]@{ type = 'skipped'; utc = ([datetime]::UtcNow).ToString('o'); reason = 'another sampler already holds Global\MemLabsDscStallWatch' } |
+            ConvertTo-Json -Compress) | Out-File -FilePath $OutFile -Append -Encoding ascii
+    return
+}
+
 # Processes worth naming when something blocks. WmiPrvSE hosts class-based DSC
 # resources; the rest are the usual machine-wide lock holders.
 $watchNames = @('WmiPrvSE', 'WmiApSrv', 'msiexec', 'TrustedInstaller', 'TiWorker', 'MsMpEng', 'powershell', 'dsc')
@@ -423,7 +441,16 @@ switch ($Action) {
                 # A scheduled task, not Start-Process: a detached child of the PSDirect
                 # host is not guaranteed to outlive the session, and AtStartup brings the
                 # sampler back after the reboots Phase 8/9 perform.
+                # Unregistering a task does NOT kill an instance already running,
+                # and a leftover sampler would interleave its ticks into the same file.
                 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+                $leftovers = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+                        Where-Object { "$($_.CommandLine)" -like "*Watch-Stall.ps1*" })
+                foreach ($lp in $leftovers) { Stop-Process -Id $lp.ProcessId -Force -ErrorAction SilentlyContinue }
+                if ($leftovers.Count -gt 0) {
+                    $ev.Add("killedLeftovers=$($leftovers.Count)")
+                    Start-Sleep -Seconds 2
+                }
                 $argLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -OutFile "{1}" -StopFile "{2}" -DurationMinutes {3}' -f $script, $outFile, $stopFile, $minutes
                 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argLine
                 $trigger = New-ScheduledTaskTrigger -AtStartup
@@ -555,6 +582,19 @@ switch ($Action) {
             if ($ticks.Count -eq 0) { Write-Report '  no ticks' -Color Yellow; continue }
             $span = ([datetime]$ticks[-1].utc) - ([datetime]$ticks[0].utc)
             Write-Report ("  ticks={0} span={1:hh\:mm\:ss} gaps={2} deep={3}" -f $ticks.Count, $span, $gaps.Count, $deeps.Count)
+
+            # A file written by more than one sampler has interleaved ticks, so every
+            # statusAge-derived window in it is fiction. Say so and skip it rather than
+            # reporting hundreds of invented windows.
+            $starts = @($recs | Where-Object { $_.type -eq 'start' }).Count
+            $expected = [int]$span.TotalSeconds
+            if ($expected -lt 1) { $expected = 1 }
+            $rate = [math]::Round($ticks.Count / $expected, 2)
+            if ($starts -gt 1 -or $rate -gt 1.5) {
+                Write-Report ("  CORRUPT: {0} start record(s), {1} ticks/sec against a 1/sec sampler -- more than one sampler wrote this file." -f $starts, $rate) -Color Red
+                Write-Report '           Re-run -Action Start (it now kills leftovers and the sampler is single-instance), then collect again.' -Color Red
+                continue
+            }
 
             # Windows where the DSC status text never moved.
             $windows = @()
