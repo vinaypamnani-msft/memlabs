@@ -100,16 +100,45 @@ Write-Host ''
 # One round trip per VM: read both values, optionally write, always read back.
 $regSb = {
     param($doApply, $doRestart)
-    $r = [ordered]@{ Arb = ''; Wsman = ''; Restart = ''; Defender = '' }
+    $r = [ordered]@{ Arb = ''; Wsman = ''; Restart = ''; Defender = ''; PolicySource = '' }
 
     # Optimize-Defender reports a setting as Applied whenever the final value matches
     # what was wanted, which cannot distinguish "I changed it" from "it was already
-    # right under Tamper Protection". This is what actually separates the two.
+    # right". These are what actually explain a refusal.
+    $defPolicyValues = 0
+    foreach ($polKey in 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender',
+        'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection',
+        'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet') {
+        try {
+            if (Test-Path -LiteralPath $polKey) {
+                $p = Get-ItemProperty -LiteralPath $polKey -ErrorAction Stop
+                $defPolicyValues += @($p.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS(Path|ParentPath|ChildName|Drive|Provider)$' }).Count
+            }
+        }
+        catch {}
+    }
+
     try {
         $ms = Get-MpComputerStatus -ErrorAction Stop
-        $r.Defender = "TamperProtected=$($ms.IsTamperProtected) RunningMode=$($ms.AMRunningMode) RealTime=$($ms.RealTimeProtectionEnabled)"
+        $r.Defender = "TamperProtected=$($ms.IsTamperProtected) RunningMode=$($ms.AMRunningMode) RealTime=$($ms.RealTimeProtectionEnabled) DefenderPolicyValues=$defPolicyValues"
     }
-    catch { $r.Defender = "Get-MpComputerStatus failed: $($_.Exception.Message)" }
+    catch { $r.Defender = "Get-MpComputerStatus failed: $($_.Exception.Message) DefenderPolicyValues=$defPolicyValues" }
+
+    # Who wrote that policy branch? Group Policy history names the GPOs that applied;
+    # a ConfigMgr EP agent writes the same keys without any GPO being involved.
+    $gpoNames = @()
+    try {
+        $histRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History'
+        if (Test-Path -LiteralPath $histRoot) {
+            $gpoNames = @(Get-ChildItem -LiteralPath $histRoot -Recurse -ErrorAction SilentlyContinue |
+                ForEach-Object { (Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue).DisplayName } |
+                Where-Object { $_ } | Select-Object -Unique)
+        }
+    }
+    catch {}
+    $gpoText = 'none'
+    if ($gpoNames.Count -gt 0) { $gpoText = ($gpoNames -join ' | ') }
+    $r.PolicySource = "GPOs=[$gpoText] CMClient=$(Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM') EPAgent=$(Test-Path 'HKLM:\SOFTWARE\Microsoft\CCM\EPAgent')"
 
     $arbKey = 'HKLM:\SOFTWARE\Microsoft\WBEM\CIMOM'
     if (-not (Test-Path -LiteralPath $arbKey)) { $r.Arb = 'CIMOM key absent' }
@@ -169,7 +198,7 @@ foreach ($vm in $running) {
     $dom = "$($vm.domain)"
     Write-Host "$name" -ForegroundColor White
 
-    $row = [ordered]@{ VM = $name; Defender = 'skipped'; DefenderState = ''; Arb = ''; Wsman = ''; Restart = '' }
+    $row = [ordered]@{ VM = $name; Defender = 'skipped'; DefenderState = ''; PolicySource = ''; Arb = ''; Wsman = ''; Restart = '' }
 
     if (-not $SkipDefender -and -not $CheckOnly) {
         $src = Join-Path $Common.StagingInjectPath 'staging\Optimize-Defender.ps1'
@@ -210,12 +239,13 @@ foreach ($vm in $running) {
         $row.Wsman = $rr.ScriptBlockOutput.Wsman
         $row.Restart = $rr.ScriptBlockOutput.Restart
         $row.DefenderState = $rr.ScriptBlockOutput.Defender
+        $row.PolicySource = $rr.ScriptBlockOutput.PolicySource
     }
 
-    foreach ($k in 'Defender', 'DefenderState', 'Arb', 'Wsman', 'Restart') {
+    foreach ($k in 'Defender', 'DefenderState', 'PolicySource', 'Arb', 'Wsman', 'Restart') {
         if ($row.$k) {
             $colour = if ("$($row.$k)" -match 'fail|FAILED|absent|missing') { 'Red' } else { 'Green' }
-            Write-Host ("    {0,-9} {1}" -f $k, $row.$k) -ForegroundColor $colour
+            Write-Host ("    {0,-13} {1}" -f $k, $row.$k) -ForegroundColor $colour
         }
     }
     $rows.Add((New-Object psobject -Property $row))
@@ -223,7 +253,7 @@ foreach ($vm in $running) {
 
 Write-Host ''
 Write-Host '=== summary ===' -ForegroundColor Cyan
-$rows | Format-Table -AutoSize VM, DefenderState, Arb, Wsman, Restart
+$rows | Format-Table -AutoSize VM, Arb, Wsman, Restart
 
 $failed = @($rows | Where-Object { "$($_.Arb)$($_.Wsman)$($_.Defender)" -match 'fail|FAILED|absent' })
 if ($failed.Count -gt 0) {
