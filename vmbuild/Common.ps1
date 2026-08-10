@@ -6221,6 +6221,18 @@ function Wait-ForVm {
                     if ($channelBrokenNow) { $hbText += ", channel broken" }
                     Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding ($hbText)"
 
+                    # Everything above this point reports through Write-ProgressElapsed, which
+                    # is console-only, and the probe runs -SuppressLog. So a VM that never
+                    # answers leaves NO trace at all until the loop times out -- CS2-FS1 went
+                    # 4m11s silent and then died mid-recovery, and the run log could not say
+                    # what it had been failing on. One line a minute, capped by the modulus.
+                    if ($count % 20 -eq 0) {
+                        $probeErrText = ''
+                        try { if ($out.ErrorDetails) { $probeErrText = (@($out.ErrorDetails) -join '; ') -replace '\s+', ' ' } } catch { }
+                        if ($probeErrText.Length -gt 200) { $probeErrText = $probeErrText.Substring(0, 200) }
+                        Write-Log "$VmName`: still not responding to PSDirect: poll=$count elapsed=$([int]$stopWatch.Elapsed.TotalSeconds)s heartbeat=$hb channelBroken=$channelBrokenNow timedOut=$($out.TimedOut) consecutiveBroken=$channelBrokenCount lastError='$probeErrText'" -LogOnly
+                    }
+
                     # Only hard-reset when heartbeat is NoContact (IC not responding
                     # at all — VM is likely stuck at boot or crashed).
                     # OkApplicationsUnknown / OkApplicationsHealthy mean the OS is
@@ -6245,6 +6257,9 @@ function Wait-ForVm {
                         # Require 3 consecutive channel-broken results + 3 min
                         # elapsed to avoid false positives from transient timeouts.
                         $channelBrokenCount++
+                        # The reboot decision below is taken on this counter, so record each
+                        # step of it. Bounded: the branch stops firing once it reaches 3.
+                        Write-Log "$VmName`: PSDirect channel-broken evidence $channelBrokenCount/3 (poll=$count elapsed=$([int]$stopWatch.Elapsed.TotalSeconds)s heartbeat=$hb timedOut=$($out.TimedOut) parkedRunspaces=$(@($global:ps_orphanRunspaces).Count))" -LogOnly
                         if ($channelBrokenCount -ge 3 -and $stopWatch.Elapsed.TotalMinutes -ge 3) {
                             $psdirectRebootDone = $true
                             Write-Log "$VmName`: PSDirect channel broken after $channelBrokenCount consecutive failures despite healthy heartbeat ($hb). Rebooting VM to recover VMBus." -Warning
@@ -6456,6 +6471,11 @@ function Invoke-VmCommand {
             try {
                 if ($AsJob) {
                     $job = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue -AsJob
+                    # Without this the ledger only ever holds terminal ops, so an empty
+                    # census cannot distinguish "created no jobs" from "created many and
+                    # released none through the ledger" -- which is exactly what the
+                    # CS2-FS1 census could not say. No Get-PSCallStack on this op.
+                    Write-VmJobLedger -Op 'created' -Job $job -VmName $VmName -DisplayName $DisplayName
                     if ($PollProgress) {
                         # Poll the inner job's Progress stream while it runs and re-emit the
                         # latest record. Under -AsJob the remote scriptblock's Write-Progress
@@ -7710,9 +7730,22 @@ function Write-VmJobLedgerCensus {
         }
         $byRs = (@($rsStates | Group-Object | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
         Write-Log "[JobLedger]   live jobs=$($live.Count) state [$byState] runspace [$byRs]" -LogOnly
+        # Name them while there are few enough to name. The CS2-FS1 crash census summarised
+        # its single live job to "NotStarted=1" with a blank runspace, which is exactly the
+        # object worth identifying and the only form in which it was recorded.
+        if ($live.Count -le 12) {
+            foreach ($lj in $live) {
+                $ljId = ''; $ljRs = ''; $ljCmd = ''
+                try { $ljId = "$($lj.InstanceId)".Substring(0, 8) } catch { }
+                try { $ljRs = "$($lj.ChildJobs[0].Runspace.RunspaceStateInfo.State)/$($lj.ChildJobs[0].Runspace.RunspaceAvailability)" } catch { }
+                try { $ljCmd = ("$($lj.Command)" -replace '\s+', ' ').Trim(); if ($ljCmd.Length -gt 90) { $ljCmd = $ljCmd.Substring(0, 90) } } catch { }
+                Write-Log "[JobLedger]   live job id=$ljId num=$($lj.Id) name='$($lj.Name)' state=$($lj.State) rs=$ljRs cmd='$ljCmd'" -LogOnly
+            }
+        }
 
         $entries = @($global:ps_jobLedger)
         $byOp = (@($entries | Group-Object Op | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' ')
+        if (-not $byOp) { $byOp = '(empty -- this process released no job through the ledger)' }
         Write-Log "[JobLedger]   ledger totals: $byOp" -LogOnly
 
         # These are the candidates. A disposed job whose transport is about to break is
@@ -7725,7 +7758,9 @@ function Write-VmJobLedgerCensus {
         if ($risky.Count -eq 0) { Write-Log "[JobLedger]   no disposed/abandoned/reaped jobs recorded" -LogOnly }
 
         $orphans = 0
-        try { $orphans = @($global:ps_orphanRunspaces).Count } catch { }
+        $parked = @()
+        try { $parked = @($global:ps_orphanRunspaces) } catch { }
+        $orphans = $parked.Count
         $cacheRs = ''
         try {
             $cacheRs = (@(@($global:ps_cache.Keys) | ForEach-Object {
@@ -7737,6 +7772,27 @@ function Write-VmJobLedgerCensus {
         }
         catch { }
         Write-Log "[JobLedger]   orphanRunspaces=$orphans cacheRunspaces [$cacheRs]" -LogOnly
+
+        # A bare count is not evidence. On the CS2-FS1 crash the parked list was the ONLY
+        # thing this worker had accumulated -- 8 entries, each a PowerShell object with a
+        # BeginInvoke still outstanding against the transport Stop-VM2 was about to break --
+        # and "orphanRunspaces=8" was everything the census said about them.
+        foreach ($p in @($parked | Sort-Object At -Descending | Select-Object -First 12)) {
+            $pAge = 0; $pRs = ''; $pJob = 'none'; $pDone = ''
+            try { $pAge = [int]((Get-Date) - $p.At).TotalSeconds } catch { }
+            try { $pRs = "$($p.Rs.RunspaceStateInfo.State)/$($p.Rs.RunspaceAvailability)" } catch { }
+            try { if ($p.Job) { $pJob = "$($p.Job.State)" } } catch { }
+            try { if ($p.Ps) { $pDone = " psInvocation=$($p.Ps.InvocationStateInfo.State)" } } catch { }
+            Write-Log "[JobLedger]   parked ${pAge}s ago vm=$($p.VmName) reason='$($p.Reason)' rs=$pRs job=$pJob$pDone" -LogOnly
+        }
+
+        # Hand the compiled crash handler something to print. It is otherwise only fed by
+        # Write-VmJobLedger, which never runs in a worker that disposed nothing -- so the
+        # CONTEXT line would have been empty on exactly the crash it was written for.
+        try {
+            [MemLabsCrash]::Context = "vm=$VmName ctx='$Context' liveJobs=$($live.Count) [$byState] orphans=$orphans ledger=[$byOp]"
+        }
+        catch { }
     }
     catch {
         try { Write-Log "[JobLedger] census failed: $($_.Exception.Message)" -LogOnly } catch { }
@@ -7756,7 +7812,10 @@ function Write-VmJobLedgerCensus {
 # wrote nothing. A C# delegate has no such dependency and writes with File.AppendAllText,
 # which is synchronous and needs no PowerShell state.
 function Register-VmCrashHandler {
-    if ($global:ps_crashHandlerRegistered) { return }
+    # Re-callable: the C# side subscribes once and every call just re-points the target
+    # file. That matters because the first call happens while this file is still being
+    # dot-sourced, long before $Common (and therefore the logs folder) exists.
+    param([string]$Path)
     try {
         if (-not ('MemLabsCrash' -as [type])) {
             Add-Type -TypeDefinition @'
@@ -7801,19 +7860,23 @@ public static class MemLabsCrash {
 }
 '@ -ErrorAction Stop
         }
-        $crashPath = Join-Path ([System.IO.Path]::GetTempPath()) "VMBuild.crash.$PID.log"
-        try {
-            if ($Common -and $Common.LogPath) { $crashPath = ($Common.LogPath -replace '\.log$', '') + '.crash.log' }
-        }
-        catch { }
-        [MemLabsCrash]::Register($crashPath)
+        if (-not $Path) { $Path = Join-Path ([System.IO.Path]::GetTempPath()) "VMBuild.crash.$PID.log" }
+        [MemLabsCrash]::Register($Path)
         $global:ps_crashHandlerRegistered = $true
+        $global:ps_crashHandlerPath = $Path
     }
-    catch { }
+    catch {
+        # Arming is the whole point of this function; a silent failure here means the next
+        # worker death is unattributable again, so say so rather than swallowing it.
+        $global:ps_crashHandlerRegistered = $false
+        $global:ps_crashHandlerPath = $null
+        try { Write-Log "[CrashHandler] FAILED to arm for pid $PID`: $($_.Exception.Message)" -Warning -LogOnly } catch { }
+    }
 }
 
 # Every per-VM worker dot-sources this file, so registering here covers all of them
-# without touching each job scriptblock.
+# without touching each job scriptblock. Re-pointed at the logs folder once $Common
+# exists -- see the Register-VmCrashHandler call in the init block below.
 Register-VmCrashHandler
 
 function Get-RunspaceInventory {
@@ -11152,6 +11215,21 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
         # are flushed before the process terminates. Safe no-op when called
         # multiple times.
         Register-LogBufferExitFlush
+
+        # The crash handler armed during the dot-source above, before this block ran, so
+        # its target was still the %TEMP% fallback: a per-PID file, on the lab host, that
+        # nothing in the run log ever names. A per-VM worker dying is the exact failure it
+        # exists to explain, so put it with the logs and print the path.
+        try {
+            $crashHandlerPath = Join-Path $global:Common.CrashLogsPath "VMBuild.unhandled.$PID.log"
+            Register-VmCrashHandler -Path $crashHandlerPath
+            if ($global:ps_crashHandlerRegistered) {
+                Write-Log "[CrashHandler] armed pid=$PID -> $crashHandlerPath" -LogOnly
+            }
+        }
+        catch {
+            Write-Log "[CrashHandler] could not re-point crash log to the logs folder: $($_.Exception.Message)" -Warning -LogOnly
+        }
 
         if (-not $InJob) {
             Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
