@@ -173,13 +173,14 @@ if (-not $gotLock) {
 # parks a DSC thread on a local RPC reply, and lsass serves LSA/Kerberos/LDAP-bind.
 $watchNames = @('WmiPrvSE', 'WmiApSrv', 'msiexec', 'TrustedInstaller', 'TiWorker', 'MsMpEng', 'powershell', 'dsc', 'lsass')
 
-# Winmgmt hosts the RPC server the DSC provider host blocks on (dump showed the
-# OLE endpoint in svchost = Winmgmt). Resolve it with sc.exe, NOT a Win32_Process
-# query: WMI is the thing under investigation and the query would queue behind the
-# very stall being captured.
-function Get-WinmgmtPid {
+# Winmgmt hosts the RPC server the DSC provider host blocks on, and WinRM is the
+# next hop that relays the record back to the pushing client. Resolve with sc.exe,
+# NOT a Win32_Process query: WMI is the thing under investigation and the query
+# would queue behind the very stall being captured.
+function Get-ServicePid {
+    param([string]$Name)
     try {
-        foreach ($line in (& sc.exe queryex winmgmt 2>$null)) {
+        foreach ($line in (& sc.exe queryex $Name 2>$null)) {
             if ($line -match 'PID\s*:\s*(\d+)') { return [int]$Matches[1] }
         }
     }
@@ -267,7 +268,7 @@ function Test-IdleStatus {
 # reconstructed afterwards: the wait reasons alone classify a stall, they do not
 # identify it. One text file per stall so it transfers as a string.
 function Write-StallBundle {
-    param([string]$Folder, [string]$Status, [int]$AgeSec, [int[]]$WatchPids, [bool]$WantDump, [string]$DscLogPath, [string[]]$DscHostNames, [int[]]$ExtraDumpPids)
+    param([string]$Folder, [string]$Status, [int]$AgeSec, [int[]]$WatchPids, [bool]$WantDump, [string]$DscLogPath, [string[]]$DscHostNames, [hashtable]$ExtraDumpTargets)
 
     $stamp = ([datetime]::UtcNow).ToString('yyyyMMdd-HHmmssZ')
     $file = Join-Path $Folder "stall-$stamp.txt"
@@ -425,14 +426,20 @@ function Write-StallBundle {
         }
         catch {}
         $b.Add("   target pid $target : $why")
-        # Dump the RPC server too. A stack for the caller alone shows it is waiting;
-        # only the server's stack shows what it is waiting FOR.
+        # Dump the whole RPC chain. A stack for the caller alone shows it is waiting;
+        # only each server's stack shows what it is waiting FOR.
         $dumpTargets = New-Object System.Collections.Generic.List[object]
         $dumpTargets.Add([pscustomobject]@{ Id = $target; Why = $why })
-        foreach ($ex in @($ExtraDumpPids | Where-Object { $_ -gt 0 -and $_ -ne $target })) {
-            $exName = 'unknown'
-            try { $exName = (Get-Process -Id $ex -ErrorAction Stop).ProcessName } catch {}
-            $dumpTargets.Add([pscustomobject]@{ Id = $ex; Why = "$exName -- the RPC server the DSC host calls into" })
+        if ($ExtraDumpTargets) {
+            foreach ($ex in $ExtraDumpTargets.GetEnumerator()) {
+                $exId = 0
+                try { $exId = [int]$ex.Key } catch {}
+                if ($exId -le 0 -or $exId -eq $target) { continue }
+                if (@($dumpTargets | Where-Object { $_.Id -eq $exId }).Count -gt 0) { continue }
+                $exName = 'unknown'
+                try { $exName = (Get-Process -Id $exId -ErrorAction Stop).ProcessName } catch {}
+                $dumpTargets.Add([pscustomobject]@{ Id = $exId; Why = "$exName -- $($ex.Value)" })
+            }
         }
         foreach ($dt in $dumpTargets) {
             $dumpPath = Join-Path $Folder "stall-$stamp-pid$($dt.Id).dmp"
@@ -472,6 +479,10 @@ Write-Sample ([pscustomobject]@{
         deadline  = $deadline.ToString('o')
         psVersion = "$($PSVersionTable.PSVersion)"
     })
+
+# Resolved before the loop so the first stall bundle is not missing them.
+$winmgmtPid = Get-ServicePid -Name 'winmgmt'
+$winrmPid = Get-ServicePid -Name 'winrm'
 
 while ((Get-Date) -lt $deadline) {
     if (Test-Path $StopFile) { break }
@@ -519,7 +530,12 @@ while ((Get-Date) -lt $deadline) {
     if (-not $stallAnnounced -and -not $statusIsIdle -and $statusAgeSec -ge $StallAlertSeconds) {
         $stallAnnounced = $true
         $bundlePath = ''
-        try { $bundlePath = Write-StallBundle -Folder $dir -Status $statusText -AgeSec $statusAgeSec -WatchPids $watchPids -WantDump ([bool]$CaptureDump) -DscLogPath $DscLog -DscHostNames $dscHostNames -ExtraDumpPids @($winmgmtPid) }
+        # Built, not a hash literal: duplicate keys throw, and both resolve to 0 when
+        # sc.exe is unavailable -- which would lose the bundle at the one moment it matters.
+        $extraDumps = @{}
+        if ($winmgmtPid -gt 0) { $extraDumps[$winmgmtPid] = 'Winmgmt -- the RPC server the DSC host calls into' }
+        if ($winrmPid -gt 0 -and -not $extraDumps.ContainsKey($winrmPid)) { $extraDumps[$winrmPid] = 'WinRM -- relays the record to the pushing client, the far end of the chain' }
+        try { $bundlePath = Write-StallBundle -Folder $dir -Status $statusText -AgeSec $statusAgeSec -WatchPids $watchPids -WantDump ([bool]$CaptureDump) -DscLogPath $DscLog -DscHostNames $dscHostNames -ExtraDumpTargets $extraDumps }
         catch { $bundlePath = "bundle failed: $($_.Exception.Message)" }
         ('{0} {1}s static | {2} | bundle={3}' -f $wall.ToString('o'), $statusAgeSec, $statusText, $bundlePath) |
             Out-File -FilePath $stallFile -Append -Encoding ascii
@@ -556,8 +572,15 @@ while ((Get-Date) -lt $deadline) {
         if ($watchNames -contains $pieces[1]) { $watchPids += [int]$pieces[0] }
     }
     $watchPids = @($watchPids | Sort-Object -Unique)
-    $winmgmtPid = Get-WinmgmtPid
-    if ($winmgmtPid -gt 0 -and $watchPids -notcontains $winmgmtPid) { $watchPids += $winmgmtPid }
+    # Re-resolve only when a cached pid has gone: sc.exe is a process spawn, and this
+    # loop runs once a second -- the old unconditional call cost 540 spawns per run.
+    $livePids = @{}
+    foreach ($k in $cpu.Keys) { $livePids[[int](($k -split '\|')[0])] = $true }
+    if ($winmgmtPid -le 0 -or -not $livePids.ContainsKey($winmgmtPid)) { $winmgmtPid = Get-ServicePid -Name 'winmgmt' }
+    if ($winrmPid -le 0 -or -not $livePids.ContainsKey($winrmPid)) { $winrmPid = Get-ServicePid -Name 'winrm' }
+    foreach ($svcPid in @($winmgmtPid, $winrmPid)) {
+        if ($svcPid -gt 0 -and $watchPids -notcontains $svcPid) { $watchPids += $svcPid }
+    }
     foreach ($e in $deltas) {
         $pieces = $e.K -split '\|'
         if ($watchNames -contains $pieces[1]) { $watchCpu += $e.D }

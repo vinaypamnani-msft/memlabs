@@ -9220,16 +9220,52 @@ function Test-CMClientPackageDistribution {
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
     $siteCode = $CurrentItem.siteCode
-    Write-Log "[Phase $Phase] $VMName [ClientPkg]: Verifying client package distribution for site '$siteCode'" -LogOnly
+
+    # Everything this check reads is HIERARCHY-wide, so in a cumulative lab it is handed
+    # every DP and boundary group any earlier test left in the domain. Scope the verdict to
+    # what this run owns: its own site plus child sites present in THIS config (same rule
+    # Test-CMSiteWideFunctionality uses for expected boundary groups), plus the DP VMs the
+    # config actually declares. A 6-VM CS1+PS1 config was failed by boundary group 'PS3',
+    # whose DP is not in the config at all.
+    $ownedSiteCodes = @($siteCode)
+    try {
+        $ownedSiteCodes += @($DeployConfig.virtualMachines | Where-Object {
+                $_.role -in @('Primary', 'Secondary') -and $_.parentSiteCode -and $_.parentSiteCode -eq $siteCode
+            } | Select-Object -ExpandProperty siteCode)
+    }
+    catch {}
+    $ownedSiteCodes = @($ownedSiteCodes | Where-Object { $_ } | Select-Object -Unique)
+    $ownedDpNames = @($DeployConfig.virtualMachines | Where-Object {
+            $_.vmName -and ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Secondary')
+        } | Select-Object -ExpandProperty vmName | Select-Object -Unique)
+    $ownedSiteCsv = ($ownedSiteCodes -join ',')
+    $ownedDpCsv = ($ownedDpNames -join ',')
+
+    Write-Log "[Phase $Phase] $VMName [ClientPkg]: Verifying client package distribution for site '$siteCode' (owned sites: $ownedSiteCsv; owned DPs: $ownedDpCsv)" -LogOnly
 
     $scriptBlock = {
-        param($sc)
+        param($sc, $ownedSitesCsv, $ownedDpCsv)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
         $ns = "root\SMS\site_$sc"
         $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '4' = 'RemovalPending'; '5' = 'RemovalRetrying'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
         $dpNameOf = {
             param($nal)
             if ("$nal" -match '\\\\([^\\"\]]+)') { return $Matches[1] } else { return "$nal" }
+        }
+
+        # SMS_PackageStatusDistPointsSummarizer and SMS_BoundaryGroup are HIERARCHY-wide.
+        # In a cumulative lab (CSTest1 runs A..H into one domain) that hands this check
+        # every DP and boundary group any EARLIER test ever created. A DP is this
+        # deployment's when it is a VM in the config, or when its site is one this server
+        # owns. Everything else is reported for context and never judged.
+        $ownedSites = @("$ownedSitesCsv" -split ',' | Where-Object { $_ } | ForEach-Object { $_.Trim().ToUpper() })
+        $ownedDps = @("$ownedDpCsv" -split ',' | Where-Object { $_ } | ForEach-Object { $_.Trim().ToUpper() })
+        $isOwnedDp = {
+            param($DpNameOrFqdn, $DpSiteCode)
+            $short = ("$DpNameOrFqdn" -split '\.')[0].ToUpper()
+            if ($ownedDps -contains $short) { return $true }
+            if ($DpSiteCode -and ($ownedSites -contains "$DpSiteCode".ToUpper())) { return $true }
+            return $false
         }
 
         # Reads distmgr.log to tell whether DistMgr is STILL retrying a package vs
@@ -9299,6 +9335,25 @@ function Test-CMClientPackageDistribution {
                 $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) is NOT distributed to ANY DP -- clients can't get client content (ccmsetup loops on GetDPLocations / 0x87d00215). Distribute it to a DP in the clients' boundary group.")
                 continue
             }
+            $foreignRows = @($dpRows | Where-Object { -not (& $isOwnedDp (& $dpNameOf $_.ServerNALPath) $_.SiteCode) })
+            $dpRows = @($dpRows | Where-Object { & $isOwnedDp (& $dpNameOf $_.ServerNALPath) $_.SiteCode })
+            if ($foreignRows.Count -gt 0) {
+                $foreignSummary = (@($foreignRows | Select-Object -First 8 | ForEach-Object {
+                            $sn3 = $stateName["$([int]$_.State)"]; if (-not $sn3) { $sn3 = "State$($_.State)" }
+                            "$((("$(& $dpNameOf $_.ServerNALPath)") -split '\.')[0])=$sn3(site $($_.SiteCode))"
+                        })) -join ', '
+                $results.Details.Add("  not judged -- $($foreignRows.Count) DP(s) belong to sites this deployment does not own: $foreignSummary")
+            }
+            if ($dpRows.Count -eq 0) {
+                if ($ownedDps.Count -gt 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) is not distributed to ANY DP this deployment owns ($($ownedDps -join ', ')) -- clients assigned here loop in ccmsetup GetDPLocations.")
+                }
+                else {
+                    $results.Details.Add("  client package '$($pkg.Name)' ($pkgId) skipped: this deployment contains no DP of its own")
+                }
+                continue
+            }
             $bad = @($dpRows | Where-Object { $_.State -ne 0 })
             if ($bad.Count -eq 0) {
                 $results.Details.Add("OK: client package '$($pkg.Name)' ($pkgId) Installed on all $($dpRows.Count) DP(s)")
@@ -9345,12 +9400,20 @@ function Test-CMClientPackageDistribution {
             $bgLinks = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction SilentlyContinue)
             foreach ($pkg in $clientPkgs) {
                 $dpState = @{}
+                $dpSite = @{}
                 foreach ($row in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($pkg.PackageID)'" -ErrorAction SilentlyContinue)) {
-                    $dpState[(& $dpNameOf $row.ServerNALPath).ToUpper()] = [int]$row.State
+                    $rowName = (& $dpNameOf $row.ServerNALPath).ToUpper()
+                    $dpState[$rowName] = [int]$row.State
+                    $dpSite[$rowName] = "$($row.SiteCode)"
                 }
                 foreach ($bg in $bgs) {
                     $bgDps = @($bgLinks | Where-Object { $_.GroupID -eq $bg.GroupID } | ForEach-Object { (& $dpNameOf $_.ServerNALPath).ToUpper() } | Select-Object -Unique)
                     if ($bgDps.Count -eq 0) { continue }
+                    $ownedInBg = @($bgDps | Where-Object { & $isOwnedDp $_ $dpSite[$_] })
+                    if ($ownedInBg.Count -eq 0) {
+                        $results.Details.Add("  boundary group '$($bg.Name)' ($($bg.GroupID)) not judged: none of its DP(s) belong to this deployment ($($bgDps -join ', '))")
+                        continue
+                    }
                     $installedInBg = @($bgDps | Where-Object { $dpState.ContainsKey($_) -and $dpState[$_] -eq 0 })
                     if ($installedInBg.Count -eq 0) {
                         $results.Passed = $false
@@ -9378,8 +9441,13 @@ function Test-CMClientPackageDistribution {
         try {
             $clientPkgIds = @($clientPkgs | ForEach-Object { $_.PackageID })
             $failedRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "State = 3 OR State = 6 OR State = 8" -ErrorAction Stop)
+            $foreignFailed = @($failedRows | Where-Object { -not (& $isOwnedDp (& $dpNameOf $_.ServerNALPath) $_.SiteCode) })
+            $failedRows = @($failedRows | Where-Object { & $isOwnedDp (& $dpNameOf $_.ServerNALPath) $_.SiteCode })
+            if ($foreignFailed.Count -gt 0) {
+                $results.Details.Add("  not judged -- $($foreignFailed.Count) terminal-state row(s) on DP(s) outside this deployment: $((@($foreignFailed | Select-Object -First 8 | ForEach-Object { "$($_.PackageID)@$(("$(& $dpNameOf $_.ServerNALPath)" -split '\.')[0])(site $($_.SiteCode))" })) -join ', ')")
+            }
             if ($failedRows.Count -eq 0) {
-                $results.Details.Add("OK: no packages in a terminal distribution-failed state (3/6/8) site-wide")
+                $results.Details.Add("OK: no packages in a terminal distribution-failed state (3/6/8) on this deployment's DP(s)")
             }
             else {
                 $clientFailed = @($failedRows | Where-Object { $clientPkgIds -contains $_.PackageID })
@@ -9426,7 +9494,7 @@ function Test-CMClientPackageDistribution {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $ownedSiteCsv, $ownedDpCsv `
         -DisplayName "Phase11-ClientPkg-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 
