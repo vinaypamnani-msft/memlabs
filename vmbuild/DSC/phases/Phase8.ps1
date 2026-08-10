@@ -149,11 +149,12 @@
             # next auth -- the CMC enrollment DCOM call to the CA -- so enrollment is
             # deterministic even on a -StartPhase 8 re-run, with no reboot. Replaces
             # the old dedicated 'IISGroupReboot' RebootNow.
+            # Group SIDs reach the PAC from the KDC when the TGT is issued, not from
+            # Group Policy, so no gpupdate is involved.
             Script PkiRefreshGroupToken {
                 GetScript  = { @{ Result = 'N/A' } }
                 TestScript = { $false }
                 SetScript  = {
-                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
                     try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
                 }
                 DependsOn  = "[WriteStatus]PkiRequestCerts"
@@ -437,11 +438,12 @@
             # next auth -- the CMC enrollment DCOM call to the CA -- so enrollment is
             # deterministic even on a -StartPhase 8 re-run, with no reboot. Replaces
             # the old dedicated 'IISGroupReboot' RebootNow.
+            # Group SIDs reach the PAC from the KDC when the TGT is issued, not from
+            # Group Policy, so no gpupdate is involved.
             Script PkiRefreshGroupToken {
                 GetScript  = { @{ Result = 'N/A' } }
                 TestScript = { $false }
                 SetScript  = {
-                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
                     try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
                 }
                 DependsOn  = "[WriteStatus]PkiRequestCerts"
@@ -761,11 +763,12 @@
             # next auth -- the CMC enrollment DCOM call to the CA -- so enrollment is
             # deterministic even on a -StartPhase 8 re-run, with no reboot. Replaces
             # the old dedicated 'IISGroupReboot' RebootNow.
+            # Group SIDs reach the PAC from the KDC when the TGT is issued, not from
+            # Group Policy, so no gpupdate is involved.
             Script PkiRefreshGroupToken {
                 GetScript  = { @{ Result = 'N/A' } }
                 TestScript = { $false }
                 SetScript  = {
-                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
                     try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
                 }
                 DependsOn  = "[WriteStatus]PkiRequestCerts"
@@ -967,11 +970,12 @@
             # the old dedicated 'IISGroupReboot' RebootNow. NOTE: the site server's
             # own ScriptWorkflow (RegisterTaskScheduler, below) is unaffected -- no
             # reboot fires here anymore.
+            # Group SIDs reach the PAC from the KDC when the TGT is issued, not from
+            # Group Policy, so no gpupdate is involved.
             Script PkiRefreshGroupToken {
                 GetScript  = { @{ Result = 'N/A' } }
                 TestScript = { $false }
                 SetScript  = {
-                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
                     try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
                 }
                 DependsOn  = "[WriteStatus]PkiRequestCerts"
@@ -1249,11 +1253,12 @@
             # next auth -- the CMC enrollment DCOM call to the CA -- so enrollment is
             # deterministic even on a -StartPhase 8 re-run, with no reboot. Replaces
             # the old dedicated 'IISGroupReboot' RebootNow.
+            # Group SIDs reach the PAC from the KDC when the TGT is issued, not from
+            # Group Policy, so no gpupdate is involved.
             Script PkiRefreshGroupToken {
                 GetScript  = { @{ Result = 'N/A' } }
                 TestScript = { $false }
                 SetScript  = {
-                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
                     try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
                 }
                 DependsOn  = "[WriteStatus]PkiRequestCerts"

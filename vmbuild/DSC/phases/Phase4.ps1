@@ -151,11 +151,12 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
             # group in Phase 2 and Phase 3 already reboots after the group exists,
             # so purging the machine (0x3e7 = SYSTEM LUID) Kerberos ticket cache
             # forces a fresh TGT on the CMC enrollment call to the CA.
+            # Group SIDs reach the PAC from the KDC when the TGT is issued, not from
+            # Group Policy, so no gpupdate is involved.
             Script PkiRefreshGroupToken {
                 GetScript  = { @{ Result = 'N/A' } }
                 TestScript = { $false }
                 SetScript  = {
-                    try { gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
                     try { klist.exe -li 0x3e7 purge 2>&1 | Out-Null } catch {}
                 }
                 DependsOn  = "[WriteStatus]PkiRequestCerts"
