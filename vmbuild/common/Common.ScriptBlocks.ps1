@@ -2164,6 +2164,39 @@ $global:VM_Config = {
 
 
         $Stop_RunningDSC = {
+            param([string]$HostRunStartUtc)
+
+            # Reap PowerShell Direct hosts left behind by EARLIER runs. Phase start is the
+            # only safe moment: nothing of ours is mid-command on this VM except the session
+            # executing this block. Three guards, each load-bearing:
+            #   1. never $PID -- this block RUNS INSIDE one of the processes it enumerates;
+            #   2. only a -SocketServerMode/-so command line, which is unique to PSDirect --
+            #      ScriptWorkflow.ps1 and the DSC engine are also powershell.exe and killing
+            #      either mid-phase would destroy real work;
+            #   3. only older than the host run that sent this, so a session the launcher
+            #      still has cached and reuses across phases is never touched. A missing or
+            #      unparseable cutoff skips the reap entirely rather than guessing.
+            $reaped = 0
+            if ($HostRunStartUtc) {
+                try {
+                    $cutoffUtc = [datetime]::Parse($HostRunStartUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+                    $selfPid = [int]$PID
+                    foreach ($proc in @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'pwsh.exe'" -ErrorAction SilentlyContinue)) {
+                        if ([int]$proc.ProcessId -eq $selfPid) { continue }
+                        $procCmd = "$($proc.CommandLine)"
+                        if ($procCmd -notmatch '(?i)SocketServerMode' -and $procCmd -notmatch '(?i)(^|\s)-so(\s|$)') { continue }
+                        if (-not $proc.CreationDate) { continue }
+                        if ($proc.CreationDate.ToUniversalTime() -ge $cutoffUtc) { continue }
+                        try {
+                            Stop-Process -Id ([int]$proc.ProcessId) -Force -ErrorAction Stop
+                            $reaped++
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
+
             # Helper: hard-delete the LCM's on-disk documents and disable the
             # DSC scheduled tasks so it cannot auto-resume from a doc we
             # missed. Remove-DscConfigurationDocument goes through CIM/WMI --
@@ -2275,7 +2308,7 @@ $global:VM_Config = {
                     Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
                 }
                 catch {}
-                return [PSCustomObject]@{ Stopped = $true; LCMState = 'Idle'; PreLCMState = 'Idle'; PreLCMDetail = $preLcmDetail; PreLCMMode = $preLcmMode; PreDocs = ($preDocs -join ','); Action = 'skipped-nothing-to-stop' }
+                return [PSCustomObject]@{ Stopped = $true; LCMState = 'Idle'; PreLCMState = 'Idle'; PreLCMDetail = $preLcmDetail; PreLCMMode = $preLcmMode; PreDocs = ($preDocs -join ','); Action = 'skipped-nothing-to-stop'; Reaped = $reaped }
             }
 
             # 1. Try a clean stop first (flushes DSC logs so they're readable).
@@ -2402,7 +2435,7 @@ $global:VM_Config = {
                 } catch {}
                 Start-Sleep -Seconds 2
             }
-            return [PSCustomObject]@{ Stopped = $stopped; LCMState = $lcmState; PreLCMState = $preLcmState; PreLCMDetail = $preLcmDetail; PreLCMMode = $preLcmMode; PreDocs = ($preDocs -join ','); Action = 'stopped' }
+            return [PSCustomObject]@{ Stopped = $stopped; LCMState = $lcmState; PreLCMState = $preLcmState; PreLCMDetail = $preLcmDetail; PreLCMMode = $preLcmMode; PreDocs = ($preDocs -join ','); Action = 'stopped'; Reaped = $reaped }
         }
 
         Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 5 -force
@@ -2414,11 +2447,32 @@ $global:VM_Config = {
         # VM still escalates to the reboot that actually fixes it.
         $stopVmCount = @($deployConfig.virtualMachines).Count
         $stopTimeout = if ($stopVmCount -gt 10) { [Math]::Min(180, 60 + 10 * ($stopVmCount - 10)) } else { 60 }
-        $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+        # Cutoff for the guest's orphaned-PSDirect reap. Take the EARLIER of this process
+        # and its parent (Start-Job worker -> launcher), so a session the launcher opened
+        # before this worker existed still counts as current. Erring earlier only ever
+        # reaps less. Null on any failure, which makes the guest skip the reap.
+        $hostRunStartUtc = $null
+        try {
+            $startUtc = (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime()
+            $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction SilentlyContinue).ParentProcessId
+            if ($parentPid) {
+                $parentProc = Get-Process -Id ([int]$parentPid) -ErrorAction SilentlyContinue
+                if ($parentProc -and $parentProc.StartTime.ToUniversalTime() -lt $startUtc) { $startUtc = $parentProc.StartTime.ToUniversalTime() }
+            }
+            $hostRunStartUtc = $startUtc.ToString('o')
+        }
+        catch { $hostRunStartUtc = $null }
+        # Only the phase-start call reaps. The retry/post-reboot calls below deliberately
+        # omit it: after a reboot there is nothing left to reap, and a retry runs while the
+        # premise ("nothing else is using them") is no longer established.
+        $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -ArgumentList @($hostRunStartUtc) -DisplayName "Stop Any Running DSC's"
         # An LCM found Busy at PHASE START means the previous phase never finished --
         # we are force-terminating real work, not tidying up. That deserves to be
         # visible; it used to be sledgehammered silently.
         $sbo = $result.ScriptBlockOutput
+        if ($sbo -and $sbo.Reaped -gt 0) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): reaped $($sbo.Reaped) orphaned PowerShell Direct host(s) predating $hostRunStartUtc." -LogOnly
+        }
         if ($sbo -and $sbo.PreLCMState) {
             if ($sbo.PreLCMState -eq 'Busy') {
                 $what = if ($sbo.PreLCMDetail) { " applying '$($sbo.PreLCMDetail)'" } else { '' }
