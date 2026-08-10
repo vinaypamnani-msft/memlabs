@@ -34,8 +34,10 @@
     Guest side is read-only apart from its own JSONL under C:\staging\DSC.
 
 .PARAMETER Action
-    Start    Deploy + launch the sampler in each target VM (detached, self-expiring).
-    Stop     Stop the sampler in each target VM.
+    Start    Deploy the sampler into each target VM as a SYSTEM scheduled task and
+             run it. The task carries an AtStartup trigger, so it survives the
+             reboots Phase 8/9 perform; the sampler self-terminates at its deadline.
+    Stop     Stop and unregister the sampler task in each target VM.
     Collect  Pull each guest's JSONL back to vmbuild\logs\dscstall\.
     Report   Analyse collected JSONL and print stall windows + a verdict each.
     SelfTest Run the sampler locally with an injected freeze and assert it fires.
@@ -92,6 +94,7 @@ $guestDir = 'C:\staging\DSC\StallWatch'
 $guestScript = "$guestDir\Watch-Stall.ps1"
 $guestOut = "$guestDir\samples.jsonl"
 $guestStopFile = "$guestDir\stop.flag"
+$guestTaskName = 'MemLabsDscStallWatch'
 
 #region guest payload -------------------------------------------------------
 # ASCII only, Windows PowerShell 5.1 only: no ternary, no ?? / ?., no -Parallel.
@@ -389,55 +392,84 @@ switch ($Action) {
         $targets = Get-Targets
         Write-Host "Starting DSC stall sampler on $($targets.Count) VM(s): $($targets -join ', ')" -ForegroundColor Cyan
         $sb = {
-            param($dir, $script, $outFile, $stopFile, $payload, $minutes)
-            if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
-            Remove-Item -Path $stopFile -Force -ErrorAction SilentlyContinue
-            Remove-Item -Path $outFile -Force -ErrorAction SilentlyContinue
-            $payload | Out-File -FilePath $script -Encoding ascii -Force
-            $existing = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-                    Where-Object { "$($_.CommandLine)" -like "*Watch-Stall.ps1*" })
-            foreach ($e in $existing) { Stop-Process -Id $e.ProcessId -Force -ErrorAction SilentlyContinue }
-            $argList = @(
-                '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
-                '-ExecutionPolicy', 'Bypass', '-File', "`"$script`"",
-                '-OutFile', "`"$outFile`"", '-StopFile', "`"$stopFile`"",
-                '-DurationMinutes', "$minutes"
-            )
-            Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden | Out-Null
-            Start-Sleep -Seconds 3
-            $running = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-                    Where-Object { "$($_.CommandLine)" -like "*Watch-Stall.ps1*" })
-            $lines = 0
-            if (Test-Path $outFile) { $lines = @(Get-Content $outFile -ErrorAction SilentlyContinue).Count }
-            return "pids=$($running.Count) lines=$lines"
+            param($dir, $script, $outFile, $stopFile, $payload, $minutes, $taskName)
+            $ev = New-Object System.Collections.Generic.List[string]
+            try {
+                if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+                Remove-Item -Path $stopFile -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path $outFile -Force -ErrorAction SilentlyContinue
+                $payload | Out-File -FilePath $script -Encoding ascii -Force
+
+                $bytes = 0
+                if (Test-Path $script) { $bytes = (Get-Item $script).Length }
+                $ev.Add("payloadBytes=$bytes")
+                if ($bytes -lt 1000) { $ev.Add('ERROR=payload-not-written'); return ($ev -join ' ') }
+
+                # Prove the payload parses under the GUEST's PS 5.1 before scheduling it.
+                # A syntax error would otherwise surface only as "no samples" much later.
+                $ptok = $null
+                $perr = $null
+                [void][System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$ptok, [ref]$perr)
+                if ($perr -and $perr.Count -gt 0) {
+                    $ev.Add("ERROR=payload-parse L$($perr[0].Extent.StartLineNumber): $($perr[0].Message)")
+                    return ($ev -join ' ')
+                }
+
+                # A scheduled task, not Start-Process: a detached child of the PSDirect
+                # host is not guaranteed to outlive the session, and AtStartup brings the
+                # sampler back after the reboots Phase 8/9 perform.
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+                $argLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -OutFile "{1}" -StopFile "{2}" -DurationMinutes {3}' -f $script, $outFile, $stopFile, $minutes
+                $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argLine
+                $trigger = New-ScheduledTaskTrigger -AtStartup
+                $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+                $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
+                Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+                Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                Start-Sleep -Seconds 6
+
+                $state = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).State
+                $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+                $lines = 0
+                if (Test-Path $outFile) { $lines = @(Get-Content $outFile -ErrorAction SilentlyContinue).Count }
+                $ev.Add("task=$state lastResult=$($info.LastTaskResult) lines=$lines")
+                if ($lines -eq 0) { $ev.Add('ERROR=task-ran-but-wrote-nothing') }
+                return ($ev -join ' ')
+            }
+            catch {
+                $ev.Add("ERROR=$($_.Exception.GetType().Name): $($_.Exception.Message)")
+                return ($ev -join ' ')
+            }
         }
         foreach ($vm in $targets) {
-            $o = Invoke-Guest -Vm $vm -Sb $sb -ArgList @($guestDir, $guestScript, $guestOut, $guestStopFile, $guestPayload, $DurationMinutes)
+            $o = Invoke-Guest -Vm $vm -Sb $sb -ArgList @($guestDir, $guestScript, $guestOut, $guestStopFile, $guestPayload, $DurationMinutes, $guestTaskName)
             if ($null -ne $o) {
-                # 'pids=0' means Start-Process returned but nothing is running: report it, do not call it started.
-                $ok = ("$o" -notlike 'pids=0*')
                 $color = 'Green'
-                if (-not $ok) { $color = 'Red' }
+                if ("$o" -like '*ERROR=*') { $color = 'Red' }
                 Write-Host "  $vm : $o" -ForegroundColor $color
             }
         }
 
-        # The sampler is detached, so "Start-Process returned" is not proof it
-        # outlived the PSDirect session that spawned it. Re-check on a new session.
-        Write-Host "`nVerifying the sampler survived the session that started it..." -ForegroundColor Cyan
+        # "Register-ScheduledTask returned" is not proof the sampler is still writing.
+        # Re-check on a NEW session, and require the sample count to have GROWN.
+        Write-Host "`nVerifying the sampler is alive and still writing..." -ForegroundColor Cyan
         $verifySb = {
-            param($outFile)
-            $running = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-                    Where-Object { "$($_.CommandLine)" -like "*Watch-Stall.ps1*" })
-            $lines = 0
-            if (Test-Path $outFile) { $lines = @(Get-Content $outFile -ErrorAction SilentlyContinue).Count }
-            return "alive=$($running.Count) lines=$lines"
+            param($outFile, $taskName)
+            $lines1 = 0
+            if (Test-Path $outFile) { $lines1 = @(Get-Content $outFile -ErrorAction SilentlyContinue).Count }
+            Start-Sleep -Seconds 4
+            $lines2 = 0
+            if (Test-Path $outFile) { $lines2 = @(Get-Content $outFile -ErrorAction SilentlyContinue).Count }
+            $state = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).State
+            $verdict = 'GROWING'
+            if ($lines2 -le $lines1) { $verdict = 'ERROR=not-growing' }
+            return "task=$state lines=$lines1->$lines2 $verdict"
         }
         foreach ($vm in $targets) {
-            $o = Invoke-Guest -Vm $vm -Sb $verifySb -ArgList @($guestOut)
+            $o = Invoke-Guest -Vm $vm -Sb $verifySb -ArgList @($guestOut, $guestTaskName)
             if ($null -ne $o) {
                 $color = 'Green'
-                if ("$o" -like 'alive=0*') { $color = 'Red' }
+                if ("$o" -like '*ERROR=*') { $color = 'Red' }
                 Write-Host "  $vm : $o" -ForegroundColor $color
             }
         }
@@ -447,16 +479,20 @@ switch ($Action) {
     'Stop' {
         $targets = Get-Targets
         $sb = {
-            param($stopFile)
+            param($stopFile, $taskName)
             New-Item -Path $stopFile -ItemType File -Force | Out-Null
             Start-Sleep -Seconds 3
             $running = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
                     Where-Object { "$($_.CommandLine)" -like "*Watch-Stall.ps1*" })
             foreach ($e in $running) { Stop-Process -Id $e.ProcessId -Force -ErrorAction SilentlyContinue }
-            return "stopped=$($running.Count)"
+            # Unregister too, or the AtStartup trigger resurrects it on the next reboot.
+            Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            $left = (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
+            return "killed=$($running.Count) taskRemoved=$($null -eq $left)"
         }
         foreach ($vm in $targets) {
-            $o = Invoke-Guest -Vm $vm -Sb $sb -ArgList @($guestStopFile)
+            $o = Invoke-Guest -Vm $vm -Sb $sb -ArgList @($guestStopFile, $guestTaskName)
             if ($null -ne $o) { Write-Host "  $vm : $o" -ForegroundColor Green }
         }
     }
