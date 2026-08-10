@@ -375,8 +375,11 @@ if ($Action -ne 'Report' -and $Action -ne 'SelfTest') {
     . $commonPath
 
     if (-not ($Common -and $Common.LocalAdmin -and $Common.LocalAdmin.Password)) {
-        throw ("Local admin (vmbuildadmin) credential not loaded; expected cache at {0}. " -f (Join-Path $vmbuildRoot 'cache\vmbuildadmin.txt')) +
-        'Every guest call would fail silently without it.'
+        $credCache = Join-Path $vmbuildRoot 'cache\vmbuildadmin.txt'
+        $msg = 'Local admin (vmbuildadmin) credential not loaded -- every guest call would fail silently. ' +
+        'cacheExists={0} path={1} offlineMode={2} stamped={3} fatalError={4}. ' +
+        'If this window loaded Common.ps1 before pulling the init-gate fix, open a new PowerShell window.'
+        throw ($msg -f (Test-Path $credCache), $credCache, $Common.OfflineMode, [bool]$Common.InitCapabilities, $Common.FatalError)
     }
 }
 

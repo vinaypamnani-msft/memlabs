@@ -10665,13 +10665,21 @@ $requestedInitCapabilities = @{
 }
 
 $initUpgradeReason = $null
-if ($Common.Initialized -and $Common.InitCapabilities) {
-    # A $Common without InitCapabilities predates this stamp (launcher left open
-    # across the update); leave it alone rather than surprise it with a re-init.
-    $gained = @(foreach ($cap in 'StorageInit', 'MaintenanceRefresh', 'EnvironmentDetection', 'HostPreparation') {
-            if ($requestedInitCapabilities[$cap] -and -not $Common.InitCapabilities[$cap]) { $cap }
-        })
-    if ($gained.Count -gt 0) { $initUpgradeReason = $gained -join ', ' }
+if ($Common.Initialized) {
+    if ($Common.InitCapabilities) {
+        $gained = @(foreach ($cap in 'StorageInit', 'MaintenanceRefresh', 'EnvironmentDetection', 'HostPreparation') {
+                if ($requestedInitCapabilities[$cap] -and -not $Common.InitCapabilities[$cap]) { $cap }
+            })
+        if ($gained.Count -gt 0) { $initUpgradeReason = $gained -join ', ' }
+    }
+    elseif ($requestedInitCapabilities['StorageInit'] -and $null -eq $Common.LocalAdmin) {
+        # No stamp means this $Common predates the capability record (a launcher
+        # left open across the update). Ask the object rather than assume it is
+        # complete -- assuming would be the same first-loader-wins trap. A missing
+        # LocalAdmin proves the load that built it produced no credential. Fires at
+        # most once: the rebuilt $Common carries InitCapabilities either way.
+        $initUpgradeReason = 'StorageInit (unstamped $Common, no LocalAdmin)'
+    }
 }
 
 if (-not $Common.Initialized -or $initUpgradeReason) {
