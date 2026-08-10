@@ -333,6 +333,36 @@ function Write-StallBundle {
     }
     catch { $b.Add("   process list failed: $($_.Exception.Message)") }
 
+    # Full pid map: the process at the end of a blocked RPC chain burns no CPU, so it
+    # never reaches the top-25 list -- WinRM was unidentifiable in the 20260810 capture.
+    $b.Add('')
+    $b.Add('== all processes (pid -> name), for resolving RPC server pids from a dump ==')
+    try {
+        $line = ''
+        foreach ($pr in (Get-Process -ErrorAction SilentlyContinue | Sort-Object Id)) {
+            $cell = '{0}={1}' -f $pr.Id, $pr.ProcessName
+            if (($line.Length + $cell.Length + 2) -gt 110) { $b.Add("   $line"); $line = '' }
+            if ($line) { $line += '  ' + $cell } else { $line = $cell }
+        }
+        if ($line) { $b.Add("   $line") }
+    }
+    catch { $b.Add("   pid map failed: $($_.Exception.Message)") }
+
+    $b.Add('')
+    $b.Add('== services by pid (svchost is ambiguous without this) ==')
+    try {
+        $svc = & sc.exe queryex type= service state= all 2>$null
+        $curName = $null
+        foreach ($l in $svc) {
+            if ($l -match '^SERVICE_NAME:\s*(\S+)') { $curName = $Matches[1] }
+            elseif ($l -match '^\s*PID\s*:\s*(\d+)' -and $curName) {
+                if ([int]$Matches[1] -gt 0) { $b.Add(("   pid={0,-8} {1}" -f $Matches[1], $curName)) }
+                $curName = $null
+            }
+        }
+    }
+    catch { $b.Add("   service map failed: $($_.Exception.Message)") }
+
     $b.Add('')
     $b.Add('== netstat -ano (non-listening) ==')
     try {
