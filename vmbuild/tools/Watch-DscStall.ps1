@@ -170,6 +170,9 @@ if (-not $gotLock) {
 # Processes worth naming when something blocks. WmiPrvSE hosts class-based DSC
 # resources; the rest are the usual machine-wide lock holders.
 $watchNames = @('WmiPrvSE', 'WmiApSrv', 'msiexec', 'TrustedInstaller', 'TiWorker', 'MsMpEng', 'powershell', 'dsc')
+# Only these actually execute DSC resources. Kept separate from $watchNames so a
+# busy Defender cannot be mistaken for DSC doing work.
+$dscHostNames = @('WmiPrvSE', 'WmiApSrv', 'dsc')
 
 function Write-Sample {
     param($Record)
@@ -472,6 +475,7 @@ while ((Get-Date) -lt $deadline) {
     $top = @($deltas | Sort-Object D -Descending | Select-Object -First 5 | ForEach-Object { '{0}={1}' -f $_.K, $_.D })
 
     $watchCpu = 0.0
+    $dscCpu = 0.0
     $watchPids = @()
     foreach ($k in $cpu.Keys) {
         $pieces = $k -split '\|'
@@ -481,6 +485,9 @@ while ((Get-Date) -lt $deadline) {
     foreach ($e in $deltas) {
         $pieces = $e.K -split '\|'
         if ($watchNames -contains $pieces[1]) { $watchCpu += $e.D }
+        # The DSC ENGINE only. watchCpu sums every watched name including MsMpEng,
+        # and a Defender scan burning CPU next to a blocked DSC read as "DSC busy".
+        if ($dscHostNames -contains $pieces[1]) { $dscCpu += $e.D }
     }
 
     $rec = [pscustomobject]@{
@@ -495,6 +502,7 @@ while ((Get-Date) -lt $deadline) {
         idle       = $statusIsIdle
         dscLogSize = $dscLogSize
         watchCpuMs = [math]::Round($watchCpu, 0)
+        dscCpuMs   = [math]::Round($dscCpu, 0)
         topCpu     = $top
     }
     Write-Sample $rec
@@ -918,8 +926,26 @@ function Invoke-StartAction {
                 $maxSkew = 0
                 foreach ($t in $w) { if ([math]::Abs([double]$t.skewMs) -gt [math]::Abs($maxSkew)) { $maxSkew = [double]$t.skewMs } }
                 $cpuMs = (($w | Measure-Object watchCpuMs -Sum).Sum)
+                # dscCpuMs is the DSC engine alone. Absent in collections taken before
+                # that split, so fall back rather than silently reading 0.
+                $dscCpuMs = $null
+                if ($null -ne $w[0].dscCpuMs) { $dscCpuMs = (($w | Measure-Object dscCpuMs -Sum).Sum) }
                 $logGrew = ([int]$w[-1].dscLogSize -gt [int]$w[0].dscLogSize)
                 $winDeep = @($deeps | Where-Object { ([datetime]$_.utc) -ge $start -and ([datetime]$_.utc) -le $end })
+
+                # A thread parked on an RPC reply is the strongest single signal here:
+                # it is blocked on another process, not computing.
+                $rpcWait = $false
+                $topConsumer = ''
+                foreach ($dp in $winDeep) {
+                    foreach ($p in $dp.threads.PSObject.Properties) {
+                        if ($p.Name -like '*LpcReply*') { $rpcWait = $true }
+                    }
+                }
+                if ($winDeep.Count -gt 0) {
+                    $tc = @($winDeep[-1].topCpu)
+                    if ($tc.Count -gt 0) { $topConsumer = "$($tc[0])" }
+                }
 
                 $verdict = 'BLOCKED: no CPU, sampler on time -- local wait (see thread reasons)'
                 if ($maxLate -gt 3000 -and [math]::Abs($maxSkew) -gt 3000) {
@@ -928,8 +954,11 @@ function Invoke-StartAction {
                 elseif ($maxLate -gt 3000) {
                     $verdict = 'GUEST FROZE: the sampler was late too, so this is NOT DSC -- host CPU/storage or the VM was descheduled'
                 }
-                elseif ($cpuMs -gt (($end - $start).TotalMilliseconds * 0.3)) {
-                    $verdict = 'DSC BUSY: real CPU was burned -- the resource was working, not stuck'
+                elseif ($null -ne $dscCpuMs -and $dscCpuMs -gt (($end - $start).TotalMilliseconds * 0.3)) {
+                    $verdict = 'DSC BUSY: the DSC engine itself burned real CPU -- working, not stuck'
+                }
+                elseif ($rpcWait) {
+                    $verdict = 'BLOCKED ON RPC: a DSC thread is parked on an LpcReply (waiting on another process) -- see conns'
                 }
                 elseif (@($winDeep | Where-Object { @($_.conns).Count -gt 0 }).Count -gt 0) {
                     $verdict = 'BLOCKED, possibly on the network -- see conns in the log'
@@ -947,7 +976,10 @@ function Invoke-StartAction {
                 Write-Report ("    frozen status : {0}" -f $frozenShort)
                 Write-Report ("    frozen full   : {0}" -f $frozen) -FileOnly
                 Write-Report ("    sampler late  : max {0} ms   clock skew max {1} ms   sampler own work max {2} ms" -f $maxLate, $maxSkew, (($w | Measure-Object workMs -Maximum).Maximum))
-                Write-Report ("    watched CPU   : {0} ms over the window   DSC_Log grew: {1}" -f $cpuMs, $logGrew)
+                $dscCpuText = 'n/a (pre-split collection)'
+                if ($null -ne $dscCpuMs) { $dscCpuText = "$dscCpuMs ms" }
+                Write-Report ("    DSC engine CPU: {0} over the window   all watched procs: {1} ms" -f $dscCpuText, $cpuMs)
+                Write-Report ("    top consumer  : {0}   DSC_Log grew: {1}" -f $topConsumer, $logGrew)
                 Write-Report ("    VERDICT       : {0}" -f $verdict) -Color Magenta
                 if ($winDeep.Count -gt 0) {
                     $last = $winDeep[-1]
