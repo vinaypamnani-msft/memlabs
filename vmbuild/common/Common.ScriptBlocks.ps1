@@ -3221,8 +3221,18 @@ $global:VM_Config = {
         # circuits the copy on subsequent phases within the SAME run -- the host
         # payload cannot change mid-run, so once we've copied (and stamped the
         # signature) there is nothing to re-evaluate. It no longer FORCES a copy.
+        #
+        # $alreadyCopiedDSC is host-side bookkeeping stamped when the job was
+        # DISPATCHED, so it is a claim about this run, never about the guest.
+        # An absent DSC.zip is proof the claim is wrong (worker died mid-copy,
+        # someone wiped C:\staging), and the expand step a few lines down cannot
+        # recover from it -- so a guest with no payload always gets a copy.
         $signatureMatches = ($guestSourceSignature -eq $dscSourceSignature) -and ($guestZipHash -eq $dscZipHash)
-        if (-not $alreadyCopiedDSC -and -not $signatureMatches) {
+        $guestHasPayload = -not [string]::IsNullOrWhiteSpace($guestZipHash)
+        if ($alreadyCopiedDSC -and -not $guestHasPayload) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC was recorded as copied this run but the guest has no C:\staging\DSC\DSC.zip; copying again." -Warning
+        }
+        if ((-not $alreadyCopiedDSC -and -not $signatureMatches) -or -not $guestHasPayload) {
 
             # PS5.1 parse-check all guest scripts once per build (not per VM).
             # Guest VMs run PS 5.1 which reads non-BOM files as Windows-1252;

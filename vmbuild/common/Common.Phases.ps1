@@ -1136,6 +1136,15 @@ function Start-Phase {
         # $null = on every one of these: Start-Phase's return value is the phase pass/fail
         # gate and -OutputStream writes to the success stream, which turns it into an array.
         $null = Write-Log "[Phase $Phase] $($crashedVMs.Count) worker process(es) died without reporting a failure ($($crashedVMs -join ', ')). Re-dispatching those VMs once." -Warning -OutputStream
+        # These per-run "already did this VM" markers are stamped at DISPATCH time, so they
+        # record intent, not completion -- a worker that died mid-copy still left its VM in
+        # $global:DSC_Copied, and the re-dispatch then skipped the DSC copy and died on a
+        # missing C:\staging\DSC\DSC.zip. Nothing a dead worker claimed is verifiable, so
+        # forget the claims for these VMs only.
+        foreach ($cvm in $crashedVMs) {
+            $global:DSC_Copied = @($global:DSC_Copied | Where-Object { $_ -and $_ -ne $cvm })
+            $global:WU_Quieted = @($global:WU_Quieted | Where-Object { $_ -and $_ -ne $cvm })
+        }
         $retry = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig -OnlyVMs $crashedVMs
         if ($retry -and $retry.Applicable -and @($retry.Jobs).Count -gt 0) {
             $retryResult = Resolve-WaitPhaseResult -Raw (Wait-Phase -Phase $Phase -Jobs $retry.Jobs -AdditionalData $retry.AdditionalData -DeployConfig $deployConfig) -Phase $Phase
