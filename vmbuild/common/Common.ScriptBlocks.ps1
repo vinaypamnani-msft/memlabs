@@ -1469,6 +1469,31 @@ $global:VM_Create = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): WMI: $($arbResult.ScriptBlockOutput)" -LogOnly
             }
 
+            # The 195s DSC stall is WSMan's robust-connection retry window, not DSC. When the
+            # DC's WinRM channel drops mid-apply, ServerRobustConnection buffers every later
+            # LCM message and CListenerOperation::WaitAndSend blocks on an INFINITE condition
+            # variable until the retry timer expires. Dump showed m_maxRetryTime 0x2f9b8 =
+            # 195000 = this value (180000 default) + a hardcoded 15000 server delta. 2000 is
+            # WSMAN_MIN_RETRY_TIMEOUT, the floor ConfigRegistry clamps to, so the window
+            # becomes ~17s. Read back what actually took effect rather than assuming.
+            $rcSb = {
+                $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Client'
+                if (-not (Test-Path -LiteralPath $key)) { return 'WSMAN Client key not present -- not set' }
+                $prior = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction SilentlyContinue).max_retry_timeout_ms
+                New-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -Value 2000 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+                $now = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction SilentlyContinue).max_retry_timeout_ms
+                $priorText = 'unset (default 180000)'
+                if ($null -ne $prior) { $priorText = "$prior" }
+                return ("max_retry_timeout_ms was {0}, now {1}; server window is this +15000 (applies at next WinRM start)" -f $priorText, $now)
+            }
+            $rcResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $rcSb -DisplayName "Shorten WSMan robust-connection retry window" -AsJob -TimeoutSeconds 120
+            if ($rcResult.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): could not set WSMan max_retry_timeout_ms: $($rcResult.ScriptBlockOutput)" -Warning
+            }
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): WSMan: $($rcResult.ScriptBlockOutput)" -LogOnly
+            }
+
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Initializing Disks"
             Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Starting" -force
             $count = 0
