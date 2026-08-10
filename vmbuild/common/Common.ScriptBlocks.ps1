@@ -3494,10 +3494,15 @@ $global:VM_Config = {
             Write-Progress2 $Activity -Status "Expanding and installing modules" -percentcomplete 40 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding and installing DSC modules inside the VM."
             $swExpand = [System.Diagnostics.Stopwatch]::StartNew()
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ExpandAndInstall -DisplayName "DSC: Expand and Install Modules"
+            # -AsJob for the deadline: the sync path has no timeout. Observed 11.4-24.4s
+            # across 8 VMs; the block only expands a zip and copies modules locally, so
+            # 900s can only be a wedged channel. It reports no errors of its own, so a
+            # failure here is already a session/transport failure -- nothing to harvest.
+            $dscExpandTimeoutSeconds = 900
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds $dscExpandTimeoutSeconds -ScriptBlock $DSC_ExpandAndInstall -DisplayName "DSC: Expand and Install Modules"
             if ($result.ScriptBlockFailed) {
                 Start-Sleep -Seconds 15
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ExpandAndInstall -DisplayName "DSC: Expand and Install Modules"
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds $dscExpandTimeoutSeconds -ScriptBlock $DSC_ExpandAndInstall -DisplayName "DSC: Expand and Install Modules"
                 if ($result.ScriptBlockFailed) {
                     $swExpand.Stop()
                     Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] ExpandAndInstallModules FAILED after $([Math]::Round($swExpand.Elapsed.TotalSeconds,1)) seconds" -LogOnly
@@ -3794,7 +3799,9 @@ $global:VM_Config = {
                 # also clear PendingConfiguration if the doc auto-loaded.
                 Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's (post-reboot)" | Out-Null
             }
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder, $phaseRunGuid -DisplayName "DSC: Clear Old Status"
+            # -AsJob to match the first attempt above -- a sync retry has no timeout, so the
+            # recovery path was less bounded than the thing it was recovering.
+            $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder, $phaseRunGuid -DisplayName "DSC: Clear Old Status"
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status after Stop_RunningDSC retry / reboot. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
@@ -4561,10 +4568,43 @@ $global:VM_Config = {
             Write-Progress2 "Creating DSC" -status "Invoking DSC_CreateConfig" -PercentComplete 0 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Creating DSC configuration."
             $dscCreateStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
+            # Same unbounded shape as the DSC start below -- without -AsJob this takes the
+            # synchronous Invoke-Command path, which has no timeout. The compile is pure
+            # local CPU (no network waits; the only Start-Sleep is a bounded 5x3s log-write
+            # retry), production Phase 2 runs 6-23s, and CS2-FS1's degraded outlier was
+            # 245.5s -- so 900s here can only mean a wedged channel, not slow work.
+            # -FailOnRemoteError: both compile scriptblocks report failure with Write-Error
+            # + return (non-terminating), which -AsJob would otherwise call "Succeeded".
+            $dscCreateTimeoutSeconds = 900
+            $dscCreateArgs = @{
+                VmDomainName      = $domainName
+                ScriptBlock       = $DSC_CreateConfig
+                ArgumentList      = $DscFolder
+                DisplayName       = "DSC: Create $($currentItem.role) Configuration"
+                AsJob             = $true
+                TimeoutSeconds    = $dscCreateTimeoutSeconds
+                FailOnRemoteError = $true
+            }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName @dscCreateArgs
+            if ($result.ScriptBlockFailed) {
+                $dscCreateWhy = if ($result.TimedOut) { "timed out after ${dscCreateTimeoutSeconds}s" } else { "$($result.ScriptBlockOutput)" }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration after $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds. Retrying. $dscCreateWhy" -Warning
+                Start-Sleep -Seconds 15
+                # The compile is idempotent (it rewrites the same per-run MOF folder), and a
+                # timeout has already evicted the wedged session, so this rebuilds the channel.
+                $result = Invoke-VmCommand -VmName $currentItem.vmName @dscCreateArgs
+                # Reboot only for a timeout. A deterministic compile error repeats verbatim,
+                # so spending a reboot + a third attempt on it just delays the real failure.
+                if ($result.ScriptBlockFailed -and $result.TimedOut) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Create $($currentItem.role) configuration timed out twice. Rebooting." -Warning
+                    Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "DSC create retry" | Out-Null
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName @dscCreateArgs
+                }
+            }
             $dscCreateStopWatch.Stop()
             if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration after $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                $dscCreateWhy = if ($result.TimedOut) { "timed out after ${dscCreateTimeoutSeconds}s" } else { "$($result.ScriptBlockOutput)" }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration after $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds. $dscCreateWhy" -Failure -OutputStream
                 return
             }
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC configuration creation completed in $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds."
