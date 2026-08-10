@@ -1412,7 +1412,40 @@ $global:VM_Create = {
                 $inProgress = (-not $Migrate)
                 New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -InProgress $inProgress
             }
-                   
+
+            # Defender exclusions here rather than only at Phase 10: MsMpEng
+            # real-time scanning of the CM content library and SQL data files is
+            # the top CPU consumer during Phases 4-8, which all run before
+            # Fix-DefenderTuning gets its turn. Phase 10 re-applies it and picks
+            # up the paths that only exist once CM/SQL/WSUS are installed.
+            $defenderSource = Join-Path $Common.StagingInjectPath "staging\Optimize-Defender.ps1"
+            if (-not (Test-Path -LiteralPath $defenderSource)) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): $defenderSource is missing; Phase 10 Fix-DefenderTuning will not have it either." -Warning -OutputStream
+            }
+            else {
+                $defenderCopied = $false
+                try {
+                    $defenderSession = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
+                    if ($defenderSession) {
+                        Copy-Item -ToSession $defenderSession -Path $defenderSource -Destination "C:\staging\Optimize-Defender.ps1" -Force -ErrorAction Stop
+                        $defenderCopied = $true
+                    }
+                }
+                catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not copy Optimize-Defender.ps1: $_" -Warning }
+
+                if ($defenderCopied) {
+                    $defenderResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { & "C:\staging\Optimize-Defender.ps1" } -DisplayName "Optimize Defender" -AsJob -TimeoutSeconds 180
+                    if ($defenderResult.ScriptBlockFailed) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Defender tuning failed; Phase 10 will retry. $($defenderResult.ScriptBlockOutput)" -Warning
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Defender: $($defenderResult.ScriptBlockOutput.Message)" -LogOnly
+                    }
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Defender tuning deferred to Phase 10 Fix-DefenderTuning." -Warning
+                }
+            }
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Initializing Disks"
             Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Starting" -force
