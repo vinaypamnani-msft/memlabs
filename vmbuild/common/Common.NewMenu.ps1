@@ -653,8 +653,17 @@ function Get-Menu2 {
 # because the console window is a hidden pseudo-console stub, so pixel-based
 # detection isn't an option. CONOUT$ is the best we have, with a .NET console
 # fallback so we never return $null and disable resize watching entirely.)
-if (-not ('MemLabsConsole.NativeV3' -as [type])) {
-    Add-Type -Namespace MemLabsConsole -Name NativeV3 -MemberDefinition @'
+#
+# Compiled on first use rather than at load. Add-Type runs the C# compiler, which
+# measured 967ms of the ~2.9s Common.ps1 bootstrap -- a cost every Start-Job
+# runspace paid to build console mouse and window-size interop it can never use,
+# because a background job has no console. Only the console functions below need
+# these types, and each calls this first.
+function Initialize-MenuConsoleInterop {
+    if ($script:_menuConsoleInteropReady) { return }
+
+    if (-not ('MemLabsConsole.NativeV3' -as [type])) {
+        Add-Type -Namespace MemLabsConsole -Name NativeV3 -MemberDefinition @'
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
 public struct COORD { public short X; public short Y; }
 
@@ -696,13 +705,13 @@ public static bool TryGetWindowSize(out int width, out int height) {
     }
 }
 '@
-}
+    }
 
-# P/Invoke for ReadConsoleInput: returns keyboard AND mouse events from the
-# console input buffer. Used by Get-KeyStroke to support mouse click-to-select
-# and hover highlighting in menus.
-if (-not ('MemLabsConsole.MouseInput' -as [type])) {
-    Add-Type -Namespace MemLabsConsole -Name MouseInput -MemberDefinition @'
+    # P/Invoke for ReadConsoleInput: returns keyboard AND mouse events from the
+    # console input buffer. Used by Get-KeyStroke to support mouse click-to-select
+    # and hover highlighting in menus.
+    if (-not ('MemLabsConsole.MouseInput' -as [type])) {
+        Add-Type -Namespace MemLabsConsole -Name MouseInput -MemberDefinition @'
 // INPUT_RECORD.EventType constants
 public const ushort KEY_EVENT   = 0x0001;
 public const ushort MOUSE_EVENT = 0x0002;
@@ -795,15 +804,18 @@ public struct MOUSE_EVENT_RECORD {
     public uint dwEventFlags;
 }
 '@
-}
+    }
 
-# Detect whether the current (possibly cached) MemLabsConsole.MouseInput type
-# includes the newer P/Invoke methods. When the type was compiled in an earlier
-# session run (before these methods were added), the guard above skips
-# recompilation and the methods are missing. The polling loop falls back to
-# GetNumberOfConsoleInputEvents in that case (original behavior).
-$script:_hasPeekConsoleInput = [MemLabsConsole.MouseInput].GetMethod('PeekConsoleInput') -ne $null
-$script:_hasFlushConsoleInput = [MemLabsConsole.MouseInput].GetMethod('FlushConsoleInputBuffer') -ne $null
+    # Detect whether the current (possibly cached) MemLabsConsole.MouseInput type
+    # includes the newer P/Invoke methods. When the type was compiled in an earlier
+    # session run (before these methods were added), the guard above skips
+    # recompilation and the methods are missing. The polling loop falls back to
+    # GetNumberOfConsoleInputEvents in that case (original behavior).
+    $script:_hasPeekConsoleInput = $null -ne [MemLabsConsole.MouseInput].GetMethod('PeekConsoleInput')
+    $script:_hasFlushConsoleInput = $null -ne [MemLabsConsole.MouseInput].GetMethod('FlushConsoleInputBuffer')
+
+    $script:_menuConsoleInteropReady = $true
+}
 
 # The saved console mode before mouse input was enabled. Used by
 # Disable-MouseInput to restore the original state.
@@ -827,6 +839,7 @@ function Enable-MouseInput {
     if ($Global:Common -and -not $Global:Common.MouseEnabled) {
         return
     }
+    Initialize-MenuConsoleInterop
     if ($null -eq $script:_consoleInputHandle -or $script:_consoleInputHandle -eq [IntPtr]::Zero) {
         # STD_INPUT_HANDLE = -10
         $script:_consoleInputHandle = [MemLabsConsole.MouseInput]::GetStdHandle(-10)
@@ -896,6 +909,7 @@ function Resume-MouseInput {
 }
 
 function Get-LiveWindowSize {
+    Initialize-MenuConsoleInterop
     $w = 0; $h = 0
     $gotIt = $false
     try {
@@ -2147,6 +2161,8 @@ function Get-KeyStroke {
     if (-not $WatchSize -and -not $mouseActive) {
         return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     }
+
+    Initialize-MenuConsoleInterop
 
     # When mouse input is active, use ReadConsoleInput for unified key+mouse reading.
     if ($mouseActive) {
