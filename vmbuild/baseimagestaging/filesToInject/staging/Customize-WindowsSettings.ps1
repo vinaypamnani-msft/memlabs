@@ -297,6 +297,19 @@ if ($s) {
     Set-Service  'SysMain' -StartupType Disabled -ErrorAction SilentlyContinue
 }
 
+# Microsoft Defender: MsMpEng.exe real-time scanning of the ConfigMgr content
+# library, SQL data files and the C:\staging DSC tree is the top CPU consumer
+# on a lab VM. Fix-DefenderTuning re-applies this on existing VMs.
+Update-Log "Apply Defender exclusions and scan throttling"
+$defenderScript = "C:\staging\Optimize-Defender.ps1"
+if (Test-Path $defenderScript) {
+    $defenderResult = & $defenderScript
+    Update-Log "     $($defenderResult.Message)"
+}
+else {
+    Update-Log "     $defenderScript not found; skipped."
+}
+
 Update-Log "Add tools paths to PATH variable"
 $toolsPath = "C:\tools"
 $oldpath = (Get-ItemProperty -Path 'Registry::HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Session Manager\Environment' -Name PATH).path
