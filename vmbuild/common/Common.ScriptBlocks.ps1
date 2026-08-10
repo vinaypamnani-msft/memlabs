@@ -1447,6 +1447,28 @@ $global:VM_Create = {
                 }
             }
 
+            # A dump of the ~198s DSC stall showed the LCM blocked in a DCOM call into
+            # Winmgmt with every thread at 0ms CPU -- arbitration is the part of Winmgmt
+            # that holds an operation for a fixed interval without doing work. Winmgmt
+            # reads this at service start, so the Phase 2/3 reboots are what activate it.
+            $arbSb = {
+                $key = 'HKLM:\SOFTWARE\Microsoft\WBEM\CIMOM'
+                if (-not (Test-Path -LiteralPath $key)) { return 'CIMOM key not present -- not set' }
+                $prior = (Get-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -ErrorAction SilentlyContinue).ArbThrottlingEnabled
+                New-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+                $now = (Get-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -ErrorAction SilentlyContinue).ArbThrottlingEnabled
+                $priorText = 'unset'
+                if ($null -ne $prior) { $priorText = "$prior" }
+                return ("ArbThrottlingEnabled was {0}, now {1} (applies at next Winmgmt start)" -f $priorText, $now)
+            }
+            $arbResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $arbSb -DisplayName "Disable WMI arbitration throttling" -AsJob -TimeoutSeconds 120
+            if ($arbResult.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): could not disable WMI arbitration throttling: $($arbResult.ScriptBlockOutput)" -Warning
+            }
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): WMI: $($arbResult.ScriptBlockOutput)" -LogOnly
+            }
+
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Initializing Disks"
             Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Starting" -force
             $count = 0
