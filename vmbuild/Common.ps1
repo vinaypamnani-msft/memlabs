@@ -10617,37 +10617,67 @@ function Get-MemLabsStaleSourceFile {
 ### Common Object        ###
 ############################
 
-if (-not $Common.Initialized) {
+if (-not $PSBoundParameters.ContainsKey('StartupProfile') -and $FastInit.IsPresent) {
+    $StartupProfile = "Fast"
+}
 
-    if (-not $PSBoundParameters.ContainsKey('StartupProfile') -and $FastInit.IsPresent) {
-        $StartupProfile = "Fast"
+$profileSkipStorageInit = $false
+$profileSkipMaintenanceRefresh = $false
+$profileSkipEnvironmentDetection = $false
+$profileSkipHostPreparation = $false
+
+if ($StartupProfile -eq "Fast" -or $removeOnlyProfile) {
+    $profileSkipStorageInit = $true
+    $profileSkipMaintenanceRefresh = $true
+    $profileSkipEnvironmentDetection = $true
+    $profileSkipHostPreparation = $true
+}
+
+$effectiveSkipStorageInit = $profileSkipStorageInit -or $SkipStorageInit.IsPresent
+$effectiveSkipMaintenanceRefresh = $profileSkipMaintenanceRefresh -or $SkipMaintenanceRefresh.IsPresent
+$effectiveSkipEnvironmentDetection = $profileSkipEnvironmentDetection -or $SkipEnvironmentDetection.IsPresent
+$effectiveSkipHostPreparation = $profileSkipHostPreparation -or $SkipHostPreparation.IsPresent
+
+# Jobs inherit context from the parent process; skip expensive probes
+# that are irrelevant inside Start-Job / ThreadJob workers.
+if ($InJob) {
+    $effectiveSkipEnvironmentDetection = $true
+    if (-not $GetLatestHotfixVersion) {
+        $effectiveSkipMaintenanceRefresh = $true
     }
+    $effectiveSkipHostPreparation = $true
+}
 
-    $profileSkipStorageInit = $false
-    $profileSkipMaintenanceRefresh = $false
-    $profileSkipEnvironmentDetection = $false
-    $profileSkipHostPreparation = $false
+# $Common.Initialized alone cannot gate this block: -InJob, -FastInit and a
+# default load all set it to $true while delivering very different objects
+# (measured -- both of the first two leave $Common.LocalAdmin null and
+# OfflineMode true, which makes every later Invoke-VmCommand return a bare
+# $false). Whoever loaded first therefore capped everyone after them, and each
+# entry point grew its own `$Common.Initialized = $false` workaround. Record
+# what this load ATTEMPTS, and re-initialize when a later caller asks for
+# something the loaded one skipped. Strictly an upgrade: a request for the same
+# or fewer capabilities (every job, which is the hot path) still short-circuits.
+$requestedInitCapabilities = @{
+    StorageInit          = (-not $effectiveSkipStorageInit)
+    MaintenanceRefresh   = (-not $effectiveSkipMaintenanceRefresh)
+    EnvironmentDetection = (-not $effectiveSkipEnvironmentDetection)
+    HostPreparation      = (-not $effectiveSkipHostPreparation)
+}
 
-    if ($StartupProfile -eq "Fast" -or $removeOnlyProfile) {
-        $profileSkipStorageInit = $true
-        $profileSkipMaintenanceRefresh = $true
-        $profileSkipEnvironmentDetection = $true
-        $profileSkipHostPreparation = $true
-    }
+$initUpgradeReason = $null
+if ($Common.Initialized -and $Common.InitCapabilities) {
+    # A $Common without InitCapabilities predates this stamp (launcher left open
+    # across the update); leave it alone rather than surprise it with a re-init.
+    $gained = @(foreach ($cap in 'StorageInit', 'MaintenanceRefresh', 'EnvironmentDetection', 'HostPreparation') {
+            if ($requestedInitCapabilities[$cap] -and -not $Common.InitCapabilities[$cap]) { $cap }
+        })
+    if ($gained.Count -gt 0) { $initUpgradeReason = $gained -join ', ' }
+}
 
-    $effectiveSkipStorageInit = $profileSkipStorageInit -or $SkipStorageInit.IsPresent
-    $effectiveSkipMaintenanceRefresh = $profileSkipMaintenanceRefresh -or $SkipMaintenanceRefresh.IsPresent
-    $effectiveSkipEnvironmentDetection = $profileSkipEnvironmentDetection -or $SkipEnvironmentDetection.IsPresent
-    $effectiveSkipHostPreparation = $profileSkipHostPreparation -or $SkipHostPreparation.IsPresent
+if (-not $Common.Initialized -or $initUpgradeReason) {
 
-    # Jobs inherit context from the parent process; skip expensive probes
-    # that are irrelevant inside Start-Job / ThreadJob workers.
-    if ($InJob) {
-        $effectiveSkipEnvironmentDetection = $true
-        if (-not $GetLatestHotfixVersion) {
-            $effectiveSkipMaintenanceRefresh = $true
-        }
-        $effectiveSkipHostPreparation = $true
+    if ($initUpgradeReason) {
+        Write-Log "Common: re-initializing to add $initUpgradeReason -- the loaded init skipped it" -LogOnly
     }
 
     try {
@@ -11015,6 +11045,7 @@ if (-not $Common.Initialized) {
             LatestHotfixVersion         = "260809.0"
             PS7                         = $PS7
             Initialized                 = $true
+            InitCapabilities            = $requestedInitCapabilities
             InJob                       = $InJob
             TempPath                    = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
             ConfigPath                  = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files

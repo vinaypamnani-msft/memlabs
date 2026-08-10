@@ -369,22 +369,12 @@ if ($Action -ne 'Report' -and $Action -ne 'SelfTest') {
         throw "Common.ps1 is missing its UTF-8 BOM. Run: git checkout -- vmbuild/Common.ps1"
     }
 
-    # Get-VmSession needs $Common.LocalAdmin.Password. Do NOT dot-source with
-    # -InJob: it skips storage init, leaves LocalAdmin null, and Invoke-VmCommand
-    # then returns a bare $false for every VM -- which looks like an empty result,
-    # not an error. A fast init sets Common.Initialized and the whole init block is
-    # gated on that flag, so re-dot-sourcing is a no-op; load the credential directly.
-    function Test-CredLoaded { return ($Common -and $Common.LocalAdmin -and $Common.LocalAdmin.Password) }
-    if (-not (Test-CredLoaded)) { . $commonPath -FastInit }
-    if (-not (Test-CredLoaded) -and (Get-Command Get-LocalAdminCredential -ErrorAction SilentlyContinue)) {
-        if ($Common) { $Common.Initialized = $false }
-        try { $null = Get-LocalAdminCredential } catch {}
-    }
-    if (-not (Test-CredLoaded)) {
-        if ($Common) { $Common.Initialized = $false }
-        . $commonPath
-    }
-    if (-not (Test-CredLoaded)) {
+    # A plain load: Get-VmSession needs $Common.LocalAdmin.Password, and neither
+    # -InJob nor -FastInit populates it. The init gate upgrades a lighter
+    # already-loaded $Common rather than short-circuiting on its Initialized flag.
+    . $commonPath
+
+    if (-not ($Common -and $Common.LocalAdmin -and $Common.LocalAdmin.Password)) {
         throw ("Local admin (vmbuildadmin) credential not loaded; expected cache at {0}. " -f (Join-Path $vmbuildRoot 'cache\vmbuildadmin.txt')) +
         'Every guest call would fail silently without it.'
     }
