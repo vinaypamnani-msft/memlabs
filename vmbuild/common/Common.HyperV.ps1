@@ -665,6 +665,30 @@ function Write-PowerShellJobLeakDiag {
             }
         }
 
+        # The rule above matches on worker PROCESSES, so it is blind to ThreadJobs -- they
+        # run in this process and show up as 'worker=<not matched>'. A wedged one is also
+        # worse than a wedged Start-Job worker: .NET has no Thread.Abort, so Stop-Job cannot
+        # end a thread blocked in a PSDirect or WMI call and nothing can reclaim it before
+        # this process exits. Same median-outlier shape so a slow phase is never flagged.
+        $threadJobs = @($jobs | Where-Object { $_.PSJobTypeName -eq 'ThreadJob' -and $_.State -eq 'Running' })
+        $tjAges = @()
+        foreach ($tj in $threadJobs) {
+            try { if ($tj.PSBeginTime) { $tjAges += [Math]::Round(((Get-Date) - $tj.PSBeginTime).TotalMinutes) } } catch { }
+        }
+        if ($tjAges.Count -ge 3) {
+            $tjSorted = @($tjAges | Sort-Object)
+            # Floor, not [int]: [int](3/2) banker's-rounds to 2, which picks the LARGEST of
+            # three and leaves the rule unable to fire at small job counts.
+            $tjMedian = $tjSorted[[int][Math]::Floor($tjSorted.Count / 2)]
+            foreach ($tj in $threadJobs) {
+                $tjAge = -1
+                try { if ($tj.PSBeginTime) { $tjAge = [Math]::Round(((Get-Date) - $tj.PSBeginTime).TotalMinutes) } } catch { }
+                if ($tjAge -gt 30 -and $tjAge -gt ($tjMedian * 3)) {
+                    Write-Log "[JobLeak] $Context`: ThreadJob '$($tj.Name)' is ${tjAge}m old against a median of ${tjMedian}m for the other $($tjSorted.Count - 1) thread job(s) -- that job never finished, and a ThreadJob cannot be killed, so it holds its runspace until this process exits." -Failure
+                }
+            }
+        }
+
         foreach ($r in $rows) { Write-Log $r -LogOnly }
     }
     catch {

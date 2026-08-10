@@ -1280,6 +1280,20 @@ function Start-NormalJobs {
         Write-Log "Start-NormalJobs: ThreadJob requested but not available; using Start-Job." -LogOnly
     }
 
+    # A throttle below the machine count silently splits one parallel phase into waves,
+    # which looks like "the lab got slower", not like an error. Start-ThreadJob's own
+    # default is 5. Scale to the work unless the caller asked for a specific limit.
+    $machineCount = @($machines).Count
+    if (-not $PSBoundParameters.ContainsKey('ThreadJobThrottle')) {
+        $ThreadJobThrottle = [Math]::Max($ThreadJobThrottle, $machineCount)
+    }
+    if ($useThreadJob) {
+        Write-Log "Start-NormalJobs: dispatching $machineCount ThreadJob(s) with ThrottleLimit $ThreadJobThrottle." -LogOnly
+        if ($ThreadJobThrottle -lt $machineCount) {
+            Write-Log "Start-NormalJobs: ThrottleLimit $ThreadJobThrottle is below the $machineCount job(s) requested -- they will run in waves, not in parallel." -Warning
+        }
+    }
+
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
     $job_created_no = 0
