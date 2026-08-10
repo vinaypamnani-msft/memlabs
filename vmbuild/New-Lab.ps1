@@ -1511,7 +1511,7 @@ finally {
                 # the workers are not running Clear-VmSessionCache at all.
                 try {
                     $st = Get-VmSessionStats
-                    Write-Log "[JobLeak] session ledger: created=$($st['created']) disposeCalls=$($st['disposeCalls']) leftOpen=$($st['disposeLeftOpen']) noOwner=$($st['disposeNoOwner']) threw=$($st['disposeThrew']) workerCleanups=$($st['workerCleanups']) workerDisposed=$($st['workerDisposed'])" @sev
+                    Write-Log "[JobLeak] session ledger: created=$($st['created']) disposeCalls=$($st['disposeCalls']) leftOpen=$($st['disposeLeftOpen']) noOwner=$($st['disposeNoOwner']) threw=$($st['disposeThrew']) raceLost=$($st['cacheRaceLost']) cacheEvicted=$($st['cacheEvicted']) workerCleanups=$($st['workerCleanups']) workerDisposed=$($st['workerDisposed'])" @sev
                     # Net undisposed per creating caller -- names the leaking path.
                     $bc = $st['byCaller']
                     $net = @($bc.Keys | Where-Object { [int]$bc[$_] -gt 0 } | Sort-Object { - [int]$bc[$_] } | Select-Object -First 8 |

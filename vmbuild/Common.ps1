@@ -7445,6 +7445,8 @@ if (-not [System.AppDomain]::CurrentDomain.GetData('MemLabs_SessionStats')) {
                 disposeLeftOpen   = 0   # ...Close()+Dispose() ran, runspace still not Closed
                 disposeNoOwner    = 0   # ...session had no _OwnerRunspace to close
                 disposeThrew      = 0   # ...the close path threw
+                cacheRaceLost     = 0   # lost a create race; disposed OUR new session, kept the cached one
+                cacheEvicted      = 0   # cache slot held a DEAD session; parked it instead of dropping it
                 workerCleanups    = 0   # Clear-VmSessionCache calls (proves the fix is live)
                 workerDisposed    = 0   # sessions those calls released
                 byCaller          = [System.Collections.Hashtable]::Synchronized(@{})  # caller -> net undisposed
@@ -8289,6 +8291,26 @@ function Get-VmSession {
             $ps = $connectResult.Session
             if ($ps -and $ps.Availability -eq "Available") {
                 $cacheKey = $entry.CacheKey
+                # This slot may already hold a session: two callers can race a create for the
+                # same VM (parallel phase workers, or a worker and the launcher). The bare
+                # assignment that used to be here dropped the loser on the floor -- never handed
+                # to Remove-VmSession, so its guest-side PowerShell Direct host survived for the
+                # life of the VM. Measured: 142 orphaned hosts / 14.8 GB across a 17-VM lab.
+                $existingSession = $global:ps_cache[$cacheKey]
+                if ($existingSession -and -not [object]::ReferenceEquals($existingSession, $ps)) {
+                    if ("$($existingSession.State)" -eq 'Opened' -and "$($existingSession.Availability)" -eq 'Available') {
+                        # We lost. Dispose OURS -- nothing has a reference to it yet, so this is
+                        # the one session here that is unambiguously safe to tear down inline.
+                        try { (Get-VmSessionStats)['cacheRaceLost']++ } catch { }
+                        Remove-VmSession $ps
+                        return $existingSession
+                    }
+                    # Slot holds a dead session. Park it: another thread may still be riding it,
+                    # and disposing something with a live pipeline is the documented cause of the
+                    # disposed-PSJob phase crash.
+                    try { (Get-VmSessionStats)['cacheEvicted']++ } catch { }
+                    Add-OrphanRunspace -Runspace $existingSession._OwnerRunspace -Session $existingSession -Reason 'cache slot overwritten' -VmName $VmName
+                }
                 $global:ps_lastGoodCred[$VmName] = $entry.Tag
                 Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
                 $global:ps_cache[$cacheKey] = $ps
