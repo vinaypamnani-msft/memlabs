@@ -534,7 +534,7 @@ while ((Get-Date) -lt $deadline) {
         # sc.exe is unavailable -- which would lose the bundle at the one moment it matters.
         $extraDumps = @{}
         if ($winmgmtPid -gt 0) { $extraDumps[$winmgmtPid] = 'Winmgmt -- the RPC server the DSC host calls into' }
-        if ($winrmPid -gt 0 -and -not $extraDumps.ContainsKey($winrmPid)) { $extraDumps[$winrmPid] = 'WinRM -- relays the record to the pushing client, the far end of the chain' }
+        if ($winrmPid -gt 0 -and -not $extraDumps.ContainsKey($winrmPid)) { $extraDumps[$winrmPid] = 'WinRM -- WSMan plugin host Winmgmt hands the record to; no session socket was seen, so do not assume a remote client' }
         try { $bundlePath = Write-StallBundle -Folder $dir -Status $statusText -AgeSec $statusAgeSec -WatchPids $watchPids -WantDump ([bool]$CaptureDump) -DscLogPath $DscLog -DscHostNames $dscHostNames -ExtraDumpTargets $extraDumps }
         catch { $bundlePath = "bundle failed: $($_.Exception.Message)" }
         ('{0} {1}s static | {2} | bundle={3}' -f $wall.ToString('o'), $statusAgeSec, $statusText, $bundlePath) |
