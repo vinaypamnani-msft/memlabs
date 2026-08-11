@@ -3490,11 +3490,13 @@ class RegisterTaskScheduler {
         # hoping. State / LastRunTime update almost immediately.
         $startConfirmed = $false
         for ($i = 0; $i -lt 15; $i++) {
-            Start-Sleep -Seconds 2
+            # Probe before sleeping: the task is usually Running by the time Start-ScheduledTask
+            # returns, and sleeping first charged every registration a flat 2s for nothing.
             if ($this.IsTaskRunning()) {
                 $startConfirmed = $true
                 break
             }
+            Start-Sleep -Seconds 2
         }
         if ($startConfirmed) {
             Write-Status "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) has Started."
