@@ -1306,8 +1306,12 @@ function Get-UpdatePack {
         $updatepack = $updatepacklist
     }
     else {
-        # Multiple updates
-        $updatepack = ($updatepacklist | Sort-Object -Property fullversion)[-1]
+        # Multiple updates. Sort numerically, not lexically: CM fullversion is 5.00.NNNN.NNNN
+        # and a string sort only agrees with a version sort while the build stays 4 digits.
+        # At build 10000, "5.00.10000.1000" sorts BELOW "5.00.9999.1000" and we would pick the
+        # older pack. Cast per-item rather than casting the property so an unexpected value
+        # floors instead of throwing.
+        $updatepack = ($updatepacklist | Sort-Object -Property @{ Expression = { try { [version]$_.fullversion } catch { [version]'0.0' } } })[-1]
     }
 
     return $updatepack
