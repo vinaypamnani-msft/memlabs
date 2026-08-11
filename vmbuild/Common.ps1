@@ -4429,7 +4429,7 @@ function Add-DHCPReservationIsolated {
                     }
 
                     $existing = $null
-                    try { $existing = Get-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
+                    try { $existing = Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
                     if ($existing) {
                         $existingMac = ($existing.ClientId -replace '[-:]', '').ToLower()
                         if ($existingMac -eq $ourMac) {
@@ -4973,7 +4973,7 @@ function Set-DeployConfigIPAddresses {
             # Defensive: a reservation should never exist above the .199 pool, but
             # skip the address if one somehow does.
             $existingResv = $null
-            try { $existingResv = Get-DhcpServerv4Reservation -ScopeId $ScopeId -IPAddress $candidate -ErrorAction SilentlyContinue } catch {}
+            try { $existingResv = Get-DhcpServerv4Reservation -IPAddress $candidate -ErrorAction SilentlyContinue } catch {}
             if ($existingResv) { continue }
 
             $null = $allocatedIps.Add($candidate)
