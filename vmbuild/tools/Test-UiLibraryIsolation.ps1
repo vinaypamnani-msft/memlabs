@@ -91,6 +91,47 @@ foreach ($f in $files) {
     }
 }
 
+# Common.ScriptBlocks.ps1 is not the only job entry point: any script that dot-sources
+# Common.ps1 with -InJob gets the same reduced set of functions. Start-Test.ps1 does it in an
+# ArgumentCompleter and createGuestDscZip.ps1 does it at file level; both called behind the
+# gate and neither was visible here. Scope matters -- a library that merely DEFINES a job
+# scriptblock (Common.Maintenance.ps1, Common.Remove.ps1) is not itself running as a job.
+$rxInJobLoad = '\.\s+["'']?[^\r\n"'']*Common\.ps1["'']?[^\r\n]*-InJob(?!\s*:\s*\$false)'
+foreach ($f in (Get-ChildItem -LiteralPath $Repo -Filter '*.ps1' -File -Recurse -ErrorAction SilentlyContinue)) {
+    if ($f.Name -eq 'Common.ScriptBlocks.ps1' -or $f.Name -eq 'Common.ps1') { continue }
+    $text = [System.IO.File]::ReadAllText($f.FullName)
+    if ($text -notmatch $rxInJobLoad) { continue }
+
+    $ast = Get-FileAst $f.FullName
+    $sbAll = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.ScriptBlockExpressionAst] }, $true))
+    $loaders = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+            Where-Object { $_.Extent.Text -match $rxInJobLoad })
+    if ($loaders.Count -eq 0) { continue }
+
+    # A loader inside a scriptblock only makes THAT scriptblock run reduced. One at file
+    # level makes the whole script run reduced.
+    $fileLevel = $false
+    $sbScopes = @()
+    foreach ($ld in $loaders) {
+        $container = $null
+        foreach ($sb in $sbAll) {
+            if ($ld.Extent.StartOffset -lt $sb.Extent.StartOffset -or $ld.Extent.EndOffset -gt $sb.Extent.EndOffset) { continue }
+            if (-not $container -or ($sb.Extent.EndOffset - $sb.Extent.StartOffset) -lt ($container.Extent.EndOffset - $container.Extent.StartOffset)) {
+                $container = $sb
+            }
+        }
+        if ($container) { $sbScopes += $container } else { $fileLevel = $true }
+    }
+
+    $scopes = if ($fileLevel) { @($ast) } else { $sbScopes }
+    foreach ($scope in $scopes) {
+        foreach ($c in $scope.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+            $n2 = $c.GetCommandName()
+            if ($n2) { [void]$entry.Add($n2) }
+        }
+    }
+}
+
 if ($SelfTest) {
     # Prove the detector fires: seed a call to a function that lives behind the gate.
     $victim = $defs.GetEnumerator() | Where-Object { $gated.Contains($_.Value) } | Select-Object -First 1

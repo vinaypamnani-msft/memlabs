@@ -93,7 +93,9 @@ try {
     if ($Common.Initialized) {
         $Common.Initialized = $false
     }
-    . "..\Common.ps1" -InJob:$true -StartupProfile Fast
+    # Not -InJob: this is host-side tooling and needs Test-Configuration, which Common.ps1
+    # only loads outside a job. StartupProfile Fast already skips the expensive host probes.
+    . "..\Common.ps1" -StartupProfile Fast
     $ConfirmPreference = $false
 
     # Create dummy file so config doesn't fail

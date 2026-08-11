@@ -71,7 +71,9 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'TestName')]
     [ArgumentCompleter({
             param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
-            . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false -InJob:$true
+            # Not -InJob: the completer needs Get-SupportedOperatingSystemsForRole, which
+            # Common.ps1 only loads outside a job.
+            . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false -StartupProfile Fast
             $argument = @(Get-SupportedOperatingSystemsForRole "DC")
             $newArgument = @()
             foreach ($arg in $argument) {
