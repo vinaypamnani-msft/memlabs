@@ -2692,7 +2692,10 @@ class DownloadFile {
                     if ($cacheLines.Count -ge 3) {
                         $cachedHash = $cacheLines[0].Trim().ToLowerInvariant()
                         $cachedSize = [long]$cacheLines[1].Trim()
-                        $cachedLastWrite = [datetime]$cacheLines[2].Trim()
+                        # RoundtripKind: a bare [datetime] cast on the 'o' string returns Kind=Local
+                        # shifted by the UTC offset, so this never equalled LastWriteTimeUtc on a
+                        # non-UTC guest and the sidecar re-hashed the whole CU every run.
+                        $cachedLastWrite = [datetime]::Parse($cacheLines[2].Trim(), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
                         if ($fileItem.Length -eq $cachedSize -and $fileItem.LastWriteTimeUtc -eq $cachedLastWrite) {
                             $useCachedHash = $true
                             $actualHash = $cachedHash
