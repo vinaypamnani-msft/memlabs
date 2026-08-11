@@ -4952,6 +4952,8 @@ $global:VM_Config = {
                         # One round trip to read a tiny file measured 2.5-3s per node, serial. Time it
                         # per node so a future fix targets the real cost (session setup vs VMBus latency).
                         $nodeProbeSw = [System.Diagnostics.Stopwatch]::StartNew()
+                        $nodeHadSession = $false
+                        try { $nodeHadSession = ($global:ps_cache -and $global:ps_cache.ContainsKey($node)) } catch { $nodeHadSession = $false }
                         $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock {
                             param($expectedGuid)
                             $f = "C:\staging\DSC\RunGuid.txt"
@@ -4960,7 +4962,9 @@ $global:VM_Config = {
                             if ($content) { $content = $content.Trim() }
                             return ($content -eq $expectedGuid)
                         } -ArgumentList $phaseRunGuid -DisplayName "DSC: Check Nodes Ready"
-                        Write-Log "[Phase $Phase]: NodeReadyProbe $node attempt=$attempts took $([int]$nodeProbeSw.Elapsed.TotalMilliseconds)ms" -LogOnly
+                        $nodeCacheNow = 0
+                        try { if ($global:ps_cache) { $nodeCacheNow = $global:ps_cache.Count } } catch { }
+                        Write-Log "[Phase $Phase]: NodeReadyProbe $node attempt=$attempts took $([int]$nodeProbeSw.Elapsed.TotalMilliseconds)ms cached=$nodeHadSession cacheAfter=$nodeCacheNow" -LogOnly
                         if ($result.ScriptBlockFailed -or ($result.ScriptBlockOutput -ne $true)) {
                             if ($result.ScriptBlockFailed) {
                                 $errDetail = if ($result.ErrorDetails) { $result.ErrorDetails -join '; ' } else { 'No session / VM unreachable' }
