@@ -65,15 +65,17 @@ $getSiteSqlDataSource = {
     $sqlVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlVmName } | Select-Object -First 1
     $sqlServer = $sqlVmName
     $sqlInstance = if ($sqlVm) { "$($sqlVm.sqlInstanceName)" } else { '' }
-    $sqlPort = $null
+    # A lab SQL VM routinely listens on a non-default port with the DEFAULT instance name
+    # (CSTest3 CS1SQL = MSSQLSERVER on 5422), so neither the instance nor the AO branch
+    # below carries it. Dropping it aimed every parent query at 1433.
+    $sqlPort = if ($sqlVm -and $sqlVm.sqlPort) { $sqlVm.sqlPort } else { $null }
     if ($sqlVm -and $sqlVm.AlwaysOnListenerName) {
         $sqlServer = "$($sqlVm.AlwaysOnListenerName)"
-        if ($sqlVm.thisParams -and $sqlVm.thisParams.SQLAO -and $sqlVm.thisParams.SQLAO.SQLAOPort) {
-            $sqlPort = $sqlVm.thisParams.SQLAO.SQLAOPort
-        }
+        # The listener has its own port; a node's sqlPort does not apply to it.
+        $sqlPort = if ($sqlVm.thisParams -and $sqlVm.thisParams.SQLAO -and $sqlVm.thisParams.SQLAO.SQLAOPort) { $sqlVm.thisParams.SQLAO.SQLAOPort } else { $null }
     }
     $sqlServerFqdn = if ($sqlServer -like '*.*') { $sqlServer } else { "$sqlServer.$DomainFullName" }
-    if ($sqlPort) { return "$sqlServerFqdn,$sqlPort" }
+    if ($sqlPort -and "$sqlPort" -ne '1433') { return "$sqlServerFqdn,$sqlPort" }
     if ($sqlInstance -and $sqlInstance.ToUpper() -ne 'MSSQLSERVER') { return "$sqlServerFqdn\$sqlInstance" }
     return $sqlServerFqdn
 }
@@ -150,7 +152,7 @@ $verifyClientPackageTargetAtParent = {
 
     $result = [pscustomobject]@{
         Verified = $false; Error = $null; DataSource = $null; Database = $null; Rows = 0
-        ParentRowPresent = $false; Mismatch = $null
+        ParentRowPresent = $false; ParentQueried = $false; Mismatch = $null
         NALPath = $null; LastRefresh = $null; RefreshTrigger = $null; UpdateMask = $null; Action = $null
         GlobalNALPath = $null; GlobalLastRefresh = $null; GlobalRefreshTrigger = $null; GlobalUpdateMask = $null; GlobalAction = $null
         LocalLastRefresh = $null; LocalRefreshTrigger = $null; LocalUpdateMask = $null; LocalAction = $null
@@ -174,18 +176,42 @@ $verifyClientPackageTargetAtParent = {
         $result.DataSource = & $getSiteSqlDataSource $parentVm
         $result.Database = "CM_$parentSiteCode"
         $connectionString = "Data Source=$($result.DataSource);Initial Catalog=$($result.Database);Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
-        $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
-        $connection.Open()
-
         $localDataSource = & $getSiteSqlDataSource $ThisVM
         $localConnectionString = "Data Source=$localDataSource;Initial Catalog=CM_$SiteCode;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
-        $localConnection = New-Object System.Data.SqlClient.SqlConnection $localConnectionString
-        $localConnection.Open()
 
         $pollSeconds = 10
-        $polls = [Math]::Max(1, [int][Math]::Ceiling($TimeoutSeconds / $pollSeconds))
+        # Wall-clock, not a poll count: a refused connect burns its own 15s Connect Timeout,
+        # so a fixed number of polls silently overruns the budget the caller was promised.
+        $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
         $needle = "\\$DistributionPointFqdn\"
-        for ($poll = 1; $poll -le $polls; $poll++) {
+        $poll = 0
+        while ($true) {
+            $poll++
+            # Connect INSIDE the loop. A CAS whose SQL is restarting mid-Phase-8 is a
+            # transient this budget exists to absorb; opening once outside meant a single
+            # refused connect spent the caller's entire attempt without one row being read.
+            try {
+                if (-not $connection -or $connection.State -ne [System.Data.ConnectionState]::Open) {
+                    if ($connection) { $connection.Dispose() }
+                    $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
+                    $connection.Open()
+                }
+                if (-not $localConnection -or $localConnection.State -ne [System.Data.ConnectionState]::Open) {
+                    if ($localConnection) { $localConnection.Dispose() }
+                    $localConnection = New-Object System.Data.SqlClient.SqlConnection $localConnectionString
+                    $localConnection.Open()
+                }
+            }
+            catch {
+                $result.Error = $_.Exception.Message
+                $result.Mismatch = "could not reach $($result.DataSource)/$($result.Database) to look (poll $poll)"
+                if ((Get-Date).AddSeconds($pollSeconds) -ge $deadline) { break }
+                Start-Sleep -Seconds $pollSeconds
+                continue
+            }
+            # Connected: drop the previous poll's connect error so it cannot be reported as a finding.
+            $result.Error = $null
+
             # Compare the parent's PkgServers_G row against OUR OWN PkgServers_G row: that
             # table IS the replicated payload, so equality means the change reached the CAS.
             # Do NOT test LastRefresh against wall-clock. distsrc.cpp writes LastRefresh only
@@ -196,6 +222,7 @@ $verifyClientPackageTargetAtParent = {
             # uninitialised 1970 date. A "LastRefresh >= now" gate can therefore never pass.
             $localRow = & $readPkgServerTargetRow $localConnection 'PkgServers_G' $PackageId $needle
             $parentRow = & $readPkgServerTargetRow $connection 'PkgServers_G' $PackageId $needle
+            $result.ParentQueried = $true
 
             $result.Rows = $parentRow.Rows
             $result.ParentRowPresent = $parentRow.Found
@@ -232,32 +259,35 @@ $verifyClientPackageTargetAtParent = {
             }
 
             if ($result.Verified) { break }
-            if ($poll -lt $polls) { Start-Sleep -Seconds $pollSeconds }
+            if ((Get-Date).AddSeconds($pollSeconds) -ge $deadline) { break }
+            Start-Sleep -Seconds $pollSeconds
         }
 
-        # PkgServers is the local operational projection (_L); DistMgr clears Action and
-        # advances LastRefresh there once it processes the target. Diagnostic only.
-        $effectiveRow = & $readPkgServerTargetRow $connection 'PkgServers' $PackageId $needle
-        if ($effectiveRow.Found) {
-            $result.NALPath = $effectiveRow.NALPath
-            $result.LastRefresh = $effectiveRow.LastRefresh
-            $result.RefreshTrigger = $effectiveRow.RefreshTrigger
-            $result.UpdateMask = $effectiveRow.UpdateMask
-            $result.Action = $effectiveRow.Action
-        }
-
-        $notificationCommand = $connection.CreateCommand()
-        $notificationCommand.CommandText = 'SELECT COUNT(*) AS NotificationCount, MAX(TimeKey) AS NotificationTime FROM dbo.PkgNotification WHERE PkgID = @pkg AND Type = 4'
-        $notificationCommand.CommandTimeout = 30
-        [void]$notificationCommand.Parameters.AddWithValue('@pkg', $PackageId)
-        $notificationReader = $notificationCommand.ExecuteReader()
-        try {
-            if ($notificationReader.Read()) {
-                $result.NotificationCount = [int]$notificationReader['NotificationCount']
-                if ($notificationReader['NotificationTime'] -isnot [System.DBNull]) { $result.NotificationTime = [datetime]$notificationReader['NotificationTime'] }
+        if ($result.ParentQueried) {
+            # PkgServers is the local operational projection (_L); DistMgr clears Action and
+            # advances LastRefresh there once it processes the target. Diagnostic only.
+            $effectiveRow = & $readPkgServerTargetRow $connection 'PkgServers' $PackageId $needle
+            if ($effectiveRow.Found) {
+                $result.NALPath = $effectiveRow.NALPath
+                $result.LastRefresh = $effectiveRow.LastRefresh
+                $result.RefreshTrigger = $effectiveRow.RefreshTrigger
+                $result.UpdateMask = $effectiveRow.UpdateMask
+                $result.Action = $effectiveRow.Action
             }
+
+            $notificationCommand = $connection.CreateCommand()
+            $notificationCommand.CommandText = 'SELECT COUNT(*) AS NotificationCount, MAX(TimeKey) AS NotificationTime FROM dbo.PkgNotification WHERE PkgID = @pkg AND Type = 4'
+            $notificationCommand.CommandTimeout = 30
+            [void]$notificationCommand.Parameters.AddWithValue('@pkg', $PackageId)
+            $notificationReader = $notificationCommand.ExecuteReader()
+            try {
+                if ($notificationReader.Read()) {
+                    $result.NotificationCount = [int]$notificationReader['NotificationCount']
+                    if ($notificationReader['NotificationTime'] -isnot [System.DBNull]) { $result.NotificationTime = [datetime]$notificationReader['NotificationTime'] }
+                }
+            }
+            finally { $notificationReader.Close() }
         }
-        finally { $notificationReader.Close() }
     }
     catch { $result.Error = $_.Exception.Message }
     finally {
@@ -270,7 +300,30 @@ $verifyClientPackageTargetAtParent = {
 $writeClientPackageTargetingDiagnostics = {
     param([string]$PackageId, [string]$DistributionPointFqdn, $ParentVerification)
 
-    if ($ParentVerification) {
+    if ($ParentVerification -and -not $ParentVerification.ParentQueried) {
+        # rows=0 / present=False are the INITIAL values here, not findings. Printing them
+        # when the query never ran states a measurement that was never taken.
+        Write-DscStatus "Client package pre-stage diag [parent]: NOT QUERIED -- $($ParentVerification.DataSource)/$($ParentVerification.Database) was never read, so whether it has the $PackageId row is unknown. error='$($ParentVerification.Error)'" -NoStatus
+        $probeTarget = "$($ParentVerification.DataSource)"
+        $probeHost = $probeTarget
+        $probePort = 1433
+        if ($probeTarget -match '^(.+?),(\d+)$') { $probeHost = $Matches[1]; $probePort = [int]$Matches[2] }
+        elseif ($probeTarget -match '^(.+?)\\') { $probeHost = $Matches[1] }
+        $resolved = ''
+        try { $resolved = (@([System.Net.Dns]::GetHostAddresses($probeHost) | ForEach-Object { $_.IPAddressToString }) -join ',') } catch { $resolved = "DNS FAILED: $($_.Exception.Message)" }
+        $tcp = 'not attempted'
+        if ($resolved -and $resolved -notlike 'DNS FAILED*') {
+            $client = $null
+            try {
+                $client = New-Object System.Net.Sockets.TcpClient
+                $tcp = if ($client.ConnectAsync($probeHost, $probePort).Wait(5000) -and $client.Connected) { "open" } else { "no answer within 5s" }
+            }
+            catch { $tcp = "refused: $($_.Exception.Message)" }
+            finally { if ($client) { $client.Dispose() } }
+        }
+        Write-DscStatus "Client package pre-stage diag [parent reachability]: host='$probeHost' port=$probePort dns='$resolved' tcp=$tcp" -NoStatus
+    }
+    elseif ($ParentVerification) {
         Write-DscStatus "Client package pre-stage diag [parent effective]: SQL=$($ParentVerification.DataSource)/$($ParentVerification.Database); rows=$($ParentVerification.Rows); NALPath='$($ParentVerification.NALPath)'; LastRefresh=$($ParentVerification.LastRefresh); RefreshTrigger=$($ParentVerification.RefreshTrigger); UpdateMask=$($ParentVerification.UpdateMask); Action=$($ParentVerification.Action); PkgNotification(type4)=$($ParentVerification.NotificationCount) latest=$($ParentVerification.NotificationTime); error='$($ParentVerification.Error)'" -NoStatus
         Write-DscStatus "Client package pre-stage diag [parent global]: present=$($ParentVerification.ParentRowPresent); NALPath='$($ParentVerification.GlobalNALPath)'; LastRefresh=$($ParentVerification.GlobalLastRefresh); RefreshTrigger=$($ParentVerification.GlobalRefreshTrigger); UpdateMask=$($ParentVerification.GlobalUpdateMask); Action=$($ParentVerification.GlobalAction)" -NoStatus
         Write-DscStatus "Client package pre-stage diag [local global]: LastRefresh=$($ParentVerification.LocalLastRefresh); RefreshTrigger=$($ParentVerification.LocalRefreshTrigger); UpdateMask=$($ParentVerification.LocalUpdateMask); Action=$($ParentVerification.LocalAction); verdict='$($ParentVerification.Mismatch)'" -NoStatus
@@ -402,7 +455,12 @@ $startClientPackagePrestage = {
                     $target.RefreshNow = $true
                     [void]$target.Put()
                 }
-                Write-DscStatus "Client package pre-stage: parent still did not see $packageId targeting for $DistributionPointFqdn; re-armed and retrying DRS once."
+                if ($lastVerification -and -not $lastVerification.ParentQueried) {
+                    Write-DscStatus "Client package pre-stage: the parent could not be read on attempt 1, so its view of $packageId targeting for $DistributionPointFqdn is unknown; re-armed and retrying DRS once."
+                }
+                else {
+                    Write-DscStatus "Client package pre-stage: parent still did not see $packageId targeting for $DistributionPointFqdn; re-armed and retrying DRS once."
+                }
             }
 
             $flushResult = @(& $flushClientPackageTargetingToParent $packageId)
@@ -420,7 +478,14 @@ $startClientPackagePrestage = {
 
         $finalDetail = if ($lastVerification -and $lastVerification.Error) { $lastVerification.Error } else { "$($lastVerification.Mismatch)" }
         & $writeClientPackageTargetingDiagnostics $packageId $DistributionPointFqdn $lastVerification
-        if ($lastVerification -and $lastVerification.ParentRowPresent) {
+        if (-not $lastVerification -or -not $lastVerification.ParentQueried) {
+            # The parent database was never read, so "has no row" is not something this run
+            # is entitled to say. Failing here converts an outage on the VERIFIER into an
+            # 83-minute phase failure while replication itself may be perfectly healthy.
+            Write-DscStatus "Client package pre-stage: could not read parent site $($ThisVM.parentSiteCode) at $($lastVerification.DataSource)/$($lastVerification.Database) after 2 DRS attempts, so whether it has the $packageId targeting for $DistributionPointFqdn is UNKNOWN -- not confirmed missing ($finalDetail). Continuing; the client package coverage gate and the Phase 11 [ClientPkg] check both re-verify. See the [parent reachability] diag line above." -Warning
+            return $true
+        }
+        if ($lastVerification.ParentRowPresent) {
             # The parent HAS the DP targeting; only the replicated field values are still
             # catching up. That is a lag, not a broken DRS path, and the coverage gate in
             # InstallBoundaryGroups plus the Phase 11 [ClientPkg] check both re-verify it.

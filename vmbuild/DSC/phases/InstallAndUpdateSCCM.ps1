@@ -2055,15 +2055,19 @@ else {
             $portNum = $null
             if ($sqlVMObj) {
                 $instance = $sqlVMObj.sqlInstanceName
+                # A lab SQL VM commonly runs the DEFAULT instance on a non-default port, so the
+                # instance branch below never carries it and the connect silently aims at 1433.
+                if ($sqlVMObj.sqlPort) { $portNum = $sqlVMObj.sqlPort }
                 if ($sqlVMObj.AlwaysOnListenerName) {
                     $server = $sqlVMObj.AlwaysOnListenerName
+                    $portNum = $null
                     if ($sqlVMObj.thisParams -and $sqlVMObj.thisParams.SQLAO -and $sqlVMObj.thisParams.SQLAO.SQLAOPort) {
                         $portNum = $sqlVMObj.thisParams.SQLAO.SQLAOPort
                     }
                 }
             }
             $serverFqdn = if ($server -like "*.*") { $server } else { "$server.$DomainFqdn" }
-            if ($portNum) { return "$serverFqdn,$portNum" }
+            if ($portNum -and "$portNum" -ne '1433') { return "$serverFqdn,$portNum" }
             if ($instance -and $instance.ToUpper() -ne 'MSSQLSERVER') { return "$serverFqdn\$instance" }
             return $serverFqdn
         }
@@ -2368,7 +2372,7 @@ JOIN sys.partitions p ON s.object_id = p.object_id AND p.index_id = 1
 WHERE s.name LIKE '%Rcm%' OR s.name LIKE '%Drs%'
 ORDER BY p.rows DESC
 "@
-                                $sqlDs = if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') { "$sqlServerName\$sqlInstanceName" } else { $sqlServerName }
+                                $sqlDs = $casSqlDataSource
                                 $cs = "Data Source=$sqlDs;Initial Catalog=CM_$SiteCode;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
                                 $conn = New-Object System.Data.SqlClient.SqlConnection $cs
                                 $conn.Open()
