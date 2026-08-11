@@ -4310,20 +4310,42 @@ function Test-MPReplicaFunctionality {
 
     $replicaMPs = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' -and $_.installMP -and $_.useDatabaseReplica -and $_.siteCode -eq $siteCode })
     $mpFqdnCsv = ($replicaMPs | ForEach-Object { "$($_.vmName).$domain" }) -join ','
+    # A replica's SQL lives on another VM, so the site server's own registry port does not
+    # apply to it, and SC_SysResUse stores only the server NAME -- the port has to come from
+    # deployConfig here and travel into the guest.
+    $replicaPortPairs = New-Object System.Collections.Generic.List[string]
+    foreach ($rmp in $replicaMPs) {
+        $rsql = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $rmp.replicaSqlServerVM } | Select-Object -First 1
+        if ($rsql -and $rsql.sqlPort -and "$($rsql.sqlPort)" -ne '1433') {
+            $replicaPortPairs.Add("$($rsql.vmName)=$($rsql.sqlPort)")
+        }
+    }
+    $replicaPortCsv = ($replicaPortPairs | Select-Object -Unique) -join ','
 
     Write-Log "[Phase $Phase] $VMName [MPReplica]: verifying $($replicaMPs.Count) MP database replica(s) via v_BgbMP + sys.routes" -LogOnly
 
     $scriptBlock = {
-        param($mpFqdnCsv, $sc)
+        param($mpFqdnCsv, $sc, $replicaPortCsv)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
         $mpList = @($mpFqdnCsv -split ',' | Where-Object { $_ })
+        # "<sqlVmShortName>=<port>" pairs; SC_SysResUse stores the server name without a port.
+        $replicaPorts = @{}
+        foreach ($pair in @("$replicaPortCsv" -split ',' | Where-Object { $_ })) {
+            $kv = $pair -split '='
+            if ($kv.Count -eq 2) { $replicaPorts[$kv[0].Trim().ToUpper()] = $kv[1].Trim() }
+        }
 
         # Site DB from this server's registry (same detection ConfigMgr uses).
         try {
             $siteReg = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code').'Site Code'
             $p = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server'
             $server = $p.Server; $dbRaw = $p.'Database Name'
+            # Setup's own recovery path requires this DWORD to be > 0, so it is always present.
+            # Without it a remote site DB on a non-default port is unreachable and this check
+            # reports FAIL for a healthy hierarchy.
+            $sqlPort = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server\Site System SQL Account' -Name 'Port' -ErrorAction SilentlyContinue).'Port'
             if ($dbRaw -match '\\') { $inst = "$server\$($dbRaw.Split('\')[0])"; $db = $dbRaw.Split('\')[1] } else { $inst = $server; $db = $dbRaw }
+            if ($sqlPort -and "$sqlPort" -ne '1433') { $inst = "$inst,$sqlPort" }
             $results.Details.Add("OK: site DB $inst / $db (site $siteReg)")
         }
         catch {
@@ -4443,6 +4465,8 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
                 # DB (parse instance from the stored DatabaseName) and confirm it.
                 if ($storedSql -and $storedDb) {
                     if ($storedDb -match '\\') { $rInst = "$storedSql\$($storedDb.Split('\')[0])"; $rDb = $storedDb.Split('\')[1] } else { $rInst = $storedSql; $rDb = $storedDb }
+                    $rPort = $replicaPorts[(($storedSql -split '\.')[0]).ToUpper()]
+                    if ($rPort) { $rInst = "$rInst,$rPort" }
                     try {
                         $qRow = Invoke-Sqlcmd -ServerInstance $rInst -Database $rDb -TrustServerCertificate -ErrorAction Stop -Query "SELECT c = COUNT(*) FROM sys.service_queues WHERE name = 'ConfigMgrBGBQueue'"
                         if ([int]$qRow.c -gt 0) {
@@ -4465,7 +4489,7 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $mpFqdnCsv, $siteCode `
+        -ScriptBlock $scriptBlock -ArgumentList $mpFqdnCsv, $siteCode, $replicaPortCsv `
         -DisplayName "Phase11-MPReplica-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 
@@ -7306,7 +7330,9 @@ $Phase11SmsSiteLogCollector = {
             $siteCode = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop).'Site Code'
             $sr = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
             $dbRaw = $sr.'Database Name'
+            $srPort = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server\Site System SQL Account' -Name 'Port' -ErrorAction SilentlyContinue).'Port'
             if ($dbRaw -match '\\') { $inst = "$($sr.Server)\$($dbRaw.Split('\')[0])"; $db = $dbRaw.Split('\')[1] } else { $inst = $sr.Server; $db = $dbRaw }
+            if ($srPort -and "$srPort" -ne '1433') { $inst = "$inst,$srPort" }
             $ml += "site=$siteCode  sql=$inst  db=$db"
             $ml += ""
 

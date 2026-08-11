@@ -633,6 +633,38 @@ function Stop-CMSetupPrereqPrewarm {
     catch { }
 }
 
+function Get-VmSqlConnectionTarget {
+    # The one place that turns a deployConfig VM into a SQL "Data Source" / -ServerInstance
+    # string. A DEFAULT instance on a non-default port is the case that keeps being missed:
+    # it has no instance name to hang the port on, so omitting the port aims the connection
+    # at 1433 -- which is not listening, because ChangeSqlInstancePort moves IPAll\TcpPort.
+    # CT3-CS1SQL (MSSQLSERVER on 5422) failed an 83-minute Phase 8 that way; 13 of 62 lab
+    # configs use a non-1433 port, so this is the normal case, not an edge case.
+    param(
+        [Parameter(Mandatory)]$SiteVm,
+        [Parameter(Mandatory)]$DeployConfig,
+        [Parameter(Mandatory)][string]$DomainFullName
+    )
+
+    $sqlVmName = if ($SiteVm.remoteSQLVM) { "$($SiteVm.remoteSQLVM)" } else { "$($SiteVm.vmName)" }
+    $sqlVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlVmName } | Select-Object -First 1
+    $sqlServer = $sqlVmName
+    $sqlInstance = if ($sqlVm) { "$($sqlVm.sqlInstanceName)" } else { '' }
+    $sqlPort = if ($sqlVm -and $sqlVm.sqlPort) { $sqlVm.sqlPort } else { $null }
+
+    if ($sqlVm -and $sqlVm.AlwaysOnListenerName) {
+        $sqlServer = "$($sqlVm.AlwaysOnListenerName)"
+        $sqlInstance = ''
+        # The listener has its own port; a node's sqlPort does not reach it.
+        $sqlPort = if ($sqlVm.thisParams -and $sqlVm.thisParams.SQLAO -and $sqlVm.thisParams.SQLAO.SQLAOPort) { $sqlVm.thisParams.SQLAO.SQLAOPort } else { $null }
+    }
+
+    $target = if ($sqlServer -like '*.*') { $sqlServer } else { "$sqlServer.$DomainFullName" }
+    if ($sqlInstance -and $sqlInstance.ToUpper() -ne 'MSSQLSERVER') { $target = "$target\$sqlInstance" }
+    if ($sqlPort -and "$sqlPort" -ne '1433') { $target = "$target,$sqlPort" }
+    return $target
+}
+
 function Set-CMSiteProvider {
     param($SiteCode, $ProviderFQDN)
 

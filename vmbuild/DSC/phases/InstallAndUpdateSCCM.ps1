@@ -2048,28 +2048,7 @@ else {
         # primary's SQL; on any failure we log and fall back to the existing wait (no worse than today).
         function Get-PrimarySqlDataSourceForResync {
             param($PrimaryVM, $DeployCfg, $DomainFqdn)
-            $sqlVmName = if ($PrimaryVM.remoteSQLVM) { $PrimaryVM.remoteSQLVM } else { $PrimaryVM.vmName }
-            $sqlVMObj = $DeployCfg.virtualMachines | Where-Object { $_.vmName -eq $sqlVmName }
-            $server = $sqlVmName
-            $instance = $null
-            $portNum = $null
-            if ($sqlVMObj) {
-                $instance = $sqlVMObj.sqlInstanceName
-                # A lab SQL VM commonly runs the DEFAULT instance on a non-default port, so the
-                # instance branch below never carries it and the connect silently aims at 1433.
-                if ($sqlVMObj.sqlPort) { $portNum = $sqlVMObj.sqlPort }
-                if ($sqlVMObj.AlwaysOnListenerName) {
-                    $server = $sqlVMObj.AlwaysOnListenerName
-                    $portNum = $null
-                    if ($sqlVMObj.thisParams -and $sqlVMObj.thisParams.SQLAO -and $sqlVMObj.thisParams.SQLAO.SQLAOPort) {
-                        $portNum = $sqlVMObj.thisParams.SQLAO.SQLAOPort
-                    }
-                }
-            }
-            $serverFqdn = if ($server -like "*.*") { $server } else { "$server.$DomainFqdn" }
-            if ($portNum -and "$portNum" -ne '1433') { return "$serverFqdn,$portNum" }
-            if ($instance -and $instance.ToUpper() -ne 'MSSQLSERVER') { return "$serverFqdn\$instance" }
-            return $serverFqdn
+            return Get-VmSqlConnectionTarget -SiteVm $PrimaryVM -DeployConfig $DeployCfg -DomainFullName $DomainFqdn
         }
         function Invoke-DrsForceSendOnPrimary {
             param($PrimaryVM, $PrimarySiteCode, $DeployCfg, $DomainFqdn)

@@ -61,23 +61,7 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 $getSiteSqlDataSource = {
     param($SiteVm)
 
-    $sqlVmName = if ($SiteVm.remoteSQLVM) { "$($SiteVm.remoteSQLVM)" } else { "$($SiteVm.vmName)" }
-    $sqlVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlVmName } | Select-Object -First 1
-    $sqlServer = $sqlVmName
-    $sqlInstance = if ($sqlVm) { "$($sqlVm.sqlInstanceName)" } else { '' }
-    # A lab SQL VM routinely listens on a non-default port with the DEFAULT instance name
-    # (CSTest3 CS1SQL = MSSQLSERVER on 5422), so neither the instance nor the AO branch
-    # below carries it. Dropping it aimed every parent query at 1433.
-    $sqlPort = if ($sqlVm -and $sqlVm.sqlPort) { $sqlVm.sqlPort } else { $null }
-    if ($sqlVm -and $sqlVm.AlwaysOnListenerName) {
-        $sqlServer = "$($sqlVm.AlwaysOnListenerName)"
-        # The listener has its own port; a node's sqlPort does not apply to it.
-        $sqlPort = if ($sqlVm.thisParams -and $sqlVm.thisParams.SQLAO -and $sqlVm.thisParams.SQLAO.SQLAOPort) { $sqlVm.thisParams.SQLAO.SQLAOPort } else { $null }
-    }
-    $sqlServerFqdn = if ($sqlServer -like '*.*') { $sqlServer } else { "$sqlServer.$DomainFullName" }
-    if ($sqlPort -and "$sqlPort" -ne '1433') { return "$sqlServerFqdn,$sqlPort" }
-    if ($sqlInstance -and $sqlInstance.ToUpper() -ne 'MSSQLSERVER') { return "$sqlServerFqdn\$sqlInstance" }
-    return $sqlServerFqdn
+    return Get-VmSqlConnectionTarget -SiteVm $SiteVm -DeployConfig $deployConfig -DomainFullName $DomainFullName
 }
 
 $flushClientPackageTargetingToParent = {
