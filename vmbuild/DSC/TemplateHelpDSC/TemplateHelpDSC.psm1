@@ -833,6 +833,129 @@ class InstallADK {
     }
 }
 
+# A WiX Burn bundle carries a '.wixburn' PE section; a Visual Studio bootstrapper does not. Guessing
+# by file size / version strings is not good enough here: Burn IGNORES switches it does not recognise,
+# so handing it VS-style '--quiet' means no /quiet at all and it puts up its interactive UI on the
+# session-0 desktop and waits for a click that can never come.
+function Get-SetupInstallerKind {
+    param([string] $Path)
+
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            $header = New-Object byte[] 8192
+            $read = $stream.Read($header, 0, $header.Length)
+            if ($read -lt 512) { return 'Unknown' }
+            if ($header[0] -ne 0x4D -or $header[1] -ne 0x5A) { return 'Unknown' }
+            $peOffset = [BitConverter]::ToInt32($header, 0x3C)
+            if ($peOffset -le 0 -or ($peOffset + 24) -ge $read) { return 'Unknown' }
+            if ([BitConverter]::ToUInt32($header, $peOffset) -ne 0x00004550) { return 'Unknown' }
+            $sectionCount = [BitConverter]::ToUInt16($header, $peOffset + 6)
+            $sectionStart = $peOffset + 24 + [BitConverter]::ToUInt16($header, $peOffset + 20)
+            if (($sectionStart + ($sectionCount * 40)) -gt $read) { return 'Unknown' }
+            for ($i = 0; $i -lt $sectionCount; $i++) {
+                if ([Text.Encoding]::ASCII.GetString($header, $sectionStart + ($i * 40), 8).TrimEnd([char]0) -eq '.wixburn') { return 'Burn' }
+            }
+        }
+        finally { $stream.Dispose() }
+    }
+    catch { return 'Unknown' }
+
+    return 'VSBootstrapper'
+}
+
+function Get-PendingRebootReasons {
+    $reasons = @()
+    try {
+        $cbs = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing'
+        foreach ($key in @('RebootPending', 'RebootInProgress', 'PackagesPending')) {
+            if (Test-Path -Path "$cbs\$key") { $reasons += "CBS\$key" }
+        }
+        if (Test-Path -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
+            $reasons += 'WindowsUpdate\RebootRequired'
+        }
+        # The null filter matters: @($null).Count is 1, which would report a phantom rename.
+        $pfro = @((Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations | Where-Object { $_ })
+        if ($pfro.Count -gt 0) {
+            $renames = 0
+            for ($i = 1; $i -lt $pfro.Count; $i += 2) {
+                if ($pfro[$i]) { $renames++ }
+            }
+            $reasons += "PendingFileRename($renames renames of $([Math]::Ceiling($pfro.Count / 2)) ops)"
+        }
+        $activeName = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
+        $stagedName = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
+        if ($activeName -and $stagedName -and $activeName -ne $stagedName) {
+            $reasons += "ComputerRename($activeName -> $stagedName)"
+        }
+    }
+    catch {
+        return @("probe failed: $($_.Exception.Message)")
+    }
+    return $reasons
+}
+
+# Burn elevates by relaunching itself from the package cache, so the process we started can sit at 0%
+# while the real install runs underneath it. Anything that judges progress by CPU must sum the tree.
+function Get-ProcessTreeCpuSeconds {
+    param([int] $RootProcessId)
+
+    $all = $null
+    try { $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, KernelModeTime, UserModeTime -ErrorAction Stop) }
+    catch { return -1 }
+
+    $byId = @{}
+    $childrenOf = @{}
+    foreach ($entry in $all) {
+        $id = [int]$entry.ProcessId
+        $byId[$id] = $entry
+        $parentId = [int]$entry.ParentProcessId
+        if (-not $childrenOf.ContainsKey($parentId)) { $childrenOf[$parentId] = New-Object System.Collections.Generic.List[int] }
+        $childrenOf[$parentId].Add($id)
+    }
+
+    $total = 0.0
+    $seen = New-Object System.Collections.Generic.HashSet[int]
+    $pending = New-Object System.Collections.Generic.Stack[int]
+    $pending.Push($RootProcessId)
+    while ($pending.Count -gt 0) {
+        $id = $pending.Pop()
+        if (-not $seen.Add($id)) { continue }
+        if ($byId.ContainsKey($id)) {
+            $total += ([double]$byId[$id].KernelModeTime + [double]$byId[$id].UserModeTime) / 10000000.0
+        }
+        if ($childrenOf.ContainsKey($id)) {
+            foreach ($childId in $childrenOf[$id]) { $pending.Push($childId) }
+        }
+    }
+    return $total
+}
+
+# An exit code alone cannot say why an installer failed -- 1603 in particular is "read the log".
+function Get-SetupLogFailureReason {
+    param([string] $LogDirectory, [int] $MaxLines = 4)
+
+    $reasons = New-Object System.Collections.Generic.List[string]
+    try {
+        $logs = @(Get-ChildItem -LiteralPath $LogDirectory -Filter '*.log' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 4)
+        foreach ($log in $logs) {
+            $hits = @(Select-String -LiteralPath $log.FullName -ErrorAction SilentlyContinue `
+                    -Pattern 'Error 0x[0-9a-fA-F]{8}|error status: [1-9]|Failed to (install|configure|execute|open|cache)|returned error code' |
+                Select-Object -Last $MaxLines)
+            foreach ($hit in $hits) {
+                $text = ("{0}: {1}" -f $log.Name, (($hit.Line -replace '\s+', ' ').Trim()))
+                if ($text.Length -gt 200) { $text = $text.Substring(0, 200) }
+                if (-not $reasons.Contains($text)) { $reasons.Add($text) }
+            }
+            if ($reasons.Count -ge $MaxLines) { break }
+        }
+    }
+    catch { }
+    if ($reasons.Count -eq 0) { return '' }
+    return (($reasons | Select-Object -First $MaxLines) -join ' || ')
+}
+
 [DscResource()]
 class InstallSSMS {
     [DscProperty(Key)]
@@ -842,10 +965,7 @@ class InstallSSMS {
     [Ensure] $Ensure
 
     [void] Set() {
-        # Download SSMS
         $ssmsSetup = "C:\temp\SSMS-Setup-ENU.exe"
-
-        Invoke-DownloadFile $this.DownloadUrl $ssmsSetup
 
         # Version-agnostic detection paths. v18/19/20 install 32-bit under
         # "...(x86)\Microsoft SQL Server Management Studio NN\Common7\IDE"; v21/22+ install 64-bit under
@@ -863,56 +983,61 @@ class InstallSSMS {
             return
         }
 
-        # Pick the correct SILENT arguments for whichever installer the URL actually served, so the install
-        # is bullet-proof no matter which SSMS the link resolves to now or later:
-        #   - WiX Burn standalone (SSMS <= 20, SSMS-Setup-ENU.exe):       /install /quiet /norestart
-        #   - Visual Studio bootstrapper (SSMS 21/22+, vs_SSMS.exe):      --quiet --norestart --wait
-        # The file was saved under a fixed name, so classify by CONTENT: the VS stub is tiny (~5 MB) and its
-        # version info references Visual Studio; the Burn package is hundreds of MB.
-        $burnArgs = @('/install', '/quiet', '/norestart')
-        $vsArgs = @('--quiet', '--norestart', '--wait')
-
-        $looksVs = $false
-        try {
-            $fi = Get-Item -LiteralPath $ssmsSetup -ErrorAction Stop
-            $sizeMB = [math]::Round($fi.Length / 1MB, 1)
-            $vi = $fi.VersionInfo
-            $viText = ("{0}|{1}|{2}" -f $vi.FileDescription, $vi.ProductName, $vi.OriginalFilename)
-            if ($sizeMB -lt 60) { $looksVs = $true }
-            if ($viText -match 'Visual Studio|vs_setup|bootstrap') { $looksVs = $true }
-            if ($looksVs) { $kindText = 'VS bootstrapper' } else { $kindText = 'Burn standalone' }
-            Write-Status ("SSMS installer classified as {0} ({1} MB; '{2}')" -f $kindText, $sizeMB, $viText)
-        }
-        catch {
-            Write-Status "Could not read SSMS installer metadata ($($_.Exception.Message)); defaulting to Burn-style args."
+        # SSMS runs a few seconds after InstallFeatureForSCCM. On Server 2019 the .NET 4.8 install in
+        # between happens to force a reboot first; Server 2022 ships 4.8, so InstallDotNet4 is a no-op and
+        # the bundle lands straight on the servicing state the feature install left behind -- 1603 in 15s
+        # on CT3-W22Server1 (2026-08-11), where the identical command line later returned 0. Take the
+        # reboot Server 2019 gets by accident. The marker caps it at one, so this can never loop.
+        $preRebootMarker = 'C:\staging\SSMSPreInstallReboot.txt'
+        $pendingReasons = @(Get-PendingRebootReasons)
+        if ($pendingReasons.Count -gt 0 -and -not (Test-Path -LiteralPath $preRebootMarker)) {
+            try { "$(Get-Date -Format o) pre-install $($pendingReasons -join ' + ')" | Out-File -FilePath $preRebootMarker -Force -Encoding ascii } catch { }
+            Write-Status "SSMS install deferred: a reboot is already owed by $($pendingReasons -join ' + '). Rebooting first so the bundle does not land on a half-finished servicing operation."
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+            return
         }
 
-        # Try the most-likely arg style first; fall back to the other only if the first EXITED without
-        # installing (a misclassification). Each attempt runs under a hard timeout + kill so a wedged
-        # installer or a UI dialog in session 0 can never hang the phase for hours.
-        if ($looksVs) {
-            $attempts = @(
-                @{ Name = 'VS bootstrapper'; Args = $vsArgs },
-                @{ Name = 'Burn standalone'; Args = $burnArgs }
-            )
-        }
-        else {
-            $attempts = @(
-                @{ Name = 'Burn standalone'; Args = $burnArgs },
-                @{ Name = 'VS bootstrapper'; Args = $vsArgs }
-            )
-        }
+        Invoke-DownloadFile $this.DownloadUrl $ssmsSetup
 
-        $timeoutSeconds = 2700   # 45-min hard cap per attempt; never hang the phase for hours.
+        $logDir = 'C:\staging\DSC\SSMSSetupLogs'
+        try { if (-not (Test-Path -LiteralPath $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null } } catch { }
+
+        $sizeMB = 0
+        try { $sizeMB = [math]::Round((Get-Item -LiteralPath $ssmsSetup -ErrorAction Stop).Length / 1MB, 1) } catch { }
+        $kind = Get-SetupInstallerKind -Path $ssmsSetup
+
+        # The two silent argument styles are not interchangeable: giving Burn the VS switches is how a
+        # failed install turned into a 45-minute interactive stall. So retry the SAME style the file
+        # actually is, and only ever try both when the PE header could not identify it.
+        $burnAttempt = @{ Name = 'Burn standalone'; Args = @('/install', '/quiet', '/norestart'); IsBurn = $true }
+        $vsAttempt = @{ Name = 'VS bootstrapper'; Args = @('--quiet', '--norestart', '--wait'); IsBurn = $false }
+        if ($kind -eq 'Burn') { $attempts = @($burnAttempt, $burnAttempt) }
+        elseif ($kind -eq 'VSBootstrapper') { $attempts = @($vsAttempt, $vsAttempt) }
+        else { $attempts = @($burnAttempt, $vsAttempt) }
+
+        $timeoutSeconds = 1800   # hard cap per attempt; the wedge check below fires long before this
+        $wedgeSeconds = 360      # no CPU anywhere in the tree and no setup-log growth => it wants input
         $installed = $false
-        $timedOut = $false
         $lastDetail = 'no attempt ran'
+        $attemptIndex = 0
 
         foreach ($attempt in $attempts) {
-            Write-Status ("Installing SSMS [{0}]: `"{1}`" {2}" -f $attempt.Name, $ssmsSetup, ($attempt.Args -join ' '))
+            $attemptIndex++
+            if ($attemptIndex -gt 1) {
+                Write-Status "Waiting 60s for Windows Installer/servicing to settle before SSMS attempt $attemptIndex."
+                Start-Sleep -Seconds 60
+            }
+
+            $argList = @($attempt.Args)
+            if ($attempt.IsBurn) { $argList += @('/log', (Join-Path $logDir ("ssms-burn-attempt{0}.log" -f $attemptIndex))) }
+
+            Write-Status ("Installing SSMS [{0}] attempt {1}/{2} ({3} MB, PE says {4}): `"{5}`" {6}" -f `
+                    $attempt.Name, $attemptIndex, $attempts.Count, $sizeMB, $kind, $ssmsSetup, ($argList -join ' '))
+
             $proc = $null
             try {
-                $proc = Start-Process -FilePath $ssmsSetup -ArgumentList $attempt.Args -PassThru -WindowStyle Hidden -ErrorAction Stop
+                $proc = Start-Process -FilePath $ssmsSetup -ArgumentList $argList -PassThru -WindowStyle Hidden -ErrorAction Stop
             }
             catch {
                 $lastDetail = "Start-Process failed: $($_.Exception.Message)"
@@ -920,14 +1045,53 @@ class InstallSSMS {
                 continue
             }
 
-            if ($proc.WaitForExit($timeoutSeconds * 1000)) {
-                $lastDetail = "exit code $($proc.ExitCode)"
-                Write-Status ("SSMS install [{0}] exited with code {1}" -f $attempt.Name, $proc.ExitCode)
+            $elapsed = [Diagnostics.Stopwatch]::StartNew()
+            $sinceProgress = [Diagnostics.Stopwatch]::StartNew()
+            $lastCpu = -1.0
+            $lastLogBytes = -1
+            $wedged = $false
+
+            while (-not $proc.HasExited) {
+                Start-Sleep -Seconds 15
+                if ($proc.HasExited) { break }
+
+                $cpu = Get-ProcessTreeCpuSeconds -RootProcessId $proc.Id
+                $logFiles = @(Get-ChildItem -LiteralPath $logDir -File -ErrorAction SilentlyContinue)
+                $logFiles += @(Get-ChildItem -Path (Join-Path $env:TEMP 'dd_*.log') -File -ErrorAction SilentlyContinue)
+                $logBytes = 0
+                $logSum = ($logFiles | Measure-Object -Property Length -Sum).Sum
+                if ($null -ne $logSum) { $logBytes = [int64]$logSum }
+
+                if ($cpu -gt ($lastCpu + 0.5) -or $logBytes -gt $lastLogBytes) {
+                    $lastCpu = $cpu
+                    $lastLogBytes = $logBytes
+                    $sinceProgress.Restart()
+                }
+
+                # A failed CPU probe must not be read as "no progress" -- that would kill a healthy install.
+                if ($cpu -ge 0 -and $elapsed.Elapsed.TotalSeconds -ge 120 -and $sinceProgress.Elapsed.TotalSeconds -ge $wedgeSeconds) {
+                    $windowHandle = 0
+                    try { $windowHandle = [int64]$proc.MainWindowHandle } catch { }
+                    $wedged = $true
+                    $lastDetail = ("wedged after {0:N0}s: no tree CPU (total {1:N1}s) and no setup-log growth ({2} bytes) for {3:N0}s, MainWindowHandle={4}" -f `
+                            $elapsed.Elapsed.TotalSeconds, $lastCpu, $lastLogBytes, $sinceProgress.Elapsed.TotalSeconds, $windowHandle)
+                    break
+                }
+
+                if ($elapsed.Elapsed.TotalSeconds -ge $timeoutSeconds) {
+                    $lastDetail = "timed out after ${timeoutSeconds}s"
+                    break
+                }
+            }
+
+            if ($proc.HasExited) {
+                $exitCode = 'unknown'
+                try { $exitCode = $proc.ExitCode } catch { }
+                $lastDetail = "exit code $exitCode"
+                Write-Status ("SSMS install [{0}] exited with code {1} after {2:N0}s" -f $attempt.Name, $exitCode, $elapsed.Elapsed.TotalSeconds)
             }
             else {
-                $timedOut = $true
-                $lastDetail = "timed out after ${timeoutSeconds}s"
-                Write-Status ("SSMS install [{0}] did not finish within {1}s -- killing it and any child installers" -f $attempt.Name, $timeoutSeconds)
+                Write-Status ("SSMS install [{0}] {1} -- killing it and any child installers" -f $attempt.Name, $lastDetail)
                 try { $proc.Kill() } catch { }
                 foreach ($pn in @('vs_installer', 'vs_installershell', 'vs_bootstrapper', 'vs_setup_bootstrapper', 'setup', 'SSMS-Setup-ENU')) {
                     Get-Process -Name $pn -ErrorAction SilentlyContinue | ForEach-Object { try { $_.Kill() } catch { } }
@@ -944,18 +1108,34 @@ class InstallSSMS {
                 break
             }
 
-            if ($timedOut) {
-                # A hang on this binary will almost certainly hang again with the other arg style on the SAME
-                # file, so stop here and fail rather than burn another 45 minutes.
-                Write-Status "SSMS installer hung; not retrying the alternate argument style on the same hung binary."
-                break
+            $logReason = Get-SetupLogFailureReason -LogDirectory $logDir
+            if ($logReason) {
+                $lastDetail = "$lastDetail; $logReason"
+                Write-Status ("SSMS attempt {0} left no ssms.exe -- setup log says: {1}" -f $attemptIndex, $logReason)
+            }
+            else {
+                Write-Status ("SSMS attempt {0} left no ssms.exe and no setup log named an error; logs kept under {1}" -f $attemptIndex, $logDir)
             }
 
-            Write-Status ("SSMS not present after the [{0}] attempt; retrying with the alternate installer arguments." -f $attempt.Name)
+            if ($wedged -and $attemptIndex -lt $attempts.Count -and $attempts[$attemptIndex].Name -eq $attempt.Name) {
+                Write-Status "SSMS installer wanted input rather than failing; the same command line will wedge again -- not retrying it."
+                break
+            }
         }
 
         if (-not $installed) {
-            $msg = "Failed to install SSMS (tried Burn '/install /quiet /norestart' and VS '--quiet --norestart --wait'). Last detail: $lastDetail"
+            # Defense in depth: a reboot we have not spent yet is the one recovery left that costs a minute
+            # instead of failing the phase, and it is exactly what makes the Server 2019 ordering work.
+            $pendingNow = @(Get-PendingRebootReasons)
+            if ($pendingNow.Count -gt 0 -and -not (Test-Path -LiteralPath $preRebootMarker)) {
+                try { "$(Get-Date -Format o) post-failure $($pendingNow -join ' + ')" | Out-File -FilePath $preRebootMarker -Force -Encoding ascii } catch { }
+                Write-Status "SSMS install failed ($lastDetail) and a reboot is owed by $($pendingNow -join ' + '). Rebooting and retrying on the next pass rather than failing the phase."
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
+                return
+            }
+
+            $msg = "Failed to install SSMS after $($attempts.Count) attempt(s) [$kind, $sizeMB MB]. Last detail: $lastDetail. Setup logs kept in $logDir"
             Write-Status $msg
             throw $msg
         }
@@ -969,17 +1149,9 @@ class InstallSSMS {
         # standard pending-reboot signals and only set DSCMachineStatus when the install
         # actually staged in-use files; otherwise let the downstream reboot (or Phase 4
         # SQL, on a SQL-only SSMS box) finalize.
-        $rebootPending = $false
-        try {
-            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $rebootPending = $true }
-            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $rebootPending = $true }
-            $sm = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
-            if ($sm -and $sm.PendingFileRenameOperations) { $rebootPending = $true }
-        }
-        catch { }
-
-        if ($rebootPending) {
-            Write-Status "SSMS install left a pending reboot; rebooting to finalize."
+        $rebootReasons = @(Get-PendingRebootReasons)
+        if ($rebootReasons.Count -gt 0) {
+            Write-Status "SSMS install left a pending reboot ($($rebootReasons -join ' + ')); rebooting to finalize."
             [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
             $global:DSCMachineStatus = 1
         }
@@ -4672,33 +4844,7 @@ class InstallFeatureForSCCM {
     # Which servicing flag is holding the reboot. Get-WindowsFeature only reports that a
     # feature is *Pending; this says why, so the write can be traced back to its source.
     [string] RebootPendingReasons() {
-        $reasons = @()
-        try {
-            $cbs = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing'
-            foreach ($key in @('RebootPending', 'RebootInProgress', 'PackagesPending')) {
-                if (Test-Path -Path "$cbs\$key") { $reasons += "CBS\$key" }
-            }
-            if (Test-Path -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
-                $reasons += 'WindowsUpdate\RebootRequired'
-            }
-            $pfro = @((Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
-            if ($pfro.Count -gt 0) {
-                # Flat [source, dest, source, dest, ...]; an empty dest means delete-on-reboot.
-                $renames = 0
-                for ($i = 1; $i -lt $pfro.Count; $i += 2) {
-                    if ($pfro[$i]) { $renames++ }
-                }
-                $reasons += "PendingFileRename($renames renames of $([Math]::Ceiling($pfro.Count / 2)) ops)"
-            }
-            $activeName = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
-            $stagedName = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
-            if ($activeName -and $stagedName -and $activeName -ne $stagedName) {
-                $reasons += "ComputerRename($activeName -> $stagedName)"
-            }
-        }
-        catch {
-            return "probe failed: $($_.Exception.Message)"
-        }
+        $reasons = @(Get-PendingRebootReasons)
         if ($reasons.Count -eq 0) { return 'no reboot flag found' }
         return ($reasons -join ' + ')
     }
