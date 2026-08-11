@@ -270,8 +270,8 @@ try {
         return
     }
 
-    $commonPs1Path = Join-Path $PSScriptRoot "..\Common.ps1"
-    $commonPs1Path = (Resolve-Path $commonPs1Path).Path
+    $versionFilePath = Join-Path $PSScriptRoot "..\version.json"
+    $versionFilePath = (Resolve-Path $versionFilePath).Path
     $todayPrefix = (Get-Date).ToString("yyMMdd")
     $oldVersion = $Common.MemLabsVersion
 
@@ -282,14 +282,23 @@ try {
         $newVersion = "$todayPrefix.0"
     }
 
-    $content = Get-Content $commonPs1Path -Raw
-    # Update both MemLabsVersion and LatestHotfixVersion
-    $content = $content -replace "MemLabsVersion\s*=\s*`"$([regex]::Escape($oldVersion))`"", "MemLabsVersion              = `"$newVersion`""
-    $content = $content -replace "LatestHotfixVersion\s*=\s*`"$([regex]::Escape($oldVersion))`"", "LatestHotfixVersion         = `"$newVersion`""
-    # Write with UTF-8 BOM — PS5.1 needs the BOM to parse non-ASCII characters
-    $utf8Bom = New-Object System.Text.UTF8Encoding $true
-    [System.IO.File]::WriteAllText($commonPs1Path, $content, $utf8Bom)
-    Write-Host "MemLabsVersion updated: $oldVersion -> $newVersion" -ForegroundColor Cyan
+    # Read-modify-write the whole document rather than regex-patching a source file. The old
+    # approach anchored a -replace on the loaded version string: when that anchor did not match
+    # (file already bumped, hand-edited, or the loaded value stale) the replace was a no-op, the
+    # file was rewritten byte-identical, and it still printed "updated". Read back and compare.
+    $versionDoc = Get-Content -LiteralPath $versionFilePath -Raw | ConvertFrom-Json
+    $versionDoc.memLabsVersion = $newVersion
+    $versionDoc.latestHotfixVersion = $newVersion
+    $versionDoc | ConvertTo-Json | Set-Content -LiteralPath $versionFilePath -Encoding utf8
+
+    $verify = Get-Content -LiteralPath $versionFilePath -Raw | ConvertFrom-Json
+    if ($verify.memLabsVersion -ne $newVersion -or $verify.latestHotfixVersion -ne $newVersion) {
+        throw "Version bump did not take: $versionFilePath still reads memLabs=$($verify.memLabsVersion) hotfix=$($verify.latestHotfixVersion), expected $newVersion."
+    }
+    if (-not ($verify.memLabsVersion -is [string])) {
+        throw "Version bump wrote a non-string to $versionFilePath; Common.ps1 requires a quoted value."
+    }
+    Write-Host "MemLabsVersion updated: $oldVersion -> $newVersion (verified in version.json)" -ForegroundColor Cyan
 }
 finally {
     if ($zipJob -and $zipJob.State -eq 'Running') {

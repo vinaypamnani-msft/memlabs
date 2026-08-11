@@ -11175,9 +11175,29 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
             catch {}
         }
 
+        # Version lives in version.json so bumping a release no longer rewrites this 11k-line
+        # file. Absence is fatal on purpose: MemLabsVersion is stamped into VM notes and
+        # LatestHotfixVersion feeds a `-ge` comparison in Common.Maintenance.ps1, so a silent
+        # default would mis-stamp every VM rather than fail.
+        $versionFile = Join-Path $PSScriptRoot "version.json"
+        $versionData = $null
+        try {
+            $versionData = Get-Content -LiteralPath $versionFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            throw "MemLabs version file '$versionFile' is missing or unparseable: $($_.Exception.Message)"
+        }
+        foreach ($versionProp in 'memLabsVersion', 'latestHotfixVersion') {
+            # -is [string] is the load-bearing part: an unquoted JSON number parses as a Double
+            # and 260811.0 silently becomes 260811.
+            if (-not ($versionData.$versionProp -is [string]) -or [string]::IsNullOrWhiteSpace($versionData.$versionProp)) {
+                throw "MemLabs version file '$versionFile' has no usable string '$versionProp'. The value must be quoted."
+            }
+        }
+
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion              = "260811.0"
-            LatestHotfixVersion         = "260811.0"
+            MemLabsVersion              = $versionData.memLabsVersion
+            LatestHotfixVersion         = $versionData.latestHotfixVersion
             PS7                         = $PS7
             Initialized                 = $true
             InitCapabilities            = $requestedInitCapabilities
