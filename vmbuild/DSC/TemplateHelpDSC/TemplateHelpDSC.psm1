@@ -89,15 +89,18 @@ function Copy-MemlabsCachedFile {
 function Initialize-MemlabsCachedHashSidecar {
     param([string] $Url, [string] $Dest, [string] $ExpectedHash)
     if (-not (Test-Path $Dest) -or [string]::IsNullOrWhiteSpace($ExpectedHash)) { return $false }
+    # Every bail-out here silently costs a full SHA1 of the CU on the next Test(), which is how
+    # this could fail on every run while looking like it worked. Each exit names itself.
+    $leaf = Split-Path $Dest -Leaf
     try {
         $drive = $null
         foreach ($cd in (Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=5" -ErrorAction SilentlyContinue)) {
             if ($cd.VolumeName -eq 'MEMLABSCACHE' -and $cd.DeviceID) { $drive = $cd.DeviceID; break }
         }
-        if (-not $drive) { return $false }
+        if (-not $drive) { Write-Status "SIDECAR restore skipped for ${leaf}: no MEMLABSCACHE volume mounted"; return $false }
 
         $manifestPath = Join-Path "$drive\" 'manifest.json'
-        if (-not (Test-Path $manifestPath)) { return $false }
+        if (-not (Test-Path $manifestPath)) { Write-Status "SIDECAR restore skipped for ${leaf}: no manifest.json on $drive"; return $false }
         $manifest = Get-Content -Path $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json
         $entry = $null
         $urlTrim = $Url.Trim()
@@ -107,15 +110,19 @@ function Initialize-MemlabsCachedHashSidecar {
                 break
             }
         }
-        if (-not $entry -or -not $entry.file -or -not $entry.sha1) { return $false }
-        if (-not [string]::Equals([string]$entry.sha1, $ExpectedHash, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        if (-not $entry -or -not $entry.file -or -not $entry.sha1) { Write-Status "SIDECAR restore skipped for ${leaf}: URL not in manifest (or entry missing file/sha1)"; return $false }
+        if (-not [string]::Equals([string]$entry.sha1, $ExpectedHash, [System.StringComparison]::OrdinalIgnoreCase)) { Write-Status "SIDECAR restore skipped for ${leaf}: manifest sha1 $($entry.sha1) != expected $ExpectedHash"; return $false }
 
         $src = Join-Path "$drive\" $entry.file
-        if (-not (Test-Path $src)) { return $false }
+        if (-not (Test-Path $src)) { Write-Status "SIDECAR restore skipped for ${leaf}: cache file missing at $src"; return $false }
         $srcItem = Get-Item $src -ErrorAction Stop
         $destItem = Get-Item $Dest -ErrorAction Stop
-        if ($srcItem.Length -ne $destItem.Length -or $srcItem.LastWriteTimeUtc -ne $destItem.LastWriteTimeUtc) { return $false }
-        if ($entry.size -and ([int64]$destItem.Length -ne [int64]$entry.size)) { return $false }
+        if ($srcItem.Length -ne $destItem.Length -or $srcItem.LastWriteTimeUtc -ne $destItem.LastWriteTimeUtc) {
+            # A copy that does not preserve LastWriteTime makes this permanently unequal.
+            Write-Status "SIDECAR restore skipped for ${leaf}: src/dest differ (len $($srcItem.Length)/$($destItem.Length), lastWriteUtc $($srcItem.LastWriteTimeUtc.ToString('o'))/$($destItem.LastWriteTimeUtc.ToString('o')))"
+            return $false
+        }
+        if ($entry.size -and ([int64]$destItem.Length -ne [int64]$entry.size)) { Write-Status "SIDECAR restore skipped for ${leaf}: manifest size $($entry.size) != dest $($destItem.Length)"; return $false }
 
         @(
             $ExpectedHash.ToLowerInvariant()
@@ -125,6 +132,7 @@ function Initialize-MemlabsCachedHashSidecar {
         return $true
     }
     catch {
+        Write-Status "SIDECAR restore skipped for ${leaf}: $($_.Exception.Message)"
         return $false
     }
 }
