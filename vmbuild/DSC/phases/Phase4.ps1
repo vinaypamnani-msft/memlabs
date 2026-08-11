@@ -698,15 +698,33 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
                 $cvSPNList    = ($SPNs | ForEach-Object { "'$_'" }) -join ','
                 $cvSvcAccount = $ThisVM.SqlServiceAccount
                 $cvDCName     = $deployConfig.parameters.DCName
+                # Same DC either way, so the PDC-serialisation above still holds -- only the name
+                # form differs. A re-run measured this TestScript at 14.2s with nothing to change,
+                # while the identical Get-ADUser costs ~25ms standalone, so it emits its own step
+                # timings; they land in the LCM message stream (ConfigurationStatus\*.details.json).
+                $cvDCFqdn     = "$cvDCName.$DomainName"
                 Script SetSQLSPNs {
                     DependsOn            = '[WriteStatus]SetSQLSPN'
                     PsDscRunAsCredential = $Admincreds
                     GetScript  = { return @{ Result = (Get-Date).ToString() } }
                     TestScript = [string]"
+                        `$sw      = [Diagnostics.Stopwatch]::StartNew()
                         `$spns    = @($cvSPNList)
                         `$account = '$cvSvcAccount'
-                        `$dc      = '$cvDCName'
-                        `$user = Get-ADUser -Identity `$account -Server `$dc -Properties servicePrincipalName -ErrorAction SilentlyContinue
+                        `$mark = `$sw.Elapsed.TotalMilliseconds
+                        # Explicit, so the module cost is measured instead of hiding inside the
+                        # first Get-ADUser as auto-load.
+                        Import-Module ActiveDirectory -ErrorAction SilentlyContinue
+                        Write-Verbose ('SPNTIME import={0}ms' -f [int](`$sw.Elapsed.TotalMilliseconds - `$mark))
+                        `$user   = `$null
+                        `$usedDc = ''
+                        foreach (`$dc in @('$cvDCFqdn', '$cvDCName')) {
+                            `$mark = `$sw.Elapsed.TotalMilliseconds
+                            `$user = Get-ADUser -Identity `$account -Server `$dc -Properties servicePrincipalName -ErrorAction SilentlyContinue
+                            Write-Verbose ('SPNTIME query {0}={1}ms found={2}' -f `$dc, [int](`$sw.Elapsed.TotalMilliseconds - `$mark), (`$null -ne `$user))
+                            if (`$user) { `$usedDc = `$dc; break }
+                        }
+                        Write-Verbose ('SPNTIME total={0}ms via={1}' -f [int]`$sw.Elapsed.TotalMilliseconds, `$usedDc)
                         if (-not `$user) { return `$false }
                         foreach (`$s in `$spns) {
                             if (`$user.servicePrincipalName -notcontains `$s) { return `$false }
@@ -716,7 +734,11 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
                     SetScript  = [string]"
                         `$spns    = @($cvSPNList)
                         `$account = '$cvSvcAccount'
-                        `$dc      = '$cvDCName'
+                        Import-Module ActiveDirectory -ErrorAction SilentlyContinue
+                        `$dc = '$cvDCName'
+                        foreach (`$cand in @('$cvDCFqdn', '$cvDCName')) {
+                            if (Get-ADUser -Identity `$account -Server `$cand -ErrorAction SilentlyContinue) { `$dc = `$cand; break }
+                        }
                         foreach (`$s in `$spns) {
                             # Try adding the SPN directly first — this is a fast
                             # targeted write. Only if it fails with a duplicate
