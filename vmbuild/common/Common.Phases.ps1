@@ -2117,8 +2117,19 @@ function Start-PhaseJobs {
     $phaseDhcpReservationMap = @{}
     if ($phaseDhcpHintEnabled) {
         try {
-            $phaseVmMacMap = Get-AllVMMacsIsolated -ExcludeCluster
-            Write-Log "[Phase $Phase] Pre-cached VM MACs: $($phaseVmMacMap.Count)" -LogOnly
+            # Measured 23.5-36.6s on a 30-VM host, and Phase 3 was paying it a second time.
+            # Nothing creates or re-NICs a VM between Phase 2 and Phase 3, so Phase 3 reuses
+            # Phase 2's snapshot. Phase 2 always captures fresh, which also re-arms this for a
+            # second deployment in the same process.
+            if ($Phase -eq 3 -and $global:phaseVmMacSnapshot -and $global:phaseVmMacSnapshot.Count -gt 0) {
+                $phaseVmMacMap = $global:phaseVmMacSnapshot
+                Write-Log "[Phase $Phase] Reused Phase 2 VM MAC snapshot: $($phaseVmMacMap.Count)" -LogOnly
+            }
+            else {
+                $phaseVmMacMap = Get-AllVMMacsIsolated -ExcludeCluster
+                $global:phaseVmMacSnapshot = $phaseVmMacMap
+                Write-Log "[Phase $Phase] Pre-cached VM MACs: $($phaseVmMacMap.Count)" -LogOnly
+            }
         }
         catch {
             Write-Log "[Phase $Phase] Could not pre-cache VM MACs; VM jobs will fall back to per-VM lookup. $_" -LogOnly
