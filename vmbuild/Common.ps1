@@ -4269,21 +4269,34 @@ function Get-VMMacAndDhcpIsolated {
     Invoke-IsolatedCim requires -- it just does both queries inside it.
     #>
     param(
-        [switch] $ExcludeCluster
+        [switch] $ExcludeCluster,
+        [string[]] $VmNames
     )
-    $results = Invoke-IsolatedCim -ArgumentList $ExcludeCluster.IsPresent -ScriptBlock {
-        param($excludeCluster)
+    $scopedNames = @($VmNames | Where-Object { $_ })
+    $results = Invoke-IsolatedCim -ArgumentList $ExcludeCluster.IsPresent, $scopedNames -ScriptBlock {
+        param($excludeCluster, $vmNames)
+        $swAll = [Diagnostics.Stopwatch]::StartNew()
+        # Enumerating every VM on the host costs the same whether the deploy has 3 VMs or 30,
+        # so ask only for the ones the caller will actually look up.
+        $names = if ($vmNames -and $vmNames.Count -gt 0) { $vmNames } else { '*' }
         $byVm = @{}
-        foreach ($nic in (Get-VMNetworkAdapter -VMName * -ErrorAction SilentlyContinue)) {
+        foreach ($nic in (Get-VMNetworkAdapter -VMName $names -ErrorAction SilentlyContinue)) {
             if ($excludeCluster -and $nic.SwitchName -and $nic.SwitchName -match 'Cluster') { continue }
             if (-not $byVm.ContainsKey($nic.VMName)) { $byVm[$nic.VMName] = [string]$nic.MacAddress }
         }
+        $vms = if ($vmNames -and $vmNames.Count -gt 0) {
+            Get-VM -Name $vmNames -ErrorAction SilentlyContinue
+        }
+        else {
+            Get-VM -ErrorAction SilentlyContinue
+        }
         $macs = [System.Collections.Generic.List[object]]::new()
-        foreach ($vm in (Get-VM -ErrorAction SilentlyContinue)) {
+        foreach ($vm in $vms) {
             $name = [string]$vm.Name
             $mac = if ($byVm.ContainsKey($name)) { $byVm[$name] } else { $null }
             $macs.Add([pscustomobject]@{ VmName = $name; Mac = $mac })
         }
+        $macMs = $swAll.Elapsed.TotalMilliseconds
         $res = [System.Collections.Generic.List[object]]::new()
         foreach ($scope in (Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)) {
             $sid = [string]$scope.ScopeId
@@ -4291,13 +4304,25 @@ function Get-VMMacAndDhcpIsolated {
                 $res.Add([pscustomobject]@{ ScopeId = $sid; Mac = ($r.ClientId -replace '-', ''); Ip = [string]$r.IPAddress })
             }
         }
-        [pscustomobject]@{ Macs = $macs.ToArray(); Reservations = $res.ToArray() }
+        [pscustomobject]@{
+            Macs         = $macs.ToArray()
+            Reservations = $res.ToArray()
+            MacMs        = [int]$macMs
+            DhcpMs       = [int]($swAll.Elapsed.TotalMilliseconds - $macMs)
+            Scoped       = ($vmNames -and $vmNames.Count -gt 0)
+        }
     }
     # Tolerate the isolated call handing back a 1-element array rather than the bare object.
     $snapshot = @($results) | Select-Object -First 1
     $map = @{}
     foreach ($r in $snapshot.Macs) { $map[$r.VmName] = $r.Mac }
-    return [pscustomobject]@{ MacMap = $map; Reservations = @($snapshot.Reservations) }
+    return [pscustomobject]@{
+        MacMap       = $map
+        Reservations = @($snapshot.Reservations)
+        MacMs        = $snapshot.MacMs
+        DhcpMs       = $snapshot.DhcpMs
+        Scoped       = $snapshot.Scoped
+    }
 }
 
 # Return every DHCP reservation across every scope as an array of objects with

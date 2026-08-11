@@ -2128,11 +2128,13 @@ function Start-PhaseJobs {
             }
             else {
                 # Both lookups share one isolated runspace instead of paying two setups.
-                $phaseSnapshot = Get-VMMacAndDhcpIsolated -ExcludeCluster
+                $phaseScopeNames = @($deployConfig.virtualMachines | ForEach-Object { $_.vmName } | Where-Object { $_ })
+                $phaseSnapshotSw = [System.Diagnostics.Stopwatch]::StartNew()
+                $phaseSnapshot = Get-VMMacAndDhcpIsolated -ExcludeCluster -VmNames $phaseScopeNames
                 $phaseVmMacMap = $phaseSnapshot.MacMap
                 $reservationRows = $phaseSnapshot.Reservations
                 $global:phaseVmMacSnapshot = $phaseVmMacMap
-                Write-Log "[Phase $Phase] Pre-cached VM MACs: $($phaseVmMacMap.Count)" -LogOnly
+                Write-Log "[Phase $Phase] Pre-cached VM MACs: $($phaseVmMacMap.Count) (asked for $($phaseScopeNames.Count), scoped=$($phaseSnapshot.Scoped), mac=$($phaseSnapshot.MacMs)ms dhcp=$($phaseSnapshot.DhcpMs)ms total=$([math]::Round($phaseSnapshotSw.Elapsed.TotalSeconds,1))s)" -LogOnly
             }
         }
         catch {
