@@ -4237,17 +4237,21 @@ function Get-AllVMMacsIsolated {
     )
     $results = Invoke-IsolatedCim -ArgumentList $ExcludeCluster.IsPresent -ScriptBlock {
         param($excludeCluster)
-        $out = @()
-        foreach ($vm in (Get-VM -ErrorAction SilentlyContinue)) {
-            $nic = $vm | Get-VMNetworkAdapter
-            if ($excludeCluster) {
-                $nic = $nic | Where-Object { -not $_.SwitchName -or $_.SwitchName -notmatch 'Cluster' }
-            }
-            $nic = $nic | Select-Object -First 1
-            if ($nic) { $mac = [string]$nic.MacAddress } else { $mac = $null }
-            $out += [pscustomobject]@{ VmName = [string]$vm.Name; Mac = $mac }
+        # One Get-VMNetworkAdapter for the whole host, not one per VM. Each call is a separate
+        # WMI round trip, so the per-VM loop cost ~15s for 23 VMs on the Phase 2/3 critical path
+        # before any VM job is dispatched.
+        $byVm = @{}
+        foreach ($nic in (Get-VMNetworkAdapter -VMName * -ErrorAction SilentlyContinue)) {
+            if ($excludeCluster -and $nic.SwitchName -and $nic.SwitchName -match 'Cluster') { continue }
+            if (-not $byVm.ContainsKey($nic.VMName)) { $byVm[$nic.VMName] = [string]$nic.MacAddress }
         }
-        $out
+        $out = [System.Collections.Generic.List[object]]::new()
+        foreach ($vm in (Get-VM -ErrorAction SilentlyContinue)) {
+            $name = [string]$vm.Name
+            $mac = if ($byVm.ContainsKey($name)) { $byVm[$name] } else { $null }
+            $out.Add([pscustomobject]@{ VmName = $name; Mac = $mac })
+        }
+        $out.ToArray()
     }
     $map = @{}
     foreach ($r in $results) { $map[$r.VmName] = $r.Mac }
