@@ -4945,15 +4945,63 @@ $global:VM_Config = {
                     $detailedCheck = ((Get-Date) -ge $nextDetailedCheck)
                     if ($detailedCheck) { $nextDetailedCheck = (Get-Date).AddSeconds(60) }
 
+                    $readyProbeJobs = @{}
+                    $readyProbeState = @{}
+                    $useThreadProbe = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -and ($nonReadyNodes.Count -gt 1)
+                    $readyProbeThrottle = if ($useThreadProbe) { [Math]::Max(1, @($nonReadyNodes).Count) } else { 1 }
+
+                    $threadProbeBlock = {
+                        param(
+                            [string]$VmName,
+                            [string]$ExpectedGuid
+                        )
+
+                        try {
+                            $session = New-PSSession -VMName $VmName -ErrorAction Stop
+                            try {
+                                $ready = Invoke-Command -Session $session -ScriptBlock {
+                                    param($targetGuid)
+                                    $f = "C:\staging\DSC\RunGuid.txt"
+                                    if (-not (Test-Path $f)) { return $false }
+                                    $content = Get-Content $f -ErrorAction SilentlyContinue | Select-Object -First 1
+                                    if ($content) { $content = $content.Trim() }
+                                    return ([string]$content -eq [string]$targetGuid)
+                                } -ArgumentList $ExpectedGuid -ErrorAction Stop
+                                [pscustomobject]@{
+                                    Ready = [bool]$ready
+                                    Error = $null
+                                    Source = 'ThreadJob'
+                                    Unknown = $false
+                                }
+                            }
+                            finally {
+                                if ($session) {
+                                    Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+                                }
+                            }
+                        }
+                        catch {
+                            [pscustomobject]@{
+                                Ready = $false
+                                Error = $_.Exception.Message
+                                Source = 'ThreadJob'
+                                Unknown = $true
+                            }
+                        }
+                    }
+
                     foreach ($node in $nonReadyNodes) {
                         if (-not $node) {
                             continue
                         }
-                        # One round trip to read a tiny file measured 2.5-3s per node, serial. Time it
-                        # per node so a future fix targets the real cost (session setup vs VMBus latency).
+
+                        if ($useThreadProbe) {
+                            $readyProbeJobs[$node] = Start-ThreadJob -ScriptBlock $threadProbeBlock -ArgumentList $node, $phaseRunGuid -ThrottleLimit $readyProbeThrottle -ErrorAction Stop
+                            continue
+                        }
+
+                        # Fallback when ThreadJob is unavailable: keep the original serial probe path.
                         $nodeProbeSw = [System.Diagnostics.Stopwatch]::StartNew()
-                        $nodeHadSession = $false
-                        try { $nodeHadSession = ($global:ps_cache -and $global:ps_cache.ContainsKey($node)) } catch { $nodeHadSession = $false }
                         $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock {
                             param($expectedGuid)
                             $f = "C:\staging\DSC\RunGuid.txt"
@@ -4962,16 +5010,19 @@ $global:VM_Config = {
                             if ($content) { $content = $content.Trim() }
                             return ($content -eq $expectedGuid)
                         } -ArgumentList $phaseRunGuid -DisplayName "DSC: Check Nodes Ready"
-                        $nodeCacheNow = 0
-                        try { if ($global:ps_cache) { $nodeCacheNow = $global:ps_cache.Count } } catch { }
-                        Write-Log "[Phase $Phase]: NodeReadyProbe $node attempt=$attempts took $([int]$nodeProbeSw.Elapsed.TotalMilliseconds)ms cached=$nodeHadSession cacheAfter=$nodeCacheNow" -LogOnly
-                        if ($result.ScriptBlockFailed -or ($result.ScriptBlockOutput -ne $true)) {
-                            if ($result.ScriptBlockFailed) {
-                                $errDetail = if ($result.ErrorDetails) { $result.ErrorDetails -join '; ' } else { 'No session / VM unreachable' }
-                                Write-Log "[Phase $Phase]: Node $node is NOT ready. Command failed: $errDetail" -Warning
+                        $nodeProbeSw.Stop()
+                        $readyProbeState[$node] = [pscustomobject]@{
+                            Ready = ($result.ScriptBlockFailed -eq $false -and $result.ScriptBlockOutput -eq $true)
+                            Error = if ($result.ScriptBlockFailed) { if ($result.ErrorDetails) { $result.ErrorDetails -join '; ' } else { 'No session / VM unreachable' } } else { $null }
+                            Source = 'Invoke-VmCommand'
+                            Unknown = $false
+                        }
+                        Write-Log "[Phase $Phase]: NodeReadyProbe $node attempt=$attempts took $([int]$nodeProbeSw.Elapsed.TotalMilliseconds)ms source=$($readyProbeState[$node].Source) ready=$($readyProbeState[$node].Ready) unknown=$($readyProbeState[$node].Unknown)" -LogOnly
+                        if (-not $readyProbeState[$node].Ready) {
+                            if ($readyProbeState[$node].Error) {
+                                Write-Log "[Phase $Phase]: Node $node is NOT ready. Command failed: $($readyProbeState[$node].Error)" -Warning
                             }
                             elseif ($detailedCheck) {
-                                # Only read DSC_Init.log (written at the start of DSC_ClearStatus) to check cleanup progress
                                 $initResult = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -ScriptBlock {
                                     Get-Content "C:\staging\DSC\DSC_Init.log" -Tail 5 -ErrorAction SilentlyContinue
                                 } -DisplayName "DSC: Check Init Log"
@@ -4995,6 +5046,86 @@ $global:VM_Config = {
                             }
                             else {
                                 Write-Progress2 "$($currentItem.vmName): Waiting for all nodes. Attempt #$attempts" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent -force
+                            }
+                        }
+                    }
+
+                    if ($useThreadProbe) {
+                        foreach ($node in $readyProbeJobs.Keys) {
+                            $job = $readyProbeJobs[$node]
+                            $nodeProbeSw = [System.Diagnostics.Stopwatch]::StartNew()
+                            $jobResult = Receive-Job -Job $job -Wait -AutoRemoveJob -ErrorAction SilentlyContinue
+                            $nodeProbeSw.Stop()
+                            if ($null -eq $jobResult) {
+                                $jobResult = [pscustomobject]@{
+                                    Ready = $false
+                                    Error = 'No result from worker'
+                                    Source = 'ThreadJob'
+                                    Unknown = $true
+                                }
+                            }
+                            $readyProbeState[$node] = $jobResult
+                            Write-Log "[Phase $Phase]: NodeReadyProbe $node attempt=$attempts took $([int]$nodeProbeSw.Elapsed.TotalMilliseconds)ms source=$($jobResult.Source) ready=$($jobResult.Ready) unknown=$($jobResult.Unknown)" -LogOnly
+
+                            $result = $null
+                            if ($jobResult.Unknown -or $jobResult.Error) {
+                                # A ThreadJob error means we cannot trust the raw session result; use the
+                                # same serial probe path as today for just that node so a false 'not ready'
+                                # doesn't wait on a healthy VM and then reboot it.
+                                $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock {
+                                    param($expectedGuid)
+                                    $f = "C:\staging\DSC\RunGuid.txt"
+                                    if (-not (Test-Path $f)) { return $false }
+                                    $content = Get-Content $f -ErrorAction SilentlyContinue | Select-Object -First 1
+                                    if ($content) { $content = $content.Trim() }
+                                    return ($content -eq $expectedGuid)
+                                } -ArgumentList $phaseRunGuid -DisplayName "DSC: Check Nodes Ready (fallback)"
+                                $readyProbeState[$node] = [pscustomobject]@{
+                                    Ready = ($result.ScriptBlockFailed -eq $false -and $result.ScriptBlockOutput -eq $true)
+                                    Error = if ($result.ScriptBlockFailed) { if ($result.ErrorDetails) { $result.ErrorDetails -join '; ' } else { 'No session / VM unreachable' } } else { $null }
+                                    Source = 'Invoke-VmCommand'
+                                    Unknown = $false
+                                }
+                                if ($readyProbeState[$node].Error) {
+                                    Write-Log "[Phase $Phase]: Node $node worker error; serial fallback also failed: $($readyProbeState[$node].Error)" -Warning
+                                }
+                            }
+                            else {
+                                $result = [pscustomobject]@{
+                                    ScriptBlockFailed = $false
+                                    ScriptBlockOutput = $jobResult.Ready
+                                }
+                            }
+
+                            if (-not $readyProbeState[$node].Ready) {
+                                if ($readyProbeState[$node].Error) {
+                                    Write-Log "[Phase $Phase]: Node $node is NOT ready. Command failed: $($readyProbeState[$node].Error)" -Warning
+                                }
+                                elseif ($detailedCheck) {
+                                    $initResult = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -ScriptBlock {
+                                        Get-Content "C:\staging\DSC\DSC_Init.log" -Tail 5 -ErrorAction SilentlyContinue
+                                    } -DisplayName "DSC: Check Init Log"
+                                    if (-not $initResult.ScriptBlockFailed -and $initResult.ScriptBlockOutput) {
+                                        Write-Log "[Phase $Phase]: Node $node is NOT ready (attempt $attempts). DSC_Init.log tail: $($initResult.ScriptBlockOutput -join ' | ')"
+                                    }
+                                    else {
+                                        Write-Log "[Phase $Phase]: Node $node is NOT ready (attempt $attempts). DSC_ClearStatus may not have started yet."
+                                    }
+                                }
+                                else {
+                                    Write-Log "[Phase $Phase]: Node $node is NOT ready. RunGuid match: $($result.ScriptBlockOutput) (attempt $attempts)" -LogOnly
+                                }
+                                $allNodesReady = $false
+                            }
+                            else {
+                                $nodeList.Remove($node) | Out-Null
+                                if ($nodeList.Count -eq 0) {
+                                    Write-Progress2 "$($currentItem.vmName): Waiting for all nodes. Attempt #$attempts" -status "All nodes are ready" -PercentComplete 100 -force
+                                    $allNodesReady = $true
+                                }
+                                else {
+                                    Write-Progress2 "$($currentItem.vmName): Waiting for all nodes. Attempt #$attempts" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent -force
+                                }
                             }
                         }
                     }
