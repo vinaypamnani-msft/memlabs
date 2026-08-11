@@ -1998,7 +1998,12 @@ function Restore-DynamicMemory {
     # Drop VMs that no longer exist - typically rolled back by a failed/cancelled
     # Phase 1 (VM_Create removes its half-built VM on failure). Restoring memory
     # on a missing VM is a no-op and just generates noise.
-    $missing = @($vmsToRestore | Where-Object { -not (Get-VM2 -Name $_.vmName -ErrorAction SilentlyContinue) })
+    # One cache read rather than one Get-VM2 per VM: Get-VM2 pays a Get-List plus a
+    # Get-VM -Id every call, and a name it cannot resolve costs a further -SmartUpdate.
+    $existenceSw = [System.Diagnostics.Stopwatch]::StartNew()
+    $liveVmNames = @(Get-List -Type VM -SmartUpdate | ForEach-Object { $_.vmName })
+    $missing = @($vmsToRestore | Where-Object { $liveVmNames -notcontains $_.vmName })
+    Write-Log "[Phase 11] Dynamic memory restore: existence check for $($vmsToRestore.Count) VM(s) took $([math]::Round($existenceSw.Elapsed.TotalSeconds, 1))s" -LogOnly
     if ($missing.Count -gt 0) {
         Write-Log "[Phase 11] Skipping $($missing.Count) VM(s) that no longer exist (likely rolled back by failed Phase 1): $($missing.vmName -join ', ')" -LogOnly
         $vmsToRestore = @($vmsToRestore | Where-Object { $_.vmName -notin $missing.vmName })
