@@ -2116,6 +2116,7 @@ function Start-PhaseJobs {
     $phaseVmMacMap = @{}
     $phaseDhcpReservationMap = @{}
     if ($phaseDhcpHintEnabled) {
+        $reservationRows = $null
         try {
             # Measured 23.5-36.6s on a 30-VM host, and Phase 3 was paying it a second time.
             # Nothing creates or re-NICs a VM between Phase 2 and Phase 3, so Phase 3 reuses
@@ -2126,7 +2127,10 @@ function Start-PhaseJobs {
                 Write-Log "[Phase $Phase] Reused Phase 2 VM MAC snapshot: $($phaseVmMacMap.Count)" -LogOnly
             }
             else {
-                $phaseVmMacMap = Get-AllVMMacsIsolated -ExcludeCluster
+                # Both lookups share one isolated runspace instead of paying two setups.
+                $phaseSnapshot = Get-VMMacAndDhcpIsolated -ExcludeCluster
+                $phaseVmMacMap = $phaseSnapshot.MacMap
+                $reservationRows = $phaseSnapshot.Reservations
                 $global:phaseVmMacSnapshot = $phaseVmMacMap
                 Write-Log "[Phase $Phase] Pre-cached VM MACs: $($phaseVmMacMap.Count)" -LogOnly
             }
@@ -2137,7 +2141,11 @@ function Start-PhaseJobs {
         }
 
         try {
-            foreach ($r in (Get-AllDHCPReservationsIsolated)) {
+            # Null only when the combined call was skipped (Phase 3 reuse) or threw. Reservations
+            # are never carried across phases -- Phase 2 creates them, so Phase 2's list is stale
+            # by Phase 3.
+            if ($null -eq $reservationRows) { $reservationRows = Get-AllDHCPReservationsIsolated }
+            foreach ($r in $reservationRows) {
                 $normMac = (([string]$r.Mac) -replace '[-:]', '').ToUpper()
                 if ($normMac) {
                     $phaseDhcpReservationMap["$($r.ScopeId)|$normMac"] = [string]$r.Ip

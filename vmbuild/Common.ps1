@@ -4258,6 +4258,48 @@ function Get-AllVMMacsIsolated {
     return $map
 }
 
+function Get-VMMacAndDhcpIsolated {
+    <#
+    .SYNOPSIS
+    Both the VM MAC map and every DHCP reservation, from ONE isolated runspace.
+
+    .DESCRIPTION
+    The Phase 2 preamble needs both back to back and was paying a full Invoke-IsolatedCim
+    setup for each. This is still one FRESH throwaway runspace, which is what
+    Invoke-IsolatedCim requires -- it just does both queries inside it.
+    #>
+    param(
+        [switch] $ExcludeCluster
+    )
+    $results = Invoke-IsolatedCim -ArgumentList $ExcludeCluster.IsPresent -ScriptBlock {
+        param($excludeCluster)
+        $byVm = @{}
+        foreach ($nic in (Get-VMNetworkAdapter -VMName * -ErrorAction SilentlyContinue)) {
+            if ($excludeCluster -and $nic.SwitchName -and $nic.SwitchName -match 'Cluster') { continue }
+            if (-not $byVm.ContainsKey($nic.VMName)) { $byVm[$nic.VMName] = [string]$nic.MacAddress }
+        }
+        $macs = [System.Collections.Generic.List[object]]::new()
+        foreach ($vm in (Get-VM -ErrorAction SilentlyContinue)) {
+            $name = [string]$vm.Name
+            $mac = if ($byVm.ContainsKey($name)) { $byVm[$name] } else { $null }
+            $macs.Add([pscustomobject]@{ VmName = $name; Mac = $mac })
+        }
+        $res = [System.Collections.Generic.List[object]]::new()
+        foreach ($scope in (Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)) {
+            $sid = [string]$scope.ScopeId
+            foreach ($r in (Get-DhcpServerv4Reservation -ScopeId $sid -ErrorAction SilentlyContinue)) {
+                $res.Add([pscustomobject]@{ ScopeId = $sid; Mac = ($r.ClientId -replace '-', ''); Ip = [string]$r.IPAddress })
+            }
+        }
+        [pscustomobject]@{ Macs = $macs.ToArray(); Reservations = $res.ToArray() }
+    }
+    # Tolerate the isolated call handing back a 1-element array rather than the bare object.
+    $snapshot = @($results) | Select-Object -First 1
+    $map = @{}
+    foreach ($r in $snapshot.Macs) { $map[$r.VmName] = $r.Mac }
+    return [pscustomobject]@{ MacMap = $map; Reservations = @($snapshot.Reservations) }
+}
+
 # Return every DHCP reservation across every scope as an array of objects with
 # ScopeId / Mac (dashes stripped) / Ip, all in ONE isolated runspace (single
 # DhcpServer module import). This is the batched counterpart to
