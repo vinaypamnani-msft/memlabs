@@ -78,7 +78,7 @@ function Start-Maintenance {
         elseif ($note -and
                 ($note.PSObject.Properties.Name -notcontains 'appliedFixes') -and
                 $note.memLabsVersion -and
-                $note.memLabsVersion -ge $Common.LatestHotfixVersion) {
+                (ConvertTo-MemLabsVersion $note.memLabsVersion) -ge (ConvertTo-MemLabsVersion $Common.LatestHotfixVersion)) {
             # Transitional: VM managed by old watermark system (no appliedFixes
             # property). Watermark is at or past the latest fix, so seed all fix
             # versions into appliedFixes and skip. This is a one-time migration;
@@ -396,7 +396,7 @@ function Start-VMFixes {
     $null = Copy-ItemSafe -VmName $vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
     # Determine if we can use the batched fast-path (no fixes have DependentVMs)
-    $sortedFixes = $VMFixes | Sort-Object FixVersion
+    $sortedFixes = $VMFixes | Sort-Object { ConvertTo-MemLabsVersion $_.FixVersion }
     $hasDependentVMs = $sortedFixes | Where-Object { $_.DependentVMs -and $_.DependentVMs.Count -gt 0 -and $_.AppliesToThisVM }
 
     if (-not $hasDependentVMs) {
@@ -615,7 +615,7 @@ function Start-VMFixesBatched {
 
     # Build and execute a batched scriptblock for each session group
     # Process groups in version order of their first fix
-    $sortedKeys = $groups.Keys | Sort-Object { ($groups[$_] | Select-Object -First 1).FixVersion }
+    $sortedKeys = @($groups.Keys) | Sort-Object { ConvertTo-MemLabsVersion ($groups[$_] | Select-Object -First 1).FixVersion }
 
     foreach ($key in $sortedKeys) {
         $groupFixes = $groups[$key]
@@ -1424,7 +1424,7 @@ function Test-VMFixApplied {
     if (-not ($VMNote.appliedFixes.PSObject.Properties.Name -contains $FixName)) {
         return $false
     }
-    return ($VMNote.appliedFixes.$FixName -ge $FixVersion)
+    return ((ConvertTo-MemLabsVersion $VMNote.appliedFixes.$FixName) -ge (ConvertTo-MemLabsVersion $FixVersion))
 }
 
 function Set-VMNoteFixBatch {

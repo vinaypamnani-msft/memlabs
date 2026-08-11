@@ -732,6 +732,31 @@ function Stop-VerboseTailWindow {
     }
 }
 
+function ConvertTo-MemLabsVersion {
+    <#
+    .SYNOPSIS
+        Normalise a MemLabs / hotfix version string into something that compares numerically.
+    .DESCRIPTION
+        These versions are yymmdd with an optional .n counter, and they were being compared and
+        sorted as STRINGS. That is right up to nine builds in a day and wrong from the tenth:
+        "260811.10" -lt "260811.9" is $true lexically, so the newer build looks older.
+
+        A plain [version] cast is not the fix -- it throws on the bare yymmdd form, which is 11
+        of the 15 FixVersion values in the tree. Pad to major.minor first, then cast.
+
+        Anything absent or unparseable floors to 0.0 so it sorts below every real version. That
+        keeps today's behaviour for a VM note with no recorded version: it looks older than the
+        fix and therefore still gets the work, rather than silently being treated as current.
+    #>
+    param([string]$Version)
+
+    if ([string]::IsNullOrWhiteSpace($Version)) { return [version]'0.0' }
+    $candidate = $Version.Trim()
+    if ($candidate -notmatch '^\d+(\.\d+)*$') { return [version]'0.0' }
+    if ($candidate -notmatch '\.') { $candidate = "$candidate.0" }
+    try { return [version]$candidate } catch { return [version]'0.0' }
+}
+
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)]
@@ -3736,7 +3761,7 @@ function Set-VMNote {
     }
 
     $vmVersionUpdated = $false
-    if ($vmVersion -and ($vmNote.memLabsVersion -lt $vmVersion -or $forceVersionUpdate.IsPresent)) {
+    if ($vmVersion -and ((ConvertTo-MemLabsVersion $vmNote.memLabsVersion) -lt (ConvertTo-MemLabsVersion $vmVersion) -or $forceVersionUpdate.IsPresent)) {
         $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
         $vmVersionUpdated = $true
     }
@@ -11349,7 +11374,7 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
                 if (-not $loadedHotfixCache) {
                     $vmFixes = Get-VMFixes -ReturnDummyList
                     if ($vmFixes) {
-                        $latestHotfixVersion = $vmFixes | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
+                        $latestHotfixVersion = $vmFixes | Sort-Object { ConvertTo-MemLabsVersion $_.FixVersion } -Descending | Select-Object -First 1 -ExpandProperty FixVersion
                         if ($latestHotfixVersion) {
                             $global:Common.latestHotfixVersion = $latestHotfixVersion
 
