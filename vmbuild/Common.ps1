@@ -9424,6 +9424,17 @@ function Copy-ToolToVM {
 
     # --- Fast skip: if combined fingerprint + VM hash match, skip everything ---
     if ($combinedFingerprint -and -not $WhatIf -and -not $Force) {
+        # The VM note reverts with the guest on a checkpoint restore (Common.Snapshots.ps1
+        # re-applies it from the sidecar json), so it tracks real guest state. toolhash-<vm>.json
+        # in TempPath does NOT revert, which is why that path still has to ask the guest.
+        try {
+            $noteFingerprint = (Get-VMNote -VMName $vm.vmName -ErrorAction SilentlyContinue).ToolsFingerprint
+            if ($noteFingerprint -and $noteFingerprint -eq $combinedFingerprint) {
+                Write-Log "$vmName`: Tools unchanged (VM note fingerprint match). Skipping." -Success
+                return $true
+            }
+        }
+        catch { }
         try {
             if (Test-Path $hostCachePath) {
                 $cached = Get-Content $hostCachePath -Raw | ConvertFrom-Json
@@ -9437,6 +9448,7 @@ function Copy-ToolToVM {
                     }
                     if (-not $hashCheck.ScriptBlockFailed -and $hashCheck.ScriptBlockOutput -eq $cachedBundleHash) {
                         Write-Log "$vmName`: Tools unchanged (source fingerprint + VM hash match). Skipping." -Success
+                        try { Update-VMNoteProperty -VmName $vm.vmName -PropertyName 'ToolsFingerprint' -PropertyValue $combinedFingerprint } catch { }
                         return $true
                     }
                 }
@@ -9569,6 +9581,7 @@ function Copy-ToolToVM {
     if ($skipCopy) {
         if ($combinedFingerprint) {
             @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash; ZipFiles = $activeZipNames } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
+            try { Update-VMNoteProperty -VmName $vm.vmName -PropertyName 'ToolsFingerprint' -PropertyValue $combinedFingerprint } catch { }
         }
         return $true
     }
@@ -9700,6 +9713,7 @@ function Copy-ToolToVM {
             Write-Log "$vmName`: Successfully injected $totalItems tools via bundle. Hash: $bundleHash" -Success
             if ($combinedFingerprint) {
                 @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash; ZipFiles = $activeZipNames } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
+                try { Update-VMNoteProperty -VmName $vm.vmName -PropertyName 'ToolsFingerprint' -PropertyValue $combinedFingerprint } catch { }
             }
         }
     }
