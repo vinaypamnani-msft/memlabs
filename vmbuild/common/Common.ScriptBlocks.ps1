@@ -4506,12 +4506,16 @@ $global:VM_Config = {
 
                 # Run for single-node DSC, multi-node DSC fail with Set-DscLocalConfigurationManager
                 if ($ConfigurationData.AllNodes.NodeName -contains "LOCALHOST") {
+                    $swLcmPush = [System.Diagnostics.Stopwatch]::StartNew()
                     try {
                         "Set-DscLocalConfigurationManager for $dscConfigPath" | Out-File $log -Append
-                        Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose -force
+                        # No -Verbose: nothing drains that stream on success and each record is a
+                        # synchronous round trip back to the host job -- the same reason the
+                        # multi-node Start-DscConfiguration below omits it.
+                        Set-DscLocalConfigurationManager -Path $dscConfigPath -force
                     }
                     catch {
-                        $data = "Could not run Set-DscLocalConfigurationManager -Path $dscConfigPath -Verbose -force"
+                        $data = "Could not run Set-DscLocalConfigurationManager -Path $dscConfigPath -force"
                         $data | Out-File $log -Append      
                         $_ | Out-File $log -Append              
                         Write-Error $data
@@ -4519,6 +4523,9 @@ $global:VM_Config = {
                         return $data
                     }
 
+                    $swLcmPush.Stop()
+
+                    $swApply = [System.Diagnostics.Stopwatch]::StartNew()
                     try {
                         "Start-DscConfiguration for $dscConfigPath" | Out-File $log -Append
                         Start-DscConfiguration -Wait -Path $dscConfigPath -Force -ErrorAction Stop
@@ -4536,6 +4543,10 @@ $global:VM_Config = {
                         Write-Error $_
                         return $data
                     }
+                    $swApply.Stop()
+                    # DscConfigStart is a single number on the host and the meta-config push is
+                    # invisible inside it. Split it so the next run says which half to attack.
+                    "DSCSPLIT: lcm=$([Math]::Round($swLcmPush.Elapsed.TotalSeconds, 1))s apply=$([Math]::Round($swApply.Elapsed.TotalSeconds, 1))s"
                 }
                 else {
                     # Use domainCreds instead of local Creds for multi-node DSC
@@ -5093,6 +5104,8 @@ $global:VM_Config = {
             Write-Progress2 "Starting DSC" -status "[Phase $Phase]: $($currentItem.vmName): DSC start command returned." -PercentComplete 100 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC start command returned after $([math]::Round($dscStartStopWatch.Elapsed.TotalSeconds, 1)) seconds."
             Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] DscConfigStart completed in $([math]::Round($dscStartStopWatch.Elapsed.TotalSeconds, 1)) seconds" -LogOnly
+            $dscSplit = @($result.ScriptBlockOutput) | Where-Object { "$_" -like 'DSCSPLIT:*' } | Select-Object -First 1
+            if ($dscSplit) { Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] $dscSplit" -LogOnly }
         }
 
         # =============================================================
