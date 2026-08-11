@@ -117,7 +117,8 @@ try {
     # Not -InJob: this is host-side tooling and needs Test-Configuration, which Common.ps1
     # only loads outside a job. StartupProfile Fast already skips the expensive host probes.
     . "..\Common.ps1" -StartupProfile Fast
-    $ConfirmPreference = $false
+    # ConfirmImpact enum, not a bool -- $false threw a MetadataError on every run.
+    $ConfirmPreference = 'None'
 
     # Create dummy file so config doesn't fail
     $userConfig = Get-UserConfiguration -Configuration $configName
@@ -171,7 +172,7 @@ try {
         "InternetClient" { $dscRole += "WorkgroupMember" }
         default { $dscRole += "DomainMember" }
     }
-    Write-Host "Creating a test config for $role in C:\Temp"
+    Write-Host "Creating a test config for $role"
 
     if ($Common.LocalAdmin) { $adminCreds = $Common.LocalAdmin }
     else {
