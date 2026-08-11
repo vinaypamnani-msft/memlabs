@@ -4922,20 +4922,28 @@ $global:VM_Config = {
                 }
 
                 
+                # Budget is wall-clock, not attempts: an attempt costs one round trip PER NODE, so an
+                # attempt-capped loop silently shortened the real timeout as node count grew.
+                $nodeWaitTimeout = [timespan]::FromMinutes(30)
+                $nodeWaitStart = Get-Date
+                $rebootAt = $nodeWaitStart.AddMinutes(10)
+                $rebootDone = $false
+                $nextDetailedCheck = $nodeWaitStart.AddSeconds(60)
                 $attempts = 0
-                $maxAttempts = 150
                 do {
                     $attempts++
                     $allNodesReady = $true
                     $nonReadyNodes = $nodeList.Clone()
-                    $percent = [Math]::Min($attempts, $maxAttempts)
-                    Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent -force
+                    $waitElapsed = (Get-Date) - $nodeWaitStart
+                    $percent = [Math]::Min([int](100 * $waitElapsed.TotalSeconds / $nodeWaitTimeout.TotalSeconds), 99)
+                    Write-Progress2 "$($currentItem.vmName): Waiting for all nodes. Attempt #$attempts ($([int]$waitElapsed.TotalSeconds)s)" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent -force
 
                     # Periodically check DSC_Init.log to see if DSC_ClearStatus started/progressed.
                     # Readiness itself is keyed off RunGuid.txt == this run's GUID (written last by
                     # DSC_ClearStatus), so a self-recovery that re-creates DSC_Status.txt no longer
                     # blocks the loop.
-                    $detailedCheck = ($attempts -ge 15 -and ($attempts % 15) -eq 0)
+                    $detailedCheck = ((Get-Date) -ge $nextDetailedCheck)
+                    if ($detailedCheck) { $nextDetailedCheck = (Get-Date).AddSeconds(60) }
 
                     foreach ($node in $nonReadyNodes) {
                         if (-not $node) {
@@ -4974,16 +4982,17 @@ $global:VM_Config = {
                         else {
                             $nodeList.Remove($node) | Out-Null
                             if ($nodeList.Count -eq 0) {
-                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/$maxAttempts" -status "All nodes are ready" -PercentComplete 100 -force
+                                Write-Progress2 "$($currentItem.vmName): Waiting for all nodes. Attempt #$attempts" -status "All nodes are ready" -PercentComplete 100 -force
                                 $allNodesReady = $true
                             }
                             else {
-                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/$maxAttempts" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent -force
+                                Write-Progress2 "$($currentItem.vmName): Waiting for all nodes. Attempt #$attempts" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent -force
                             }
                         }
                     }
 
-                    if ($attempts -eq 80) {
+                    if (-not $rebootDone -and (Get-Date) -ge $rebootAt) {
+                        $rebootDone = $true
                         foreach ($node in $nodeList) {
                             # Log DSC_Init.log before rebooting to see what DSC_ClearStatus did
                             Write-Log "[Phase $Phase]: Rebooting stuck node $node at attempt $attempts" -Warning
@@ -5012,12 +5021,17 @@ $global:VM_Config = {
                         }
                     }
 
-                    Start-Sleep -Seconds 3
-                } until ($allNodesReady -or $attempts -ge $maxAttempts)
+                    # The node is normally already ready on the first poll, so poll hard early and
+                    # back off rather than paying a flat 3s before every check.
+                    $pollDelay = if ($attempts -lt 5) { 1 } elseif ($attempts -lt 10) { 2 } else { 3 }
+                    Start-Sleep -Seconds $pollDelay
+                } until ($allNodesReady -or ((Get-Date) - $nodeWaitStart) -ge $nodeWaitTimeout)
+
+                Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] NodeReadyWait completed in $([math]::Round(((Get-Date) - $nodeWaitStart).TotalSeconds, 1)) seconds after $attempts attempt(s), ready=$allNodesReady" -LogOnly
 
                 if (-not $allNodesReady) {
                     # Gather final diagnostics from each stuck node.
-                    # After 150 attempts + a reboot, DSC_ClearStatus has either completed or failed,
+                    # After the full wait + a reboot, DSC_ClearStatus has either completed or failed,
                     # so reading DSC_Status.txt here is safe - its presence means cleanup genuinely failed.
                     foreach ($node in $nodeList) {
                         Write-Log "[Phase $Phase]: FINAL DIAGNOSTICS for stuck node $node" -Failure
@@ -5049,12 +5063,13 @@ $global:VM_Config = {
                         }
                     }
                     Write-Progress2 "Failed waiting on VMs [$($nodeList -join ',')].  Please cancel and retry this phase." -force
-                    write-log "[Phase $Phase]: Node [$($nodeList -join ',')] is NOT ready after $maxAttempts attempts." -failure -OutputStream
+                    write-log "[Phase $Phase]: Node [$($nodeList -join ',')] is NOT ready after $([int]$nodeWaitTimeout.TotalMinutes) minutes ($attempts attempts)." -failure -OutputStream
                     return $false
                 }
 
             }
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished waiting on all nodes"
+
 
             Write-Progress2 "Starting DSC" -status "Invoking DSC_StartConfig" -PercentComplete 50 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting DSC configuration."
