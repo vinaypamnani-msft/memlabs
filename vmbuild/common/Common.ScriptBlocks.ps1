@@ -1469,24 +1469,10 @@ $global:VM_Create = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): WMI: $($arbResult.ScriptBlockOutput)" -LogOnly
             }
 
-            # The 195s DSC stall is WSMan's robust-connection retry window, not DSC. When the
-            # DC's WinRM channel drops mid-apply, ServerRobustConnection buffers every later
-            # LCM message and CListenerOperation::WaitAndSend blocks on an INFINITE condition
-            # variable until the retry timer expires. Dump showed m_maxRetryTime 0x2f9b8 =
-            # 195000 = this value (180000 default) + a hardcoded 15000 server delta. 2000 is
-            # WSMAN_MIN_RETRY_TIMEOUT, the floor ConfigRegistry clamps to, so the window
-            # becomes ~17s. Read back what actually took effect rather than assuming.
-            $rcSb = {
-                $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Client'
-                if (-not (Test-Path -LiteralPath $key)) { return 'WSMAN Client key not present -- not set' }
-                $prior = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction SilentlyContinue).max_retry_timeout_ms
-                New-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -Value 2000 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-                $now = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction SilentlyContinue).max_retry_timeout_ms
-                $priorText = 'unset (default 180000)'
-                if ($null -ne $prior) { $priorText = "$prior" }
-                return ("max_retry_timeout_ms was {0}, now {1}; server window is this +15000 (applies at next WinRM start)" -f $priorText, $now)
-            }
-            $rcResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $rcSb -DisplayName "Shorten WSMan robust-connection retry window" -AsJob -TimeoutSeconds 120
+            # The 195s DSC stall is WSMan's robust-connection retry window, not DSC. Full
+            # rationale on the $Set_WSManRetryWindow definition; VM_Config re-asserts it for
+            # VMs that predate this change, since Phase 1 never runs on an existing VM.
+            $rcResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Set_WSManRetryWindow -DisplayName "Shorten WSMan robust-connection retry window" -AsJob -TimeoutSeconds 120
             if ($rcResult.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): could not set WSMan max_retry_timeout_ms: $($rcResult.ScriptBlockOutput)" -Warning
             }
@@ -1948,6 +1934,25 @@ function Save-CMClientPackagePrestageLogsFromVm {
     }
 }
 
+# Shared by VM_Create (Phase 1) and VM_Config (Phase 2) so both write the same value.
+# The 195s DSC stall is WSMan's robust-connection retry window, not DSC: when the DC's WinRM
+# channel drops mid-apply, ServerRobustConnection buffers every later LCM message and
+# CListenerOperation::WaitAndSend blocks on an INFINITE condition variable until the retry
+# timer expires. A dump showed m_maxRetryTime 0x2f9b8 = 195000 = this value (180000 default)
+# plus a hardcoded 15000 server delta. 2000 is WSMAN_MIN_RETRY_TIMEOUT, the floor
+# ConfigRegistry clamps to, giving a ~17s window. Read back what took effect, never assume.
+$Set_WSManRetryWindow = {
+    $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Client'
+    if (-not (Test-Path -LiteralPath $key)) { return 'WSMAN Client key not present -- not set' }
+    $prior = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction SilentlyContinue).max_retry_timeout_ms
+    if ($prior -eq 2000) { return 'max_retry_timeout_ms already 2000' }
+    New-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -Value 2000 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+    $now = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction SilentlyContinue).max_retry_timeout_ms
+    $priorText = 'unset (default 180000)'
+    if ($null -ne $prior) { $priorText = "$prior" }
+    return ("max_retry_timeout_ms was {0}, now {1}; server window is this +15000 (applies at next WinRM start)" -f $priorText, $now)
+}
+
 $global:VM_Config = {
     # Suppress CIM cmdlet progress in child process (see VM_Create comment).
     $Global:ProgressPreference = 'SilentlyContinue'
@@ -2160,6 +2165,24 @@ $global:VM_Config = {
             catch {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Quiet Windows Update step failed (non-fatal): $($_.Exception.Message)" -Warning -LogOnly
             }
+        }
+
+        # Same create-time-only gap as the Windows Update block above: the 195s WSMan retry
+        # window is shortened at VM-create, so every VM built before that change keeps the
+        # 180000 default forever. Measured: 5.2% of all [DscTiming] rows on a lab that never
+        # received it land in the 190-215s band, versus none on a lab that did. Re-assert it
+        # here; the guest returns early when the value is already 2000.
+        try {
+            $rcRerun = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Set_WSManRetryWindow -DisplayName "Shorten WSMan robust-connection retry window" -AsJob -TimeoutSeconds 120
+            if ($rcRerun.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): could not set WSMan max_retry_timeout_ms: $($rcRerun.ScriptBlockOutput)" -Warning -LogOnly
+            }
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): WSMan: $($rcRerun.ScriptBlockOutput)" -LogOnly
+            }
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): WSMan retry-window step failed (non-fatal): $($_.Exception.Message)" -Warning -LogOnly
         }
 
 
@@ -4755,6 +4778,7 @@ $global:VM_Config = {
                 return
             }
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC configuration creation completed in $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds."
+            Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] DscConfigCreate completed in $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds" -LogOnly
 
             if ($multiNodeDsc) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) Starting"
@@ -4955,6 +4979,7 @@ $global:VM_Config = {
             $dscStartStopWatch.Stop()
             Write-Progress2 "Starting DSC" -status "[Phase $Phase]: $($currentItem.vmName): DSC start command returned." -PercentComplete 100 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC start command returned after $([math]::Round($dscStartStopWatch.Elapsed.TotalSeconds, 1)) seconds."
+            Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] DscConfigStart completed in $([math]::Round($dscStartStopWatch.Elapsed.TotalSeconds, 1)) seconds" -LogOnly
         }
 
         # =============================================================
