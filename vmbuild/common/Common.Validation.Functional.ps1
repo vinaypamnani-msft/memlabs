@@ -9245,7 +9245,7 @@ function Test-CMClientPackageDistribution {
 
     $scriptBlock = {
         param($sc, $ownedSitesCsv, $ownedDpCsv)
-        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $results = @{ Passed = $true; ContentPendingFromParent = $false; Details = [System.Collections.Generic.List[string]]::new() }
         $ns = "root\SMS\site_$sc"
         $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '4' = 'RemovalPending'; '5' = 'RemovalRetrying'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
         $dpNameOf = {
@@ -9378,6 +9378,15 @@ function Test-CMClientPackageDistribution {
                             $dpShort = ("$(& $dpNameOf $_.ServerNALPath)" -split '\.')[0]
                             "$dpShort=$sn2(site $($_.SiteCode))"
                         })) -join ', '
+                # A DP cannot install content its own site never received. On a child primary
+                # the client package is owned by the CAS, so StoredPkgVersion=0 means the
+                # parent never sent it down and every DP state above is a consequence, not a
+                # cause. Saying so here stops the next reader triaging the DP: on cstest2 the
+                # DP had been registered for 50 minutes and the site still held no content.
+                if ([int]$pkg.StoredPkgVersion -lt 1) {
+                    $results.ContentPendingFromParent = $true
+                    $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) has NO content at site $sc at all (StoredPkgVersion=0, SourceVersion=$($pkg.SourceVersion)) -- it is owned by a parent site that never sent it down, so no DP here could have installed it. Triage the PARENT site's distmgr/sender, not the DP.")
+                }
                 $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s): $badSummary -- a fallback DP may still serve clients; the boundary-group check below decides whether any client is actually blocked.")
                 foreach ($b in $bad | Select-Object -First 15) {
                     $sn = $stateName["$([int]$b.State)"]; if (-not $sn) { $sn = "State$($b.State)" }
@@ -9418,7 +9427,8 @@ function Test-CMClientPackageDistribution {
                     if ($installedInBg.Count -eq 0) {
                         $results.Passed = $false
                         $stateList = ($bgDps | ForEach-Object { $s = if ($dpState.ContainsKey($_)) { $stateName["$($dpState[$_])"] } else { 'no-row' }; "$_=$s" }) -join ', '
-                        $results.Details.Add("FAIL: boundary group '$($bg.Name)' ($($bg.GroupID)) has NO DP with client package '$($pkg.Name)' Installed -- clients in this BG loop in ccmsetup GetDPLocations (empty LocationRecords). DP states: $stateList")
+                        $why = if ([int]$pkg.StoredPkgVersion -lt 1) { " -- site $sc holds no copy of this package (StoredPkgVersion=0), so the content never arrived from its parent site" } else { '' }
+                        $results.Details.Add("FAIL: boundary group '$($bg.Name)' ($($bg.GroupID)) has NO DP with client package '$($pkg.Name)' Installed -- clients in this BG loop in ccmsetup GetDPLocations (empty LocationRecords). DP states: $stateList$why")
                         foreach ($d in $bgDps) { if (-not ($dpState.ContainsKey($d) -and $dpState[$d] -eq 0)) { [void]$failingDps.Add(("$d" -split '\.')[0]) } }
                     }
                     else {
@@ -9557,6 +9567,32 @@ function Test-CMClientPackageDistribution {
                 }
                 elseif (-not $ownerVm) {
                     Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is fed by site $ownerCode but no site server for that site exists in domain '$domain' -- sending-side logs NOT collected." -Level Warning
+                }
+            }
+        }
+
+        # The loop above follows the DP to ITS site, which for a child primary's own DP is
+        # this same site -- so nothing above ever reaches the CAS. When the package has no
+        # local copy the content owes down from the parent, and the only record of why the
+        # parent did not send it ("Created minijob to send compressed copy ... to site X",
+        # or its absence) is the parent's distmgr/sender. Without this, the pulled logs can
+        # only show the local site waiting: cstest2 burned a 45-minute Phase 8 wait and a
+        # Phase 11 failure whose entire evidence set was collected from the wrong two hosts.
+        if ($result.ScriptBlockOutput.ContentPendingFromParent) {
+            $parentCode = "$($CurrentItem.parentSiteCode)"
+            if (-not $parentCode) {
+                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: the client package has no content at site $siteCode but this site has no parent -- its own distmgr owns the missing content." -Level Warning
+            }
+            else {
+                $parentVm = @(@($DeployConfig.virtualMachines) + @($domainVms) | Where-Object {
+                        $_.vmName -and "$($_.siteCode)" -eq $parentCode -and "$($_.role)" -in @('CAS', 'Primary')
+                    }) | Select-Object -First 1
+                if (-not $parentVm) {
+                    Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: the client package content owes down from parent site $parentCode, but no site server for it exists in domain '$domain' -- the sending side was NOT collected." -Level Warning
+                }
+                elseif ($collectedFrom.Add($parentVm.vmName)) {
+                    Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: site $siteCode holds no copy of the client package -- collecting the sending side from parent site $parentCode ('$($parentVm.vmName)')"
+                    $null = Save-Phase11GuestLogs -VMName $parentVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-ContentSource' -Collector $Phase11SmsSiteLogCollector
                 }
             }
         }

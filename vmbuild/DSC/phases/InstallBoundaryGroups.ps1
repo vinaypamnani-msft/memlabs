@@ -357,11 +357,17 @@ $ensureClientPkgCoverage = {
             }
             # InstallPending (1) is a distribution actually in flight -- leave it alone.
             if ($st -eq 1) { continue }
-            # Content still replicating down from the parent/CAS: the DP cannot receive
-            # anything until it lands locally, so the targeting row above is all that is
-            # needed and poking distmgr changes nothing.
-            if ($contentPendingFromParent) { continue }
             # Re-arm at most every 5 minutes. RefreshNow is the ONLY remediation, by design.
+            #
+            # This runs while content is still pending from the parent too. RefreshNow does
+            # not poke the LOCAL distmgr into producing content it does not have -- it writes
+            # PkgServers, which replicates to the parent's PkgServers_G and is the one signal
+            # that wakes the PARENT's distmgr to send the package down. Arming once is not
+            # enough: cstest2 armed at 20:50, the CAS provably had the delta by 20:51
+            # (RefreshTrigger=1/UpdateMask=4/Action=2) and still sent nothing for the next 50
+            # minutes, while a fresh target refresh in the 08-09 run had the CAS scheduling
+            # the send immediately. Space those out further, because unlike the local case
+            # this can land on an inter-site transfer that is already running.
             # Remove-CMContentDistribution (the old "clean copy through the wedge" step)
             # deletes the PkgServers row and stranded the package every time it fired --
             # most recently 7s after the CAS content finally landed, killing a distribution
@@ -369,12 +375,14 @@ $ensureClientPkgCoverage = {
             # destructive (it aborts content import / status publication). ConfigMgr's own
             # retry backoff (STATMSG 2326: 30 min, 100 retries) outlives this whole gate, so
             # flipping RefreshNow is what makes distmgr re-process the package now.
+            $armMinutes = if ($contentPendingFromParent) { 10 } else { 5 }
             $armedAt = if ($lastArm.ContainsKey($u)) { $lastArm[$u] } else { $null }
-            if ($armedAt -and ((Get-Date) - $armedAt).TotalMinutes -lt 5) { continue }
+            if ($armedAt -and ((Get-Date) - $armedAt).TotalMinutes -lt $armMinutes) { continue }
             try {
                 & $redistOrDistribute $dp | Out-Null
                 $lastArm[$u] = Get-Date
-                if ($armedAt) { Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> re-armed with RefreshNow so distmgr retries now instead of waiting out its backoff [try $try]" }
+                if ($contentPendingFromParent) { Write-DscStatus "Client pkg coverage: DP '$dp' is $stName and site $SiteCode still has no content -> re-armed the targeting with RefreshNow so the parent sees a fresh change and sends the package [try $try]" }
+                elseif ($armedAt) { Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> re-armed with RefreshNow so distmgr retries now instead of waiting out its backoff [try $try]" }
                 else { Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed (RefreshNow) [try $try]" }
             }
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
