@@ -6399,6 +6399,11 @@ $global:VM_Config = {
                 }
 
             } until ($complete -or ($stopWatch.Elapsed -ge $timeSpan))
+
+            # Largest unmeasured block in every DSC phase: everything from the push landing to
+            # the guest reporting done. Emitted on the timeout exit too, so a phase that ran out
+            # of budget is still accounted for rather than silently missing.
+            Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] DscApplyWait completed in $([math]::Round($stopWatch.Elapsed.TotalSeconds, 1)) seconds (complete=$complete)" -LogOnly
         }
         catch {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
