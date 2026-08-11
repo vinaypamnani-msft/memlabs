@@ -4097,6 +4097,11 @@ $global:VM_Config = {
                 $mofFromCache = $false
                 $mofCacheKey = $null
                 $mofCacheDir = $null
+                $mofCacheKeyParts = @()
+                # Returned to the host on the output stream. The first cut logged hit/miss only to
+                # this guest's DSC_Init.log, which nothing pulls -- so a cache that never hit was
+                # indistinguishable from one that did.
+                $mofCacheNote = $null
                 $installedFlagPath = "C:\staging\DSC\DSC.zip.Installed"
                 try {
                     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -4114,7 +4119,13 @@ $global:VM_Config = {
                     }
                     finally { $sha.Dispose() }
 
-                    $mofCacheDir = "C:\staging\DSC\MofCache\$mofCacheKey"
+                    $mofCacheKeyParts = $keyParts
+                    $mofCacheRoot = "C:\staging\DSC\MofCache"
+                    $mofCacheDir = Join-Path $mofCacheRoot $mofCacheKey
+                    # Key parts from the last compile, kept under a STABLE name: the cache dir is
+                    # named by the key, so once the key moves the old parts are unfindable and a
+                    # permanent miss can never explain itself.
+                    $lastPartsPath = Join-Path $mofCacheRoot "last-$dscRole.txt"
                     $stampPath = Join-Path $mofCacheDir 'cachekey.txt'
                     if ((Test-Path -LiteralPath $stampPath) -and ((Get-Content -LiteralPath $stampPath -Raw -ErrorAction Stop).Trim() -eq $mofCacheKey)) {
                         $cachedMofs = @(Get-ChildItem -LiteralPath $mofCacheDir -Filter '*.mof' -ErrorAction SilentlyContinue)
@@ -4129,13 +4140,32 @@ $global:VM_Config = {
                             # nothing has to compile rather than push an empty configuration.
                             if (@(Get-ChildItem -LiteralPath $dscConfigPath -Filter '*.mof' -ErrorAction SilentlyContinue).Count -gt 0) {
                                 $mofFromCache = $true
+                                $mofCacheNote = "MOFCACHE: hit role=$dscRole key=$($mofCacheKey.Substring(0, 12)) files=$($cachedMofs.Count)"
                                 "MOF cache HIT $($mofCacheKey.Substring(0, 12)): copied $($cachedMofs.Count) file(s) into $dscConfigPath" | Out-File $log -Append
                             }
                         }
                     }
+
+                    if (-not $mofFromCache) {
+                        $changed = 'no-previous-run'
+                        if (Test-Path -LiteralPath $lastPartsPath) {
+                            $prev = @(Get-Content -LiteralPath $lastPartsPath -ErrorAction SilentlyContinue)
+                            $diff = @()
+                            foreach ($part in $mofCacheKeyParts) {
+                                $name = ($part -split '=', 2)[0]
+                                $was = @($prev | Where-Object { $_ -like "$name=*" })
+                                if ($was.Count -eq 0) { $diff += "$name(absent)" }
+                                elseif ($was[0] -ne $part) { $diff += $name }
+                            }
+                            $changed = if ($diff.Count) { $diff -join ',' } else { 'key-matches-but-no-usable-cache' }
+                        }
+                        $mofCacheNote = "MOFCACHE: miss role=$dscRole key=$($mofCacheKey.Substring(0, 12)) changed=$changed"
+                        $mofCacheNote | Out-File $log -Append
+                    }
                 }
                 catch {
                     $mofFromCache = $false
+                    $mofCacheNote = "MOFCACHE: error $($_.Exception.Message)"
                     "MOF cache lookup failed, compiling instead: $_" | Out-File $log -Append
                 }
 
@@ -4162,6 +4192,9 @@ $global:VM_Config = {
                                 # Stamped last: a later run trusts this file, so it must not exist
                                 # until every MOF beside it is already in place.
                                 Set-Content -LiteralPath (Join-Path $mofCacheDir 'cachekey.txt') -Value $mofCacheKey -Force -Encoding ASCII -ErrorAction Stop
+                                if ($mofCacheKeyParts.Count -gt 0) {
+                                    Set-Content -LiteralPath (Join-Path $mofCacheRoot "last-$dscRole.txt") -Value $mofCacheKeyParts -Force -Encoding ASCII -ErrorAction SilentlyContinue
+                                }
                             }
                         }
                         catch {
@@ -4169,6 +4202,10 @@ $global:VM_Config = {
                         }
                     }
                 }
+
+                # Output stream, not error: FailOnRemoteError keys off the child job's Error
+                # collection, and the caller only reads ScriptBlockOutput when the step failed.
+                if ($mofCacheNote) { $mofCacheNote }
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
@@ -4851,6 +4888,8 @@ $global:VM_Config = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration after $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds. $dscCreateWhy" -Failure -OutputStream
                 return
             }
+            $mofCacheNote = @($result.ScriptBlockOutput) | Where-Object { "$_" -like 'MOFCACHE:*' } | Select-Object -First 1
+            if ($mofCacheNote) { Write-Log "[Phase $Phase]: $($currentItem.vmName): $mofCacheNote" -LogOnly }
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC configuration creation completed in $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds."
             Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] DscConfigCreate completed in $([math]::Round($dscCreateStopWatch.Elapsed.TotalSeconds, 1)) seconds" -LogOnly
 
