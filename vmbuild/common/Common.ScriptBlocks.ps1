@@ -4070,9 +4070,6 @@ $global:VM_Config = {
 
                 $env:PSModulePath = "C:\Program Files\WindowsPowerShell\Modules;C:\Windows\system32\WindowsPowerShell\v1.0\Modules"
 
-                # Dot Source config script
-                . "$dscConfigScript"
-
                 # Configuration Data
                 $cd = @{
                     AllNodes = @(
@@ -4091,10 +4088,87 @@ $global:VM_Config = {
                     return $error_message
                 }
 
-                # Compile config, to create MOF
-                "[Phase $Phase]: $($currentItem.vmName): Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append                
-                & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
-                "[Phase $Phase]: $($currentItem.vmName): Done Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
+                # Compiling is deterministic given the role script, deployConfig, the installed
+                # resource modules and the credential the MOF embeds, so a re-run with all of them
+                # unchanged can copy the previous MOF instead of recompiling (~13s in Phase 2).
+                # Every one of those inputs is hashed into the key, and anything unexpected here
+                # falls through to a real compile: the failure mode is "no saving", never "stale
+                # config pushed".
+                $mofFromCache = $false
+                $mofCacheKey = $null
+                $mofCacheDir = $null
+                $installedFlagPath = "C:\staging\DSC\DSC.zip.Installed"
+                try {
+                    $sha = [System.Security.Cryptography.SHA256]::Create()
+                    try {
+                        $keyParts = @(
+                            "role=$dscRole"
+                            "script=" + (Get-FileHash -LiteralPath $dscConfigScript -Algorithm SHA256 -ErrorAction Stop).Hash
+                            "deploy=" + (Get-FileHash -LiteralPath $deployConfigPath -Algorithm SHA256 -ErrorAction Stop).Hash
+                            "modules=" + $(if (Test-Path -LiteralPath $installedFlagPath) { (Get-Content -LiteralPath $installedFlagPath -Raw -ErrorAction Stop).Trim() } else { 'none' })
+                            "cd=" + ($cd | ConvertTo-Json -Depth 5 -Compress)
+                            # The MOF stores this in plain text, so a credential change must miss.
+                            "cred=" + [BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($adminCreds.UserName + "|" + $adminCreds.GetNetworkCredential().Password))).Replace('-', '')
+                        )
+                        $mofCacheKey = [BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(($keyParts -join "`n")))).Replace('-', '')
+                    }
+                    finally { $sha.Dispose() }
+
+                    $mofCacheDir = "C:\staging\DSC\MofCache\$mofCacheKey"
+                    $stampPath = Join-Path $mofCacheDir 'cachekey.txt'
+                    if ((Test-Path -LiteralPath $stampPath) -and ((Get-Content -LiteralPath $stampPath -Raw -ErrorAction Stop).Trim() -eq $mofCacheKey)) {
+                        $cachedMofs = @(Get-ChildItem -LiteralPath $mofCacheDir -Filter '*.mof' -ErrorAction SilentlyContinue)
+                        if ($cachedMofs.Count -gt 0) {
+                            if (-not (Test-Path -LiteralPath $dscConfigPath)) {
+                                New-Item -ItemType Directory -Path $dscConfigPath -Force -ErrorAction Stop | Out-Null
+                            }
+                            foreach ($cachedMof in $cachedMofs) {
+                                Copy-Item -LiteralPath $cachedMof.FullName -Destination $dscConfigPath -Force -ErrorAction Stop
+                            }
+                            # StartConfig pushes whatever is in this folder, so a copy that landed
+                            # nothing has to compile rather than push an empty configuration.
+                            if (@(Get-ChildItem -LiteralPath $dscConfigPath -Filter '*.mof' -ErrorAction SilentlyContinue).Count -gt 0) {
+                                $mofFromCache = $true
+                                "MOF cache HIT $($mofCacheKey.Substring(0, 12)): copied $($cachedMofs.Count) file(s) into $dscConfigPath" | Out-File $log -Append
+                            }
+                        }
+                    }
+                }
+                catch {
+                    $mofFromCache = $false
+                    "MOF cache lookup failed, compiling instead: $_" | Out-File $log -Append
+                }
+
+                if (-not $mofFromCache) {
+                    # Dot Source config script
+                    . "$dscConfigScript"
+
+                    # Compile config, to create MOF
+                    "[Phase $Phase]: $($currentItem.vmName): Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
+                    & "$($dscRole)" -DeployConfigPath $deployConfigPath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $dscConfigPath
+                    "[Phase $Phase]: $($currentItem.vmName): Done Running configuration script to create MOF in $dscConfigPath" | Out-File $log -Append
+
+                    if ($mofCacheKey) {
+                        try {
+                            $freshMofs = @(Get-ChildItem -LiteralPath $dscConfigPath -Filter '*.mof' -ErrorAction SilentlyContinue)
+                            if ($freshMofs.Count -gt 0) {
+                                if (Test-Path -LiteralPath $mofCacheDir) {
+                                    Remove-Item -LiteralPath $mofCacheDir -Recurse -Force -ErrorAction SilentlyContinue
+                                }
+                                New-Item -ItemType Directory -Path $mofCacheDir -Force -ErrorAction Stop | Out-Null
+                                foreach ($freshMof in $freshMofs) {
+                                    Copy-Item -LiteralPath $freshMof.FullName -Destination $mofCacheDir -Force -ErrorAction Stop
+                                }
+                                # Stamped last: a later run trusts this file, so it must not exist
+                                # until every MOF beside it is already in place.
+                                Set-Content -LiteralPath (Join-Path $mofCacheDir 'cachekey.txt') -Value $mofCacheKey -Force -Encoding ASCII -ErrorAction Stop
+                            }
+                        }
+                        catch {
+                            "MOF cache store failed (ignored): $_" | Out-File $log -Append
+                        }
+                    }
+                }
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
