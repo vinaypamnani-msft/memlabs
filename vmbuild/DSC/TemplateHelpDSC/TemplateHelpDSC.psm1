@@ -2858,6 +2858,7 @@ class DownloadFile {
             # Check for a cached hash sidecar file with size and last-modified metadata
             $actualHash = $null
             $useCachedHash = $false
+            $sidecarMiss = 'no sidecar file'
             if (Test-Path $hashCachePath) {
                 try {
                     $cacheLines = Get-Content $hashCachePath
@@ -2871,12 +2872,30 @@ class DownloadFile {
                         if ($fileItem.Length -eq $cachedSize -and $fileItem.LastWriteTimeUtc -eq $cachedLastWrite) {
                             $useCachedHash = $true
                             $actualHash = $cachedHash
+                            $sidecarMiss = ''
                         }
+                        elseif ($fileItem.Length -ne $cachedSize) {
+                            $sidecarMiss = "size differs (file $($fileItem.Length), sidecar $cachedSize)"
+                        }
+                        else {
+                            $sidecarMiss = "LastWriteTimeUtc differs (file $($fileItem.LastWriteTimeUtc.ToString('o')), sidecar $($cachedLastWrite.ToString('o')))"
+                        }
+                    }
+                    else {
+                        $sidecarMiss = "sidecar has $($cacheLines.Count) line(s), expected 3"
                     }
                 }
                 catch {
-                    # Sidecar corrupt or unreadable; fall through to full hash
+                    # Never silent: a throw here costs a full re-hash of the CU, and swallowing it
+                    # is why the sidecar could miss run after run without leaving any trace.
+                    $sidecarMiss = "sidecar unreadable: $($_.Exception.Message)"
                 }
+            }
+            if ($useCachedHash) {
+                Write-Verbose "SIDECAR hit for $(Split-Path $this.FilePath -Leaf); skipping SHA1"
+            }
+            else {
+                Write-Status "SIDECAR miss for $(Split-Path $this.FilePath -Leaf): $sidecarMiss -- hashing the full file"
             }
 
             if (-not $useCachedHash) {
@@ -2901,9 +2920,11 @@ class DownloadFile {
             if (-not $useCachedHash) {
                 try {
                     @($actualHash, $fileItem.Length.ToString(), $fileItem.LastWriteTimeUtc.ToString('o')) | Out-File -FilePath $hashCachePath -Force
+                    Write-Verbose "SIDECAR wrote $hashCachePath (size $($fileItem.Length), lastWriteUtc $($fileItem.LastWriteTimeUtc.ToString('o')))"
                 }
                 catch {
-                    Write-Verbose "Could not write hash cache file: $_"
+                    # A failed write means every later run re-hashes, so this is not verbose-only.
+                    Write-Status "SIDECAR write FAILED for $(Split-Path $this.FilePath -Leaf): $($_.Exception.Message)"
                 }
             }
 
