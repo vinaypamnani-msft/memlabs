@@ -11,11 +11,27 @@ param(
 )
 
 $dryRunRoot = $null
+$dryRunCompleted = $false
+$dryRunHyperV = $false
+$dryRunHyperVWhy = 'Hyper-V cmdlets are not installed'
 if ($DryRun) {
     $dryRunRoot = Join-Path $env:TEMP ("memlabs-dsczip-test-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
     New-Item -ItemType Directory -Path $dryRunRoot -Force | Out-Null
     Write-Host "DRYRUN: writing everything to $dryRunRoot" -ForegroundColor Yellow
     Write-Host "DRYRUN: repo DSC.zip, Common.ps1 and installed modules will not be touched." -ForegroundColor Yellow
+
+    # Probed up front so a box without Hyper-V reports itself as the wrong machine rather
+    # than looking like a script fault when the first VM query fails.
+    if (Get-Command Get-VMHost -ErrorAction SilentlyContinue) {
+        try { $null = Get-VMHost -ErrorAction Stop; $dryRunHyperV = $true }
+        catch { $dryRunHyperVWhy = $_.Exception.Message }
+    }
+    $dryRunAz = [bool](Get-Command Publish-AzVMDscConfiguration -ErrorAction SilentlyContinue)
+    Write-Host ("DRYRUN: Hyper-V usable : {0}" -f $(if ($dryRunHyperV) { 'yes' } else { "NO - $dryRunHyperVWhy" })) -ForegroundColor Yellow
+    Write-Host ("DRYRUN: Az.Compute     : {0}" -f $(if ($dryRunAz) { 'yes' } else { 'NO - the zip step cannot run' })) -ForegroundColor Yellow
+    if (-not $dryRunHyperV) {
+        Write-Host "DRYRUN: without Hyper-V this validates the config path and then stops at the first VM query." -ForegroundColor Yellow
+    }
 }
 
 # Defined before the try so the finally block can never fall back to the repo copy.
@@ -250,6 +266,7 @@ try {
         Get-ChildItem -LiteralPath $dryRunRoot -Recurse -File -ErrorAction SilentlyContinue |
             ForEach-Object { Write-Host ("  produced       : {0} ({1:n0} KB)" -f $_.Name, ($_.Length / 1KB)) -ForegroundColor Green }
         Write-Host "  remove it with : Remove-Item -Recurse -Force '$dryRunRoot'" -ForegroundColor DarkGray
+        $dryRunCompleted = $true
         return
     }
 
@@ -292,4 +309,16 @@ finally {
     }
     $parentDir = Split-Path -Path $PSScriptRoot -Parent
     Set-Location $parentDir
+
+    # Say which of the two it was, because they need different responses.
+    if ($DryRun -and -not $dryRunCompleted) {
+        Write-Host ""
+        if (-not $dryRunHyperV) {
+            Write-Host "DRYRUN STOPPED BY ENVIRONMENT: no usable Hyper-V here ($dryRunHyperVWhy)." -ForegroundColor Yellow
+            Write-Host "  The config path was exercised; the build stages were not. Re-run on the lab host." -ForegroundColor Yellow
+        }
+        else {
+            Write-Host "DRYRUN FAILED with Hyper-V available -- this is a real failure, see the error above." -ForegroundColor Red
+        }
+    }
 }
