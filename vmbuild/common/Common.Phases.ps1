@@ -1445,6 +1445,7 @@ function Start-PhaseJobs {
     # their per-VM payload is larger so the relative win is smaller, and
     # they touch $global:DSC_Copied which would need review for ThreadJob.
     $usePhaseThreadJob = $null -ne (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)
+    # Floor only; scaled up to the dispatch count once $vmDispatchList is known.
     $phaseThreadJobThrottle = 16
 
     # Determine single vs. multi-DSC
@@ -2137,6 +2138,15 @@ function Start-PhaseJobs {
             Write-Log "[Phase $Phase] Could not pre-cache DHCP reservations; VM jobs will fall back to per-VM lookup. $_" -LogOnly
             $phaseDhcpReservationMap = @{}
         }
+    }
+
+    # Phases 10/11 dispatch every eligible VM at once, so a throttle below that count splits the
+    # phase into waves -- which shows up as "the lab got slower", not as a limit being reached.
+    # The fixed 16 already did that: phase 11 dispatched 19-24 VMs in four separate lab runs.
+    if ($usePhaseThreadJob -and ($Phase -eq 10 -or $Phase -eq 11)) {
+        $phaseDispatchCount = @($vmDispatchList).Count
+        $phaseThreadJobThrottle = [Math]::Max($phaseThreadJobThrottle, $phaseDispatchCount)
+        Write-Log "[Phase $Phase] ThreadJob throttle $phaseThreadJobThrottle for $phaseDispatchCount candidate VM(s)." -LogOnly
     }
 
     foreach ($currentItem in $vmDispatchList) {
