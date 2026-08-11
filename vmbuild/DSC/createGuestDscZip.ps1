@@ -3,8 +3,23 @@
 param(
     $configName,
     $vmName,
-    [switch]$force
+    [switch]$force,
+    # Exercise the real build -- zip, config compile, parse check -- against a scratch
+    # folder instead of the repo. Nothing under vmbuild is written, no module is installed,
+    # and MemLabsVersion is not bumped.
+    [switch]$DryRun
 )
+
+$dryRunRoot = $null
+if ($DryRun) {
+    $dryRunRoot = Join-Path $env:TEMP ("memlabs-dsczip-test-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    New-Item -ItemType Directory -Path $dryRunRoot -Force | Out-Null
+    Write-Host "DRYRUN: writing everything to $dryRunRoot" -ForegroundColor Yellow
+    Write-Host "DRYRUN: repo DSC.zip, Common.ps1 and installed modules will not be touched." -ForegroundColor Yellow
+}
+
+# Defined before the try so the finally block can never fall back to the repo copy.
+$zipTarget = if ($DryRun) { Join-Path $dryRunRoot 'DSC.zip' } else { Join-Path $PSScriptRoot 'DSC.zip' }
 
 if (-not $configName) {
     Write-Host "Using test config: CSTest1-A-CSPS.json, and test VM Name: CT1-DC1"
@@ -53,7 +68,7 @@ try {
     $missing = @()
     foreach ($module in $modules) {
         if ($allAvailable -contains $module) {
-            if ($force) {
+            if ($force -and -not $DryRun) {
                 Write-Host "Module exists: $module. Updating..."
                 Update-Module $module -Force
             }
@@ -67,27 +82,33 @@ try {
     }
 
     foreach ($module in $missing) {
+        if ($DryRun) { Write-Host "DRYRUN: would install module: $module" -ForegroundColor Yellow; continue }
         Write-Host "Installing Module: $module "
         Install-Module $module -Force
     }
 
     # Install TemplateHelpDSC module on this machine (needed before test compilation)
-    Write-Host "Installing TemplateHelpDSC on this machine.."
-    Copy-Item .\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
+    if ($DryRun) {
+        Write-Host "DRYRUN: skipping TemplateHelpDSC install into Program Files (machine-wide)." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "Installing TemplateHelpDSC on this machine.."
+        Copy-Item .\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
+    }
 
-    # Start ZIP creation as a background job — runs in parallel with everything below.
+    # Start ZIP creation as a background job - runs in parallel with everything below.
     # Nothing else depends on DSC.zip; we wait for it at the very end.
-    Write-Host "Starting DSC.zip creation in background..."
+    Write-Host "Starting DSC.zip creation in background ($zipTarget)..."
     $dscDir = $PSScriptRoot
     $zipJob = Start-Job -ScriptBlock {
-        param($dir)
+        param($dir, $target)
         Set-Location $dir
-        Write-Output "Creating DSC.zip..."
-        Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\DSC.zip -Force -Confirm:$false
+        Write-Output "Creating DSC.zip at $target..."
+        Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath $target -Force -Confirm:$false
         Write-Output "Adding TemplateHelpDSC to DSC.zip..."
-        Compress-Archive -Path .\TemplateHelpDSC -Update -DestinationPath .\DSC.zip
+        Compress-Archive -Path .\TemplateHelpDSC -Update -DestinationPath $target
         Write-Output "DSC.zip creation complete."
-    } -ArgumentList $dscDir
+    } -ArgumentList $dscDir, $zipTarget
 
     # Tell common to re-init (runs in parallel with ZIP creation above)
     if ($Common.Initialized) {
@@ -106,7 +127,7 @@ try {
 
     # Dump config to file, for debugging
     #$result.DeployConfig | ConvertTo-Json | Set-Clipboard
-    $filePath = "C:\temp\deployConfig.json"
+    $filePath = if ($DryRun) { Join-Path $dryRunRoot 'deployConfig.json' } else { "C:\temp\deployConfig.json" }
     $deployConfigCopy.parameters.ThisMachineName = $vmName
     $deployConfigCopy | ConvertTo-Json -Depth 5 | Out-File $filePath -Force
 
@@ -173,9 +194,12 @@ try {
             }
         )
     }
-write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath ""C:\Temp\$($role)-Config"" "
-    & "$($dscRole)" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config" | out-host
-    Add-CmdHistory "$($dscRole) -DeployConfigPath $filePath -AdminCreds (Get-Credential) -ConfigurationData $cd -OutputPath `"C:\Temp\$($role)-Config`""
+    $configOutPath = if ($DryRun) { Join-Path $dryRunRoot "$($role)-Config" } else { "C:\Temp\$($role)-Config" }
+    write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath ""$configOutPath"" "
+    & "$($dscRole)" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath $configOutPath | out-host
+    if (-not $DryRun) {
+        Add-CmdHistory "$($dscRole) -DeployConfigPath $filePath -AdminCreds (Get-Credential) -ConfigurationData $cd -OutputPath `"$configOutPath`""
+    }
 
     # Wait for the background parse-check job to finish and report results.
     if ($parseCheckJob) {
@@ -193,11 +217,11 @@ write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adm
                 Write-Host "    $($f.Errors)" -ForegroundColor DarkYellow
             }
             Write-Host ""
-            # Delete the zip so the next run rebuilds it
-            $dscZipPath = Join-Path $PSScriptRoot "DSC.zip"
-            if (Test-Path $dscZipPath) {
-                Remove-Item $dscZipPath -Force -ErrorAction SilentlyContinue
-                Write-Host "Deleted DSC.zip so next run will rebuild." -ForegroundColor Yellow
+            # Delete the zip so the next run rebuilds it. $zipTarget, not the repo copy --
+            # a dry run must never remove the real DSC.zip.
+            if (Test-Path $zipTarget) {
+                Remove-Item $zipTarget -Force -ErrorAction SilentlyContinue
+                Write-Host "Deleted $zipTarget so next run will rebuild." -ForegroundColor Yellow
             }
             throw "PS5.1 parse check failed. Fix the above files before deploying to guest VMs."
         }
@@ -216,7 +240,18 @@ write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adm
     }
 
     # Auto-bump MemLabsVersion now that the DSC build succeeded.
-    # Format: YYMMDD.n — if today's date matches the current prefix, increment n; otherwise reset to .0
+    # Format: YYMMDD.n - if today's date matches the current prefix, increment n; otherwise reset to .0
+    if ($DryRun) {
+        Write-Host ""
+        Write-Host "DRYRUN COMPLETE - the real build ran, nothing in the repo was touched." -ForegroundColor Green
+        Write-Host "  scratch folder : $dryRunRoot" -ForegroundColor Green
+        Write-Host "  MemLabsVersion : left at $($Common.MemLabsVersion) (not bumped)" -ForegroundColor Green
+        Get-ChildItem -LiteralPath $dryRunRoot -Recurse -File -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host ("  produced       : {0} ({1:n0} KB)" -f $_.Name, ($_.Length / 1KB)) -ForegroundColor Green }
+        Write-Host "  remove it with : Remove-Item -Recurse -Force '$dryRunRoot'" -ForegroundColor DarkGray
+        return
+    }
+
     $commonPs1Path = Join-Path $PSScriptRoot "..\Common.ps1"
     $commonPs1Path = (Resolve-Path $commonPs1Path).Path
     $todayPrefix = (Get-Date).ToString("yyMMdd")
@@ -245,12 +280,13 @@ finally {
     if ($parseCheckJob -and $parseCheckJob.State -eq 'Running') {
         $parseCheckJob | Stop-Job -PassThru | Remove-Job -Force -ErrorAction SilentlyContinue
     }
-    # If we terminated with an error, delete DSC.zip so the next run rebuilds
+    # If we terminated with an error, delete the zip so the next run rebuilds. Uses
+    # $zipTarget, so a dry run reaching here removes only its scratch copy -- this runs on
+    # every exit path, including the dry run's own return.
     if (-not $?) {
-        $dscZipPath = Join-Path $PSScriptRoot "DSC.zip"
-        if (Test-Path $dscZipPath) {
-            Remove-Item $dscZipPath -Force -ErrorAction SilentlyContinue
-            Write-Host "Deleted DSC.zip due to build failure." -ForegroundColor Yellow
+        if ($zipTarget -and (Test-Path $zipTarget)) {
+            Remove-Item $zipTarget -Force -ErrorAction SilentlyContinue
+            Write-Host "Deleted $zipTarget due to build failure." -ForegroundColor Yellow
         }
     }
     $parentDir = Split-Path -Path $PSScriptRoot -Parent
