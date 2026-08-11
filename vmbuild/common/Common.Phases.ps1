@@ -2529,6 +2529,38 @@ function Start-PhaseJobs {
 
 }
 
+# The VM names a job's DSC status says it is blocked on, upper-cased. Two shapes:
+# an explicit wait ("Waiting on X to Complete", "Waiting for X to finish adding
+# passive site server role", "Waiting for Site Server X to finish configuration"),
+# and a remote Write-DscStatus -MachineName stamp ("Setting up ConfigMgr. [X]: ..."),
+# where X owns this job's progress and stranding it strands this job too -- PL-PICKLE
+# held Phase 8 for 55m+ on "[PL-MELT]: ..." after PL-MELT had already failed, and in
+# that shape its status never contains the word "Waiting".
+function Get-JobWaitTargets {
+    param([string]$StatusText)
+
+    # Emitted unwrapped -- every caller wraps in @(), which is the only form that
+    # survives PowerShell unrolling a 0- or 1-element result.
+    $targets = New-Object System.Collections.Generic.List[string]
+    if ([string]::IsNullOrWhiteSpace($StatusText)) { return $targets.ToArray() }
+
+    # [regex]::Match, not -match: a nested -match would clobber the caller's $Matches.
+    # WaitFor is joined with ',' so one status can name several VMs.
+    $waitMatch = [regex]::Match($StatusText, 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)')
+    if ($waitMatch.Success) {
+        foreach ($w in ($waitMatch.Groups[1].Value -split ',')) {
+            $t = "$w".Trim().ToUpper()
+            if ($t) { [void]$targets.Add($t) }
+        }
+    }
+    $ownerMatch = [regex]::Match($StatusText, 'Setting up ConfigMgr\. \[([A-Za-z0-9\-]+)\]:')
+    if ($ownerMatch.Success) {
+        $t = "$($ownerMatch.Groups[1].Value)".Trim().ToUpper()
+        if ($t) { [void]$targets.Add($t) }
+    }
+    return $targets.ToArray()
+}
+
 function Wait-Phase {
 
     param(
@@ -2630,6 +2662,10 @@ function Wait-Phase {
         $stallHeartbeatEverySec = 600
         $stallHeartbeatFileMinutes = 10
         $stallHeartbeatConsoleMinutes = 30
+        # "held 'Waiting on X' for 68m" said every 10m is indistinguishable from progress,
+        # and the follower of a cross-VM wait never has anything new to add. Console lines
+        # are rationed: only the job nobody can explain, and then at a doubling interval.
+        $stallHeartbeatConsoleNext = @{}   # "<jobId>|<status>" -> next held-minutes worth saying aloud
 
         $FailRetry = 0
         do {
@@ -2679,23 +2715,8 @@ function Wait-Phase {
                     try {
                         $hist = $global:JobProgressHistory[$job.Id]
                         $statusText = if ($hist) { "$($hist.Status)" } else { '' }
-                        # [regex]::Match, not -match: a nested -match would clobber $Matches.
-                        $waitCandidates = @()
-                        # WaitFor is joined with ',' so the status can name several VMs.
-                        $waitMatch = [regex]::Match($statusText, 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)')
-                        if ($waitMatch.Success) { $waitCandidates += ($waitMatch.Groups[1].Value -split ',') }
-                        # A remote Write-DscStatus -MachineName stamps "Setting up ConfigMgr.
-                        # [<writer>]: ..." into this VM's status file, so the writer owns this
-                        # job's progress (a Primary driving its Secondary's install). If the
-                        # writer died this job is just as stranded, and in that state its
-                        # status never contains the word "Waiting" -- PL-PICKLE held Phase 8
-                        # for 55m+ on "[PL-MELT]: Secondary site replication link is 'Active'"
-                        # after PL-MELT had already failed.
-                        $ownerMatch = [regex]::Match($statusText, 'Setting up ConfigMgr\. \[([A-Za-z0-9\-]+)\]:')
-                        if ($ownerMatch.Success) { $waitCandidates += $ownerMatch.Groups[1].Value }
-                        foreach ($w in $waitCandidates) {
-                            $waitedOn = "$w".Trim().ToUpper()
-                            if ($waitedOn -and $failedVmNames.ContainsKey($waitedOn)) {
+                        foreach ($waitedOn in @(Get-JobWaitTargets -StatusText $statusText)) {
+                            if ($failedVmNames.ContainsKey($waitedOn)) {
                                 $deadDep = $waitedOn
                                 $deadStatus = $statusText
                                 break
@@ -3221,13 +3242,38 @@ function Wait-Phase {
             if ($runningJobs.Count -gt 0 -and ([DateTime]::UtcNow - $stallHeartbeatLastUtc).TotalSeconds -ge $stallHeartbeatEverySec) {
                 $stallHeartbeatLastUtc = [DateTime]::UtcNow
                 $phaseHeldMin = [Math]::Floor(((Get-Date) - $StartTime).TotalMinutes)
+                $hbRunningVms = @{}
+                foreach ($rj in $runningJobs) { $hbRunningVms[(("$($rj.Name)" -split ' ')[0].Trim().ToUpper())] = $true }
                 foreach ($hbJob in $runningJobs) {
                     $hbEntry = $global:JobProgressHistory[$hbJob.Id]
                     if (-not $hbEntry -or -not $hbEntry.StatusSince) { continue }
                     $hbHeldMin = [Math]::Floor(([DateTime]::UtcNow - $hbEntry.StatusSince).TotalMinutes)
                     if ($hbHeldMin -lt $stallHeartbeatFileMinutes) { continue }
                     $hbLine = "[Phase $Phase] STILL WAITING: $("$($hbEntry.JobName)".Trim()) has held '$("$($hbEntry.Status)".Trim())' for ${hbHeldMin}m (${phaseHeldMin}m into the phase)."
-                    if ($hbHeldMin -ge $stallHeartbeatConsoleMinutes) { Write-Log $hbLine -Warning } else { Write-Log $hbLine -LogOnly }
+
+                    # A wait that names a VM still running in this phase is doing exactly what
+                    # it was told to. That VM is the one that owes an explanation and it gets
+                    # its own line here, so warning about its followers only crowds out the
+                    # line that matters. (A wait on a VM that has FAILED is handled far above:
+                    # the job is stopped outright, since it can never be satisfied.)
+                    $hbVm = ("$($hbJob.Name)" -split ' ')[0].Trim().ToUpper()
+                    $hbBlockedBy = $null
+                    foreach ($hbTarget in @(Get-JobWaitTargets -StatusText "$($hbEntry.Status)")) {
+                        if ($hbTarget -ne $hbVm -and $hbRunningVms.ContainsKey($hbTarget)) { $hbBlockedBy = $hbTarget; break }
+                    }
+                    if ($hbBlockedBy) {
+                        Write-Log "$hbLine Blocked on $hbBlockedBy, which is still running -- expected." -LogOnly
+                        continue
+                    }
+
+                    $hbKey = "$($hbJob.Id)|$("$($hbEntry.Status)".Trim())"
+                    $hbSayAt = $stallHeartbeatConsoleNext[$hbKey]
+                    if (-not $hbSayAt) { $hbSayAt = $stallHeartbeatConsoleMinutes }
+                    if ($hbHeldMin -ge $hbSayAt) {
+                        $stallHeartbeatConsoleNext[$hbKey] = $hbSayAt * 2
+                        Write-Log $hbLine -Warning
+                    }
+                    else { Write-Log $hbLine -LogOnly }
                 }
             }
 
