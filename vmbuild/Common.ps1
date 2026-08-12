@@ -8495,6 +8495,11 @@ function Get-VmSession {
     # credential that had just failed, clustered at 31-32s = the 30s connect timeout plus a
     # ~2s retry -- so whether those are timeouts or errors decides if the timeout is tunable.
     $failReasons = New-Object System.Collections.ArrayList
+    # Bounded deliberately below the 30s connect timeout, so the wait substitutes for a doomed
+    # connect instead of adding to one.
+    $sessionHeartbeatWaitSec = 12
+    [double]$swHeartbeatWaitMs = 0
+    $heartbeatAtConnect = 'n/a'
     while ($true) {
         $ps = $null
         $failCount++
@@ -8509,12 +8514,36 @@ function Get-VmSession {
         # Skip New-PSSession entirely if the VM is not running.
         # Avoids 30s+ timeout per credential attempt on a dead/rebooting VM.
         $swStateCheck = [System.Diagnostics.Stopwatch]::StartNew()
-        $vmState = (Get-VM2 -Name $VmName -ErrorAction SilentlyContinue).State
+        $vmNow = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+        $vmState = $vmNow.State
         $swStateCheck.Stop()
         $swStateCheckTotalMs += $swStateCheck.Elapsed.TotalMilliseconds
         if ($vmState -ne 'Running') {
             Write-Log "$VmName`: VM state is '$vmState'; skipping session attempt $failCount/$MaxRetries" -Verbose
             continue
+        }
+
+        # State stays 'Running' straight through a GUEST-initiated reboot, so it cannot see
+        # the window that costs the most: every 30s+ connect timeout in the sample landed
+        # within seconds of a JoinDomain or a computer rename, both of which reboot the guest.
+        # PSDirect rides the same integration-services channel the heartbeat reports on, so a
+        # non-Ok heartbeat means this connect cannot succeed and would block the full timeout
+        # for nothing. Poll briefly, then connect REGARDLESS -- a guest whose ICs never report
+        # must still be reachable, and this must never become a way to refuse to connect.
+        # Self-limiting: healthy heartbeat costs one property read off an object already in hand.
+        $heartbeatAtConnect = "$($vmNow.Heartbeat)"
+        if ($heartbeatAtConnect -notlike 'Ok*') {
+            $swHb = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($swHb.Elapsed.TotalSeconds -lt $sessionHeartbeatWaitSec) {
+                Start-Sleep -Seconds 2
+                $vmNow = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                $heartbeatAtConnect = "$($vmNow.Heartbeat)"
+                # OkApplicationsUnknown counts: the IC is answering, which is what PSDirect needs.
+                if ($heartbeatAtConnect -like 'Ok*') { break }
+                if ($vmNow.State -ne 'Running') { break }
+            }
+            $swHb.Stop()
+            $swHeartbeatWaitMs += $swHb.Elapsed.TotalMilliseconds
         }
 
         # Try each credential in order; stop on first success
@@ -8553,10 +8582,10 @@ function Get-VmSession {
                 }
                 $global:ps_lastGoodCred[$VmName] = $entry.Tag
                 Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
-                Write-Log ("[StepTiming] {0} SessionCreate completed in {1} seconds (vmLookup={2}ms stateCheck={3}ms connect={4}ms attempts={5} tag={6} hint={7} failed=[{8}])" -f `
-                        $VmName, [Math]::Round(($swVmLookup.Elapsed.TotalMilliseconds + $swStateCheckTotalMs + $swConnectTotalMs) / 1000, 1),
-                    [int]$swVmLookup.Elapsed.TotalMilliseconds, [int]$swStateCheckTotalMs, [int]$swConnectTotalMs,
-                    $connectAttempts, $entry.Tag, $(if ($lastGood) { $lastGood } else { 'none' }),
+                Write-Log ("[StepTiming] {0} SessionCreate completed in {1} seconds (vmLookup={2}ms stateCheck={3}ms hbWait={4}ms connect={5}ms attempts={6} tag={7} hb={8} failed=[{9}])" -f `
+                        $VmName, [Math]::Round(($swVmLookup.Elapsed.TotalMilliseconds + $swStateCheckTotalMs + $swHeartbeatWaitMs + $swConnectTotalMs) / 1000, 1),
+                    [int]$swVmLookup.Elapsed.TotalMilliseconds, [int]$swStateCheckTotalMs, [int]$swHeartbeatWaitMs, [int]$swConnectTotalMs,
+                    $connectAttempts, $entry.Tag, $heartbeatAtConnect,
                     ($failReasons -join ',')) -LogOnly
                 $global:ps_cache[$cacheKey] = $ps
                 Set-VmSessionCacheStamp -Session $ps -VmName $VmName
