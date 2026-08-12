@@ -3119,8 +3119,13 @@ function Add-LcmLogLine {
     )
     try {
         if (-not $Component) { $Component = 'LCM' }
+        # Same UTC bias the CMTrace writers emit. This file is written in the GUEST's
+        # timezone but read on the host, where it sits next to host-stamped lines.
+        $lcmNow = Get-Date
+        $lcmBias = [int](-[TimeZoneInfo]::Local.GetUtcOffset($lcmNow).TotalMinutes)
+        $lcmStamp = $lcmNow.ToString('MM-dd HH:mm:ss.fff') + $(if ($lcmBias -ge 0) { "+$lcmBias" } else { "$lcmBias" })
         $line = '{0} pid={1,-6} tid={2,-4} {3,-34} {4}{5}' -f `
-            (Get-Date -Format 'MM-dd HH:mm:ss.fff'), $PID,
+            $lcmStamp, $PID,
             [System.Threading.Thread]::CurrentThread.ManagedThreadId,
             $Component, ("" + $Text).Trim(), [Environment]::NewLine
 
@@ -3240,8 +3245,12 @@ function Write-Status {
             }
             $file = $CallingFunction.Location
             $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
-            $date = Get-Date -Format 'MM-dd-yyyy'
-            $time = Get-Date -Format 'HH:mm:ss.fff'
+            $now = Get-Date
+            $date = $now.ToString('MM-dd-yyyy')
+            # Bias = minutes to ADD to this stamp to reach UTC (ConfigMgr's own convention).
+            # This log is written in the GUEST's timezone, which need not match the host's.
+            $bias = [int](-[TimeZoneInfo]::Local.GetUtcOffset($now).TotalMinutes)
+            $time = $now.ToString('HH:mm:ss.fff') + $(if ($bias -ge 0) { "+$bias" } else { "$bias" })
 
             $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""Status"" thread=""$tid"" file=""$file"">"
             $logText | Out-File $StatusLog -Append -Encoding utf8

@@ -1131,9 +1131,19 @@ $global:VM_Create = {
             } catch { $warnings += "Fix Local Account: $_" }
 
             # Set Timezone
+            $tzReport = $null
             try {
                 Set-TimeZone -Id $timezone
             } catch { $warnings += "Set Timezone: $_" }
+            # Report the zone the guest ACTUALLY ended up in. Every timestamp this VM writes
+            # -- CMTrace status logs, DSC state, CM logs later pulled to the host -- is in
+            # THIS zone, not the host's. ClearCachedData first: TimeZoneInfo.Local is cached
+            # per-process, so without it we would read back the pre-Set-TimeZone value.
+            try {
+                [TimeZoneInfo]::ClearCachedData()
+                $tzNow = Get-TimeZone
+                $tzReport = [PSCustomObject]@{ Id = $tzNow.Id; OffsetMinutes = [int]$tzNow.GetUtcOffset([DateTime]::Now).TotalMinutes }
+            } catch { $warnings += "Read back timezone: $_" }
 
             # TLS 1.2 Registry Keys
             try {
@@ -1348,7 +1358,7 @@ $global:VM_Create = {
                 }
             } catch { $warnings += "Visual performance: $_" }
 
-            [PSCustomObject]@{ Warnings = $warnings }
+            [PSCustomObject]@{ Warnings = $warnings; TimeZone = $tzReport }
         }
 
         if ($createVM) {
@@ -1409,6 +1419,22 @@ $global:VM_Create = {
             elseif ($result.ScriptBlockOutput.Warnings -and $result.ScriptBlockOutput.Warnings.Count -gt 0) {
                 foreach ($w in $result.ScriptBlockOutput.Warnings) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): $w" -Warning -OutputStream
+                }
+            }
+            # Record the guest's real zone against the host's. Set-TimeZone can no-op on an
+            # id this host resolves but the guest OS does not, and the failure is otherwise
+            # invisible until someone tries to line a guest log up with a host line.
+            $guestTz = $null
+            if (-not $result.ScriptBlockFailed) { $guestTz = $result.ScriptBlockOutput.TimeZone }
+            if ($guestTz) {
+                $hostOffMin = [int]([TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now).TotalMinutes)
+                $skewMin = [int]$guestTz.OffsetMinutes - $hostOffMin
+                $skewNote = if ($skewMin -eq 0) { 'same offset as host' } else { "$([math]::Round($skewMin / 60.0, 2))h vs host -- guest log timestamps are shifted by that much" }
+                if ("$($guestTz.Id)" -ne "$timeZone") {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): timezone is '$($guestTz.Id)' but '$timeZone' was requested ($skewNote)." -Warning -OutputStream
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): timezone '$($guestTz.Id)' (UTC offset $($guestTz.OffsetMinutes) min, $skewNote)" -LogOnly
                 }
             }
             # Set vm note

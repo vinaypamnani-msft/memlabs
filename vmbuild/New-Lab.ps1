@@ -685,6 +685,28 @@ try {
     Write-Log "ConfigFile: $($Global:configfile)" -LogOnly
     Write-Log "Domain: $domainName" -LogOnly
     Write-Log "MemLabs Version: $($Common.MemLabsVersion)" -LogOnly
+    # Guest and host timezones are independent (vmOptions.timeZone is free-form), and both
+    # write their CMTrace logs into this same folder. State the relationship once so a
+    # reader never has to infer it from the bias suffix on individual lines.
+    try {
+        $hostTz = [TimeZoneInfo]::Local
+        $hostOff = $hostTz.GetUtcOffset([DateTime]::Now)
+        $labTzId = $deployConfig.vmOptions.timeZone
+        if (-not $labTzId) { $labTzId = $hostTz.Id }
+        $labOff = $null
+        try { $labOff = ([TimeZoneInfo]::FindSystemTimeZoneById($labTzId)).GetUtcOffset([DateTime]::UtcNow) } catch { }
+        if ($null -eq $labOff) {
+            Write-Log "Timezone: host '$($hostTz.Id)' (UTC$($hostOff.ToString('\+hh\:mm;\-hh\:mm'))); lab VMs '$labTzId' -- NOT a recognized timezone id on this host, so Phase 1 Set-TimeZone will fail and the guests will keep the base image's zone." -Warning
+        }
+        elseif ($labOff -eq $hostOff) {
+            Write-Log "Timezone: host and lab VMs both '$labTzId' (UTC$($hostOff.ToString('\+hh\:mm;\-hh\:mm'))); host and guest log timestamps line up directly." -LogOnly
+        }
+        else {
+            $delta = $labOff - $hostOff
+            Write-Log "Timezone: host '$($hostTz.Id)' (UTC$($hostOff.ToString('\+hh\:mm;\-hh\:mm'))) but lab VMs run '$labTzId' (UTC$($labOff.ToString('\+hh\:mm;\-hh\:mm'))). Guest-written timestamps are $($delta.ToString('\+hh\:mm;\-hh\:mm')) versus host lines -- compare using the +bias suffix on each CMTrace time field, not the bare clock time." -LogOnly
+        }
+    }
+    catch { }
     try {
         $gitBranch = git -C $PSScriptRoot rev-parse --abbrev-ref HEAD 2>$null
         $gitHash   = git -C $PSScriptRoot rev-parse --short HEAD 2>$null

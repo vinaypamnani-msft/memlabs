@@ -26,6 +26,10 @@ function Write-StatusLogEntry {
             catch { $Component = '<Script>' }
         }
         $date = Get-Date -Format 'MM-dd-yyyy'
+        # Bias = minutes to ADD to this stamp to reach UTC (ConfigMgr's own convention).
+        # This log is written in the GUEST's timezone, which need not match the host's.
+        $biasMin = [int](-[TimeZoneInfo]::Local.GetUtcOffset((Get-Date)).TotalMinutes)
+        $tzBias = if ($biasMin -ge 0) { "+$biasMin" } else { "$biasMin" }
         $buffer = New-Object System.Collections.Generic.List[string]
     }
     process {
@@ -39,7 +43,7 @@ function Write-StatusLogEntry {
         }
         if ([string]::IsNullOrWhiteSpace($text)) {
             if (-not $AllowBlank) { return }
-            $time = Get-Date -Format 'HH:mm:ss.fff'
+            $time = (Get-Date -Format 'HH:mm:ss.fff') + $tzBias
             $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
             $buffer.Add("<![LOG[]LOG]!><time=`"$time`" date=`"$date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"$tid`" file=`"`">")
             return
@@ -48,7 +52,7 @@ function Write-StatusLogEntry {
         foreach ($line in ($text -split "`r?`n")) {
             if ([string]::IsNullOrWhiteSpace($line)) {
                 if ($AllowBlank) {
-                    $time = Get-Date -Format 'HH:mm:ss.fff'
+                    $time = (Get-Date -Format 'HH:mm:ss.fff') + $tzBias
                     $buffer.Add("<![LOG[]LOG]!><time=`"$time`" date=`"$date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"$tid`" file=`"`">")
                 }
                 continue
@@ -58,12 +62,12 @@ function Write-StatusLogEntry {
             $clean = $clean.TrimEnd()
             if ([string]::IsNullOrWhiteSpace($clean)) {
                 if ($AllowBlank) {
-                    $time = Get-Date -Format 'HH:mm:ss.fff'
+                    $time = (Get-Date -Format 'HH:mm:ss.fff') + $tzBias
                     $buffer.Add("<![LOG[]LOG]!><time=`"$time`" date=`"$date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"$tid`" file=`"`">")
                 }
                 continue
             }
-            $time = Get-Date -Format 'HH:mm:ss.fff'
+            $time = (Get-Date -Format 'HH:mm:ss.fff') + $tzBias
             $buffer.Add("<![LOG[$clean]LOG]!><time=`"$time`" date=`"$date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"$tid`" file=`"`">")
         }
     }

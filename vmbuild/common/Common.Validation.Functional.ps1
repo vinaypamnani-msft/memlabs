@@ -3440,7 +3440,10 @@ function Test-CMSiteFunctionality {
             try { $raw = Get-Content -Path $p -Tail $Lines -ErrorAction Stop } catch { return @() }
             $out = New-Object System.Collections.Generic.List[string]
             foreach ($ln in $raw) {
-                if ($ln -match '\<\!\[LOG\[(.*?)\]LOG\]\!\>.*?time="([0-9:\.]+)"') { $out.Add("$($Matches[2])  $($Matches[1])") }
+                # ConfigMgr's own logs carry a UTC bias in the time field ("20:22:32.990+240"),
+                # so anchoring on digits-and-colons alone silently drops every such line into
+                # the raw-text fallback.
+                if ($ln -match '\<\!\[LOG\[(.*?)\]LOG\]\!\>.*?time="([0-9:\.]+)([+\-]\d+)?"') { $out.Add("$($Matches[2])$($Matches[3])  $($Matches[1])") }
                 elseif ($ln.Trim()) { $out.Add($ln.Trim()) }
             }
             return $out
@@ -10818,7 +10821,7 @@ function Test-CMSiteWideFunctionality {
                         $supErrShown = if ($supErrHex) { "$supErr / $supErrHex" } else { "$supErr" }
                         $supFailTime = $null
                         try { $supFailTime = [Management.ManagementDateTimeConverter]::ToDateTime($syncStatus.LastSyncStateTime) } catch { }
-                        $whenCm = if ($supFailTime) { " at $($supFailTime.ToString('yyyy-MM-dd HH:mm:ss'))" } else { '' }
+                        $whenCm = if ($supFailTime) { " at $($supFailTime.ToString('yyyy-MM-dd HH:mm:ss')) SUP-local" } else { '' }
                         # An HRESULT on its own is not actionable -- 0x80131509 is just
                         # "a managed InvalidOperationException happened somewhere". WSUS
                         # keeps the real reason in its own sync history, so read it.
@@ -10830,6 +10833,9 @@ function Test-CMSiteWideFunctionality {
                         # reads as a different day until you convert it (-> 22:32-22:47,
                         # inside the run) -- and CM's own failure timestamp was never printed
                         # at all, so there was no way to tell a live failure from a stale row.
+                        # "local" here is the SUP's zone, which a lab may set away from the
+                        # host's, so the offset is stated rather than implied.
+                        $tzTag = "UTC$(([TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now)).ToString('\+hh\:mm;\-hh\:mm'))"
                         $toLocal = {
                             param($dt)
                             if ($null -eq $dt) { return $null }
@@ -10852,7 +10858,7 @@ function Test-CMSiteWideFunctionality {
                                     $hEnd = & $toLocal $h.EndTime
                                     $parts = @("result=$($h.Result)", "error=$($h.Error)")
                                     if ($h.ErrorText) { $parts += "errorText='$(("$($h.ErrorText)" -replace '\s+', ' ').Trim())'" }
-                                    if ($hStart) { $parts += "ran=$($hStart.ToString('yyyy-MM-dd HH:mm:ss'))->$(if ($hEnd) { $hEnd.ToString('HH:mm:ss') } else { '?' }) local" }
+                                    if ($hStart) { $parts += "ran=$($hStart.ToString('yyyy-MM-dd HH:mm:ss'))->$(if ($hEnd) { $hEnd.ToString('HH:mm:ss') } else { '?' }) SUP-local $tzTag" }
                                     try {
                                         $ue = @($h.UpdateErrors)
                                         if ($ue.Count -gt 0) { $parts += "updateErrors=$($ue.Count) first='$(("$($ue[0])" -replace '\s+', ' ').Trim())'" }

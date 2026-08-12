@@ -984,8 +984,14 @@ function Write-Log {
             $context = $CallingFunction.Command
             $file = $CallingFunction.Location
             $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
-            $date = Get-Date -Format 'MM-dd-yyyy'
-            $time = Get-Date -Format 'HH:mm:ss.fff'
+            $now = Get-Date
+            $date = $now.ToString('MM-dd-yyyy')
+            # Bias = minutes to ADD to this stamp to reach UTC (ConfigMgr's own convention:
+            # EDT is +240). A lab can run its guests in ANY timezone -- vmOptions.timeZone is
+            # free-form -- and guest logs are pulled into this same folder, so a bare local
+            # time cannot be lined up against a host line without it.
+            $bias = [int](-[TimeZoneInfo]::Local.GetUtcOffset($now).TotalMinutes)
+            $time = $now.ToString('HH:mm:ss.fff') + $(if ($bias -ge 0) { "+$bias" } else { "$bias" })
 
             $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""$logLevel"" thread=""$tid"" file=""$file"">"
 
