@@ -8412,7 +8412,9 @@ function Get-VmSession {
         }
     }
 
+    $swVmLookup = [System.Diagnostics.Stopwatch]::StartNew()
     $vm = get-vm2 -Fallback -Name $VmName
+    $swVmLookup.Stop()
     if (-not $vm) {
         Write-Log "[Get-VMSession] $VmName`: Failed to find VM named $VmName" -Failure
         return $null
@@ -8478,6 +8480,12 @@ function Get-VmSession {
 
     $failCount = 0
     [bool]$sawChannelBroken = $false
+    # Split the cost of a session CREATE (never a cache hit -- those return above) so the
+    # log says whether the ~8s is the PSDirect handshake or vmms contention on the two
+    # Get-VM calls. Only one of those is fixable; hiding it behind other work is the other.
+    [double]$swStateCheckTotalMs = 0
+    [double]$swConnectTotalMs = 0
+    [int]$connectAttempts = 0
     while ($true) {
         $ps = $null
         $failCount++
@@ -8491,7 +8499,10 @@ function Get-VmSession {
 
         # Skip New-PSSession entirely if the VM is not running.
         # Avoids 30s+ timeout per credential attempt on a dead/rebooting VM.
+        $swStateCheck = [System.Diagnostics.Stopwatch]::StartNew()
         $vmState = (Get-VM2 -Name $VmName -ErrorAction SilentlyContinue).State
+        $swStateCheck.Stop()
+        $swStateCheckTotalMs += $swStateCheck.Elapsed.TotalMilliseconds
         if ($vmState -ne 'Running') {
             Write-Log "$VmName`: VM state is '$vmState'; skipping session attempt $failCount/$MaxRetries" -Verbose
             continue
@@ -8503,7 +8514,11 @@ function Get-VmSession {
             $triedNames += $entry.Username
             $creds = New-Object System.Management.Automation.PSCredential ($entry.Username, $Common.LocalAdmin.Password)
             Write-Log "$VmName`: Trying credential '$($entry.Username)' (tag=$($entry.Tag))." -Verbose
+            $connectAttempts++
+            $swConnect = [System.Diagnostics.Stopwatch]::StartNew()
             $connectResult = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
+            $swConnect.Stop()
+            $swConnectTotalMs += $swConnect.Elapsed.TotalMilliseconds
             $ps = $connectResult.Session
             if ($ps -and $ps.Availability -eq "Available") {
                 $cacheKey = $entry.CacheKey
@@ -8529,6 +8544,10 @@ function Get-VmSession {
                 }
                 $global:ps_lastGoodCred[$VmName] = $entry.Tag
                 Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
+                Write-Log ("[StepTiming] {0} SessionCreate completed in {1} seconds (vmLookup={2}ms stateCheck={3}ms connect={4}ms attempts={5} tag={6})" -f `
+                        $VmName, [Math]::Round(($swVmLookup.Elapsed.TotalMilliseconds + $swStateCheckTotalMs + $swConnectTotalMs) / 1000, 1),
+                    [int]$swVmLookup.Elapsed.TotalMilliseconds, [int]$swStateCheckTotalMs, [int]$swConnectTotalMs,
+                    $connectAttempts, $entry.Tag) -LogOnly
                 $global:ps_cache[$cacheKey] = $ps
                 Set-VmSessionCacheStamp -Session $ps -VmName $VmName
                 Set-VmSessionPipelineEvent -Session $ps -Kind 'created'
