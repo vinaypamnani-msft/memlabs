@@ -8463,27 +8463,13 @@ function Get-VmSession {
         }
     }
 
-    # If we remember which credential last worked, move it to the front
+    # If we remember which credential last worked, move it to the front.
+    # In-process only, deliberately NOT persisted to the VM note. Measured: every non-primary
+    # win is a TRANSIENT -- all 5 observed 'local' wins were immediately followed by a
+    # 'primary' win on the same VM (a domain-join / reboot window where the domain credential
+    # briefly failed), so a persisted hint would guess wrong on the very next create, which is
+    # already the expensive one (33-62s). See perf-rerun-tuning-findings.
     $lastGood = $global:ps_lastGoodCred[$VmName]
-    $noteLastGoodCred = $null
-    $noteParsed = $false
-    if (-not $lastGood) {
-        # ps_lastGoodCred is per-PROCESS and VM_Config runs under Start-Job, so every fresh
-        # worker starts blind and re-discovers the credential. Measured: 5 creates tried the
-        # domain account first, failed after ~25s, then succeeded as 'local'. $vm.Notes is
-        # already in hand from the get-vm2 above, so seeding from it costs no extra WMI.
-        try {
-            if ($vm.Notes -like '*lastUpdate*') {
-                $noteObj = $vm.Notes | ConvertFrom-Json
-                $noteParsed = $true
-                if ($noteObj.LastGoodCred) {
-                    $noteLastGoodCred = "$($noteObj.LastGoodCred)"
-                    $lastGood = $noteLastGoodCred
-                }
-            }
-        }
-        catch { $noteParsed = $false }
-    }
     if ($lastGood) {
         $idx = -1
         for ($i = 0; $i -lt $credEntries.Count; $i++) {
@@ -8566,11 +8552,6 @@ function Get-VmSession {
                     Add-OrphanRunspace -Runspace $existingSession._OwnerRunspace -Session $existingSession -Reason 'cache slot overwritten' -VmName $VmName
                 }
                 $global:ps_lastGoodCred[$VmName] = $entry.Tag
-                # Survives the Start-Job process boundary that ps_lastGoodCred cannot. Written
-                # only when it changes, and only for a VM whose note actually parsed.
-                if ($noteParsed -and $noteLastGoodCred -ne $entry.Tag) {
-                    try { Update-VMNoteProperty -VmName $VmName -PropertyName 'LastGoodCred' -PropertyValue $entry.Tag } catch { }
-                }
                 Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
                 Write-Log ("[StepTiming] {0} SessionCreate completed in {1} seconds (vmLookup={2}ms stateCheck={3}ms connect={4}ms attempts={5} tag={6} hint={7} failed=[{8}])" -f `
                         $VmName, [Math]::Round(($swVmLookup.Elapsed.TotalMilliseconds + $swStateCheckTotalMs + $swConnectTotalMs) / 1000, 1),
