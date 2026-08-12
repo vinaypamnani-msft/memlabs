@@ -2467,6 +2467,8 @@ $global:VM_Config = {
 
         Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 5 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
+        $stopDscSw = [System.Diagnostics.Stopwatch]::StartNew()
+        $stopDscAttempts = 1
         # Scale the stop timeout with lab size. After the bounded in-guest stop,
         # the scriptblock always returns in ~47s regardless of VM count; only the
         # WinRM/PSDirect transport setup grows with lab size under host CPU/disk
@@ -2517,10 +2519,12 @@ $global:VM_Config = {
         # let an old DSC leak forward into the new push.
         $stopFailed = $result.ScriptBlockFailed -or ($result.ScriptBlockOutput -and ($result.ScriptBlockOutput.Stopped -eq $false))
         if ($stopFailed) {
+            $stopDscAttempts++
             Write-Progress2 $Activity -Status "Retry Stopping DSCs" -percentcomplete 5 -force
             $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
             $stopFailed = $result.ScriptBlockFailed -or ($result.ScriptBlockOutput -and ($result.ScriptBlockOutput.Stopped -eq $false))
             if ($stopFailed) {
+                $stopDscAttempts++
                 $lcmInfo = if ($result.ScriptBlockOutput -and $result.ScriptBlockOutput.LCMState) { " (LCM='$($result.ScriptBlockOutput.LCMState)')" } else { "" }
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC did not stop$lcmInfo; rebooting VM to clear the running configuration." -Warning
                 Write-Progress2 $Activity -Status "Restarting VM then Stopping DSCs" -percentcomplete 5 -force
@@ -2536,6 +2540,12 @@ $global:VM_Config = {
                 }
             }
         }
+
+        $stopDscSw.Stop()
+        # ~12.6s median on a steady-state re-run where there is nothing to stop -- the
+        # second-biggest un-instrumented link in the per-VM chain, so record what the
+        # guest actually decided as well as how long it took.
+        Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] StopRunningDsc completed in $([math]::Round($stopDscSw.Elapsed.TotalSeconds, 1)) seconds (attempts=$stopDscAttempts failed=$stopFailed preLcm='$(if ($sbo) { $sbo.PreLCMState } else { 'unknown' })' action='$(if ($sbo) { $sbo.Action } else { 'unknown' })' timeout=${stopTimeout}s)" -LogOnly
 
         if ($Phase -eq 2) {
             $retryCount = 0
@@ -2901,6 +2911,8 @@ $global:VM_Config = {
         if ($Phase -eq 2) {
 
             Write-Progress2 $Activity -Status "Injecting Tools" -percentcomplete 10 -force
+            $toolInjectSw = [System.Diagnostics.Stopwatch]::StartNew()
+            $toolInjectRecovered = $false
             $SkipAutoDeploy = $false
             if ($deployConfig.cmOptions.PrePopulateObjects) {
                 if ($deployConfig.cmOptions.Install) {
@@ -2920,6 +2932,7 @@ $global:VM_Config = {
                 # only power-cycles on NoContact heartbeat or repeated ChannelBroken
                 # evidence; healthy-heartbeat authentication failures are left intact.
                 Write-Progress2 $Activity -Status "Waiting for guarded guest recovery before retrying tools" -percentcomplete 12 -force
+                $toolInjectRecovered = $true
                 $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest -TimeoutMinutes 10
                 if ($connected) {
                     Write-Progress2 $Activity -Status "Retrying tool injection after guest recovery" -percentcomplete 13 -force
@@ -2938,6 +2951,11 @@ $global:VM_Config = {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection FAILED -- later phases depend on the injected tools. See the Copy-ItemSafe stall-diag lines above for why the copy died." -Failure -OutputStream
                 }
             }
+
+            $toolInjectSw.Stop()
+            # 13.8s median on a steady-state re-run. The existing ToolInject-* markers cover
+            # only the lookup/fingerprint preamble (<1s), so the copy itself was invisible.
+            Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] ToolInjectTotal completed in $([math]::Round($toolInjectSw.Elapsed.TotalSeconds, 1)) seconds (ok=$injectedOk recovered=$toolInjectRecovered)" -LogOnly
         }
         
         # copy language packs when locale is set to other than en-US
@@ -4002,6 +4020,9 @@ $global:VM_Config = {
 
         Write-Progress2 $Activity -Status "Clearing DSC Status" -percentcomplete 65 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName):DSC_ClearStatus Clearing previous DSC status"
+        $clearStatusSw = [System.Diagnostics.Stopwatch]::StartNew()
+        $clearStatusAttempts = 1
+        $clearStatusRebooted = $false
         $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder, $phaseRunGuid -DisplayName "DSC: Clear Old Status"
         if ($result.ScriptBlockFailed) {
             # DSC_ClearStatus now throws when LCM is still Busy after its 15s
@@ -4015,6 +4036,7 @@ $global:VM_Config = {
             $stopRetryFailed = $stopRetry.ScriptBlockFailed -or ($stopRetry.ScriptBlockOutput -and ($stopRetry.ScriptBlockOutput.Stopped -eq $false))
             if ($stopRetryFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Stop_RunningDSC retry also failed; rebooting VM to clear the LCM." -Warning
+                $clearStatusRebooted = $true
                 Stop-Vm2 -Name $currentItem.vmName
                 Start-Sleep -Seconds 10
                 Start-VM2 -Name $currentItem.vmName
@@ -4025,12 +4047,19 @@ $global:VM_Config = {
             }
             # -AsJob to match the first attempt above -- a sync retry has no timeout, so the
             # recovery path was less bounded than the thing it was recovering.
+            $clearStatusAttempts++
             $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder, $phaseRunGuid -DisplayName "DSC: Clear Old Status"
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status after Stop_RunningDSC retry / reboot. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
         }
+
+        $clearStatusSw.Stop()
+        # 17.5s median on a steady-state re-run and the single largest un-instrumented link
+        # in the per-VM chain, so it needs its own number rather than being inferred from
+        # the gap to the next unrelated log line.
+        Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] DscClearStatus completed in $([math]::Round($clearStatusSw.Elapsed.TotalSeconds, 1)) seconds (attempts=$clearStatusAttempts rebooted=$clearStatusRebooted)" -LogOnly
 
         $DSC_CreateSingleConfig = {
             param($DscFolder)

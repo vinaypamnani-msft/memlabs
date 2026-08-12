@@ -6283,11 +6283,23 @@ function Wait-ForVm {
 
     if ($PathToVerify) {
 
+        # This wait runs once per VM per phase; a SUCCESSFUL probe against an
+        # already-running VM measured 6.9s median / 301s aggregate on a steady-state
+        # re-run, so each part of it is timed rather than inferred from the gap
+        # between two unrelated log lines.
+        $wfvSw = [System.Diagnostics.Stopwatch]::StartNew()
+        [int]$wfvDiskMs = 0
+        [int]$wfvLookupMs = 0
+        [int]$wfvProbe1Ms = 0
+
         if (-not $SkipDiskTest.IsPresent) {
             #If we already copied a DSC at least once, Disks are valid. Run if this is the first time.
             Write-Progress2 "Testing Disks" -Status "Testing Disks" -percentcomplete 0 -force
-            if ((Get-VMHardDiskDrive -VMName $VmName).Count -eq 0) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM has no disks attached." -Failure
+            $wfvStepSw = [System.Diagnostics.Stopwatch]::StartNew()
+            $wfvDiskCount = @(Get-VMHardDiskDrive -VMName $VmName -ErrorAction SilentlyContinue).Count
+            $wfvDiskMs = [int]$wfvStepSw.Elapsed.TotalMilliseconds
+            if ($wfvDiskCount -eq 0) {
+                Write-Log "$VmName`: VM has no disks attached." -Failure
                 return $false
             }
         }
@@ -6299,8 +6311,11 @@ function Wait-ForVm {
             $msg = "Waiting for $PathToVerify to exist"
         }
 
+        $wfvStepSw = [System.Diagnostics.Stopwatch]::StartNew()
         $vmTest = Get-VM2 -Fallback -Name $VmName
-        if ($vmTest.State -ne "Running") {
+        $wfvLookupMs = [int]$wfvStepSw.Elapsed.TotalMilliseconds
+        $vmWasRunning = ($vmTest -and $vmTest.State -eq "Running")
+        if (-not $vmWasRunning) {
             start-vm2 -name $vmName
             start-sleep -seconds 15
         }
@@ -6324,8 +6339,12 @@ function Wait-ForVm {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $msg
             }
             catch {}
-            # Only check VM state every 3rd iteration or on first attempt
-            if ($count -eq 1 -or $count % 3 -eq 0) {
+            # Only check VM state every 3rd iteration or on first attempt.
+            # The count=1 read repeats the lookup done immediately above this loop, so
+            # it is only worth paying when that lookup found the VM stopped and we just
+            # issued a start -- otherwise it is a second Hyper-V round trip for a state
+            # we read milliseconds ago.
+            if (($count -eq 1 -and -not $vmWasRunning) -or ($count % 3 -eq 0)) {
                 $vmTest = Get-VM2 -Fallback -Name $VmName
                 if ($vmTest.State -ne "Running") {
                     stop-vm2 -name $vmName -TurnOff | Out-Null
@@ -6343,9 +6362,11 @@ function Wait-ForVm {
             # -SessionMaxRetries 1: the outer do/until loop already retries, and
             # 3 retries x 3 credentials x 30s timeout = 4.5 min per call freezes the
             # progress display and starves the timeout check.
+            $wfvProbeSw = if ($count -eq 1) { [System.Diagnostics.Stopwatch]::StartNew() } else { $null }
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SessionMaxRetries 1 -ScriptBlock {
                 [PSCustomObject]@{ Path = (Test-Path $using:PathToVerify); Root = (Test-Path "C:\") }
             } -SuppressLog
+            if ($wfvProbeSw) { $wfvProbe1Ms = [int]$wfvProbeSw.Elapsed.TotalMilliseconds }
             $ready = $true -eq $out.ScriptBlockOutput.Path
             if ($ready) {
                 $channelBrokenCount = 0
@@ -6434,6 +6455,9 @@ function Wait-ForVm {
 
 
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
+
+        $wfvSw.Stop()
+        Write-Log "[StepTiming] $VmName WaitForVm completed in $([math]::Round($wfvSw.Elapsed.TotalSeconds, 1)) seconds (ready=$ready polls=$count disk=${wfvDiskMs}ms vmLookup=${wfvLookupMs}ms probe1=${wfvProbe1Ms}ms skipDisk=$($SkipDiskTest.IsPresent) wasRunning=$vmWasRunning path='$PathToVerify')" -LogOnly
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
