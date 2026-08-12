@@ -4474,9 +4474,15 @@ function Add-DHCPReservationIsolated {
     while ($attempt -lt $MaxAttempts) {
         $attempt++
         try {
-            Invoke-WithDhcpMutex -ScriptBlock {
+            $outcome = Invoke-WithDhcpMutex -ScriptBlock {
                 Invoke-IsolatedCim -ArgumentList $ScopeId, $IPAddress, $Mac, $Description, $purgeMac -ScriptBlock {
                     param($scopeId, $ip, $mac, $desc, $purgeMac)
+
+                    # Every branch records why it fired, and the whole set is returned to the
+                    # caller to log. The success path used to be completely silent, so a
+                    # reservation logged as "created" that was absent minutes later left no
+                    # evidence of which branch ran or of what the server did with it.
+                    $notes = [System.Collections.Generic.List[string]]::new()
 
                     # Drop stale reservations this MAC still holds elsewhere (a VM that
                     # moved subnets, or a rerun against a changed config). Anything already
@@ -4492,6 +4498,7 @@ function Add-DHCPReservationIsolated {
                                 if ($staleIp -eq $ip) { continue }
                                 Remove-DhcpServerv4Reservation -ScopeId $s -ClientId $mac -ErrorAction SilentlyContinue | Out-Null
                                 try { Remove-DhcpServerv4Lease -IPAddress $staleIp -ErrorAction SilentlyContinue | Out-Null } catch { }
+                                $notes.Add("purged our MAC's stale reservation $staleIp in scope $s")
                             }
                         }
                     }
@@ -4530,7 +4537,8 @@ function Add-DHCPReservationIsolated {
                         $existingMac = ($existing.ClientId -replace '[-:]', '').ToLower()
                         if ($existingMac -eq $ourMac) {
                             # Reservation already exists with our MAC -- idempotent success.
-                            return
+                            $notes.Add("already reserved to our MAC; left unchanged")
+                            return ($notes.ToArray() -join '; ')
                         }
                         if ($null -eq $switchMacs) { $switchMacs = & $resolveSwitchMacs }
                         if ($switchMacs.ContainsKey($existingMac)) {
@@ -4539,6 +4547,7 @@ function Add-DHCPReservationIsolated {
                         # Orphan reservation -- reclaim the IP (drop any matching lease too).
                         Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null
                         try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null } catch { }
+                        $notes.Add("reclaimed orphan reservation on $ip from MAC $existingMac")
                     }
                     else {
                         # No reservation, but a stale ACTIVE LEASE held by a
@@ -4555,13 +4564,55 @@ function Add-DHCPReservationIsolated {
                                 if ($null -eq $switchMacs) { $switchMacs = & $resolveSwitchMacs }
                                 if (-not $switchMacs.ContainsKey($leaseMac)) {
                                     try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null } catch { }
+                                    $notes.Add("cleared orphan lease on $ip held by MAC $leaseMac")
+                                }
+                                else {
+                                    $notes.Add("$ip is leased to live switch member MAC $leaseMac; lease left in place")
                                 }
                             }
                         }
                     }
 
                     Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ClientId $mac -Description $desc -ErrorAction Stop | Out-Null
-                } | Out-Null
+
+                    # Read the reservation back before reporting success. Add-* returning
+                    # without an error is NOT proof the server kept it: on cstest5 two VMs
+                    # were logged as created here and then had no reservation in three
+                    # independent later reads (Phase 2 pre-cache, Phase 3 pre-cache, the
+                    # Phase 11 audit). Throwing here routes it through the retry loop and,
+                    # if it still won't stick, fails at the point of the lie instead of
+                    # three hours later in Phase 11.
+                    $verify = $null
+                    try { $verify = Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
+                    if (-not $verify) {
+                        throw "post-add read-back found NO reservation at $ip in scope $scopeId, although Add-DhcpServerv4Reservation reported success"
+                    }
+                    $verifyMac = ([string]$verify.ClientId -replace '[-:]', '').ToLower()
+                    if ($verifyMac -ne $ourMac) {
+                        throw "post-add read-back found $ip in scope $scopeId reserved to MAC $verifyMac, not $ourMac"
+                    }
+                    $notes.Add("added and read back $ip")
+
+                    # A lease this MAC still holds at ANOTHER address in the same scope is
+                    # the one condition that can quietly undo the reservation afterwards:
+                    # the guest booted and leased before the reservation existed, and keeps
+                    # renewing the older client record. Nothing else in the run can see it.
+                    $ourLeases = @()
+                    try { $ourLeases = @(Get-DhcpServerv4Lease -ScopeId $scopeId -ClientId $mac -ErrorAction SilentlyContinue) } catch { }
+                    foreach ($l in $ourLeases) {
+                        if (-not $l) { continue }
+                        $lIp = [string]$l.IPAddress
+                        if ($lIp -and $lIp -ne $ip) {
+                            $notes.Add("WARNING our MAC also holds lease $lIp in scope $scopeId (state $($l.AddressState))")
+                        }
+                    }
+
+                    $notes.ToArray() -join '; '
+                }
+            }
+            $summary = @($outcome | Where-Object { $_ -is [string] -and $_ }) | Select-Object -Last 1
+            if ($summary) {
+                Write-Log "${tag}Add-DHCPReservationIsolated: $IPAddress (Scope=$ScopeId, MAC=$Mac): $summary" -LogOnly
             }
             if ($attempt -gt 1) {
                 Write-Log "${tag}Add-DHCPReservationIsolated: succeeded for $IPAddress on attempt $attempt/$MaxAttempts (Scope=$ScopeId, MAC=$Mac)" -LogOnly
@@ -5497,7 +5548,7 @@ function New-VirtualMachine {
                             if ($existing) {
                                 Write-Log "$VmName`: DHCP reservation for MAC=$vmMac points to $existing but AssignedIP is $assignedIP; correcting to avoid an address collision" -LogOnly
                             }
-                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName" -PurgeMacFirst
+                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName" -LogContext $VmName -PurgeMacFirst
                             Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
                         }
                     }

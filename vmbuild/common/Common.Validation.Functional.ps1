@@ -1250,6 +1250,20 @@ function Test-DhcpReservations {
         $reservedIp = $resvMap["$scopeId|$mac"]
 
         if (-not $reservedIp) {
+            # The batch read is a single snapshot taken before the loop. Re-ask the
+            # server for just this MAC before failing a whole phase on its absence,
+            # so "the reservation is gone" is never confused with "the batch read
+            # was incomplete". Costs one isolated runspace, and only on this path.
+            $directIp = $null
+            try { $directIp = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $mac }
+            catch { Write-Log "[Phase $Phase] [$label]: $($vm.vmName): direct reservation re-read failed: $_" -LogOnly }
+            if ($directIp) {
+                Write-Log "[Phase $Phase] [$label]: $($vm.vmName): batch read missed reservation $directIp (scope $scopeId, MAC=$mac); direct re-read found it" -LogOnly
+                $reservedIp = $directIp
+            }
+        }
+
+        if (-not $reservedIp) {
             $passed = $false
             $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: FAIL: $($vm.vmName) has no DHCP reservation in scope $scopeId (expected $expectedIp, MAC=$mac)"; Level = 'Failure' })
             continue
@@ -1275,6 +1289,18 @@ function Test-DhcpReservations {
             $passed = $false
             $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: FAIL: IP $ip is reserved for multiple VMs: $($ipOwners[$ip] -join ', ')"; Level = 'Failure' })
         }
+    }
+
+    if ($checked -eq 0) {
+        # An audit that inspected nothing is not a passing audit. This printed
+        # "All 0 DHCP reservation(s) verified" on three separate lab runs.
+        $candidates = @($DeployConfig.virtualMachines | Where-Object {
+                -not $_.hidden -and $_.role -ne 'OSDClient' -and (-not $_.domain -or $_.domain -eq $Domain)
+            })
+        $why = if ($candidates.Count -gt 0) { "$($candidates.Count) eligible VM(s) carry no AssignedIP" } else { 'no VM in this domain is eligible' }
+        Write-Log "[Phase $Phase] [$label]: nothing was audited -- $why" -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: WARN: no DHCP reservation was verified ($why)"; Level = 'Warning' })
+        return $passed
     }
 
     if ($passed) {

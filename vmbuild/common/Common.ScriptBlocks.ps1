@@ -2855,8 +2855,8 @@ $global:VM_Config = {
                                         elseif ($currentItem.network) { $realnetwork = $currentItem.network }
                                         else { $realnetwork = $deployConfig.vmOptions.network }
                                     }
-                                    Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $resolvedIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName)" -PurgeMacFirst
-                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation attempted for $resolvedIP in scope $realnetwork" -LogOnly
+                                    Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $resolvedIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName)" -LogContext $currentItem.vmName -PurgeMacFirst
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $resolvedIP in scope $realnetwork (none was cached for MAC $vmMac)" -LogOnly
                                 }
                                 else {
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): No MAC resolved; skipped the DHCP reservation for $resolvedIP" -LogOnly
