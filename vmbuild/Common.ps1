@@ -6635,11 +6635,17 @@ function Invoke-VmCommand {
             $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
-        if (-not $ps) {
+        # Get-VmSession already refuses to cycle credentials WITHIN a pass once the
+        # transport is proven dead ("they all ride the SAME broken channel"). The same
+        # reasoning applies to these outer rungs, which were re-running the whole
+        # MaxRetries ladder under a different account: CSB-W19SERVER1 burned 95s on a
+        # local-admin ladder, then another 95s on a domain-admin one, while Hyper-V
+        # reported the guest 'Operating normally' -- only a reboot cleared it.
+        if (-not $ps -and -not $sessionDiag.ChannelBroken) {
             $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
-        if (-not $ps -and $VmDomainName -eq "WORKGROUP" -and -not $SkipDomainFallback) {
+        if (-not $ps -and -not $sessionDiag.ChannelBroken -and $VmDomainName -eq "WORKGROUP" -and -not $SkipDomainFallback) {
             $note = Get-VMNote -VMName $VmName
             $domain2 = $note.domain
             $adminName = $note.adminName
@@ -6652,6 +6658,9 @@ function Invoke-VmCommand {
         $failed = ($null -eq $ps)
         if ($failed) {
             $return.ChannelBroken = [bool]$sessionDiag.ChannelBroken
+            if ($sessionDiag.ChannelBroken) {
+                Write-Log "$VmName`: '$DisplayName' skipped the remaining credential ladders -- the transport is broken, not the credential." -LogOnly -Verbose
+            }
         }
 
         # Run script block inside VM
