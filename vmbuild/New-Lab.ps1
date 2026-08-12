@@ -689,6 +689,8 @@ try {
     # write their CMTrace logs into this same folder. State the relationship once so a
     # reader never has to infer it from the bias suffix on individual lines.
     try {
+        # TimeSpan has no pos;neg format sections and 'hh\:mm' drops the sign, so format by hand.
+        $fmtOff = { param($o) '{0}{1}' -f $(if ($o.Ticks -ge 0) { '+' } else { '-' }), $o.ToString('hh\:mm') }
         $hostTz = [TimeZoneInfo]::Local
         $hostOff = [DateTimeOffset]::Now.Offset
         # The bias stamped on every host log line claims local + bias == UTC. Check it here
@@ -703,14 +705,14 @@ try {
         $labOff = $null
         try { $labOff = ([TimeZoneInfo]::FindSystemTimeZoneById($labTzId)).GetUtcOffset([DateTime]::UtcNow) } catch { }
         if ($null -eq $labOff) {
-            Write-Log "Timezone: host '$($hostTz.Id)' (UTC$($hostOff.ToString('\+hh\:mm;\-hh\:mm'))); lab VMs '$labTzId' -- NOT a recognized timezone id on this host, so Phase 1 Set-TimeZone will fail and the guests will keep the base image's zone." -Warning
+            Write-Log "Timezone: host '$($hostTz.Id)' (UTC$(& $fmtOff $hostOff)); lab VMs '$labTzId' -- NOT a recognized timezone id on this host, so Phase 1 Set-TimeZone will fail and the guests will keep the base image's zone." -Warning
         }
         elseif ($labOff -eq $hostOff) {
-            Write-Log "Timezone: host and lab VMs both '$labTzId' (UTC$($hostOff.ToString('\+hh\:mm;\-hh\:mm'))); host and guest log timestamps line up directly." -LogOnly
+            Write-Log "Timezone: host and lab VMs both '$labTzId' (UTC$(& $fmtOff $hostOff)); host and guest log timestamps line up directly." -LogOnly
         }
         else {
             $delta = $labOff - $hostOff
-            Write-Log "Timezone: host '$($hostTz.Id)' (UTC$($hostOff.ToString('\+hh\:mm;\-hh\:mm'))) but lab VMs run '$labTzId' (UTC$($labOff.ToString('\+hh\:mm;\-hh\:mm'))). Guest-written timestamps are $($delta.ToString('\+hh\:mm;\-hh\:mm')) versus host lines -- compare using the +bias suffix on each CMTrace time field, not the bare clock time." -LogOnly
+            Write-Log "Timezone: host '$($hostTz.Id)' (UTC$(& $fmtOff $hostOff)) but lab VMs run '$labTzId' (UTC$(& $fmtOff $labOff)). Guest-written timestamps are $(& $fmtOff $delta) versus host lines -- compare using the +bias suffix on each CMTrace time field, not the bare clock time." -LogOnly
         }
     }
     catch {

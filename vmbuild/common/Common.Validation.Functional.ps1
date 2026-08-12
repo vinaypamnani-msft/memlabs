@@ -10836,7 +10836,11 @@ function Test-CMSiteWideFunctionality {
                         # "local" here is the SUP's zone, which a lab may set away from the
                         # host's, so the offset is stated rather than implied.
                         $tzTag = ''
-                        try { $tzTag = " UTC$(([TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now)).ToString('\+hh\:mm;\-hh\:mm'))" } catch { }
+                        try {
+                            $tzOff = [DateTimeOffset]::Now.Offset
+                            $tzTag = ' UTC{0}{1}' -f $(if ($tzOff.Ticks -ge 0) { '+' } else { '-' }), $tzOff.ToString('hh\:mm')
+                        }
+                        catch { }
                         $toLocal = {
                             param($dt)
                             if ($null -eq $dt) { return $null }
