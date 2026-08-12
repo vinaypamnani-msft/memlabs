@@ -657,14 +657,16 @@
                 # return LLMNR results that mask a missing A record.
                 # With multiple DCs (DC + BDC), the record might exist on one
                 # but not the other due to replication lag.
+                $vlog = { param($m) try { Write-VerboseEx -Message $m -Component 'VerifyListenerDns/Test' } catch { Write-Verbose $m } }
                 try {
                     $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
                     if ($allDCs.Count -eq 0) { $allDCs = @($using:dcForDns) }
                     foreach ($dc in $allDCs) {
+                        & $vlog "query A '$($using:listenerNameForDns)' on DC '$dc'"
                         $rec = @(Get-DnsServerResourceRecord -ZoneName $using:DomainName -Name $using:listenerNameForDns `
                             -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
                         if ($rec.Count -eq 0) {
-                            Write-Verbose "DNS A record for '$($using:listenerNameForDns)' missing on DC '$dc'"
+                            & $vlog "DNS A record for '$($using:listenerNameForDns)' missing on DC '$dc'"
                             return $false
                         }
                     }
@@ -678,8 +680,17 @@
                 # Phase 5 must not proceed without listener DNS — Phase 8
                 # setup.exe will fail with 'untrusted domain' if FQDN
                 # resolution is missing.
+                #
+                # Every call below is an unbounded CIM/cluster round trip with no
+                # native timeout, and this resource posts no status of its own, so a
+                # hang here freezes the phase under the PREVIOUS caption (the SPN
+                # step). Bracket each one so the breadcrumb names the call we did not
+                # come back from.
+                $vlog = { param($m) try { Write-VerboseEx -Message $m -Component 'VerifyListenerDns/Set' } catch { Write-Verbose $m } }
+                & $vlog 'enter Get-ADDomainController -Filter *'
                 $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
                 if ($allDCs.Count -eq 0) { $allDCs = @($using:dcForDns) }
+                & $vlog "DCs: $($allDCs -join ', ')"
                 $dcShortNames = @($allDCs | ForEach-Object { ($_ -split '\.')[0] })
                 $listenerName = $using:listenerNameForDns
                 $listenerIP   = $using:listenerIpForDns
@@ -687,46 +698,57 @@
                 $primaryDC    = $using:dcForDns
                 $maxAttempts  = 5
                 $registered   = $false
+                $addedRecord  = $false
 
                 for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-                    Write-Verbose "VerifyListenerDns: attempt $attempt/$maxAttempts"
+                    & $vlog "VerifyListenerDns: attempt $attempt/$maxAttempts"
 
                     # Attempt a) Register the A record on the primary DC (idempotent).
                     if (-not $registered) {
                         try {
+                            & $vlog "enter Get-DnsServerResourceRecord on '$primaryDC'"
                             $existing = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $listenerName `
                                 -RRType A -ComputerName $primaryDC -ErrorAction SilentlyContinue)
                             if ($existing.Count -eq 0) {
+                                & $vlog "enter Add-DnsServerResourceRecordA $listenerName -> $listenerIP on '$primaryDC'"
                                 Add-DnsServerResourceRecordA -ZoneName $zoneName -Name $listenerName `
                                     -IPv4Address $listenerIP -ComputerName $primaryDC -ErrorAction Stop
-                                Write-Verbose "Registered DNS A record: $listenerName -> $listenerIP on DC '$primaryDC'"
+                                & $vlog "Registered DNS A record: $listenerName -> $listenerIP on DC '$primaryDC'"
+                                $addedRecord = $true
                             }
                             else {
-                                Write-Verbose "DNS A record already exists on primary DC '$primaryDC'"
+                                & $vlog "DNS A record already exists on primary DC '$primaryDC'"
                             }
                             $registered = $true
                         }
                         catch {
-                            Write-Verbose "DNS registration attempt $attempt failed: $($_.Exception.Message)"
+                            & $vlog "DNS registration attempt $attempt failed: $($_.Exception.Message)"
                         }
                     }
 
                     # Attempt b) Bounce the listener's Network Name resource so
                     # the cluster service re-registers DNS for future failovers.
-                    if ($attempt -le 2) {
+                    # Only when the record was genuinely absent on the primary DC:
+                    # the common case here is a record that exists but has not
+                    # replicated to the BDC yet, and taking the AG listener offline
+                    # to fix a replication delay is both useless and disruptive.
+                    if ($addedRecord -and $attempt -le 2) {
+                        & $vlog 'enter Get-ClusterResource (Network Name)'
                         $nnRes = Get-ClusterResource -ErrorAction SilentlyContinue |
                             Where-Object { $_.ResourceType -eq 'Network Name' -and $_.OwnerGroup -eq $listenerName }
                         if ($nnRes) {
+                            & $vlog "enter Stop-ClusterResource '$($nnRes.Name)'"
                             $nnRes | Stop-ClusterResource -ErrorAction SilentlyContinue
                             Start-Sleep -Seconds 2
+                            & $vlog "enter Start-ClusterResource '$($nnRes.Name)'"
                             $nnRes | Start-ClusterResource -ErrorAction SilentlyContinue
-                            Write-Verbose "Bounced cluster Network Name resource for '$listenerName'"
+                            & $vlog "Bounced cluster Network Name resource for '$listenerName'"
                         }
                     }
 
                     # Attempt c) Force AD replication so all DCs pick up the record.
                     if ($allDCs.Count -gt 1) {
-                        Write-Verbose "Forcing AD replication across $($allDCs.Count) DCs"
+                        & $vlog "Forcing AD replication across $($allDCs.Count) DCs"
                         $replJob = Start-Job -ScriptBlock {
                             param($dcNames)
                             $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
@@ -734,12 +756,14 @@
                         $null = Wait-Job $replJob -Timeout 30
                         if ($replJob.State -eq 'Running') { Stop-Job $replJob -ErrorAction SilentlyContinue }
                         Remove-Job $replJob -Force -ErrorAction SilentlyContinue
+                        & $vlog 'AD replication job drained'
                     }
                     Start-Sleep -Seconds 5
 
                     # Verify the record exists on ALL DCs.
                     $missingDCs = @()
                     foreach ($dc in $allDCs) {
+                        & $vlog "enter verify Get-DnsServerResourceRecord on '$dc'"
                         $verify = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $listenerName `
                             -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
                         if ($verify.Count -eq 0) {
@@ -747,10 +771,10 @@
                         }
                     }
                     if ($missingDCs.Count -eq 0) {
-                        Write-Verbose "Verified: DNS A record exists on all $($allDCs.Count) DC(s) (attempt ${attempt})"
+                        & $vlog "Verified: DNS A record exists on all $($allDCs.Count) DC(s) (attempt ${attempt})"
                         return
                     }
-                    Write-Verbose "Attempt ${attempt}: record still missing on DC(s): $($missingDCs -join ', ')"
+                    & $vlog "Attempt ${attempt}: record still missing on DC(s): $($missingDCs -join ', ')"
                     if ($attempt -lt $maxAttempts) {
                         Start-Sleep -Seconds 10
                     }

@@ -3104,6 +3104,79 @@ class MoveComputerToOU {
     }
 }
 
+# Append-only breadcrumb trail for a wedged LCM. Deliberately NOT under
+# C:\staging\DSC: that tree is re-copied and DSC_Status.txt is cleared at the top
+# of every phase, and the whole value here is surviving both -- plus a WmiPrvSE
+# kill, which is why every line is opened, written and closed on the spot rather
+# than buffered. pid is recorded because a changed pid across two lines is the
+# only in-guest proof that the DSC provider host died mid-apply.
+$script:LcmLogPath = 'C:\staging\LCMLog.txt'
+
+function Add-LcmLogLine {
+    param(
+        [string] $Text,
+        [string] $Component
+    )
+    try {
+        if (-not $Component) { $Component = 'LCM' }
+        $line = '{0} pid={1,-6} tid={2,-4} {3,-34} {4}{5}' -f `
+            (Get-Date -Format 'MM-dd HH:mm:ss.fff'), $PID,
+            [System.Threading.Thread]::CurrentThread.ManagedThreadId,
+            $Component, ("" + $Text).Trim(), [Environment]::NewLine
+
+        $dir = Split-Path -Parent $script:LcmLogPath
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -Path $dir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+        # An 11-phase build appends to this all day; roll rather than fill the disk.
+        try {
+            $existing = Get-Item -LiteralPath $script:LcmLogPath -ErrorAction SilentlyContinue
+            if ($existing -and $existing.Length -gt 8MB) {
+                Move-Item -LiteralPath $script:LcmLogPath -Destination "$($script:LcmLogPath).1" -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch {}
+        # DSC applies resources serially, but ScriptWorkflow and the engine can both
+        # be logging; a sharing violation must cost a retry, never an exception.
+        for ($i = 0; $i -lt 3; $i++) {
+            try {
+                [System.IO.File]::AppendAllText($script:LcmLogPath, $line)
+                return
+            }
+            catch { Start-Sleep -Milliseconds 25 }
+        }
+    }
+    catch {}
+}
+
+function Write-VerboseEx {
+    # Write-Verbose alone is a dead end here: a pushed configuration is not started
+    # -Verbose, so the resource's verbose stream is discarded and the one description
+    # of the call that hung never leaves the node. Mirror it to a file the LCM does
+    # not own, which the host pulls at the stranded point (Common.ScriptBlocks.ps1)
+    # rather than at phase end -- a phase that never ends is the case this is for.
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [AllowEmptyString()]
+        [string] $Message,
+        [string] $Component
+    )
+    try { Write-Verbose $Message } catch {}
+    if (-not $Component) {
+        try {
+            try {
+                [void](Get-Variable this -ErrorAction Stop)
+                $Component = $this.GetType().Name
+            }
+            catch {
+                $Component = (Get-PSCallStack)[1].Command
+            }
+        }
+        catch {}
+    }
+    Add-LcmLogLine -Text $Message -Component $Component
+}
+
 function Write-Status {
     param(
         [String] $Status
@@ -3157,6 +3230,9 @@ function Write-Status {
             }
             catch {}
             $Text = $_Status.ToString().Trim()
+            # Same file as Write-VerboseEx, so the captions and the verbose detail
+            # between them read as one ordered timeline.
+            Add-LcmLogLine -Text $Text -Component $caller
             $CallingFunction = Get-PSCallStack | Select-Object -first 2 | select-object -last 1
             $context = $CallingFunction.Command
             if (-not $context) {

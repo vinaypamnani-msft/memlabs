@@ -5330,7 +5330,9 @@ $global:VM_Config = {
         $deadWorkflowMax = 3               # after this many, the wait is provably unclearable -- fail instead of warning forever
         $lcmIdleSince = $null              # when the DSC LCM was FIRST seen continuously idle (null = not idle / unknown)
         $lcmRebootPendingSince = $null     # when the DSC LCM was FIRST seen parked reboot-pending (null = not parked / unknown)
-        $lcmProbeStartMinutes = 5          # begin sampling the guest LCM once the status has been frozen this long
+        $lcmDetail = ''                    # LCMStateDetail from the last sample -- names the resource the engine is inside
+        $lastLcmDetail = ''                # last LCMStateDetail logged, so only CHANGES are recorded
+        $lcmProbeStartMinutes = 2          # begin sampling the guest LCM once the status has been frozen this long
         $rebootStuckMinutes = 4            # resume/restart the VM once a stranded PendingConfiguration stays this long with frozen status
         $rebootPendingStuckMinutes = 2     # restart the VM once the LCM stays reboot-pending (reboot genuinely owed) this long with frozen status -- shorter than the stranded case because the LCM is literally asking for a restart
         $lcmPendingNoRebootSince = $null   # when the LCM was FIRST seen PendingConfiguration with NO reboot owed (stranded apply)
@@ -6032,13 +6034,30 @@ $global:VM_Config = {
                             # (the recorded fact that the last apply asked for a restart). Get-DscConfigurationStatus
                             # throws while the LCM is Busy, so a populated RebootRequested also implies 'not Busy'.
                             $lcmCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
-                                $st = try { (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState } catch { 'unreachable' }
+                                # LCMStateDetail is the only thing on the node that NAMES the resource the
+                                # engine is currently inside. The status caption is written by our own
+                                # WriteStatus resources, so when a STOCK resource hangs (SqlAG,
+                                # ADServicePrincipalName, a bare Script) the caption stays frozen on the
+                                # previous step and nothing else identifies the real culprit.
+                                $st = 'unreachable'
+                                $detail = ''
+                                try {
+                                    $lcm = Get-DscLocalConfigurationManager -ErrorAction Stop
+                                    $st = "$($lcm.LCMState)"
+                                    $detail = "$($lcm.LCMStateDetail)"
+                                }
+                                catch { }
                                 $rr = $false
                                 try { $rr = [bool]((Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1).RebootRequested) } catch { }
-                                [PSCustomObject]@{ LCMState = $st; RebootRequested = $rr }
+                                [PSCustomObject]@{ LCMState = $st; RebootRequested = $rr; LCMStateDetail = $detail }
                             } -SuppressLog
                             $lcmReadable = (-not $lcmCheck.ScriptBlockFailed) -and $lcmCheck.ScriptBlockOutput
                             $lcmState = if ($lcmReadable) { [string]$lcmCheck.ScriptBlockOutput.LCMState } else { 'unreachable' }
+                            $lcmDetail = if ($lcmReadable) { [string]$lcmCheck.ScriptBlockOutput.LCMStateDetail } else { '' }
+                            if ($lcmDetail -and $lcmDetail -ne $lastLcmDetail) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM state=$lcmState inside '$lcmDetail' (status frozen ${staleMins}m)." -LogOnly
+                                $lastLcmDetail = $lcmDetail
+                            }
                             $rebootRequested = $lcmReadable -and $lcmCheck.ScriptBlockOutput.RebootRequested
                             # A reboot is genuinely OWED only when the last apply asked for one (RebootRequested)
                             # or the in-memory state is PendingReboot. A bare PendingConfiguration (pending.mof on
@@ -6188,7 +6207,9 @@ $global:VM_Config = {
                                 # TIER 1: gentle in-place resume (fire-and-forget, bounded). No reboot.
                                 $dscResumeCount++
                                 $dscResumeTotal++
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM stranded PendingConfiguration for ${pendingMins}m (no reboot owed) with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Resuming the pending config in place: Stop + Start-DscConfiguration -UseExisting (resume $dscResumeCount/$dscResumeMax this stall, $dscResumeTotal/$dscResumeTotalMax this phase)." -Warning -OutputStream
+                                $detailText = ''
+                                if ($lcmDetail) { $detailText = " LCM was inside '$lcmDetail'." }
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM stranded PendingConfiguration for ${pendingMins}m (no reboot owed) with status unchanged for ${staleMins}m ('$($currentStatus.Trim())').$detailText Resuming the pending config in place: Stop + Start-DscConfiguration -UseExisting (resume $dscResumeCount/$dscResumeMax this stall, $dscResumeTotal/$dscResumeTotalMax this phase)." -Warning -OutputStream
                                 # Capture the tail of the guest's most recent DSC ConfigurationStatus record
                                 # (C:\Windows\System32\Configuration\ConfigurationStatus\*.json -- the actual last
                                 # LCM run, what Get-DscConfigurationStatus reads) so the build log shows which
@@ -6203,10 +6224,11 @@ $global:VM_Config = {
                                     Stop-DscConfiguration -Force -ErrorAction SilentlyContinue
                                 } -SuppressLog
 
-                                $dscEventsTail = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
+                                $dscEventsTail = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 180 -ScriptBlock {
                                     Start-Sleep -Seconds 3   # let the LCM release its handles after the stop
                                     $sb = New-Object System.Text.StringBuilder
                                     $add = { param($t) $null = $sb.AppendLine($t) }
+                                    $since = (Get-Date).AddMinutes(-45)
 
                                     $scPath = Join-Path $env:windir 'System32\Configuration\ConfigurationStatus'
                                     $f = Get-ChildItem -Path $scPath -Filter '*.details.json' -ErrorAction SilentlyContinue |
@@ -6217,7 +6239,12 @@ $global:VM_Config = {
                                     }
                                     if (-not $f) { & $add "ConfigurationStatus: no records found under $scPath" }
                                     else {
-                                        & $add "ConfigurationStatus record: $($f.Name) (written $($f.LastWriteTime), $([Math]::Round($f.Length/1KB))KB)"
+                                        # The record file stops growing when the engine stops finishing
+                                        # resources, so its LastWriteTime is the moment the apply died --
+                                        # usually LATER than the frozen caption, which is what proves the
+                                        # stall is in a resource AFTER the last thing that got logged.
+                                        $since = $f.LastWriteTime.AddMinutes(-5)
+                                        & $add "ConfigurationStatus record: $($f.Name) (last resource record written $($f.LastWriteTime), $([Math]::Round($f.Length/1KB))KB)"
                                         $raw = $null
                                         try { $raw = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop }
                                         catch { & $add "  read failed even after stop: $($_.Exception.Message)" }
@@ -6252,20 +6279,106 @@ $global:VM_Config = {
                                                     }
                                                 }
                                             }
+                                            else {
+                                                # A record truncated by a dying engine will not parse -- which is
+                                                # exactly the run worth reading. Records are appended in execution
+                                                # order, so the LAST id in the file is the last resource to finish
+                                                # and the stall is in whatever came after it.
+                                                $ids = @([regex]::Matches($raw, '"ResourceId"\s*:\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+                                                if ($ids.Count -gt 0) {
+                                                    & $add "  --- raw scan: $($ids.Count) resource id(s), last 12 in execution order (stall is AFTER the last) ---"
+                                                    foreach ($id in @($ids | Select-Object -Last 12)) { & $add "    $id" }
+                                                }
+                                                else { & $add "  raw scan found no ResourceId tokens." }
+                                            }
                                         }
                                     }
 
-                                    # The operational channel names the resource that was executing, which the
-                                    # status record does not show for an apply that never finished.
-                                    & $add "--- Microsoft-Windows-DSC/Operational (last 25) ---"
-                                    try {
-                                        foreach ($e in @(Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 25 -ErrorAction Stop)) {
-                                            $m = ($e.Message -replace '\s+', ' ').Trim()
-                                            if ($m.Length -gt 200) { $m = $m.Substring(0, 200) }
-                                            & $add ("    {0:HH:mm:ss} [{1}] {2}" -f $e.TimeCreated, $e.LevelDisplayName, $m)
+                                    # Which document is staged tells apart 'interrupted mid-apply' (Pending.mof
+                                    # survives) from 'finished and went idle' (Current.mof only).
+                                    & $add "--- C:\Windows\System32\Configuration ---"
+                                    foreach ($d in @('Current.mof', 'Pending.mof', 'Previous.mof', 'DSCEngineCache.mof')) {
+                                        $p = Join-Path $env:windir "System32\Configuration\$d"
+                                        $i = Get-Item -LiteralPath $p -ErrorAction SilentlyContinue
+                                        if ($i) { & $add ("    {0,-20} {1}  {2}KB" -f $d, $i.LastWriteTime, [Math]::Round($i.Length / 1KB)) }
+                                    }
+
+                                    # Win32 only -- a WMI query cannot describe a wedged WMI. A provider host
+                                    # started AFTER the config began, with no older sibling, means the original
+                                    # host died and took the apply with it.
+                                    & $add "--- WmiPrvSE / DSC hosts (Win32, no WMI) ---"
+                                    foreach ($pn in @('WmiPrvSE', 'WmiApSrv', 'dsc')) {
+                                        foreach ($pr in @(Get-Process -Name $pn -ErrorAction SilentlyContinue)) {
+                                            $st = 'unknown'
+                                            $cpu = '?'
+                                            try { $st = "$($pr.StartTime)" } catch {}
+                                            try { $cpu = '{0:N0}' -f $pr.TotalProcessorTime.TotalMilliseconds } catch {}
+                                            $waits = @{}
+                                            try {
+                                                foreach ($th in $pr.Threads) {
+                                                    $k = "$($th.ThreadState)"
+                                                    if ($k -eq 'Wait') { try { $k = "Wait/$($th.WaitReason)" } catch {} }
+                                                    if ($waits.ContainsKey($k)) { $waits[$k] = $waits[$k] + 1 } else { $waits[$k] = 1 }
+                                                }
+                                            }
+                                            catch {}
+                                            $wtext = (@($waits.Keys | Sort-Object | ForEach-Object { "$_=$($waits[$_])" }) -join ' ')
+                                            & $add ("    {0,-10} pid={1,-6} started={2} cpuMs={3} threads: {4}" -f $pr.ProcessName, $pr.Id, $st, $cpu, $wtext)
                                         }
                                     }
+
+                                    # The resource's own verbose stream, mirrored by Write-VerboseEx to a file
+                                    # the LCM does not own. This is the only place a stock/Script resource can
+                                    # say what call it was inside when it stopped coming back.
+                                    & $add "--- C:\staging\LCMLog.txt (last 60) ---"
+                                    if (Test-Path -LiteralPath 'C:\staging\LCMLog.txt') {
+                                        foreach ($l in @(Get-Content -LiteralPath 'C:\staging\LCMLog.txt' -Tail 60 -ErrorAction SilentlyContinue)) { & $add "    $l" }
+                                    }
+                                    else { & $add "    not present (no resource on this node calls Write-VerboseEx yet)" }
+
+                                    # The operational channel names the resource that was executing, which the
+                                    # status record does not show for an apply that never finished. The host's
+                                    # own once-a-minute LCM/status probes each emit 2-4 events here, so an
+                                    # unfiltered tail is 100% our own polling -- a 25-event window covered only
+                                    # the last 3 minutes and named nothing (cstest5 CT5-CS1SQLAO1, Phase 5).
+                                    & $add "--- Microsoft-Windows-DSC/Operational (probe noise removed) ---"
+                                    try {
+                                        $kept = New-Object System.Collections.Generic.List[string]
+                                        foreach ($e in @(Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 400 -ErrorAction Stop)) {
+                                            $m = ($e.Message -replace '\s+', ' ').Trim()
+                                            if ($e.LevelDisplayName -notmatch 'Error|Warning' -and
+                                                $m -match 'Operation (Get-DscLocalConfigurationManager|Get-DscConfigurationStatus|Get-DscConfiguration) (started|completed)') { continue }
+                                            if ($m.Length -gt 240) { $m = $m.Substring(0, 240) }
+                                            $kept.Add(("    {0:MM-dd HH:mm:ss} [{1}] {2}" -f $e.TimeCreated, $e.LevelDisplayName, $m))
+                                            if ($kept.Count -ge 60) { break }
+                                        }
+                                        if ($kept.Count -eq 0) { & $add "    (no non-probe events)" }
+                                        else { foreach ($k in $kept) { & $add $k } }
+                                    }
                                     catch { & $add "    Get-WinEvent failed: $($_.Exception.Message)" }
+
+                                    # A provider-host crash ends the apply without any DSC-channel event at all,
+                                    # so the DSC log alone can never rule it in or out.
+                                    & $add "--- provider-host / WMI faults since $($since.ToString('MM-dd HH:mm:ss')) ---"
+                                    $faultQueries = @(
+                                        @{ LogName = 'Application'; Id = @(1000, 1001, 1026) },
+                                        @{ LogName = 'System'; Id = @(7031, 7034, 7000) },
+                                        @{ LogName = 'Microsoft-Windows-WMI-Activity/Operational'; Id = @(5858, 5857) }
+                                    )
+                                    $faultCount = 0
+                                    foreach ($q in $faultQueries) {
+                                        try {
+                                            foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = $q.LogName; Id = $q.Id; StartTime = $since } -MaxEvents 15 -ErrorAction Stop)) {
+                                                $m = ($e.Message -replace '\s+', ' ').Trim()
+                                                if ($m -notmatch 'WmiPrvSE|Winmgmt|WMI|powershell|dsc|repadmin|cluster') { continue }
+                                                if ($m.Length -gt 240) { $m = $m.Substring(0, 240) }
+                                                & $add ("    {0:MM-dd HH:mm:ss} {1}/{2} {3}" -f $e.TimeCreated, $q.LogName, $e.Id, $m)
+                                                $faultCount++
+                                            }
+                                        }
+                                        catch { }   # no matching events is the common case and throws here
+                                    }
+                                    if ($faultCount -eq 0) { & $add "    none -- the provider host did not crash in this window" }
                                     $sb.ToString()
                                 } -SuppressLog
                                 if (-not $dscEventsTail.ScriptBlockFailed -and $dscEventsTail.ScriptBlockOutput) {
