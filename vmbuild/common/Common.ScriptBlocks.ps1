@@ -4921,7 +4921,27 @@ $global:VM_Config = {
                     $nodeList.Add($node) | Out-Null
                 }
 
-                
+                # Resolve what the parallel probe needs ONCE, on this thread. A worker must not call
+                # Get-VM2/Get-List (documented 10+ minute logjam with 20+ workers), and PSDirect is
+                # not credential-free: it authenticates against the guest, so a bare
+                # 'New-PSSession -VMName' with no -Credential throws on every node. That is exactly
+                # what shipped -- 35/35 probes came back unknown and every one paid the serial
+                # fallback, so the fan-out cost more than it saved.
+                $probeVmIds = @{}
+                $probeCred = $null
+                if ($Common.LocalAdmin) {
+                    $probeCred = New-Object System.Management.Automation.PSCredential (
+                        "$($deployConfig.vmOptions.domainName)\$($Common.LocalAdmin.UserName)", $Common.LocalAdmin.Password)
+                    foreach ($node in $nodeList) {
+                        try {
+                            $probeVm = Get-VM2 -Name $node -Fallback
+                            if ($probeVm -and $probeVm.vmID) { $probeVmIds[$node] = [guid]$probeVm.vmID }
+                        }
+                        catch { }
+                    }
+                }
+                Write-Log "[Phase $Phase]: NodeReadyProbe fan-out armed for $($probeVmIds.Count)/$($nodeList.Count) node(s), cred=$($null -ne $probeCred)" -LogOnly
+
                 # Budget is wall-clock, not attempts: an attempt costs one round trip PER NODE, so an
                 # attempt-capped loop silently shortened the real timeout as node count grew.
                 $nodeWaitTimeout = [timespan]::FromMinutes(30)
@@ -4947,37 +4967,34 @@ $global:VM_Config = {
 
                     $readyProbeJobs = @{}
                     $readyProbeState = @{}
-                    $useThreadProbe = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -and ($nonReadyNodes.Count -gt 1)
+                    $useThreadProbe = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -and ($nonReadyNodes.Count -gt 1) -and ($probeVmIds.Count -gt 0)
+                    # Throttle must be >= node count; below it the fan-out silently splits into waves.
                     $readyProbeThrottle = if ($useThreadProbe) { [Math]::Max(1, @($nonReadyNodes).Count) } else { 1 }
+                    $readyProbeTimeoutSec = 45
 
                     $threadProbeBlock = {
                         param(
-                            [string]$VmName,
+                            [guid]$VmId,
+                            [pscredential]$VmCredential,
                             [string]$ExpectedGuid
                         )
 
+                        $session = $null
                         try {
-                            $session = New-PSSession -VMName $VmName -ErrorAction Stop
-                            try {
-                                $ready = Invoke-Command -Session $session -ScriptBlock {
-                                    param($targetGuid)
-                                    $f = "C:\staging\DSC\RunGuid.txt"
-                                    if (-not (Test-Path $f)) { return $false }
-                                    $content = Get-Content $f -ErrorAction SilentlyContinue | Select-Object -First 1
-                                    if ($content) { $content = $content.Trim() }
-                                    return ([string]$content -eq [string]$targetGuid)
-                                } -ArgumentList $ExpectedGuid -ErrorAction Stop
-                                [pscustomobject]@{
-                                    Ready = [bool]$ready
-                                    Error = $null
-                                    Source = 'ThreadJob'
-                                    Unknown = $false
-                                }
-                            }
-                            finally {
-                                if ($session) {
-                                    Remove-PSSession -Session $session -ErrorAction SilentlyContinue
-                                }
+                            $session = New-PSSession -VMId $VmId -Credential $VmCredential -ErrorAction Stop
+                            $ready = Invoke-Command -Session $session -ScriptBlock {
+                                param($targetGuid)
+                                $f = "C:\staging\DSC\RunGuid.txt"
+                                if (-not (Test-Path $f)) { return $false }
+                                $content = Get-Content $f -ErrorAction SilentlyContinue | Select-Object -First 1
+                                if ($content) { $content = $content.Trim() }
+                                return ([string]$content -eq [string]$targetGuid)
+                            } -ArgumentList $ExpectedGuid -ErrorAction Stop
+                            [pscustomobject]@{
+                                Ready = [bool]$ready
+                                Error = $null
+                                Source = 'ThreadJob'
+                                Unknown = $false
                             }
                         }
                         catch {
@@ -4988,6 +5005,9 @@ $global:VM_Config = {
                                 Unknown = $true
                             }
                         }
+                        finally {
+                            if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+                        }
                     }
 
                     foreach ($node in $nonReadyNodes) {
@@ -4995,8 +5015,8 @@ $global:VM_Config = {
                             continue
                         }
 
-                        if ($useThreadProbe) {
-                            $readyProbeJobs[$node] = Start-ThreadJob -ScriptBlock $threadProbeBlock -ArgumentList $node, $phaseRunGuid -ThrottleLimit $readyProbeThrottle -ErrorAction Stop
+                        if ($useThreadProbe -and $probeVmIds.ContainsKey($node)) {
+                            $readyProbeJobs[$node] = Start-ThreadJob -ScriptBlock $threadProbeBlock -ArgumentList $probeVmIds[$node], $probeCred, $phaseRunGuid -ThrottleLimit $readyProbeThrottle -ErrorAction Stop
                             continue
                         }
 
@@ -5050,22 +5070,40 @@ $global:VM_Config = {
                         }
                     }
 
-                    if ($useThreadProbe) {
-                        foreach ($node in $readyProbeJobs.Keys) {
+                    if ($readyProbeJobs.Count -gt 0) {
+                        # New-PSSession's VMId parameter set accepts no -SessionOption, so it has no
+                        # connect timeout of its own; a wedged guest would hold this loop open forever.
+                        # Bound the whole fan-out once -- that is also the only wall-clock that matters,
+                        # since the workers run concurrently.
+                        $probeBatchSw = [System.Diagnostics.Stopwatch]::StartNew()
+                        $null = Wait-Job -Job @($readyProbeJobs.Values) -Timeout $readyProbeTimeoutSec -ErrorAction SilentlyContinue
+                        $probeBatchSw.Stop()
+                        Write-Log "[Phase $Phase]: NodeReadyProbe fan-out attempt=$attempts nodes=$($readyProbeJobs.Count) batch=$([int]$probeBatchSw.Elapsed.TotalMilliseconds)ms" -LogOnly
+
+                        foreach ($node in @($readyProbeJobs.Keys)) {
                             $job = $readyProbeJobs[$node]
                             $nodeProbeSw = [System.Diagnostics.Stopwatch]::StartNew()
-                            $jobResult = Receive-Job -Job $job -Wait -AutoRemoveJob -ErrorAction SilentlyContinue
+                            $jobResult = $null
+                            if ($job.State -eq 'Completed') {
+                                $jobResult = Receive-Job -Job $job -ErrorAction SilentlyContinue | Select-Object -First 1
+                                Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+                            }
+                            else {
+                                # Abandon, don't Remove: a worker still blocked inside PSDirect cannot be
+                                # stopped synchronously, and Remove-Job -Force would wait on it.
+                                try { $job.StopJobAsync() } catch { }
+                            }
                             $nodeProbeSw.Stop()
                             if ($null -eq $jobResult) {
                                 $jobResult = [pscustomobject]@{
                                     Ready = $false
-                                    Error = 'No result from worker'
+                                    Error = "No result from worker (state=$($job.State))"
                                     Source = 'ThreadJob'
                                     Unknown = $true
                                 }
                             }
                             $readyProbeState[$node] = $jobResult
-                            Write-Log "[Phase $Phase]: NodeReadyProbe $node attempt=$attempts took $([int]$nodeProbeSw.Elapsed.TotalMilliseconds)ms source=$($jobResult.Source) ready=$($jobResult.Ready) unknown=$($jobResult.Unknown)" -LogOnly
+                            Write-Log "[Phase $Phase]: NodeReadyProbe $node attempt=$attempts took $([int]$nodeProbeSw.Elapsed.TotalMilliseconds)ms source=$($jobResult.Source) ready=$($jobResult.Ready) unknown=$($jobResult.Unknown)$(if ($jobResult.Error) { " err=$($jobResult.Error)" })" -LogOnly
 
                             $result = $null
                             if ($jobResult.Unknown -or $jobResult.Error) {
