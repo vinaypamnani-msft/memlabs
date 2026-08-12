@@ -1755,6 +1755,121 @@ function Start-PhaseJobs {
             }
         }
 
+        # SQL engine health. CM Setup's database initialization spends ~40 minutes
+        # building the site DB, and an instance that cannot complete a plain
+        # CREATE INDEX kills it near the end of that with an opaque
+        # "Contact your SQL administrator". Both checks below are seconds.
+        $engineProbe = {
+            $out = [ordered]@{ Dumps = @(); DumpNote = $null; IndexProbe = $null; ProbeError = $null }
+            try {
+                $instProps = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction Stop
+                $instName = ($instProps.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | Select-Object -First 1).Name
+                $instId = [string]$instProps.$instName
+                $params = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instId\MSSQLServer\Parameters" -ErrorAction SilentlyContinue
+                $logPath = $null
+                if ($params) {
+                    foreach ($p in $params.PSObject.Properties) {
+                        if ($p.Name -like 'SQLArg*' -and ([string]$p.Value).StartsWith('-e')) { $logPath = ([string]$p.Value).Substring(2) }
+                    }
+                }
+
+                # Has this instance ever produced a stack dump? Nothing in a healthy
+                # memlabs build should. Every generation, because SQL starts a new
+                # ERRORLOG on each service restart.
+                if ($logPath) {
+                    $folder = Split-Path -Parent $logPath
+                    $rx = 'BEGIN STACK DUMP|SQL Server Assertion|Stack Signature for the dump|::\w+ - .*corruption'
+                    $scanned = 0
+                    foreach ($f in @(Get-ChildItem -LiteralPath $folder -Filter 'ERRORLOG*' -File -ErrorAction SilentlyContinue |
+                                Where-Object { $_.Name -notlike '*.trc' })) {
+                        $scanned++
+                        try {
+                            foreach ($h in @(Select-String -LiteralPath $f.FullName -Pattern $rx -ErrorAction SilentlyContinue | Select-Object -Last 5)) {
+                                $out.Dumps += ('{0} | {1}' -f $f.Name, $h.Line.Trim())
+                            }
+                        }
+                        catch { }
+                    }
+                    $out.DumpNote = "scanned $scanned ERRORLOG generation(s): $($out.Dumps.Count) assertion/dump line(s)"
+                }
+                else { $out.DumpNote = 'ERRORLOG path not resolvable from the registry; dump scan skipped' }
+
+                # Exercise the operation CM Setup dies on: a bare CREATE INDEX with
+                # an INCLUDE over an nvarchar key, which builds a statistics
+                # histogram. tempdb, because no user database exists yet.
+                $server = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
+                $cn = New-Object System.Data.SqlClient.SqlConnection "Server=$server;Database=tempdb;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=30"
+                try {
+                    $cn.Open()
+                    $cmd = $cn.CreateCommand()
+                    $cmd.CommandTimeout = 120
+                    $cmd.CommandText = @'
+SET NOCOUNT ON;
+CREATE TABLE #memlabs_idxprobe (h nvarchar(64) NOT NULL, sid nvarchar(36) NULL);
+INSERT #memlabs_idxprobe (h, sid)
+    SELECT TOP (5000) CONVERT(nvarchar(64), HASHBYTES('SHA2_256', CONVERT(varchar(36), NEWID())), 2),
+                      CONVERT(nvarchar(36), NEWID())
+    FROM sys.all_objects a CROSS JOIN sys.all_objects b;
+CREATE INDEX IX_memlabs_idxprobe ON #memlabs_idxprobe (h) INCLUDE (sid);
+DROP TABLE #memlabs_idxprobe;
+'@
+                    $cmd.ExecuteNonQuery() | Out-Null
+                    $out.IndexProbe = 'OK'
+                }
+                finally {
+                    if ($cn.State -ne 'Closed') { $cn.Close() }
+                    $cn.Dispose()
+                }
+            }
+            catch {
+                # Distinguish "the SQL statement failed" from "the probe could not run".
+                if ($_.Exception -is [System.Data.SqlClient.SqlException]) { $out.IndexProbe = "SQL FAILED: $($_.Exception.Message)" }
+                else { $out.ProbeError = $_.Exception.Message }
+            }
+            [pscustomobject]$out
+        }
+
+        # CAS/Primary with no remoteSQLVM hosts SQL locally, so probe those too.
+        $engineHosts = New-Object System.Collections.Generic.List[string]
+        foreach ($ss in @($deployConfig.virtualMachines | Where-Object { $_.role -in @('CAS', 'Primary') -and -not $_.hidden })) {
+            if ($ss.remoteSQLVM) {
+                $engineHosts.Add([string]$ss.remoteSQLVM) | Out-Null
+                $svm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ss.remoteSQLVM } | Select-Object -First 1
+                if ($svm -and $svm.OtherNode) { $engineHosts.Add([string]$svm.OtherNode) | Out-Null }
+            }
+            else { $engineHosts.Add([string]$ss.vmName) | Out-Null }
+        }
+        foreach ($sqlHost in @($engineHosts | Where-Object { $_ } | Select-Object -Unique)) {
+            $probe = $null
+            try {
+                $probe = Invoke-VmCommand -VmName $sqlHost -VmDomainName $domain -SuppressLog -DisplayName "Phase 8 SQL engine preflight on $sqlHost" -ScriptBlock $engineProbe
+            }
+            catch {
+                Write-Log "[Phase 8] SQL engine preflight on $sqlHost could not run (PSDirect threw: $($_.Exception.Message)); nothing was measured." -Warning
+                continue
+            }
+            if (-not $probe -or $probe.ScriptBlockFailed -or -not $probe.ScriptBlockOutput) {
+                Write-Log "[Phase 8] SQL engine preflight on $sqlHost returned nothing; nothing was measured." -Warning
+                continue
+            }
+            $e = $probe.ScriptBlockOutput
+            if ($e.DumpNote) { Write-Log "[Phase 8] $sqlHost`: $($e.DumpNote)" -LogOnly }
+            foreach ($d in @($e.Dumps)) {
+                Write-Log "[Phase 8] $sqlHost`: SQL engine has previously produced a stack dump -- $d" -Warning
+            }
+            if ($e.ProbeError) {
+                Write-Log "[Phase 8] $sqlHost`: SQL engine preflight did not complete ($($e.ProbeError)); nothing was measured." -Warning
+            }
+            elseif ($e.IndexProbe -eq 'OK') {
+                Write-Log "[Phase 8] $sqlHost`: SQL engine preflight OK (5000-row CREATE INDEX with INCLUDE succeeded)." -LogOnly
+            }
+            elseif ($e.IndexProbe) {
+                $msg = "[$sqlHost] SQL engine cannot complete a plain CREATE INDEX: $($e.IndexProbe). CM Setup's database initialization will fail on the same operation after ~40 minutes."
+                Write-Log "[Phase 8] $msg" -Failure
+                $preflightFailures.Add($msg) | Out-Null
+            }
+        }
+
         # MP database-replica SQL hosts: the replicaSqlServerVM of each SiteSystem MP
         # that uses a database replica is (typically) a HIDDEN VM, so it is NOT a Phase 8
         # DSC node -- Invoke-SmartStartVMs never starts it, and the loop above only covers
