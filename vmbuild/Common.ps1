@@ -4531,8 +4531,24 @@ function Add-DHCPReservationIsolated {
                         $m
                     }
 
+                    # Ask the SCOPE, never the address. Get-DhcpServerv4Reservation -IPAddress
+                    # returns the DHCP client record at that address whether or not it is a
+                    # reservation, so an ordinary dynamic lease reads back as one. That is
+                    # what made Phase 1 log "reservation created" for CT5-W10Client1 .25 and
+                    # CT5-W11Client2 .26 while four scope enumerations over 4.5 hours never
+                    # listed them: each guest had simply leased its own AssignedIP first, the
+                    # idempotent branch believed it, and no reservation was ever created.
+                    # The scope enumeration is the only query that lists reservations alone.
+                    $findReservation = {
+                        param($addr)
+                        foreach ($r in @(Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue)) {
+                            if ($r -and ([string]$r.IPAddress) -eq $addr) { return $r }
+                        }
+                        return $null
+                    }
+
                     $existing = $null
-                    try { $existing = Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
+                    try { $existing = & $findReservation $ip } catch { }
                     if ($existing) {
                         $existingMac = ($existing.ClientId -replace '[-:]', '').ToLower()
                         if ($existingMac -eq $ourMac) {
@@ -4550,40 +4566,30 @@ function Add-DHCPReservationIsolated {
                         $notes.Add("reclaimed orphan reservation on $ip from MAC $existingMac")
                     }
                     else {
-                        # No reservation, but a stale ACTIVE LEASE held by a
-                        # different, non-member client can still make the Add fail
-                        # with "Failed to reserve IP address". Clear that orphan
-                        # lease -- never one belonging to a live switch member.
-                        # (Get-DhcpServerv4Lease rejects -ScopeId + -IPAddress
-                        # together, so query by -IPAddress alone.)
+                        # No reservation, but a lease already sitting on this address will
+                        # make the Add fail with "Failed to reserve IP address". $ip is this
+                        # VM's own AssignedIP, so any lease here that is not ours is transient
+                        # and its holder will renew onto its own reserved address -- unlike a
+                        # reservation, which is a real ownership claim and is refused above.
                         $lease = $null
                         try { $lease = Get-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
                         if ($lease) {
                             $leaseMac = ($lease.ClientId -replace '[-:]', '').ToLower()
                             if ($leaseMac -ne $ourMac) {
                                 if ($null -eq $switchMacs) { $switchMacs = & $resolveSwitchMacs }
-                                if (-not $switchMacs.ContainsKey($leaseMac)) {
-                                    try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null } catch { }
-                                    $notes.Add("cleared orphan lease on $ip held by MAC $leaseMac")
-                                }
-                                else {
-                                    $notes.Add("$ip is leased to live switch member MAC $leaseMac; lease left in place")
-                                }
+                                $holder = if ($switchMacs.ContainsKey($leaseMac)) { "live switch member '$($switchMacs[$leaseMac])'" } else { 'a non-member client' }
+                                try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null } catch { }
+                                $notes.Add("cleared lease on $ip held by $holder (MAC $leaseMac)")
                             }
                         }
                     }
 
                     Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ClientId $mac -Description $desc -ErrorAction Stop | Out-Null
 
-                    # Read the reservation back before reporting success. Add-* returning
-                    # without an error is NOT proof the server kept it: on cstest5 two VMs
-                    # were logged as created here and then had no reservation in three
-                    # independent later reads (Phase 2 pre-cache, Phase 3 pre-cache, the
-                    # Phase 11 audit). Throwing here routes it through the retry loop and,
-                    # if it still won't stick, fails at the point of the lie instead of
-                    # three hours later in Phase 11.
+                    # Read the reservation back before reporting success, from the scope
+                    # rather than the address, for the reason given at $findReservation.
                     $verify = $null
-                    try { $verify = Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
+                    try { $verify = & $findReservation $ip } catch { }
                     if (-not $verify) {
                         throw "post-add read-back found NO reservation at $ip in scope $scopeId, although Add-DhcpServerv4Reservation reported success"
                     }

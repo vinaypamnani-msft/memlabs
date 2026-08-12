@@ -1229,11 +1229,17 @@ function Test-DhcpReservations {
         if ($vm.domain -and $vm.domain -ne $Domain) { continue }
         # OSDClient never gets a reservation (Phase 1 skips it via -OSDClient).
         if ($vm.role -eq 'OSDClient') { continue }
-        # A VM with no pre-assigned IP had no reservation created for it.
-        if (-not $vm.AssignedIP) { continue }
+        # deployConfig only carries AssignedIP on a run that allocated it, so a rerun
+        # against an existing lab skipped every VM and the audit checked nothing --
+        # exactly the runs where a lost reservation has had time to matter.
+        $assignedIp = $vm.AssignedIP
+        if (-not $assignedIp) {
+            try { $assignedIp = (Get-VMNote -VMName $vm.vmName -ErrorAction SilentlyContinue).AssignedIP } catch { }
+        }
+        if (-not $assignedIp) { continue }
 
         $checked++
-        $expectedIp = ($vm.AssignedIP -replace '/.+$', '')
+        $expectedIp = ($assignedIp -replace '/.+$', '')
         $scopeId = if ($vm.role -in 'InternetClient', 'AADClient') {
             '172.31.250.0'
         } else {
@@ -1297,7 +1303,7 @@ function Test-DhcpReservations {
         $candidates = @($DeployConfig.virtualMachines | Where-Object {
                 -not $_.hidden -and $_.role -ne 'OSDClient' -and (-not $_.domain -or $_.domain -eq $Domain)
             })
-        $why = if ($candidates.Count -gt 0) { "$($candidates.Count) eligible VM(s) carry no AssignedIP" } else { 'no VM in this domain is eligible' }
+        $why = if ($candidates.Count -gt 0) { "$($candidates.Count) eligible VM(s) have no AssignedIP in either the config or their VM note" } else { 'no VM in this domain is eligible' }
         Write-Log "[Phase $Phase] [$label]: nothing was audited -- $why" -LogOnly
         $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: WARN: no DHCP reservation was verified ($why)"; Level = 'Warning' })
         return $passed
