@@ -2062,8 +2062,8 @@ function Save-CMSetupSqlFailureEvidence {
                 $logFolder = Split-Path -Parent $out.ErrorLogPath
                 $nums = @($corruptionList | ForEach-Object { [string][int]$_ })
                 $rx = 'Error:\s*(' + ($nums -join '|') + ')\s*,'
-                # An error number alone does not say WHY. On CT5 the 9100 was
-                # emitted only after an engine assertion -- "COnDiskHistogram::
+                # An error number alone does not say WHY. A 9100 can be emitted
+                # only after an engine assertion -- e.g. "COnDiskHistogram::
                 # AddValue - Statistics corruption" -- and that line, plus the
                 # Input Buffer naming the failing statement, is the whole answer.
                 # It matches no error-number pattern, so scan for it separately.
