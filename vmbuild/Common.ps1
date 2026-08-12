@@ -8465,6 +8465,25 @@ function Get-VmSession {
 
     # If we remember which credential last worked, move it to the front
     $lastGood = $global:ps_lastGoodCred[$VmName]
+    $noteLastGoodCred = $null
+    $noteParsed = $false
+    if (-not $lastGood) {
+        # ps_lastGoodCred is per-PROCESS and VM_Config runs under Start-Job, so every fresh
+        # worker starts blind and re-discovers the credential. Measured: 5 creates tried the
+        # domain account first, failed after ~25s, then succeeded as 'local'. $vm.Notes is
+        # already in hand from the get-vm2 above, so seeding from it costs no extra WMI.
+        try {
+            if ($vm.Notes -like '*lastUpdate*') {
+                $noteObj = $vm.Notes | ConvertFrom-Json
+                $noteParsed = $true
+                if ($noteObj.LastGoodCred) {
+                    $noteLastGoodCred = "$($noteObj.LastGoodCred)"
+                    $lastGood = $noteLastGoodCred
+                }
+            }
+        }
+        catch { $noteParsed = $false }
+    }
     if ($lastGood) {
         $idx = -1
         for ($i = 0; $i -lt $credEntries.Count; $i++) {
@@ -8486,6 +8505,10 @@ function Get-VmSession {
     [double]$swStateCheckTotalMs = 0
     [double]$swConnectTotalMs = 0
     [int]$connectAttempts = 0
+    # Why the LOSING attempts lost. 29 of 34 multi-attempt creates ended on the same
+    # credential that had just failed, clustered at 31-32s = the 30s connect timeout plus a
+    # ~2s retry -- so whether those are timeouts or errors decides if the timeout is tunable.
+    $failReasons = New-Object System.Collections.ArrayList
     while ($true) {
         $ps = $null
         $failCount++
@@ -8543,11 +8566,17 @@ function Get-VmSession {
                     Add-OrphanRunspace -Runspace $existingSession._OwnerRunspace -Session $existingSession -Reason 'cache slot overwritten' -VmName $VmName
                 }
                 $global:ps_lastGoodCred[$VmName] = $entry.Tag
+                # Survives the Start-Job process boundary that ps_lastGoodCred cannot. Written
+                # only when it changes, and only for a VM whose note actually parsed.
+                if ($noteParsed -and $noteLastGoodCred -ne $entry.Tag) {
+                    try { Update-VMNoteProperty -VmName $VmName -PropertyName 'LastGoodCred' -PropertyValue $entry.Tag } catch { }
+                }
                 Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
-                Write-Log ("[StepTiming] {0} SessionCreate completed in {1} seconds (vmLookup={2}ms stateCheck={3}ms connect={4}ms attempts={5} tag={6})" -f `
+                Write-Log ("[StepTiming] {0} SessionCreate completed in {1} seconds (vmLookup={2}ms stateCheck={3}ms connect={4}ms attempts={5} tag={6} hint={7} failed=[{8}])" -f `
                         $VmName, [Math]::Round(($swVmLookup.Elapsed.TotalMilliseconds + $swStateCheckTotalMs + $swConnectTotalMs) / 1000, 1),
                     [int]$swVmLookup.Elapsed.TotalMilliseconds, [int]$swStateCheckTotalMs, [int]$swConnectTotalMs,
-                    $connectAttempts, $entry.Tag) -LogOnly
+                    $connectAttempts, $entry.Tag, $(if ($lastGood) { $lastGood } else { 'none' }),
+                    ($failReasons -join ',')) -LogOnly
                 $global:ps_cache[$cacheKey] = $ps
                 Set-VmSessionCacheStamp -Session $ps -VmName $VmName
                 Set-VmSessionPipelineEvent -Session $ps -Kind 'created'
@@ -8559,12 +8588,17 @@ function Get-VmSession {
             # Auth errors (access denied, logon failure) are NOT channel-broken.
             $channelBroken = $false
             if ($connectResult.TimedOut) {
+                $null = $failReasons.Add('timeout')
                 $sawChannelBroken = $true
                 $channelBroken = $true
             }
             elseif ($connectResult.ErrorMessage -match 'socket target process has ended|background process reported an error') {
+                $null = $failReasons.Add('guest-host-crash')
                 $sawChannelBroken = $true
                 $channelBroken = $true
+            }
+            else {
+                $null = $failReasons.Add('auth-or-other')
             }
             Remove-VmSession $ps
 
