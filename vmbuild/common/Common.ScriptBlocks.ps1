@@ -1930,6 +1930,238 @@ function Save-CMSetupLogsFromVm {
     }
 }
 
+function Save-CMSetupSqlFailureEvidence {
+    <#
+    .SYNOPSIS
+        Names the SQL Server error that killed ConfigMgr Setup's database
+        initialization, and for corruption-class errors captures the SQL-side
+        evidence needed to decide whether the database is really damaged.
+    .DESCRIPTION
+        A database-initialization failure ends ConfigMgrSetup.log with
+        "Contact your SQL administrator", which is all the orchestrator has
+        ever logged. The line that actually matters sits two lines above:
+            ***  <the statement that failed>
+            *** [HY000][9100][...][SQL Server]<the SQL error>
+        Both are lifted into the build log.
+
+        For the corruption class (9100/824/8909/...) the CM log alone cannot
+        distinguish a genuinely damaged database from a spurious engine error,
+        and the answer only exists on the SQL host -- which memlabs never
+        collected, so every past occurrence was undiagnosable after the fact.
+        Each SQL host's ERRORLOG is pulled and DBCC CHECKDB is run on the site
+        database while the lab is still standing.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$DomainName,
+        [Parameter(Mandatory)][int]$Phase,
+        [Parameter()][object]$DeployConfig
+    )
+
+    # The monitor's 30-line tail is not guaranteed to reach back to the '***'
+    # pair, so re-read a wider window rather than parsing what it already has.
+    $tail = $null
+    try {
+        $tailRead = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -SuppressLog -DisplayName 'Read ConfigMgrSetup.log tail for SQL error' -ScriptBlock {
+            if (Test-Path 'C:\ConfigMgrSetup.log') {
+                (Get-Content 'C:\ConfigMgrSetup.log' -Tail 400 -ErrorAction SilentlyContinue) -join "`n"
+            }
+        }
+        if ($tailRead -and -not $tailRead.ScriptBlockFailed) { $tail = [string]$tailRead.ScriptBlockOutput }
+    }
+    catch {
+        Write-Log "[Phase $Phase]: $VmName`: SQL failure evidence: could not re-read ConfigMgrSetup.log: $($_.Exception.Message)" -Warning
+        return
+    }
+    if (-not $tail) { return }
+
+    $rxSqlError = [regex]'^\s*\*\*\*\s+\[[^\]]+\]\[(?<num>\d+)\](?<msg>.*?)\s*(\$\$<|$)'
+    $rxStatement = [regex]'^\s*\*\*\*\s+(?<stmt>\S.*?)\s*(\$\$<|$)'
+    $lines = $tail -split "`r?`n"
+    $sqlErrNum = 0
+    $sqlErrText = $null
+    $sqlStmt = $null
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        $m = $rxSqlError.Match($lines[$i])
+        if (-not $m.Success) { continue }
+        $sqlErrNum = [int]$m.Groups['num'].Value
+        $sqlErrText = $m.Groups['msg'].Value.Trim()
+        for ($j = $i - 1; $j -ge 0 -and $j -ge ($i - 5); $j--) {
+            $sm = $rxStatement.Match($lines[$j])
+            if ($sm.Success) { $sqlStmt = $sm.Groups['stmt'].Value; break }
+        }
+        break
+    }
+    if (-not $sqlErrNum) { return }
+
+    Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup database initialization was killed by SQL Server error $sqlErrNum -- $sqlErrText" -OutputStream
+    if ($sqlStmt) {
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: failing statement -- $sqlStmt" -OutputStream
+    }
+
+    # Storage/page-integrity errors. Everything else (permissions, timeouts,
+    # bad parameters) is answered by ConfigMgrSetup.log alone.
+    $corruptionErrors = @(605, 823, 824, 825, 829, 5180, 7105, 8646, 8909, 8928, 9100)
+    if ($corruptionErrors -notcontains $sqlErrNum) { return }
+
+    $sqlHosts = New-Object System.Collections.Generic.List[string]
+    $siteVm = $null
+    if ($DeployConfig -and $DeployConfig.virtualMachines) {
+        $siteVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+    }
+    if ($siteVm -and $siteVm.remoteSQLVM) {
+        $sqlHosts.Add([string]$siteVm.remoteSQLVM)
+        $sqlVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $siteVm.remoteSQLVM } | Select-Object -First 1
+        if ($sqlVm -and $sqlVm.OtherNode) { $sqlHosts.Add([string]$sqlVm.OtherNode) }
+    }
+    else {
+        $sqlHosts.Add($VmName)
+    }
+
+    $logDir = $null
+    if ($Common -and $Common.LogPath) { $logDir = Split-Path $Common.LogPath -Parent }
+    $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
+
+    $collect = {
+        $out = [ordered]@{
+            ErrorLogPath = $null
+            ErrorLog     = $null
+            Checks       = @()
+            Error        = $null
+        }
+        try {
+            $instProps = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction Stop
+            $instName = ($instProps.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | Select-Object -First 1).Name
+            $instId = [string]$instProps.$instName
+            $params = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instId\MSSQLServer\Parameters" -ErrorAction SilentlyContinue
+            if ($params) {
+                foreach ($p in $params.PSObject.Properties) {
+                    if ($p.Name -like 'SQLArg*' -and ([string]$p.Value).StartsWith('-e')) {
+                        $out.ErrorLogPath = ([string]$p.Value).Substring(2)
+                    }
+                }
+            }
+            # SQL holds ERRORLOG open for write but shares read, so a live read works.
+            if ($out.ErrorLogPath -and (Test-Path -LiteralPath $out.ErrorLogPath)) {
+                $out.ErrorLog = (Get-Content -LiteralPath $out.ErrorLogPath -Tail 300 -ErrorAction SilentlyContinue) -join "`r`n"
+            }
+
+            $server = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
+            $cn = New-Object System.Data.SqlClient.SqlConnection "Server=$server;Database=master;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=30"
+            try {
+                $cn.Open()
+                $cmd = $cn.CreateCommand()
+                $cmd.CommandTimeout = 120
+                $cmd.CommandText = @'
+SELECT d.name AS DbName, d.state_desc AS StateDesc, ISNULL(ars.role_desc, '') AS RoleDesc
+FROM sys.databases d
+LEFT JOIN sys.dm_hadr_database_replica_states drs ON drs.database_id = d.database_id AND drs.is_local = 1
+LEFT JOIN sys.dm_hadr_availability_replica_states ars ON ars.replica_id = drs.replica_id
+WHERE d.name LIKE 'CM[_]%'
+'@
+                $targets = @()
+                $rd = $cmd.ExecuteReader()
+                while ($rd.Read()) {
+                    $targets += [pscustomobject]@{ DbName = [string]$rd['DbName']; StateDesc = [string]$rd['StateDesc']; RoleDesc = [string]$rd['RoleDesc'] }
+                }
+                $rd.Close()
+
+                foreach ($t in $targets) {
+                    if ($t.StateDesc -ne 'ONLINE') {
+                        $out.Checks += [pscustomobject]@{ DbName = $t.DbName; Verdict = "SKIPPED (state=$($t.StateDesc))"; Messages = @() }
+                        continue
+                    }
+                    # A non-readable AG secondary cannot be opened at all; its
+                    # ERRORLOG above is the evidence for that node.
+                    if ($t.RoleDesc -eq 'SECONDARY') {
+                        $out.Checks += [pscustomobject]@{ DbName = $t.DbName; Verdict = 'SKIPPED (AG secondary)'; Messages = @() }
+                        continue
+                    }
+                    $chk = $cn.CreateCommand()
+                    $chk.CommandTimeout = 900
+                    $chk.CommandText = "DBCC CHECKDB ([" + ($t.DbName -replace '\]', ']]') + "]) WITH NO_INFOMSGS, ALL_ERRORMSGS, TABLERESULTS"
+                    try {
+                        $msgs = @()
+                        $rows = 0
+                        $cr = $chk.ExecuteReader()
+                        while ($cr.Read()) {
+                            $rows++
+                            if ($msgs.Count -lt 15) { $msgs += [string]$cr['MessageText'] }
+                        }
+                        $cr.Close()
+                        $verdict = if ($rows -eq 0) { 'CLEAN' } else { "$rows error row(s)" }
+                        $out.Checks += [pscustomobject]@{ DbName = $t.DbName; Verdict = $verdict; Messages = $msgs }
+                    }
+                    catch {
+                        $out.Checks += [pscustomobject]@{ DbName = $t.DbName; Verdict = "CHECKDB threw: $($_.Exception.Message)"; Messages = @() }
+                    }
+                }
+            }
+            finally {
+                if ($cn.State -ne 'Closed') { $cn.Close() }
+                $cn.Dispose()
+            }
+        }
+        catch {
+            $out.Error = $_.Exception.Message
+        }
+        [pscustomobject]$out
+    }
+
+    $sawCorruption = $false
+    $ranCheck = $false
+    foreach ($sqlHost in ($sqlHosts | Where-Object { $_ } | Select-Object -Unique)) {
+        $res = $null
+        try {
+            $res = Invoke-VmCommand -VmName $sqlHost -VmDomainName $DomainName -SuppressLog -DisplayName "Collect SQL evidence from $sqlHost" -ScriptBlock $collect
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $VmName`: SQL evidence from $sqlHost`: PSDirect call threw: $($_.Exception.Message)" -Warning -OutputStream
+            continue
+        }
+        if (-not $res -or $res.ScriptBlockFailed -or -not $res.ScriptBlockOutput) {
+            Write-Log "[Phase $Phase]: $VmName`: SQL evidence from $sqlHost`: no response." -Warning -OutputStream
+            continue
+        }
+        $e = $res.ScriptBlockOutput
+        if ($e.Error) {
+            Write-Log "[Phase $Phase]: $VmName`: SQL evidence from $sqlHost`: collection error: $($e.Error)" -Warning -OutputStream
+        }
+        if ($e.ErrorLog -and $logDir -and (Test-Path $logDir)) {
+            $dest = Join-Path $logDir "$sqlHost-Phase$Phase-$stamp-SQL-ERRORLOG.log"
+            try {
+                Set-Content -LiteralPath $dest -Value $e.ErrorLog -Encoding UTF8 -ErrorAction Stop
+                Write-Log "[Phase $Phase]: $VmName`: Pulled SQL ERRORLOG tail from $sqlHost -> $dest" -OutputStream
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $VmName`: SQL evidence from $sqlHost`: failed to write ERRORLOG copy: $_" -Warning
+            }
+        }
+        else {
+            Write-Log "[Phase $Phase]: $VmName`: SQL evidence from $sqlHost`: ERRORLOG not readable (path='$($e.ErrorLogPath)')." -Warning -OutputStream
+        }
+        foreach ($c in @($e.Checks)) {
+            Write-Log "[Phase $Phase]: $VmName`: DBCC CHECKDB on $sqlHost [$($c.DbName)]: $($c.Verdict)" -OutputStream
+            if ($c.Verdict -eq 'CLEAN') { $ranCheck = $true }
+            if ($c.Messages -and $c.Messages.Count -gt 0) {
+                $ranCheck = $true
+                $sawCorruption = $true
+                foreach ($msg in $c.Messages) {
+                    Write-Log "[Phase $Phase]: $VmName`:   CHECKDB: $msg" -OutputStream
+                }
+            }
+        }
+    }
+
+    if ($sawCorruption) {
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: DBCC CHECKDB confirms REAL database corruption -- this is a storage fault, not a ConfigMgr fault. Check the Hyper-V host volume backing the SQL VM's disks: run 'vmbuild\tools\Set-MemlabsDedup.ps1 -CheckOnly' (Data Deduplication with OptimizeInUseFiles=`$true silently corrupts VHDXs of running VMs) and 'Start-DedupJob -Type Scrubbing -Volume <vol> -Full'. Rebuilding this lab without fixing the volume will corrupt the next one too." -OutputStream -Failure
+    }
+    elseif ($ranCheck) {
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: DBCC CHECKDB found NO corruption, so SQL error $sqlErrNum was spurious -- the database is intact and the failure is not reproducible from stored data. The site DB is still partially committed, so retry Phase 8 with -restore (or drop the CM database from every replica first); re-running setup.exe over the partial database will fail with 'Database already exists'." -OutputStream
+    }
+}
+
 function Save-CMClientPackagePrestageLogsFromVm {
     [CmdletBinding()]
     param(
@@ -6957,6 +7189,23 @@ $global:VM_Config = {
                             )) {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG: SQLAO Init_Database failure detected. ConfigMgr Setup failed over to the secondary to set db_owner, failed back to the primary, and the secondary replica did not re-converge to HEALTHY/SYNCHRONIZED within ConfigMgr's ~15min budget." -OutputStream
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG: The CM site DB is partially committed (created before the failover); re-running setup.exe is unsafe. Restore the Phase 8 checkpoint on this VM, then before redeploying restart the SQL service on the SQLAO secondary node (the one that was UNKNOWN in ConfigMgrSetup.log) to clear the stuck replica state-machine, wait ~2 min for AG to report HEALTHY on both replicas, then resume Phase 8. The new pre-flight AG stability gate will hold setup.exe until the AG has been HEALTHY for 60s, which prevents this in most cases." -OutputStream
+                        }
+                        # A database-initialization fatal ends with "Contact your SQL
+                        # administrator" and names no error. The SQL error is a few
+                        # lines up, and for corruption-class errors the only evidence
+                        # that decides real-vs-spurious lives on the SQL host, which
+                        # gets rebuilt long before anyone can look at it.
+                        if ($failContext -and (
+                                $failContext -match 'fatal errors during database initialization' -or
+                                $failContext -match 'cannot create the required database tables' -or
+                                $failContext -match 'Failed to execute SQL Server script'
+                            )) {
+                            try {
+                                Save-CMSetupSqlFailureEvidence -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -DeployConfig $deployConfig
+                            }
+                            catch {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): SQL failure evidence collection threw: $($_.Exception.Message)" -Warning
+                            }
                         }
                         if ($using:Phase -eq 8 -and $currentItem.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite')) {
                             Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
