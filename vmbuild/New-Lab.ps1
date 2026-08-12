@@ -690,7 +690,14 @@ try {
     # reader never has to infer it from the bias suffix on individual lines.
     try {
         $hostTz = [TimeZoneInfo]::Local
-        $hostOff = $hostTz.GetUtcOffset([DateTime]::Now)
+        $hostOff = [DateTimeOffset]::Now.Offset
+        # The bias stamped on every host log line claims local + bias == UTC. Check it here
+        # rather than trusting the offset read, so a sign error or a DST-ambiguous read is
+        # caught once at startup instead of silently mis-labelling the whole run.
+        $biasErrSec = [int][math]::Abs((((Get-Date).AddMinutes(-$hostOff.TotalMinutes)) - [datetime]::UtcNow).TotalSeconds)
+        if ($biasErrSec -gt 2) {
+            Write-Log "Timezone: HOST SELF-CHECK FAILED -- local time plus the UTC bias does not equal UTC (off by ${biasErrSec}s). Every timestamp this run writes carries a wrong bias." -Warning
+        }
         $labTzId = $deployConfig.vmOptions.timeZone
         if (-not $labTzId) { $labTzId = $hostTz.Id }
         $labOff = $null

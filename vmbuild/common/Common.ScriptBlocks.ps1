@@ -1142,7 +1142,19 @@ $global:VM_Create = {
             try {
                 [TimeZoneInfo]::ClearCachedData()
                 $tzNow = [TimeZoneInfo]::Local
-                $tzReport = [PSCustomObject]@{ Id = $tzNow.Id; OffsetMinutes = [int]$tzNow.GetUtcOffset([DateTime]::Now).TotalMinutes }
+                $tzOffMin = [int]([DateTimeOffset]::Now.Offset.TotalMinutes)
+                # Every stamp this guest writes CLAIMS that local + bias == UTC. Verify the
+                # claim against the clock rather than trusting the offset just read: a sign
+                # error, a stale cache, or a DST-ambiguous read all surface here as a non-zero
+                # error, and nothing downstream could tell the difference otherwise.
+                $tzLocal = Get-Date
+                $tzUtc = [datetime]::UtcNow
+                $tzReport = [PSCustomObject]@{
+                    Id            = $tzNow.Id
+                    OffsetMinutes = $tzOffMin
+                    UtcNow        = $tzUtc.ToString('o')
+                    BiasErrorSec  = [int][math]::Abs(($tzLocal.AddMinutes(-$tzOffMin) - $tzUtc).TotalSeconds)
+                }
             } catch { $warnings += "Read back timezone: $_" }
 
             # TLS 1.2 Registry Keys
@@ -1433,14 +1445,29 @@ $global:VM_Create = {
                     $guestTz = @($result.ScriptBlockOutput.TimeZone | Where-Object { $_ }) | Select-Object -First 1
                 }
                 if ($guestTz) {
-                    $hostOffMin = [int]([TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now).TotalMinutes)
+                    $hostOffMin = [int]([DateTimeOffset]::Now.Offset.TotalMinutes)
                     $skewMin = [int]$guestTz.OffsetMinutes - $hostOffMin
                     $skewNote = if ($skewMin -eq 0) { 'same offset as host' } else { "$([math]::Round($skewMin / 60.0, 2))h vs host -- guest log timestamps are shifted by that much" }
+
+                    # Two things that make every timestamp this guest writes untrustworthy,
+                    # neither of which any later reader could detect on its own.
+                    if ([int]$guestTz.BiasErrorSec -gt 2) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): TIMEZONE SELF-CHECK FAILED -- the guest's own local+bias does not equal its UTC (off by $($guestTz.BiasErrorSec)s). Every timestamp it writes carries a wrong UTC bias." -Warning -OutputStream
+                    }
+                    try {
+                        $gUtc = [datetime]::Parse($guestTz.UtcNow, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+                        $clockSkewSec = [int][math]::Abs(($gUtc - [datetime]::UtcNow).TotalSeconds)
+                        if ($clockSkewSec -gt 120) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): guest UTC clock differs from the host's by ${clockSkewSec}s. Host and guest log timestamps cannot be correlated no matter what the timezone bias says -- check Hyper-V time synchronization on this VM." -Warning -OutputStream
+                        }
+                    }
+                    catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): could not compare guest UTC clock to host: $($_.Exception.Message)" -LogOnly }
+
                     if ("$($guestTz.Id)" -ne "$timeZone") {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): timezone is '$($guestTz.Id)' but '$timeZone' was requested ($skewNote)." -Warning -OutputStream
                     }
                     else {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): timezone '$($guestTz.Id)' (UTC offset $($guestTz.OffsetMinutes) min, $skewNote)" -LogOnly
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): timezone '$($guestTz.Id)' (UTC offset $($guestTz.OffsetMinutes) min, $skewNote, bias self-check off by $($guestTz.BiasErrorSec)s)" -LogOnly
                     }
                 }
                 elseif (-not $result.ScriptBlockFailed) {

@@ -10860,6 +10860,29 @@ function Test-CMSiteWideFunctionality {
                                     $parts = @("result=$($h.Result)", "error=$($h.Error)")
                                     if ($h.ErrorText) { $parts += "errorText='$(("$($h.ErrorText)" -replace '\s+', ' ').Trim())'" }
                                     if ($hStart) { $parts += "ran=$($hStart.ToString('yyyy-MM-dd HH:mm:ss'))->$(if ($hEnd) { $hEnd.ToString('HH:mm:ss') } else { '?' }) SUP-local$tzTag" }
+                                    # A converted stamp in the FUTURE is proof the conversion went
+                                    # the wrong way: treating an already-local value as UTC shifts
+                                    # it forward by the offset. A finished sync cannot start later
+                                    # than now, so say the conversion is suspect rather than
+                                    # printing a confident nonsense time.
+                                    if ($hStart -and $hStart -gt (Get-Date).AddMinutes(5)) {
+                                        $parts += 'SUSPECT: that start time is in the future -- the WSUS value was probably already local, so this UTC->local conversion is wrong (or the SUP clock is ahead)'
+                                    }
+                                    # Stronger than the future check, which only fires when the
+                                    # misapplied shift exceeds the record's age: CM and WSUS both
+                                    # recorded THIS sync independently, and CM's stamp is already
+                                    # local. If the converted WSUS time sits a whole UTC offset
+                                    # away from CM's, that gap is the double-application itself.
+                                    try {
+                                        $offAbs = [math]::Abs([int]([DateTimeOffset]::Now.Offset.TotalMinutes))
+                                        if ($hEnd -and $supFailTime -and $offAbs -gt 0) {
+                                            $gapMin = [math]::Abs(($hEnd - $supFailTime).TotalMinutes)
+                                            if ([math]::Abs($gapMin - $offAbs) -le 5) {
+                                                $parts += "SUSPECT: converted end sits $([int]$gapMin)min from CM's own record of the same sync, which is this SUP's UTC offset -- the conversion looks double-applied"
+                                            }
+                                        }
+                                    }
+                                    catch { }
                                     try {
                                         $ue = @($h.UpdateErrors)
                                         if ($ue.Count -gt 0) { $parts += "updateErrors=$($ue.Count) first='$(("$($ue[0])" -replace '\s+', ' ').Trim())'" }

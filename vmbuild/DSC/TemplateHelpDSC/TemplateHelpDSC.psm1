@@ -3119,13 +3119,13 @@ function Add-LcmLogLine {
     )
     try {
         if (-not $Component) { $Component = 'LCM' }
-        # Same UTC bias the CMTrace writers emit. This file is written in the GUEST's
-        # timezone but read on the host, where it sits next to host-stamped lines.
-        # Guarded so corrupt registry timezone data cannot cost the whole line.
+        # Same UTC bias the CMTrace writers emit, read from the instant so the DST fall-back
+        # hour is not stamped with the standard offset. Guarded so corrupt registry timezone
+        # data cannot cost the whole line.
         $lcmNow = Get-Date
         $lcmBias = ''
         try {
-            $lcmBiasMin = [int](-[TimeZoneInfo]::Local.GetUtcOffset($lcmNow).TotalMinutes)
+            $lcmBiasMin = [int](-[DateTimeOffset]::Now.Offset.TotalMinutes)
             $lcmBias = $(if ($lcmBiasMin -ge 0) { "+$lcmBiasMin" } else { "$lcmBiasMin" })
         }
         catch { }
@@ -3255,12 +3255,13 @@ function Write-Status {
             $date = $now.ToString('MM-dd-yyyy')
             # Bias = minutes to ADD to this stamp to reach UTC (ConfigMgr's own convention).
             # This log is written in the GUEST's timezone, which need not match the host's.
-            # Guarded: TimeZoneInfo.Local throws on corrupt registry timezone data, and the
-            # catch below re-emits $logText -- which would be unassigned, silently costing
-            # the status line instead of just the bias.
+            # Offset comes from the INSTANT: GetUtcOffset(localDateTime) returns the STANDARD
+            # offset for an ambiguous wall clock, i.e. 60 min wrong through a DST fall-back.
+            # Guarded: the catch below re-emits $logText, which would be unassigned, silently
+            # costing the status line instead of just the bias.
             $bias = ''
             try {
-                $biasMin = [int](-[TimeZoneInfo]::Local.GetUtcOffset($now).TotalMinutes)
+                $biasMin = [int](-[DateTimeOffset]::Now.Offset.TotalMinutes)
                 $bias = $(if ($biasMin -ge 0) { "+$biasMin" } else { "$biasMin" })
             }
             catch { }

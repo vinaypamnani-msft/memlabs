@@ -990,13 +990,15 @@ function Write-Log {
             # EDT is +240). A lab can run its guests in ANY timezone -- vmOptions.timeZone is
             # free-form -- and guest logs are pulled into this same folder, so a bare local
             # time cannot be lined up against a host line without it.
-            # TimeZoneInfo.Local throws on corrupt/missing registry timezone data, and this is
-            # the one function whose failure has no other reporting channel: an exception here
-            # would leave $logText unassigned, and the catch below drops the line. So a broken
-            # zone costs the bias, never the log entry.
+            # Read the offset from the INSTANT, not from $now: GetUtcOffset(localDateTime)
+            # returns the STANDARD offset for an ambiguous wall clock, so during the DST
+            # fall-back hour every line would be stamped 60 minutes wrong.
+            # Guarded because this is the one function whose failure has no other reporting
+            # channel: an exception would leave $logText unassigned and the catch below drops
+            # the line. A broken zone costs the bias, never the log entry.
             $bias = ''
             try {
-                $biasMin = [int](-[TimeZoneInfo]::Local.GetUtcOffset($now).TotalMinutes)
+                $biasMin = [int](-[DateTimeOffset]::Now.Offset.TotalMinutes)
                 $bias = $(if ($biasMin -ge 0) { "+$biasMin" } else { "$biasMin" })
             }
             catch { }
