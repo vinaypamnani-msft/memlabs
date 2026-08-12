@@ -6619,7 +6619,13 @@ function Test-ForestTrustFunctionality {
                 $results.Details.Add("OK: Remote CA '$remoteDnsShort-*' present in enterprise Root store")
             }
             else {
-                $results.Details.Add("WARN: Remote CA '$remoteDnsShort-*' NOT found in enterprise Root store (InstallRootCertificate dspublish RootCA may have failed)")
+                $extra = ''
+                # This is the same fact ccmsetup reports as "Unable to find any
+                # Certificate based on Certificate Issuers" -> CCM_E_NO_CLIENT_PKI_CERT.
+                if ($externalSiteCode -and $externalSiteCode -ne 'NONE') {
+                    $extra = " -- clients here are managed by remote site '$externalSiteCode' over HTTPS, so until this CA is trusted locally none of them can present a client cert (ccmsetup 0x87D00454)"
+                }
+                $results.Details.Add("WARN: Remote CA '$remoteDnsShort-*' NOT found in enterprise Root store (InstallRootCertificate dspublish RootCA may have failed)$extra")
             }
             if ($ntauthStore -match $needle) {
                 $results.Details.Add("OK: Remote CA present in enterprise NTAuth store")
@@ -6652,6 +6658,99 @@ function Test-ForestTrustFunctionality {
         }
         catch {
             $results.Details.Add("WARN: Could not read local Configuration NC PKI containers: $($_.Exception.Message)")
+        }
+
+        # --- C3: Can a computer in THIS domain actually autoenroll a ConfigMgr
+        #         client cert from the remote CA? Read the template ACL in BOTH
+        #         forests plus the local publication. Labs are deleted long before
+        #         anyone can log on to a client, so this has to land in the run log:
+        #         it is the whole decision tree behind ccmsetup 0x87D00454.
+        #           grant missing in CA forest    -> AddCertificateTemplate did not take
+        #           present there, absent locally -> PKISync ran before the grant
+        #           present in both               -> autoenrollment / GP on the client
+        if ($externalSiteCode -and $externalSiteCode -ne 'NONE') {
+            $tplName = 'ConfigMgrClientCertificate'
+            # Match by SID, not name: a foreign-forest ACE routinely fails to
+            # resolve to a name, and 'Domain Computers' is always <domainSid>-515.
+            $domainComputersSid = ''
+            try { $domainComputersSid = "$((Get-ADDomain -ErrorAction Stop).DomainSID.Value)-515" } catch {}
+            if (-not $domainComputersSid) {
+                $results.Details.Add("WARN: could not resolve this domain's SID; skipping the certificate-template enrollment check (nothing was measured)")
+            }
+            else {
+                $results.Details.Add("CMD: read '$tplName' ACL in both forests for Enroll/AutoEnroll by $domainComputersSid ($localDomain\Domain Computers)")
+                $enrollGuid = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
+                $autoEnrollGuid = 'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
+                $readTemplateAcl = {
+                    param($server, $label)
+                    $prefix = ''
+                    if ($server) { $prefix = "$server/" }
+                    # Interpolate, never -f: -f renders a PropertyValueCollection as
+                    # its type name and silently builds an unbindable LDAP path.
+                    $cfg = "$(([ADSI]"LDAP://${prefix}RootDSE").configurationNamingContext)"
+                    if ($cfg -notmatch '^CN=Configuration,DC=') { throw "unusable configurationNamingContext '$cfg'" }
+                    $tpl = [ADSI]"LDAP://${prefix}CN=$tplName,CN=Certificate Templates,CN=Public Key Services,CN=Services,$cfg"
+                    if (-not $tpl.distinguishedName) { throw "template '$tplName' not present in $label" }
+                    $granted = @()
+                    foreach ($ace in @($tpl.ObjectSecurity.Access | Where-Object { $null -ne $_ })) {
+                        if ("$($ace.AccessControlType)" -ne 'Allow') { continue }
+                        if ("$($ace.IdentityReference)" -ne $domainComputersSid) { continue }
+                        $ot = "$($ace.ObjectType)"
+                        if ($ot -eq $enrollGuid) { $granted += 'Enroll' }
+                        elseif ($ot -eq $autoEnrollGuid) { $granted += 'AutoEnroll' }
+                        elseif ("$($ace.ActiveDirectoryRights)" -match 'GenericRead|GenericAll') { $granted += 'Read' }
+                    }
+                    return , @($granted | Select-Object -Unique)
+                }
+
+                foreach ($tgt in @(@{ Server = ''; Label = "this forest ($localDomain)" }, @{ Server = $remoteDcFqdn; Label = "CA forest ($remoteForest)" })) {
+                    try {
+                        $granted = & $readTemplateAcl $tgt.Server $tgt.Label
+                        if ($granted -contains 'AutoEnroll' -and $granted -contains 'Enroll') {
+                            $results.Details.Add("OK: '$tplName' in $($tgt.Label) grants this domain's computers $($granted -join '+')")
+                        }
+                        else {
+                            $have = if ($granted.Count -gt 0) { $granted -join '+' } else { 'nothing' }
+                            $results.Details.Add("WARN: '$tplName' in $($tgt.Label) grants this domain's computers $have (need Read+Enroll+AutoEnroll) -- clients here cannot autoenroll, so ccmsetup will fail CCM_E_NO_CLIENT_PKI_CERT (0x87D00454)")
+                        }
+                    }
+                    catch {
+                        $results.Details.Add("WARN: could not read '$tplName' ACL in $($tgt.Label): $($_.Exception.Message)")
+                    }
+                }
+
+                # An issuing CA must also be published HERE, offering that template,
+                # or autoenrollment has nowhere to send the request.
+                try {
+                    $cfgLocal = "$(([ADSI]'LDAP://RootDSE').configurationNamingContext)"
+                    $enrollSvc = [ADSI]"LDAP://CN=Enrollment Services,CN=Public Key Services,CN=Services,$cfgLocal"
+                    $svcs = @($enrollSvc.Children | Where-Object { $null -ne $_ })
+                    if ($svcs.Count -eq 0) {
+                        $results.Details.Add("WARN: no issuing CA published in this forest's Enrollment Services -- autoenrollment has no CA to request from (PKISync gap)")
+                    }
+                    foreach ($svc in $svcs) {
+                        $offered = @($svc.Properties['certificateTemplates'].Value | Where-Object { $_ })
+                        $hasTpl = $offered -contains $tplName
+                        $line = "issuing CA '$("$($svc.Properties['cn'].Value)")' on $("$($svc.Properties['dNSHostName'].Value)") published here, offers $($offered.Count) template(s), $tplName offered=$hasTpl"
+                        if ($hasTpl) { $results.Details.Add("OK: $line") } else { $results.Details.Add("WARN: $line -- clients here will not request it") }
+                    }
+                }
+                catch {
+                    $results.Details.Add("WARN: could not read this forest's Enrollment Services container: $($_.Exception.Message)")
+                }
+
+                # NTAuthCertificates in AD is the authoritative copy; the enterprise
+                # store checked above is only this machine's synced view of it.
+                try {
+                    $ntAuth = [ADSI]"LDAP://CN=NTAuthCertificates,CN=Public Key Services,CN=Services,$(([ADSI]'LDAP://RootDSE').configurationNamingContext)"
+                    $ntCount = @($ntAuth.Properties['cACertificate'].Value | Where-Object { $_ -is [byte[]] }).Count
+                    if ($ntCount -gt 0) { $results.Details.Add("OK: this forest's AD NTAuthCertificates holds $ntCount CA cert(s)") }
+                    else { $results.Details.Add("WARN: this forest's AD NTAuthCertificates is EMPTY (certutil -dspublish NtauthCA never landed)") }
+                }
+                catch {
+                    $results.Details.Add("WARN: could not read this forest's NTAuthCertificates: $($_.Exception.Message)")
+                }
+            }
         }
 
         # --- D: Remote-site client-management prerequisites (externalDomainJoinSiteCode) ---
@@ -7757,6 +7856,29 @@ function Test-DomainMemberFunctionality {
     $expectedSiteCode = if ($isExternallyManaged) { "$extSiteCode" } else { '' }
     $externalSiteServer = if ($isExternallyManaged -and $domainDC.thisParams) { $domainDC.thisParams.ExternalSiteServer } else { $null }
 
+    # UsePKI belongs to the site that MANAGES these clients, not to this domain.
+    # A cross-forest domain deploys no CM site, so its deployConfig carries a null
+    # cmOptions and the check above yields $false -- which silently switched OFF
+    # the client-certificate check on exactly the labs that need it. cstest8b then
+    # shipped 6/6 DomainMembers whose ccmsetup died with CCM_E_NO_CLIENT_PKI_CERT
+    # and still reported "Functional validation PASSED". The remote managing site
+    # server is merged into virtualMachines as a hidden VM and carries the real
+    # cmOptions.
+    if (-not $usePKI -and $isExternallyManaged) {
+        $mgmtShort = if ($externalSiteServer) { ($externalSiteServer -split '\.')[0] } else { '' }
+        $mgmtVm = $DeployConfig.virtualMachines | Where-Object { $_.cmOptions -and $_.vmName -eq $mgmtShort } | Select-Object -First 1
+        if (-not $mgmtVm) {
+            $mgmtVm = $DeployConfig.virtualMachines | Where-Object { $_.cmOptions -and $_.role -in @('CAS', 'Primary') } | Select-Object -First 1
+        }
+        if ($mgmtVm) {
+            $usePKI = [bool]$mgmtVm.cmOptions.UsePKI
+            Write-Log "[Phase $Phase] $VMName [DomainMember]: managing site '$expectedSiteCode' resolved from $($mgmtVm.vmName); UsePKI=$usePKI (this domain has no cmOptions of its own)" -LogOnly
+        }
+        else {
+            Write-Log "[Phase $Phase] $VMName [DomainMember]: domain is managed by remote site '$expectedSiteCode' but no VM in this config carries cmOptions -- UsePKI unknown, client-certificate check will be skipped" -LogOnly
+        }
+    }
+
     # A client push is only possible when a ConfigMgr site actually manages this
     # domain -- either a local CAS/Primary/Secondary site server in the deployment,
     # or a remote site (cross-forest externally-managed). On a no-ConfigMgr lab
@@ -7791,8 +7913,9 @@ function Test-DomainMemberFunctionality {
             if (-not $line) { return $null }
             $l = "$line".ToLower()
             if ($l -match '0x87d00454') {
-                return "GetDPLocations failed (the MP replied HTTP 200 but returned no content location) -- either the ConfigMgr Client Package isn't distributed to a DP in this VM's boundary group yet, or under PKI/HTTPS the client cert issuer isn't in the MP's trusted-issuer list. Typically a transient content-distribution race during auto-push that clears on the next client-location cycle / Phase 11 re-run."
+                return "CCM_E_NO_CLIENT_PKI_CERT -- the client had no usable PKI client-auth certificate for an HTTPS site, so ccmsetup aborted BEFORE any request reached the MP (ConfigMgr requestresponse.cpp: 'Client is not allowed to use or doesn't have PKI cert while talking to HTTPS server'). The 'StatusCode 200' printed alongside is the value ccmsetup seeds itself before each attempt ('Reset status to ok' in ccmsetup.cpp), NOT a reply from the MP -- nothing was sent. This is NOT a content-distribution race: an MP that answers with no content location returns 0x87d00215 (CCM_E_ITEMNOTFOUND) instead. Check ccmsetup.log for CCMCERTISSUERS + 'Unable to find any Certificate based on Certificate Issuers': either the machine never enrolled (Enroll/AutoEnroll not granted to this domain's computers on the ConfigMgr client template) or the issuing CA is not trusted here (cross-forest: root/NTAuth not published into this forest)."
             }
+            if ($l -match '0x87d00215') { return "CCM_E_ITEMNOTFOUND -- the MP answered but returned no content location for the ConfigMgr Client Package. This IS the content-distribution case: the client package is not on a DP in this VM's boundary group at the expected version. ccmsetup retries on its own schedule." }
             if ($l -match '0x87d00227') { return "client.msi installation failed (see C:\Windows\ccmsetup\Logs\client.msi.log)." }
             if ($l -match '0x87d0029e') { return "failed to download client content from a DP (content not available / BITS or transport error)." }
             if ($l -match '0x87d00269') { return "no Management Point could be located (boundary / boundary-group or MP availability problem)." }
@@ -7813,14 +7936,23 @@ function Test-DomainMemberFunctionality {
                     ($msg -replace '\s+', ' ').Trim()
                 }
                 $tail = Get-Content $logFile -Tail 150 -ErrorAction SilentlyContinue
-                # Prefer lines that name a known stuck/interesting activity...
-                $hits = $tail | Where-Object {
-                    $_ -match 'GetDPLocations|Failed to find DP locations|Unable to find any Certificate|no (client )?certificate|Sending location (services )?request|status code|MP_LocationManager|boundary|retry|error|fail|download|prereq|reboot|pending|waiting|timed? ?out'
-                } | Select-Object -Last 5
-                # ...but ALWAYS fall back to the raw tail when nothing matched, so a
-                # ccmsetup stuck on something OUTSIDE the known patterns (which is
-                # exactly the "running for hours" case) is never invisible.
-                if (-not $hits) { $hits = $tail | Where-Object { $_ } | Select-Object -Last 5 }
+                # Rank by CAUSE, not recency. The final matching lines of a failed
+                # ccmsetup are its shutdown bookkeeping ('Failed to revoke client
+                # upgrade local policy', 'Successfully created task'), while the line
+                # naming the failure sits ~30 lines earlier and got dropped. cstest8b
+                # reported five useless lines with 'Unable to find any Certificate
+                # based on Certificate Issuers' sitting in the same 150-line window.
+                $causePattern = 'CCM_E_|Unable to find any Certificate|certificate by issuer|CCMCERTISSUERS|Client is not allowed to use|didn''t return DP locations|Failed to find DP locations|CcmSetup failed with error code|status code'
+                $generalPattern = 'GetDPLocations|Sending location (services )?request|MP_LocationManager|boundary|retry|error|fail|download|prereq|reboot|pending|waiting|timed? ?out'
+                $hits = @($tail | Where-Object { $_ -match $causePattern } | Select-Object -Last 5)
+                if ($hits.Count -lt 5) {
+                    $filler = @($tail | Where-Object { $_ -notmatch $causePattern -and $_ -match $generalPattern } | Select-Object -Last (5 - $hits.Count))
+                    $hits = $filler + $hits
+                }
+                # ALWAYS fall back to the raw tail when nothing matched, so a ccmsetup
+                # stuck on something OUTSIDE the known patterns (which is exactly the
+                # "running for hours" case) is never invisible.
+                if ($hits.Count -eq 0) { $hits = @($tail | Where-Object { $_ } | Select-Object -Last 5) }
                 foreach ($h in $hits) {
                     $line = & $unwrap $h
                     if ($line) {
@@ -7831,6 +7963,95 @@ function Test-DomainMemberFunctionality {
             }
             if ($diag.Count -eq 0) { $diag.Add('(ccmsetup.log missing or unreadable)') }
             return $diag
+        }
+        # CCM_E_NO_CLIENT_PKI_CERT forensics. 'Unable to find any Certificate based
+        # on Certificate Issuers' has two very different causes with the same text:
+        # the machine never enrolled at all, or it holds a cert whose issuer chain
+        # cannot be built here. Only the client can tell them apart, and they need
+        # opposite fixes (template Enroll/AutoEnroll grant vs publishing the CA's
+        # root/NTAuth into this forest), so report both facts rather than the code.
+        $ccmPkiForensics = {
+            $out = New-Object System.Collections.Generic.List[string]
+            $wantedIssuer = ''
+            try {
+                $p = 'C:\Windows\ccmsetup\Logs\ccmsetup.log'
+                if (Test-Path $p) {
+                    $line = Get-Content $p -Tail 400 -ErrorAction SilentlyContinue |
+                        Where-Object { $_ -match 'CCMCERTISSUERS:' } | Select-Object -Last 1
+                    if ($line -and ([string]$line) -match 'CCMCERTISSUERS:\s*([^\]<]+)') { $wantedIssuer = $Matches[1].Trim() }
+                }
+            }
+            catch {}
+            if ($wantedIssuer) { $out.Add("PKI: ccmsetup requires a client cert issued by [$wantedIssuer]") }
+
+            $certs = @()
+            try {
+                $certs = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction Stop |
+                        Where-Object { $_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.2' })
+            }
+            catch { $out.Add("PKI: could not read LocalMachine\My: $($_.Exception.Message)") }
+            if ($certs.Count -eq 0) {
+                $out.Add('PKI: LocalMachine\My holds NO client-authentication certificate -- the machine never enrolled. Cause is enrollment, not chain trust: check that this domain''s computers have Read/Enroll/AutoEnroll on the ConfigMgr client template on the issuing CA, and that autoenrollment GP is applied here.')
+            }
+            else {
+                foreach ($c in ($certs | Select-Object -First 4)) {
+                    $chainTxt = 'chain=untested'
+                    try {
+                        $ch = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+                        $ch.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+                        $built = $ch.Build($c)
+                        $flags = (@($ch.ChainStatus) | ForEach-Object { $_.Status }) -join ','
+                        if (-not $flags) { $flags = 'OK' }
+                        $chainTxt = "chainsToTrustedRoot=$built ($flags)"
+                    }
+                    catch { $chainTxt = "chain-build-threw: $($_.Exception.Message)" }
+                    $out.Add("PKI: have client-auth cert Subject='$($c.Subject)' Issuer='$($c.Issuer)' $chainTxt")
+                }
+                $out.Add('PKI: a cert exists, so ccmsetup''s "Unable to find any Certificate" means it could not chain it to the required issuer -- publish the issuing CA''s root (and NTAuth) into this forest rather than re-granting the template.')
+            }
+
+            # Is the required issuer's CA trusted locally at all? Cross-forest this
+            # is the half that InstallRootCertificate / RunPkiSync is responsible for.
+            if ($wantedIssuer) {
+                $issuerCn = ''
+                if ($wantedIssuer -match 'CN=\s*([^;,]+)') { $issuerCn = $Matches[1].Trim() }
+                if ($issuerCn) {
+                    foreach ($store in 'Root', 'CA') {
+                        $n = 0
+                        try { $n = @(Get-ChildItem "Cert:\LocalMachine\$store" -ErrorAction Stop | Where-Object { $_.Subject -like "*$issuerCn*" }).Count } catch {}
+                        if ($n -gt 0) { $out.Add("PKI: issuer '$issuerCn' IS present in LocalMachine\$store") }
+                        else { $out.Add("PKI: issuer '$issuerCn' is NOT in LocalMachine\$store -- ccmsetup cannot build a chain to it from this machine") }
+                    }
+                }
+            }
+
+            # Autoenrollment's own verdict. This is the only place that says why no
+            # cert was issued (template not offered / access denied / no CA found),
+            # and it dies with the VM, so it has to be lifted into the run log here.
+            try {
+                $ev = @(Get-WinEvent -LogName Application -MaxEvents 600 -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ProviderName -like '*AutoEnrollment*' } | Select-Object -First 4)
+                if ($ev.Count -eq 0) {
+                    $out.Add('PKI: no CertificateServicesClient-AutoEnrollment events in the Application log -- autoenrollment has not run here (check the Certificate AutoEnrollment GPO)')
+                }
+                foreach ($e in $ev) {
+                    $m = (($e.Message -replace '\s+', ' ').Trim())
+                    if ($m.Length -gt 220) { $m = $m.Substring(0, 220) + '...' }
+                    $out.Add("PKI: AutoEnroll [$($e.TimeCreated.ToString('MM-dd HH:mm:ss'))] Id=$($e.Id) $($e.LevelDisplayName): $m")
+                }
+            }
+            catch { $out.Add("PKI: could not read AutoEnrollment events: $($_.Exception.Message)") }
+
+            # Which templates does this machine actually see it may enroll for?
+            try {
+                $tpl = & certutil.exe -template 2>&1 | Out-String
+                $names = @([regex]::Matches($tpl, 'TemplatePropCommonName = (\S+)') | ForEach-Object { $_.Groups[1].Value })
+                $cm = @($names | Where-Object { $_ -like 'ConfigMgr*' })
+                if ($cm.Count -gt 0) { $out.Add("PKI: certutil -template offers this machine: $($cm -join ', ') (of $($names.Count) total)") }
+                else { $out.Add("PKI: certutil -template offers this machine NO ConfigMgr* template (of $($names.Count) total) -- the template is not published to this forest or this machine has no Enroll right on it") }
+            }
+            catch { $out.Add("PKI: certutil -template failed: $($_.Exception.Message)") }
+            return $out
         }
         # Returns the last meaningful ccmsetup.log line (message unwrapped from the
         # <![LOG[...]LOG]!> envelope, whitespace-collapsed, capped) so a 'waiting'
@@ -8191,6 +8412,9 @@ function Test-DomainMemberFunctionality {
                             $results.Details.Add("WARN: CcmExec is $($ccm.Status); ccmsetup failed: $failDetail")
                         }
                         foreach ($d in (& $grabCcmDiag $logPath)) { $results.Details.Add("  ccmsetup.log: $d") }
+                        if ($failDetail -match '0x87d00454') {
+                            foreach ($d in (& $ccmPkiForensics)) { $results.Details.Add("  $d") }
+                        }
                     }
                     else {
                         $results.Details.Add("WARN: CcmExec is $($ccm.Status) (ccmsetup finished but service won't start)")
@@ -8321,6 +8545,9 @@ function Test-DomainMemberFunctionality {
                     if ($meaning) { $headline += " -- $meaning" }
                     $pendingFailure.Add($headline)
                     foreach ($d in (& $grabCcmDiag 'C:\Windows\ccmsetup\Logs\ccmsetup.log')) { $pendingFailure.Add("  ccmsetup.log: $d") }
+                    if ($exitLine -match '0x87d00454') {
+                        foreach ($d in (& $ccmPkiForensics)) { $pendingFailure.Add("  $d") }
+                    }
                 }
                 elseif ($isSuccess) {
                     $pendingFailure.Add("ccmsetup reported success but CcmExec did not start")
