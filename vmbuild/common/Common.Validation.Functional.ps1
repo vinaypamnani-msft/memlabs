@@ -7327,6 +7327,12 @@ $Phase11SmsSiteLogCollector = {
         }
         else { $diag += "'$n' not present at $p" }
     }
+    # A remote DP still carries SMS\Identification with an Installation Directory, so
+    # the guard above passes and the loop then reports five separate "not present"
+    # lines that never say the one thing that matters. Say it once, plainly.
+    if ($out.Count -eq 0) {
+        $diag += "NONE of the site-server logs exist under '$smsDir\Logs'. This VM is a remote DP/site system, not a site server -- the logs that explain ITS content state are under ?:\SMS_DP`$\sms\logs (see the DpContent capture)."
+    }
 
     # A Secondary can sit in a despooler retry loop -- "This package[X]'s information
     # hasn't arrived yet for this version [N]" -- where the CONTENT arrived but the
@@ -7430,6 +7436,93 @@ $Phase11SmsSiteLogCollector = {
     }
     catch {}
     $out['_collector-diag.txt'] = ($diag -join "`r`n")
+    return $out
+}
+
+$Phase11DpContentLogCollector = {
+    # Runs ON a distribution point. A remote DP has no <SMS install>\Logs, so the
+    # site-log collector above returns nothing for it -- on cstest2 the DP that was
+    # the entire reason Phase 11 failed (CS2-PS2SITESYS1, parked at
+    # ContentValidating) yielded a six-line capture that said only "not present"
+    # five times. Everything that describes a DP's OWN view of the content lives
+    # under SMS_DP$ and in the content library instead.
+    $out = @{}
+    $diag = @()
+
+    $dpLogDir = $null
+    foreach ($d in @('E:', 'D:', 'F:', 'G:', 'C:')) {
+        $cand = "$d\SMS_DP`$\sms\logs"
+        if (Test-Path $cand) { $dpLogDir = $cand; break }
+    }
+    if ($dpLogDir) {
+        $diag += "DP log dir = '$dpLogDir'"
+        foreach ($n in @('smsdpprov.log', 'SMSDPMon.log', 'PrestageContent.log')) {
+            $p = Join-Path $dpLogDir $n
+            if (-not (Test-Path $p)) { $diag += "'$n' not present at $p"; continue }
+            try {
+                $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue
+                if ($c) { $out[$n] = ($c -join "`r`n") } else { $diag += "'$n' present but read returned no content" }
+            }
+            catch { $diag += "'$n' read threw: $($_.Exception.Message)" }
+        }
+    }
+    else {
+        $diag += 'no ?:\SMS_DP$\sms\logs found (probed E,D,F,G,C) -- the DP role is not installed on this server.'
+    }
+
+    # Whether content ever reached this DP is a PkgLib question, not a log question:
+    # a DP parked at ContentValidating with the package absent from PkgLib never
+    # received it at all, which moves triage to the SENDING site and off the DP.
+    $lines = @()
+    try {
+        $clp = ''
+        try { $clp = "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name ContentLibraryPath -ErrorAction Stop).ContentLibraryPath)" } catch { }
+        if (-not $clp) {
+            foreach ($d in @('E:', 'D:', 'F:', 'G:', 'C:')) { if (Test-Path "$d\SCCMContentLib") { $clp = "$d\SCCMContentLib"; break } }
+        }
+        if (-not $clp) {
+            $lines += 'no content library found (HKLM\SOFTWARE\Microsoft\SMS\DP ContentLibraryPath absent and no ?:\SCCMContentLib)'
+        }
+        else {
+            $isRemote = $clp.StartsWith('\\')
+            $lines += "ContentLibraryPath = $clp$(if ($isRemote) { ' (REMOTE/UNC -- HA relocated content library)' })"
+            $pl = Join-Path $clp 'PkgLib'
+            if (Test-Path $pl) {
+                $inis = @(Get-ChildItem -LiteralPath $pl -Filter '*.INI' -ErrorAction SilentlyContinue)
+                $lines += "PkgLib holds $($inis.Count) package(s): $((@($inis | Select-Object -First 60 | ForEach-Object { $_.BaseName })) -join ', ')"
+            }
+            else {
+                $lines += "PkgLib NOT reachable at $pl -- no content has ever been imported into this DP's library"
+            }
+            if (-not $isRemote) {
+                try {
+                    $drv = Get-PSDrive -Name $clp.Substring(0, 1) -ErrorAction Stop
+                    $lines += "content drive free = $([math]::Round($drv.Free / 1GB, 1))GB"
+                }
+                catch { }
+            }
+        }
+    }
+    catch { $lines += "content-library probe threw: $($_.Exception.Message)" }
+
+    # IIS is how a DP serves content and how smsdpprov publishes state; a stopped
+    # site/app pool looks identical to "content never arrived" from the site's side.
+    try {
+        Import-Module WebAdministration -ErrorAction Stop
+        foreach ($vd in @('SMS_DP_SMSPKG$', 'SMS_DP_SMSSIG$', 'NOCERT_SMS_DP_SMSPKG$')) {
+            $exists = Test-Path "IIS:\Sites\Default Web Site\$vd"
+            $lines += "IIS vdir '$vd': $(if ($exists) { 'present' } else { 'MISSING' })"
+        }
+        $site = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
+        if ($site) { $lines += "IIS 'Default Web Site' state = $($site.State)" }
+    }
+    catch { $lines += "IIS probe unavailable: $($_.Exception.Message)" }
+
+    $out['DpContent.txt'] = ($lines -join "`r`n")
+    # Deliberately NOT '_collector-diag.txt': Save-Phase11GuestLogs names files
+    # <vm>-Phase11-<stamp>-<key>, so a second collector finishing in the same second
+    # would overwrite the first one's diagnostics.
+    $out['_dp-collector-diag.txt'] = ($diag -join "`r`n")
     return $out
 }
 
@@ -9598,6 +9691,10 @@ function Test-CMClientPackageDistribution {
                 Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: collecting DP logs from behind/failing DP '$($dpVm.vmName)'"
                 $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11CcmClientLogCollector
                 $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11SmsSiteLogCollector
+                # The two collectors above cover a PULL DP (CCM logs) and a SITE SERVER
+                # (SMS logs). A plain remote DP is neither, so on cstest2 both returned
+                # nothing for the one machine the whole failure was about.
+                $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11DpContentLogCollector
                 # A Secondary DP that never gets the client package is often wedged in
                 # distmgr on "site exchange certificate is not found / Failed to decrypt
                 # cert PFX data" -- its site DB lost the SiteExchangeCertificate, so it
@@ -10719,31 +10816,81 @@ function Test-CMSiteWideFunctionality {
                     }
                     else {
                         $supErrShown = if ($supErrHex) { "$supErr / $supErrHex" } else { "$supErr" }
+                        $supFailTime = $null
+                        try { $supFailTime = [Management.ManagementDateTimeConverter]::ToDateTime($syncStatus.LastSyncStateTime) } catch { }
+                        $whenCm = if ($supFailTime) { " at $($supFailTime.ToString('yyyy-MM-dd HH:mm:ss'))" } else { '' }
                         # An HRESULT on its own is not actionable -- 0x80131509 is just
                         # "a managed InvalidOperationException happened somewhere". WSUS
                         # keeps the real reason in its own sync history, so read it.
+                        #
+                        # The WSUS API hands back UTC DateTimes while every other timestamp
+                        # in this log is local. Printing HH:mm:ss with neither a date nor a
+                        # zone left the one real occurrence uncorrelatable: cstest5 reported
+                        # "ran=02:32:23->02:47:58" on a run spanning 19:30-23:52 local, which
+                        # reads as a different day until you convert it (-> 22:32-22:47,
+                        # inside the run) -- and CM's own failure timestamp was never printed
+                        # at all, so there was no way to tell a live failure from a stale row.
+                        $toLocal = {
+                            param($dt)
+                            if ($null -eq $dt) { return $null }
+                            if ($dt.Kind -eq [DateTimeKind]::Local) { return $dt }
+                            return ([DateTime]::SpecifyKind($dt, [DateTimeKind]::Utc)).ToLocalTime()
+                        }
                         $supFailDiag = ''
+                        $superseded = ''
                         if ($supServer) {
                             try {
                                 $wsusSrvF = Get-WsusServer -Name $supServer -PortNumber $wsusPort -UseSsl:$wsusUseSsl -ErrorAction Stop
-                                $hist = @($wsusSrvF.GetSubscription().GetSynchronizationHistory() | Select-Object -First 1)
+                                $subF = $wsusSrvF.GetSubscription()
+                                # Do NOT trust the collection's own order -- sort it. Taking
+                                # element [0] on faith is how an unrelated older cycle gets
+                                # reported as the failure being investigated.
+                                $hist = @($subF.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
                                 if ($hist.Count -gt 0) {
                                     $h = $hist[0]
+                                    $hStart = & $toLocal $h.StartTime
+                                    $hEnd = & $toLocal $h.EndTime
                                     $parts = @("result=$($h.Result)", "error=$($h.Error)")
                                     if ($h.ErrorText) { $parts += "errorText='$(("$($h.ErrorText)" -replace '\s+', ' ').Trim())'" }
-                                    try { $parts += "ran=$($h.StartTime.ToString('HH:mm:ss'))->$($h.EndTime.ToString('HH:mm:ss'))" } catch { }
+                                    if ($hStart) { $parts += "ran=$($hStart.ToString('yyyy-MM-dd HH:mm:ss'))->$(if ($hEnd) { $hEnd.ToString('HH:mm:ss') } else { '?' }) local" }
                                     try {
                                         $ue = @($h.UpdateErrors)
                                         if ($ue.Count -gt 0) { $parts += "updateErrors=$($ue.Count) first='$(("$($ue[0])" -replace '\s+', ' ').Trim())'" }
                                     }
                                     catch { }
+                                    # A cancelled sync is not a broken sync -- something STOPPED
+                                    # it, and in a memlabs build that is usually memlabs itself:
+                                    # perfloading's Repair-WsusSync restarts WsusPool and
+                                    # SMS_EXECUTIVE before re-triggering, and InstallRoles notes
+                                    # that starting a sync on top of a running one cancels it.
+                                    # Either way the NEXT cycle is the one worth judging.
+                                    if ("$($h.Result)" -match 'Cancel' -or "$($h.Error)" -match 'Cancel') {
+                                        $parts += 'cause=the sync was CANCELLED, not failed -- WsusPool/WsusService/SMS_EXECUTIVE restarted mid-cycle (perfloading Repair-WsusSync does exactly that), the SUP rebooted, or a second sync was started on top of it'
+                                    }
                                     $supFailDiag = " [WSUS history: $($parts -join ' ')]"
+
+                                    # Is CM's record already stale? A later WSUS cycle that
+                                    # succeeded, or one running right now, means the failure has
+                                    # been superseded and there is nothing to act on.
+                                    $liveState = ''
+                                    try { $liveState = "$($subF.GetSynchronizationStatus())" } catch { }
+                                    if ($liveState -match 'Running|Progress|Syncing') {
+                                        $superseded = "WSUS is running a new sync now ($liveState)"
+                                    }
+                                    elseif ("$($h.Result)" -match 'Succeeded' -and $supFailTime -and $hStart -and $hStart -gt $supFailTime) {
+                                        $superseded = "a later WSUS sync succeeded at $($hStart.ToString('yyyy-MM-dd HH:mm:ss'))"
+                                    }
                                 }
                                 else { $supFailDiag = ' [WSUS history: no entries]' }
                             }
                             catch { $supFailDiag = " [WSUS history not collected from '$($supServer):$wsusPort': $($_.Exception.Message)]" }
                         }
-                        $results.Details.Add("WARN: SUP last sync FAILED (state 6703, error code $supErrShown)$supFailDiag")
+                        if ($superseded) {
+                            $results.Details.Add("INFO: SUP last CM sync record is Failed (6703, $supErrShown)$whenCm but is already stale -- $superseded$supFailDiag")
+                        }
+                        else {
+                            $results.Details.Add("WARN: SUP last sync FAILED (state 6703, error code $supErrShown)$whenCm$supFailDiag")
+                        }
                     }
                 }
                 elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
