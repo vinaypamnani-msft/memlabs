@@ -224,6 +224,10 @@ $global:Phase11Job = {
                 }
             } -DisplayName "Phase11: Remove DSC shortcuts" -SuppressLog
 
+            # Phase 2 skips shortcut creation when this note says they exist, so deleting them
+            # here without clearing it would leave them gone for every subsequent run.
+            try { Update-VMNoteProperty -VmName $currentItem.vmName -PropertyName 'DscShortcutsCreated' -PropertyValue 'False' } catch { }
+
             # --- Revert Windows Update lockdown set during Phase 2 ---
             # Only touch settings we own (WsusSetByMemLabs marker present).
             $useFakeWSUS = [bool]$currentItem.useFakeWSUSServer
