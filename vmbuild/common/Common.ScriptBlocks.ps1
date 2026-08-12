@@ -2030,6 +2030,8 @@ function Save-CMSetupSqlFailureEvidence {
             ErrorLog     = $null
             LogScan      = @()
             LogScanNote  = $null
+            Assertions   = @()
+            DumpFiles    = @()
             SuspectPages = @()
             Checks       = @()
             Error        = $null
@@ -2060,6 +2062,12 @@ function Save-CMSetupSqlFailureEvidence {
                 $logFolder = Split-Path -Parent $out.ErrorLogPath
                 $nums = @($corruptionList | ForEach-Object { [string][int]$_ })
                 $rx = 'Error:\s*(' + ($nums -join '|') + ')\s*,'
+                # An error number alone does not say WHY. On CT5 the 9100 was
+                # emitted only after an engine assertion -- "COnDiskHistogram::
+                # AddValue - Statistics corruption" -- and that line, plus the
+                # Input Buffer naming the failing statement, is the whole answer.
+                # It matches no error-number pattern, so scan for it separately.
+                $rxAssert = 'BEGIN STACK DUMP|Stack Signature for the dump|SQL Server Assertion|Assertion:|::\w+ - .*corruption|Input Buffer \d+ bytes'
                 $files = @(Get-ChildItem -LiteralPath $logFolder -Filter 'ERRORLOG*' -File -ErrorAction SilentlyContinue |
                         Where-Object { $_.Name -notlike '*.trc' } | Sort-Object LastWriteTime)
                 $scanned = 0
@@ -2070,11 +2078,30 @@ function Save-CMSetupSqlFailureEvidence {
                         foreach ($h in ($hits | Select-Object -Last 10)) {
                             $out.LogScan += ('{0} | {1}' -f $f.Name, ($h.Line.Trim()))
                         }
+                        $ah = @(Select-String -LiteralPath $f.FullName -Pattern $rxAssert -ErrorAction SilentlyContinue)
+                        foreach ($h in ($ah | Select-Object -Last 12)) {
+                            $out.Assertions += ('{0} | {1}' -f $f.Name, ($h.Line.Trim()))
+                        }
                     }
                     catch { $out.LogScan += ('{0} | UNREADABLE: {1}' -f $f.Name, $_.Exception.Message) }
                 }
                 # A scan of zero files is not a clean result; say which it was.
-                $out.LogScanNote = "scanned $scanned ERRORLOG generation(s) in $logFolder for errors $($nums -join '/'): $($out.LogScan.Count) hit(s)"
+                $out.LogScanNote = "scanned $scanned ERRORLOG generation(s) in $logFolder for errors $($nums -join '/'): $($out.LogScan.Count) error hit(s), $($out.Assertions.Count) assertion/dump line(s)"
+
+                # SQLDump####.txt is the readable companion to the .mdmp and holds
+                # the assertion, the Input Buffer and the module stack. Small; the
+                # .mdmp is not collected.
+                foreach ($d in @(Get-ChildItem -LiteralPath $logFolder -Filter 'SQLDump*.txt' -File -ErrorAction SilentlyContinue |
+                            Sort-Object LastWriteTime -Descending | Select-Object -First 3)) {
+                    try {
+                        $out.DumpFiles += [pscustomobject]@{
+                            Name    = $d.Name
+                            Written = $d.LastWriteTime
+                            Text    = (Get-Content -LiteralPath $d.FullName -TotalCount 400 -ErrorAction SilentlyContinue) -join "`r`n"
+                        }
+                    }
+                    catch { }
+                }
             }
 
             $server = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
@@ -2160,6 +2187,8 @@ WHERE d.name LIKE 'CM[_]%'
     $ranCheck = $false
     $logHits = 0
     $suspectRows = 0
+    $assertLines = 0
+    $assertText = $null
     foreach ($sqlHost in ($sqlHosts | Where-Object { $_ } | Select-Object -Unique)) {
         $res = $null
         try {
@@ -2197,6 +2226,22 @@ WHERE d.name LIKE 'CM[_]%'
             $logHits++
             Write-Log "[Phase $Phase]: $VmName`:   ERRORLOG $sqlHost`: $h" -OutputStream
         }
+        foreach ($a in @($e.Assertions)) {
+            $assertLines++
+            if (-not $assertText -and $a -match '::\w+ - .*corruption') { $assertText = ($a -split '\|', 2)[-1].Trim() }
+            Write-Log "[Phase $Phase]: $VmName`:   ASSERT $sqlHost`: $a" -OutputStream
+        }
+        foreach ($d in @($e.DumpFiles)) {
+            if (-not $d.Text) { continue }
+            if ($logDir -and (Test-Path $logDir)) {
+                $ddest = Join-Path $logDir "$sqlHost-Phase$Phase-$stamp-$($d.Name)"
+                try {
+                    Set-Content -LiteralPath $ddest -Value $d.Text -Encoding UTF8 -ErrorAction Stop
+                    Write-Log "[Phase $Phase]: $VmName`: Pulled SQL stack dump $($d.Name) (written $($d.Written)) from $sqlHost -> $ddest" -OutputStream
+                }
+                catch { Write-Log "[Phase $Phase]: $VmName`: failed to write $($d.Name): $_" -Warning }
+            }
+        }
         if (@($e.SuspectPages).Count -eq 0) {
             Write-Log "[Phase $Phase]: $VmName`: msdb.dbo.suspect_pages on $sqlHost is EMPTY -- the engine has never recorded a page-level fault here" -OutputStream
         }
@@ -2228,6 +2273,9 @@ WHERE d.name LIKE 'CM[_]%'
         # error was a one-off during setup or is still recurring is decided by
         # how many times it appears across the ERRORLOG generations.
         $verdict = "DIAG: DBCC CHECKDB found NO corruption and suspect_pages is empty, so SQL error $sqlErrNum left no damage on disk. The site DB is still partially committed, so retry Phase 8 with -restore (or drop the CM database from every replica first); re-running setup.exe over the partial database will fail with 'Database already exists'."
+        if ($assertText) {
+            $verdict = "DIAG: SQL error $sqlErrNum was raised BY AN ENGINE ASSERTION, not by a page read -- '$assertText' -- which is why DBCC CHECKDB is clean and suspect_pages is empty. Treat the assertion (and the Input Buffer in the stack dump above, which names the statement) as the failure, not the error number. " + $verdict
+        }
         if ($logHits -gt 1) {
             $verdict += " NOTE: error $sqlErrNum appears $logHits times across the ERRORLOG generations, so this is RECURRING rather than a one-off -- compare the timestamps above against the setup window before retrying, because a retry will not fix an error that is still being raised."
         }
