@@ -3708,42 +3708,73 @@ $global:VM_Config = {
 
         # Create DSC troubleshooting shortcuts on Phase 2 (first DSC phase)
         if ($Phase -eq 2) {
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
-                try {
-                    # Grant Users read access to DSC configuration folders
-                    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                        'BUILTIN\Users', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-                    foreach ($folder in @(
-                        'C:\Windows\System32\Configuration',
-                        'C:\Windows\System32\Configuration\ConfigurationStatus'
-                    )) {
-                        if (Test-Path $folder) {
-                            $acl = Get-Acl $folder
-                            $acl.AddAccessRule($rule)
-                            Set-Acl $folder $acl
+            # Desktop shortcuts and an ACL grant are one-time guest setup, but this ran on
+            # every VM on every run: 8.8s on the critical path, 91.6s across 11 VMs, all of
+            # it redoing work that was already there. Gate on the VM note, which reverts
+            # with the guest on a checkpoint restore, so it tracks guest state rather than
+            # run history.
+            $shortcutsDone = $false
+            try {
+                # Compared as a string, not cast to [bool]: the note stores it via
+                # Update-VMNoteProperty's [string] parameter, and EVERY non-empty string
+                # casts true -- including 'False'.
+                $shortcutsNote = (Get-VMNote -VMName $currentItem.vmName -ErrorAction SilentlyContinue).DscShortcutsCreated
+                $shortcutsDone = ("$shortcutsNote" -eq 'True')
+            }
+            catch { $shortcutsDone = $false }
+
+            if ($shortcutsDone) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC desktop shortcuts already present (VM note); skipping." -LogOnly
+            }
+            else {
+                $swShortcuts = [System.Diagnostics.Stopwatch]::StartNew()
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                    try {
+                        # Grant Users read access to DSC configuration folders
+                        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                            'BUILTIN\Users', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+                        foreach ($folder in @(
+                            'C:\Windows\System32\Configuration',
+                            'C:\Windows\System32\Configuration\ConfigurationStatus'
+                        )) {
+                            if (Test-Path $folder) {
+                                $acl = Get-Acl $folder
+                                $acl.AddAccessRule($rule)
+                                Set-Acl $folder $acl
+                            }
                         }
-                    }
 
-                    $desktopPath = [Environment]::GetFolderPath('CommonDesktopDirectory')
-                    $shell = New-Object -ComObject WScript.Shell
+                        $desktopPath = [Environment]::GetFolderPath('CommonDesktopDirectory')
+                        $shell = New-Object -ComObject WScript.Shell
 
-                    $linkPath = Join-Path $desktopPath 'Read DSC Log.lnk'
-                    if (-not (Test-Path $linkPath)) {
-                        $shortcut = $shell.CreateShortcut($linkPath)
-                        $shortcut.TargetPath = 'powershell.exe'
-                        $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "C:\staging\DSC\Read-DSCLog.ps1"'
-                        $shortcut.WorkingDirectory = 'C:\staging\DSC'
-                        $shortcut.Save()
-                    }
+                        $linkPath = Join-Path $desktopPath 'Read DSC Log.lnk'
+                        if (-not (Test-Path $linkPath)) {
+                            $shortcut = $shell.CreateShortcut($linkPath)
+                            $shortcut.TargetPath = 'powershell.exe'
+                            $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "C:\staging\DSC\Read-DSCLog.ps1"'
+                            $shortcut.WorkingDirectory = 'C:\staging\DSC'
+                            $shortcut.Save()
+                        }
 
-                    $linkPath2 = Join-Path $desktopPath 'DSC ConfigurationStatus.lnk'
-                    if (-not (Test-Path $linkPath2)) {
-                        $shortcut2 = $shell.CreateShortcut($linkPath2)
-                        $shortcut2.TargetPath = 'C:\Windows\System32\Configuration\ConfigurationStatus'
-                        $shortcut2.Save()
+                        $linkPath2 = Join-Path $desktopPath 'DSC ConfigurationStatus.lnk'
+                        if (-not (Test-Path $linkPath2)) {
+                            $shortcut2 = $shell.CreateShortcut($linkPath2)
+                            $shortcut2.TargetPath = 'C:\Windows\System32\Configuration\ConfigurationStatus'
+                            $shortcut2.Save()
+                        }
+                        # Reported so the note is only stamped for work that actually landed.
+                        return $true
                     }
-                } catch { }
-            } -DisplayName "DSC: Create desktop shortcuts"
+                    catch { return $false }
+                } -DisplayName "DSC: Create desktop shortcuts"
+                $swShortcuts.Stop()
+
+                $shortcutsOk = (-not $result.ScriptBlockFailed) -and ($result.ScriptBlockOutput -eq $true)
+                if ($shortcutsOk) {
+                    try { Update-VMNoteProperty -VmName $currentItem.vmName -PropertyName 'DscShortcutsCreated' -PropertyValue $true } catch { }
+                }
+                Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] DscShortcuts completed in $([math]::Round($swShortcuts.Elapsed.TotalSeconds, 1)) seconds (created=$shortcutsOk)" -LogOnly
+            }
         }
 
         $DSC_ClearStatus = {
