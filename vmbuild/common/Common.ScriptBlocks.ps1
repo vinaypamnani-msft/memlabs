@@ -1141,7 +1141,7 @@ $global:VM_Create = {
             # per-process, so without it we would read back the pre-Set-TimeZone value.
             try {
                 [TimeZoneInfo]::ClearCachedData()
-                $tzNow = Get-TimeZone
+                $tzNow = [TimeZoneInfo]::Local
                 $tzReport = [PSCustomObject]@{ Id = $tzNow.Id; OffsetMinutes = [int]$tzNow.GetUtcOffset([DateTime]::Now).TotalMinutes }
             } catch { $warnings += "Read back timezone: $_" }
 
@@ -1424,19 +1424,30 @@ $global:VM_Create = {
             # Record the guest's real zone against the host's. Set-TimeZone can no-op on an
             # id this host resolves but the guest OS does not, and the failure is otherwise
             # invisible until someone tries to line a guest log up with a host line.
-            $guestTz = $null
-            if (-not $result.ScriptBlockFailed) { $guestTz = $result.ScriptBlockOutput.TimeZone }
-            if ($guestTz) {
-                $hostOffMin = [int]([TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now).TotalMinutes)
-                $skewMin = [int]$guestTz.OffsetMinutes - $hostOffMin
-                $skewNote = if ($skewMin -eq 0) { 'same offset as host' } else { "$([math]::Round($skewMin / 60.0, 2))h vs host -- guest log timestamps are shifted by that much" }
-                if ("$($guestTz.Id)" -ne "$timeZone") {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): timezone is '$($guestTz.Id)' but '$timeZone' was requested ($skewNote)." -Warning -OutputStream
+            # ScriptBlockOutput becomes an ARRAY the moment anything in that scriptblock leaks
+            # to the pipeline, and member access on an array yields an array -- so take one
+            # object, and never let a reporting line break Phase 1 for this VM.
+            try {
+                $guestTz = $null
+                if (-not $result.ScriptBlockFailed) {
+                    $guestTz = @($result.ScriptBlockOutput.TimeZone | Where-Object { $_ }) | Select-Object -First 1
                 }
-                else {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): timezone '$($guestTz.Id)' (UTC offset $($guestTz.OffsetMinutes) min, $skewNote)" -LogOnly
+                if ($guestTz) {
+                    $hostOffMin = [int]([TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now).TotalMinutes)
+                    $skewMin = [int]$guestTz.OffsetMinutes - $hostOffMin
+                    $skewNote = if ($skewMin -eq 0) { 'same offset as host' } else { "$([math]::Round($skewMin / 60.0, 2))h vs host -- guest log timestamps are shifted by that much" }
+                    if ("$($guestTz.Id)" -ne "$timeZone") {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): timezone is '$($guestTz.Id)' but '$timeZone' was requested ($skewNote)." -Warning -OutputStream
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): timezone '$($guestTz.Id)' (UTC offset $($guestTz.OffsetMinutes) min, $skewNote)" -LogOnly
+                    }
+                }
+                elseif (-not $result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): settings step returned no timezone read-back; guest zone unverified, so its log timestamps cannot be aligned to host lines." -LogOnly
                 }
             }
+            catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): could not report guest timezone: $($_.Exception.Message)" -LogOnly }
             # Set vm note
             if (-not $skipVersionUpdate) {
                 $inProgress = (-not $Migrate)

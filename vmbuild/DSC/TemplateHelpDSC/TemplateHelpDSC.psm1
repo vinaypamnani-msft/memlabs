@@ -3121,9 +3121,15 @@ function Add-LcmLogLine {
         if (-not $Component) { $Component = 'LCM' }
         # Same UTC bias the CMTrace writers emit. This file is written in the GUEST's
         # timezone but read on the host, where it sits next to host-stamped lines.
+        # Guarded so corrupt registry timezone data cannot cost the whole line.
         $lcmNow = Get-Date
-        $lcmBias = [int](-[TimeZoneInfo]::Local.GetUtcOffset($lcmNow).TotalMinutes)
-        $lcmStamp = $lcmNow.ToString('MM-dd HH:mm:ss.fff') + $(if ($lcmBias -ge 0) { "+$lcmBias" } else { "$lcmBias" })
+        $lcmBias = ''
+        try {
+            $lcmBiasMin = [int](-[TimeZoneInfo]::Local.GetUtcOffset($lcmNow).TotalMinutes)
+            $lcmBias = $(if ($lcmBiasMin -ge 0) { "+$lcmBiasMin" } else { "$lcmBiasMin" })
+        }
+        catch { }
+        $lcmStamp = $lcmNow.ToString('MM-dd HH:mm:ss.fff') + $lcmBias
         $line = '{0} pid={1,-6} tid={2,-4} {3,-34} {4}{5}' -f `
             $lcmStamp, $PID,
             [System.Threading.Thread]::CurrentThread.ManagedThreadId,
@@ -3249,8 +3255,16 @@ function Write-Status {
             $date = $now.ToString('MM-dd-yyyy')
             # Bias = minutes to ADD to this stamp to reach UTC (ConfigMgr's own convention).
             # This log is written in the GUEST's timezone, which need not match the host's.
-            $bias = [int](-[TimeZoneInfo]::Local.GetUtcOffset($now).TotalMinutes)
-            $time = $now.ToString('HH:mm:ss.fff') + $(if ($bias -ge 0) { "+$bias" } else { "$bias" })
+            # Guarded: TimeZoneInfo.Local throws on corrupt registry timezone data, and the
+            # catch below re-emits $logText -- which would be unassigned, silently costing
+            # the status line instead of just the bias.
+            $bias = ''
+            try {
+                $biasMin = [int](-[TimeZoneInfo]::Local.GetUtcOffset($now).TotalMinutes)
+                $bias = $(if ($biasMin -ge 0) { "+$biasMin" } else { "$biasMin" })
+            }
+            catch { }
+            $time = $now.ToString('HH:mm:ss.fff') + $bias
 
             $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""Status"" thread=""$tid"" file=""$file"">"
             $logText | Out-File $StatusLog -Append -Encoding utf8

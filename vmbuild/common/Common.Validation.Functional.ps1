@@ -10835,7 +10835,8 @@ function Test-CMSiteWideFunctionality {
                         # at all, so there was no way to tell a live failure from a stale row.
                         # "local" here is the SUP's zone, which a lab may set away from the
                         # host's, so the offset is stated rather than implied.
-                        $tzTag = "UTC$(([TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now)).ToString('\+hh\:mm;\-hh\:mm'))"
+                        $tzTag = ''
+                        try { $tzTag = " UTC$(([TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now)).ToString('\+hh\:mm;\-hh\:mm'))" } catch { }
                         $toLocal = {
                             param($dt)
                             if ($null -eq $dt) { return $null }
@@ -10858,7 +10859,7 @@ function Test-CMSiteWideFunctionality {
                                     $hEnd = & $toLocal $h.EndTime
                                     $parts = @("result=$($h.Result)", "error=$($h.Error)")
                                     if ($h.ErrorText) { $parts += "errorText='$(("$($h.ErrorText)" -replace '\s+', ' ').Trim())'" }
-                                    if ($hStart) { $parts += "ran=$($hStart.ToString('yyyy-MM-dd HH:mm:ss'))->$(if ($hEnd) { $hEnd.ToString('HH:mm:ss') } else { '?' }) SUP-local $tzTag" }
+                                    if ($hStart) { $parts += "ran=$($hStart.ToString('yyyy-MM-dd HH:mm:ss'))->$(if ($hEnd) { $hEnd.ToString('HH:mm:ss') } else { '?' }) SUP-local$tzTag" }
                                     try {
                                         $ue = @($h.UpdateErrors)
                                         if ($ue.Count -gt 0) { $parts += "updateErrors=$($ue.Count) first='$(("$($ue[0])" -replace '\s+', ' ').Trim())'" }

@@ -28,8 +28,15 @@ function Write-StatusLogEntry {
         $date = Get-Date -Format 'MM-dd-yyyy'
         # Bias = minutes to ADD to this stamp to reach UTC (ConfigMgr's own convention).
         # This log is written in the GUEST's timezone, which need not match the host's.
-        $biasMin = [int](-[TimeZoneInfo]::Local.GetUtcOffset((Get-Date)).TotalMinutes)
-        $tzBias = if ($biasMin -ge 0) { "+$biasMin" } else { "$biasMin" }
+        # TimeZoneInfo.Local throws on corrupt registry timezone data; this runs in begin{},
+        # so an escape would take out every status line this guest writes. Bias is optional,
+        # the log is not.
+        $tzBias = ''
+        try {
+            $biasMin = [int](-[TimeZoneInfo]::Local.GetUtcOffset((Get-Date)).TotalMinutes)
+            $tzBias = $(if ($biasMin -ge 0) { "+$biasMin" } else { "$biasMin" })
+        }
+        catch { }
         $buffer = New-Object System.Collections.Generic.List[string]
     }
     process {

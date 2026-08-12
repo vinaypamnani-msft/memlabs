@@ -706,7 +706,11 @@ try {
             Write-Log "Timezone: host '$($hostTz.Id)' (UTC$($hostOff.ToString('\+hh\:mm;\-hh\:mm'))) but lab VMs run '$labTzId' (UTC$($labOff.ToString('\+hh\:mm;\-hh\:mm'))). Guest-written timestamps are $($delta.ToString('\+hh\:mm;\-hh\:mm')) versus host lines -- compare using the +bias suffix on each CMTrace time field, not the bare clock time." -LogOnly
         }
     }
-    catch { }
+    catch {
+        # Canary for the same TimeZoneInfo API the log writers use: if it throws here it
+        # throws there too, and there it degrades silently to an unbiased stamp.
+        Write-Log "Timezone: could not determine the host/lab timezone relationship: $($_.Exception.Message). Log timestamps will carry no UTC bias, so host and guest lines cannot be aligned." -Warning
+    }
     try {
         $gitBranch = git -C $PSScriptRoot rev-parse --abbrev-ref HEAD 2>$null
         $gitHash   = git -C $PSScriptRoot rev-parse --short HEAD 2>$null
