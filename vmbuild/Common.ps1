@@ -9227,20 +9227,18 @@ function Get-ToolSetFingerprint {
     .SYNOPSIS
         Path+size fingerprint for a set of tool source entries, memoized per process.
     .DESCRIPTION
-        The fingerprint depends only on host-side files, so it is identical for every
-        VM -- but Copy-ToolToVM computed it per VM, which meant 11 concurrent recursive
-        walks of the same tool trees (Wireshark, Netmon, Toolbox...). Measured: 0.4s
-        single-threaded in Build-ToolZipsForPhase2 vs 8.2-14.3s per VM under contention,
-        112.5s aggregate across one Phase 2, every one of which ended in
-        "Tools unchanged ... Skipping".
+        The fingerprint depends only on host-side files, so it is identical for every VM.
+        Computing it is cheap -- ~0.2s, measured across all 11 VMs of a Phase 2 -- so this
+        memo is a tidiness measure, NOT a performance fix. The 8-14s once blamed on it was
+        `Get-List -Type VM -SmartUpdate` a few lines below, in Copy-ToolToVM.
 
-        Held on the APPDOMAIN, deliberately NOT on disk. A stale fingerprint is not a
-        slow answer, it is a WRONG one: Copy-ToolToVM compares it against the VM note
-        and skips injection on a match, so serving a pre-change value would silently
-        leave old tools on the guest. Process-scoped memo cannot outlive the run that
-        computed it. Workers are runspaces in the launcher process (same reason
-        MemLabs_SessionStats lives here); if that ever stops being true the lookup
-        simply misses and every caller computes as before.
+        The memo does NOT span VMs on the phase path: VM_Config and VM_Create run under
+        Start-Job (separate process, see Start-PhaseJobs), so each VM gets its own AppDomain
+        and its own empty memo. It only helps a caller that asks twice in ONE process --
+        Build-ToolZipsForPhase2 on the launcher, or the ThreadJob-based phases. Kept on the
+        AppDomain rather than disk because a stale fingerprint is not a slow answer but a
+        wrong one: Copy-ToolToVM compares it against the VM note and SKIPS injection on a
+        match, so a pre-change value would silently leave old tools on the guest.
 
         Sizes, not timestamps: Get-Tools re-extracts the zips every run, which rewrites
         LastWriteTimeUtc even when content is identical.
