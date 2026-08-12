@@ -9453,7 +9453,37 @@ function Copy-ToolToVM {
         [switch]$Force
     )
 
-    $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VMName }
+    # -SmartUpdate refreshes EVERY VM (Get-VM over the host, Update-VMFromHyperV per VM, then
+    # a disk-cache write) just to select one, and its 3s throttle is per-process, so 11
+    # concurrent workers each pay the whole refresh at the same instant: measured 9.9-13.2s
+    # per VM, 126.7s across one Phase 2. Install-Tools already carries this fix (c7accf4a);
+    # its note warns that other call sites do not inherit it, and this is one of them.
+    $swVmLookup = [System.Diagnostics.Stopwatch]::StartNew()
+    $vmLookupPath = 'cached + per-VM state'
+    $staleState = $false
+    $vm = Get-List -Type VM | Where-Object { $_.vmName -eq $VMName }
+    if (-not $vm) {
+        # Cache miss (e.g. a VM created earlier in this run): pay for the full refresh.
+        $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VMName }
+        $vmLookupPath = 'cache miss -> full SmartUpdate'
+    }
+    if ($vm) {
+        $liveVm = Get-VM -Name $vm.vmName -ErrorAction SilentlyContinue
+        if ($liveVm) {
+            # String, not the enum, to match how Update-VMFromHyperV sets it.
+            $vm | Add-Member -MemberType NoteProperty -Name 'state' -Value ($liveVm.State.ToString()) -Force
+        }
+        else {
+            # State gates the injection below, so a stale 'Off' would silently skip the work.
+            $staleState = $true
+            Write-Log "$VMName`: Copy-ToolToVM could not read live state; using cached state '$($vm.state)'." -Warning
+        }
+    }
+    $swVmLookup.Stop()
+    Write-Log ("[StepTiming] {0} ToolCopy-GetList completed in {1} seconds ({2}{3})" -f `
+            $VMName, [Math]::Round($swVmLookup.Elapsed.TotalSeconds, 1), $vmLookupPath,
+        $(if ($staleState) { ', stale state' } else { '' })) -LogOnly
+
     if ($vm.State -ne "Running") {
         Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
         return $false
