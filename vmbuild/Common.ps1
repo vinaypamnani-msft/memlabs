@@ -9168,6 +9168,60 @@ function Clean-StaleToolZips {
     }
 }
 
+function Get-VMListEntryWithLiveState {
+    <#
+    .SYNOPSIS
+        Cached Get-List entry for ONE named VM, with only its state refreshed.
+    .DESCRIPTION
+        `Get-List -Type VM -SmartUpdate` refreshes EVERY VM on the host (Get-VM, an
+        Update-VMFromHyperV per VM, then a disk-cache write) just to select one, and its
+        3s throttle is per-process -- so N concurrent phase workers each pay the whole
+        refresh at the same instant. Measured 9.9-13.2s per VM, 126.7s across one Phase 2
+        on an 11-VM lab.
+
+        `state` is the only field callers act on (they refuse to touch a VM that is not
+        Running); domain and operatingSystem come from vmNotes and do not change mid-run.
+        So take the cached entry and refresh just that one field with a targeted Get-VM.
+
+        Returns $null if the VM is unknown even after a full refresh.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $false, HelpMessage = "Names the StepTiming marker so the log says which call site paid.")]
+        [string]$Caller = 'VMListLookup'
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lookupPath = 'cached + per-VM state'
+    $staleState = $false
+
+    $vm = Get-List -Type VM | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+    if (-not $vm) {
+        # Cache miss (e.g. a VM created earlier in this run): pay for the full refresh.
+        $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+        $lookupPath = 'cache miss -> full SmartUpdate'
+    }
+    if ($vm) {
+        $liveVm = Get-VM -Name $vm.vmName -ErrorAction SilentlyContinue
+        if ($liveVm) {
+            # String, not the enum, to match how Update-VMFromHyperV sets it.
+            $vm | Add-Member -MemberType NoteProperty -Name 'state' -Value ($liveVm.State.ToString()) -Force
+        }
+        else {
+            # Callers gate on Running, so a stale 'Off' would silently skip their work.
+            $staleState = $true
+            Write-Log "$VmName`: $Caller could not read live state; using cached state '$($vm.state)'." -Warning
+        }
+    }
+    $sw.Stop()
+    Write-Log ("[StepTiming] {0} {1}-GetList completed in {2} seconds ({3}{4})" -f `
+            $VmName, $Caller, [Math]::Round($sw.Elapsed.TotalSeconds, 1), $lookupPath,
+        $(if ($staleState) { ', stale state' } else { '' })) -LogOnly
+
+    return $vm
+}
+
 function Get-ToolSetFingerprint {
     <#
     .SYNOPSIS
@@ -9453,36 +9507,7 @@ function Copy-ToolToVM {
         [switch]$Force
     )
 
-    # -SmartUpdate refreshes EVERY VM (Get-VM over the host, Update-VMFromHyperV per VM, then
-    # a disk-cache write) just to select one, and its 3s throttle is per-process, so 11
-    # concurrent workers each pay the whole refresh at the same instant: measured 9.9-13.2s
-    # per VM, 126.7s across one Phase 2. Install-Tools already carries this fix (c7accf4a);
-    # its note warns that other call sites do not inherit it, and this is one of them.
-    $swVmLookup = [System.Diagnostics.Stopwatch]::StartNew()
-    $vmLookupPath = 'cached + per-VM state'
-    $staleState = $false
-    $vm = Get-List -Type VM | Where-Object { $_.vmName -eq $VMName }
-    if (-not $vm) {
-        # Cache miss (e.g. a VM created earlier in this run): pay for the full refresh.
-        $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VMName }
-        $vmLookupPath = 'cache miss -> full SmartUpdate'
-    }
-    if ($vm) {
-        $liveVm = Get-VM -Name $vm.vmName -ErrorAction SilentlyContinue
-        if ($liveVm) {
-            # String, not the enum, to match how Update-VMFromHyperV sets it.
-            $vm | Add-Member -MemberType NoteProperty -Name 'state' -Value ($liveVm.State.ToString()) -Force
-        }
-        else {
-            # State gates the injection below, so a stale 'Off' would silently skip the work.
-            $staleState = $true
-            Write-Log "$VMName`: Copy-ToolToVM could not read live state; using cached state '$($vm.state)'." -Warning
-        }
-    }
-    $swVmLookup.Stop()
-    Write-Log ("[StepTiming] {0} ToolCopy-GetList completed in {1} seconds ({2}{3})" -f `
-            $VMName, [Math]::Round($swVmLookup.Elapsed.TotalSeconds, 1), $vmLookupPath,
-        $(if ($staleState) { ', stale state' } else { '' })) -LogOnly
+    $vm = Get-VMListEntryWithLiveState -VmName $VMName -Caller 'ToolCopy'
 
     if ($vm.State -ne "Running") {
         Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
@@ -9925,7 +9950,8 @@ function Copy-LanguagePacksToVM {
     $destDir = "C:\LanguagePacks"
 
     if ($VmName) {
-        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+        # Null-filtered: @($null) has Count 1, which would iterate once on a null VM.
+        $allVMs = @(Get-VMListEntryWithLiveState -VmName $VmName -Caller 'LanguagePacks' | Where-Object { $null -ne $_ })
     }
     else {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
@@ -10000,7 +10026,8 @@ function Copy-LocaleConfigToVM {
     $localeConfigFile = "_localeConfig.json"
 
     if ($VmName) {
-        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+        # Null-filtered: @($null) has Count 1, which would iterate once on a null VM.
+        $allVMs = @(Get-VMListEntryWithLiveState -VmName $VmName -Caller 'LocaleConfig' | Where-Object { $null -ne $_ })
     }
     else {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
