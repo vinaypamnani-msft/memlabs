@@ -2540,7 +2540,29 @@ $global:VM_Config = {
             while ($retrycount -le 3 -and $success -eq $false) {
                 Write-Progress2 $Activity -Status "Testing IP Address" -percentcomplete 9 -force
                 #169.254.239.16
-                $IPAddress = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetIPConfiguration).Ipv4Address.IpAddress } -DisplayName "GetIPs"
+                $swGetIps = [System.Diagnostics.Stopwatch]::StartNew()
+                $IPAddress = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                    # Get-NetIPConfiguration resolves DNS servers, gateways and a connectivity
+                    # profile per interface: measured 2.8s warm and 9.1s COLD, and every VM here
+                    # is cold. The pair below returns the same addresses in ~30ms.
+                    $ips = @()
+                    try {
+                        $connected = @(Get-NetIPInterface -AddressFamily IPv4 -ConnectionState Connected -ErrorAction Stop).InterfaceIndex
+                        $ips = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+                            Where-Object { $_.InterfaceIndex -in $connected -and -not "$($_.IPAddress)".StartsWith('127.') } |
+                            ForEach-Object { "$($_.IPAddress)" })
+                    }
+                    catch { $ips = @() }
+                    # Returning nothing is not a cheap answer, it is a different one: the caller
+                    # skips the whole LastKnownIP/reservation block on an empty result. Confirm
+                    # "no addresses" the expensive way before reporting it.
+                    if ($ips.Count -eq 0) {
+                        $ips = @((Get-NetIPConfiguration).Ipv4Address.IpAddress)
+                    }
+                    return $ips
+                } -DisplayName "GetIPs"
+                $swGetIps.Stop()
+                Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] GetIPs completed in $([math]::Round($swGetIps.Elapsed.TotalSeconds, 1)) seconds (attempt $($retryCount + 1), returned $(@($IPAddress.ScriptBlockOutput).Count))" -LogOnly
                 $success = $true
                 if ($IPAddress.ScriptBlockOutput) {
                     # A VM with multiple NICs (e.g. SQLAO with a ClusterV2 NIC)
