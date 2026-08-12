@@ -9168,6 +9168,80 @@ function Clean-StaleToolZips {
     }
 }
 
+function Get-ToolSetFingerprint {
+    <#
+    .SYNOPSIS
+        Path+size fingerprint for a set of tool source entries, memoized per process.
+    .DESCRIPTION
+        The fingerprint depends only on host-side files, so it is identical for every
+        VM -- but Copy-ToolToVM computed it per VM, which meant 11 concurrent recursive
+        walks of the same tool trees (Wireshark, Netmon, Toolbox...). Measured: 0.4s
+        single-threaded in Build-ToolZipsForPhase2 vs 8.2-14.3s per VM under contention,
+        112.5s aggregate across one Phase 2, every one of which ended in
+        "Tools unchanged ... Skipping".
+
+        Held on the APPDOMAIN, deliberately NOT on disk. A stale fingerprint is not a
+        slow answer, it is a WRONG one: Copy-ToolToVM compares it against the VM note
+        and skips injection on a match, so serving a pre-change value would silently
+        leave old tools on the guest. Process-scoped memo cannot outlive the run that
+        computed it. Workers are runspaces in the launcher process (same reason
+        MemLabs_SessionStats lives here); if that ever stops being true the lookup
+        simply misses and every caller computes as before.
+
+        Sizes, not timestamps: Get-Tools re-extracts the zips every run, which rewrites
+        LastWriteTimeUtc even when content is identical.
+    #>
+    param(
+        [Parameter(Mandatory = $false)]
+        [object[]]$Entries
+    )
+
+    $entryList = @($Entries | Where-Object { $null -ne $_ })
+    if ($entryList.Count -eq 0) { return $null }
+
+    $sorted = @($entryList | Sort-Object { $_.TargetRelative })
+
+    $memo = $null
+    $setKey = $null
+    try {
+        $keySource = ($sorted | ForEach-Object { "$($_.TargetRelative)|$($_.SourcePath)" }) -join "`n"
+        $keyStream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($keySource))
+        $setKey = (Get-FileHash -InputStream $keyStream -Algorithm MD5).Hash
+        $keyStream.Dispose()
+
+        $memo = [System.AppDomain]::CurrentDomain.GetData('MemLabs_ToolFingerprints')
+        if (-not $memo) {
+            $memo = [System.Collections.Hashtable]::Synchronized(@{})
+            [System.AppDomain]::CurrentDomain.SetData('MemLabs_ToolFingerprints', $memo)
+        }
+        if ($memo.ContainsKey($setKey)) { return $memo[$setKey] }
+    }
+    catch {
+        $memo = $null
+    }
+
+    $parts = foreach ($entry in $sorted) {
+        $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
+        if ($item -is [System.IO.DirectoryInfo]) {
+            $children = Get-ChildItem $item.FullName -Recurse -File | Sort-Object FullName
+            foreach ($child in $children) {
+                "$($entry.TargetRelative)|$($child.FullName.Substring($item.FullName.Length))|$($child.Length)"
+            }
+        }
+        else {
+            "$($entry.TargetRelative)|$($item.Length)"
+        }
+    }
+    $str = $parts -join "`n"
+    $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($str))
+    $hash = (Get-FileHash -InputStream $stream -Algorithm MD5).Hash
+    $stream.Dispose()
+
+    if ($memo -and $setKey) { $memo[$setKey] = $hash }
+
+    return $hash
+}
+
 function Build-ToolZipsForPhase2 {
     <#
     .SYNOPSIS
@@ -9260,27 +9334,6 @@ function Build-ToolZipsForPhase2 {
     }
 
     # --- Fingerprint helper (same logic as Copy-ToolToVM) ---
-    $computeFingerprint = {
-        param([object[]]$entries)
-        $parts = foreach ($entry in $entries | Sort-Object { $_.TargetRelative }) {
-            $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
-            if ($item -is [System.IO.DirectoryInfo]) {
-                $children = Get-ChildItem $item.FullName -Recurse -File | Sort-Object FullName
-                foreach ($child in $children) {
-                    "$($entry.TargetRelative)|$($child.FullName.Substring($item.FullName.Length))|$($child.Length)"
-                }
-            }
-            else {
-                "$($entry.TargetRelative)|$($item.Length)"
-            }
-        }
-        $str = $parts -join "`n"
-        $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($str))
-        $hash = (Get-FileHash -InputStream $stream -Algorithm MD5).Hash
-        $stream.Dispose()
-        return $hash
-    }
-
     # --- Build zip helper (same logic as Copy-ToolToVM.$buildZip) ---
     $buildZipLocal = {
         param([object[]]$entries, [string]$fingerprint, [string]$label)
@@ -9347,7 +9400,7 @@ function Build-ToolZipsForPhase2 {
     $builtCount = 0
     $allZipNames = @()
     if ($commonEntries.Count -gt 0) {
-        $commonFP = & $computeFingerprint $commonEntries
+        $commonFP = Get-ToolSetFingerprint -Entries $commonEntries
         $zipPath = Join-Path $Common.TempPath "tools-$commonFP.zip"
         $zipExists = Test-Path $zipPath
         $newestFile = & $getNewestSource $commonEntries
@@ -9362,7 +9415,7 @@ function Build-ToolZipsForPhase2 {
     $builtExtraFPs = @{}
     foreach ($role in $allExtraSets.Keys) {
         $extraEntries = $allExtraSets[$role]
-        $extraFP = & $computeFingerprint $extraEntries
+        $extraFP = Get-ToolSetFingerprint -Entries $extraEntries
         if (-not $builtExtraFPs.ContainsKey($extraFP)) {
             $zipPath = Join-Path $Common.TempPath "tools-$extraFP.zip"
             $zipExists = Test-Path $zipPath
@@ -9493,32 +9546,6 @@ function Copy-ToolToVM {
         return $true
     }
 
-    # --- Helper: compute a fingerprint for a set of zip entries ---
-    $computeFingerprint = {
-        param([object[]]$entries)
-        # Use path + size only (no timestamps). Get-Tools re-extracts tool
-        # zips on every run, which updates LastWriteTimeUtc even though the
-        # content is identical. Including timestamps would invalidate the
-        # fingerprint cache on every rerun.
-        $parts = foreach ($entry in $entries | Sort-Object { $_.TargetRelative }) {
-            $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
-            if ($item -is [System.IO.DirectoryInfo]) {
-                $children = Get-ChildItem $item.FullName -Recurse -File | Sort-Object FullName
-                foreach ($child in $children) {
-                    "$($entry.TargetRelative)|$($child.FullName.Substring($item.FullName.Length))|$($child.Length)"
-                }
-            }
-            else {
-                "$($entry.TargetRelative)|$($item.Length)"
-            }
-        }
-        $str = $parts -join "`n"
-        $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($str))
-        $hash = (Get-FileHash -InputStream $stream -Algorithm MD5).Hash
-        $stream.Dispose()
-        return $hash
-    }
-
     # --- Compute fingerprints ---
     $commonFingerprint = $null
     $extraFingerprint = $null
@@ -9526,12 +9553,15 @@ function Copy-ToolToVM {
     $hostCachePath = Join-Path $Common.TempPath "toolhash-$VMName.json"
 
     try {
+        $swFp = [System.Diagnostics.Stopwatch]::StartNew()
         if ($commonEntries.Count -gt 0) {
-            $commonFingerprint = & $computeFingerprint $commonEntries
+            $commonFingerprint = Get-ToolSetFingerprint -Entries $commonEntries
         }
         if ($extraEntries.Count -gt 0) {
-            $extraFingerprint = & $computeFingerprint $extraEntries
+            $extraFingerprint = Get-ToolSetFingerprint -Entries $extraEntries
         }
+        $swFp.Stop()
+        Write-Log ("[StepTiming] {0} ToolInject-Fingerprint completed in {1} seconds" -f $vmName, [Math]::Round($swFp.Elapsed.TotalSeconds, 1)) -LogOnly
     }
     catch {
         Write-Log "$vmName`: Source fingerprint computation failed, will do full rebuild: $_" -LogOnly
