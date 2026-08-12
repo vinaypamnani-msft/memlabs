@@ -2024,9 +2024,13 @@ function Save-CMSetupSqlFailureEvidence {
     $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
 
     $collect = {
+        param($errNum, $corruptionList)
         $out = [ordered]@{
             ErrorLogPath = $null
             ErrorLog     = $null
+            LogScan      = @()
+            LogScanNote  = $null
+            SuspectPages = @()
             Checks       = @()
             Error        = $null
         }
@@ -2045,6 +2049,32 @@ function Save-CMSetupSqlFailureEvidence {
             # SQL holds ERRORLOG open for write but shares read, so a live read works.
             if ($out.ErrorLogPath -and (Test-Path -LiteralPath $out.ErrorLogPath)) {
                 $out.ErrorLog = (Get-Content -LiteralPath $out.ErrorLogPath -Tail 300 -ErrorAction SilentlyContinue) -join "`r`n"
+            }
+
+            # The tail above is a convenience copy, not evidence: an AG instance
+            # logs enough that a failure from hours earlier scrolls out of 300
+            # lines, and SQL starts a NEW ERRORLOG on every service restart, so
+            # the entry that killed setup is routinely in ERRORLOG.1/.2/... and
+            # invisible to any read of the current file. Scan every generation.
+            if ($out.ErrorLogPath) {
+                $logFolder = Split-Path -Parent $out.ErrorLogPath
+                $nums = @($corruptionList | ForEach-Object { [string][int]$_ })
+                $rx = 'Error:\s*(' + ($nums -join '|') + ')\s*,'
+                $files = @(Get-ChildItem -LiteralPath $logFolder -Filter 'ERRORLOG*' -File -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -notlike '*.trc' } | Sort-Object LastWriteTime)
+                $scanned = 0
+                foreach ($f in $files) {
+                    $scanned++
+                    try {
+                        $hits = @(Select-String -LiteralPath $f.FullName -Pattern $rx -ErrorAction SilentlyContinue)
+                        foreach ($h in ($hits | Select-Object -Last 10)) {
+                            $out.LogScan += ('{0} | {1}' -f $f.Name, ($h.Line.Trim()))
+                        }
+                    }
+                    catch { $out.LogScan += ('{0} | UNREADABLE: {1}' -f $f.Name, $_.Exception.Message) }
+                }
+                # A scan of zero files is not a clean result; say which it was.
+                $out.LogScanNote = "scanned $scanned ERRORLOG generation(s) in $logFolder for errors $($nums -join '/'): $($out.LogScan.Count) hit(s)"
             }
 
             $server = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
@@ -2066,6 +2096,23 @@ WHERE d.name LIKE 'CM[_]%'
                     $targets += [pscustomobject]@{ DbName = [string]$rd['DbName']; StateDesc = [string]$rd['StateDesc']; RoleDesc = [string]$rd['RoleDesc'] }
                 }
                 $rd.Close()
+
+                # suspect_pages is the engine's own durable record of page-level
+                # faults (823/824/829). CHECKDB only reports what is damaged NOW,
+                # so a page that was hit and later overwritten leaves no CHECKDB
+                # trace but does leave a row here.
+                try {
+                    $sp = $cn.CreateCommand()
+                    $sp.CommandTimeout = 60
+                    $sp.CommandText = 'SELECT DB_NAME(database_id) AS DbName, file_id, page_id, event_type, error_count, last_update_date FROM msdb.dbo.suspect_pages'
+                    $spr = $sp.ExecuteReader()
+                    while ($spr.Read()) {
+                        $out.SuspectPages += ('db={0} file={1} page={2} event_type={3} errors={4} last={5}' -f `
+                                $spr['DbName'], $spr['file_id'], $spr['page_id'], $spr['event_type'], $spr['error_count'], $spr['last_update_date'])
+                    }
+                    $spr.Close()
+                }
+                catch { $out.SuspectPages += "suspect_pages query failed: $($_.Exception.Message)" }
 
                 foreach ($t in $targets) {
                     if ($t.StateDesc -ne 'ONLINE') {
@@ -2111,10 +2158,12 @@ WHERE d.name LIKE 'CM[_]%'
 
     $sawCorruption = $false
     $ranCheck = $false
+    $logHits = 0
+    $suspectRows = 0
     foreach ($sqlHost in ($sqlHosts | Where-Object { $_ } | Select-Object -Unique)) {
         $res = $null
         try {
-            $res = Invoke-VmCommand -VmName $sqlHost -VmDomainName $DomainName -SuppressLog -DisplayName "Collect SQL evidence from $sqlHost" -ScriptBlock $collect
+            $res = Invoke-VmCommand -VmName $sqlHost -VmDomainName $DomainName -SuppressLog -DisplayName "Collect SQL evidence from $sqlHost" -ScriptBlock $collect -ArgumentList $sqlErrNum, $corruptionErrors
         }
         catch {
             Write-Log "[Phase $Phase]: $VmName`: SQL evidence from $sqlHost`: PSDirect call threw: $($_.Exception.Message)" -Warning -OutputStream
@@ -2141,6 +2190,20 @@ WHERE d.name LIKE 'CM[_]%'
         else {
             Write-Log "[Phase $Phase]: $VmName`: SQL evidence from $sqlHost`: ERRORLOG not readable (path='$($e.ErrorLogPath)')." -Warning -OutputStream
         }
+        if ($e.LogScanNote) {
+            Write-Log "[Phase $Phase]: $VmName`: ERRORLOG scan on $sqlHost`: $($e.LogScanNote)" -OutputStream
+        }
+        foreach ($h in @($e.LogScan)) {
+            $logHits++
+            Write-Log "[Phase $Phase]: $VmName`:   ERRORLOG $sqlHost`: $h" -OutputStream
+        }
+        if (@($e.SuspectPages).Count -eq 0) {
+            Write-Log "[Phase $Phase]: $VmName`: msdb.dbo.suspect_pages on $sqlHost is EMPTY -- the engine has never recorded a page-level fault here" -OutputStream
+        }
+        foreach ($sp in @($e.SuspectPages)) {
+            $suspectRows++
+            Write-Log "[Phase $Phase]: $VmName`:   suspect_pages $sqlHost`: $sp" -OutputStream -Warning
+        }
         foreach ($c in @($e.Checks)) {
             Write-Log "[Phase $Phase]: $VmName`: DBCC CHECKDB on $sqlHost [$($c.DbName)]: $($c.Verdict)" -OutputStream
             if ($c.Verdict -eq 'CLEAN') { $ranCheck = $true }
@@ -2157,8 +2220,21 @@ WHERE d.name LIKE 'CM[_]%'
     if ($sawCorruption) {
         Write-Log "[Phase $Phase]: $VmName`: DIAG: DBCC CHECKDB confirms REAL database corruption -- this is a storage fault, not a ConfigMgr fault. Check the Hyper-V host volume backing the SQL VM's disks: run 'vmbuild\tools\Set-MemlabsDedup.ps1 -CheckOnly' (Data Deduplication with OptimizeInUseFiles=`$true silently corrupts VHDXs of running VMs) and 'Start-DedupJob -Type Scrubbing -Volume <vol> -Full'. Rebuilding this lab without fixing the volume will corrupt the next one too." -OutputStream -Failure
     }
+    elseif ($suspectRows -gt 0) {
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: DBCC CHECKDB is clean but msdb.dbo.suspect_pages holds $suspectRows row(s) -- a page fault DID occur and the damaged page has since been overwritten or repaired. Treat this as storage, not a spurious error: check the Hyper-V host volume ('vmbuild\tools\Set-MemlabsDedup.ps1 -CheckOnly')." -OutputStream -Failure
+    }
     elseif ($ranCheck) {
-        Write-Log "[Phase $Phase]: $VmName`: DIAG: DBCC CHECKDB found NO corruption, so SQL error $sqlErrNum was spurious -- the database is intact and the failure is not reproducible from stored data. The site DB is still partially committed, so retry Phase 8 with -restore (or drop the CM database from every replica first); re-running setup.exe over the partial database will fail with 'Database already exists'." -OutputStream
+        # A clean CHECKDB only says the database is undamaged NOW. Whether the
+        # error was a one-off during setup or is still recurring is decided by
+        # how many times it appears across the ERRORLOG generations.
+        $verdict = "DIAG: DBCC CHECKDB found NO corruption and suspect_pages is empty, so SQL error $sqlErrNum left no damage on disk. The site DB is still partially committed, so retry Phase 8 with -restore (or drop the CM database from every replica first); re-running setup.exe over the partial database will fail with 'Database already exists'."
+        if ($logHits -gt 1) {
+            $verdict += " NOTE: error $sqlErrNum appears $logHits times across the ERRORLOG generations, so this is RECURRING rather than a one-off -- compare the timestamps above against the setup window before retrying, because a retry will not fix an error that is still being raised."
+        }
+        Write-Log "[Phase $Phase]: $VmName`: $verdict" -OutputStream
+    }
+    else {
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: SQL error $sqlErrNum is corruption-class but NO DBCC CHECKDB result was obtained from any SQL host, so nothing was measured -- do not read this as 'no corruption'. See the ERRORLOG copies above." -OutputStream -Warning
     }
 }
 
