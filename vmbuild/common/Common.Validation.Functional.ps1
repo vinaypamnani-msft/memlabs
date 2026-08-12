@@ -7850,6 +7850,30 @@ function Test-DomainMemberFunctionality {
             return ''
         }
 
+        # Has THIS attempt's ccmsetup already exited in failure? Only a terminal line
+        # dated after $since counts: ccmsetup.log is cumulative and never truncated, so
+        # an older failure is routinely one the retry is about to fix. An undated or
+        # unparseable line also returns null -- it cannot prove the failure is current.
+        $ccmTerminalFailure = {
+            param($since)
+            $p = 'C:\Windows\ccmsetup\Logs\ccmsetup.log'
+            if (-not (Test-Path $p)) { return $null }
+            $tail = Get-Content $p -Tail 60 -ErrorAction SilentlyContinue
+            $line = $tail | Where-Object { $_ -match 'CcmSetup failed with error code|CcmSetup is exiting with return code' } | Select-Object -Last 1
+            if (-not $line) { return $null }
+            if ($line -match 'return code 0\b') { return $null }
+            $m = [regex]::Match([string]$line, 'time="(?<h>\d\d:\d\d:\d\d)[^"]*"\s+date="(?<d>[\d\-]+)"')
+            if (-not $m.Success) { return $null }
+            $when = [datetime]::MinValue
+            if (-not [datetime]::TryParse("$($m.Groups['d'].Value) $($m.Groups['h'].Value)", [ref]$when)) { return $null }
+            if ($when -lt $since) { return $null }
+            $mm = [regex]::Match([string]$line, '<!\[LOG\[(.*?)\]LOG\]!>')
+            $msg = if ($mm.Success) { $mm.Groups[1].Value } else { [string]$line }
+            $msg = ($msg -replace '\s+', ' ').Trim()
+            if ($msg.Length -gt 160) { $msg = $msg.Substring(0, 160) + '...' }
+            return $msg
+        }
+
         # Domain membership
         $cs = Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue
         if (-not $cs.PartOfDomain) {
@@ -8064,10 +8088,19 @@ function Test-DomainMemberFunctionality {
             # Same overall budget, correct exit condition.
             $waitStart = Get-Date
             $waitBudget = 300
+            $terminalFailure = $null
             while (((Get-Date) - $waitStart).TotalSeconds -lt $waitBudget) {
                 $svc = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
                 if ($svc -and $svc.Status -eq 'Running') { break }
                 if ($svc) { try { Start-Service -Name 'CcmExec' -ErrorAction SilentlyContinue } catch {} }
+                # The loop was already reading this log every 10s just to decorate the
+                # progress line. When it records THIS attempt exiting in failure, CcmExec
+                # cannot appear inside the remaining budget -- ccmsetup schedules its own
+                # next attempt hours out -- so the rest of the wait is dead time. Six
+                # DomainMember VMs each burned the full 300s on exactly that, 40% of a
+                # 14-minute re-run.
+                $terminalFailure = & $ccmTerminalFailure $waitStart
+                if ($terminalFailure) { break }
                 $elapsed = [int]((Get-Date) - $waitStart).TotalSeconds
                 $busy = @(Get-Process -Name 'ccmsetup', 'msiexec' -ErrorAction SilentlyContinue).Count
                 $tail = & $tailCcmLine
@@ -8080,6 +8113,9 @@ function Test-DomainMemberFunctionality {
             if ($svc -and $svc.Status -eq 'Running') {
                 $results.Details.Add("OK: CcmExec is Running after ccmsetup retry ($([int]((Get-Date) - $waitStart).TotalSeconds)s)")
                 return $true
+            }
+            if ($terminalFailure) {
+                $results.Details.Add("INFO: stopped waiting after $([int]((Get-Date) - $waitStart).TotalSeconds)s of ${waitBudget}s -- this retry's ccmsetup already exited in failure: $terminalFailure")
             }
             return $false
         }
