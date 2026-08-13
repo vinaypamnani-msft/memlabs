@@ -4392,7 +4392,12 @@ function Invoke-WithDhcpMutex {
     param(
         [Parameter(Mandatory = $true)] [scriptblock] $ScriptBlock,
         [int] $TimeoutSeconds = 120,
-        [int] $CeilingSeconds = 900
+        [int] $CeilingSeconds = 900,
+        # Filled with WaitSeconds/HoldSeconds/Acquired so the caller can attribute
+        # its own elapsed time between queueing and real work. The >=10s log line
+        # below is host-wide and carries no VM name, so it cannot be paired with a
+        # VM in a log that interleaves 19 of them.
+        [hashtable] $Timing
     )
     $mtx = $null
     $acquired = $false
@@ -4431,6 +4436,11 @@ function Invoke-WithDhcpMutex {
         try { & $ScriptBlock }
         finally {
             $holdSw.Stop()
+            if ($Timing) {
+                $Timing['WaitSeconds'] = [Math]::Round($waitSw.Elapsed.TotalSeconds, 1)
+                $Timing['HoldSeconds'] = [Math]::Round($holdSw.Elapsed.TotalSeconds, 1)
+                $Timing['Acquired'] = $acquired
+            }
             # Hold time is the only number that explains queue depth; log it when it
             # is large enough to matter so the next sweep can attribute the wait.
             if ($holdSw.Elapsed.TotalSeconds -ge 10) {
@@ -4488,10 +4498,12 @@ function Add-DHCPReservationIsolated {
     $purgeMac = $PurgeMacFirst.IsPresent
     $attempt = 0
     $lastError = $null
+    $stepName = if ($LogContext) { $LogContext } else { $IPAddress }
     while ($attempt -lt $MaxAttempts) {
         $attempt++
         try {
-            $outcome = Invoke-WithDhcpMutex -ScriptBlock {
+            $mutexTiming = @{}
+            $outcome = Invoke-WithDhcpMutex -Timing $mutexTiming -ScriptBlock {
                 Invoke-IsolatedCim -ArgumentList $ScopeId, $IPAddress, $Mac, $Description, $purgeMac -ScriptBlock {
                     param($scopeId, $ip, $mac, $desc, $purgeMac)
 
@@ -4500,6 +4512,13 @@ function Add-DHCPReservationIsolated {
                     # reservation logged as "created" that was absent minutes later left no
                     # evidence of which branch ran or of what the server did with it.
                     $notes = [System.Collections.Generic.List[string]]::new()
+
+                    # Per-stage timers. The mutex is held for this entire scriptblock, so
+                    # on a full build every other VM's Phase 1 is queued behind whichever
+                    # stage below is slow -- and until now nothing said which one.
+                    $swInner = [System.Diagnostics.Stopwatch]::StartNew()
+                    $msPurge = 0; $msFind = 0; $msSwitch = 0; $msAdd = 0; $msVerify = 0; $msLease = 0
+                    $swStage = [System.Diagnostics.Stopwatch]::StartNew()
 
                     # Drop stale reservations this MAC still holds elsewhere (a VM that
                     # moved subnets, or a rerun against a changed config). Anything already
@@ -4519,6 +4538,7 @@ function Add-DHCPReservationIsolated {
                             }
                         }
                     }
+                    $msPurge = [int]$swStage.ElapsedMilliseconds
 
                     # Pre-clean: a reservation OR active lease already sitting on
                     # this IP under a DIFFERENT client is the most common cause of
@@ -4565,15 +4585,18 @@ function Add-DHCPReservationIsolated {
                     }
 
                     $existing = $null
+                    $swStage.Restart()
                     try { $existing = & $findReservation $ip } catch { }
+                    $msFind = [int]$swStage.ElapsedMilliseconds
                     if ($existing) {
                         $existingMac = ($existing.ClientId -replace '[-:]', '').ToLower()
                         if ($existingMac -eq $ourMac) {
                             # Reservation already exists with our MAC -- idempotent success.
                             $notes.Add("already reserved to our MAC; left unchanged")
+                            $notes.Add("timings=[inner=$([int]$swInner.ElapsedMilliseconds)ms purge=${msPurge}ms find=${msFind}ms switchMacs=${msSwitch}ms add=${msAdd}ms verify=${msVerify}ms lease=${msLease}ms]")
                             return ($notes.ToArray() -join '; ')
                         }
-                        if ($null -eq $switchMacs) { $switchMacs = & $resolveSwitchMacs }
+                        if ($null -eq $switchMacs) { $swStage.Restart(); $switchMacs = & $resolveSwitchMacs; $msSwitch += [int]$swStage.ElapsedMilliseconds }
                         if ($switchMacs.ContainsKey($existingMac)) {
                             throw "DHCP in-lab IP collision: $ip on scope $scopeId is already reserved to live switch member '$($switchMacs[$existingMac])' (MAC $existingMac); refusing to reassign it to MAC $mac. Fix the IP assignment for one of these VMs."
                         }
@@ -4593,7 +4616,7 @@ function Add-DHCPReservationIsolated {
                         if ($lease) {
                             $leaseMac = ($lease.ClientId -replace '[-:]', '').ToLower()
                             if ($leaseMac -ne $ourMac) {
-                                if ($null -eq $switchMacs) { $switchMacs = & $resolveSwitchMacs }
+                                if ($null -eq $switchMacs) { $swStage.Restart(); $switchMacs = & $resolveSwitchMacs; $msSwitch += [int]$swStage.ElapsedMilliseconds }
                                 $holder = if ($switchMacs.ContainsKey($leaseMac)) { "live switch member '$($switchMacs[$leaseMac])'" } else { 'a non-member client' }
                                 try { Remove-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null } catch { }
                                 $notes.Add("cleared lease on $ip held by $holder (MAC $leaseMac)")
@@ -4601,12 +4624,16 @@ function Add-DHCPReservationIsolated {
                         }
                     }
 
+                    $swStage.Restart()
                     Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ClientId $mac -Description $desc -ErrorAction Stop | Out-Null
+                    $msAdd = [int]$swStage.ElapsedMilliseconds
 
                     # Read the reservation back before reporting success, from the scope
                     # rather than the address, for the reason given at $findReservation.
                     $verify = $null
+                    $swStage.Restart()
                     try { $verify = & $findReservation $ip } catch { }
+                    $msVerify = [int]$swStage.ElapsedMilliseconds
                     if (-not $verify) {
                         throw "post-add read-back found NO reservation at $ip in scope $scopeId, although Add-DhcpServerv4Reservation reported success"
                     }
@@ -4621,7 +4648,9 @@ function Add-DHCPReservationIsolated {
                     # the guest booted and leased before the reservation existed, and keeps
                     # renewing the older client record. Nothing else in the run can see it.
                     $ourLeases = @()
+                    $swStage.Restart()
                     try { $ourLeases = @(Get-DhcpServerv4Lease -ScopeId $scopeId -ClientId $mac -ErrorAction SilentlyContinue) } catch { }
+                    $msLease = [int]$swStage.ElapsedMilliseconds
                     foreach ($l in $ourLeases) {
                         if (-not $l) { continue }
                         $lIp = [string]$l.IPAddress
@@ -4630,13 +4659,30 @@ function Add-DHCPReservationIsolated {
                         }
                     }
 
+                    $notes.Add("timings=[inner=$([int]$swInner.ElapsedMilliseconds)ms purge=${msPurge}ms find=${msFind}ms switchMacs=${msSwitch}ms add=${msAdd}ms verify=${msVerify}ms lease=${msLease}ms]")
                     $notes.ToArray() -join '; '
                 }
             }
             $summary = @($outcome | Where-Object { $_ -is [string] -and $_ }) | Select-Object -Last 1
+            # Split the machine-readable timing fragment back off so the human-readable
+            # note keeps its old shape and the StepTiming carries the numbers.
+            $innerTimings = ''
+            if ($summary -match '(?:^|; )timings=\[(?<t>[^\]]*)\]') {
+                $innerTimings = $Matches['t']
+                $summary = (($summary -replace '(?:^|; )timings=\[[^\]]*\]', '').Trim()).TrimEnd(';').Trim()
+            }
             if ($summary) {
                 Write-Log "${tag}Add-DHCPReservationIsolated: $IPAddress (Scope=$ScopeId, MAC=$Mac): $summary" -LogOnly
             }
+            # Phase 1 serializes every VM through Global\MemLabs_DHCP, so this one step
+            # decides when the other VMs may proceed. wait/hold split says whether a slow
+            # VM is queued or working; the inner fragment says which CIM call is slow, and
+            # hold-minus-inner is the isolated-runspace/module-import overhead.
+            $waitSec = if ($mutexTiming.ContainsKey('WaitSeconds')) { $mutexTiming['WaitSeconds'] } else { -1 }
+            $holdSec = if ($mutexTiming.ContainsKey('HoldSeconds')) { $mutexTiming['HoldSeconds'] } else { -1 }
+            $isoSec = if ($holdSec -ge 0 -and $innerTimings -match 'inner=(\d+)ms') { [Math]::Round($holdSec - ([int]$Matches[1] / 1000.0), 1) } else { -1 }
+            Write-Log ("[StepTiming] {0} DhcpReservation completed in {1} seconds (wait={2}s hold={3}s isolation={4}s attempt={5}/{6} scope={7} {8})" -f `
+                    $stepName, [Math]::Round($waitSec + $holdSec, 1), $waitSec, $holdSec, $isoSec, $attempt, $MaxAttempts, $ScopeId, $innerTimings) -LogOnly
             if ($attempt -gt 1) {
                 Write-Log "${tag}Add-DHCPReservationIsolated: succeeded for $IPAddress on attempt $attempt/$MaxAttempts (Scope=$ScopeId, MAC=$Mac)" -LogOnly
             }
@@ -5426,6 +5472,10 @@ function New-VirtualMachine {
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'SilentlyContinue'
     $Activity = "Creating Virtual Machine"
+    # Phase 1 was 92-97% uninstrumented on the two full builds measured 2026-08-12.
+    # Everything below reports through the finally, so a bail-out path is timed too.
+    $swVmCreate = [System.Diagnostics.Stopwatch]::StartNew()
+    $vmCreateStage = 'start'
     try {
         # WhatIf
         if ($WhatIf) {
@@ -5505,6 +5555,7 @@ function New-VirtualMachine {
 
         Write-Progress2 $Activity -Status "Creating VM in Hyper-V" -percentcomplete 5 -force
         # Create new VM
+        $vmCreateStage = 'newVM'
         try {
             $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
             if ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($Memory / 1))) {
@@ -5542,6 +5593,12 @@ function New-VirtualMachine {
         if ($DeployConfig -and -not $OSDClient.IsPresent) {
             $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
+                # The whole block, not just the reservation: Get-VMMacIsolated and
+                # Get-DHCPReservationIPForMac are two more isolated-runspace CIM calls, and
+                # they run BEFORE the mutex is taken, so they are invisible to the hold time.
+                $vmCreateStage = 'dhcpPreStart'
+                $swDhcp1 = [System.Diagnostics.Stopwatch]::StartNew()
+                $dhcp1Action = 'none'
                 # DHCP CIM cmdlets run in an isolated runspace (Invoke-IsolatedCim
                 # via the Get-VMMacIsolated / *DHCPReservation* helpers) so their
                 # CIM progress never poisons this job's managed progress bars.
@@ -5566,6 +5623,7 @@ function New-VirtualMachine {
                         $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
                         if ($existing -and $existing -eq $assignedIP) {
                             Write-Log "$VmName`: DHCP reservation already exists: $existing (MAC=$vmMac); keeping" -LogOnly
+                            $dhcp1Action = 'kept'
                         }
                         else {
                             if ($existing) {
@@ -5573,12 +5631,16 @@ function New-VirtualMachine {
                             }
                             Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName" -LogContext $VmName -PurgeMacFirst
                             Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
+                            $dhcp1Action = 'added'
                         }
                     }
                 }
                 catch {
                     Write-Log "$VmName`: Could not create DHCP reservation for $($thisVmConfig.AssignedIP). $_" -Warning
+                    $dhcp1Action = 'failed'
                 }
+                $swDhcp1.Stop()
+                Write-Log "[StepTiming] $VmName DhcpBlock completed in $([Math]::Round($swDhcp1.Elapsed.TotalSeconds, 1)) seconds (stage=preStart action=$dhcp1Action)" -LogOnly
             }
         }
 
@@ -5588,7 +5650,17 @@ function New-VirtualMachine {
 
         if (-not $Migrate) {
             if (-not $OSDClient.IsPresent) {
+                # The largest single silence in Phase 1 (192.7s on one cstest8b VM). Get-File
+                # logs the robocopy start and a "succeeded" line with NO VM name, so in a log
+                # interleaving 19 VMs the two cannot be paired. Time the call instead.
+                $vmCreateStage = 'osDiskCopy'
+                $swOsCopy = [System.Diagnostics.Stopwatch]::StartNew()
                 $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
+                $swOsCopy.Stop()
+                $osCopyGb = 0.0
+                try { $osCopyGb = [Math]::Round((Get-Item -LiteralPath $SourceDiskPath -ErrorAction Stop).Length / 1GB, 2) } catch { }
+                $osCopyMBs = if ($swOsCopy.Elapsed.TotalSeconds -gt 0) { [Math]::Round(($osCopyGb * 1024) / $swOsCopy.Elapsed.TotalSeconds, 1) } else { 0 }
+                Write-Log "[StepTiming] $VmName OsDiskCopy completed in $([Math]::Round($swOsCopy.Elapsed.TotalSeconds, 1)) seconds (ok=$worked sizeGB=$osCopyGb MBps=$osCopyMBs src='$(Split-Path $SourceDiskPath -Leaf)')" -LogOnly
                 if (-not $worked) {
                     Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
                     return $false
@@ -5615,12 +5687,17 @@ function New-VirtualMachine {
         Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | out-null
 
         if ($Generation -eq "2" -and $tpmEnabled) {
+            # A second host-wide serialization point in Phase 1, and unmeasured until now.
+            $vmCreateStage = 'tpm'
+            $swTpmWait = [System.Diagnostics.Stopwatch]::StartNew()
             $mutexName = "TPM"
             $mtx = New-Object System.Threading.Mutex($false, $mutexName)
             Write-Progress2 $Activity -Status "Waiting to enable TPM" -percentcomplete 40 -force
             write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly
             [void]$mtx.WaitOne()
             write-log "acquired '$mutexName' Mutex" -LogOnly
+            $swTpmWait.Stop()
+            $swTpmHold = [System.Diagnostics.Stopwatch]::StartNew()
             try {
                 Write-Progress2 $Activity -Status "Enabling TPM" -percentcomplete 50 -force
                 if ($null -eq (Get-HgsGuardian -Name MemLabsGuardian -ErrorAction SilentlyContinue)) {
@@ -5651,6 +5728,8 @@ function New-VirtualMachine {
             finally {
                 [void]$mtx.ReleaseMutex()
                 [void]$mtx.Dispose()
+                $swTpmHold.Stop()
+                Write-Log "[StepTiming] $VmName TpmEnable completed in $([Math]::Round(($swTpmWait.Elapsed + $swTpmHold.Elapsed).TotalSeconds, 1)) seconds (wait=$([Math]::Round($swTpmWait.Elapsed.TotalSeconds, 1))s hold=$([Math]::Round($swTpmHold.Elapsed.TotalSeconds, 1))s)" -LogOnly
             }
         }
 
@@ -5687,6 +5766,8 @@ function New-VirtualMachine {
 
         # Add additional disks
         if ($AdditionalDisks) {
+            $vmCreateStage = 'addDisks'
+            $swAddDisks = [System.Diagnostics.Stopwatch]::StartNew()
             $count = 0
             $label = "DATA"
             Write-Progress2 $Activity -Status "Adding Additional Disks" -percentcomplete 80 -force -log
@@ -5704,6 +5785,8 @@ function New-VirtualMachine {
                 Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath | out-null
                 $count++
             }
+            $swAddDisks.Stop()
+            Write-Log "[StepTiming] $VmName AddDisks completed in $([Math]::Round($swAddDisks.Elapsed.TotalSeconds, 1)) seconds (disks=$count)" -LogOnly
         }
 
         Write-Progress2 $Activity -Status "Setting Firmware" -percentcomplete 85 -force
@@ -5730,6 +5813,7 @@ function New-VirtualMachine {
 
         Write-Progress2 $Activity -Status "Starting VM" -percentcomplete 86 -force
         Write-Log "$VmName`: Starting virtual machine"
+        $vmCreateStage = 'startVm'
         $started = Start-VM2 -Name $VmName -Passthru
         if (-not $started) {
             Write-Log "$VmName`: VM Not Started."
@@ -5742,6 +5826,9 @@ function New-VirtualMachine {
         if ($DeployConfig -and -not $OSDClient.IsPresent) {
             $thisVmConfig2 = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated) {
+                $vmCreateStage = 'dhcpPostStart'
+                $swDhcp2 = [System.Diagnostics.Stopwatch]::StartNew()
+                $dhcp2Action = 'none'
                 # DHCP/Hyper-V CIM cmdlets run isolated (see Get-VMMacIsolated /
                 # *DHCPReservation* helpers) so they don't poison the managed bars.
                 try {
@@ -5762,6 +5849,7 @@ function New-VirtualMachine {
                         $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2
                         if ($existing2 -and $existing2 -eq $thisVmConfig2.AssignedIP) {
                             Write-Log "$VmName`: DHCP reservation already exists: $existing2 (MAC=$vmMac2); keeping" -LogOnly
+                            $dhcp2Action = 'kept'
                         }
                         else {
                             if ($existing2) {
@@ -5769,6 +5857,7 @@ function New-VirtualMachine {
                             }
                             Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName" -LogContext $VmName -PurgeMacFirst
                             Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
+                            $dhcp2Action = 'added'
                         }
                         $thisVmConfig2 | Add-Member -MemberType NoteProperty -Name 'ReservationCreated' -Value $true -Force
                     }
@@ -5781,7 +5870,10 @@ function New-VirtualMachine {
                     $exMsg  = $_.Exception.Message
                     Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP) [$exType]: $exMsg" -Warning
                     if ($_.ScriptStackTrace) { Write-Log "$VmName`: DHCP reservation failure stack: $($_.ScriptStackTrace)" -LogOnly }
+                    $dhcp2Action = 'failed'
                 }
+                $swDhcp2.Stop()
+                Write-Log "[StepTiming] $VmName DhcpBlock completed in $([Math]::Round($swDhcp2.Elapsed.TotalSeconds, 1)) seconds (stage=postStart action=$dhcp2Action)" -LogOnly
             }
         }
 
@@ -5792,6 +5884,7 @@ function New-VirtualMachine {
         # convergent (safe to re-run).
 
         Write-Progress2 $Activity -Status "VM Created in Hyper-V successfully" -percentcomplete 100 -force -Completed
+        $vmCreateStage = 'complete'
         return $true
     }
     catch {
@@ -5803,6 +5896,8 @@ function New-VirtualMachine {
     }
     finally {
         $Global:ProgressPreference = $OriginalProgressPreference
+        $swVmCreate.Stop()
+        Write-Log "[StepTiming] $VmName VmCreate completed in $([Math]::Round($swVmCreate.Elapsed.TotalSeconds, 1)) seconds (lastStage=$vmCreateStage)" -LogOnly
     }
 }
 
