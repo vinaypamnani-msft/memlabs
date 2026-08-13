@@ -883,7 +883,11 @@ $global:VM_Create = {
                         $oobeTimeout = $deployConfig.virtualMachines.Count + $oobeTimeout
                     }
 
+                    # First boot of a fresh guest, and the last unmeasured Phase 1 step.
+                    $swOobe = [System.Diagnostics.Stopwatch]::StartNew()
                     $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
+                    $swOobe.Stop()
+                    Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] OobeWait completed in $([Math]::Round($swOobe.Elapsed.TotalSeconds, 1)) seconds (ok=$connected attempt=$($oobeRetries + 1) timeoutMin=$oobeTimeout)" -LogOnly
                     if (-not $connected) {
                         if ($oobeRetries -lt $maxOobeRetries) {
                             $oobeRetries++
@@ -1390,6 +1394,8 @@ $global:VM_Create = {
             # stop): +10s per VM over 10, capped at 480s, floor 240s.
             $settingsVmCount = @($deployConfig.virtualMachines).Count
             $settingsTimeout = if ($settingsVmCount -gt 10) { [Math]::Min(480, 240 + 10 * ($settingsVmCount - 10)) } else { 240 }
+            $swSettings = [System.Diagnostics.Stopwatch]::StartNew()
+            $settingsAttempts = 1
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings" -AsJob -TimeoutSeconds $settingsTimeout
             if ($result.ScriptBlockFailed) {
                 # The step can fail two very different ways:
@@ -1410,6 +1416,7 @@ $global:VM_Create = {
                     # Guest is responsive over PSDirect - it was just slow. Retry the
                     # idempotent step once with the scaled timeout before any reboot.
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Guest responded to liveness probe; retrying settings step (no recovery needed)." -Warning
+                    $settingsAttempts++
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings (retry)" -AsJob -TimeoutSeconds $settingsTimeout
                 }
                 if ($result.ScriptBlockFailed) {
@@ -1420,10 +1427,13 @@ $global:VM_Create = {
                     # healing here keeps the later disk-init step healthy too.
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Guest still failing; attempting CIM/WMI recovery." -Warning
                     if (Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase -AllowReboot) {
+                        $settingsAttempts++
                         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings (post-recovery retry)" -AsJob -TimeoutSeconds $settingsTimeout
                     }
                 }
             }
+            $swSettings.Stop()
+            Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] NewVmSettings completed in $([Math]::Round($swSettings.Elapsed.TotalSeconds, 1)) seconds (attempts=$settingsAttempts failed=$($result.ScriptBlockFailed) timeout=${settingsTimeout}s)" -LogOnly
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to configure new VM settings." -Warning -OutputStream
                 $skipVersionUpdate = $true
@@ -4150,23 +4160,48 @@ $global:VM_Config = {
 
         # Create DSC troubleshooting shortcuts on Phase 2 (first DSC phase)
         if ($Phase -eq 2) {
-            # Desktop shortcuts and an ACL grant are one-time guest setup, but this ran on
-            # every VM on every run: 8.8s on the critical path, 91.6s across 11 VMs, all of
-            # it redoing work that was already there. Gate on the VM note, which reverts
-            # with the guest on a checkpoint restore, so it tracks guest state rather than
-            # run history.
+            # These are troubleshooting aids: they only earn their cost on a deployment
+            # that might still fail. Two independent reasons to skip.
+            #
+            # 1. lastPhaseComplete >= 11 means Phase 11 validation PASSED on this VM, so
+            #    the deployment already succeeded once and there is nothing to read a DSC
+            #    log about. This is the case the DscShortcutsCreated note cannot cover:
+            #    Phase 11 deletes the shortcuts and clears that note, so on a healthy lab
+            #    the note gate could never fire and every re-run paid the cost again.
+            # 2. DscShortcutsCreated still covers the run that FAILED before Phase 11 --
+            #    the shortcuts are genuinely on the desktop and wanted, just already there.
+            #
+            # The cost is asymmetric and worst exactly where it is least useful: 0.3-0.7s
+            # on a first build (the ACL grant is Test-Path'd and those folders do not exist
+            # yet) versus 8.5-10.0s on a re-run, where Set-Acl re-propagates
+            # ContainerInherit,ObjectInherit across every status MOF the lab has accumulated.
             $shortcutsDone = $false
+            $shortcutsSkipReason = ''
             try {
-                # Compared as a string, not cast to [bool]: the note stores it via
-                # Update-VMNoteProperty's [string] parameter, and EVERY non-empty string
-                # casts true -- including 'False'.
-                $shortcutsNote = (Get-VMNote -VMName $currentItem.vmName -ErrorAction SilentlyContinue).DscShortcutsCreated
-                $shortcutsDone = ("$shortcutsNote" -eq 'True')
+                $shortcutsNoteObj = Get-VMNote -VMName $currentItem.vmName -ErrorAction SilentlyContinue
+                $lastPhase = 0
+                if ($shortcutsNoteObj -and $shortcutsNoteObj.PSObject.Properties['lastPhaseComplete']) {
+                    $lastPhase = [int]$shortcutsNoteObj.lastPhaseComplete
+                }
+                if ($lastPhase -ge 11) {
+                    $shortcutsDone = $true
+                    $shortcutsSkipReason = "deployment already validated (lastPhaseComplete=$lastPhase)"
+                }
+                else {
+                    # Compared as a string, not cast to [bool]: the note stores it via
+                    # Update-VMNoteProperty's [string] parameter, and EVERY non-empty string
+                    # casts true -- including 'False'.
+                    $shortcutsNote = $shortcutsNoteObj.DscShortcutsCreated
+                    if ("$shortcutsNote" -eq 'True') {
+                        $shortcutsDone = $true
+                        $shortcutsSkipReason = 'already present (VM note)'
+                    }
+                }
             }
             catch { $shortcutsDone = $false }
 
             if ($shortcutsDone) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC desktop shortcuts already present (VM note); skipping." -LogOnly
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC desktop shortcuts skipped -- $shortcutsSkipReason." -LogOnly
             }
             else {
                 $swShortcuts = [System.Diagnostics.Stopwatch]::StartNew()
