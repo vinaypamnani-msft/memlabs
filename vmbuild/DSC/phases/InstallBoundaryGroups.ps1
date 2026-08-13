@@ -319,6 +319,41 @@ $ensureClientPkgCoverage = {
         $secWhere = if ($secLinkSites.Count -gt 0) { @($secLinkSites.Keys) -join ', ' } else { $secKeptDps -join ', ' }
         Write-DscStatus "Client pkg coverage: covering secondary-site DP(s) $secWhere -- content needs an extra parent->secondary hop, so allowing up to $maxTries tries."
     }
+
+    # The parent already HAS our targeting change: tr_PkgServers_G_ins/upd insert a
+    # PkgNotification row (Type 4) the moment DRS applies the replicated PkgServers_G row.
+    # What the parent never gets is a WAKE-UP. distmgr's main loop waits on a directory
+    # change in <install>\inboxes\distmgr.box or a <=3600s timeout (distmgr.cpp:
+    # FindFirstChangeNotification(sDistMgrInbox, ...) + m_dwWaitSecs = 3600), and a row
+    # written by SQL replication touches no file. So it sleeps out the hour and only then
+    # logs "No action specified for the package ... however there may be package server
+    # changes" and sends. That is the whole delay: measured mean 1,718s against the 1,800s
+    # a uniform arrival into a 1-hour cycle predicts.
+    # SMS_Package.AddChangeNotification() is a no-argument provider method whose entire
+    # body is AddNotification(pkgid, priority, PKG_NOTIF_TYPE_PKG) (SspPackage.cpp) -- it
+    # changes no package property, bumps no SourceVersion, and re-snapshots no content
+    # (unlike RefreshPkgSource, which would re-send the whole 673MB package). Best-effort:
+    # on failure the parent's own timer still owns the outcome, exactly as before.
+    $parentFqdn = if ($ThisVM.thisParams) { "$($ThisVM.thisParams.ParentSiteServer)" } else { '' }
+    $parentSite = "$($ThisVM.parentSiteCode)"
+    $lastParentPoke = $null
+    $pokeParentDistmgr = {
+        if (-not $parentFqdn -or -not $parentSite) { return $false }
+        try {
+            $pPkg = @(Get-WmiObject -ComputerName $parentFqdn -Namespace "root\SMS\site_$parentSite" -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction Stop) | Select-Object -First 1
+            if (-not $pPkg) {
+                Write-DscStatus "Client pkg coverage: parent site $parentSite ($parentFqdn) has no SMS_Package row for $PackageID; cannot re-notify its distmgr."
+                return $false
+            }
+            $rc = $pPkg.AddChangeNotification()
+            Write-DscStatus "Client pkg coverage: asked parent site $parentSite ($parentFqdn) to re-notify its distmgr for $PackageID (AddChangeNotification returned $($rc.ReturnValue)); without this it only re-reads PkgNotification when its <=60m sleep expires."
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: could not re-notify parent site $parentSite ($parentFqdn) distmgr for $PackageID -- $($_.Exception.Message). The parent's own timer still governs the send."
+            return $false
+        }
+    }
     for ($try = 1; $try -le $maxTries; $try++) {
         # Is the client package content present at THIS site yet? StoredPkgVersion=0
         # means it is still replicating down from a parent/CAS site.
@@ -328,6 +363,11 @@ $ensureClientPkgCoverage = {
         if ($contentPendingFromParent -and $maxTries -lt $maxTriesContentPending) {
             $maxTries = $maxTriesContentPending
             Write-DscStatus "Client pkg coverage: client package content has not replicated down to site $SiteCode yet (StoredPkgVersion=0; source is a parent/CAS site). Waiting for the parent to send content (up to ~45 min) and NOT tearing down the DP targeting that signals it."
+        }
+        # Only the parent can start this send, and only after something wakes its distmgr.
+        if ($contentPendingFromParent -and (-not $lastParentPoke -or ((Get-Date) - $lastParentPoke).TotalMinutes -ge 5)) {
+            $null = & $pokeParentDistmgr
+            $lastParentPoke = Get-Date
         }
         $state = @{}
         foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
