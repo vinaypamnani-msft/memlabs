@@ -108,6 +108,10 @@ else {
     $enabled = $false
     $attempts = 0
     $maxAttempts = 40
+    # Don't stop on the first success -- site component manager can flip it back while
+    # roles are still installing. Stop once it has held for a few consecutive checks.
+    $stableChecks = 0
+    $requiredStableChecks = 3
 
     if (-not $firstRun) {
         Write-DscStatus "Not the first run.. Skipping e-HTTP setup."
@@ -167,6 +171,7 @@ else {
 
             if (-not $component) {
                 Write-DscStatus "WMI query returned no results for CAS during e-HTTP enabling. Ensure the site code and namespace are correct. Retrying..." -NoStatus
+                $stableChecks = 0
                 Start-Sleep -Seconds 10
                 continue
             }
@@ -197,8 +202,9 @@ else {
         Start-Sleep 10
         $prop = Get-CMSiteComponent -SiteCode $siteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
         $enabled = ($prop.Value -band 1024) -eq 1024
-        Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled" -RetrySeconds 15 -NoStatus
-    } until ($attempts -ge $maxAttempts)
+        if ($enabled) { $stableChecks++ } else { $stableChecks = 0 }
+        Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled (stable $stableChecks/$requiredStableChecks, attempt $attempts/$maxAttempts)" -RetrySeconds 15 -NoStatus
+    } until ($stableChecks -ge $requiredStableChecks -or $attempts -ge $maxAttempts)
 
     if (-not $enabled) {
         Write-DscStatus "e-HTTP not enabled after trying $attempts times, skip." 

@@ -54,6 +54,10 @@ Set-Location "$($SiteCode):\" @initParams
 $enabled = $false
 $attempts = 0
 $maxAttempts = 5
+# Don't stop on the first success -- site component manager can flip it back while
+# roles are still installing. Stop once it has held for a few consecutive checks.
+$stableChecks = 0
+$requiredStableChecks = 3
 
 if (-not $FirstRun) {
     if ($isCas) {
@@ -202,8 +206,9 @@ else {
 
         $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
         $enabled = ($prop.Value -eq 63)
-        Write-DscStatus "IISSSLState Value is $($prop.Value). HTTPS enabled: $enabled" -RetrySeconds 15
-    } until ($attempts -ge $maxAttempts)
+        if ($enabled) { $stableChecks++ } else { $stableChecks = 0 }
+        Write-DscStatus "IISSSLState Value is $($prop.Value). HTTPS enabled: $enabled (stable $stableChecks/$requiredStableChecks, attempt $attempts/$maxAttempts)" -RetrySeconds 15
+    } until ($stableChecks -ge $requiredStableChecks -or $attempts -ge $maxAttempts)
 
     if (-not $enabled) {
         Write-DscStatus "HTTPS not enabled after trying $attempts times, skip."
