@@ -6129,8 +6129,23 @@ function Wait-ForVm {
         [int]$maxFailures = 40  # ~10 min at ~15s per failure increment (power-cycle threshold, independent of total timeout)
         [int]$powerCycles = 0
         [int]$maxPowerCycles = 3
+
+        # Phase 1 reports only SessionCreate/JobBootstrap/StartVm, so this wait -- which
+        # dominates Phase 1 once the parallel VHDX copy is not masking it -- has never been
+        # attributed. rpc= is what the polling itself costs; a large share of the total means
+        # the round-trips are the expense, a small one means we are just waiting for Windows.
+        $oobeSw = [System.Diagnostics.Stopwatch]::StartNew()
+        [int]$oobePolls = 0
+        [int]$oobeRpcCalls = 0
+        [double]$oobeRpcMs = 0
+        [int]$oobeSettleWaits = 0
+        $oobeAtImageState = $null
+        $oobeAtSmb = $null
+        $oobeAtWwahost = $null
+
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
+            $oobePolls++
             # Check OOBE complete registry key
             $oobeStatusText = "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State\ImageState = IMAGE_STATE_COMPLETE"
             if ($powerCycles -gt 0) {
@@ -6146,6 +6161,8 @@ function Wait-ForVm {
             $stopwatch2.Start()
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
+            $oobeRpcCalls++
+            $oobeRpcMs += $stopwatch2.Elapsed.TotalMilliseconds
             Write-Log "$VmName`: $out" -Verbose
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
                 try {
@@ -6310,10 +6327,14 @@ function Wait-ForVm {
                     # fail or meaningfully delay a healthy VM: a settled box passes immediately,
                     # a not-yet-settled box is accepted anyway after $oobeSettleCapSeconds, and
                     # if the probe can't run we fall back to trusting IMAGE_STATE_COMPLETE.
+                    $swSettle = [System.Diagnostics.Stopwatch]::StartNew()
                     $settle = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock {
                         $s = Get-ItemProperty "HKLM:\SYSTEM\Setup" -Name SetupType, OOBEInProgress -ErrorAction SilentlyContinue
                         [pscustomobject]@{ SetupType = [int]$s.SetupType; OOBE = [int]$s.OOBEInProgress; Name = $env:COMPUTERNAME }
                     }
+                    $swSettle.Stop()
+                    $oobeRpcCalls++
+                    $oobeRpcMs += $swSettle.Elapsed.TotalMilliseconds
                     if ($null -eq $oobeCompleteFirstSeen) { $oobeCompleteFirstSeen = [DateTime]::UtcNow }
                     if ($settle.ScriptBlockOutput -and $settle.ScriptBlockOutput.Name) {
                         $so = $settle.ScriptBlockOutput
@@ -6335,6 +6356,7 @@ function Wait-ForVm {
                         }
                         else {
                             $readyOobe = $false
+                            $oobeSettleWaits++
                             Write-Log "$VmName`: ImageState COMPLETE but sysprep not settled yet (SetupType=$($so.SetupType) OOBEInProgress=$($so.OOBE) Name=$($so.Name)); waiting for specialize to finalize before DSC."
                         }
                     }
@@ -6352,20 +6374,33 @@ function Wait-ForVm {
                 Start-Sleep -Seconds 5
             }
 
+            if ($readyOobe -and $null -eq $oobeAtImageState) { $oobeAtImageState = $oobeSw.Elapsed.TotalSeconds }
+
             # Wait until \\localhost\c$ is accessible
             if (-not $readySmb -and $readyOobe) {
 
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE complete. Checking SMB access"
                 Start-Sleep -Seconds 3
+                $swSmb = [System.Diagnostics.Stopwatch]::StartNew()
                 $out = Invoke-VmCommand -VmName $VmName -AsJob -VmDomainName $VmDomainName -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
+                $swSmb.Stop()
+                $oobeRpcCalls++
+                $oobeRpcMs += $swSmb.Elapsed.TotalMilliseconds
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "$VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
                 $readySmb = $true -eq $out.ScriptBlockOutput
-                if ($readySmb) { Start-Sleep -Seconds 10 } # Extra wait to ensure wwahost has had a chance to start
+                if ($readySmb) {
+                    if ($null -eq $oobeAtSmb) { $oobeAtSmb = $oobeSw.Elapsed.TotalSeconds }
+                    Start-Sleep -Seconds 10 # Extra wait to ensure wwahost has had a chance to start
+                }
             }
 
             # Wait until wwahost.exe is not found, or not longer running
             if ($readySmb) {
+                $swWwa = [System.Diagnostics.Stopwatch]::StartNew()
                 $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+                $swWwa.Stop()
+                $oobeRpcCalls++
+                $oobeRpcMs += $swWwa.Elapsed.TotalMilliseconds
 
                 if ($wwahost.ScriptBlockOutput) {
                     $wwahostrunning = $true
@@ -6376,6 +6411,7 @@ function Wait-ForVm {
                 else {
                     Write-Log "$VmName`: OOBE complete. WWAHost not running."
                     $wwahostrunning = $false
+                    if ($null -eq $oobeAtWwahost) { $oobeAtWwahost = $oobeSw.Elapsed.TotalSeconds }
                 }
             }
 
@@ -6387,6 +6423,16 @@ function Wait-ForVm {
                 $ready = $true
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
+
+        $oobeSw.Stop()
+        # A stage that was never reached reports n/a, not 0 -- absent is not zero.
+        $oobeImageStateText = if ($null -eq $oobeAtImageState) { 'n/a' } else { "$([Math]::Round($oobeAtImageState, 1))s" }
+        $oobeSmbText = if ($null -eq $oobeAtSmb) { 'n/a' } else { "$([Math]::Round($oobeAtSmb, 1))s" }
+        $oobeWwahostText = if ($null -eq $oobeAtWwahost) { 'n/a' } else { "$([Math]::Round($oobeAtWwahost, 1))s" }
+        Write-Log ("[StepTiming] $VmName OobeWait completed in $([Math]::Round($oobeSw.Elapsed.TotalSeconds, 1)) seconds " +
+            "(ready=$ready polls=$oobePolls rpc=$([Math]::Round($oobeRpcMs / 1000, 1))s/$oobeRpcCalls " +
+            "imageState=$oobeImageStateText smb=$oobeSmbText wwahost=$oobeWwahostText " +
+            "settleWaits=$oobeSettleWaits powerCycles=$powerCycles buffer=${WaitSeconds}s)") -LogOnly
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
