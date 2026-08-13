@@ -2877,6 +2877,8 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             @{ Label = 'scheduled scan off'; Args = @{ EnableScheduledScan = $false } }
             @{
                 Label = 'exclusions'
+                # All three must go in ONE call: the provider maps the excluded-settings group
+                # as a unit and defaults any property you omit to empty (AMGroup.cpp).
                 Args  = @{
                     ExcludeFilePath = @(
                         'C:\staging', 'C:\temp', 'C:\tools', 'C:\CMCB', 'C:\inetpub',
@@ -2884,7 +2886,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                         'C:\Windows\CCM', 'C:\Windows\ccmcache', 'C:\Windows\ccmsetup',
                         'C:\Windows\SoftwareDistribution\Download'
                     )
-                    ExcludeFileType = @('mdf', 'ldf', 'ndf', 'bak', 'trn', 'vhd', 'vhdx')
+                    ExcludeFileType = @('.mdf', '.ldf', '.ndf', '.bak', '.trn', '.vhd', '.vhdx')
                     ExcludeProcess  = @(
                         'sqlservr.exe', 'sqlagent.exe', 'sqlwriter.exe', 'sqlceip.exe', 'fdhost.exe', 'fdlauncher.exe',
                         'ReportingServicesService.exe',
