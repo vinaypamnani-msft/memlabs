@@ -337,6 +337,7 @@ $ensureClientPkgCoverage = {
     $parentFqdn = if ($ThisVM.thisParams) { "$($ThisVM.thisParams.ParentSiteServer)" } else { '' }
     $parentSite = "$($ThisVM.parentSiteCode)"
     $lastParentPoke = $null
+    $lastParentFilePoke = $null
     $pokeParentDistmgr = {
         if (-not $parentFqdn -or -not $parentSite) { return $false }
         try {
@@ -346,12 +347,45 @@ $ensureClientPkgCoverage = {
                 return $false
             }
             $rc = $pPkg.AddChangeNotification()
-            Write-DscStatus "Client pkg coverage: asked parent site $parentSite ($parentFqdn) to re-notify its distmgr for $PackageID (AddChangeNotification returned $($rc.ReturnValue)); without this it only re-reads PkgNotification when its <=60m sleep expires."
+            Write-DscStatus "Client pkg coverage: [wake-ROW] asked parent site $parentSite ($parentFqdn) to re-notify its distmgr for $PackageID (AddChangeNotification returned $($rc.ReturnValue))."
             return $true
         }
         catch {
-            Write-DscStatus "Client pkg coverage: could not re-notify parent site $parentSite ($parentFqdn) distmgr for $PackageID -- $($_.Exception.Message). The parent's own timer still governs the send."
+            Write-DscStatus "Client pkg coverage: [wake-ROW] could not re-notify parent site $parentSite ($parentFqdn) distmgr for $PackageID -- $($_.Exception.Message). The parent's own timer still governs the send."
             return $false
+        }
+    }
+
+    # Second, INDEPENDENT wake path, run on a deliberately DIFFERENT cadence (8 min vs the
+    # row's 5) so the next build can attribute which one actually moved the parent: compare
+    # these [wake-ROW]/[wake-FILE] stamps against the wake times in the pulled
+    # <CAS>-Phase8-*-ClientPkgPrestage-ParentCAS-distmgr.log. They coincide only every 40 min.
+    #
+    # distmgr's wake handle is FindFirstChangeNotification(sDistMgrInbox, FALSE, FILE_NOTIFY_
+    # CHANGE_FILE_NAME | ...), so ANY file created in distmgr.box wakes it -- but only the top
+    # directory (bWatchSubtree = FALSE). Choosing an extension no enumerator matches is what
+    # makes this safe: distmgr.box itself is only ever enumerated for *.STS, *.MNT, *.PXY,
+    # *.TRN, *.NOT, *.CF?, *.CLM, *.DP?, *.CER*, *.DPU and *.DSU. The "*.*" sweep that deletes
+    # unrecognised files ('Unknown package replication file ... delete it') runs against
+    # SMS_INBOX_DISTMGR_INCOMING = distmgr.box\incoming, a SUBdirectory we must not touch.
+    # .MEMLABS matches none of those, so nothing parses or deletes it -- we clean it up here.
+    $pokeParentDistmgrFile = {
+        if (-not $parentFqdn -or -not $parentSite) { return $false }
+        # SMS_<sitecode> is the site server's own install-dir share (the CAS reads package
+        # sources over it: '...from source \\<cas>\SMS_CS1\Client').
+        $wakeFile = "\\$parentFqdn\SMS_$parentSite\inboxes\distmgr.box\memlabs-wake-$([guid]::NewGuid().ToString('N')).MEMLABS"
+        try {
+            Set-Content -LiteralPath $wakeFile -Value 'memlabs distmgr wake' -ErrorAction Stop
+            Write-DscStatus "Client pkg coverage: [wake-FILE] created a distmgr.box change on parent site $parentSite ($parentFqdn) to wake its distmgr for $PackageID."
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [wake-FILE] could not write to $parentFqdn distmgr.box -- $($_.Exception.Message). The parent's own timer still governs the send."
+            return $false
+        }
+        finally {
+            # Leaving it would be litter no ConfigMgr component ever collects.
+            try { Remove-Item -LiteralPath $wakeFile -Force -ErrorAction SilentlyContinue } catch { }
         }
     }
     for ($try = 1; $try -le $maxTries; $try++) {
@@ -368,6 +402,10 @@ $ensureClientPkgCoverage = {
         if ($contentPendingFromParent -and (-not $lastParentPoke -or ((Get-Date) - $lastParentPoke).TotalMinutes -ge 5)) {
             $null = & $pokeParentDistmgr
             $lastParentPoke = Get-Date
+        }
+        if ($contentPendingFromParent -and (-not $lastParentFilePoke -or ((Get-Date) - $lastParentFilePoke).TotalMinutes -ge 8)) {
+            $null = & $pokeParentDistmgrFile
+            $lastParentFilePoke = Get-Date
         }
         $state = @{}
         foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
