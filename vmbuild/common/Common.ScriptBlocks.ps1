@@ -1822,10 +1822,9 @@ $global:VM_Create = {
 function Save-CMSetupLogsFromVm {
     <#
     .SYNOPSIS
-        Pulls C:\ConfigMgrSetup.log and C:\staging\DSC\InstallCMLog.log out of
-        a CM-setup VM (CAS / Primary / Secondary / PassiveSite) and writes
-        them next to the host VMBuild log so operators can inspect them
-        without RDP'ing the VM.
+        Pulls C:\ConfigMgrSetup.log, C:\staging\DSC\InstallCMLog.log and
+        C:\staging\DSC\DSC_Log.log out of a VM and writes them next to the
+        host VMBuild log so operators can inspect them without RDP'ing in.
     .DESCRIPTION
         InstallCMLog.log (DSC wrapper transcript, normally <1 MB) is ALWAYS
         pulled in full. ConfigMgrSetup.log is pulled FULL on failure and as
@@ -1833,10 +1832,15 @@ function Save-CMSetupLogsFromVm {
         file routinely runs 100-300 MB, so the tail keeps disk + PSDirect
         serialization cost bounded while still preserving the operationally
         useful end-of-install context.
+        DSC_Log.log is the TemplateHelpDSC resources' own Write-Status
+        narrative -- a different file from InstallCMLog.log, and the only
+        place a resource can say WHY it gave up. The host only ever samples
+        the current status, so without this the reasoning is unrecoverable.
         Files land in (Split-Path $Common.LogPath -Parent) as:
             <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.log          (Failure: full)
             <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.tail5000.log (Success: tail)
             <VmName>-Phase<N>-<timestamp>-InstallCMLog.log            (always: full)
+            <VmName>-Phase<N>-<timestamp>-DSC_Log.log                 (always: tail 4000)
     #>
     [CmdletBinding()]
     param(
@@ -1856,6 +1860,9 @@ function Save-CMSetupLogsFromVm {
             WrapperExists  = $false
             WrapperBytes   = 0
             WrapperContent = $null
+            DscLogExists   = $false
+            DscLogBytes    = 0
+            DscLogContent  = $null
         }
         if (Test-Path 'C:\ConfigMgrSetup.log') {
             $fi = Get-Item 'C:\ConfigMgrSetup.log' -ErrorAction SilentlyContinue
@@ -1877,6 +1884,14 @@ function Save-CMSetupLogsFromVm {
                 $out.WrapperExists  = $true
                 $out.WrapperBytes   = $fi.Length
                 $out.WrapperContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
+            }
+        }
+        if (Test-Path 'C:\staging\DSC\DSC_Log.log') {
+            $fi = Get-Item 'C:\staging\DSC\DSC_Log.log' -ErrorAction SilentlyContinue
+            if ($fi) {
+                $out.DscLogExists  = $true
+                $out.DscLogBytes   = $fi.Length
+                $out.DscLogContent = (Get-Content -LiteralPath $fi.FullName -Tail 4000 -ErrorAction SilentlyContinue) -join "`r`n"
             }
         }
         [pscustomobject]$out
@@ -1938,6 +1953,18 @@ function Save-CMSetupLogsFromVm {
         }
         else {
             Write-Log "[Phase $Phase]: $VmName`: InstallCMLog.log present in VM ($($r.WrapperBytes) bytes) but Get-Content returned empty" -Warning
+        }
+    }
+
+    if ($r.DscLogExists -and $r.DscLogContent) {
+        $dest = Join-Path $logDir "$base-DSC_Log.log"
+        try {
+            Set-Content -LiteralPath $dest -Value $r.DscLogContent -Encoding UTF8 -ErrorAction Stop
+            $kb = [math]::Round($r.DscLogBytes / 1KB, 1)
+            Write-Log "[Phase $Phase]: $VmName`: Pulled DSC_Log.log (tail of ${kb}KB) -> $dest" -OutputStream
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write DSC_Log copy: $_" -Warning
         }
     }
 }
@@ -7368,9 +7395,9 @@ $global:VM_Config = {
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): SQL failure evidence collection threw: $($_.Exception.Message)" -Warning
                             }
                         }
-                        if ($using:Phase -eq 8 -and $currentItem.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite')) {
-                            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
-                        }
+                        # Any role/phase: DSC_Log.log is the only host-visible record of what
+                        # the guest's DSC resources reported before giving up.
+                        Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
                         return
                     }
                 }
@@ -7400,9 +7427,7 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
             Write-Progress2 "Exception" -Status "Failed end $_" -force
-            if ($using:Phase -eq 8 -and $currentItem.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite')) {
-                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
-            }
+            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
             return
         }
 
@@ -7410,7 +7435,13 @@ $global:VM_Config = {
         # off the VM into the host log folder so operators don't have to RDP
         # in to read them. Full ConfigMgrSetup.log on failure (incl. timeout),
         # tail-5000 on success; InstallCMLog.log is always full.
-        if ($using:Phase -eq 8 -and $currentItem.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite')) {
+        # DCs are pulled after Phase 2 even on success: the cross-forest PKI and
+        # AD-delegation resources can report in-desired-state having applied
+        # nothing, so success is exactly the case whose reasoning we lose.
+        $pullGuestLogs = (-not $complete) -or
+                         ($using:Phase -eq 8 -and $currentItem.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite')) -or
+                         ($using:Phase -eq 2 -and $currentItem.role -in @('DC', 'OtherDC'))
+        if ($pullGuestLogs) {
             $cmLogMode = if ($complete) { 'Success' } else { 'Failure' }
             Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode $cmLogMode
         }

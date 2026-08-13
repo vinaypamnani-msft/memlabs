@@ -2531,7 +2531,9 @@ class DelegateControl {
         $retries = 0
         $maxretries = 15
         $forcedReplication = $false
-        while ($retries -le $maxretries) {
+        $dsaclsExitCode = -1
+        $granted = $false
+        while ($retries -lt $maxretries) {
 
             Clear-DnsClientCache -ErrorAction SilentlyContinue
 
@@ -2553,6 +2555,9 @@ class DelegateControl {
             Write-Verbose "Running $cmd $arg1 $arg2 $arg3 $arg4"
             $result = & $cmd $arg1 $arg2 $arg3 $arg4 *>&1
             $dsaclsExitCode = $LASTEXITCODE
+            if ($dsaclsExitCode -ne 0) {
+                Write-Status "dsacls.exe exit=$dsaclsExitCode adding $arg3 (1332 = target SID not resolvable from this forest yet) [try $retries/$maxretries]"
+            }
 
             Write-Verbose "Result $result"
             Write-Verbose "dsacls.exe exit code: $dsaclsExitCode"
@@ -2593,8 +2598,11 @@ class DelegateControl {
             if ($dsaclsExitCode -eq 1332) {
                 try {
                     $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue)
+                    # .HostName is an FQDN; comparing it to the NetBIOS name never matched, so
+                    # this loop used to re-run against the same DC that just returned 1332.
+                    $localShort = $env:COMPUTERNAME
                     foreach ($dc in $allDCs) {
-                        if ($dc.HostName -eq (hostname)) { continue }
+                        if (($dc.HostName -split '\.')[0] -eq $localShort) { continue }
                         $serverArg1 = "\\$($dc.HostName)\$arg1"
                         Write-Status "Trying dsacls via $($dc.Name)... (Try $retries/$maxretries)"
                         Write-Verbose "Running $cmd $serverArg1 $arg2 $arg3 $arg4"
@@ -2628,6 +2636,7 @@ class DelegateControl {
             # Use helper method to check permissions
             if ($this.CheckPermissions($permissioninfo, $_machinename, $DomainName)) {
                 Write-Verbose "Permissions verified successfully"
+                $granted = $true
                 break
             }
 
@@ -2637,6 +2646,7 @@ class DelegateControl {
                 $remotePerm = & $tcmd $successDcArg1
                 if ($this.CheckPermissions($remotePerm, $_machinename, $DomainName)) {
                     Write-Status "Permissions verified on remote DC"
+                    $granted = $true
                     break
                 }
             }
@@ -2655,6 +2665,7 @@ class DelegateControl {
                 if ($relaxedMatch) {
                     Write-Status "Relaxed verification passed for $_machinename"
                     Write-Verbose "Matched line: $relaxedMatch"
+                    $granted = $true
                     break
                 }
                 Write-Verbose "Relaxed match also failed. dsacls output sample:"
@@ -2667,6 +2678,11 @@ class DelegateControl {
 
         }
 
+        # Exhausting the retries used to return silently, so the phase passed and the missing
+        # ACE only surfaced as unexplained cross-forest failures several phases later.
+        if (-not $granted) {
+            throw "DelegateControl: failed to grant '$arg3' FULL CONTROL on '$arg1' after $retries attempts (last dsacls exit=$dsaclsExitCode; 1332 = trustee SID not resolvable from this forest). DSC will retry."
+        }
 
     }
 
@@ -7877,129 +7893,235 @@ class InstallRootCertificate {
         return $true
     }
 
+    # cACertificate is multi-valued (cross-cert history), so compare the target
+    # against every blob rather than just the first.
+    [bool] AnyCertMatches([object]$val, [byte[]]$target) {
+        if ($null -eq $val -or $null -eq $target) { return $false }
+        if ($val -is [byte[]]) { return $this.BytesEqual($val, $target) }
+        if ($val -is [System.Array]) {
+            foreach ($item in $val) {
+                if ($item -is [byte[]] -and $this.BytesEqual($item, $target)) { return $true }
+            }
+        }
+        return $false
+    }
+
+    [string] LocalConfigNC() {
+        try {
+            $cfg = [string]([ADSI]"LDAP://RootDSE").configurationNamingContext.Value
+            if ($cfg -notmatch '^CN=Configuration,DC=') { return '' }
+            return $cfg
+        }
+        catch {
+            return ''
+        }
+    }
+
+    # certutil -dspublish reports success even when the write did not land, so ask
+    # AD directly. Returns '' when the cert is published, else what is missing.
+    [string] PublishGaps([byte[]]$rootBytes) {
+        $cfg = $this.LocalConfigNC()
+        if ([string]::IsNullOrWhiteSpace($cfg)) { return 'local configurationNamingContext unreadable' }
+        $gaps = @()
+        try {
+            $container = [ADSI]"LDAP://CN=Certification Authorities,CN=Public Key Services,CN=Services,$cfg"
+            $found = $false
+            foreach ($kid in @($container.Children | Where-Object { $null -ne $_ })) {
+                if ($this.AnyCertMatches($kid.Properties['cACertificate'].Value, $rootBytes)) {
+                    $found = $true
+                    break
+                }
+            }
+            if (-not $found) { $gaps += 'RootCA (CN=Certification Authorities)' }
+        }
+        catch {
+            $gaps += "CN=Certification Authorities unreadable ($_)"
+        }
+        try {
+            $ntauth = [ADSI]"LDAP://CN=NTAuthCertificates,CN=Public Key Services,CN=Services,$cfg"
+            if (-not $this.AnyCertMatches($ntauth.Properties['cACertificate'].Value, $rootBytes)) {
+                $gaps += 'NtauthCA (CN=NTAuthCertificates)'
+            }
+        }
+        catch {
+            $gaps += "CN=NTAuthCertificates unreadable ($_)"
+        }
+        return ($gaps -join '; ')
+    }
+
     [void] Set() {
 
         $_FileName = "C:\Temp\rootCA.cer"
+        $subCACertFile = "C:\Temp\subCA.cer"
 
+        Write-Status "Install Root Cert"
 
-        if (-not (Test-Path $_FileName)) {
-            Write-Status "Install Root Cert"
+        $rootBytes = $null
+        $issuingBytes = $null
+        $adReadNote = ''
 
-            $rootBytes = $null
-            $issuingBytes = $null
+        # PRIMARY retrieval: read the CA certificates straight from the remote
+        # forest's AD (Configuration NC), where ADCS publishes them and which
+        # is replicated to every DC. This replaces 'certutil -config X
+        # -ca.chain <file>', which mis-parses on Server 2022 ("Too many
+        # arguments" -> no file produced) and so never worked for the
+        # cross-forest case. The CA is reachable (certutil -ping/ICertRequest2
+        # succeeds); the retrieval verb was the bug. AD read is naming-, IP-,
+        # tier-, and DCOM-agnostic and works for single- and multi-tier PKI.
+        if (-not [string]::IsNullOrWhiteSpace($this.RemoteForestDC)) {
+            try {
+                $configNC = [string]([ADSI]"LDAP://$($this.RemoteForestDC)/RootDSE").configurationNamingContext.Value
+                if ([string]::IsNullOrWhiteSpace($configNC)) {
+                    throw "configurationNamingContext came back empty from $($this.RemoteForestDC)"
+                }
 
-            # PRIMARY retrieval: read the CA certificates straight from the remote
-            # forest's AD (Configuration NC), where ADCS publishes them and which
-            # is replicated to every DC. This replaces 'certutil -config X
-            # -ca.chain <file>', which mis-parses on Server 2022 ("Too many
-            # arguments" -> no file produced) and so never worked for the
-            # cross-forest case. The CA is reachable (certutil -ping/ICertRequest2
-            # succeeds); the retrieval verb was the bug. AD read is naming-, IP-,
-            # tier-, and DCOM-agnostic and works for single- and multi-tier PKI.
-            if (-not [string]::IsNullOrWhiteSpace($this.RemoteForestDC)) {
-                try {
-                    $configNC = [string]([ADSI]"LDAP://$($this.RemoteForestDC)/RootDSE").configurationNamingContext.Value
+                # Root (self-signed) CA cert(s): CN=Certification Authorities
+                $caContainer = [ADSI]"LDAP://$($this.RemoteForestDC)/CN=Certification Authorities,CN=Public Key Services,CN=Services,$configNC"
+                $caKids = @($caContainer.Children | Where-Object { $null -ne $_ })
+                Write-Status "Remote CN=Certification Authorities holds $($caKids.Count) entr(ies): $(($caKids | ForEach-Object { "$($_.Properties['cn'].Value)" }) -join ', ')"
+                foreach ($ca in $caKids) {
+                    $b = $this.FirstCertBytes($ca.Properties['cACertificate'].Value)
+                    if ($b) {
+                        $rootBytes = $b
+                        Write-Status "Read root CA '$([string]$ca.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
+                        break
+                    }
+                }
 
-                    # Root (self-signed) CA cert(s): CN=Certification Authorities
-                    $caContainer = [ADSI]"LDAP://$($this.RemoteForestDC)/CN=Certification Authorities,CN=Public Key Services,CN=Services,$configNC"
-                    $caKids = @($caContainer.Children | Where-Object { $null -ne $_ })
-                    Write-Status "Remote CN=Certification Authorities holds $($caKids.Count) entr(ies): $(($caKids | ForEach-Object { "$($_.Properties['cn'].Value)" }) -join ', ')"
-                    foreach ($ca in $caKids) {
-                        $b = $this.FirstCertBytes($ca.Properties['cACertificate'].Value)
-                        if ($b) {
-                            $rootBytes = $b
-                            Write-Status "Read root CA '$([string]$ca.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
+                # Issuing CA cert: the pKIEnrollmentService object (prefer the
+                # host hint when more than one issuing CA is published).
+                $enroll = [ADSI]"LDAP://$($this.RemoteForestDC)/CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC"
+                $enrollKids = @($enroll.Children | Where-Object { $null -ne $_ })
+                Write-Status "Remote CN=Enrollment Services holds $($enrollKids.Count) issuing CA(s): $(($enrollKids | ForEach-Object { "$($_.Properties['cn'].Value)" }) -join ', ')"
+                $picked = $null
+                foreach ($svc in $enrollKids) {
+                    if (-not [string]::IsNullOrWhiteSpace($this.IssuingCAHint)) {
+                        $dns = [string]$svc.Properties['dNSHostName'].Value
+                        $short = ($dns -split '\.')[0]
+                        if ($short -eq $this.IssuingCAHint -or $dns -eq $this.IssuingCAHint) {
+                            $picked = $svc
                             break
                         }
                     }
-
-                    # Issuing CA cert: the pKIEnrollmentService object (prefer the
-                    # host hint when more than one issuing CA is published).
-                    $enroll = [ADSI]"LDAP://$($this.RemoteForestDC)/CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC"
-                    $enrollKids = @($enroll.Children | Where-Object { $null -ne $_ })
-                    Write-Status "Remote CN=Enrollment Services holds $($enrollKids.Count) issuing CA(s): $(($enrollKids | ForEach-Object { "$($_.Properties['cn'].Value)" }) -join ', ')"
-                    $picked = $null
-                    foreach ($svc in $enrollKids) {
-                        if (-not [string]::IsNullOrWhiteSpace($this.IssuingCAHint)) {
-                            $dns = [string]$svc.Properties['dNSHostName'].Value
-                            $short = ($dns -split '\.')[0]
-                            if ($short -eq $this.IssuingCAHint -or $dns -eq $this.IssuingCAHint) {
-                                $picked = $svc
-                                break
-                            }
-                        }
-                        if (-not $picked) { $picked = $svc }
-                    }
-                    if ($picked) {
-                        $b = $this.FirstCertBytes($picked.Properties['cACertificate'].Value)
-                        if ($b) {
-                            $issuingBytes = $b
-                            Write-Status "Read issuing CA '$([string]$picked.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
-                        }
+                    if (-not $picked) { $picked = $svc }
+                }
+                if ($picked) {
+                    $b = $this.FirstCertBytes($picked.Properties['cACertificate'].Value)
+                    if ($b) {
+                        $issuingBytes = $b
+                        Write-Status "Read issuing CA '$([string]$picked.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
                     }
                 }
-                catch {
-                    Write-Status "WARNING: Reading CA certs from AD ($($this.RemoteForestDC)) failed: $_"
+                if (-not ($rootBytes -or $issuingBytes)) {
+                    $adReadNote = "AD read of $($this.RemoteForestDC) bound OK but no cACertificate was published (CertAuthorities=$($caKids.Count), EnrollmentServices=$($enrollKids.Count))"
                 }
             }
-
-            if ($rootBytes -or $issuingBytes) {
-                # Prefer the self-signed root for the RootCA file; if only the
-                # issuing CA was found, use it.
-                if (-not $rootBytes) { $rootBytes = $issuingBytes }
-                [System.IO.File]::WriteAllBytes($_FileName, $rootBytes)
-                Write-Status "Wrote root CA certificate to $_FileName from AD"
-            }
-            else {
-                # FALLBACK: legacy certutil retrieval (only if the AD read yielded
-                # nothing -- e.g. RemoteForestDC absent or the container empty).
-                $caConfig = $this.ResolveCAConfig()
-                Write-Status "AD CA read unavailable (RemoteForestDC='$($this.RemoteForestDC)' rootBytes=none issuingBytes=none); falling back to certutil -ca.cert against '$caConfig'"
-                $certutilOut = certutil.exe -config $caConfig -ca.cert $_FileName 2>&1 | Out-String
-                Write-Status "certutil -ca.cert exit=$LASTEXITCODE output: $((($certutilOut -replace '\s+', ' ').Trim()))"
-            }
-
-            # If we still have no root cert file, fail with a clear, actionable
-            # error so the LCM retries on a real (recoverable) condition instead
-            # of the downstream dspublish calls running against a missing file.
-            if (-not (Test-Path $_FileName)) {
-                throw "InstallRootCertificate: unable to obtain root CA certificate for forest '$($this.RemoteForestDC)' / CA '$($this.CAName)' (AD read produced no cert and certutil -ca.cert fallback produced no file). DSC will retry."
-            }
-
-            # Publish root CA cert as RootCA and NtauthCA
-            # Both calls are best-effort in certutil and report only via exit code,
-            # so a silent failure here surfaces much later as ccmsetup 0x87D00454.
-            foreach ($store in 'RootCA', 'NtauthCA') {
-                $out = certutil.exe -dspublish -f $_FileName $store 2>&1 | Out-String
-                Write-Status "certutil -dspublish -f rootCA.cer $store exit=$LASTEXITCODE : $((($out -replace '\s+', ' ').Trim()))"
-            }
-
-            # If two-tier PKI (issuing CA differs from the root), publish the
-            # issuing/subordinate CA as SubCA and NtauthCA (it is the CA that
-            # actually signs the end-entity certs we cross-forest authenticate).
-            if ($issuingBytes -and $rootBytes -and -not $this.BytesEqual($issuingBytes, $rootBytes)) {
-                $subCACertFile = "C:\Temp\subCA.cer"
-                [System.IO.File]::WriteAllBytes($subCACertFile, $issuingBytes)
-                Write-Status "Two-tier PKI: publishing subordinate/issuing CA as SubCA + NtauthCA"
-                foreach ($store in 'SubCA', 'NtauthCA') {
-                    $out = certutil.exe -dspublish -f $subCACertFile $store 2>&1 | Out-String
-                    Write-Status "certutil -dspublish -f subCA.cer $store exit=$LASTEXITCODE : $((($out -replace '\s+', ' ').Trim()))"
-                }
-            }
-            else {
-                # Single-tier: the CA is the root, publish as SubCA too
-                $out = certutil.exe -dspublish -f $_FileName SubCA 2>&1 | Out-String
-                Write-Status "certutil -dspublish -f rootCA.cer SubCA exit=$LASTEXITCODE : $((($out -replace '\s+', ' ').Trim()))"
+            catch {
+                $adReadNote = "AD read of $($this.RemoteForestDC) failed: $_"
+                Write-Status "WARNING: Reading CA certs from AD ($($this.RemoteForestDC)) failed: $_"
             }
         }
+        else {
+            $adReadNote = 'RemoteForestDC property was empty, so the AD read was skipped'
+        }
 
+        if ($rootBytes -or $issuingBytes) {
+            # Prefer the self-signed root for the RootCA file; if only the
+            # issuing CA was found, use it.
+            if (-not $rootBytes) { $rootBytes = $issuingBytes }
+            [System.IO.File]::WriteAllBytes($_FileName, $rootBytes)
+            Write-Status "Wrote root CA certificate to $_FileName from AD"
+        }
+        elseif (Test-Path $_FileName) {
+            # An earlier pass already fetched the cert; Set() is running again
+            # because the publish did not land, so re-publish from the cached copy.
+            $rootBytes = [System.IO.File]::ReadAllBytes($_FileName)
+            if (Test-Path $subCACertFile) { $issuingBytes = [System.IO.File]::ReadAllBytes($subCACertFile) }
+            Write-Status "AD CA read produced nothing ($adReadNote); re-publishing cached $_FileName ($($rootBytes.Length) bytes)"
+        }
+        else {
+            # FALLBACK: legacy certutil retrieval. Known to mis-parse on Server 2022
+            # (certutil matches the '-CA' verb and reports "Too many arguments"), so
+            # treat anything it produces as a bonus, not a dependency.
+            $caConfig = $this.ResolveCAConfig()
+            Write-Status "AD CA read unavailable (RemoteForestDC='$($this.RemoteForestDC)' rootBytes=none issuingBytes=none); falling back to certutil -ca.cert against '$caConfig'"
+            $certutilOut = certutil.exe -config $caConfig -ca.cert $_FileName 2>&1 | Out-String
+            $certutilNote = (($certutilOut -replace '\s+', ' ').Trim())
+            Write-Status "certutil -ca.cert exit=$LASTEXITCODE output: $certutilNote"
+            if (Test-Path $_FileName) { $rootBytes = [System.IO.File]::ReadAllBytes($_FileName) }
+            $adReadNote = "$adReadNote; certutil -ca.cert fallback: $certutilNote"
+        }
 
+        # Fail with a clear, actionable error so the LCM retries on a real
+        # (recoverable) condition instead of the dspublish calls running against a
+        # missing file.
+        if (-not $rootBytes) {
+            throw "InstallRootCertificate: unable to obtain root CA certificate for forest '$($this.RemoteForestDC)' / CA '$($this.CAName)' ($adReadNote). DSC will retry."
+        }
+
+        # Publish root CA cert as RootCA and NtauthCA
+        $publishFailures = @()
+        foreach ($store in 'RootCA', 'NtauthCA') {
+            $out = certutil.exe -dspublish -f $_FileName $store 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Write-Status "certutil -dspublish -f rootCA.cer $store exit=$code : $((($out -replace '\s+', ' ').Trim()))"
+            if ($code -ne 0) { $publishFailures += "rootCA.cer->$store exit=$code" }
+        }
+
+        # If two-tier PKI (issuing CA differs from the root), publish the
+        # issuing/subordinate CA as SubCA and NtauthCA (it is the CA that
+        # actually signs the end-entity certs we cross-forest authenticate).
+        if ($issuingBytes -and -not $this.BytesEqual($issuingBytes, $rootBytes)) {
+            [System.IO.File]::WriteAllBytes($subCACertFile, $issuingBytes)
+            Write-Status "Two-tier PKI: publishing subordinate/issuing CA as SubCA + NtauthCA"
+            foreach ($store in 'SubCA', 'NtauthCA') {
+                $out = certutil.exe -dspublish -f $subCACertFile $store 2>&1 | Out-String
+                $code = $LASTEXITCODE
+                Write-Status "certutil -dspublish -f subCA.cer $store exit=$code : $((($out -replace '\s+', ' ').Trim()))"
+                if ($code -ne 0) { $publishFailures += "subCA.cer->$store exit=$code" }
+            }
+        }
+        else {
+            # Single-tier: the CA is the root, publish as SubCA too
+            $out = certutil.exe -dspublish -f $_FileName SubCA 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Write-Status "certutil -dspublish -f rootCA.cer SubCA exit=$code : $((($out -replace '\s+', ' ').Trim()))"
+            if ($code -ne 0) { $publishFailures += "rootCA.cer->SubCA exit=$code" }
+        }
+
+        # A publish that did not land used to pass silently here and resurface three
+        # phases later as ccmsetup CCM_E_NO_CLIENT_PKI_CERT on every client.
+        $gaps = $this.PublishGaps($rootBytes)
+        if ($gaps -or $publishFailures.Count -gt 0) {
+            $detail = @()
+            if ($publishFailures.Count -gt 0) { $detail += "certutil exit codes: $($publishFailures -join ', ')" }
+            if ($gaps) { $detail += "still absent from AD: $gaps" }
+            throw "InstallRootCertificate: the root CA of forest '$($this.RemoteForestDC)' was NOT published into this forest ($($detail -join ' | ')). Cross-forest clients cannot enrol a PKI client cert until this lands (ccmsetup 0x87D00454). DSC will retry."
+        }
+
+        Write-Status "Root CA verified in this forest's AD (CN=Certification Authorities + CN=NTAuthCertificates)"
     }
 
     [bool] Test() {
 
         $_FileName = "C:\Temp\rootCA.cer"
         if (-not (Test-Path $_FileName)) {
+            return $false
+        }
+
+        $rootBytes = $null
+        try {
+            $rootBytes = [System.IO.File]::ReadAllBytes($_FileName)
+        }
+        catch {
+            return $false
+        }
+        if ($null -eq $rootBytes -or $rootBytes.Length -eq 0) { return $false }
+
+        # The file on disk proves nothing about AD, which is what clients read.
+        $gaps = $this.PublishGaps($rootBytes)
+        if ($gaps) {
+            Write-Status "Root CA is on disk but not published to this forest's AD ($gaps); re-running InstallRootCertificate"
             return $false
         }
 
@@ -8021,6 +8143,11 @@ class AddCertificateTemplate {
 
     [DscProperty()]
     [string]$GroupName
+
+    # Second identity form to try. A cross-forest grant is an LSA name lookup on the CA,
+    # and the DNS-qualified form does not always resolve for a foreign trusted domain.
+    [DscProperty()]
+    [string]$GroupAlt
 
     [DscProperty()]
     [string]$Permissions
@@ -8078,6 +8205,10 @@ class AddCertificateTemplate {
             #Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName ..."
             $retries = 0
             $success = $false
+            $grantNotes = @()
+            $anyResolved = $false
+            $identities = @($_Group)
+            if ($this.GroupAlt -and $this.GroupAlt -ne $_Group) { $identities += $this.GroupAlt }
             while ($retries -lt 10 -and $success -eq $false) {
                 Write-Status "Adding Certificate Template $_TemplateName ..."                 
                 try {
@@ -8088,6 +8219,7 @@ class AddCertificateTemplate {
                 }
                 catch {}
                 $retries++
+                $templateFound = $false
                 try {
                     Write-Status "PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop"
                     $template = PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop
@@ -8096,37 +8228,64 @@ class AddCertificateTemplate {
                         Write-Status "SKIP $_TemplateName`: Get-CertificateTemplate returned nothing -- no ACL grant applied for $_Group"
                         return
                     }
-                    Write-Status "PSPKI\Get-CertificateTemplateAcl -ErrorAction stop"
-                    $templateacl = $template | PSPKI\Get-CertificateTemplateAcl -ErrorAction stop
+                    $templateFound = $true
 
-                    # A cross-forest grant lives or dies on this translation, and
-                    # PSPKI reports the failure as an opaque throw.
-                    try {
-                        $_sid = (New-Object System.Security.Principal.NTAccount($_Group)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-                        Write-Status "Identity '$_Group' resolves to $_sid"
-                    }
-                    catch {
-                        Write-Status "Identity '$_Group' does NOT resolve on this CA: $($_.Exception.Message)"
+                    foreach ($ident in $identities) {
+                        try {
+                            Write-Status "PSPKI\Get-CertificateTemplateAcl -ErrorAction stop"
+                            $templateacl = $template | PSPKI\Get-CertificateTemplateAcl -ErrorAction stop
+
+                            # A cross-forest grant lives or dies on this translation, and
+                            # PSPKI reports the failure as an opaque throw.
+                            try {
+                                $_sid = (New-Object System.Security.Principal.NTAccount($ident)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+                                $anyResolved = $true
+                                Write-Status "Identity '$ident' resolves to $_sid"
+                            }
+                            catch {
+                                Write-Status "Identity '$ident' does NOT resolve on this CA: $($_.Exception.Message)"
+                            }
+
+                            Write-Status "PSPKI\Add-CertificateTemplateAcl -Identity $ident -AccessType Allow -AccessMask $_Permissions -ErrorAction stop"
+                            $templateacl2 = $templateacl |  PSPKI\Add-CertificateTemplateAcl -Identity $ident -AccessType Allow -AccessMask $_Permissions -ErrorAction stop
+
+                            Write-Status "PSPKI\Set-CertificateTemplateAcl -ErrorAction stop"
+                            $templateacl2 | PSPKI\Set-CertificateTemplateAcl -ErrorAction stop
+                        }
+                        catch {
+                            $grantNotes += "$ident -> $($_.Exception.GetType().Name): $($_.Exception.Message)"
+                            Write-Status "ACL grant for '$ident' on $_TemplateName FAILED: $($_.Exception.Message)"
+                            continue
+                        }
+
+                        # Set-CertificateTemplateAcl returning without throwing is not proof the
+                        # ACE landed; only the read-back decides.
+                        $leaf = ($ident -split '\\')[-1]
+                        $_back = @()
+                        try {
+                            $_back = @((PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction Stop | PSPKI\Get-CertificateTemplateAcl -ErrorAction Stop).Access |
+                                    Where-Object { "$($_.IdentityReference)" -eq $ident -or "$($_.IdentityReference)" -like "*\$leaf" })
+                            Write-Status "Read-back: $_TemplateName now has $($_back.Count) ACE(s) for '$ident' [$(($_back | ForEach-Object { $_.Rights }) -join ' | ')]"
+                        }
+                        catch {
+                            $grantNotes += "$ident -> read-back threw: $($_.Exception.Message)"
+                            Write-Status "Read-back of $_TemplateName ACL failed: $($_.Exception.Message)"
+                        }
+                        if ($_back.Count -gt 0) {
+                            $success = $true
+                            break
+                        }
+                        $grantNotes += "$ident -> Set-CertificateTemplateAcl did not throw but read-back found 0 ACEs"
                     }
 
-                    Write-Status "PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions -ErrorAction stop"
-                    $templateacl2 = $templateacl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions -ErrorAction stop
-
-                    Write-Status "PSPKI\Set-CertificateTemplateAcl -ErrorAction stop"
-                    $templateacl2 | PSPKI\Set-CertificateTemplateAcl -ErrorAction stop
-                    $success = $true
-                    try {
-                        $_back = @((PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction Stop | PSPKI\Get-CertificateTemplateAcl -ErrorAction Stop).Access |
-                                Where-Object { "$($_.IdentityReference)" -eq $_Group -or "$($_.IdentityReference)" -like "*\$(($_Group -split '\\')[-1])" })
-                        Write-Status "Read-back: $_TemplateName now has $($_back.Count) ACE(s) for '$_Group' [$(($_back | ForEach-Object { $_.Rights }) -join ' | ')]"
-                    }
-                    catch {
-                        Write-Status "Read-back of $_TemplateName ACL failed: $($_.Exception.Message)"
-                    }
+                    if (-not $success) { throw "no identity form in [$($identities -join ' | ')] produced an ACE on $_TemplateName" }
                 }
                 catch {
-                    if ($_Skip) {
-                        Write-Status "SKIP $_TemplateName`: ACL grant for '$_Group' FAILED and was swallowed -- $($_.Exception.GetType().Name): $($_.Exception.Message)"
+                    # SkipIfNotExist means 'this CA does not carry the template', never
+                    # 'the grant failed' -- swallowing the latter is what let a lab build
+                    # clean and then fail every client at ccmsetup.
+                    if ($_Skip -and -not $templateFound) {
+                        Write-Status "SKIP $_TemplateName`: template not available on this CA -- $($_.Exception.GetType().Name): $($_.Exception.Message)"
                         return
                     }
                     try {
@@ -8156,6 +8315,16 @@ class AddCertificateTemplate {
                         }
                     }
                 }
+            }
+
+            if (-not $success) {
+                # SkipIfNotExist covers a principal that is not there to grant to. It must NOT
+                # cover a principal that resolved and still ended up with no ACE.
+                if ($_Skip -and -not $anyResolved) {
+                    Write-Status "SKIP $_TemplateName`: no identity in [$($identities -join ' | ')] resolves to a SID on this CA, so no ACL grant was applied. $($grantNotes -join ' ; ')"
+                    return
+                }
+                throw "AddCertificateTemplate: could not grant '$_Permissions' on '$_TemplateName' to any of [$($identities -join ' | ')] after $retries attempt(s). $($grantNotes -join ' ; '). Cross-forest clients cannot autoenroll until this ACE exists (ccmsetup 0x87D00454). DSC will retry."
             }
         }
 

@@ -19,6 +19,9 @@
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
     $DomainAdminName = $deployConfig.vmOptions.adminName
+    # Authoritative NetBIOS name (never derive it from the FQDN's first label).
+    $DomainNetBios = $deployConfig.vmOptions.domainNetBiosName
+    if (-not $DomainNetBios) { $DomainNetBios = $DomainName }
 
     # This VM
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
@@ -162,6 +165,7 @@
                 AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
                     TemplateName = "ConfigMgrClientDistributionPointCertificate"
                     GroupName    = "$DomainName\ConfigMgr IIS Servers"
+                    GroupAlt     = "$DomainNetBios\ConfigMgr IIS Servers"
                     Permissions  = 'Read, Enroll'
                     PermissionsOnly = $true
                     SkipIfNotExist = $true
@@ -172,6 +176,7 @@
                 AddCertificateTemplate ConfigMgrWebServerCertificate {
                     TemplateName = "ConfigMgrWebServerCertificate"
                     GroupName    = "$DomainName\ConfigMgr IIS Servers"
+                    GroupAlt     = "$DomainNetBios\ConfigMgr IIS Servers"
                     Permissions  = 'Read, Enroll'
                     PermissionsOnly = $true
                     SkipIfNotExist = $true
@@ -183,6 +188,7 @@
             AddCertificateTemplate ConfigMgrClientCertificate {
                 TemplateName = "ConfigMgrClientCertificate"
                 GroupName    = "$DomainName\Domain Computers"
+                GroupAlt     = "$DomainNetBios\Domain Computers"
                 Permissions  = 'Read, Enroll, AutoEnroll'
                 PermissionsOnly = $true
                 SkipIfNotExist = $true
