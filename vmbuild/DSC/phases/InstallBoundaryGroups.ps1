@@ -227,6 +227,7 @@ $ensureClientPkgCoverage = {
     foreach ($v in @($deployConfig.virtualMachines)) { if ($v.vmName) { $vmByHost["$($v.vmName)".ToUpper()] = $v } }
     $secSkipped = @()
     $keptDpFqdns = @()
+    $secKeptDps = @()
     foreach ($dp in $bgDpFqdns) {
         $dpHost = ("$dp" -split '\.')[0].ToUpper()
         $dpVm = $vmByHost[$dpHost]
@@ -239,7 +240,7 @@ $ensureClientPkgCoverage = {
                     (($_.pushClient -eq $true) -and $secNet -and ("$($_.network)" -eq $secNet))
                 )
             })
-        if ($assigned.Count -gt 0) { $keptDpFqdns += $dp }                                  # clients depend on it -> wait
+        if ($assigned.Count -gt 0) { $keptDpFqdns += $dp; $secKeptDps += "$dp" }             # clients depend on it -> wait
         else { $secSkipped += "$dp" }                                                       # no clients -> skip
     }
     $bgDpFqdns = @($keptDpFqdns)
@@ -256,10 +257,14 @@ $ensureClientPkgCoverage = {
     # that just finished installing still needs DRS init + link Active). If the link
     # is still not Active after 30 min, warn and fall through: the parent-Primary DPs
     # still serve every boundary, and Phase 11 re-checks + collects link diagnostics.
+    # $secLinkSites drives only the LINK wait, so it needs a resolvable site code. The
+    # retry BUDGET must not: PT1-SS1SITE/PT1-SS2SITE were covered as secondary DPs but
+    # contributed no site code here, so the budget stayed at 24 tries (720s) and the gate
+    # gave up twice at exactly 742/743/744s. Track the covered secondary DPs themselves.
     $secLinkSites = @{}   # secondary siteCode -> $true (for kept secondary DPs)
-    foreach ($dp in $bgDpFqdns) {
+    foreach ($dp in $secKeptDps) {
         $dpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
-        if ($dpVm -and $dpVm.role -eq 'Secondary' -and $dpVm.siteCode) { $secLinkSites["$($dpVm.siteCode)"] = $true }
+        if ($dpVm -and $dpVm.siteCode) { $secLinkSites["$($dpVm.siteCode)"] = $true }
     }
     if ($secLinkSites.Count -gt 0) {
         $linkDeadline = (Get-Date).AddMinutes(30)
@@ -309,9 +314,10 @@ $ensureClientPkgCoverage = {
     # 23:32:25, so this warned about a DP that had just gone healthy. The loop still
     # breaks the moment every DP reports Installed, so the larger budget only costs
     # wall-clock when the content genuinely has not landed.
-    if ($secLinkSites.Count -gt 0) {
+    if ($secKeptDps.Count -gt 0) {
         $maxTries = $maxTriesContentPending
-        Write-DscStatus "Client pkg coverage: covering secondary-site DP(s) in $(@($secLinkSites.Keys) -join ', ') -- content needs an extra parent->secondary hop, so allowing up to $maxTries tries."
+        $secWhere = if ($secLinkSites.Count -gt 0) { @($secLinkSites.Keys) -join ', ' } else { $secKeptDps -join ', ' }
+        Write-DscStatus "Client pkg coverage: covering secondary-site DP(s) $secWhere -- content needs an extra parent->secondary hop, so allowing up to $maxTries tries."
     }
     for ($try = 1; $try -le $maxTries; $try++) {
         # Is the client package content present at THIS site yet? StoredPkgVersion=0
