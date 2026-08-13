@@ -391,6 +391,7 @@ $global:VM_Create = {
         $azureFileList = $using:Common.AzureFileList
         $Phase = $using:Phase
         $Migrate = $using:Migrate
+        $phase1ReservedMacs = $using:phase1ReservedMacs
 
         if (-not ($Common.LogPath)) {
             Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
@@ -784,6 +785,7 @@ $global:VM_Create = {
                 tpmEnabled      = $tpmEnabled
                 DeployConfig    = $deployConfig
                 Migrate         = $Migrate
+                KnownReservedMacs = $phase1ReservedMacs
             }
 
             if ($currentItem.role -eq "OSDClient") {

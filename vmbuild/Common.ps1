@@ -4599,11 +4599,32 @@ function Add-DHCPReservationIsolated {
         [string] $Description,
         [int] $MaxAttempts = 4,
         [string] $LogContext,
-        [switch] $PurgeMacFirst
+        [switch] $PurgeMacFirst,
+        # MACs that already held a reservation when the phase snapshot was taken.
+        # $null means "unknown", which must always fall back to scanning.
+        [hashtable] $KnownReservedMacs
     )
 
     $tag = if ($LogContext) { "$LogContext`: " } else { '' }
     $purgeMac = $PurgeMacFirst.IsPresent
+    # The by-MAC purge is 92.4% of the time this function holds the host-wide DHCP
+    # mutex (oddball 2026-08-13: 71.4s of 77.3s, 4.3-11.3s per VM) and it found
+    # nothing on 12 of 12 VMs, because it re-scans EVERY scope on the host looking
+    # for stale reservations belonging to a MAC Hyper-V minted minutes earlier.
+    #
+    # Skipping it on a snapshot miss is safe: the snapshot is taken before any VM
+    # of this phase exists, and the case the purge guards -- a RECYCLED Hyper-V MAC
+    # still carrying a deleted VM's reservation -- is by definition older than the
+    # snapshot, so it is always present in it. Nothing but this deploy writes DHCP
+    # during a run, and it only writes for MACs it is itself assigning.
+    $purgeSkipped = $false
+    if ($purgeMac -and $null -ne $KnownReservedMacs) {
+        $selfMac = ($Mac -replace '[-:]', '').ToUpper()
+        if (-not $KnownReservedMacs.ContainsKey($selfMac)) {
+            $purgeMac = $false
+            $purgeSkipped = $true
+        }
+    }
     $attempt = 0
     $lastError = $null
     $stepName = if ($LogContext) { $LogContext } else { $IPAddress }
@@ -4789,8 +4810,9 @@ function Add-DHCPReservationIsolated {
             $waitSec = if ($mutexTiming.ContainsKey('WaitSeconds')) { $mutexTiming['WaitSeconds'] } else { -1 }
             $holdSec = if ($mutexTiming.ContainsKey('HoldSeconds')) { $mutexTiming['HoldSeconds'] } else { -1 }
             $isoSec = if ($holdSec -ge 0 -and $innerTimings -match 'inner=(\d+)ms') { [Math]::Round($holdSec - ([int]$Matches[1] / 1000.0), 1) } else { -1 }
-            Write-Log ("[StepTiming] {0} DhcpReservation completed in {1} seconds (wait={2}s hold={3}s isolation={4}s attempt={5}/{6} scope={7} {8})" -f `
-                    $stepName, [Math]::Round($waitSec + $holdSec, 1), $waitSec, $holdSec, $isoSec, $attempt, $MaxAttempts, $ScopeId, $innerTimings) -LogOnly
+            $purgeMode = if ($purgeSkipped) { 'skipped-snapshot-miss' } elseif ($purgeMac) { 'scanned' } else { 'not-requested' }
+            Write-Log ("[StepTiming] {0} DhcpReservation completed in {1} seconds (wait={2}s hold={3}s isolation={4}s attempt={5}/{6} scope={7} purge={8} {9})" -f `
+                    $stepName, [Math]::Round($waitSec + $holdSec, 1), $waitSec, $holdSec, $isoSec, $attempt, $MaxAttempts, $ScopeId, $purgeMode, $innerTimings) -LogOnly
             if ($attempt -gt 1) {
                 Write-Log "${tag}Add-DHCPReservationIsolated: succeeded for $IPAddress on attempt $attempt/$MaxAttempts (Scope=$ScopeId, MAC=$Mac)" -LogOnly
             }
@@ -5573,6 +5595,8 @@ function New-VirtualMachine {
         [switch]$tpmEnabled,
         [Parameter(Mandatory = $false)]
         [switch]$Migrate,
+        [Parameter(Mandatory = $false, HelpMessage = "MACs already holding a DHCP reservation at phase start; lets the by-MAC purge scan be skipped. Null = unknown, so scan.")]
+        [hashtable]$KnownReservedMacs,
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
@@ -5737,7 +5761,7 @@ function New-VirtualMachine {
                             if ($existing) {
                                 Write-Log "$VmName`: DHCP reservation for MAC=$vmMac points to $existing but AssignedIP is $assignedIP; correcting to avoid an address collision" -LogOnly
                             }
-                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName" -LogContext $VmName -PurgeMacFirst
+                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName" -LogContext $VmName -PurgeMacFirst -KnownReservedMacs $KnownReservedMacs
                             Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
                             $dhcp1Action = 'added'
                         }
@@ -5963,7 +5987,7 @@ function New-VirtualMachine {
                             if ($existing2) {
                                 Write-Log "$VmName`: DHCP reservation for MAC=$vmMac2 points to $existing2 but AssignedIP is $($thisVmConfig2.AssignedIP); correcting to avoid an address collision" -LogOnly
                             }
-                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName" -LogContext $VmName -PurgeMacFirst
+                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName" -LogContext $VmName -PurgeMacFirst -KnownReservedMacs $KnownReservedMacs
                             Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
                             $dhcp2Action = 'added'
                         }

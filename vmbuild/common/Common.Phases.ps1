@@ -2354,6 +2354,31 @@ DROP TABLE #memlabs_idxprobe;
         }
     }
 
+    # Phase 1: which MACs already hold a DHCP reservation anywhere on the host.
+    # Add-DHCPReservationIsolated -PurgeMacFirst otherwise re-scans EVERY scope per
+    # VM, inside the host-wide mutex -- 92.4% of the hold and 0 hits on 12 of 12
+    # (oddball 2026-08-13). One batched enumeration replaces N_VMs x N_scopes
+    # queries. Declared unconditionally so $using:phase1ReservedMacs always
+    # resolves (see the $reservation note below re: 418f5d9d).
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Read in $global:VM_Config via $using:phase1ReservedMacs')]
+    $phase1ReservedMacs = $null
+    if ($Phase -eq 1 -and -not $WhatIf) {
+        try {
+            $macSet = @{}
+            foreach ($r in @(Get-AllDHCPReservationsIsolated)) {
+                $nm = (([string]$r.Mac) -replace '[-:]', '').ToUpper()
+                if ($nm) { $macSet[$nm] = $true }
+            }
+            $phase1ReservedMacs = $macSet
+            Write-Log "[Phase 1] Pre-cached reserved MACs: $($macSet.Count) MAC(s) hold a reservation; VMs whose MAC is absent skip the by-MAC purge scan." -LogOnly
+        }
+        catch {
+            # Unknown must never read as "nothing to purge" -- fall back to scanning.
+            $phase1ReservedMacs = $null
+            Write-Log "[Phase 1] Could not pre-cache reserved MACs; every VM will run the full by-MAC purge scan. $_" -LogOnly
+        }
+    }
+
     # Phases 10/11 dispatch every eligible VM at once, so a throttle below that count splits the
     # phase into waves -- which shows up as "the lab got slower", not as a limit being reached.
     # The fixed 16 already did that: phase 11 dispatched 19-24 VMs in four separate lab runs.
