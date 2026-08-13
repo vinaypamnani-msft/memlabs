@@ -1398,8 +1398,22 @@ function Get-File {
                 # /NP = no progress percentage.
                 $roboArgs = @($roboSrc, $roboDst, $roboFile, '/J', '/R:2', '/W:10', '/NP')
                 Write-Log "Get-File: robocopy (round $round/$maxRounds) $($roboArgs -join ' ')" -LogOnly
-                $roboResult = & robocopy @roboArgs 2>&1
-                $roboExit = $LASTEXITCODE
+                # A hashtable, because the slot helper takes a scriptblock and a
+                # `return` inside one would return from the scriptblock, not Get-File.
+                $roboBox = @{}
+                $copyTiming = @{}
+                Invoke-WithVhdxCopySlot -Timing $copyTiming -ScriptBlock {
+                    $roboBox['Output'] = & robocopy @roboArgs 2>&1
+                    $roboBox['Exit'] = $LASTEXITCODE
+                } | Out-Null
+                $roboResult = $roboBox['Output']
+                $roboExit = if ($roboBox.ContainsKey('Exit')) { [int]$roboBox['Exit'] } else { 16 }
+                Write-Log ("Get-File: robocopy (round $round) took {0}s (slotWait={1}s slots={2} throttled={3}) for '{4}'" -f `
+                    $(if ($copyTiming.ContainsKey('HoldSeconds')) { $copyTiming['HoldSeconds'] } else { -1 }), `
+                    $(if ($copyTiming.ContainsKey('WaitSeconds')) { $copyTiming['WaitSeconds'] } else { -1 }), `
+                    $(if ($copyTiming.ContainsKey('Slots')) { $copyTiming['Slots'] } else { -1 }), `
+                    $(if ($copyTiming.ContainsKey('Throttled')) { $copyTiming['Throttled'] } else { 'unknown' }), `
+                    $destinationFile) -LogOnly
 
                 if ($roboExit -lt 8) {
                     if ($needsRename -and (Test-Path $tempCopy)) {
@@ -4388,6 +4402,100 @@ function Get-AllDHCPReservationsIsolated {
 # UNSERIALIZED, which is the exact race this mutex exists to prevent (32-40
 # such fall-throughs per 25-VM run, i.e. the mutex was silently off for most
 # of Phase 1). Keep waiting to $CeilingSeconds instead.
+function Invoke-WithVhdxCopySlot {
+    <#
+    .SYNOPSIS
+    Runs a base-image VHDX copy holding one of a bounded number of host-wide slots.
+
+    .DESCRIPTION
+    Phase 1 dispatches every VM at once, so on a 19-VM build all 19 base-image
+    copies run concurrently against one volume. Measured on fabrikam 2026-08-12:
+    all 19 started inside 63s, NOTHING completed for the next 5m23s, then all 19
+    finished in a 3m14s cluster. That is fair-share completion -- every stream
+    gets 1/N of the device, so every VM crosses the finish line together.
+
+    The cost is not the copy. Each VM must finish copying before it can start,
+    and it cannot reserve its DHCP address until it has started (the MAC is
+    000000000000 until then), so all 19 reservations became runnable at the same
+    instant and then serialized through Global\MemLabs_DHCP: copies 17:09:14 to
+    17:18:54, reservations 17:18:07 to 17:28:18, overlapping by 47 SECONDS out
+    of 1,190s. Two disjoint serial chains, 85% of a 1,396s phase.
+
+    Bounding copy concurrency staggers completion instead, so early VMs reach
+    Start-VM and take the DHCP mutex while later VMs are still copying. The
+    device is already saturated (~360 MB/s aggregate across the 19), so the same
+    bytes take about the same total time either way -- what changes is WHEN each
+    copy finishes. The OsDiskCopy StepTiming reports sizeGB and MBps precisely so
+    the next run can confirm that assumption rather than assume it.
+
+    A slot is never load-bearing: on ceiling the copy proceeds unthrottled with a
+    WARN. A semaphore has no AbandonedMutexException equivalent, so a slot leaked
+    by a killed VM_Config worker would otherwise be lost for the lifetime of the
+    kernel object and could silently starve Phase 1 down to zero copies.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [scriptblock] $ScriptBlock,
+        [int] $TimeoutSeconds = 120,
+        [int] $CeilingSeconds = 1800,
+        [hashtable] $Timing,
+        # Overridable only so a test can exercise the real function without
+        # touching the semaphore a live build is using.
+        [string] $Name = 'Global\MemLabs_VhdxCopy'
+    )
+
+    # Env var so the host can be tuned without a code change, and because each
+    # VM_Config worker is a separate process that inherits it.
+    $slots = 4
+    if ($env:MEMLABS_VHDXCOPY_SLOTS) {
+        $parsed = 0
+        if ([int]::TryParse($env:MEMLABS_VHDXCOPY_SLOTS, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le 64) { $slots = $parsed }
+    }
+
+    $sem = $null
+    $acquired = $false
+    $waitSw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        try {
+            # The first process to create it fixes the count; later opens ignore
+            # these arguments, which is why $slots must be deterministic.
+            $sem = [System.Threading.Semaphore]::new($slots, $slots, $Name)
+        }
+        catch {
+            Write-Log "Invoke-WithVhdxCopySlot: semaphore unavailable, copying unthrottled ($($_.Exception.GetType().FullName)): $($_.Exception.Message)" -LogOnly
+        }
+        if ($sem) {
+            $ceiling = [TimeSpan]::FromSeconds([Math]::Max($CeilingSeconds, $TimeoutSeconds))
+            while (-not $acquired -and $waitSw.Elapsed -lt $ceiling) {
+                try { $acquired = $sem.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds)) } catch { break }
+                if (-not $acquired) {
+                    Write-Log "Invoke-WithVhdxCopySlot: still queued after $([int]$waitSw.Elapsed.TotalSeconds)s for 1 of $slots slot(s) (ceiling $([int]$ceiling.TotalSeconds)s)" -LogOnly
+                }
+            }
+            if (-not $acquired) {
+                Write-Log "Invoke-WithVhdxCopySlot: gave up after $([int]$waitSw.Elapsed.TotalSeconds)s; copying without throttle. A slot may have been leaked by a killed worker." -Warning
+            }
+        }
+        $waitSw.Stop()
+        $holdSw = [System.Diagnostics.Stopwatch]::StartNew()
+        try { & $ScriptBlock }
+        finally {
+            $holdSw.Stop()
+            if ($Timing) {
+                $Timing['WaitSeconds'] = [Math]::Round($waitSw.Elapsed.TotalSeconds, 1)
+                $Timing['HoldSeconds'] = [Math]::Round($holdSw.Elapsed.TotalSeconds, 1)
+                $Timing['Slots'] = $slots
+                $Timing['Throttled'] = $acquired
+            }
+        }
+    }
+    finally {
+        if ($sem) {
+            if ($acquired) { try { [void]$sem.Release() } catch {} }
+            try { $sem.Dispose() } catch {}
+        }
+    }
+}
+
 function Invoke-WithDhcpMutex {
     param(
         [Parameter(Mandatory = $true)] [scriptblock] $ScriptBlock,
