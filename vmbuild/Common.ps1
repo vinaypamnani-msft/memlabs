@@ -3983,7 +3983,16 @@ function Invoke-IsolatedCim {
     param(
         [Parameter(Mandatory = $true)]
         [scriptblock] $ScriptBlock,
-        [object[]] $ArgumentList
+        [object[]] $ArgumentList,
+        # Runs in this same runspace before $Gate is entered. Importing a CDXML
+        # module (DhcpServer, Hyper-V) into a fresh runspace costs ~4s and is billed
+        # to whichever cmdlet happens to run first -- measured oddball 2026-08-13:
+        # the first DHCP call took 4402ms while later ones in the same runspace took
+        # 24-46ms. Warming here keeps that import outside a caller's lock.
+        [string] $WarmupCommand,
+        # Wraps ONLY the invocation. Receives a scriptblock to call and must return
+        # its output. Lets a caller serialize the work without serializing the import.
+        [scriptblock] $Gate
     )
 
     # Create a FRESH throwaway runspace for this call and dispose it in the
@@ -3993,6 +4002,18 @@ function Invoke-IsolatedCim {
     # Direct sessions Phase 1 uses for disk init (in-guest Storage cmdlets hang).
     $ps = [System.Management.Automation.PowerShell]::Create()
     try {
+        if ($WarmupCommand) {
+            # Best-effort: a failed warm-up only means the import is paid later, so it
+            # must never be the thing that fails the call.
+            try {
+                $null = $ps.AddScript($WarmupCommand)
+                $null = $ps.Invoke()
+            }
+            catch { }
+            $ps.Commands.Clear()
+            try { $ps.Streams.ClearStreams() } catch { }
+        }
+
         $null = $ps.AddScript($ScriptBlock.ToString())
         if ($ArgumentList) {
             foreach ($arg in $ArgumentList) { $null = $ps.AddArgument($arg) }
@@ -4002,7 +4023,9 @@ function Invoke-IsolatedCim {
         # the scriptblock), which preserves the caller's existing try/catch
         # semantics. The results are materialized before the finally disposes
         # the runspace, so returning them is safe.
-        return $ps.Invoke()
+        $invoker = { $ps.Invoke() }
+        if ($Gate) { return (& $Gate $invoker) }
+        return (& $invoker)
     }
     finally {
         try { $ps.Runspace.Close() } catch {}
@@ -4600,7 +4623,7 @@ function Add-DHCPReservationIsolated {
         [int] $MaxAttempts = 4,
         [string] $LogContext,
         [switch] $PurgeMacFirst,
-        # MACs that already held a reservation when the phase snapshot was taken.
+        # Phase snapshot: @{ Macs = <set>; ByScopeMac = <scope|mac -> ip> }.
         # $null means "unknown", which must always fall back to scanning.
         [hashtable] $KnownReservedMacs
     )
@@ -4618,9 +4641,9 @@ function Add-DHCPReservationIsolated {
     # snapshot, so it is always present in it. Nothing but this deploy writes DHCP
     # during a run, and it only writes for MACs it is itself assigning.
     $purgeSkipped = $false
-    if ($purgeMac -and $null -ne $KnownReservedMacs) {
+    if ($purgeMac -and $null -ne $KnownReservedMacs -and $null -ne $KnownReservedMacs['Macs']) {
         $selfMac = ($Mac -replace '[-:]', '').ToUpper()
-        if (-not $KnownReservedMacs.ContainsKey($selfMac)) {
+        if (-not $KnownReservedMacs['Macs'].ContainsKey($selfMac)) {
             $purgeMac = $false
             $purgeSkipped = $true
         }
@@ -4632,8 +4655,12 @@ function Add-DHCPReservationIsolated {
         $attempt++
         try {
             $mutexTiming = @{}
-            $outcome = Invoke-WithDhcpMutex -Timing $mutexTiming -ScriptBlock {
-                Invoke-IsolatedCim -ArgumentList $ScopeId, $IPAddress, $Mac, $Description, $purgeMac -ScriptBlock {
+            # The DhcpServer import is warmed BEFORE the mutex is taken, so the hold
+            # covers the reservation work only -- it was ~4.4s of the ~4.7s hold.
+            $outcome = Invoke-IsolatedCim -WarmupCommand 'Get-DhcpServerv4Scope -ErrorAction SilentlyContinue | Out-Null' -Gate {
+                param($run)
+                Invoke-WithDhcpMutex -Timing $mutexTiming -ScriptBlock $run
+            } -ArgumentList $ScopeId, $IPAddress, $Mac, $Description, $purgeMac -ScriptBlock {
                     param($scopeId, $ip, $mac, $desc, $purgeMac)
 
                     # Every branch records why it fired, and the whole set is returned to the
@@ -4790,7 +4817,6 @@ function Add-DHCPReservationIsolated {
 
                     $notes.Add("timings=[inner=$([int]$swInner.ElapsedMilliseconds)ms purge=${msPurge}ms find=${msFind}ms switchMacs=${msSwitch}ms add=${msAdd}ms verify=${msVerify}ms lease=${msLease}ms]")
                     $notes.ToArray() -join '; '
-                }
             }
             $summary = @($outcome | Where-Object { $_ -is [string] -and $_ }) | Select-Object -Last 1
             # Split the machine-readable timing fragment back off so the human-readable
@@ -5752,7 +5778,15 @@ function New-VirtualMachine {
                         # for this MAC at a DIFFERENT IP is stale (e.g. left over pointing at
                         # another VM's fixed-role IP) and MUST be corrected, or the VM boots
                         # onto the wrong address and collides with the IP's rightful owner.
-                        $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
+                        # The phase snapshot answers this without another isolated
+                        # runspace (~4s of CDXML import per call).
+                        $existing = $null
+                        if ($KnownReservedMacs -and $KnownReservedMacs['ByScopeMac']) {
+                            $existing = [string]$KnownReservedMacs['ByScopeMac']["$scopeId|$(($vmMac -replace '[-:]', '').ToUpper())"]
+                        }
+                        else {
+                            $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
+                        }
                         if ($existing -and $existing -eq $assignedIP) {
                             Write-Log "$VmName`: DHCP reservation already exists: $existing (MAC=$vmMac); keeping" -LogOnly
                             $dhcp1Action = 'kept'
@@ -5978,7 +6012,13 @@ function New-VirtualMachine {
                         # Only KEEP an existing reservation for this MAC when it points at the
                         # VM's AssignedIP; a reservation at a different IP is stale and would put
                         # the VM on the wrong address (and collide with that IP's rightful owner).
-                        $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2
+                        $existing2 = $null
+                        if ($KnownReservedMacs -and $KnownReservedMacs['ByScopeMac']) {
+                            $existing2 = [string]$KnownReservedMacs['ByScopeMac']["$scopeId2|$(($vmMac2 -replace '[-:]', '').ToUpper())"]
+                        }
+                        else {
+                            $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2
+                        }
                         if ($existing2 -and $existing2 -eq $thisVmConfig2.AssignedIP) {
                             Write-Log "$VmName`: DHCP reservation already exists: $existing2 (MAC=$vmMac2); keeping" -LogOnly
                             $dhcp2Action = 'kept'

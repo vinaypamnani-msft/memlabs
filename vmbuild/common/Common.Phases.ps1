@@ -2354,28 +2354,34 @@ DROP TABLE #memlabs_idxprobe;
         }
     }
 
-    # Phase 1: which MACs already hold a DHCP reservation anywhere on the host.
-    # Add-DHCPReservationIsolated -PurgeMacFirst otherwise re-scans EVERY scope per
-    # VM, inside the host-wide mutex -- 92.4% of the hold and 0 hits on 12 of 12
-    # (oddball 2026-08-13). One batched enumeration replaces N_VMs x N_scopes
-    # queries. Declared unconditionally so $using:phase1ReservedMacs always
-    # resolves (see the $reservation note below re: 418f5d9d).
+    # Phase 1: one batched snapshot of every DHCP reservation on the host, so each
+    # VM job can answer two questions without spinning up its own isolated runspace
+    # (each import of the DhcpServer CDXML module costs ~4s -- measured oddball
+    # 2026-08-13, where the first DHCP call in a runspace took 4402ms and later ones
+    # took 24-46ms):
+    #   Macs        -- does this MAC hold a reservation anywhere? (skips the purge scan)
+    #   ByScopeMac  -- what IP does it hold in THIS scope? (replaces Get-DHCPReservationIPForMac)
+    # Declared unconditionally so $using:phase1ReservedMacs always resolves (see the
+    # $reservation note below re: 418f5d9d).
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Read in $global:VM_Config via $using:phase1ReservedMacs')]
     $phase1ReservedMacs = $null
     if ($Phase -eq 1 -and -not $WhatIf) {
         try {
             $macSet = @{}
+            $byScopeMac = @{}
             foreach ($r in @(Get-AllDHCPReservationsIsolated)) {
                 $nm = (([string]$r.Mac) -replace '[-:]', '').ToUpper()
-                if ($nm) { $macSet[$nm] = $true }
+                if (-not $nm) { continue }
+                $macSet[$nm] = $true
+                $byScopeMac["$($r.ScopeId)|$nm"] = [string]$r.Ip
             }
-            $phase1ReservedMacs = $macSet
-            Write-Log "[Phase 1] Pre-cached reserved MACs: $($macSet.Count) MAC(s) hold a reservation; VMs whose MAC is absent skip the by-MAC purge scan." -LogOnly
+            $phase1ReservedMacs = @{ Macs = $macSet; ByScopeMac = $byScopeMac }
+            Write-Log "[Phase 1] Pre-cached DHCP reservations: $($byScopeMac.Count) reservation(s) across $($macSet.Count) MAC(s); VM jobs skip both the per-VM reservation lookup and, when their MAC is absent, the by-MAC purge scan." -LogOnly
         }
         catch {
-            # Unknown must never read as "nothing to purge" -- fall back to scanning.
+            # Unknown must never read as "nothing to purge" or "no reservation".
             $phase1ReservedMacs = $null
-            Write-Log "[Phase 1] Could not pre-cache reserved MACs; every VM will run the full by-MAC purge scan. $_" -LogOnly
+            Write-Log "[Phase 1] Could not pre-cache DHCP reservations; every VM will do its own lookup and full purge scan. $_" -LogOnly
         }
     }
 
