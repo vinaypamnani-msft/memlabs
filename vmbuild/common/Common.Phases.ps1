@@ -2223,6 +2223,43 @@ DROP TABLE #memlabs_idxprobe;
         $vmDispatchList = @($phase2Tagged | Sort-Object Pri, Idx | ForEach-Object { $_.Vm })
     }
 
+    # Phase 1: copy the client-OS VMs first, because their OOBE is the long pole.
+    #
+    # Base-image copy concurrency is now bounded (Invoke-WithVhdxCopySlot), which
+    # staggers copy completion instead of letting all N finish together. That made
+    # dispatch order matter for the first time: whoever copies last starts OOBE
+    # last. Measured on two independent full builds, the client-OS VMs are the
+    # slowest to finish Phase 1 -- and it is the OS, not the role:
+    #
+    #   cstest8b -- SAME role (DomainMember), different OS:
+    #     W11CLIENT1 564.9s  W11CLIENT3 548.7s  W10CLIENT2 540.5s  W11CLIENT2 522.3s
+    #     W19SERVER1 446.4s  W22SERVER1 433.8s          => clients +76..139s
+    #   fabrikam -- matched reservation times, different OS:
+    #     CS1SQLAO2 (Server) reserved 539s -> done 1107s
+    #     W10CLIENT2 (Win10) reserved 544s -> done 1292s => +185s
+    #
+    # Copy start order cannot explain either: all 19 fabrikam copies began inside
+    # 63s of each other. Sorting the long pole to the front costs nothing when the
+    # copies are unthrottled (they all still overlap) and avoids the regression
+    # where a client lands in the last copy wave and adds its OOBE on top.
+    if ($Phase -eq 1) {
+        $phase1Idx = 0
+        $phase1Tagged = foreach ($v in $deployConfig.virtualMachines) {
+            # AADClient defers its own creation on purpose (it waits for the host to
+            # settle), so keep it last regardless of its OS.
+            $pri = if ($v.role -eq 'AADClient') { 2 }
+                   elseif ($v.operatingSystem -and $v.operatingSystem -like 'Windows 1*' -and $v.operatingSystem -notlike '*Server*') { 0 }
+                   else { 1 }
+            [PSCustomObject]@{ Vm = $v; Pri = $pri; Idx = $phase1Idx }
+            $phase1Idx++
+        }
+        $clientFirst = @($phase1Tagged | Where-Object { $_.Pri -eq 0 })
+        if ($clientFirst.Count -gt 0) {
+            $vmDispatchList = @($phase1Tagged | Sort-Object Pri, Idx | ForEach-Object { $_.Vm })
+            Write-Log "[Phase 1] Dispatch order: $($clientFirst.Count) client-OS VM(s) first ($(($clientFirst | ForEach-Object { $_.Vm.vmName }) -join ', ')) -- their OOBE is the Phase 1 long pole." -LogOnly
+        }
+    }
+
     # Phase 2/3 hot path: seed one host-side snapshot of VM MACs and DHCP
     # reservations, then hand each VM_Config job a tiny per-VM hint object.
     # This avoids spawning isolated Hyper-V/DHCP runspaces per VM just to find
