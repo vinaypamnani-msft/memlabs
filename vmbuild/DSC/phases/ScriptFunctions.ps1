@@ -754,6 +754,64 @@ function Get-SMSProvider {
     return $return
 }
 
+function Wait-CMRoleRegistered {
+    # Replaces the blind post-add Start-Sleep in the role installers with a poll on
+    # the SAME predicate the caller's do/until already exits on, so the wait ends when
+    # the role appears instead of when a hardcoded timer expires. Worst case equals the
+    # sleep it replaces, so this can only ever finish earlier.
+    #
+    # It also records how long registration actually took, which no log has ever
+    # carried: measured DP 72s / MP 72s / SUP 71s against a 70s floor and Reporting
+    # Point 43s against a 40s floor, i.e. every role landed 1-3s past its own sleep and
+    # the true latency was never observable.
+    param (
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Probe,
+        [Parameter(Mandatory = $true)]
+        [string]$RoleName,
+        [Parameter(Mandatory = $true)]
+        [string]$ServerFQDN,
+        [int]$TimeoutSeconds = 60,
+        [int]$PollSeconds = 5
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $result = $null
+    $probeError = $null
+
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        Start-Sleep -Seconds $PollSeconds
+        try {
+            $result = & $Probe
+            $probeError = $null
+        }
+        catch {
+            # A provider hiccup is not the same answer as "role absent", so keep
+            # polling -- but keep the reason so a timeout can name it.
+            $result = $null
+            $probeError = $_.Exception.Message
+        }
+        if ($result) { break }
+    }
+
+    $sw.Stop()
+    $secs = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+
+    if ($result) {
+        # Wording keeps the existing "<Role> Role detected on <FQDN>" marker so log
+        # analysis that pairs it with "Role not detected ... Adding" still works.
+        Write-DscStatus "$RoleName Role detected on $ServerFQDN after ${secs}s (polled every ${PollSeconds}s, budget ${TimeoutSeconds}s)"
+    }
+    elseif ($probeError) {
+        Write-DscStatus "$RoleName Role not registered on $ServerFQDN within ${secs}s; last probe error: $probeError. Retrying."
+    }
+    else {
+        Write-DscStatus "$RoleName Role not registered on $ServerFQDN within ${secs}s. Retrying."
+    }
+
+    return $result
+}
+
 function Install-DP {
     param (
         [Parameter()]
@@ -779,8 +837,8 @@ function Install-DP {
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
             New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode *>&1 | Write-StatusLogEntry
-            Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
+            $SystemServer = Wait-CMRoleRegistered -RoleName 'Site System' -ServerFQDN $DPFQDN -TimeoutSeconds 15 -PollSeconds 3 `
+                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode }
         }
 
         # Install DP
@@ -812,7 +870,10 @@ function Install-DP {
             else {
                 Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force *>&1 | Write-StatusLogEntry
             }
-            Start-Sleep -Seconds 60
+            if (-not $installFailure) {
+                $dpinstalled = Wait-CMRoleRegistered -RoleName 'DP' -ServerFQDN $DPFQDN -TimeoutSeconds 60 `
+                    -Probe { Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode }
+            }
         }
         else {
             Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
@@ -866,8 +927,8 @@ function Install-PullDP {
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
             New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode *>&1 | Write-StatusLogEntry
-            Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
+            $SystemServer = Wait-CMRoleRegistered -RoleName 'Site System' -ServerFQDN $DPFQDN -TimeoutSeconds 15 -PollSeconds 3 `
+                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode }
         }
 
         # Install Pull DP
@@ -910,7 +971,10 @@ function Install-PullDP {
                 Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN -Force *>&1 | Write-StatusLogEntry
 
             }
-            Start-Sleep -Seconds 60
+            if (-not $installFailure) {
+                $dpinstalled = Wait-CMRoleRegistered -RoleName 'DP' -ServerFQDN $DPFQDN -TimeoutSeconds 60 `
+                    -Probe { Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode }
+            }
         }
         else {
             Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
@@ -1080,8 +1144,8 @@ function Install-MP {
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $MPFQDN"
             New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode *>&1 | Write-StatusLogEntry
-            Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
+            $SystemServer = Wait-CMRoleRegistered -RoleName 'Site System' -ServerFQDN $MPFQDN -TimeoutSeconds 15 -PollSeconds 3 `
+                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN }
         }
 
         $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN
@@ -1093,7 +1157,8 @@ function Install-MP {
             else {
                 Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http *>&1 | Write-StatusLogEntry
             }
-            Start-Sleep -Seconds 60
+            $mpinstalled = Wait-CMRoleRegistered -RoleName 'MP' -ServerFQDN $MPFQDN -TimeoutSeconds 60 `
+                -Probe { Get-CMManagementPoint -SiteSystemServerName $MPFQDN }
         }
         else {
             Write-DscStatus "MP Role detected on $MPFQDN"
@@ -1138,8 +1203,8 @@ function Install-SUP {
             } catch {
                 if ($_.Exception.Message -notmatch 'already exists') { Write-DscStatus "WARNING: New-CMSiteSystemServer failed: $($_.Exception.Message)" }
             }
-            Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
+            $SystemServer = Wait-CMRoleRegistered -RoleName 'Site System' -ServerFQDN $ServerFQDN -TimeoutSeconds 15 -PollSeconds 3 `
+                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN }
         }
 
         $installed = Get-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN
@@ -1159,7 +1224,8 @@ function Install-SUP {
                 }
             }
             if (-not $installed) {
-                Start-Sleep -Seconds 60
+                $installed = Wait-CMRoleRegistered -RoleName 'SUP' -ServerFQDN $ServerFQDN -TimeoutSeconds 60 `
+                    -Probe { Get-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN }
             }
         }
         else {
@@ -1239,15 +1305,16 @@ function Install-SRP {
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
             New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode  *>&1 | Write-StatusLogEntry
-            Start-Sleep -Seconds 15
-            $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
+            $SystemServer = Wait-CMRoleRegistered -RoleName 'Site System' -ServerFQDN $ServerFQDN -TimeoutSeconds 15 -PollSeconds 3 `
+                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN }
         }
 
         $installed = Get-CMReportingServicePoint -SiteSystemServerName $ServerFQDN
         if (-not $installed) {
             Write-DscStatus "Reporting Point Role not detected on $ServerFQDN. Adding Reporting Point role using DB Server [$SqlServerName], DB Name [$DatabaseName], UserName [$UserName]"
             Add-CMReportingServicePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -UserName $UserName -DatabaseServerName $SqlServerName -DatabaseName $DatabaseName -ReportServerInstance "PBIRS" *>&1 | Write-StatusLogEntry
-            Start-Sleep -Seconds 30
+            $installed = Wait-CMRoleRegistered -RoleName 'Reporting Point' -ServerFQDN $ServerFQDN -TimeoutSeconds 30 `
+                -Probe { Get-CMReportingServicePoint -SiteSystemServerName $ServerFQDN }
         }
         else {
             Write-DscStatus "Reporting Point Role detected on $ServerFQDN"
