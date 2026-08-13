@@ -1294,15 +1294,24 @@ if ($($cmo.OfflineSCP) -eq $true) {
 if ($Configuration.UpgradeSCCM.Status -eq 'Completed') {
     # Verify the update is actually installed before skipping
     $targetVersion = $cmo.version
-    $installedUpdate = Get-CMSiteUpdate -Fast | Where-Object { $_.State -eq 196612 -and $_.Name -eq "Configuration Manager $targetVersion" }
-    if ($installedUpdate) {
-        Write-DscStatus "Update 'Configuration Manager $targetVersion' verified as installed. Skipping upgrade."
-        $UpdateRequired = $false
+    if (-not $UpdateRequired) {
+        # No in-console update applies here (baseline media is already at this version,
+        # or the SCP is offline/absent), so there is no site-update record to find and
+        # the check below would fail forever.
+        Write-DscStatus "UpgradeSCCM Completed and no in-console update applies for 'Configuration Manager $targetVersion'. Skipping upgrade."
     }
     else {
-        Write-DscStatus "UpgradeSCCM marked Completed but update 'Configuration Manager $targetVersion' not found in installed state. Re-running upgrade."
-        $Configuration.UpgradeSCCM.Status = 'NotStart'
-        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+        $installedUpdate = Get-CMSiteUpdate -Fast | Where-Object { $_.State -eq 196612 -and $_.Name -eq "Configuration Manager $targetVersion" }
+        if ($installedUpdate) {
+            Write-DscStatus "Update 'Configuration Manager $targetVersion' verified as installed. Skipping upgrade."
+            $UpdateRequired = $false
+        }
+        else {
+            Write-DscStatus "UpgradeSCCM marked Completed but update 'Configuration Manager $targetVersion' not found in installed state. Re-running upgrade."
+            $Configuration.UpgradeSCCM.Status = 'NotStart'
+            Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+            $UpdateRequired = $true
+        }
     }
 }
 
