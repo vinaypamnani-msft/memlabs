@@ -2242,7 +2242,40 @@ DROP TABLE #memlabs_idxprobe;
     # 63s of each other. Sorting the long pole to the front costs nothing when the
     # copies are unthrottled (they all still overlap) and avoids the regression
     # where a client lands in the last copy wave and adds its OOBE on top.
+    #
+    # Within each group, smallest base image first. Shortest-processing-time
+    # minimises mean completion, and mean completion here IS "how soon the DHCP
+    # chain gets fed" -- the reservation mutex is a ~610s serial pipeline that
+    # today only starts once the copies are basically done. Size is read from the
+    # local file rather than the file list (which carries md5 but no size) or an
+    # Azure HEAD: Get-FilesForConfiguration downloads and hash-verifies every
+    # image before the phase loop and exits the script if it cannot, so the local
+    # file is guaranteed present, is the exact bytes robocopy will move, and
+    # costs no network call that could fail. Self-calibrating -- identical image
+    # sizes make this a no-op, and the log line below reports the real spread.
     if ($Phase -eq 1) {
+        $phase1SizeCache = @{}
+        $phase1SizeOf = {
+            param($vm)
+            # Unknown sorts LAST within its group: an image we cannot stat might be
+            # the biggest, and guessing 0 would promote it to the front.
+            if (-not $vm.operatingSystem) { return [long]::MaxValue }
+            if ($phase1SizeCache.ContainsKey($vm.operatingSystem)) { return $phase1SizeCache[$vm.operatingSystem] }
+            $size = [long]::MaxValue
+            try {
+                $entry = $Common.AzureFileList.OS | Where-Object { $_.id -eq $vm.operatingSystem } | Select-Object -First 1
+                if ($entry -and $entry.filename) {
+                    $imgPath = Join-Path $Common.AzureFilesPath $entry.filename
+                    if (Test-Path -LiteralPath $imgPath -PathType Leaf) {
+                        $size = [long](Get-Item -LiteralPath $imgPath -ErrorAction Stop).Length
+                    }
+                }
+            }
+            catch { $size = [long]::MaxValue }
+            $phase1SizeCache[$vm.operatingSystem] = $size
+            return $size
+        }
+
         $phase1Idx = 0
         $phase1Tagged = foreach ($v in $deployConfig.virtualMachines) {
             # AADClient defers its own creation on purpose (it waits for the host to
@@ -2250,13 +2283,21 @@ DROP TABLE #memlabs_idxprobe;
             $pri = if ($v.role -eq 'AADClient') { 2 }
                    elseif ($v.operatingSystem -and $v.operatingSystem -like 'Windows 1*' -and $v.operatingSystem -notlike '*Server*') { 0 }
                    else { 1 }
-            [PSCustomObject]@{ Vm = $v; Pri = $pri; Idx = $phase1Idx }
+            [PSCustomObject]@{ Vm = $v; Pri = $pri; Size = (& $phase1SizeOf $v); Idx = $phase1Idx }
             $phase1Idx++
         }
+
+        $knownSizes = @($phase1Tagged | Where-Object { $_.Size -ne [long]::MaxValue } | ForEach-Object { $_.Size })
+        $sizeSpread = if ($knownSizes.Count -gt 1) { ($knownSizes | Measure-Object -Maximum).Maximum - ($knownSizes | Measure-Object -Minimum).Minimum } else { 0 }
         $clientFirst = @($phase1Tagged | Where-Object { $_.Pri -eq 0 })
-        if ($clientFirst.Count -gt 0) {
-            $vmDispatchList = @($phase1Tagged | Sort-Object Pri, Idx | ForEach-Object { $_.Vm })
-            Write-Log "[Phase 1] Dispatch order: $($clientFirst.Count) client-OS VM(s) first ($(($clientFirst | ForEach-Object { $_.Vm.vmName }) -join ', ')) -- their OOBE is the Phase 1 long pole." -LogOnly
+
+        if ($clientFirst.Count -gt 0 -or $sizeSpread -gt 0) {
+            $vmDispatchList = @($phase1Tagged | Sort-Object Pri, Size, Idx | ForEach-Object { $_.Vm })
+            $order = ($phase1Tagged | Sort-Object Pri, Size, Idx | ForEach-Object {
+                    '{0}({1})' -f $_.Vm.vmName, $(if ($_.Size -eq [long]::MaxValue) { 'size?' } else { '{0:N1}GB' -f ($_.Size / 1GB) })
+                }) -join ', '
+            Write-Log ("[Phase 1] Dispatch order: {0} client-OS VM(s) first, then smallest base image first (spread {1:N1}GB across {2} known image size(s)): {3}" -f `
+                    $clientFirst.Count, ($sizeSpread / 1GB), @($phase1SizeCache.Values | Where-Object { $_ -ne [long]::MaxValue } | Sort-Object -Unique).Count, $order) -LogOnly
         }
     }
 
