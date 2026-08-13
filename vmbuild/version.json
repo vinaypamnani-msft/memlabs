@@ -1,5 +1,5 @@
 ﻿{
     "_comment":  "Keep these values QUOTED. Unquoted 260811.0 parses as a Double and silently becomes 260811, and latestHotfixVersion feeds a string comparison in Common.Maintenance.ps1. Bumped by vmbuild/DSC/createGuestDscZip.ps1; read by Common.ps1 at init.",
-    "memLabsVersion":  "260812.3",
-    "latestHotfixVersion":  "260812.3"
+    "memLabsVersion":  "260813.0",
+    "latestHotfixVersion":  "260813.0"
 }
