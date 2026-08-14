@@ -237,7 +237,8 @@ $sqlSnapBlock = {
     }
     if ($PkgId) {
         $keep = 'Action|Mask|Version|SiteCode|SourceSite|Flags|Status|Refresh|Type|PkgID|^ID$|Priority|Time|Date'
-        Q "SELECT * FROM PkgStatus_G WHERE ID = @p" 'PkgStatus_G' $keep $PkgId        Q "SELECT * FROM PkgServers_G WHERE PkgID = @p" 'PkgServers_G' $keep $PkgId
+        Q "SELECT * FROM PkgStatus_G WHERE ID = @p" 'PkgStatus_G' $keep $PkgId
+        Q "SELECT * FROM PkgServers_G WHERE PkgID = @p" 'PkgServers_G' $keep $PkgId
         Q "SELECT * FROM PkgServers_L WHERE PkgID = @p" 'PkgServers_L' $keep $PkgId
         Q "SELECT * FROM SMSPackages WHERE PkgID = @p" 'SMSPackages' $keep $PkgId
         Q "SELECT * FROM PkgNotification WHERE ID = @p" 'PkgNotification' $keep $PkgId
