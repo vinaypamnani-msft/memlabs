@@ -86,11 +86,48 @@ Write-Host ""
 $sqlSnapBlock = {
     param($siteCode)
     $out = New-Object System.Collections.Generic.List[string]
+    # 'localhost' silently means default-instance-on-1433. CS2-PS2SQL is MSSQL instance 'BOB'
+    # on port 41223, so every query failed with "Named Pipes ... error 40" and the snapshot
+    # came back empty -- which reads exactly like a site with nothing to report.
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $psMeta = @('PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider')
+    try {
+        $names = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction Stop
+        foreach ($p in $names.PSObject.Properties) {
+            if ($psMeta -contains $p.Name) { continue }
+            $instId = "$($p.Value)"; $port = $null
+            foreach ($sub in @('IPAll')) {
+                $tcp = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instId\MSSQLServer\SuperSocketNetLib\Tcp\$sub"
+                try { $t = Get-ItemProperty -Path $tcp -ErrorAction Stop
+                    if ($t.TcpPort) { $port = "$($t.TcpPort)".Split(',')[0] }
+                    elseif ($t.TcpDynamicPorts) { $port = "$($t.TcpDynamicPorts)".Split(',')[0] } }
+                catch { }
+            }
+            $base = if ($p.Name -ieq 'MSSQLSERVER') { 'localhost' } else { "localhost\$($p.Name)" }
+            if ($port) { $candidates.Add("$base,$port") }
+            $candidates.Add($base)
+        }
+    }
+    catch { }
+    $candidates.Add('localhost')
+    $server = $null
+    $db = $null
+    foreach ($c in $candidates) {
+        try {
+            $cs = "Server=$c;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+            $cn = New-Object System.Data.SqlClient.SqlConnection $cs; $cn.Open()
+            $cmd = $cn.CreateCommand(); $cmd.CommandText = "SELECT TOP 1 name FROM sys.databases WHERE name = 'CM_$siteCode' OR name LIKE 'CM[_]%' ORDER BY CASE WHEN name='CM_$siteCode' THEN 0 ELSE 1 END, name"
+            $found = $cmd.ExecuteScalar(); $cn.Close()
+            if ($found) { $server = $c; $db = $found; break }
+        }
+        catch { }
+    }
+    if (-not $db) { $out.Add("Could not resolve CM database. Tried: $($candidates -join ' | ')"); return $out }
     function Q {
-        param($db, $q, $title)
+        param($q, $title)
         $out.Add("---- $title ----")
         try {
-            $cs = "Server=localhost;Initial Catalog=$db;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+            $cs = "Server=$server;Initial Catalog=$db;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
             $cn = New-Object System.Data.SqlClient.SqlConnection $cs
             $cn.Open()
             $cmd = $cn.CreateCommand(); $cmd.CommandText = $q; $cmd.CommandTimeout = 60
@@ -104,20 +141,14 @@ $sqlSnapBlock = {
         }
         catch { $out.Add('  ERROR: ' + $_.Exception.Message) }
     }
-    $db = $null
-    try {
-        $cs = "Server=localhost;Initial Catalog=master;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
-        $cn = New-Object System.Data.SqlClient.SqlConnection $cs; $cn.Open()
-        $cmd = $cn.CreateCommand(); $cmd.CommandText = "SELECT TOP 1 name FROM sys.databases WHERE name = 'CM_$siteCode' OR name LIKE 'CM[_]%' ORDER BY CASE WHEN name='CM_$siteCode' THEN 0 ELSE 1 END, name"
-        $db = $cmd.ExecuteScalar(); $cn.Close()
-    }
-    catch { $out.Add("Could not resolve CM database: $($_.Exception.Message)") }
-    if (-not $db) { return $out }
-    $out.Add("CM database: $db")
-    Q $db "SELECT SiteCode, SiteStatus FROM ServerData ORDER BY SiteCode" "ServerData (SiteStatus per site)"
-    Q $db "SELECT ReplicationGroup, ReplicationPattern FROM ReplicationData ORDER BY ReplicationPattern, ReplicationGroup" "ReplicationData (groups)"
-    Q $db "SELECT TOP 60 rd.ReplicationGroup, rd.ReplicationPattern, s.SiteCode, s.Active, s.LastSendResult, s.LastVersionSent, s.LastSendStartTime, s.LastSendEndTime FROM DRS_MessageActivity_Send s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID ORDER BY s.LastSendStartTime DESC" "DRS_MessageActivity_Send (per-group send status; LastSendResult<0 = error)"
-    Q $db "SELECT rd.ReplicationGroup, rd.ReplicationPattern, s.SiteCode, s.Active, s.LastSendResult FROM DRS_MessageActivity_Send s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID WHERE s.LastSendResult < 0 ORDER BY rd.ReplicationGroup" "Send groups with an ERROR result (LastSendResult<0)"
+    $out.Add("CM database: $db  (server $server)")
+    Q "SELECT SiteCode, SiteStatus FROM ServerData ORDER BY SiteCode" "ServerData (SiteStatus per site)"
+    Q "SELECT ReplicationGroup, ReplicationPattern FROM ReplicationData ORDER BY ReplicationPattern, ReplicationGroup" "ReplicationData (groups)"
+    Q "SELECT TOP 60 rd.ReplicationGroup, rd.ReplicationPattern, s.SiteCode, s.Active, s.LastSendResult, s.LastVersionSent, s.LastSendStartTime, s.LastSendEndTime FROM DRS_MessageActivity_Send s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID ORDER BY s.LastSendStartTime DESC" "DRS_MessageActivity_Send (per-group send status; LastSendResult<0 = error)"
+    Q "SELECT rd.ReplicationGroup, rd.ReplicationPattern, s.SiteCode, s.Active, s.LastSendResult FROM DRS_MessageActivity_Send s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID WHERE s.LastSendResult < 0 ORDER BY rd.ReplicationGroup" "Send groups with an ERROR result (LastSendResult<0)"
+    # Per-group link status both directions. spGetLinkOverAllStatus takes MAX(Status) across
+    # groups, so one lagging group is what turns the whole link Degraded (7816) / Failed (7822).
+    Q "SELECT rd.ReplicationGroup, rd.ReplicationPattern, s.SiteSending, s.SiteReceiving, s.Status FROM RCM_ReplicationLinkStatus s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID ORDER BY s.Status DESC, s.SiteSending, rd.ReplicationGroup" "RCM_ReplicationLinkStatus (per-group, both directions)"
     return $out
 }
 
