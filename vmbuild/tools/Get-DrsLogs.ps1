@@ -12,16 +12,46 @@
 .PARAMETER PrimaryName   Limit collection to a specific child-primary VM. Omit to collect from ALL child primaries under the CAS.
 .PARAMETER TailLines     Tail size for the on-screen preview of rcmctrl.log (default 30; 0 = no preview).
 
+.PARAMETER WatchSendChain
+    Instead of a one-shot collection, poll every table the CAS send decision actually reads -- on the CAS
+    AND every child primary -- until the content lands, and log only what CHANGED. This exists because the
+    child-primary client-package coverage wait costs 579-2622s (mean 1718s) and distmgr logs NOTHING when it
+    decides not to send. Start it as Phase 8 begins on the child; run the plain collection afterwards.
+
+    Decision chain, source-verified in distmgr.cpp -- this is what the poll is aimed at:
+      ~14640 outer gate     : pkg.SourceSite == thisSite && Action != DELETE && StoreFlag != NO_SRC
+      ~27862 bServerChange  : FALSE iff PkgSrvAction == NONE, or (UPDATE && UpdateMask == 0)
+      ~27908 bResendPkg     : TRUE iff pkgUpdateMask & PKG_UPDATE_SOURCE, or
+                              (& PKG_UPDATE_LASTREFRESH && StoreFlag == PKG_STORAGE_DIRECT)
+      ~14663 send iff       : bResendPkg || IsPkgSendingNeeded(...)
+      ~23172 IsPkgSendingNeeded reads PkgStatus_G(Type=PKG_TYPE_MAIN, SiteCode): no row -> send;
+             version match && INSTALLED/RECEIVED -> no; SENT within 1 day -> no; else send.
+    The declining path falls out of the else-if and IsPkgSendingNeeded has no logging at all, so the
+    database is the only witness. Do NOT read absence of a distmgr line as absence of a decision.
+
+    Queries are SELECT * with the COLUMN NAMES filtered at runtime, so no column name is ever guessed.
+    Read-only throughout.
+
+.PARAMETER PackageId    Package to follow under -WatchSendChain. Auto-resolved to the Configuration Manager Client Package if omitted.
+.PARAMETER IntervalSeconds  Poll interval for -WatchSendChain (default 20).
+.PARAMETER MaxMinutes   Give up after this long under -WatchSendChain (default 75; historical worst case is 2622s).
+
 .EXAMPLE
     cd C:\memlabs\vmbuild\tools ; .\Get-DrsLogs.ps1
 .EXAMPLE
     .\Get-DrsLogs.ps1 -Domain cstest8.com
+.EXAMPLE
+    .\Get-DrsLogs.ps1 -WatchSendChain
 #>
 [CmdletBinding()]
 param(
     [string]$Domain,
     [string]$PrimaryName,
-    [int]$TailLines = 30
+    [int]$TailLines = 30,
+    [switch]$WatchSendChain,
+    [string]$PackageId,
+    [int]$IntervalSeconds = 20,
+    [int]$MaxMinutes = 75
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,8 +113,11 @@ if ($siteSystems.Count) { Write-Host "SiteSys : $($siteSystems.vmName -join ', '
 Write-Host ""
 
 # ---- in-guest replication-state snapshot (runs on the SQL VM) ----
+# With -PkgId this switches to send-chain mode and returns the package's rows instead of the site
+# replication state. Same block on purpose: the instance/port discovery below is the part that was
+# hard to get right, and a second copy of it would drift.
 $sqlSnapBlock = {
-    param($siteCode)
+    param($siteCode, $PkgId)
     $out = New-Object System.Collections.Generic.List[string]
     # 'localhost' silently means default-instance-on-1433. CS2-PS2SQL is MSSQL instance 'BOB'
     # on port 41223, so every query failed with "Named Pipes ... error 40" and the snapshot
@@ -124,22 +157,42 @@ $sqlSnapBlock = {
     }
     if (-not $db) { $out.Add("Could not resolve CM database. Tried: $($candidates -join ' | ')"); return $out }
     function Q {
-        param($q, $title)
-        $out.Add("---- $title ----")
+        param($q, $title, $keep, $p)
+        $rows = 0
+        if (-not $keep) { $out.Add("---- $title ----") }
         try {
             $cs = "Server=$server;Initial Catalog=$db;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
             $cn = New-Object System.Data.SqlClient.SqlConnection $cs
             $cn.Open()
             $cmd = $cn.CreateCommand(); $cmd.CommandText = $q; $cmd.CommandTimeout = 60
+            if ($p) { [void]$cmd.Parameters.AddWithValue('@p', $p) }
             $r = $cmd.ExecuteReader()
             while ($r.Read()) {
+                $rows++
                 $line = @()
-                for ($i = 0; $i -lt $r.FieldCount; $i++) { $line += ("{0}={1}" -f $r.GetName($i), $r.GetValue($i)) }
-                $out.Add('  ' + ($line -join '  '))
+                for ($i = 0; $i -lt $r.FieldCount; $i++) {
+                    $nm = $r.GetName($i)
+                    if ($keep -and $nm -notmatch $keep) { continue }
+                    $v = $r.GetValue($i)
+                    if ($keep -and $v -is [DBNull]) { continue }
+                    $line += ("{0}={1}" -f $nm, $v)
+                }
+                if ($keep) { $out.Add("$title[$rows] " + ($line -join ' ')) } else { $out.Add('  ' + ($line -join '  ')) }
             }
             $r.Close(); $cn.Close()
+            # Absence is evidence here -- no row in PkgStatus_G is what makes IsPkgSendingNeeded return TRUE.
+            if ($keep -and $rows -eq 0) { $out.Add("$title NO ROWS") }
         }
-        catch { $out.Add('  ERROR: ' + $_.Exception.Message) }
+        catch { if ($keep) { $out.Add("$title ERROR: " + $_.Exception.Message) } else { $out.Add('  ERROR: ' + $_.Exception.Message) } }
+    }
+    if ($PkgId) {
+        $keep = 'Action|Mask|Version|SiteCode|SourceSite|Flags|Status|Refresh|Type|PkgID|^ID$|Priority|Time|Date'
+        Q "SELECT * FROM PkgStatus_G WHERE ID = @p" 'PkgStatus_G' $keep $PkgId
+        Q "SELECT * FROM PkgServers_G WHERE PkgID = @p" 'PkgServers_G' $keep $PkgId
+        Q "SELECT * FROM PkgServers_L WHERE PkgID = @p" 'PkgServers_L' $keep $PkgId
+        Q "SELECT * FROM SMSPackages WHERE PkgID = @p" 'SMSPackages' $keep $PkgId
+        Q "SELECT * FROM PkgNotification WHERE ID = @p" 'PkgNotification' $keep $PkgId
+        return $out
     }
     $out.Add("CM database: $db  (server $server)")
     Q "SELECT SiteCode, SiteStatus FROM ServerData ORDER BY SiteCode" "ServerData (SiteStatus per site)"
@@ -162,6 +215,148 @@ $logCollectBlock = {
     # ConfigMgrSetup.log lives at the system drive root
     foreach ($c in @('C:\ConfigMgrSetup.log', 'D:\ConfigMgrSetup.log', 'E:\ConfigMgrSetup.log')) { if (Test-Path $c) { $found += $c } }
     return [pscustomobject]@{ LogDir = $dir; Files = $found }
+}
+
+# ---- send-chain watch (-WatchSendChain) ----
+# distmgr writes PkgStatus SENT at ~14900 and consumes it at ~23219; sender moves the .PCK; despool on the
+# child receives it. Watch all three logs plus the file itself, because the DECLINE path logs nothing.
+$pkgLogBlock = {
+    param($PkgId)
+    $o = New-Object System.Collections.Generic.List[string]
+    $d = $null
+    foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+        try { $d = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
+        if ($d) { break }
+    }
+    if (-not $d) { return @('LOG ERROR: no install dir') }
+    foreach ($n in @('distmgr.log', 'sender.log', 'despool.log')) {
+        $f = Join-Path $d "Logs\$n"
+        if (-not (Test-Path $f)) { continue }
+        foreach ($x in @(Get-Content -LiteralPath $f -Tail 400 -ErrorAction SilentlyContinue | Where-Object { $_ -match [regex]::Escape($PkgId) })) {
+            $o.Add("LOG $n :: " + (($x -replace '\s+', ' ').Trim()))
+        }
+    }
+    foreach ($base in @($d, 'E:\SMSPKG', 'C:\SMSPKG', (Join-Path $d 'inboxes\despoolr.box\receive'))) {
+        if (-not $base -or -not (Test-Path $base)) { continue }
+        foreach ($g in @(Get-ChildItem -LiteralPath $base -Filter "$PkgId*" -File -ErrorAction SilentlyContinue)) {
+            $o.Add("PCK $($g.FullName) $([int]($g.Length / 1MB))MB $($g.LastWriteTime.ToString('HH:mm:ss'))")
+        }
+    }
+    return $o.ToArray()
+}
+
+# StoredPkgVersion lives in SMSPackages_L (local, never replicated) and flips LAST, so it is a good
+# arrival oracle. It explains nothing about the delay -- do not reason backwards from it.
+$pkgWmiBlock = {
+    param($PkgId, $SiteCode)
+    try {
+        $k = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Package -Filter "PackageID='$PkgId'" -ErrorAction Stop | Select-Object -First 1
+        if ($k) { return @("WMI StoredPkgVersion=$($k.StoredPkgVersion) SourceVersion=$($k.SourceVersion)") }
+        return @('WMI no row')
+    }
+    catch { return @("WMI ERROR: $($_.Exception.Message)") }
+}
+
+$pkgFindBlock = {
+    param($SiteCode)
+    try {
+        $p = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Package -ErrorAction Stop | Where-Object { $_.Name -eq 'Configuration Manager Client Package' })
+        return @($p | ForEach-Object { "$($_.PackageID) $($_.Name)" })
+    }
+    catch { return @("ERROR: $($_.Exception.Message)") }
+}
+
+function Get-GuestOutput {
+    param($VmName, $DomainName, [scriptblock]$Block, [object[]]$ArgList, $Tag)
+    # -AsJob is required for -TimeoutSeconds to mean anything; without it a wedged guest hangs the watch.
+    try { $r = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -ScriptBlock $Block -ArgumentList $ArgList -SuppressLog -AsJob -TimeoutSeconds 110 -DisplayName $Tag }
+    catch { return @("ERROR: $Tag threw $($_.Exception.Message)") }
+    if (-not $r -or $r.ScriptBlockFailed -or $null -eq $r.ScriptBlockOutput) {
+        return @("ERROR: $Tag no output (failed=$($r.ScriptBlockFailed) timedOut=$($r.TimedOut))")
+    }
+    return @($r.ScriptBlockOutput)
+}
+
+if ($WatchSendChain) {
+    $watchLog = Join-Path $logsRoot ("send-chain-watch-{0}.log" -f $stamp)
+    $say = {
+        param($t)
+        $l = '{0}  {1}' -f (Get-Date -Format 'HH:mm:ss'), $t
+        Write-Host $l -ForegroundColor Gray
+        try { Add-Content -LiteralPath $watchLog -Value $l -Encoding utf8 -ErrorAction Stop } catch { }
+    }
+
+    if (-not $PackageId) {
+        $cand = @(Get-GuestOutput -VmName $cas.vmName -DomainName $dom -Block $pkgFindBlock -ArgList @($cas.siteCode) -Tag 'find-clientpkg')
+        $ids = @($cand | Where-Object { $_ -match '^[A-Z0-9]{8} ' })
+        if ($ids.Count -ne 1) {
+            Write-Host "FATAL: could not resolve the client package on $($cas.vmName) (site $($cas.siteCode))." -ForegroundColor Red
+            $cand | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+            Write-Host "Re-run with -PackageId <id>." -ForegroundColor Red
+            return
+        }
+        $PackageId = $ids[0].Split(' ')[0]
+    }
+
+    $watchSites = @()
+    $watchSites += [pscustomobject]@{ Tag = 'CAS '; Vm = $cas; SqlVm = (Resolve-SqlVm -SiteVm $cas -AllVms $allVms); SiteCode = $cas.siteCode; IsChild = $false }
+    foreach ($p in $priList) {
+        $watchSites += [pscustomobject]@{ Tag = $p.siteCode.PadRight(4); Vm = $p; SqlVm = (Resolve-SqlVm -SiteVm $p -AllVms $allVms); SiteCode = $p.siteCode; IsChild = $true }
+    }
+
+    & $say "log -> $watchLog"
+    & $say "send-chain watch: pkg=$PackageId every=${IntervalSeconds}s max=${MaxMinutes}m"
+    foreach ($w in $watchSites) { & $say "  $($w.Tag) site=$($w.SiteCode) server=$($w.Vm.vmName) sql=$($w.SqlVm.vmName)" }
+
+    $seenLog = New-Object 'System.Collections.Generic.HashSet[string]'
+    $pending = New-Object System.Collections.Generic.List[string]
+    foreach ($w in $watchSites) { if ($w.IsChild) { $pending.Add($w.SiteCode) } }
+    $prev = ''
+    $t0 = Get-Date
+    $deadline = $t0.AddMinutes($MaxMinutes)
+
+    while ((Get-Date) -lt $deadline -and $pending.Count -gt 0) {
+        $lines = @()
+        foreach ($w in $watchSites) {
+            foreach ($l in (Get-GuestOutput -VmName $w.SqlVm.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($w.SiteCode, $PackageId) -Tag "tables-$($w.SiteCode)")) {
+                $lines += "$($w.Tag) $l"
+            }
+        }
+        $arrived = @()
+        foreach ($w in $watchSites) {
+            if (-not $w.IsChild) { continue }
+            foreach ($l in (Get-GuestOutput -VmName $w.Vm.vmName -DomainName $dom -Block $pkgWmiBlock -ArgList @($PackageId, $w.SiteCode) -Tag "wmi-$($w.SiteCode)")) {
+                $lines += "$($w.Tag) $l"
+                if ($l -match 'StoredPkgVersion=[1-9]') { $arrived += $w.SiteCode }
+            }
+        }
+
+        # Change-only logging: a signature that includes anything time-varying (a poll counter, a
+        # timestamp) defeats the whole point and prints every cycle.
+        $sig = ($lines -join '|')
+        if ($sig -ne $prev) {
+            & $say "CHANGE (+$([int]((Get-Date) - $t0).TotalSeconds)s)"
+            foreach ($l in $lines) { & $say "    $l" }
+            $prev = $sig
+        }
+
+        foreach ($w in $watchSites) {
+            foreach ($l in (Get-GuestOutput -VmName $w.Vm.vmName -DomainName $dom -Block $pkgLogBlock -ArgList @($PackageId) -Tag "logs-$($w.SiteCode)")) {
+                if ($seenLog.Add("$($w.Tag)$l")) { & $say "    $($w.Tag) $l" }
+            }
+        }
+
+        foreach ($s in $arrived) {
+            if ($pending.Remove($s)) { & $say "*** $s CONTENT ARRIVED after $([int]((Get-Date) - $t0).TotalSeconds)s ***" }
+        }
+        if ($pending.Count -gt 0) { Start-Sleep -Seconds $IntervalSeconds }
+    }
+
+    if ($pending.Count -gt 0) {
+        & $say "NOT CAPTURED: no arrival at $($pending -join ', ') within $MaxMinutes min -- this file does not explain the transition."
+    }
+    Write-Host "Watch log: $watchLog" -ForegroundColor Green
+    return
 }
 
 foreach ($vm in $logTargets) {
