@@ -403,6 +403,32 @@ if ($FlushExperiment) {
     & $esay "log -> $expLog"
     & $esay "FLUSH EXPERIMENT  pkg=$PackageId  child=$($child.vmName)/$($child.siteCode) (sql $($childSql.vmName))  cas=$($cas.vmName)/$($cas.siteCode) (sql $($casSql.vmName))"
     & $esay "pre-registered: baseline ${BaselineSeconds}s with NO intervention, then flush 'Configuration Data' on the CHILD, then watch ${PostSeconds}s."
+    $armStartExp = Get-Date
+
+    # The window this experiment needs -- child has its row, CAS does not -- opens and closes on its
+    # own. Run by hand and you will almost always arrive after it shut, so -ArmWaitMinutes waits for it.
+    if ($ArmWaitMinutes -gt 0) {
+        $expArmDeadline = (Get-Date).AddMinutes($ArmWaitMinutes)
+        $armCycles = 0
+        while ((Get-Date) -lt $expArmDeadline) {
+            $childRows = @(Get-GuestOutput -VmName $childSql.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($child.siteCode, $PackageId) -Tag 'child-rows')
+            $childSpoke = @($childRows | Where-Object { $_ -match '^PkgServers_G' })
+            $childHas = @($childSpoke | Where-Object { $_ -match '^PkgServers_G\[' -and $_ -match "SiteCode=$($child.siteCode)(\s|$)" }).Count -gt 0
+            $casState = Test-CasHasChildRow
+            if ($childSpoke.Count -eq 0 -or -not $casState.Readable) {
+                & $esay "arming: could not read PkgServers_G (child readable=$($childSpoke.Count -gt 0), CAS readable=$($casState.Readable)); retrying"
+            }
+            elseif ($childHas -and $casState.Present) {
+                & $esay "WINDOW MISSED: the child's row is already at the CAS, so the pending state this experiment needs is over. Start it earlier next run. NOT A RESULT."
+                return
+            }
+            elseif ($childHas) { & $esay "armed: child has its row and the CAS does not."; break }
+            $armCycles++
+            if ($armCycles % 10 -eq 0) { & $esay "  arming +$([int]((Get-Date) - $armStartExp).TotalMinutes)m: child has not written its PkgServers_G row yet" }
+            Start-Sleep -Seconds 30
+        }
+        if ((Get-Date) -ge $expArmDeadline) { & $esay "NOT ARMED within ${ArmWaitMinutes}m. NOT A RESULT."; return }
+    }
 
     $childRows = @(Get-GuestOutput -VmName $childSql.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($child.siteCode, $PackageId) -Tag 'child-rows')
     $childSpoke = @($childRows | Where-Object { $_ -match '^PkgServers_G' })
