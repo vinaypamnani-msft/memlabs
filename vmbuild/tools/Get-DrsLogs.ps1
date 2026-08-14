@@ -390,10 +390,12 @@ if ($FlushExperiment) {
     }
 
     # Reads the CAS's own PkgServers_G and answers one question: is the child's row there yet.
+    # Returns every line, because "the query failed" and "there is no row" must not look alike.
     function Test-CasHasChildRow {
         $lines = @(Get-GuestOutput -VmName $casSql.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($cas.siteCode, $PackageId) -Tag 'cas-rows')
-        $hit = @($lines | Where-Object { $_ -match '^PkgServers_G\[' -and $_ -match "SiteCode=$($child.siteCode)(\s|$)" })
-        return [pscustomobject]@{ Present = ($hit.Count -gt 0); Rows = @($lines | Where-Object { $_ -match '^PkgServers_G' }) }
+        $spoke = @($lines | Where-Object { $_ -match '^PkgServers_G' })
+        $hit = @($spoke | Where-Object { $_ -match '^PkgServers_G\[' -and $_ -match "SiteCode=$($child.siteCode)(\s|$)" })
+        return [pscustomobject]@{ Readable = ($spoke.Count -gt 0); Present = ($hit.Count -gt 0); Lines = $lines }
     }
 
     & $esay "log -> $expLog"
@@ -401,12 +403,17 @@ if ($FlushExperiment) {
     & $esay "pre-registered: baseline ${BaselineSeconds}s with NO intervention, then flush 'Configuration Data' on the CHILD, then watch ${PostSeconds}s."
 
     $childRows = @(Get-GuestOutput -VmName $childSql.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($child.siteCode, $PackageId) -Tag 'child-rows')
-    $childHas = @($childRows | Where-Object { $_ -match '^PkgServers_G\[' -and $_ -match "SiteCode=$($child.siteCode)(\s|$)" }).Count -gt 0
+    $childSpoke = @($childRows | Where-Object { $_ -match '^PkgServers_G' })
+    $childHas = @($childSpoke | Where-Object { $_ -match '^PkgServers_G\[' -and $_ -match "SiteCode=$($child.siteCode)(\s|$)" }).Count -gt 0
     $casState = Test-CasHasChildRow
-    & $esay "precondition: child has own row = $childHas ; CAS has child row = $($casState.Present)"
-    foreach ($r in @($childRows | Where-Object { $_ -match '^PkgServers_G' })) { & $esay "    CHILD $r" }
-    foreach ($r in $casState.Rows) { & $esay "    CAS   $r" }
-    if (-not $childHas) { & $esay "ABORT: the child has not written its own PkgServers_G row yet. Nothing to flush. NOT A RESULT."; return }
+    foreach ($r in $childRows) { & $esay "    CHILD $r" }
+    foreach ($r in $casState.Lines) { & $esay "    CAS   $r" }
+    & $esay "precondition: child readable=$($childSpoke.Count -gt 0) hasOwnRow=$childHas ; CAS readable=$($casState.Readable) hasChildRow=$($casState.Present)"
+    if ($childSpoke.Count -eq 0 -or -not $casState.Readable) {
+        & $esay "ABORT: could not READ PkgServers_G on $(if ($childSpoke.Count -eq 0) { $childSql.vmName } else { $casSql.vmName }). That is an instrument failure, NOT evidence about the row. See the lines above."
+        return
+    }
+    if (-not $childHas) { & $esay "ABORT: the child's database is readable and genuinely has no PkgServers_G row of its own yet. Nothing to flush. NOT A RESULT."; return }
     if ($casState.Present) { & $esay "ABORT: the CAS already has the child's row, so there is no pending replication to accelerate. NOT A RESULT."; return }
 
     $tBase = Get-Date
@@ -438,7 +445,7 @@ if ($FlushExperiment) {
     }
     $dFlush = [int]($tArrive - $tFlush).TotalSeconds
     & $esay "RESULT: row visible at the CAS ${dFlush}s after the flush (baseline had ${BaselineSeconds}s with nothing)."
-    foreach ($r in (Test-CasHasChildRow).Rows) { & $esay "    CAS   $r" }
+    foreach ($r in (Test-CasHasChildRow).Lines) { & $esay "    CAS   $r" }
 
     $seen = New-Object 'System.Collections.Generic.HashSet[string]'
     $tSendDeadline = $tArrive.AddSeconds(600)
