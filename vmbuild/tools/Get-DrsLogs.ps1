@@ -308,21 +308,39 @@ if ($WatchSendChain) {
     }
 
     if ($ArmWaitMinutes -gt 0) {
-        $armDeadline = (Get-Date).AddMinutes($ArmWaitMinutes)
+        $armStart = Get-Date
+        $armDeadline = $armStart.AddMinutes($ArmWaitMinutes)
         $needArm = @($cas) + $priList
         $armed = @{}
+        $answered = @{}
+        $armCycle = 0
         & $say "arming: waiting up to ${ArmWaitMinutes}m for ConfigMgr on $($needArm.vmName -join ', ')"
         while ($armed.Count -lt $needArm.Count -and (Get-Date) -lt $armDeadline) {
+            $armCycle++
             foreach ($v in $needArm) {
                 if ($armed.ContainsKey($v.vmName)) { continue }
                 $r = @(Get-GuestOutput -VmName $v.vmName -DomainName $dom -Block $cmReadyBlock -ArgList @($v.siteCode) -Tag "arm-$($v.siteCode)")
-                if ($r -contains 'CMREADY') { $armed[$v.vmName] = $true; & $say "  armed: $($v.vmName) (site $($v.siteCode))" }
+                if ($r -contains 'CMREADY') { $armed[$v.vmName] = $true; & $say "  armed: $($v.vmName) (site $($v.siteCode))"; continue }
+                if ($r -match '^CMWAIT') { $answered[$v.vmName] = $true }
+            }
+            # Silence while arming is indistinguishable from progress, and a VM that is in the domain
+            # but not in this build never answers at all -- so say which is which, out loud.
+            if ($armed.Count -lt $needArm.Count -and $armCycle % 5 -eq 0) {
+                $outstanding = @()
+                foreach ($v in $needArm) {
+                    if ($armed.ContainsKey($v.vmName)) { continue }
+                    $outstanding += if ($answered.ContainsKey($v.vmName)) { "$($v.vmName)=building" } else { "$($v.vmName)=NEVER-ANSWERED" }
+                }
+                & $say "  arming +$([int]((Get-Date) - $armStart).TotalMinutes)m: $($outstanding -join '  ')"
+                if ($outstanding -match 'NEVER-ANSWERED') {
+                    & $say "  ^ that VM is probably not part of this build. Restart with -PrimaryName <vm> to scope the watch, or it will block arming for the full ${ArmWaitMinutes}m."
+                }
             }
             if ($armed.Count -lt $needArm.Count) { Start-Sleep -Seconds 60 }
         }
         if ($armed.Count -lt $needArm.Count) {
             $missing = @($needArm | Where-Object { -not $armed.ContainsKey($_.vmName) } | Select-Object -ExpandProperty vmName)
-            & $say "NOT ARMED within ${ArmWaitMinutes}m: $($missing -join ', ') never answered. Nothing was watched."
+            & $say "NOT ARMED within ${ArmWaitMinutes}m: $($missing -join ', ') never reached ConfigMgr. Nothing was watched."
             return
         }
     }
@@ -353,6 +371,8 @@ if ($WatchSendChain) {
     $pending = New-Object System.Collections.Generic.List[string]
     foreach ($w in $watchSites) { if ($w.IsChild) { $pending.Add($w.SiteCode) } }
     $prev = ''
+    $firstPoll = $true
+    $measured = 0
     $t0 = Get-Date
     $deadline = $t0.AddMinutes($MaxMinutes)
 
@@ -387,14 +407,26 @@ if ($WatchSendChain) {
             }
         }
 
+        # A package that was already there when the watch started is not an arrival. Reporting it as
+        # one turns "this run measured nothing" into something that reads like a successful capture.
         foreach ($s in $arrived) {
-            if ($pending.Remove($s)) { & $say "*** $s CONTENT ARRIVED after $([int]((Get-Date) - $t0).TotalSeconds)s ***" }
+            if (-not $pending.Contains($s)) { continue }
+            [void]$pending.Remove($s)
+            if ($firstPoll) { & $say "$s ALREADY had the package when the watch started -- nothing to measure there." }
+            else {
+                $measured++
+                & $say "*** $s CONTENT ARRIVED after $([int]((Get-Date) - $t0).TotalSeconds)s ***"
+            }
         }
+        $firstPoll = $false
         if ($pending.Count -gt 0) { Start-Sleep -Seconds $IntervalSeconds }
     }
 
     if ($pending.Count -gt 0) {
         & $say "NOT CAPTURED: no arrival at $($pending -join ', ') within $MaxMinutes min -- this file does not explain the transition."
+    }
+    elseif ($measured -eq 0) {
+        & $say "NOTHING MEASURED: every child already had the package before the watch started. Needs a primary that has not run Phase 8."
     }
     Write-Host "Watch log: $watchLog" -ForegroundColor Green
     return
