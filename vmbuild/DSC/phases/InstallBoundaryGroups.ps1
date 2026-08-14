@@ -1043,8 +1043,7 @@ if ($false) {
             continue
         }
 
-        $testClient = Test-NetConnection -ComputerName $client -CommonTCPPort SMB -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-        if (-not $testClient.TcpTestSucceeded) {
+        if (-not (Test-TcpPortFast -ComputerName $client -Port 445)) {
             # Don't wait for client to appear in collection if it's not online
             Write-DscStatus "Could not test SMB connection to $client. Skipping."
             continue

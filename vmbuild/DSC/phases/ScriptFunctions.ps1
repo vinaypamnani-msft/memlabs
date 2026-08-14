@@ -2,6 +2,41 @@
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
 $global:StatusLog = "C:\staging\DSC\InstallCMLog.log"
 
+
+function Test-TcpPortFast {
+    # Hard-timeout TCP probe using TcpClient + WaitHandle. Never use Test-NetConnection:
+    # it can hang well past its own timeouts on DNS reverse lookups and ICMP fallbacks,
+    # and in-guest that stalls a DSC phase with no way to bound it.
+    # In-guest twin of Test-TcpPort in Common.HyperV.ps1, which the guest cannot reach.
+    param(
+        [Parameter(Mandatory)] [string]$ComputerName,
+        [Parameter(Mandatory)] [int]$Port,
+        [int]$TimeoutMs = 3000,
+        [int]$Retries = 3,
+        [int]$RetryDelayMs = 1000
+    )
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        $client = $null
+        try {
+            $client = New-Object System.Net.Sockets.TcpClient
+            $iar = $client.BeginConnect($ComputerName, $Port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+                try {
+                    $client.EndConnect($iar)
+                    if ($client.Connected) { return $true }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        finally {
+            if ($client) { try { $client.Close() } catch { } }
+        }
+        if ($attempt -lt $Retries) { Start-Sleep -Milliseconds $RetryDelayMs }
+    }
+    return $false
+}
+
 function Write-StatusLogEntry {
     # Pipeline-friendly writer that emits CMTrace-format entries to $global:StatusLog.
     # Drop-in replacement for `Write-StatusLogEntry` so the log can
