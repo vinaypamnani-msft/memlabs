@@ -150,15 +150,46 @@ $ensureClientPkgCoverage = {
     # when there is NO targeting row do we create one with Start-CMContentDistribution.
     # Deciding on the targeting table (not the lagging summarizer) also avoids the
     # "already distributed" throw when the summarizer row hasn't appeared yet.
+    # Every re-arm below rewrites PkgServers_G on THIS site, but the parent only sends once
+    # that row reaches its database -- measured at ~37 min of ordinary replication on
+    # CSTest2-B, which was the whole client-package wait. InstallDPMPClient's pre-stage
+    # already flushes the group for exactly this reason, but it returns early whenever the
+    # distribution is refused ("No content destination was found"), so on that path nothing
+    # ever flushed. Push it here too, where the targeting is actually being written.
+    $flushTargetingToParent = {
+        if (-not $ThisVM -or $ThisVM.role -ne 'Primary' -or (-not $ThisVM.parentSiteCode -and -not $ThisVM.thisParams.ParentSiteServer)) { return $false }
+        $connection = $null
+        try {
+            $dataSource = Get-VmSqlConnectionTarget -SiteVm $ThisVM -DeployConfig $deployConfig -DomainFullName $DomainFullName
+            $database = "CM_$SiteCode"
+            $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$dataSource;Initial Catalog=$database;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+            $connection.Open()
+            $command = $connection.CreateCommand()
+            $command.CommandText = 'EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup = @rg'
+            $command.CommandTimeout = 120
+            [void]$command.Parameters.AddWithValue('@rg', 'Configuration Data')
+            [void]$command.ExecuteNonQuery()
+            Write-DscStatus "Client pkg coverage: [drs-flush] pushed Configuration Data (PkgServers_G) to parent site now (SQL=$dataSource/$database)."
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [drs-flush] could not push Configuration Data to the parent -- $($_.Exception.Message). Ordinary DRS replication still applies." -Warning
+            return $false
+        }
+        finally { if ($connection) { $connection.Dispose() } }
+    }
+
     $redistOrDistribute = {
         param($dpFqdn)
         $targeting = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue |
                 Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dpFqdn })
         if ($targeting.Count -gt 0) {
             foreach ($t in $targeting) { $t.RefreshNow = $true; [void]$t.Put() }
+            $null = & $flushTargetingToParent
             return 'redistributed'
         }
         Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dpFqdn -ErrorAction Stop
+        $null = & $flushTargetingToParent
         return 'distributed'
     }
 
