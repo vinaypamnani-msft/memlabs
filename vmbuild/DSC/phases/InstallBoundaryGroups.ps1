@@ -339,7 +339,10 @@ $ensureClientPkgCoverage = {
     $lastParentPoke = $null
     $lastParentFilePoke = $null
     $pokeParentDistmgr = {
-        if (-not $parentFqdn -or -not $parentSite) { return $false }
+        if (-not $parentFqdn -or -not $parentSite) {
+            Write-DscStatus "Client pkg coverage: [wake-ROW] skipped -- parent site unknown (fqdn='$parentFqdn' site='$parentSite')."
+            return $false
+        }
         try {
             $pPkg = @(Get-WmiObject -ComputerName $parentFqdn -Namespace "root\SMS\site_$parentSite" -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction Stop) | Select-Object -First 1
             if (-not $pPkg) {
@@ -370,12 +373,20 @@ $ensureClientPkgCoverage = {
     # SMS_INBOX_DISTMGR_INCOMING = distmgr.box\incoming, a SUBdirectory we must not touch.
     # .MEMLABS matches none of those, so nothing parses or deletes it -- we clean it up here.
     $pokeParentDistmgrFile = {
-        if (-not $parentFqdn -or -not $parentSite) { return $false }
+        if (-not $parentFqdn -or -not $parentSite) {
+            Write-DscStatus "Client pkg coverage: [wake-FILE] skipped -- parent site unknown (fqdn='$parentFqdn' site='$parentSite')."
+            return $false
+        }
         # SMS_<sitecode> is the site server's own install-dir share (the CAS reads package
         # sources over it: '...from source \\<cas>\SMS_CS1\Client').
         $wakeFile = "\\$parentFqdn\SMS_$parentSite\inboxes\distmgr.box\memlabs-wake-$([guid]::NewGuid().ToString('N')).MEMLABS"
         try {
-            Set-Content -LiteralPath $wakeFile -Value 'memlabs distmgr wake' -ErrorAction Stop
+            # .NET, not Set-Content/Remove-Item: this runs under the CMSite PSDrive, where a
+            # path starting with '\' is rooted on the CURRENT drive, so the cmdlets resolve to
+            # the CM provider and throw 'Cannot use interface. The IContentCmdletProvider
+            # interface is not implemented by this provider.' -- which is what happened on
+            # every poke of every run until now.
+            [System.IO.File]::WriteAllText($wakeFile, 'memlabs distmgr wake')
             Write-DscStatus "Client pkg coverage: [wake-FILE] created a distmgr.box change on parent site $parentSite ($parentFqdn) to wake its distmgr for $PackageID."
             return $true
         }
@@ -385,7 +396,7 @@ $ensureClientPkgCoverage = {
         }
         finally {
             # Leaving it would be litter no ConfigMgr component ever collects.
-            try { Remove-Item -LiteralPath $wakeFile -Force -ErrorAction SilentlyContinue } catch { }
+            try { [System.IO.File]::Delete($wakeFile) } catch { }
         }
     }
     for ($try = 1; $try -le $maxTries; $try++) {
