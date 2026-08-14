@@ -403,7 +403,32 @@ $startClientPackagePrestage = {
             Write-DscStatus "Client package pre-stage: $packageId is already targeted to $DistributionPointFqdn."
         }
         else {
-            Start-CMContentDistribution -PackageId $packageId -DistributionPointName $DistributionPointFqdn -ErrorAction Stop
+            # A DP's role registers before its content destination exists. Install-DP used to
+            # sleep a flat 60s after adding the role, which incidentally covered that gap; it
+            # now returns as soon as the role registers (~5s), so this call can arrive first
+            # and fail with "No content destination was found" -- observed on CS2-PS1SITE,
+            # 4s after "DP Role detected ... after 5.2s". Wait on the real precondition
+            # instead, and exit the moment it takes.
+            $distDeadline = (Get-Date).AddMinutes(5)
+            $distErr = $null
+            while ($true) {
+                try {
+                    Start-CMContentDistribution -PackageId $packageId -DistributionPointName $DistributionPointFqdn -ErrorAction Stop
+                    $distErr = $null
+                    break
+                }
+                catch {
+                    $distErr = $_
+                    if ((Get-Date) -ge $distDeadline) { break }
+                    Start-Sleep -Seconds 10
+                }
+            }
+            if ($distErr) {
+                # Not "confirmed broken", just not ready -- same call the coverage gate makes
+                # on every iteration when a DP has no targeting row, so let it own the retry.
+                Write-DscStatus "Client package pre-stage: $DistributionPointFqdn would not accept the $packageId distribution within 5 min ($($distErr.Exception.Message)). Continuing; the client-package coverage gate re-establishes a missing targeting row on every pass and Phase 11 re-checks." -Warning
+                return $true
+            }
             $targeting = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
                     Where-Object {
                         $targetFqdn = if ("$($_.ServerNALPath)" -match '\\([^\\"\]]+)') { $Matches[1] } else { '' }
