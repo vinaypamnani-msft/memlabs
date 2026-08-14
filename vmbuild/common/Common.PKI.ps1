@@ -1174,6 +1174,16 @@ LoadDefaultTemplates=0
     $refreshedSessionForCA = $false
     $rebootedForCA = $false
     $result = $null
+    # Proactively drop any cached PSDirect session BEFORE attempt 1, the same way the
+    # two-tier Step 2 path does. Without it the first attempt rides whatever session the
+    # promotion left behind and can only fail its way to the eviction below: measured on
+    # PSTest6-A, attempt 1 ground for 235s and returned SettlingToken, then the retry on a
+    # fresh session succeeded in 8s. Re-establishing costs ~1-2s.
+    try {
+        Remove-VmSessionFromCache -VmName $caVMName
+        Write-Log "[SingleTierPKI] Dropped cached PSDirect session before Step 1 so attempt 1 runs on a fresh (EA-carrying) logon token." -LogOnly
+    }
+    catch { Write-Log "[SingleTierPKI] pre-Step1 session eviction note: $($_.Exception.Message)" -LogOnly }
     while ($true) {
         $result = Invoke-VmCommand -VmName $caVMName -VmDomainName $domainName `
             -ScriptBlock $singleTierScript `
