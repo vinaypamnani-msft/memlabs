@@ -3,6 +3,160 @@
 ### Remove Functions ###
 ########################
 
+function Remove-ItemWithRetry {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+        [int] $MaxAttempts = 3,
+        [int] $DelaySeconds = 5,
+        [switch] $WhatIf
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            Remove-Item -Path $Path -Force -Recurse -WhatIf:$WhatIf -ProgressAction SilentlyContinue -ErrorAction Stop | Out-Null
+            return $true
+        }
+        catch {
+            Write-Log "Attempt $attempt/$MaxAttempts`: Failed to remove '$Path': $($_.Exception.Message)" -Warning
+            if ($attempt -lt $MaxAttempts) {
+                Write-Log "Sleeping $DelaySeconds seconds before retry..." -SubActivity
+                Start-Sleep -Seconds $DelaySeconds
+            }
+        }
+    }
+    return $false
+}
+
+function Stop-LockingProcesses {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $FolderPath,
+        [switch] $IdentifyOnly
+    )
+
+    $handleExe = "C:\tools\handle.exe"
+    if (-not (Test-Path $handleExe)) {
+        Write-Log "Downloading handle.exe from Sysinternals..." -SubActivity
+        if (-not (Test-Path "C:\tools")) {
+            New-Item -Path "C:\tools" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+        $originalProgressPreference = $ProgressPreference
+        try {
+            $ProgressPreference = 'SilentlyContinue'
+            Start-BitsTransfer -Source "https://live.sysinternals.com/handle.exe" -Destination $handleExe -ErrorAction Stop
+        }
+        catch {
+            Write-Log "Could not download handle.exe: $($_.Exception.Message)" -Warning
+            return $false
+        }
+        finally {
+            $ProgressPreference = $originalProgressPreference
+        }
+    }
+
+    try {
+        $output = & $handleExe -accepteula -nobanner "$FolderPath" 2>&1 | Out-String
+    }
+    catch {
+        Write-Log "handle.exe failed while inspecting '$FolderPath': $($_.Exception.Message)" -Warning
+        return $false
+    }
+
+    if (-not $output -or $output -match 'No matching handles found') {
+        Write-Log "No locking processes found by handle.exe for '$FolderPath'." -SubActivity
+        return $false
+    }
+
+    $killedAny = $false
+    $ownerCount = 0
+    $pidsKilled = @{}
+    $protectedProcesses = @('System', 'vmcompute.exe', 'vmms.exe', 'vmwp.exe')
+    foreach ($line in $output -split "`r?`n") {
+        if ($line -notmatch '^(?<name>.+?)\s+pid:\s+(?<pid>\d+).*?\s+(?<handle>[0-9A-F]+):\s+(?<path>.+)$') {
+            continue
+        }
+
+        $ownerCount++
+        $procName = $Matches['name']
+        $procPid = [int]$Matches['pid']
+        $heldPath = $Matches['path'].Trim()
+        Write-Log "Lock owner: $procName (PID $procPid) holds '$heldPath'." -Warning
+
+        if ($IdentifyOnly -or $protectedProcesses -contains $procName) {
+            if (-not $IdentifyOnly -and $protectedProcesses -contains $procName) {
+                Write-Log "Not terminating $procName (PID $procPid); Hyper-V/System processes must be released through their owning service or VM." -Warning
+            }
+            continue
+        }
+
+        if (-not $pidsKilled.ContainsKey($procPid)) {
+            $pidsKilled[$procPid] = $true
+            Write-Log "Terminating $procName (PID $procPid) so '$FolderPath' can be removed..." -Warning
+            try {
+                Stop-Process -Id $procPid -Force -ErrorAction Stop
+                $killedAny = $true
+            }
+            catch {
+                Write-Log "Could not terminate $procName (PID $procPid): $($_.Exception.Message)" -Warning
+            }
+        }
+    }
+
+    if ($ownerCount -eq 0) {
+        $rawOutput = ($output -replace '\s+', ' ').Trim()
+        if ($rawOutput.Length -gt 1000) { $rawOutput = $rawOutput.Substring(0, 1000) + '...' }
+        Write-Log "handle.exe returned no parseable lock-owner rows for '$FolderPath'. Raw output: $rawOutput" -Warning
+    }
+    elseif ($killedAny) {
+        Start-Sleep -Seconds 2
+    }
+
+    return $killedAny
+}
+
+function Get-DomainHyperVVM {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $DomainName,
+        [Parameter()]
+        [string] $VmStorageRoot
+    )
+
+    $domainFolder = $null
+    $domainPrefix = $null
+    if ($VmStorageRoot) {
+        $domainFolder = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($VmStorageRoot, $DomainName)).TrimEnd('\')
+        $domainPrefix = $domainFolder + '\'
+    }
+    $liveVms = @(Get-VM -ErrorAction Stop)
+    foreach ($vm in $liveVms) {
+        $belongsToDomain = $false
+        if ($vm.Path) {
+            try {
+                $vmPath = [System.IO.Path]::GetFullPath("$($vm.Path)").TrimEnd('\')
+                $pathSegments = @($vmPath -split '\\')
+                $belongsToDomain = ($pathSegments -contains $DomainName)
+                if (-not $belongsToDomain -and $domainFolder) {
+                    $belongsToDomain = ($vmPath -ieq $domainFolder -or $vmPath.StartsWith($domainPrefix, [System.StringComparison]::OrdinalIgnoreCase))
+                }
+            }
+            catch { }
+        }
+        if (-not $belongsToDomain -and $vm.Notes) {
+            try {
+                $vmNote = $vm.Notes | ConvertFrom-Json -ErrorAction Stop
+                $belongsToDomain = ($vmNote.domain -and "$($vmNote.domain)" -ieq $DomainName)
+            }
+            catch { }
+        }
+        if ($belongsToDomain) { $vm }
+    }
+}
+
 function Remove-VirtualMachine {
     param (
         [Parameter(Mandatory = $true)]
@@ -31,110 +185,6 @@ function Remove-VirtualMachine {
         [Parameter()]
         [switch] $SkipProxyCleanup
     )
-
-    # Helper: retry Remove-Item with configurable attempts and delay
-    function Remove-ItemWithRetry {
-        param (
-            [string] $Path,
-            [int]    $MaxAttempts = 3,
-            [int]    $DelaySeconds = 5,
-            [switch] $WhatIf
-        )
-        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-            try {
-                Remove-Item -Path $Path -Force -Recurse -WhatIf:$WhatIf -ProgressAction SilentlyContinue -ErrorAction Stop | Out-Null
-                return $true
-            }
-            catch {
-                Write-Log "Attempt $attempt/$MaxAttempts`: Failed to remove '$Path': $($_.Exception.Message)" -Warning
-                if ($attempt -lt $MaxAttempts) {
-                    Write-Log "Sleeping $DelaySeconds seconds before retry..." -SubActivity
-                    Start-Sleep -Seconds $DelaySeconds
-                }
-            }
-        }
-        return $false
-    }
-
-    # Helper: find and kill processes holding open handles inside a folder.
-    # Uses Sysinternals handle.exe (auto-downloaded to C:\tools if missing).
-    function Stop-LockingProcesses {
-        param (
-            [string] $FolderPath
-        )
-
-        $handleExe = "C:\tools\handle.exe"
-
-        # Download handle.exe from Sysinternals if not present
-        if (-not (Test-Path $handleExe)) {
-            Write-Log "Downloading handle.exe from Sysinternals..." -SubActivity
-            if (-not (Test-Path "C:\tools")) {
-                New-Item -Path "C:\tools" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-            try {
-                $ProgressPreference = 'SilentlyContinue'
-                Start-BitsTransfer -Source "https://live.sysinternals.com/handle.exe" -Destination $handleExe -ErrorAction Stop
-            }
-            catch {
-                Write-Log "Could not download handle.exe: $($_.Exception.Message)" -Warning
-                return $false
-            }
-            finally {
-                $ProgressPreference = 'Continue'
-            }
-        }
-
-        # Run handle.exe to find processes with open handles in the folder
-        try {
-            $output = & $handleExe -accepteula -nobanner "$FolderPath" 2>&1 | Out-String
-        }
-        catch {
-            Write-Log "handle.exe failed: $($_.Exception.Message)" -Warning
-            return $false
-        }
-
-        if (-not $output -or $output -match 'No matching handles found') {
-            Write-Log "No locking processes found by handle.exe." -SubActivity
-            return $false
-        }
-
-        # Parse output lines: "processname pid: type (access): handle: path"
-        # Each line with a PID represents a process holding a handle.
-        $killedAny = $false
-        $pidsKilled = @{}
-        foreach ($line in $output -split "`n") {
-            if ($line -match '^(?<name>\S+)\s+pid:\s+(?<pid>\d+)') {
-                $procName = $Matches['name']
-                $procPid  = [int]$Matches['pid']
-
-                # Never kill vmms.exe (VM Management Service) -- that would
-                # break all Hyper-V management until the service restarts.
-                if ($procName -eq 'vmms.exe') {
-                    Write-Log "Skipping vmms.exe (PID $procPid) -- killing it would affect all VMs." -Warning
-                    continue
-                }
-
-                if (-not $pidsKilled.ContainsKey($procPid)) {
-                    $pidsKilled[$procPid] = $true
-                    Write-Log "Killing $procName (PID $procPid) holding handle in '$FolderPath'..." -Warning
-                    try {
-                        Stop-Process -Id $procPid -Force -ErrorAction Stop
-                        $killedAny = $true
-                    }
-                    catch {
-                        Write-Log "Could not kill $procName (PID $procPid): $($_.Exception.Message)" -Warning
-                    }
-                }
-            }
-        }
-
-        if ($killedAny) {
-            # Give the OS a moment to release handles after process termination
-            Start-Sleep -Seconds 2
-        }
-
-        return $killedAny
-    }
 
     # Helper: ensure VM is fully stopped with timeout.
     # Since we're deleting the VM, skip the graceful shutdown and TurnOff directly
@@ -289,11 +339,17 @@ function Remove-VirtualMachine {
         Write-Log "VM '$VmName' removed from Hyper-V." -SubActivity
     }
     catch {
-        Write-Log "Remove-VM failed for '$VmName': $($_.Exception.Message)" -Warning
+        $removeVmError = $_.Exception.Message
+        Write-Log "Remove-VM failed for '$VmName': $removeVmError" -Warning
+        if (-not $WhatIf) {
+            $null = Stop-LockingProcesses -FolderPath $vmTest.Path -IdentifyOnly
+        }
+        throw "Remove-VM failed for '$VmName'; its files will not be deleted while the VM remains registered. $removeVmError"
     }
 
     # -- Folder removal (after Remove-VM has released file handles) --
     $folderRemoved = $false
+    $folderCleanupFailed = $false
     if (-not $Migrate) {
         if (Test-Path $vmTest.Path) {
             Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
@@ -308,6 +364,7 @@ function Remove-VirtualMachine {
                 }
                 if (-not $folderRemoved) {
                     Write-Log "$VmName`: WARNING - Folder '$($vmTest.Path)' could not be removed. Manual cleanup required." -Warning
+                    $folderCleanupFailed = $true
                 }
             }
         }
@@ -391,6 +448,10 @@ function Remove-VirtualMachine {
         catch {
             Write-Log "$VmName`: Failed to scrub known_hosts: $($_.Exception.Message)" -Warning
         }
+    }
+
+    if ($folderCleanupFailed) {
+        throw "VM '$VmName' was unregistered, but folder '$($vmTest.Path)' remains after cleanup retries. Lock owners were reported above."
     }
 }
 
@@ -688,10 +749,10 @@ function Remove-Domain {
     $all = $false
     Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
     if ($VMList) {
-        $vmsToDelete = Get-List -Type VM -DomainName $DomainName | Where-Object { $_.vmName -in $VMList }
+        $vmsToDelete = Get-List -Type VM -DomainName $DomainName -ResetCache -SmartUpdate | Where-Object { $_.vmName -in $VMList }
     }
     else {
-        $vmsToDelete = Get-List -Type VM -DomainName $DomainName
+        $vmsToDelete = Get-List -Type VM -DomainName $DomainName -ResetCache -SmartUpdate
         $all = $true
     }
     $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
@@ -699,6 +760,7 @@ function Remove-Domain {
     # Capture scopes BEFORE deleting VMs — once VMs are gone, Get-List
     # can't discover which switches belonged to this domain.
     $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster" -and $_ -ne "ClusterV2" } # Internet/Cluster subnets could be shared between multiple domains
+    $vmStorageRoot = if ($all) { Get-MemlabsVmStorageRoot -NoPrompt } else { $null }
 
     try {
 
@@ -735,7 +797,7 @@ function Remove-Domain {
             $vm = $currentItem
             # Pass the already-resolved VM record so the worker doesn't
             # re-enumerate every VM on the host (~1s/worker saved).
-            Remove-VirtualMachine -VmName $vm.VmName -VmRecord $vm -RemovingDomain:$using:removingDomain
+            $null = Remove-VirtualMachine -VmName $vm.VmName -VmRecord $vm -RemovingDomain:$using:removingDomain
             Write-Log "[Phase $Phase]: $($vm.vmName): Remove VM Successful" -OutputStream -Success
         }
         catch {
@@ -745,6 +807,7 @@ function Remove-Domain {
     }
 
 
+    $result = $null
     if ($vmsToDelete) {        
         # PreferThreadJob: removes share parent's Hyper-V/DhcpServer modules
         # and skip a fresh powershell.exe process per VM -- each worker's
@@ -758,6 +821,40 @@ function Remove-Domain {
         Write-Log "No virtual machines found for '$DomainName'." -Warning
     }
 
+    if ($all -and -not $WhatIf) {
+        if ($result -and $result.Failed -gt 0) {
+            Write-Log "Parallel removal reported $($result.Failed) failed VM job(s); checking live Hyper-V state before removing network resources." -Warning
+        }
+
+        $survivors = @(Get-DomainHyperVVM -DomainName $DomainName -VmStorageRoot $vmStorageRoot)
+        if ($survivors.Count -gt 0) {
+            Write-Log "Live Hyper-V verification found $($survivors.Count) VM(s) still registered for '$DomainName': $($survivors.Name -join ', '). Retrying them once serially." -Warning
+            $refreshedRecords = @(Get-List -Type VM -DomainName $DomainName -SmartUpdate)
+            foreach ($survivor in $survivors) {
+                $vmRecord = $refreshedRecords | Where-Object { $_.vmID -eq $survivor.vmID } | Select-Object -First 1
+                try {
+                    if ($vmRecord) {
+                        $null = Remove-VirtualMachine -VmName $survivor.Name -VmRecord $vmRecord -RemovingDomain
+                    }
+                    else {
+                        $null = Remove-VirtualMachine -VmName $survivor.Name -RemovingDomain
+                    }
+                }
+                catch {
+                    Write-Log "Serial removal retry failed for '$($survivor.Name)': $($_.Exception.Message)" -Failure
+                }
+            }
+
+            $survivors = @(Get-DomainHyperVVM -DomainName $DomainName -VmStorageRoot $vmStorageRoot)
+        }
+
+        if ($survivors.Count -gt 0) {
+            foreach ($survivor in $survivors) {
+                Write-Log "Still registered: $($survivor.Name) (state=$($survivor.State), id=$($survivor.VMId), path='$($survivor.Path)')." -Failure
+            }
+            throw "Domain removal stopped because $($survivors.Count) VM(s) for '$DomainName' remain registered in Hyper-V. DHCP scopes and switches were left intact."
+        }
+    }
 
     if ($DC) {
         if ($scopesToDelete) {
@@ -794,12 +891,20 @@ function Remove-Domain {
     }
     
     if ($all) {
-        $vmStorageRoot = Get-MemlabsVmStorageRoot -NoPrompt
         if ($vmStorageRoot) {
             $domainFolder = Join-Path $vmStorageRoot $DomainName
             if (Test-Path $domainFolder) {
                 Write-Log "Removing $DomainName folder" -SubActivity
-                Remove-Item -Path $domainFolder -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+                $domainFolderRemoved = Remove-ItemWithRetry -Path $domainFolder -MaxAttempts 3 -DelaySeconds 5 -WhatIf:$WhatIf
+                if (-not $domainFolderRemoved -and -not $WhatIf) {
+                    Write-Log "Domain folder '$domainFolder' remains after cleanup retries. Identifying every process with an open handle below it." -Warning
+                    $null = Stop-LockingProcesses -FolderPath $domainFolder -IdentifyOnly
+                    $survivors = @(Get-DomainHyperVVM -DomainName $DomainName -VmStorageRoot $vmStorageRoot)
+                    foreach ($survivor in $survivors) {
+                        Write-Log "Registered VM still references the folder: $($survivor.Name) (state=$($survivor.State), id=$($survivor.VMId), path='$($survivor.Path)')." -Failure
+                    }
+                    throw "Could not remove domain folder '$domainFolder' after 3 attempts. Lock owners were reported above."
+                }
             }
         }
     }
