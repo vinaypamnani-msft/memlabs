@@ -36,6 +36,30 @@ $Fix_ActivateWindows = {
         return $null
     }
 
+    # Hard-timeout TCP probe. Never Test-NetConnection: it can hang well past its own
+    # timeouts on DNS reverse lookups and ICMP fallbacks. Defined inline because this
+    # scriptblock is transported into the guest whole and can reach no shared helper.
+    $testTcp = {
+        param($computerName, $port, $timeoutMs)
+        $client = $null
+        try {
+            $client = New-Object System.Net.Sockets.TcpClient
+            $iar = $client.BeginConnect($computerName, $port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne($timeoutMs, $false)) {
+                try {
+                    $client.EndConnect($iar)
+                    if ($client.Connected) { return $true }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        finally {
+            if ($client) { try { $client.Close() } catch { } }
+        }
+        return $false
+    }
+
     $cosname = (Get-CimInstance -Class Win32_OperatingSystem -ErrorAction SilentlyContinue).Name
     if (-not $cosname) {
         return [pscustomobject]@{ Success = $false; Message = 'Could not query Win32_OperatingSystem.Name' }
@@ -96,12 +120,11 @@ $Fix_ActivateWindows = {
 
         $reachable = $false
         try {
-            $tnc = Test-NetConnection -ComputerName $atkmsHost -Port $atkmsPort -WarningAction SilentlyContinue -ErrorAction Stop
-            $reachable = [bool]$tnc.TcpTestSucceeded
-            Write-FixLog "TCP test $atkms : TcpTestSucceeded=$reachable"
+            $reachable = [bool](& $testTcp $atkmsHost $atkmsPort 3000)
+            Write-FixLog "TCP test $atkms : reachable=$reachable"
         }
         catch {
-            Write-FixLog "Test-NetConnection to $atkms failed: $($_.Exception.Message)"
+            Write-FixLog "TCP test to $atkms failed: $($_.Exception.Message)"
         }
 
         if (-not $resolved -or -not $reachable) {

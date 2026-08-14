@@ -7,6 +7,41 @@ enum Ensure {
     Present
 }
 
+function Test-TcpPortFast {
+    # Hard-timeout TCP probe using TcpClient + WaitHandle. Never use Test-NetConnection
+    # (hangs past its own timeouts on DNS reverse lookups / ICMP fallbacks) and never a
+    # bare TcpClient.Connect() (no timeout parameter at all -- a black-holed route blocks
+    # for the OS connect timeout or longer). In-guest twin of Test-TcpPort in
+    # Common.HyperV.ps1, which is host-side and unreachable from here.
+    param(
+        [Parameter(Mandatory)] [string]$ComputerName,
+        [Parameter(Mandatory)] [int]$Port,
+        [int]$TimeoutMs = 3000,
+        [int]$Retries = 1,
+        [int]$RetryDelayMs = 1000
+    )
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        $client = $null
+        try {
+            $client = New-Object System.Net.Sockets.TcpClient
+            $iar = $client.BeginConnect($ComputerName, $Port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+                try {
+                    $client.EndConnect($iar)
+                    if ($client.Connected) { return $true }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        finally {
+            if ($client) { try { $client.Close() } catch { } }
+        }
+        if ($attempt -lt $Retries) { Start-Sleep -Milliseconds $RetryDelayMs }
+    }
+    return $false
+}
+
 function Get-InstalledProducts {
     $Installer = New-Object -ComObject WindowsInstaller.Installer
     $InstallerProducts = $Installer.ProductsEx("", "", 7)
@@ -4230,17 +4265,12 @@ class JoinDomain {
                 $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                     Where-Object { $_.ServerAddresses.Count -gt 0 } | Select-Object -First 1).ServerAddresses[0]
                 if ($dnsServer) {
-                    $tcp = New-Object System.Net.Sockets.TcpClient
-                    try {
-                        $tcp.Connect($dnsServer, 389)
-                        if ($tcp.Connected) {
-                            Write-Status "LDAP: DC at $dnsServer`:389 is reachable."
-                        }
+                    if (Test-TcpPortFast -ComputerName $dnsServer -Port 389) {
+                        Write-Status "LDAP: DC at $dnsServer`:389 is reachable."
                     }
-                    catch {
-                        Write-Status "WARNING: LDAP port 389 on DC $dnsServer is not reachable: $($_.Exception.Message)"
+                    else {
+                        Write-Status "WARNING: LDAP port 389 on DC $dnsServer is not reachable."
                     }
-                    finally { $tcp.Dispose() }
                 }
             }
             catch {}
@@ -5420,8 +5450,8 @@ class WaitForClusterAccess {
 
         # TCP 135 (RPC endpoint mapper -- used by Get-Cluster)
         try {
-            $tcp135 = Test-NetConnection -ComputerName $ip -Port 135 -WarningAction SilentlyContinue -ErrorAction Stop
-            $results.Add("TCP135:$(if ($tcp135.TcpTestSucceeded) { 'OK' } else { 'CLOSED' })")
+            $tcp135 = Test-TcpPortFast -ComputerName $ip -Port 135
+            $results.Add("TCP135:$(if ($tcp135) { 'OK' } else { 'CLOSED' })")
         }
         catch {
             $results.Add("TCP135:ERR")
@@ -5429,8 +5459,8 @@ class WaitForClusterAccess {
 
         # TCP 445 (SMB -- used for cluster admin shares)
         try {
-            $tcp445 = Test-NetConnection -ComputerName $ip -Port 445 -WarningAction SilentlyContinue -ErrorAction Stop
-            $results.Add("TCP445:$(if ($tcp445.TcpTestSucceeded) { 'OK' } else { 'CLOSED' })")
+            $tcp445 = Test-TcpPortFast -ComputerName $ip -Port 445
+            $results.Add("TCP445:$(if ($tcp445) { 'OK' } else { 'CLOSED' })")
         }
         catch {
             $results.Add("TCP445:ERR")
