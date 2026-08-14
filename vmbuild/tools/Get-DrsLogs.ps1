@@ -33,6 +33,24 @@
     Read-only throughout.
 
 .PARAMETER PackageId    Package to follow under -WatchSendChain. Auto-resolved to the Configuration Manager Client Package if omitted.
+
+.PARAMETER FlushExperiment
+    INTERVENES on the lab. Tests the one thing left unexplained: a child primary's PkgServers row can
+    sit for 20+ minutes without reaching the CAS, and the reverted 8527f678 flushed the correct group
+    ('Configuration Data', measured from ArticleData) yet did not speed anything up.
+
+    Pre-registered, so the result cannot be rationalised afterwards:
+      precondition  child HAS its own PkgServers_G row and the CAS does NOT. Otherwise abort --
+                    there is nothing to test.
+      baseline      poll the CAS every 15s for -BaselineSeconds with NO intervention. If the row
+                    arrives during this, the flush was NOT tested and the run says exactly that.
+      intervention  EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup='Configuration Data' on the CHILD.
+      measure       flush -> row visible at CAS, then row -> send in the CAS distmgr log.
+    Requires -PrimaryName. ONE trial is not proof. It discriminates "a flush cannot move this row"
+    from "8527f678 simply ran at the wrong moment", which is the fork the investigation is stuck on.
+
+.PARAMETER BaselineSeconds  No-intervention baseline before the flush (default 180).
+.PARAMETER PostSeconds      How long to watch after the flush (default 900).
 .PARAMETER IntervalSeconds  Poll interval for -WatchSendChain (default 20).
 .PARAMETER MaxMinutes   Give up after this long under -WatchSendChain (default 120). Counts from ARMING, not from launch: arming lands at child site install, and the rest of Phase 8 still has to run before the coverage wait, whose own worst case is 2622s.
 .PARAMETER ArmWaitMinutes
@@ -61,7 +79,10 @@ param(
     [string]$PackageId,
     [int]$IntervalSeconds = 20,
     [int]$MaxMinutes = 120,
-    [int]$ArmWaitMinutes = 0
+    [int]$ArmWaitMinutes = 0,
+    [switch]$FlushExperiment,
+    [int]$BaselineSeconds = 180,
+    [int]$PostSeconds = 900
 )
 
 $ErrorActionPreference = 'Stop'
@@ -127,7 +148,7 @@ Write-Host ""
 # replication state. Same block on purpose: the instance/port discovery below is the part that was
 # hard to get right, and a second copy of it would drift.
 $sqlSnapBlock = {
-    param($siteCode, $PkgId)
+    param($siteCode, $PkgId, $FlushGroup)
     $out = New-Object System.Collections.Generic.List[string]
     # 'localhost' silently means default-instance-on-1433. CS2-PS2SQL is MSSQL instance 'BOB'
     # on port 41223, so every query failed with "Named Pipes ... error 40" and the snapshot
@@ -166,6 +187,25 @@ $sqlSnapBlock = {
         catch { }
     }
     if (-not $db) { $out.Add("Could not resolve CM database. Tried: $($candidates -join ' | ')"); return $out }
+    if ($FlushGroup) {
+        # The one write this tool makes. spDRSSendChangesForGroup is the same proc ConfigMgr's own
+        # RCM calls; scope is CAS_OR_PRIMARY_OR_SECONDARY (verified in source).
+        try {
+            $cs = "Server=$server;Initial Catalog=$db;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+            $cn = New-Object System.Data.SqlClient.SqlConnection $cs
+            $cn.Open()
+            $cmd = $cn.CreateCommand()
+            $cmd.CommandText = 'dbo.spDRSSendChangesForGroup'
+            $cmd.CommandType = [System.Data.CommandType]::StoredProcedure
+            $cmd.CommandTimeout = 180
+            [void]$cmd.Parameters.AddWithValue('@ReplicationGroup', $FlushGroup)
+            [void]$cmd.ExecuteNonQuery()
+            $cn.Close()
+            $out.Add("FLUSH OK '$FlushGroup' on $db ($server)")
+        }
+        catch { $out.Add("FLUSH FAILED '$FlushGroup': " + $_.Exception.Message) }
+        return $out
+    }
     function Q {
         param($q, $title, $keep, $p)
         $rows = 0
@@ -197,8 +237,7 @@ $sqlSnapBlock = {
     }
     if ($PkgId) {
         $keep = 'Action|Mask|Version|SiteCode|SourceSite|Flags|Status|Refresh|Type|PkgID|^ID$|Priority|Time|Date'
-        Q "SELECT * FROM PkgStatus_G WHERE ID = @p" 'PkgStatus_G' $keep $PkgId
-        Q "SELECT * FROM PkgServers_G WHERE PkgID = @p" 'PkgServers_G' $keep $PkgId
+        Q "SELECT * FROM PkgStatus_G WHERE ID = @p" 'PkgStatus_G' $keep $PkgId        Q "SELECT * FROM PkgServers_G WHERE PkgID = @p" 'PkgServers_G' $keep $PkgId
         Q "SELECT * FROM PkgServers_L WHERE PkgID = @p" 'PkgServers_L' $keep $PkgId
         Q "SELECT * FROM SMSPackages WHERE PkgID = @p" 'SMSPackages' $keep $PkgId
         Q "SELECT * FROM PkgNotification WHERE ID = @p" 'PkgNotification' $keep $PkgId
@@ -325,6 +364,97 @@ function Get-GuestOutput {
             if ($attempt -eq 2) { return @("ERROR: $Tag $($_.Exception.Message)") }
         }
     }
+}
+
+if ($FlushExperiment) {
+    $expLog = Join-Path $logsRoot ("flush-experiment-{0}.log" -f $stamp)
+    $esay = {
+        param($t)
+        $l = '{0}  {1}' -f (Get-Date -Format 'HH:mm:ss'), $t
+        Write-Host $l -ForegroundColor Gray
+        try { Add-Content -LiteralPath $expLog -Value $l -Encoding utf8 -ErrorAction Stop } catch { }
+    }
+    if ($priList.Count -ne 1) {
+        Write-Host "FATAL: -FlushExperiment needs exactly one child primary. Use -PrimaryName. Got: $($priList.vmName -join ', ')" -ForegroundColor Red
+        return
+    }
+    $child = $priList[0]
+    $childSql = Resolve-SqlVm -SiteVm $child -AllVms $allVms
+    $casSql = Resolve-SqlVm -SiteVm $cas -AllVms $allVms
+
+    if (-not $PackageId) {
+        $cand = @(Get-GuestOutput -VmName $cas.vmName -DomainName $dom -Block $pkgFindBlock -ArgList @($cas.siteCode) -Tag 'find-clientpkg')
+        $ids = @($cand | Where-Object { $_ -match '^[A-Z0-9]{8} ' })
+        if ($ids.Count -ne 1) { Write-Host "FATAL: could not resolve the client package. Re-run with -PackageId." -ForegroundColor Red; return }
+        $PackageId = $ids[0].Split(' ')[0]
+    }
+
+    # Reads the CAS's own PkgServers_G and answers one question: is the child's row there yet.
+    function Test-CasHasChildRow {
+        $lines = @(Get-GuestOutput -VmName $casSql.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($cas.siteCode, $PackageId) -Tag 'cas-rows')
+        $hit = @($lines | Where-Object { $_ -match '^PkgServers_G\[' -and $_ -match "SiteCode=$($child.siteCode)(\s|$)" })
+        return [pscustomobject]@{ Present = ($hit.Count -gt 0); Rows = @($lines | Where-Object { $_ -match '^PkgServers_G' }) }
+    }
+
+    & $esay "log -> $expLog"
+    & $esay "FLUSH EXPERIMENT  pkg=$PackageId  child=$($child.vmName)/$($child.siteCode) (sql $($childSql.vmName))  cas=$($cas.vmName)/$($cas.siteCode) (sql $($casSql.vmName))"
+    & $esay "pre-registered: baseline ${BaselineSeconds}s with NO intervention, then flush 'Configuration Data' on the CHILD, then watch ${PostSeconds}s."
+
+    $childRows = @(Get-GuestOutput -VmName $childSql.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($child.siteCode, $PackageId) -Tag 'child-rows')
+    $childHas = @($childRows | Where-Object { $_ -match '^PkgServers_G\[' -and $_ -match "SiteCode=$($child.siteCode)(\s|$)" }).Count -gt 0
+    $casState = Test-CasHasChildRow
+    & $esay "precondition: child has own row = $childHas ; CAS has child row = $($casState.Present)"
+    foreach ($r in @($childRows | Where-Object { $_ -match '^PkgServers_G' })) { & $esay "    CHILD $r" }
+    foreach ($r in $casState.Rows) { & $esay "    CAS   $r" }
+    if (-not $childHas) { & $esay "ABORT: the child has not written its own PkgServers_G row yet. Nothing to flush. NOT A RESULT."; return }
+    if ($casState.Present) { & $esay "ABORT: the CAS already has the child's row, so there is no pending replication to accelerate. NOT A RESULT."; return }
+
+    $tBase = Get-Date
+    $arrivedInBaseline = $false
+    while (((Get-Date) - $tBase).TotalSeconds -lt $BaselineSeconds) {
+        Start-Sleep -Seconds 15
+        if ((Test-CasHasChildRow).Present) { $arrivedInBaseline = $true; break }
+    }
+    if ($arrivedInBaseline) {
+        & $esay "ROW ARRIVED DURING BASELINE after $([int]((Get-Date) - $tBase).TotalSeconds)s, with no intervention."
+        & $esay "THE FLUSH WAS NOT TESTED. Do not read this as the flush working, and do not read it as the lag being short -- it only means this trial started too late."
+        return
+    }
+    & $esay "baseline done: ${BaselineSeconds}s with no arrival and no intervention."
+
+    $tFlush = Get-Date
+    foreach ($l in (Get-GuestOutput -VmName $childSql.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($child.siteCode, $null, 'Configuration Data') -Tag 'child-flush')) { & $esay "    $l" }
+    & $esay "flushed at $($tFlush.ToString('HH:mm:ss')); watching the CAS every 15s for up to ${PostSeconds}s"
+
+    $tArrive = $null
+    while (((Get-Date) - $tFlush).TotalSeconds -lt $PostSeconds) {
+        Start-Sleep -Seconds 15
+        if ((Test-CasHasChildRow).Present) { $tArrive = Get-Date; break }
+    }
+    if (-not $tArrive) {
+        & $esay "RESULT: no arrival at the CAS within ${PostSeconds}s of a flush of the correct group."
+        & $esay "That is evidence the flush cannot move this row, and the delay is NOT on the child's send side."
+        return
+    }
+    $dFlush = [int]($tArrive - $tFlush).TotalSeconds
+    & $esay "RESULT: row visible at the CAS ${dFlush}s after the flush (baseline had ${BaselineSeconds}s with nothing)."
+    foreach ($r in (Test-CasHasChildRow).Rows) { & $esay "    CAS   $r" }
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    $tSendDeadline = $tArrive.AddSeconds(600)
+    $sent = $false
+    while ((Get-Date) -lt $tSendDeadline -and -not $sent) {
+        foreach ($l in (Get-GuestOutput -VmName $cas.vmName -DomainName $dom -Block $pkgLogBlock -ArgList @($PackageId) -Tag 'cas-log')) {
+            if ($seen.Add("$l")) { & $esay "    CAS $l" }
+            if ($l -match 'Needs to send|Created minijob|distribution point has been changed') { $sent = $true }
+        }
+        if (-not $sent) { Start-Sleep -Seconds 15 }
+    }
+    if ($sent) { & $esay "RESULT: send started $([int]((Get-Date) - $tArrive).TotalSeconds)s after the row became visible at the CAS." }
+    else { & $esay "RESULT: row reached the CAS but NO send within 600s -- arrival of the row is therefore NOT sufficient on its own." }
+    & $esay "ONE TRIAL. It separates 'a flush cannot move this row' from '8527f678 ran at the wrong moment'. It does not establish a fix."
+    Write-Host "Experiment log: $expLog" -ForegroundColor Green
+    return
 }
 
 if ($WatchSendChain) {
