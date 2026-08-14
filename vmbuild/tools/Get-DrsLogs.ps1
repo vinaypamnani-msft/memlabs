@@ -241,7 +241,8 @@ $sqlSnapBlock = {
         Q "SELECT * FROM PkgServers_G WHERE PkgID = @p" 'PkgServers_G' $keep $PkgId
         Q "SELECT * FROM PkgServers_L WHERE PkgID = @p" 'PkgServers_L' $keep $PkgId
         Q "SELECT * FROM SMSPackages WHERE PkgID = @p" 'SMSPackages' $keep $PkgId
-        Q "SELECT * FROM PkgNotification WHERE ID = @p" 'PkgNotification' $keep $PkgId
+        # Type: 1 Package, 2 Program, 4 Package Server (DP), 8 Access account (PkgNotification.h).
+        Q "SELECT * FROM PkgNotification WHERE PkgID = @p" 'PkgNotification' $keep $PkgId
         return $out
     }
     $out.Add("CM database: $db  (server $server)")
