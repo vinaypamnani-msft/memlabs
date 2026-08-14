@@ -293,15 +293,38 @@ $cmReadyBlock = {
     catch { return @("CMWAIT: $($_.Exception.Message)") }
 }
 
+$script:watchSessions = @{}
 function Get-GuestOutput {
     param($VmName, $DomainName, [scriptblock]$Block, [object[]]$ArgList, $Tag)
-    # -AsJob is required for -TimeoutSeconds to mean anything; without it a wedged guest hangs the watch.
-    try { $r = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -ScriptBlock $Block -ArgumentList $ArgList -SuppressLog -AsJob -TimeoutSeconds 110 -DisplayName $Tag }
-    catch { return @("ERROR: $Tag threw $($_.Exception.Message)") }
-    if (-not $r -or $r.ScriptBlockFailed -or $null -eq $r.ScriptBlockOutput) {
-        return @("ERROR: $Tag no output (failed=$($r.ScriptBlockFailed) timedOut=$($r.TimedOut))")
+    # Invoke-VmCommand -AsJob bootstraps a job AND a session on every call (~1-2 min each), which
+    # swamped a 20s poll into 7-15 min -- too coarse to time a transition that lasts minutes. Reuse
+    # one session per VM and get the timeout from a job ON that session instead.
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $s = $script:watchSessions[$VmName]
+        if (-not $s -or $s.State -ne 'Opened') {
+            $s = Get-VmSession -VmName $VmName -VmDomainName $DomainName
+            if (-not $s) { return @("ERROR: $Tag no session to $VmName") }
+            $script:watchSessions[$VmName] = $s
+        }
+        $j = $null
+        try {
+            $j = Invoke-Command -Session $s -ScriptBlock $Block -ArgumentList $ArgList -AsJob -ErrorAction Stop
+            if (Wait-Job -Job $j -Timeout 90) {
+                $out = @(Receive-Job -Job $j -ErrorAction SilentlyContinue)
+                Remove-Job -Job $j -Force -ErrorAction SilentlyContinue
+                # An empty result is legitimate for the log block; only the table block is required
+                # to speak, and it always emits at least a NO ROWS line.
+                return $out
+            }
+            Remove-Job -Job $j -Force -ErrorAction SilentlyContinue
+            return @("ERROR: $Tag timed out after 90s")
+        }
+        catch {
+            if ($j) { Remove-Job -Job $j -Force -ErrorAction SilentlyContinue }
+            $script:watchSessions.Remove($VmName)
+            if ($attempt -eq 2) { return @("ERROR: $Tag $($_.Exception.Message)") }
+        }
     }
-    return @($r.ScriptBlockOutput)
 }
 
 if ($WatchSendChain) {
