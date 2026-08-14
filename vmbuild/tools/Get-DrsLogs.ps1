@@ -34,7 +34,13 @@
 
 .PARAMETER PackageId    Package to follow under -WatchSendChain. Auto-resolved to the Configuration Manager Client Package if omitted.
 .PARAMETER IntervalSeconds  Poll interval for -WatchSendChain (default 20).
-.PARAMETER MaxMinutes   Give up after this long under -WatchSendChain (default 75; historical worst case is 2622s).
+.PARAMETER MaxMinutes   Give up after this long under -WatchSendChain (default 120). Counts from ARMING, not from launch: arming lands at child site install, and the rest of Phase 8 still has to run before the coverage wait, whose own worst case is 2622s.
+.PARAMETER ArmWaitMinutes
+    Let -WatchSendChain be started at ANY phase. It polls once a minute until ConfigMgr answers on the
+    CAS and on every child primary, then resolves the package and begins the real watch. 0 (default)
+    means everything must already be installed, i.e. you are starting during Phase 8.
+    Use this to start the watch in Phase 2 and walk away -- the transition being chased is a single
+    unlogged decision, so being late to it costs the whole run.
 
 .EXAMPLE
     cd C:\memlabs\vmbuild\tools ; .\Get-DrsLogs.ps1
@@ -42,6 +48,9 @@
     .\Get-DrsLogs.ps1 -Domain cstest8.com
 .EXAMPLE
     .\Get-DrsLogs.ps1 -WatchSendChain
+.EXAMPLE
+    # start during Phase 2 of an add-child-primary run and let it arm itself
+    .\Get-DrsLogs.ps1 -WatchSendChain -ArmWaitMinutes 300
 #>
 [CmdletBinding()]
 param(
@@ -51,7 +60,8 @@ param(
     [switch]$WatchSendChain,
     [string]$PackageId,
     [int]$IntervalSeconds = 20,
-    [int]$MaxMinutes = 75
+    [int]$MaxMinutes = 120,
+    [int]$ArmWaitMinutes = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -266,6 +276,17 @@ $pkgFindBlock = {
     catch { return @("ERROR: $($_.Exception.Message)") }
 }
 
+# Deliberately reuses SMS_Package -- the one class in this namespace already proven to work here.
+# A site with no packages returns empty without throwing, so this tests the namespace, not the data.
+$cmReadyBlock = {
+    param($SiteCode)
+    try {
+        $null = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Package -ErrorAction Stop | Select-Object -First 1)
+        return @('CMREADY')
+    }
+    catch { return @("CMWAIT: $($_.Exception.Message)") }
+}
+
 function Get-GuestOutput {
     param($VmName, $DomainName, [scriptblock]$Block, [object[]]$ArgList, $Tag)
     # -AsJob is required for -TimeoutSeconds to mean anything; without it a wedged guest hangs the watch.
@@ -286,13 +307,33 @@ if ($WatchSendChain) {
         try { Add-Content -LiteralPath $watchLog -Value $l -Encoding utf8 -ErrorAction Stop } catch { }
     }
 
+    if ($ArmWaitMinutes -gt 0) {
+        $armDeadline = (Get-Date).AddMinutes($ArmWaitMinutes)
+        $needArm = @($cas) + $priList
+        $armed = @{}
+        & $say "arming: waiting up to ${ArmWaitMinutes}m for ConfigMgr on $($needArm.vmName -join ', ')"
+        while ($armed.Count -lt $needArm.Count -and (Get-Date) -lt $armDeadline) {
+            foreach ($v in $needArm) {
+                if ($armed.ContainsKey($v.vmName)) { continue }
+                $r = @(Get-GuestOutput -VmName $v.vmName -DomainName $dom -Block $cmReadyBlock -ArgList @($v.siteCode) -Tag "arm-$($v.siteCode)")
+                if ($r -contains 'CMREADY') { $armed[$v.vmName] = $true; & $say "  armed: $($v.vmName) (site $($v.siteCode))" }
+            }
+            if ($armed.Count -lt $needArm.Count) { Start-Sleep -Seconds 60 }
+        }
+        if ($armed.Count -lt $needArm.Count) {
+            $missing = @($needArm | Where-Object { -not $armed.ContainsKey($_.vmName) } | Select-Object -ExpandProperty vmName)
+            & $say "NOT ARMED within ${ArmWaitMinutes}m: $($missing -join ', ') never answered. Nothing was watched."
+            return
+        }
+    }
+
     if (-not $PackageId) {
         $cand = @(Get-GuestOutput -VmName $cas.vmName -DomainName $dom -Block $pkgFindBlock -ArgList @($cas.siteCode) -Tag 'find-clientpkg')
         $ids = @($cand | Where-Object { $_ -match '^[A-Z0-9]{8} ' })
         if ($ids.Count -ne 1) {
             Write-Host "FATAL: could not resolve the client package on $($cas.vmName) (site $($cas.siteCode))." -ForegroundColor Red
             $cand | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
-            Write-Host "Re-run with -PackageId <id>." -ForegroundColor Red
+            Write-Host "Re-run with -PackageId <id>, or with -ArmWaitMinutes if ConfigMgr is not installed yet." -ForegroundColor Red
             return
         }
         $PackageId = $ids[0].Split(' ')[0]
