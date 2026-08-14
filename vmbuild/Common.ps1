@@ -6203,12 +6203,50 @@ function Wait-ForVm {
         [int]$oobeRpcCalls = 0
         [double]$oobeRpcMs = 0
         [int]$oobeSettleWaits = 0
+        [double]$oobeHbGateMs = 0
+        [int]$oobeHbGates = 0
+        [int]$oobeFloorSkips = 0
+        [bool]$oobeLastProbeFailed = $false
+        # No VM has ever reached IMAGE_STATE_COMPLETE sooner than 95s -- measured across 71
+        # OobeWait samples spanning Server 2016/2019/2022/2025 and Win10/Win11, the fastest
+        # being 95s (Server 2019, single-VM lab). Every probe before that is guaranteed to
+        # find OOBE incomplete, and each one costs a PSDirect round trip that all the other
+        # Phase 1 workers are contending with: mean seconds per call rises 14.3s -> 21.6s
+        # between a 1-VM and a 12-VM lab. Held below the observed minimum on purpose, so a
+        # faster host or a leaner image cannot be delayed by it.
+        [int]$oobeFloorSeconds = 90
+        # The floor is time since the guest BOOTED, not since this wait started -- a VM that
+        # was already up (re-run, or this wait entered late) must not be held for it. Read
+        # once: re-reading uptime every iteration would put the Get-VM storm back.
+        [int]$oobeBootOffset = 0
+        try {
+            $vmForUptime = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            if ($vmForUptime -and "$($vmForUptime.State)" -eq 'Running') {
+                $oobeBootOffset = [int]$vmForUptime.Uptime.TotalSeconds
+            }
+        }
+        catch { }
         $oobeAtImageState = $null
         $oobeAtSmb = $null
         $oobeAtWwahost = $null
 
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
+            # Below the floor there is nothing to ask, so do not spend a round trip asking.
+            # Slept in short steps rather than one block so the timeout and the progress
+            # display stay live, and skipped without touching $failures -- a poll that was
+            # never issued is not a poll that failed.
+            if (($oobeBootOffset + $oobeSw.Elapsed.TotalSeconds) -lt $oobeFloorSeconds -and -not $readyOobe) {
+                $oobeFloorSkips++
+                try {
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan `
+                        -text "Waiting for OOBE (holding probes until $oobeFloorSeconds`s uptime; $([int]($oobeBootOffset + $oobeSw.Elapsed.TotalSeconds))s booted)"
+                }
+                catch {}
+                Start-Sleep -Seconds 5
+                continue
+            }
+
             $oobePolls++
             # Check OOBE complete registry key
             $oobeStatusText = "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State\ImageState = IMAGE_STATE_COMPLETE"
@@ -6221,12 +6259,36 @@ function Wait-ForVm {
             }
             catch {}
 
+            # PSDirect rides the same integration-services channel the heartbeat reports on, so
+            # a non-Ok heartbeat means this probe cannot be answered and will block for its full
+            # timeout. New-VmSession gates the session CREATE this way, but every poll after the
+            # first rides a cached session and skips that path. Measured on this loop: probes at
+            # NoContact cost 38.0s mean against 14.8s at OkApplicationsUnknown.
+            # Only after a probe has already failed -- Get-VM2 is a live Hyper-V call and 20+
+            # Phase 1 workers doing it every poll would serialize on vmms, so the read is spent
+            # only where a 30s+ blocked call is the alternative. Bounded, then probe regardless:
+            # a guest whose ICs never report must still be reachable.
+            # Dropped past half of $maxFailures: by then this VM is heading for a power-cycle,
+            # and the gate would only delay that recovery for a guest that is not coming back.
+            if ($oobeLastProbeFailed -and -not $readyOobe -and $failures -lt ($maxFailures / 2)) {
+                $swHbGate = [System.Diagnostics.Stopwatch]::StartNew()
+                while ($swHbGate.Elapsed.TotalSeconds -lt 12) {
+                    $vmHbNow = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    if ("$($vmHbNow.Heartbeat)" -like 'Ok*' -or "$($vmHbNow.State)" -ne 'Running') { break }
+                    Start-Sleep -Seconds 2
+                }
+                $swHbGate.Stop()
+                $oobeHbGateMs += $swHbGate.Elapsed.TotalMilliseconds
+                $oobeHbGates++
+            }
+
             $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
             $stopwatch2.Start()
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
             $oobeRpcCalls++
             $oobeRpcMs += $stopwatch2.Elapsed.TotalMilliseconds
+            $oobeLastProbeFailed = ($null -eq $out.ScriptBlockOutput)
             Write-Log "$VmName`: $out" -Verbose
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
                 try {
@@ -6495,6 +6557,7 @@ function Wait-ForVm {
         $oobeWwahostText = if ($null -eq $oobeAtWwahost) { 'n/a' } else { "$([Math]::Round($oobeAtWwahost, 1))s" }
         Write-Log ("[StepTiming] $VmName OobeWait completed in $([Math]::Round($oobeSw.Elapsed.TotalSeconds, 1)) seconds " +
             "(ready=$ready polls=$oobePolls rpc=$([Math]::Round($oobeRpcMs / 1000, 1))s/$oobeRpcCalls " +
+            "hbGate=$([Math]::Round($oobeHbGateMs / 1000, 1))s/$oobeHbGates floorSkips=$oobeFloorSkips " +
             "imageState=$oobeImageStateText smb=$oobeSmbText wwahost=$oobeWwahostText " +
             "settleWaits=$oobeSettleWaits powerCycles=$powerCycles buffer=${WaitSeconds}s)") -LogOnly
 
