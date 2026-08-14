@@ -11,10 +11,24 @@ $Fix_ActivateWindows = {
     # Returns the LicenseStatus (int) of the active Windows SKU, or $null if it
     # can't be read. 1 = Licensed (activated). Only the entry with an installed
     # PartialProductKey is the active SKU.
+    # Filtered in WQL, not in the pipeline: enumerating every SoftwareLicensingProduct
+    # instance materialises dozens of SKUs and measured ~20s a call on a client VM --
+    # paid 2-3 times per run, it was most of this fix's 69s mean. Falls back to the
+    # unfiltered form if a provider rejects the filter, so behaviour cannot regress.
     $getLicenseStatus = {
+        $appId = '55c92734-d682-4d71-983e-d6ec3f16059f'
+        try {
+            $win = Get-CimInstance -ClassName SoftwareLicensingProduct `
+                -Filter "ApplicationId='$appId' AND PartialProductKey IS NOT NULL" `
+                -ErrorAction Stop | Select-Object -First 1
+            if ($win) { return [int]$win.LicenseStatus }
+        }
+        catch {
+            Write-FixLog "Filtered SoftwareLicensingProduct query failed ($($_.Exception.Message)); falling back to full enumeration"
+        }
         try {
             $win = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction Stop |
-                Where-Object { $_.ApplicationId -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and $_.PartialProductKey } |
+                Where-Object { $_.ApplicationId -eq $appId -and $_.PartialProductKey } |
                 Select-Object -First 1
             if ($win) { return [int]$win.LicenseStatus }
         }

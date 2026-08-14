@@ -793,6 +793,9 @@ function Start-VMFixesBatched {
             }
             if ($r.PSObject.Properties.Name -contains 'DurationSec') {
                 Write-Log -LogOnly "$VMName`: [$fixDisplayName] Success=$($r.Success) DurationSec=$($r.DurationSec)"
+                # Also as a marker: the line above carried this all along, but every
+                # analyzer keys off [StepTiming] and so scored Phase 10 as uninstrumented.
+                Write-Log -LogOnly "[StepTiming] $VMName Fix:$fixDisplayName completed in $($r.DurationSec) seconds (ok=$($r.Success) batched=True)"
             }
 
             # Always pull transcript (LogOnly) so failures + slow fixes are diagnosable
@@ -1077,6 +1080,7 @@ function Start-VMFix {
                 Write-Log "$VMName`: [$fixName] EXCEPTION on VM: $($rawOut.ExceptionInfo)" -Warning
             }
             Write-Log -LogOnly "$VMName`: [$fixName] Success=$($rawOut.Success) DurationSec=$($rawOut.DurationSec)"
+            Write-Log -LogOnly "[StepTiming] $VMName Fix:$fixName completed in $($rawOut.DurationSec) seconds (ok=$($rawOut.Success) batched=False)"
         }
         else {
             # No explicit success marker -> NOT applied (legacy bool no longer trusted).
