@@ -1197,6 +1197,43 @@ $global:VM_Create = {
                 } catch { $warnings += "Fix WorkGroup: $_" }
             }
 
+            # Boot recovery policy. A VM that drops to the WinRE "Choose an option" menu
+            # still reports State=Running / Status='Operating normally' to Hyper-V, but WinRE
+            # runs neither the heartbeat IC nor vmicvmsession -- so it is Heartbeat=NoContact
+            # and permanently unreachable over PSDirect, and rebooting returns it to the menu.
+            # A disposable lab VM must never be able to strand itself there.
+            $bootPolicyReport = $null
+            try {
+                $bcdSetErrors = @()
+                foreach ($bcdSetting in @(
+                        @{ Name = 'bootstatuspolicy'; Value = 'IgnoreAllFailures' },
+                        @{ Name = 'recoveryenabled'; Value = 'No' }
+                    )) {
+                    # 2>&1 | Out-String: bcdedit writes to stdout, and anything reaching the
+                    # pipeline here turns this scriptblock's return value into an array.
+                    $bcdSetOut = (& bcdedit.exe /set '{default}' $bcdSetting.Name $bcdSetting.Value 2>&1 | Out-String).Trim()
+                    if ($LASTEXITCODE -ne 0) { $bcdSetErrors += "$($bcdSetting.Name) exit=$LASTEXITCODE $bcdSetOut" }
+                }
+                # bcdedit prints "The operation completed successfully" for values the store
+                # then ignores, so only this read-back is evidence that the setting took.
+                $bcdEnum = (& bcdedit.exe /enum '{default}' 2>&1 | Out-String)
+                if ($LASTEXITCODE -ne 0) {
+                    # An unreadable store and a setting that failed to apply both read as
+                    # '<absent>' below. Keep them distinguishable -- they need different fixes.
+                    $bcdSetErrors += "read-back exit=$LASTEXITCODE " + (($bcdEnum -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 1)
+                }
+                $bcdStatusPolicy = '<absent>'
+                if ($bcdEnum -match '(?m)^\s*bootstatuspolicy\s+(\S+)') { $bcdStatusPolicy = $Matches[1] }
+                $bcdRecovery = '<absent>'
+                if ($bcdEnum -match '(?m)^\s*recoveryenabled\s+(\S+)') { $bcdRecovery = $Matches[1] }
+                $bootPolicyReport = [PSCustomObject]@{
+                    BootStatusPolicy = $bcdStatusPolicy
+                    RecoveryEnabled  = $bcdRecovery
+                    Verified         = (($bcdStatusPolicy -eq 'IgnoreAllFailures') -and ($bcdRecovery -eq 'No'))
+                    SetErrors        = ($bcdSetErrors -join '; ')
+                }
+            } catch { $warnings += "Boot recovery policy: $_" }
+
             # Suppress Windows Update immediately so it can't install updates
             # and trigger pending reboots before Phase 2 gets a chance to run.
             # Disable the services rather than registry-only — UsoSvc on newer
@@ -1376,7 +1413,7 @@ $global:VM_Create = {
                 }
             } catch { $warnings += "Visual performance: $_" }
 
-            [PSCustomObject]@{ Warnings = $warnings; TimeZone = $tzReport }
+            [PSCustomObject]@{ Warnings = $warnings; TimeZone = $tzReport; BootPolicy = $bootPolicyReport }
         }
 
         if ($createVM) {
@@ -1487,6 +1524,23 @@ $global:VM_Create = {
                 }
             }
             catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): could not report guest timezone: $($_.Exception.Message)" -LogOnly }
+            # Boot recovery policy read-back. Unverified is worth a warning: it means this VM
+            # can still park at the WinRE menu, where Hyper-V reports it Running while PSDirect
+            # can never reach it, and every later phase blames whatever step happened to be next.
+            try {
+                $bootPol = $null
+                if (-not $result.ScriptBlockFailed) {
+                    $bootPol = @($result.ScriptBlockOutput.BootPolicy | Where-Object { $_ }) | Select-Object -First 1
+                }
+                if ($bootPol -and $bootPol.Verified) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): boot recovery disabled (bootstatuspolicy=$($bootPol.BootStatusPolicy) recoveryenabled=$($bootPol.RecoveryEnabled)); a failed boot retries instead of parking at the WinRE menu." -LogOnly
+                }
+                elseif (-not $result.ScriptBlockFailed) {
+                    $bootPolWhy = if ($bootPol) { "bootstatuspolicy=$($bootPol.BootStatusPolicy) recoveryenabled=$($bootPol.RecoveryEnabled) $($bootPol.SetErrors)".Trim() } else { 'settings step returned no read-back' }
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): boot recovery policy NOT confirmed ($bootPolWhy). A failed boot can strand this VM at the WinRE menu, where it reports Running/NoContact and stays unreachable until someone opens the console." -Warning -OutputStream
+                }
+            }
+            catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): could not report boot recovery policy: $($_.Exception.Message)" -LogOnly }
             # Set vm note
             if (-not $skipVersionUpdate) {
                 $inProgress = (-not $Migrate)
