@@ -643,9 +643,12 @@ function Start-VMFixesBatched {
 
         # The batch runner: executes all wrapped fixes sequentially inside the VM,
         # collects their structured results, and returns them as JSON. Fail-fast on
-        # the first failure (subsequent fixes assume prior ones succeeded).
+        # the first failure (subsequent fixes assume prior ones succeeded) EXCEPT on
+        # the final attempt, where $continueOnFailure runs the rest anyway: by then
+        # the failure has already survived a retry, and abandoning the remaining
+        # fixes leaves them unstamped and therefore blocked on every future pass too.
         $batchRunner = {
-            param($json)
+            param($json, $continueOnFailure)
             $fixDefs = $json | ConvertFrom-Json
             $results = @()
             foreach ($def in $fixDefs) {
@@ -699,7 +702,7 @@ function Start-VMFixesBatched {
                         IsStructured  = $true
                     }
                 }
-                if (-not $results[-1].Success) { break }
+                if (-not $results[-1].Success -and -not $continueOnFailure) { break }
             }
             return ($results | ConvertTo-Json -Depth 4 -Compress)
         }
@@ -732,9 +735,12 @@ function Start-VMFixesBatched {
         while ($groupAttempt -lt $maxGroupAttempts) {
             $groupAttempt++
             $batchErr = $null
+            # Last time round: run every fix even after one fails, so the rest get
+            # applied and stamped instead of being abandoned indefinitely.
+            $continueOnFailure = ($groupAttempt -ge $maxGroupAttempts)
 
             try {
-                $rawOutput = Invoke-Command -Session $ps -ScriptBlock $batchRunner -ArgumentList $fixDefsJson -ErrorVariable batchErr -ErrorAction SilentlyContinue
+                $rawOutput = Invoke-Command -Session $ps -ScriptBlock $batchRunner -ArgumentList $fixDefsJson, $continueOnFailure -ErrorVariable batchErr -ErrorAction SilentlyContinue
             }
             catch {
                 Write-Log "$VMName`: Batched fix execution failed with exception (attempt $groupAttempt): $_" -Warning
@@ -776,6 +782,7 @@ function Start-VMFixesBatched {
 
         $accountForTranscript = if ($key -eq "__default__") { $null } else { $key }
         $groupApplied = @()
+        $groupFailedNames = @()
 
         foreach ($r in $results) {
             $matchingFix = $groupFixes | Where-Object { $_.FixName -eq $r.Name -or $_.FixName -eq $r.FixName } | Select-Object -First 1
@@ -808,30 +815,29 @@ function Start-VMFixesBatched {
             }
             else {
                 Write-Log "$VMName`: Fix '$fixDisplayName' ($($matchingFix.FixVersion)) failed in batch." -Warning
-                # Stamp fixes that succeeded before the failure
-                if ($groupApplied.Count -gt 0) {
-                    $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $groupApplied
-                }
-                return $return
+                $groupFailedNames += $fixDisplayName
             }
         }
 
-        # If fewer results than fixes in group, the batch broke early (shouldn't happen if fail-fast returned)
+        # A short result set now means the batch really did crash: the final attempt
+        # runs every fix, so it is no longer just fail-fast stopping early.
         if ($results.Count -lt $groupFixes.Count) {
             $failedFix = $groupFixes[$results.Count]
             Write-Log "$VMName`: Batch stopped before fix '$($failedFix.FixName)'. Possible crash in scriptblock." -Warning
             # Pull transcript for the fix that we suspect crashed mid-execution
             Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $failedFix.FixName -VMDomainAccount $accountForTranscript
-            # Stamp fixes that succeeded before the crash
-            if ($groupApplied.Count -gt 0) {
-                $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $groupApplied
-            }
-            return $return
+            $groupFailedNames += $failedFix.FixName
         }
 
-        # Batch-stamp all successful fixes from this group in one CIM write
+        # Stamp every fix that succeeded even when a sibling failed. Leaving them
+        # unstamped is what let one broken fix re-block the whole tail on every pass.
         if ($groupApplied.Count -gt 0) {
             $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $groupApplied
+        }
+
+        if ($groupFailedNames.Count -gt 0) {
+            Write-Log "$VMName`: $($groupFailedNames.Count) fix(es) failed [$($groupFailedNames -join ', ')]; $($groupApplied.Count) applied and stamped. Only the failed fix(es) remain pending." -Warning
+            return $return
         }
     }
 
