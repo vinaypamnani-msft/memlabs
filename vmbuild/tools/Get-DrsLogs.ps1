@@ -212,6 +212,11 @@ $sqlSnapBlock = {
     # Per-group link status both directions. spGetLinkOverAllStatus takes MAX(Status) across
     # groups, so one lagging group is what turns the whole link Degraded (7816) / Failed (7822).
     Q "SELECT rd.ReplicationGroup, rd.ReplicationPattern, s.SiteSending, s.SiteReceiving, s.Status FROM RCM_ReplicationLinkStatus s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID ORDER BY s.Status DESC, s.SiteSending, rd.ReplicationGroup" "RCM_ReplicationLinkStatus (per-group, both directions)"
+    # A child primary's own PkgServers row is what tells the CAS the site needs content; until it
+    # replicates UP, the CAS finds no such site and declines to send WITHOUT LOGGING ANYTHING.
+    # Flushing 'Configuration Data' for this was a guess and it did not work (8527f678, reverted) --
+    # this says which group actually carries the row.
+    Q "SELECT ad.ArticleName, ad.Type, rd.ReplicationGroup, rd.ReplicationPattern FROM ArticleData ad INNER JOIN ReplicationData rd ON rd.ID = ad.ReplicationID WHERE ad.ArticleName LIKE 'Pkg%' OR ad.ArticleName LIKE 'SMSPackages%' ORDER BY ad.ArticleName" "Replication group per Pkg*/SMSPackages* article"
     return $out
 }
 
