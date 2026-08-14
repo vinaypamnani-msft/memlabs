@@ -81,6 +81,7 @@ param(
     [int]$MaxMinutes = 120,
     [int]$ArmWaitMinutes = 0,
     [switch]$FlushExperiment,
+    [switch]$ResetChildPackageState,
     [int]$BaselineSeconds = 180,
     [int]$PostSeconds = 900
 )
@@ -148,7 +149,7 @@ Write-Host ""
 # replication state. Same block on purpose: the instance/port discovery below is the part that was
 # hard to get right, and a second copy of it would drift.
 $sqlSnapBlock = {
-    param($siteCode, $PkgId, $FlushGroup)
+    param($siteCode, $PkgId, $FlushGroup, $ExecSql, $ExecSite)
     $out = New-Object System.Collections.Generic.List[string]
     # 'localhost' silently means default-instance-on-1433. CS2-PS2SQL is MSSQL instance 'BOB'
     # on port 41223, so every query failed with "Named Pipes ... error 40" and the snapshot
@@ -187,6 +188,25 @@ $sqlSnapBlock = {
         catch { }
     }
     if (-not $db) { $out.Add("Could not resolve CM database. Tried: $($candidates -join ' | ')"); return $out }
+    if ($ExecSql) {
+        # @p = package, @s = site code. Rows affected is reported so the caller can verify the write
+        # landed instead of assuming it did.
+        try {
+            $cs = "Server=$server;Initial Catalog=$db;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+            $cn = New-Object System.Data.SqlClient.SqlConnection $cs
+            $cn.Open()
+            $cmd = $cn.CreateCommand()
+            $cmd.CommandText = $ExecSql
+            $cmd.CommandTimeout = 120
+            [void]$cmd.Parameters.AddWithValue('@p', "$PkgId")
+            [void]$cmd.Parameters.AddWithValue('@s', "$ExecSite")
+            $n = $cmd.ExecuteNonQuery()
+            $cn.Close()
+            $out.Add("EXEC rows=$n :: $ExecSql")
+        }
+        catch { $out.Add("EXEC FAILED :: $ExecSql :: " + $_.Exception.Message) }
+        return $out
+    }
     if ($FlushGroup) {
         # The one write this tool makes. spDRSSendChangesForGroup is the same proc ConfigMgr's own
         # RCM calls; scope is CAS_OR_PRIMARY_OR_SECONDARY (verified in source).
@@ -335,6 +355,41 @@ $cmReadyBlock = {
 }
 
 $script:watchSessions = @{}
+# SMS_DistributionPoint is the targeting table InstallBoundaryGroups.ps1 already drives; going
+# through it (and Start-CMContentDistribution) keeps the re-add on the real provider path rather
+# than hand-writing a PkgServers row that ConfigMgr would never produce.
+$dpTargetingBlock = {
+    param($SiteCode, $PkgId, $Mode, $DpFqdn)
+    $o = New-Object System.Collections.Generic.List[string]
+    $ns = "root\SMS\site_$SiteCode"
+    $fqdnOf = { param($nal) if ("$nal" -match '\\\\([^\\"\]]+)') { $Matches[1] } else { "$nal" } }
+    if ($Mode -eq 'add') {
+        try {
+            $ui = $env:SMS_ADMIN_UI_PATH
+            if (-not $ui) { return @('ADD ERROR: SMS_ADMIN_UI_PATH not set') }
+            Import-Module (Join-Path (Split-Path $ui -Parent) 'ConfigurationManager.psd1') -ErrorAction Stop
+            if (-not (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                $null = New-PSDrive -Name $SiteCode -PSProvider CMSite -Root "$env:COMPUTERNAME.$env:USERDNSDOMAIN" -ErrorAction Stop
+            }
+            Push-Location "$($SiteCode):" -ErrorAction Stop
+            try { Start-CMContentDistribution -PackageId $PkgId -DistributionPointName $DpFqdn -ErrorAction Stop; $o.Add("ADDED $DpFqdn") }
+            finally { Pop-Location }
+        }
+        catch { $o.Add("ADD ERROR: " + $_.Exception.Message) }
+        return $o.ToArray()
+    }
+    try {
+        $t = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PkgId'" -ErrorAction Stop)
+        if ($t.Count -eq 0) { $o.Add('TARGET none') }
+        foreach ($x in $t) {
+            $f = & $fqdnOf $x.ServerNALPath
+            if ($Mode -eq 'delete') { $x.Delete(); $o.Add("DELETED $f") } else { $o.Add("TARGET $f") }
+        }
+    }
+    catch { $o.Add("WMI ERROR: " + $_.Exception.Message) }
+    return $o.ToArray()
+}
+
 function Get-GuestOutput {
     param($VmName, $DomainName, [scriptblock]$Block, [object[]]$ArgList, $Tag)
     # Invoke-VmCommand -AsJob bootstraps a job AND a session on every call (~1-2 min each), which
@@ -366,6 +421,89 @@ function Get-GuestOutput {
             if ($attempt -eq 2) { return @("ERROR: $Tag $($_.Exception.Message)") }
         }
     }
+}
+
+if ($ResetChildPackageState) {
+    $resetLog = Join-Path $logsRoot ("reset-childpkg-{0}.log" -f $stamp)
+    $rsay = {
+        param($t)
+        $l = '{0}  {1}' -f (Get-Date -Format 'HH:mm:ss'), $t
+        Write-Host $l -ForegroundColor Gray
+        try { Add-Content -LiteralPath $resetLog -Value $l -Encoding utf8 -ErrorAction Stop } catch { }
+    }
+    if ($priList.Count -ne 1) {
+        Write-Host "FATAL: -ResetChildPackageState needs exactly one child primary. Use -PrimaryName." -ForegroundColor Red
+        return
+    }
+    $child = $priList[0]
+    $childSql = Resolve-SqlVm -SiteVm $child -AllVms $allVms
+    $casSql = Resolve-SqlVm -SiteVm $cas -AllVms $allVms
+    if (-not $PackageId) {
+        $cand = @(Get-GuestOutput -VmName $cas.vmName -DomainName $dom -Block $pkgFindBlock -ArgList @($cas.siteCode) -Tag 'find-clientpkg')
+        $ids = @($cand | Where-Object { $_ -match '^[A-Z0-9]{8} ' })
+        if ($ids.Count -ne 1) { Write-Host "FATAL: could not resolve the client package. Re-run with -PackageId." -ForegroundColor Red; return }
+        $PackageId = $ids[0].Split(' ')[0]
+    }
+
+    $rows = {
+        param($Tag, $VmName, $SiteCode)
+        $l = @(Get-GuestOutput -VmName $VmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($SiteCode, $PackageId) -Tag $Tag)
+        foreach ($x in $l) { if ($x -match '^Pkg|^SMSPackages') { & $rsay "    $Tag $x" } }
+        return $l
+    }
+    $childHasFor = { param($Lines, $Site) return (@($Lines | Where-Object { $_ -match '^PkgServers_[GL]\[' -and $_ -match "SiteCode=$Site(\s|$)" }).Count -gt 0) }
+
+    & $rsay "log -> $resetLog"
+    & $rsay "RESET  pkg=$PackageId  child=$($child.vmName)/$($child.siteCode)  cas=$($cas.vmName)/$($cas.siteCode)"
+    & $rsay "This WRITES to the lab: it deletes the child's DP targeting, clears PkgServers/PkgStatus rows for $($child.siteCode) on both sides, zeroes StoredPkgVersion, then re-adds the targeting to restart the wait."
+
+    $tgt = @(Get-GuestOutput -VmName $child.vmName -DomainName $dom -Block $dpTargetingBlock -ArgList @($child.siteCode, $PackageId, 'list', $null) -Tag 'tgt-list')
+    foreach ($x in $tgt) { & $rsay "    CHILD $x" }
+    $dpFqdns = @($tgt | Where-Object { $_ -match '^TARGET \S' } | ForEach-Object { ($_ -split ' ', 2)[1] })
+    if ($dpFqdns.Count -eq 0) { & $rsay "ABORT: no DP targeting found on the child, so there is nothing to reset and re-add."; return }
+
+    & $rsay "--- before ---"
+    $null = & $rows 'CHILD' $childSql.vmName $child.siteCode
+    $null = & $rows 'CAS  ' $casSql.vmName $cas.siteCode
+
+    foreach ($x in (Get-GuestOutput -VmName $child.vmName -DomainName $dom -Block $dpTargetingBlock -ArgList @($child.siteCode, $PackageId, 'delete', $null) -Tag 'tgt-del')) { & $rsay "    CHILD $x" }
+
+    $childSite = $child.siteCode
+    $execs = @(
+        @{ Vm = $childSql.vmName; Site = $child.siteCode; Sql = "DELETE FROM PkgServers_G WHERE PkgID = @p AND SiteCode = @s" },
+        @{ Vm = $childSql.vmName; Site = $child.siteCode; Sql = "DELETE FROM PkgServers_L WHERE PkgID = @p AND SiteCode = @s" },
+        @{ Vm = $childSql.vmName; Site = $child.siteCode; Sql = "DELETE FROM PkgStatus_G WHERE ID = @p AND SiteCode = @s" },
+        @{ Vm = $childSql.vmName; Site = $child.siteCode; Sql = "UPDATE SMSPackages_L SET StoredPkgVersion = 0 WHERE PkgID = @p" },
+        @{ Vm = $casSql.vmName; Site = $cas.siteCode; Sql = "DELETE FROM PkgServers_G WHERE PkgID = @p AND SiteCode = @s" },
+        @{ Vm = $casSql.vmName; Site = $cas.siteCode; Sql = "DELETE FROM PkgServers_L WHERE PkgID = @p AND SiteCode = @s" },
+        @{ Vm = $casSql.vmName; Site = $cas.siteCode; Sql = "DELETE FROM PkgStatus_G WHERE ID = @p AND SiteCode = @s" }
+    )
+    foreach ($e in $execs) {
+        foreach ($l in (Get-GuestOutput -VmName $e.Vm -DomainName $dom -Block $sqlSnapBlock -ArgList @($e.Site, $PackageId, $null, $e.Sql, $childSite) -Tag 'exec')) { & $rsay "    $($e.Vm) $l" }
+    }
+
+    & $rsay "--- after clearing (both sides must show no $childSite row) ---"
+    $childAfter = & $rows 'CHILD' $childSql.vmName $child.siteCode
+    $casAfter = & $rows 'CAS  ' $casSql.vmName $cas.siteCode
+    $stillChild = & $childHasFor $childAfter $childSite
+    $stillCas = & $childHasFor $casAfter $childSite
+    if ($stillChild -or $stillCas) {
+        & $rsay "ABORT: rows for $childSite survived the clear (child=$stillChild cas=$stillCas). NOT reset -- do not measure this."
+        return
+    }
+
+    $tReAdd = Get-Date
+    foreach ($f in $dpFqdns) {
+        foreach ($x in (Get-GuestOutput -VmName $child.vmName -DomainName $dom -Block $dpTargetingBlock -ArgList @($child.siteCode, $PackageId, 'add', $f) -Tag 'tgt-add')) { & $rsay "    CHILD $x" }
+    }
+    & $rsay "--- after re-add (clock starts $($tReAdd.ToString('HH:mm:ss'))) ---"
+    $null = & $rows 'CHILD' $childSql.vmName $child.siteCode
+    $null = & $rows 'CAS  ' $casSql.vmName $cas.siteCode
+    & $rsay "RESET COMPLETE. Now run, in two windows:"
+    & $rsay "  .\Get-DrsLogs.ps1 -PrimaryName $($child.vmName) -WatchSendChain -PackageId $PackageId"
+    & $rsay "  .\Get-DrsLogs.ps1 -PrimaryName $($child.vmName) -FlushExperiment -PackageId $PackageId -ArmWaitMinutes 60"
+    Write-Host "Reset log: $resetLog" -ForegroundColor Green
+    return
 }
 
 if ($FlushExperiment) {
