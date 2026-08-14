@@ -31,8 +31,21 @@ still on the VM, unread. Writing to a log is not reporting. Trace the evidence a
 to a human under the failure you just created; if the only path runs through the thing that
 is broken, add one that does not (`0adaf631`: a breadcrumb file the host polls directly).
 
-## Proof that a wait can never clear must FAIL, not warn
+## Validate the instrument before you derive anything from it
 
+An oracle that looks authoritative can be structurally blind, and a zero from a blind oracle
+is indistinguishable from a real zero. Cross-check any counter, API projection or WMI class
+against a second, independent read of the *same* fact ONCE -- at a moment you already know
+the answer -- before a conclusion rests on it.
+
+`SMS_DistributionPoint` on a CAS returned 0 while direct SQL showed the row present and
+byte-identical on both sites. A root cause, a fix (`8527f678`), a commit message and a memory
+file were all built on that 0; the fix then measured *worse* than the baseline it was meant
+to beat and was reverted (`8ca37baa`). Three of four root causes in that investigation died to
+instruments nobody had validated. A plausible mechanism read out of source is a hypothesis,
+not a measurement -- and neither is a number from an unvalidated probe.
+
+## Proof that a wait can never clear must FAIL, not warn
 A warning on a repeating loop is indistinguishable from progress and burns the whole
 timeout budget. If code has enough evidence to log "this cannot clear on its own", it has
 enough evidence to stop. The host printed exactly that sentence every 5 minutes for 80
