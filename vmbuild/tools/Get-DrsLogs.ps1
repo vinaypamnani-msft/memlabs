@@ -499,11 +499,16 @@ if ($ResetChildPackageState) {
     & $rsay "--- after re-add (clock starts $($tReAdd.ToString('HH:mm:ss'))) ---"
     $null = & $rows 'CHILD' $childSql.vmName $child.siteCode
     $null = & $rows 'CAS  ' $casSql.vmName $cas.siteCode
-    & $rsay "RESET COMPLETE. Now run, in two windows:"
-    & $rsay "  .\Get-DrsLogs.ps1 -PrimaryName $($child.vmName) -WatchSendChain -PackageId $PackageId"
-    & $rsay "  .\Get-DrsLogs.ps1 -PrimaryName $($child.vmName) -FlushExperiment -PackageId $PackageId -ArmWaitMinutes 60"
-    Write-Host "Reset log: $resetLog" -ForegroundColor Green
-    return
+    if (-not $FlushExperiment) {
+        & $rsay "RESET COMPLETE. Now run, in two windows:"
+        & $rsay "  .\Get-DrsLogs.ps1 -PrimaryName $($child.vmName) -WatchSendChain -PackageId $PackageId"
+        & $rsay "  .\Get-DrsLogs.ps1 -PrimaryName $($child.vmName) -FlushExperiment -PackageId $PackageId -ArmWaitMinutes 60"
+        Write-Host "Reset log: $resetLog" -ForegroundColor Green
+        return
+    }
+    # The window opens the instant the re-add lands, so hand straight over rather than making a
+    # human start the experiment inside it -- that hand-off is what was missed on the last run.
+    & $rsay "RESET COMPLETE -- continuing into the flush experiment while the window is open."
 }
 
 if ($FlushExperiment) {
