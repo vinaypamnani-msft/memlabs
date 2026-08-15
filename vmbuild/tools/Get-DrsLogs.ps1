@@ -103,6 +103,7 @@ param(
     [int]$IntervalSeconds = 20,
     [int]$MaxMinutes = 120,
     [int]$ArmWaitMinutes = 0,
+    [int]$ExpectPrimaries = 0,
     [switch]$FlushExperiment,
     [switch]$ResetChildPackageState,
     [switch]$DrsProbe,
@@ -982,8 +983,24 @@ if ($WatchSendChain) {
         $answered = @{}
         $armCycle = 0
         & $say "arming: waiting up to ${ArmWaitMinutes}m for ConfigMgr on $($needArm.vmName -join ', ')"
-        while ($armed.Count -lt $needArm.Count -and (Get-Date) -lt $armDeadline) {
+        if ($ExpectPrimaries -gt 0) { & $say "  also waiting for the child-primary count to reach $ExpectPrimaries (currently $($priList.Count))" }
+        while (((Get-Date) -lt $armDeadline) -and (($armed.Count -lt $needArm.Count) -or ($ExpectPrimaries -gt 0 -and $priList.Count -lt $ExpectPrimaries))) {
             $armCycle++
+            # Get-List is read ONCE at launch, so a primary that does not exist yet can never join the
+            # watch. Re-read it here or starting before the new site is created silently watches only
+            # the old ones -- which is exactly what a run against an in-progress add-primary did.
+            if ($ExpectPrimaries -gt 0) {
+                $allVms = @(Get-List -Type VM -SmartUpdate)
+                if ($Domain) { $allVms = @($allVms | Where-Object { $_.domain -eq $Domain }) }
+                $fresh = @($allVms | Where-Object { $_.role -eq 'Primary' -and $_.domain -eq $dom -and $_.parentSiteCode -eq $cas.siteCode })
+                if ($PrimaryName) { $fresh = @($fresh | Where-Object { $_.vmName -eq $PrimaryName }) }
+                foreach ($f in $fresh) {
+                    if ($priList.vmName -contains $f.vmName) { continue }
+                    $priList += $f
+                    $needArm += $f
+                    & $say "  NEW child primary appeared: $($f.vmName) (site $($f.siteCode)) -- added to the watch"
+                }
+            }
             foreach ($v in $needArm) {
                 if ($armed.ContainsKey($v.vmName)) { continue }
                 $r = @(Get-GuestOutput -VmName $v.vmName -DomainName $dom -Block $cmReadyBlock -ArgList @($v.siteCode) -Tag "arm-$($v.siteCode)")
@@ -1003,7 +1020,11 @@ if ($WatchSendChain) {
                     & $say "  ^ that VM is probably not part of this build. Restart with -PrimaryName <vm> to scope the watch, or it will block arming for the full ${ArmWaitMinutes}m."
                 }
             }
-            if ($armed.Count -lt $needArm.Count) { Start-Sleep -Seconds 60 }
+            if ($armed.Count -lt $needArm.Count -or ($ExpectPrimaries -gt 0 -and $priList.Count -lt $ExpectPrimaries)) { Start-Sleep -Seconds 60 }
+        }
+        if ($ExpectPrimaries -gt 0 -and $priList.Count -lt $ExpectPrimaries) {
+            & $say "NOT ARMED within ${ArmWaitMinutes}m: only $($priList.Count) of $ExpectPrimaries child primaries ever appeared. Nothing was watched."
+            return
         }
         if ($armed.Count -lt $needArm.Count) {
             $missing = @($needArm | Where-Object { -not $armed.ContainsKey($_.vmName) } | Select-Object -ExpandProperty vmName)
