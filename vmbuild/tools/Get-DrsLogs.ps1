@@ -267,18 +267,25 @@ $sqlSnapBlock = {
             $cmd = $cn.CreateCommand(); $cmd.CommandText = $q; $cmd.CommandTimeout = 60
             if ($p) { [void]$cmd.Parameters.AddWithValue('@p', $p) }
             $r = $cmd.ExecuteReader()
-            while ($r.Read()) {
-                $rows++
-                $line = @()
-                for ($i = 0; $i -lt $r.FieldCount; $i++) {
-                    $nm = $r.GetName($i)
-                    if ($keep -and $nm -notmatch $keep) { continue }
-                    $v = $r.GetValue($i)
-                    if ($keep -and $v -is [DBNull]) { continue }
-                    $line += ("{0}={1}" -f $nm, $v)
+            # Procs like spDiagDRS return MANY result sets; reading only the first silently drops the
+            # rest and looks like a complete answer.
+            $set = 0
+            do {
+                $set++
+                if (-not $keep -and $set -gt 1) { $out.Add("  ---- result set $set ----") }
+                while ($r.Read()) {
+                    $rows++
+                    $line = @()
+                    for ($i = 0; $i -lt $r.FieldCount; $i++) {
+                        $nm = $r.GetName($i)
+                        if ($keep -and $nm -notmatch $keep) { continue }
+                        $v = $r.GetValue($i)
+                        if ($keep -and $v -is [DBNull]) { continue }
+                        $line += ("{0}={1}" -f $nm, $v)
+                    }
+                    if ($keep) { $out.Add("$title[$rows] " + ($line -join ' ')) } else { $out.Add('  ' + ($line -join '  ')) }
                 }
-                if ($keep) { $out.Add("$title[$rows] " + ($line -join ' ')) } else { $out.Add('  ' + ($line -join '  ')) }
-            }
+            } while ($r.NextResult())
             $r.Close(); $cn.Close()
             # Absence is evidence here -- no row in PkgStatus_G is what makes IsPkgSendingNeeded return TRUE.
             if ($keep -and $rows -eq 0) { $out.Add("$title NO ROWS") }
@@ -293,6 +300,9 @@ $sqlSnapBlock = {
         Q "SELECT * FROM SMSPackages WHERE PkgID = @p" 'SMSPackages' $keep $PkgId
         # Type: 1 Package, 2 Program, 4 Package Server (DP), 8 Access account (PkgNotification.h).
         Q "SELECT * FROM PkgNotification WHERE PkgID = @p" 'PkgNotification' $keep $PkgId
+        # Second mode of the same proc: all three params non-null jumps to SEARCHFORDATA, which reports
+        # this specific row's replication state rather than the site's general state.
+        Q "EXEC dbo.spDiagDRS N'PkgServers_G', N'PkgID', @p" 'spDiagDRS-PkgServers_G' $keep $PkgId
         return $out
     }
     $out.Add("CM database: $db  (server $server)")
@@ -343,6 +353,13 @@ $sqlSnapBlock = {
     # Core/Tables/DRSSentMessages.h.
     Q "SELECT COUNT(*) AS MessagesCaptured, MIN(ProcessedTime) AS Earliest, MAX(ProcessedTime) AS Latest FROM DRSSentMessages" "DRSSentMessages: is per-group message capture even on? (0 = OFF, not 'nothing sent')"
     Q "SELECT TOP 40 m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@TableName','NVARCHAR(256)') AS TableName, T.X.value('./@Type','NVARCHAR(64)') AS Operation FROM DRSSentMessages m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) WHERE T.X.value('./@TableName','NVARCHAR(256)') LIKE 'Pkg%' OR T.X.value('./@TableName','NVARCHAR(256)') LIKE 'SMSPackages%' ORDER BY m.ID DESC" "DRSSentMessages: which Pkg*/SMSPackages* rows were actually SENT, and when"
+    # The product's own diagnostic, and the entry point the support wiki tells engineers to use.
+    # With no arguments it emits a USAGE banner as result set 1 and the general-state sections after
+    # it, so the sets are offset by one from the wiki's numbering: general status (SiteStatus, cert
+    # thumbprint), queue depths, global group init % (must be 100), link status, SSB certs+routes,
+    # hierarchy, per-group LastSentStatus. The section headings are PRINT output, which ADO.NET does
+    # not return, so sets are numbered rather than named.
+    Q 'EXEC dbo.spDiagDRS' 'spDiagDRS (product diagnostic; set 1 is a USAGE banner, the state sections follow)'
     return $out
 }
 
