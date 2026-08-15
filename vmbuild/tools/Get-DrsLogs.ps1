@@ -284,6 +284,10 @@ $sqlSnapBlock = {
     # SyncInterval=1 and healthy links mean transport is NOT the delay, so the question becomes
     # whether the change is even offered to the sender: FilterColumn can exclude rows from a site's
     # send, and IsColumnTracked/CCARPopulated govern how change tracking picks the row up.
+    # spLogEntry writes DRS's own reasons into the Logs TABLE, not rcmctrl.log -- searching the file
+    # log for "Not sending changes to sites" returns nothing because it was never written there.
+    # Columns verified in Core/Tables/Logs.h.
+    Q "SELECT TOP 200 LogTime, ProcedureName, ComponentName, LogText FROM Logs WHERE ProcedureName LIKE 'spDRS%' OR ProcedureName LIKE 'spRcm%' OR LogText LIKE '%Configuration Data%' ORDER BY LogLine DESC" "Logs (DRS's own account of what it sent and why not)"
     Q "SELECT ad.ArticleName, ad.Type, rd.ReplicationGroup, rd.ReplicationPattern, ad.FilterColumn, ad.IsColumnTracked, ad.CCARPopulated, ad.FireTriggersOnBCP, ad.OptionalFlag FROM ArticleData ad INNER JOIN ReplicationData rd ON rd.ID = ad.ReplicationID WHERE ad.ArticleName LIKE 'Pkg%' OR ad.ArticleName LIKE 'SMSPackages%' ORDER BY ad.ArticleName" "Replication group per Pkg*/SMSPackages* article"
     return $out
 }
