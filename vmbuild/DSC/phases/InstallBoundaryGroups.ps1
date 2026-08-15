@@ -361,6 +361,11 @@ $ensureClientPkgCoverage = {
     #     PS3 hman 02:47:11 -> distmgr 02:47:21 ;  PS2 hman 19:11:46 -> distmgr 19:12:01
     # So the group that matters is 'Site Control Data', not 'Configuration Data'. Both are pushed:
     # the child's DRS sender is known not to self-schedule, so either can sit unsent indefinitely.
+    # VERIFIED 2026-08-15, controlled comparison in one run (same CAS, same hierarchy):
+    #   PS1 'Configuration Data' only  wait 05:40:12 -> hman "DPs changed" 06:09:18 = 29m06s
+    #   PS3 + 'Site Control Data'      wait 11:56:06 -> hman "DPs changed" 11:56:26 =     20s
+    # Wait-start to content: 41m53s (no push) / 37m52s (Config only) / 17m03s (both).
+    # The residual is ~5 min for distmgr's next pass plus ~11 min of actual package transfer.
     # Registry detection matches ConfigureMPReplica.ps1; System.Data.SqlClient because Invoke-Sqlcmd
     # is not present on a site server.
     $drsPushGroups = @('Site Control Data', 'Configuration Data')
