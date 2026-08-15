@@ -341,6 +341,48 @@ $ensureClientPkgCoverage = {
     # changes no package property, bumps no SourceVersion, and re-snapshots no content
     # (unlike RefreshPkgSource, which would re-send the whole 673MB package). Best-effort:
     # on failure the parent's own timer still owns the outcome, exactly as before.
+    # MEASURED on cstest2 PS3 2026-08-15: the child had written its PkgServers_G row and held it for
+    # ~20 min; a 60s control window confirmed it was not about to move. One call to
+    # spDRSSendChangesForGroup put it at the CAS in 27s, and the CAS scheduled the send immediately.
+    # So the extraction works and change tracking sees the row -- nothing was INVOKING the extraction.
+    # DRSSentMessages on the child stayed frozen at its post-init burst the whole time while the scan
+    # timestamps kept advancing, which is what a group that is never queued looks like.
+    # This is the counterpart to the wake paths above: they poke the PARENT, which has nothing to act
+    # on until this row arrives. Registry detection matches ConfigureMPReplica.ps1; System.Data.SqlClient
+    # because Invoke-Sqlcmd is not present on a site server.
+    $pushDrsChangesToParent = {
+        param($Group)
+        try {
+            $sqlReg = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+            $srv = $sqlReg.Server
+            $dbRaw = $sqlReg.'Database Name'
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [drs-push] skipped -- could not read site SQL registry: $($_.Exception.Message)"
+            return $false
+        }
+        $inst = $srv
+        $dbName = $dbRaw
+        if ($dbRaw -match '\\') { $inst = "$srv\$($dbRaw.Split('\')[0])"; $dbName = $dbRaw.Split('\')[1] }
+        $cn = $null
+        try {
+            $cn = New-Object System.Data.SqlClient.SqlConnection "Server=$inst;Initial Catalog=$dbName;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
+            $cn.Open()
+            $cmd = $cn.CreateCommand()
+            $cmd.CommandText = 'EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup'
+            $cmd.CommandTimeout = 120
+            [void]$cmd.Parameters.AddWithValue('@ReplicationGroup', $Group)
+            [void]$cmd.ExecuteNonQuery()
+            Write-DscStatus "Client pkg coverage: [drs-push] ran spDRSSendChangesForGroup '$Group' on $dbName so the parent gets our targeting row now instead of waiting for the next scheduled sync."
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [drs-push] spDRSSendChangesForGroup '$Group' failed: $($_.Exception.Message). The site's own scheduler still owns the outcome."
+            return $false
+        }
+        finally { if ($cn) { try { $cn.Close() } catch { } } }
+    }
+
     $parentFqdn = if ($ThisVM.thisParams) { "$($ThisVM.thisParams.ParentSiteServer)" } else { '' }
     $parentSite = "$($ThisVM.parentSiteCode)"
     $lastParentPoke = $null
@@ -453,6 +495,7 @@ $ensureClientPkgCoverage = {
                     Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
                     $lastArm[$u] = Get-Date
                     Write-DscStatus "Client pkg coverage: DP '$dp' had NO targeting row (PkgServers) -> distributed to re-establish it [try $try]"
+                    if ($contentPendingFromParent) { [void](& $pushDrsChangesToParent 'Configuration Data') }
                 }
                 catch { Write-DscStatus "Client pkg coverage: re-establishing the targeting row for DP '$dp' failed: $($_.Exception.Message)" }
                 continue
@@ -486,6 +529,8 @@ $ensureClientPkgCoverage = {
                 if ($contentPendingFromParent) { Write-DscStatus "Client pkg coverage: DP '$dp' is $stName and site $SiteCode still has no content -> re-armed the targeting with RefreshNow so the parent sees a fresh change and sends the package [try $try]" }
                 elseif ($armedAt) { Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> re-armed with RefreshNow so distmgr retries now instead of waiting out its backoff [try $try]" }
                 else { Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed (RefreshNow) [try $try]" }
+                # Writing the row is not enough on a new child primary -- push it, or it sits unsent.
+                if ($contentPendingFromParent) { [void](& $pushDrsChangesToParent 'Configuration Data') }
             }
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
         }
