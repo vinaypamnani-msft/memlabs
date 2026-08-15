@@ -347,12 +347,23 @@ $ensureClientPkgCoverage = {
     # sees the row -- nothing was INVOKING the extraction. DRSSentMessages on the child stayed frozen
     # at its post-init burst the whole time while the scan timestamps kept advancing, which is what a
     # group that is never queued looks like.
-    # THIS DOES NOT SHORTEN THE WAIT. The CAS did not act on the row's arrival: it declined four more
-    # times over the next 14 min and sent at 02:47:21, ~46 min after the site-attach trigger file --
-    # matching PS1 (51m) and PS2 (50m), which had no help at all. Delivering the row early is correct
-    # on its own terms, but the clock lives inside distmgr and nothing here reaches it.
+    # Pushing 'Configuration Data' alone does NOT shorten the wait -- measured at +8s, +17min and
+    # never, giving 37m52s / ~38m / 41m53s. That is because the CAS was never blocked on the
+    # PkgServers row at all:
+    #   CDistributionSrcSQL::FindFirstPkgServer (basesvr/distsrc.cpp) reads
+    #     PkgServers psrv JOIN DistributionPoints dp ON dp.NALPath = psrv.NALPath ... dp.DPFlags<>1
+    #   With no DistributionPoints row for the child's DP the PkgServers row is not returned, the
+    #   child site never enters arrReplGroups, and the send loop never evaluates it -- which is why
+    #   the decline was silent: no decision was ever made.
+    #   CAS hman writes that row from the child's SITE CONTROL data
+    #   (CHierarchyManager::UpdateSysResList iterates CSCItem_SysResUse and CRCs the DP list), and
+    #   the send follows within 15s of it doing so -- measured twice:
+    #     PS3 hman 02:47:11 -> distmgr 02:47:21 ;  PS2 hman 19:11:46 -> distmgr 19:12:01
+    # So the group that matters is 'Site Control Data', not 'Configuration Data'. Both are pushed:
+    # the child's DRS sender is known not to self-schedule, so either can sit unsent indefinitely.
     # Registry detection matches ConfigureMPReplica.ps1; System.Data.SqlClient because Invoke-Sqlcmd
     # is not present on a site server.
+    $drsPushGroups = @('Site Control Data', 'Configuration Data')
     $pushDrsChangesToParent = {
         param($Group)
         try {
@@ -498,7 +509,7 @@ $ensureClientPkgCoverage = {
                     Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
                     $lastArm[$u] = Get-Date
                     Write-DscStatus "Client pkg coverage: DP '$dp' had NO targeting row (PkgServers) -> distributed to re-establish it [try $try]"
-                    if ($contentPendingFromParent) { [void](& $pushDrsChangesToParent 'Configuration Data') }
+                    if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) } }
                 }
                 catch { Write-DscStatus "Client pkg coverage: re-establishing the targeting row for DP '$dp' failed: $($_.Exception.Message)" }
                 continue
@@ -532,8 +543,8 @@ $ensureClientPkgCoverage = {
                 if ($contentPendingFromParent) { Write-DscStatus "Client pkg coverage: DP '$dp' is $stName and site $SiteCode still has no content -> re-armed the targeting with RefreshNow so the parent sees a fresh change and sends the package [try $try]" }
                 elseif ($armedAt) { Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> re-armed with RefreshNow so distmgr retries now instead of waiting out its backoff [try $try]" }
                 else { Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed (RefreshNow) [try $try]" }
-                # Writing the row is not enough on a new child primary -- push it, or it sits unsent.
-                if ($contentPendingFromParent) { [void](& $pushDrsChangesToParent 'Configuration Data') }
+                # The CAS is gated on DistributionPoints, which hman builds from site control data.
+                if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) } }
             }
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
         }
