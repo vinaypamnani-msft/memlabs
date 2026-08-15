@@ -267,7 +267,10 @@ $sqlSnapBlock = {
     }
     $out.Add("CM database: $db  (server $server)")
     Q "SELECT SiteCode, SiteStatus FROM ServerData ORDER BY SiteCode" "ServerData (SiteStatus per site)"
-    Q "SELECT ReplicationGroup, ReplicationPattern FROM ReplicationData ORDER BY ReplicationPattern, ReplicationGroup" "ReplicationData (groups)"
+    # SyncInterval is MINUTES and it is the whole schedule: spDRSInitiateSynchronizations only queues
+    # a group once (60*SyncInterval) seconds have passed since LastSendStartTime, so a change lands at
+    # a random point in that cycle and waits, on average, half of it.
+    Q "SELECT ReplicationGroup, ReplicationPattern, SyncInterval, IsPush, ReplicationPriority, TransportType, Flags FROM ReplicationData ORDER BY SyncInterval DESC, ReplicationGroup" "ReplicationData (SyncInterval in MINUTES = the send cadence)"
     Q "SELECT TOP 60 rd.ReplicationGroup, rd.ReplicationPattern, s.SiteCode, s.Active, s.LastSendResult, s.LastVersionSent, s.LastSendStartTime, s.LastSendEndTime FROM DRS_MessageActivity_Send s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID ORDER BY s.LastSendStartTime DESC" "DRS_MessageActivity_Send (per-group send status; LastSendResult<0 = error)"
     Q "SELECT rd.ReplicationGroup, rd.ReplicationPattern, s.SiteCode, s.Active, s.LastSendResult FROM DRS_MessageActivity_Send s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID WHERE s.LastSendResult < 0 ORDER BY rd.ReplicationGroup" "Send groups with an ERROR result (LastSendResult<0)"
     # Per-group link status both directions. spGetLinkOverAllStatus takes MAX(Status) across
