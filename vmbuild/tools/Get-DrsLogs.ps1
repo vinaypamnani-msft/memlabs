@@ -363,6 +363,9 @@ $sqlSnapBlock = {
     # and a TOP..DESC list only ever shows the most recent traffic. Capture predates the coverage
     # wait, so this reaches back to the event itself instead of to whatever happened most recently.
     Q "SELECT m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@Type','NVARCHAR(64)') AS Operation FROM DRSSentMessages m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) WHERE T.X.value('./@TableName','NVARCHAR(256)') = 'PkgServers_G' ORDER BY m.ID" "DRSSentMessages: EVERY PkgServers_G send captured, oldest first"
+    # Dumps the row element verbatim rather than naming attributes, so WHICH row moved is read off the
+    # message instead of inferred from a timestamp lining up.
+    Q "SELECT m.ID, m.ProcessedTime, T.X.value('./@Type','NVARCHAR(64)') AS Operation, CONVERT(NVARCHAR(400), R.Y.query('.')) AS RowXml FROM DRSSentMessages m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) CROSS APPLY T.X.nodes('row') R(Y) WHERE T.X.value('./@TableName','NVARCHAR(256)') = 'PkgServers_G' ORDER BY m.ID" "DRSSentMessages: the PkgServers_G rows themselves (which package, which site)"
     # The product's own diagnostic, and the entry point the support wiki tells engineers to use.
     # With no arguments it emits a USAGE banner as result set 1 and the general-state sections after
     # it, so the sets are offset by one from the wiki's numbering: general status (SiteStatus, cert
