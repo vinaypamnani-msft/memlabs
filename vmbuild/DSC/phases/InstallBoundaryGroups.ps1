@@ -343,13 +343,16 @@ $ensureClientPkgCoverage = {
     # on failure the parent's own timer still owns the outcome, exactly as before.
     # MEASURED on cstest2 PS3 2026-08-15: the child had written its PkgServers_G row and held it for
     # ~20 min; a 60s control window confirmed it was not about to move. One call to
-    # spDRSSendChangesForGroup put it at the CAS in 27s, and the CAS scheduled the send immediately.
-    # So the extraction works and change tracking sees the row -- nothing was INVOKING the extraction.
-    # DRSSentMessages on the child stayed frozen at its post-init burst the whole time while the scan
-    # timestamps kept advancing, which is what a group that is never queued looks like.
-    # This is the counterpart to the wake paths above: they poke the PARENT, which has nothing to act
-    # on until this row arrives. Registry detection matches ConfigureMPReplica.ps1; System.Data.SqlClient
-    # because Invoke-Sqlcmd is not present on a site server.
+    # spDRSSendChangesForGroup put it at the CAS in 27s. So the extraction works and change tracking
+    # sees the row -- nothing was INVOKING the extraction. DRSSentMessages on the child stayed frozen
+    # at its post-init burst the whole time while the scan timestamps kept advancing, which is what a
+    # group that is never queued looks like.
+    # THIS DOES NOT SHORTEN THE WAIT. The CAS did not act on the row's arrival: it declined four more
+    # times over the next 14 min and sent at 02:47:21, ~46 min after the site-attach trigger file --
+    # matching PS1 (51m) and PS2 (50m), which had no help at all. Delivering the row early is correct
+    # on its own terms, but the clock lives inside distmgr and nothing here reaches it.
+    # Registry detection matches ConfigureMPReplica.ps1; System.Data.SqlClient because Invoke-Sqlcmd
+    # is not present on a site server.
     $pushDrsChangesToParent = {
         param($Group)
         try {
