@@ -2405,7 +2405,6 @@ ORDER BY p.rows DESC
                         Write-DscStatus "$SiteCode -> $PSSiteCode global data init: $pct% (${drsElapsedMin}m elapsed)" -RetrySeconds $sleepSeconds -MachineName $PSVM.VmName
                         Write-DscStatus "$SiteCode -> $PSSiteCode replication init: $pct%" -NoLog -RetrySeconds $sleepSeconds
                     }
-                    Start-Sleep -Seconds $sleepSeconds
                 }
                 else {
                     Write-DscStatus "Replication link is Active (${drsElapsedMin}m elapsed)" -MachineName $PSVM.VmName
@@ -2416,6 +2415,12 @@ ORDER BY p.rows DESC
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
                 }
+            }
+            # One sleep per PASS, not per primary. With the sleep inside the foreach each pending
+            # primary was only polled every (pending count) x $sleepSeconds - measured at 60s on
+            # fabrikam while PS1 and PS2 both waited, halving back to 30s the moment PS1 completed.
+            if ($waitList.Count -gt 0) {
+                Start-Sleep -Seconds $sleepSeconds
             }
         }
 
