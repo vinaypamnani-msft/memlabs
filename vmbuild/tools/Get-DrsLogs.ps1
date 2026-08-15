@@ -281,7 +281,10 @@ $sqlSnapBlock = {
     # Measured: these all sit in 'Configuration Data' (global), which is exactly what the reverted
     # 8527f678 flushed -- so a correctly targeted flush that did transmit still did not help, and why
     # is still unknown. Confirm the group here before anyone proposes flushing again.
-    Q "SELECT ad.ArticleName, ad.Type, rd.ReplicationGroup, rd.ReplicationPattern FROM ArticleData ad INNER JOIN ReplicationData rd ON rd.ID = ad.ReplicationID WHERE ad.ArticleName LIKE 'Pkg%' OR ad.ArticleName LIKE 'SMSPackages%' ORDER BY ad.ArticleName" "Replication group per Pkg*/SMSPackages* article"
+    # SyncInterval=1 and healthy links mean transport is NOT the delay, so the question becomes
+    # whether the change is even offered to the sender: FilterColumn can exclude rows from a site's
+    # send, and IsColumnTracked/CCARPopulated govern how change tracking picks the row up.
+    Q "SELECT ad.ArticleName, ad.Type, rd.ReplicationGroup, rd.ReplicationPattern, ad.FilterColumn, ad.IsColumnTracked, ad.CCARPopulated, ad.FireTriggersOnBCP, ad.OptionalFlag FROM ArticleData ad INNER JOIN ReplicationData rd ON rd.ID = ad.ReplicationID WHERE ad.ArticleName LIKE 'Pkg%' OR ad.ArticleName LIKE 'SMSPackages%' ORDER BY ad.ArticleName" "Replication group per Pkg*/SMSPackages* article"
     return $out
 }
 
