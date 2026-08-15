@@ -333,6 +333,11 @@ $sqlSnapBlock = {
     # rcmctrl logs 'Changed the status of ConfigMgrDRSQueue to OFF' on entering Maintenance Mode;
     # this is the live state rather than the last logged transition.
     Q "SELECT name, is_receive_enabled, is_enqueue_enabled, is_activation_enabled FROM sys.service_queues WHERE name LIKE 'ConfigMgr%' ORDER BY name" "Service Broker queues (is_receive_enabled=0 means DRS is halted)"
+    # Only populated once -EnableDrsTracing sets 'DRS Replication Group Message Logging'. The count
+    # runs first so that an empty detail list cannot be misread as "nothing was sent" when it really
+    # means "capture was never on". Columns verified in Core/Tables/DRSSentMessages.h.
+    Q "SELECT COUNT(*) AS MessagesCaptured, MIN(ProcessedTime) AS Earliest, MAX(ProcessedTime) AS Latest FROM DRSSentMessages" "DRSSentMessages: is per-group message capture even on? (0 = OFF, not 'nothing sent')"
+    Q "SELECT TOP 40 m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@TableName','NVARCHAR(256)') AS TableName, T.X.value('./@Type','NVARCHAR(64)') AS Operation FROM DRSSentMessages m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) WHERE T.X.value('./@TableName','NVARCHAR(256)') LIKE 'Pkg%' OR T.X.value('./@TableName','NVARCHAR(256)') LIKE 'SMSPackages%' ORDER BY m.ID DESC" "DRSSentMessages: which Pkg*/SMSPackages* rows were actually SENT, and when"
     return $out
 }
 
