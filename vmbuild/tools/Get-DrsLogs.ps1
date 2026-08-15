@@ -295,6 +295,19 @@ $sqlSnapBlock = {
     Q "SELECT TOP 200 LogTime, ProcedureName, LogText FROM Logs WHERE LogText LIKE '%[[]Configuration Data]%' ORDER BY LogLine DESC" "Logs: Configuration Data (the group carrying PkgServers_G)"
     Q "SELECT TOP 60 LogTime, ProcedureName, LogText FROM Logs WHERE (ProcedureName LIKE 'spDRS%' OR ProcedureName LIKE 'spRcm%') AND (LogText LIKE '%Not sending changes%' OR LogText LIKE '%previous sync has not completed%' OR LogText LIKE '%Scheduling is off%' OR LogText LIKE '%re-init%' OR LogText LIKE '%invalid subscription%') ORDER BY LogLine DESC" "Logs: DRS refusals (throttle / changed dialog / schedule / reinit)"
     Q "SELECT ad.ArticleName, ad.Type, rd.ReplicationGroup, rd.ReplicationPattern, ad.FilterColumn, ad.IsColumnTracked, ad.CCARPopulated, ad.FireTriggersOnBCP, ad.OptionalFlag FROM ArticleData ad INNER JOIN ReplicationData rd ON rd.ID = ad.ReplicationID WHERE ad.ArticleName LIKE 'Pkg%' OR ad.ArticleName LIKE 'SMSPackages%' ORDER BY ad.ArticleName" "Replication group per Pkg*/SMSPackages* article"
+    # ChangeCount is how many changes the extraction actually FOUND for that sync, so a run of
+    # ChangeCount=0 rows while the row provably exists locally is DRS saying change tracking never
+    # offered it -- which separates "not extracted" from "extracted but not delivered". Columns
+    # verified in Core/Tables/DrsSendHistory.h.
+    Q "SELECT TOP 40 h.ID, h.TargetSite, h.ChangeCount, h.MessageCount, h.StartTime, h.EndTime, h.ProcessedTime, h.SyncCompleteTime FROM DrsSendHistory h INNER JOIN ReplicationData rd ON rd.ID = h.ReplicationGroupID WHERE rd.ReplicationGroup = 'Configuration Data' ORDER BY h.ID DESC" "DrsSendHistory: Configuration Data (ChangeCount per sync = was anything offered)"
+    Q "SELECT TOP 40 h.ID, rd.ReplicationGroup, h.TargetSite, h.ChangeCount, h.MessageCount, h.StartTime, h.EndTime FROM DrsSendHistory h INNER JOIN ReplicationData rd ON rd.ID = h.ReplicationGroupID WHERE h.ProcessedTime IS NULL ORDER BY h.ID DESC" "DrsSendHistory: sends still unprocessed (ProcessedTime IS NULL)"
+    # Status 6 = DRS_INIT_ACTIVE, 7 = aborted-but-historical; anything else means a group is still
+    # initializing and the site is in Maintenance Mode. Core/Tables/RCM_DrsInitializationTracking.h.
+    Q "SELECT SiteRequesting, SiteFulfilling, ReplicationGroup, InitializationStatus, InitializationPercent, TryCount, CreatedTime, ModifiedTime FROM RCM_DrsInitializationTracking WHERE InitializationStatus NOT IN (6,7) ORDER BY ModifiedTime DESC" "RCM_DrsInitializationTracking: groups NOT active (init still pending)"
+    Q "SELECT s.SiteSending, s.SiteReceiving, rd.ReplicationGroup, s.Status, s.StatusName, s.SnapshotApplied, s.SnapshotAppliedTime FROM RCM_ReplicationLinkStatus s INNER JOIN ReplicationData rd ON rd.ID = s.ReplicationID WHERE s.SnapshotApplied IS NULL OR s.SnapshotApplied <> 1 ORDER BY rd.ReplicationGroup" "RCM_ReplicationLinkStatus: snapshot NOT applied (waiting on init)"
+    # rcmctrl logs 'Changed the status of ConfigMgrDRSQueue to OFF' on entering Maintenance Mode;
+    # this is the live state rather than the last logged transition.
+    Q "SELECT name, is_receive_enabled, is_enqueue_enabled, is_activation_enabled FROM sys.service_queues WHERE name LIKE 'ConfigMgr%' ORDER BY name" "Service Broker queues (is_receive_enabled=0 means DRS is halted)"
     return $out
 }
 
