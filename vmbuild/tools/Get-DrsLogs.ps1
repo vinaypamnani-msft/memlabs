@@ -353,6 +353,10 @@ $sqlSnapBlock = {
     # Core/Tables/DRSSentMessages.h.
     Q "SELECT COUNT(*) AS MessagesCaptured, MIN(ProcessedTime) AS Earliest, MAX(ProcessedTime) AS Latest FROM DRSSentMessages" "DRSSentMessages: is per-group message capture even on? (0 = OFF, not 'nothing sent')"
     Q "SELECT TOP 40 m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@TableName','NVARCHAR(256)') AS TableName, T.X.value('./@Type','NVARCHAR(64)') AS Operation FROM DRSSentMessages m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) WHERE T.X.value('./@TableName','NVARCHAR(256)') LIKE 'Pkg%' OR T.X.value('./@TableName','NVARCHAR(256)') LIKE 'SMSPackages%' ORDER BY m.ID DESC" "DRSSentMessages: which Pkg*/SMSPackages* rows were actually SENT, and when"
+    # Unbounded and OLDEST FIRST on purpose: the question is when this table's rows actually moved,
+    # and a TOP..DESC list only ever shows the most recent traffic. Capture predates the coverage
+    # wait, so this reaches back to the event itself instead of to whatever happened most recently.
+    Q "SELECT m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@Type','NVARCHAR(64)') AS Operation FROM DRSSentMessages m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) WHERE T.X.value('./@TableName','NVARCHAR(256)') = 'PkgServers_G' ORDER BY m.ID" "DRSSentMessages: EVERY PkgServers_G send captured, oldest first"
     # The product's own diagnostic, and the entry point the support wiki tells engineers to use.
     # With no arguments it emits a USAGE banner as result set 1 and the general-state sections after
     # it, so the sets are offset by one from the wiki's numbering: general status (SiteStatus, cert
