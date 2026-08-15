@@ -60,6 +60,29 @@
     Use this to start the watch in Phase 2 and walk away -- the transition being chased is a single
     unlogged decision, so being late to it costs the whole run.
 
+.PARAMETER EnableDrsTracing
+    CHANGES SITE CONFIGURATION on the CAS and every child primary. Turns on the DRS diagnostics that
+    are OFF by default and whose absence is why DrsSendHistory/DRSSentMessages have been empty:
+
+      DRS Replication Group Message Logging = 'Configuration Data'  -> populates vDRSSentMessages /
+        vDRSReceivedMessages with the per-operation XML (@TableName, @Type), which is the only way to
+        see WHICH rows a sync actually carried. Off by default for every group.
+      DRS Logging Level = 2, Verbose Logging = 2                    -> verbose vLogs / rcmctrl.
+      Tracing DebugLogging = 1, LoggingLevel = 0, MaxFileSize = 50MB.
+      fnIsDebugLoggingEnabled() -> RETURN 1 (ALTER, so there is no window where the function is
+        missing; the shipped body is 'RETURN 0', verified in Core/Functions/fnIsDebugLoggingEnabled.sql).
+
+    The prior value AND whether each value existed at all is captured to C:\Windows\Temp on each VM, so
+    -DisableDrsTracing restores exactly what was there and REMOVES values that it created, rather than
+    writing documented defaults over settings the site may not have had.
+
+    Run this BEFORE the build whose replication you want to explain. Verbose DRS logging can fill a
+    disk, so turn it back off afterwards.
+
+.PARAMETER DisableDrsTracing
+    Reverses -EnableDrsTracing from the captured prior state. If the capture file is missing it falls
+    back to the documented defaults and says so, rather than silently claiming a clean restore.
+
 .EXAMPLE
     cd C:\memlabs\vmbuild\tools ; .\Get-DrsLogs.ps1
 .EXAMPLE
@@ -83,6 +106,8 @@ param(
     [switch]$FlushExperiment,
     [switch]$ResetChildPackageState,
     [switch]$DrsProbe,
+    [switch]$EnableDrsTracing,
+    [switch]$DisableDrsTracing,
     [int]$BaselineSeconds = 180,
     [int]$PostSeconds = 900
 )
@@ -480,6 +505,96 @@ function Get-GuestOutput {
             if ($attempt -eq 2) { return @("ERROR: $Tag $($_.Exception.Message)") }
         }
     }
+}
+
+# Value names/types are as documented by the DRS support wiki. Prior state (including ABSENCE) is
+# captured so the disable path restores what was there instead of writing documented defaults over it.
+$drsTracingBlock = {
+    param($Mode)
+    $out = New-Object System.Collections.Generic.List[string]
+    $comp = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_REPLICATION_CONFIGURATION_MONITOR'
+    $trace = 'HKLM:\SOFTWARE\Microsoft\SMS\Tracing\SMS_REPLICATION_CONFIGURATION_MONITOR'
+    $backup = 'C:\Windows\Temp\drs-tracing-prior.json'
+    $spec = @(
+        @{ Key = $comp; Name = 'DRS Replication Group Message Logging'; Type = 'String'; On = 'Configuration Data'; Off = '' },
+        @{ Key = $comp; Name = 'DRS Logging Level'; Type = 'DWord'; On = 2; Off = 1 },
+        @{ Key = $comp; Name = 'Verbose Logging'; Type = 'DWord'; On = 2; Off = 0 },
+        @{ Key = $trace; Name = 'DebugLogging'; Type = 'DWord'; On = 1; Off = 0 },
+        @{ Key = $trace; Name = 'LoggingLevel'; Type = 'DWord'; On = 0; Off = 1 },
+        @{ Key = $trace; Name = 'MaxFileSize'; Type = 'DWord'; On = 52428800; Off = 2621440 }
+    )
+    $prior = @()
+    if ($Mode -eq 'disable') {
+        if (Test-Path -LiteralPath $backup) {
+            # Assign BEFORE wrapping: on PS5.1 @(<pipeline ending in ConvertFrom-Json>) yields ONE
+            # element holding the whole array, which silently restores nothing. PS7 hides this.
+            try { $parsed = Get-Content -LiteralPath $backup -Raw | ConvertFrom-Json; $prior = @($parsed) }
+            catch { $out.Add("PRIOR STATE UNREADABLE ($($_.Exception.Message)) -- falling back to documented defaults") }
+        }
+        else { $out.Add('NO PRIOR STATE FILE -- restoring documented defaults, not the values this site actually had') }
+    }
+    $capture = New-Object System.Collections.Generic.List[object]
+    foreach ($s in $spec) {
+        $existed = $false
+        $was = $null
+        if (Test-Path -LiteralPath $s.Key) {
+            $p = Get-ItemProperty -LiteralPath $s.Key -ErrorAction SilentlyContinue
+            if ($p -and $p.PSObject.Properties[$s.Name]) { $existed = $true; $was = $p.PSObject.Properties[$s.Name].Value }
+        }
+        else {
+            if ($Mode -eq 'enable') { New-Item -Path $s.Key -Force -ErrorAction SilentlyContinue | Out-Null; $out.Add("KEY CREATED $($s.Key)") }
+            else { $out.Add("KEY ABSENT $($s.Key) -- nothing to restore"); continue }
+        }
+        $capture.Add([pscustomobject]@{ Key = $s.Key; Name = $s.Name; Existed = $existed; Was = $was })
+        $remove = $false
+        if ($Mode -eq 'enable') { $target = $s.On }
+        else {
+            $target = $s.Off
+            $rec = @($prior | Where-Object { $_.Key -eq $s.Key -and $_.Name -eq $s.Name }) | Select-Object -First 1
+            if ($rec) { if (-not $rec.Existed) { $remove = $true } else { $target = $rec.Was } }
+        }
+        try {
+            if ($remove) {
+                Remove-ItemProperty -LiteralPath $s.Key -Name $s.Name -Force -ErrorAction Stop
+                $out.Add(("{0,-38} REMOVED (did not exist before)" -f $s.Name))
+                continue
+            }
+            Set-ItemProperty -LiteralPath $s.Key -Name $s.Name -Value $target -Type $s.Type -Force -ErrorAction Stop
+        }
+        catch { $out.Add(("{0,-38} FAILED: {1}" -f $s.Name, $_.Exception.Message)); continue }
+        $rb = Get-ItemProperty -LiteralPath $s.Key -ErrorAction SilentlyContinue
+        $now = if ($rb -and $rb.PSObject.Properties[$s.Name]) { $rb.PSObject.Properties[$s.Name].Value } else { '<MISSING AFTER WRITE>' }
+        $before = if ($existed) { "$was" } else { '<absent>' }
+        $flag = if ("$now" -eq "$target") { 'ok' } else { 'READBACK MISMATCH' }
+        $out.Add(("{0,-38} {1} -> {2}  [{3}]" -f $s.Name, $before, $now, $flag))
+    }
+    if ($Mode -eq 'enable') {
+        try { $capture | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $backup -Encoding UTF8 -ErrorAction Stop; $out.Add("prior state saved -> $backup") }
+        catch { $out.Add("COULD NOT SAVE PRIOR STATE ($($_.Exception.Message)) -- disable will only be able to use defaults") }
+    }
+    else { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
+    return $out
+}
+
+if ($EnableDrsTracing -and $DisableDrsTracing) {
+    Write-Host 'FATAL: pass only one of -EnableDrsTracing / -DisableDrsTracing.' -ForegroundColor Red
+    return
+}
+if ($EnableDrsTracing -or $DisableDrsTracing) {
+    $mode = if ($EnableDrsTracing) { 'enable' } else { 'disable' }
+    $bit = if ($EnableDrsTracing) { '1' } else { '0' }
+    $fnSql = "ALTER FUNCTION dbo.fnIsDebugLoggingEnabled() RETURNS BIT AS BEGIN RETURN $bit; END"
+    Write-Host "==== DRS tracing: $mode ====" -ForegroundColor Cyan
+    foreach ($t in (@($cas) + @($priList))) {
+        Write-Host "---- $($t.vmName) [$($t.siteCode)] ----" -ForegroundColor Cyan
+        foreach ($l in (Get-GuestOutput -VmName $t.vmName -DomainName $dom -Block $drsTracingBlock -ArgList @($mode) -Tag "trace-$($t.siteCode)")) { Write-Host "    $l" }
+        $sq = Resolve-SqlVm -SiteVm $t -AllVms $allVms
+        foreach ($l in (Get-GuestOutput -VmName $sq.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($t.siteCode, $null, $null, $fnSql, $t.siteCode) -Tag "fn-$($t.siteCode)")) { Write-Host "    $l" }
+    }
+    Write-Host ''
+    Write-Host 'SMS_REPLICATION_CONFIGURATION_MONITOR picks these up on its next cycle; no service is restarted here.' -ForegroundColor Yellow
+    if ($mode -eq 'enable') { Write-Host 'Verbose DRS logging can fill a disk -- re-run with -DisableDrsTracing when the run is done.' -ForegroundColor Yellow }
+    return
 }
 
 if ($DrsProbe) {
