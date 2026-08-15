@@ -7605,25 +7605,44 @@ class InstallPBIRS {
             # If the database is still corrupt the probe will fail and we throw
             # so DSC marks this resource as failed rather than silently passing.
             if (-not $needsReboot) {
-                Start-Sleep -Seconds 10
                 $scheme = if ($this.TemplateName) { 'https' } else { 'http' }
                 $probeFqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
                 $soapUri = "$scheme`://$probeFqdn/ReportServer/ReportService2005.asmx"
                 $origCb = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
                 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
                 try {
-                    $ssrsProxy = New-WebServiceProxy -Uri $soapUri -UseDefaultCredential -ErrorAction Stop
-                    $itemType = $ssrsProxy.GetItemType("/")
-                    if ($itemType -eq 'Folder') {
+                    # The final Restart-Service above returns as soon as the service
+                    # reports Running, but the Report Server HTTP/SOAP endpoint needs
+                    # longer to start listening and serve ReportService2005.asmx. A
+                    # single attempt ~10s after restart raced that warm-up and threw
+                    # "portal is not functional" on a WSDL download error, failing an
+                    # install that was actually fine (the LCM resume then passed once
+                    # warm). Poll the endpoint within a budget before declaring failure.
+                    $probeDeadline = (Get-Date).AddSeconds(180)
+                    $probeErr = $null
+                    $probeOk = $false
+                    while ((Get-Date) -lt $probeDeadline) {
+                        try {
+                            $ssrsProxy = New-WebServiceProxy -Uri $soapUri -UseDefaultCredential -ErrorAction Stop
+                            $itemType = $ssrsProxy.GetItemType("/")
+                            if ($itemType -eq 'Folder') {
+                                $probeOk = $true
+                                break
+                            }
+                            $probeErr = "unexpected root type '$itemType'"
+                        }
+                        catch {
+                            $probeErr = $_.Exception.Message
+                        }
+                        Start-Sleep -Seconds 10
+                    }
+                    if ($probeOk) {
                         Write-Status "PBIRS SOAP health check passed after install."
                     }
                     else {
-                        throw "PBIRS SOAP health check: unexpected root type '$itemType'"
+                        Write-Status "PBIRS SOAP health check FAILED after install (retried until 180s budget): $probeErr"
+                        throw "PBIRS installed but portal is not functional. SOAP probe at $soapUri failed after 180s: $probeErr"
                     }
-                }
-                catch {
-                    Write-Status "PBIRS SOAP health check FAILED after install: $($_.Exception.Message)"
-                    throw "PBIRS installed but portal is not functional. SOAP probe at $soapUri failed: $($_.Exception.Message)"
                 }
                 finally {
                     [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $origCb
