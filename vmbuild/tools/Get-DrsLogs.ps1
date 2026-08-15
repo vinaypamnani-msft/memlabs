@@ -287,7 +287,12 @@ $sqlSnapBlock = {
     # spLogEntry writes DRS's own reasons into the Logs TABLE, not rcmctrl.log -- searching the file
     # log for "Not sending changes to sites" returns nothing because it was never written there.
     # Columns verified in Core/Tables/Logs.h.
-    Q "SELECT TOP 200 LogTime, ProcedureName, ComponentName, LogText FROM Logs WHERE ProcedureName LIKE 'spDRS%' OR ProcedureName LIKE 'spRcm%' OR LogText LIKE '%Configuration Data%' ORDER BY LogLine DESC" "Logs (DRS's own account of what it sent and why not)"
+    # TOP 200 unfiltered spans only minutes -- Hardware_Inventory_* floods this table every cycle.
+    # Scoping to the group that carries PkgServers_G makes 200 rows reach back hours instead.
+    # 'No changes detected for group.' at a moment the child HAS the row and the CAS does not is
+    # DRS stating that change tracking never offered it.
+    Q "SELECT TOP 200 LogTime, ProcedureName, LogText FROM Logs WHERE LogText LIKE '%[[]Configuration Data]%' ORDER BY LogLine DESC" "Logs: Configuration Data (the group carrying PkgServers_G)"
+    Q "SELECT TOP 60 LogTime, ProcedureName, LogText FROM Logs WHERE (ProcedureName LIKE 'spDRS%' OR ProcedureName LIKE 'spRcm%') AND (LogText LIKE '%Not sending changes%' OR LogText LIKE '%previous sync has not completed%' OR LogText LIKE '%Scheduling is off%' OR LogText LIKE '%re-init%' OR LogText LIKE '%invalid subscription%') ORDER BY LogLine DESC" "Logs: DRS refusals (throttle / changed dialog / schedule / reinit)"
     Q "SELECT ad.ArticleName, ad.Type, rd.ReplicationGroup, rd.ReplicationPattern, ad.FilterColumn, ad.IsColumnTracked, ad.CCARPopulated, ad.FireTriggersOnBCP, ad.OptionalFlag FROM ArticleData ad INNER JOIN ReplicationData rd ON rd.ID = ad.ReplicationID WHERE ad.ArticleName LIKE 'Pkg%' OR ad.ArticleName LIKE 'SMSPackages%' ORDER BY ad.ArticleName" "Replication group per Pkg*/SMSPackages* article"
     return $out
 }
