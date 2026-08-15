@@ -356,6 +356,24 @@ $sqlSnapBlock = {
     # rcmctrl logs 'Changed the status of ConfigMgrDRSQueue to OFF' on entering Maintenance Mode;
     # this is the live state rather than the last logged transition.
     Q "SELECT name, is_receive_enabled, is_enqueue_enabled, is_activation_enabled FROM sys.service_queues WHERE name LIKE 'ConfigMgr%' ORDER BY name" "Service Broker queues (is_receive_enabled=0 means DRS is halted)"
+    # Measured on cstest2: at 18:45 EVERY group on the new child still showed LastSendStartTime
+    # 18:21:4x -- the sender had produced nothing for 24 min while our code kept writing the row.
+    # A single number that covers all groups is the fastest way to see that state again.
+    Q "SELECT rd.ReplicationGroup, ma.SiteCode, ma.Active, ma.LastSendResult, ma.LastVersionSent, ma.LastSendStartTime, DATEDIFF(SECOND, ma.LastSendStartTime, GETUTCDATE()) AS SecsSinceSendStart, rd.SyncInterval*60 AS DueAfterSecs FROM DRS_MessageActivity_Send ma INNER JOIN ReplicationData rd ON rd.ID = ma.ReplicationID ORDER BY SecsSinceSendStart DESC" "STALL: seconds since each group last STARTED a send (all groups high = sender idle)"
+    # Reproduces the gate in spDRSInitiateSynchronizations: it queues a group only once
+    # (60*SyncInterval) seconds have passed since LastSendStartTime and ma.Active=1. Rows here are
+    # groups the product itself considers due, so a non-empty list with nothing being sent is the
+    # stall, not a schedule.
+    Q "SELECT rd.ReplicationGroup, ma.SiteCode, DATEDIFF(SECOND, ma.LastSendStartTime, GETUTCDATE()) AS AgeSecs, rd.SyncInterval*60 AS ThresholdSecs, ma.LastSendResult FROM DRS_MessageActivity_Send ma INNER JOIN ReplicationData rd ON rd.ID = ma.ReplicationID WHERE ma.Active = 1 AND DATEDIFF(SECOND, ma.LastSendStartTime, GETUTCDATE()) > rd.SyncInterval*60 ORDER BY AgeSecs DESC" "STALL: groups OVERDUE by the product's own rule (60*SyncInterval elapsed, Active=1)"
+    # A DRS_StartMsgBuilder still sitting here makes spDRSInitiateSynchronizations skip the group
+    # entirely -- one un-finished extraction stalls every later send for that group.
+    Q "SELECT message_type_name, COUNT(*) AS Msgs FROM ConfigMgrDRSMsgBuilderQueue WITH (NOLOCK) GROUP BY message_type_name" "STALL: ConfigMgrDRSMsgBuilderQueue depth (a stuck DRS_StartMsgBuilder blocks re-queue)"
+    # spDRSMsgBuilderActivation refuses to start an extraction while a context for that group is
+    # still running, so the blocker chain is the thing to capture, not just the runner.
+    Q "SELECT r.session_id, s.program_name, r.status, r.command, r.wait_type, r.wait_time, r.blocking_session_id, CONVERT(NVARCHAR(300), SUBSTRING(t.text, 1, 300)) AS Stmt FROM sys.dm_exec_requests r INNER JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t WHERE s.program_name LIKE '%REPLICATION%' OR s.program_name LIKE '%SMS%' OR r.blocking_session_id <> 0 ORDER BY r.blocking_session_id DESC, r.wait_time DESC" "STALL: running DRS/SMS requests and anything blocking them"
+    Q "SELECT to_service_name, transmission_status, COUNT(*) AS Msgs, MIN(enqueue_time) AS Oldest FROM sys.transmission_queue GROUP BY to_service_name, transmission_status" "STALL: sys.transmission_queue (outgoing SSB backlog; transmission_status names the error)"
+    Q "SELECT state_desc, COUNT(*) AS Dialogs, MIN(security_timestamp) AS Oldest FROM sys.conversation_endpoints GROUP BY state_desc" "STALL: conversation endpoints by state (DISCONNECTED/ERROR dialogs wedge a group)"
+    Q 'EXEC spDiagMessagesInQueue' 'spDiagMessagesInQueue (incoming backlog per group; multiple result sets)'
     # 'Configuration Data' message capture is ON by default in this build, so these can hold history
     # from before -EnableDrsTracing was ever run. The count runs first so that an empty detail list
     # cannot be misread as "nothing was sent" when it means "capture is off". Columns verified in
