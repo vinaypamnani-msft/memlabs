@@ -109,6 +109,7 @@ param(
     [switch]$EnableDrsTracing,
     [switch]$DisableDrsTracing,
     [int]$SettleSeconds = 120,
+    [int]$StallSnapshotEverySeconds = 300,
     [int]$BaselineSeconds = 180,
     [int]$PostSeconds = 900
 )
@@ -1039,10 +1040,21 @@ if ($WatchSendChain) {
     $prev = ''
     $firstPoll = $true
     $measured = 0
+    $lastStallSnap = $null
     $t0 = Get-Date
     $deadline = $t0.AddMinutes($MaxMinutes)
 
     while ((Get-Date) -lt $deadline -and $pending.Count -gt 0) {
+        # sys.dm_exec_requests, the blocking chain and the queue depths only exist WHILE the stall is
+        # happening; a snapshot taken afterwards shows a healthy site and explains nothing. The
+        # per-package poll below cannot carry them because it runs the PkgId mode of the same block.
+        if ($StallSnapshotEverySeconds -gt 0 -and (-not $lastStallSnap -or ((Get-Date) - $lastStallSnap).TotalSeconds -ge $StallSnapshotEverySeconds)) {
+            $lastStallSnap = Get-Date
+            foreach ($w in $watchSites) {
+                & $say "--- stall snapshot $($w.SiteCode) ---"
+                foreach ($l in (Get-GuestOutput -VmName $w.SqlVm.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($w.SiteCode) -Tag "stall-$($w.SiteCode)")) { & $say "    $($w.Tag) $l" }
+            }
+        }
         $lines = @()
         foreach ($w in $watchSites) {
             foreach ($l in (Get-GuestOutput -VmName $w.SqlVm.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($w.SiteCode, $PackageId) -Tag "tables-$($w.SiteCode)")) {
