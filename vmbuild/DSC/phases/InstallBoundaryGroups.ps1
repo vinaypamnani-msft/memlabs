@@ -356,16 +356,18 @@ $ensureClientPkgCoverage = {
     #   child site never enters arrReplGroups, and the send loop never evaluates it -- which is why
     #   the decline was silent: no decision was ever made.
     #   CAS hman writes that row from the child's SITE CONTROL data
-    #   (CHierarchyManager::UpdateSysResList iterates CSCItem_SysResUse and CRCs the DP list), and
-    #   the send follows within 15s of it doing so -- measured twice:
-    #     PS3 hman 02:47:11 -> distmgr 02:47:21 ;  PS2 hman 19:11:46 -> distmgr 19:12:01
+    #   (CHierarchyManager::UpdateSysResList iterates CSCItem_SysResUse and CRCs the DP list).
+    #   hman -> "Needs to send" is NOT tightly coupled: measured 21s / 2m02s / 5m15s across three
+    #   sites. An earlier "within 15s, measured twice" note here was an over-read of n=2.
     # So the group that matters is 'Site Control Data', not 'Configuration Data'. Both are pushed:
     # the child's DRS sender is known not to self-schedule, so either can sit unsent indefinitely.
-    # VERIFIED 2026-08-15, controlled comparison in one run (same CAS, same hierarchy):
-    #   PS1 'Configuration Data' only  wait 05:40:12 -> hman "DPs changed" 06:09:18 = 29m06s
-    #   PS3 + 'Site Control Data'      wait 11:56:06 -> hman "DPs changed" 11:56:26 =     20s
-    # Wait-start to content: 41m53s (no push) / 37m52s (Config only) / 17m03s (both).
-    # The residual is ~5 min for distmgr's next pass plus ~11 min of actual package transfer.
+    # VERIFIED 2026-08-15 across 9 cstest2 child-primary waits (deduped on start/end; a re-run
+    # re-copies the same guest log under a new Phase 8 stamp). Wait-start -> content:
+    #   no push          33m05s 36m26s 37m53s 38m29s 42m28s              (5)
+    #   Config Data only 37m44s 43m09s                                   (2)
+    #   + Site Control   16m54s (PS3) and 8m12s (PS1)                    (2)
+    # No overlap between the arms. Do NOT compare across labs -- fabrikam 08-12 gave 8m15s and
+    # 19m53s with no push at all, so a single fast reading proves nothing (rule 13).
     # Registry detection matches ConfigureMPReplica.ps1; System.Data.SqlClient because Invoke-Sqlcmd
     # is not present on a site server.
     $drsPushGroups = @('Site Control Data', 'Configuration Data')
@@ -552,6 +554,9 @@ $ensureClientPkgCoverage = {
                 # Clearing the poke stamp re-wakes the parent on the NEXT iteration (~31s): the wake at
                 # the top of this one fired ~19s BEFORE hman wrote the row, so distmgr looked while the
                 # join still failed and we then waited out the full 5-minute wake interval.
+                # CADENCE VERIFIED 2026-08-15 -- push -> next [wake-ROW] went 5m05s (PS3, before this)
+                # to 31s (PS1, after). The OUTCOME (16m54s -> 8m12s) is n=1 vs n=1 and the CAS half of
+                # the chain was not collected that run, so do not bank it as the cause.
                 if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) }; $lastParentPoke = $null }
             }
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
