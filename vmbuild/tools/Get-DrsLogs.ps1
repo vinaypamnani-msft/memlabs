@@ -132,7 +132,10 @@ $logsRoot = Join-Path $vmbuildRoot 'logs'
 $destRoot = Join-Path $logsRoot 'drs-investigation'
 New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
 
-$logNames = @('rcmctrl.log', 'rcmctrl.lo_', 'smsexec.log', 'hman.log', 'sender.log', 'despool.log', 'despoolr.log', 'replmgr.log', 'dataldr.log', 'ConfigMgrSetup.log')
+# SMSProv.log records every provider Put/method call with its caller, which is the only log that
+# names WHO wrote a PkgServers row -- the one thing the 2026-08-14 cstest2 analysis could not
+# establish from DRS capture alone.
+$logNames = @('rcmctrl.log', 'rcmctrl.lo_', 'smsexec.log', 'hman.log', 'sender.log', 'despool.log', 'despoolr.log', 'replmgr.log', 'dataldr.log', 'ConfigMgrSetup.log', 'SMSProv.log', 'SMSProv.lo_', 'distmgr.log', 'distmgr.lo_')
 
 # ---- resolve topology ----
 function Resolve-SqlVm {

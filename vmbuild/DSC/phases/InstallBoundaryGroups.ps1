@@ -320,15 +320,22 @@ $ensureClientPkgCoverage = {
         Write-DscStatus "Client pkg coverage: covering secondary-site DP(s) $secWhere -- content needs an extra parent->secondary hop, so allowing up to $maxTries tries."
     }
 
-    # The parent already HAS our targeting change: tr_PkgServers_G_ins/upd insert a
-    # PkgNotification row (Type 4) the moment DRS applies the replicated PkgServers_G row.
-    # What the parent never gets is a WAKE-UP. distmgr's main loop waits on a directory
-    # change in <install>\inboxes\distmgr.box or a <=3600s timeout (distmgr.cpp:
-    # FindFirstChangeNotification(sDistMgrInbox, ...) + m_dwWaitSecs = 3600), and a row
-    # written by SQL replication touches no file. So it sleeps out the hour and only then
-    # logs "No action specified for the package ... however there may be package server
-    # changes" and sends. That is the whole delay: measured mean 1,718s against the 1,800s
-    # a uniform arrival into a 1-hour cycle predicts.
+    # MEASURED 2026-08-14 (cstest2 PS2, DRSSentMessages capture covering the whole wait): the parent
+    # does NOT already have our targeting change. The child sent no PkgServers_G row at all until
+    # 19:11:50 -- 2107s into the wait -- and once it did, the CAS had it 3s later and decided to send
+    # the package 8s after that. Inter-site replication cost ~11s of a 2107s wait; the rest was the
+    # CHILD not writing the row. Both wake paths below therefore poke a parent that has nothing to
+    # act on, which is consistent with neither of them ever having moved the outcome ([wake-ROW] at
+    # 19:12:43 fired AFTER the row had already replicated).
+    # They are kept because what DID write the row at 19:11:50 is still unidentified -- the row
+    # carried RefreshTrigger=1/UpdateMask=4, the signature of the RefreshNow Put() below, but no
+    # re-arm status was observed and Write-DscStatus is a single-line file the host samples every
+    # ~31s, so that absence proves nothing. SMSProv.log on the CHILD names the caller; get that
+    # before removing either path.
+    # The earlier claim here -- that distmgr sleeps out a 3600s FindFirstChangeNotification timeout
+    # and that this "is the whole delay" -- was wrong twice over: the child's distmgr processed the
+    # package every ~10 minutes throughout (18:30, 18:37, 18:47, 18:57, 19:07), each time logging
+    # "No action specified ... however there may be package server changes" and doing nothing.
     # SMS_Package.AddChangeNotification() is a no-argument provider method whose entire
     # body is AddNotification(pkgid, priority, PKG_NOTIF_TYPE_PKG) (SspPackage.cpp) -- it
     # changes no package property, bumps no SourceVersion, and re-snapshots no content
