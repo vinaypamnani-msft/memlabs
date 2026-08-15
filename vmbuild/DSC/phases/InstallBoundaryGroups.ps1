@@ -514,7 +514,7 @@ $ensureClientPkgCoverage = {
                     Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
                     $lastArm[$u] = Get-Date
                     Write-DscStatus "Client pkg coverage: DP '$dp' had NO targeting row (PkgServers) -> distributed to re-establish it [try $try]"
-                    if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) } }
+                    if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) }; $lastParentPoke = $null }
                 }
                 catch { Write-DscStatus "Client pkg coverage: re-establishing the targeting row for DP '$dp' failed: $($_.Exception.Message)" }
                 continue
@@ -549,7 +549,10 @@ $ensureClientPkgCoverage = {
                 elseif ($armedAt) { Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> re-armed with RefreshNow so distmgr retries now instead of waiting out its backoff [try $try]" }
                 else { Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed (RefreshNow) [try $try]" }
                 # The CAS is gated on DistributionPoints, which hman builds from site control data.
-                if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) } }
+                # Clearing the poke stamp re-wakes the parent on the NEXT iteration (~31s): the wake at
+                # the top of this one fired ~19s BEFORE hman wrote the row, so distmgr looked while the
+                # join still failed and we then waited out the full 5-minute wake interval.
+                if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) }; $lastParentPoke = $null }
             }
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
         }
