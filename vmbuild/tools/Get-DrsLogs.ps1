@@ -82,6 +82,7 @@ param(
     [int]$ArmWaitMinutes = 0,
     [switch]$FlushExperiment,
     [switch]$ResetChildPackageState,
+    [switch]$DrsProbe,
     [int]$BaselineSeconds = 180,
     [int]$PostSeconds = 900
 )
@@ -405,6 +406,36 @@ $dpTargetingBlock = {
     return $o.ToArray()
 }
 
+# Creates/removes a throwaway package on the child. SMSPackages_G rides the SAME replication group
+# as PkgServers_G ('Configuration Data', global), so this exercises the exact article set and
+# direction under investigation without touching DP targeting.
+$cmPackageBlock = {
+    param($SiteCode, $Mode, $NameOrId)
+    $o = New-Object System.Collections.Generic.List[string]
+    try {
+        $ui = $env:SMS_ADMIN_UI_PATH
+        if (-not $ui) { return @('CM ERROR: SMS_ADMIN_UI_PATH not set') }
+        Import-Module (Join-Path (Split-Path $ui -Parent) 'ConfigurationManager.psd1') -ErrorAction Stop
+        if (-not (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+            $null = New-PSDrive -Name $SiteCode -PSProvider CMSite -Root "$env:COMPUTERNAME.$env:USERDNSDOMAIN" -ErrorAction Stop
+        }
+        Push-Location "$($SiteCode):" -ErrorAction Stop
+        try {
+            if ($Mode -eq 'create') {
+                $p = New-CMPackage -Name $NameOrId -ErrorAction Stop
+                $o.Add("CREATED PackageID=$($p.PackageID) Name=$NameOrId")
+            }
+            elseif ($Mode -eq 'delete') {
+                Remove-CMPackage -Id $NameOrId -Force -ErrorAction Stop
+                $o.Add("DELETED PackageID=$NameOrId")
+            }
+        }
+        finally { Pop-Location }
+    }
+    catch { $o.Add("CM ERROR ($Mode): " + $_.Exception.Message) }
+    return $o.ToArray()
+}
+
 function Get-GuestOutput {
     param($VmName, $DomainName, [scriptblock]$Block, [object[]]$ArgList, $Tag)
     # Invoke-VmCommand -AsJob bootstraps a job AND a session on every call (~1-2 min each), which
@@ -436,6 +467,76 @@ function Get-GuestOutput {
             if ($attempt -eq 2) { return @("ERROR: $Tag $($_.Exception.Message)") }
         }
     }
+}
+
+if ($DrsProbe) {
+    $probeLog = Join-Path $logsRoot ("drs-probe-{0}.log" -f $stamp)
+    $psay = {
+        param($t)
+        $l = '{0}  {1}' -f (Get-Date -Format 'HH:mm:ss'), $t
+        Write-Host $l -ForegroundColor Gray
+        try { Add-Content -LiteralPath $probeLog -Value $l -Encoding utf8 -ErrorAction Stop } catch { }
+    }
+    if ($priList.Count -ne 1) { Write-Host "FATAL: -DrsProbe needs exactly one child primary. Use -PrimaryName." -ForegroundColor Red; return }
+    $child = $priList[0]
+    $childSql = Resolve-SqlVm -SiteVm $child -AllVms $allVms
+    $casSql = Resolve-SqlVm -SiteVm $cas -AllVms $allVms
+
+    # Does a given site's DB have this package yet? SMSPackages is the global article under test.
+    $hasPkg = {
+        param($SqlVm, $SiteCode, $PkgId)
+        $l = @(Get-GuestOutput -VmName $SqlVm -DomainName $dom -Block $sqlSnapBlock -ArgList @($SiteCode, $PkgId) -Tag "rows-$SiteCode")
+        $spoke = @($l | Where-Object { $_ -match '^SMSPackages' })
+        return [pscustomobject]@{ Readable = ($spoke.Count -gt 0); Present = (@($spoke | Where-Object { $_ -match '^SMSPackages\[' }).Count -gt 0) }
+    }
+
+    & $psay "log -> $probeLog"
+    & $psay "DRS PROBE  child=$($child.vmName)/$($child.siteCode)  cas=$($cas.vmName)/$($cas.siteCode)"
+    & $psay "Creates a throwaway package at BOTH sites and times each direction. SMSPackages_G rides the same"
+    & $psay "group as PkgServers_G ('Configuration Data', global), so this is the article set under investigation."
+    & $psay "child->parent is the suspect direction (the missing row was SourceSite=$($child.siteCode)); parent->child is the CONTROL."
+
+    $tag = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $created = @()
+    try {
+        foreach ($side in @(
+                @{ Name = 'CHILD->CAS'; Vm = $child; Site = $child.siteCode; WatchSql = $casSql.vmName; WatchSite = $cas.siteCode },
+                @{ Name = 'CAS->CHILD'; Vm = $cas; Site = $cas.siteCode; WatchSql = $childSql.vmName; WatchSite = $child.siteCode })) {
+
+            $pkgName = "DRSPROBE-$($side.Site)-$tag"
+            $res = @(Get-GuestOutput -VmName $side.Vm.vmName -DomainName $dom -Block $cmPackageBlock -ArgList @($side.Site, 'create', $pkgName) -Tag "create-$($side.Site)")
+            foreach ($r in $res) { & $psay "    $r" }
+            $id = ($res | Where-Object { $_ -match 'CREATED PackageID=(\S+)' } | ForEach-Object { $Matches[1] } | Select-Object -First 1)
+            if (-not $id) { & $psay "$($side.Name): could not create the probe package. NOT A RESULT."; continue }
+            $created += [pscustomobject]@{ Vm = $side.Vm; Site = $side.Site; Id = $id }
+
+            $t0 = Get-Date
+            $local = & $hasPkg $(if ($side.Name -eq 'CHILD->CAS') { $childSql.vmName } else { $casSql.vmName }) $side.Site $id
+            & $psay "$($side.Name): created $id, present at origin=$($local.Present)"
+
+            $arrived = $null
+            while (((Get-Date) - $t0).TotalSeconds -lt $PostSeconds) {
+                $far = & $hasPkg $side.WatchSql $side.WatchSite $id
+                if (-not $far.Readable) { & $psay "    WARN: cannot read SMSPackages at $($side.WatchSql) -- instrument failure, not evidence"; break }
+                if ($far.Present) { $arrived = Get-Date; break }
+                Start-Sleep -Seconds 10
+            }
+            if ($arrived) { & $psay "*** $($side.Name): package $id visible after $([int]($arrived - $t0).TotalSeconds)s ***" }
+            else { & $psay "$($side.Name): package $id NOT visible within ${PostSeconds}s." }
+        }
+    }
+    finally {
+        foreach ($c in $created) {
+            foreach ($r in (Get-GuestOutput -VmName $c.Vm.vmName -DomainName $dom -Block $cmPackageBlock -ArgList @($c.Site, 'delete', $c.Id) -Tag "del-$($c.Id)")) { & $psay "    cleanup: $r" }
+        }
+    }
+
+    & $psay "--- what DRS logged, child ---"
+    foreach ($l in (Get-GuestOutput -VmName $childSql.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($child.siteCode) -Tag 'child-logs')) {
+        if ($l -match 'Configuration Data|Not sending|No changes detected|Starting scan|LastVersionSent') { & $psay "    CHILD $l" }
+    }
+    Write-Host "Probe log: $probeLog" -ForegroundColor Green
+    return
 }
 
 if ($ResetChildPackageState) {
