@@ -230,6 +230,12 @@ $sqlSnapBlock = {
             # in this context"). Only bind what the statement actually references.
             if ($ExecSql -match '@p\b') { [void]$cmd.Parameters.AddWithValue('@p', "$PkgId") }
             if ($ExecSql -match '@s\b') { [void]$cmd.Parameters.AddWithValue('@s', "$ExecSite") }
+            if ($ExecSql -match '^\s*SELECT\b') {
+                $v = $cmd.ExecuteScalar()
+                $cn.Close()
+                $out.Add("EXEC value=$v :: $ExecSql")
+                return $out
+            }
             $n = $cmd.ExecuteNonQuery()
             $cn.Close()
             $out.Add("EXEC rows=$n :: $ExecSql")
@@ -610,8 +616,13 @@ $drsTracingBlock = {
         $out.Add(("{0,-38} {1} -> {2}  [{3}]" -f $s.Name, $before, $now, $flag))
     }
     if ($Mode -eq 'enable') {
-        try { $capture | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $backup -Encoding UTF8 -ErrorAction Stop; $out.Add("prior state saved -> $backup") }
-        catch { $out.Add("COULD NOT SAVE PRIOR STATE ($($_.Exception.Message)) -- disable will only be able to use defaults") }
+        # Never overwrite an earlier capture: it holds the state from before this tool first ran, and
+        # a second enable would replace it with values this tool already changed.
+        if (Test-Path -LiteralPath $backup) { $out.Add("prior state ALREADY captured, left untouched -> $backup") }
+        else {
+            try { $capture | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $backup -Encoding UTF8 -ErrorAction Stop; $out.Add("prior state saved -> $backup") }
+            catch { $out.Add("COULD NOT SAVE PRIOR STATE ($($_.Exception.Message)) -- disable will only be able to use defaults") }
+        }
     }
     else { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
     return $out
@@ -631,6 +642,8 @@ if ($EnableDrsTracing -or $DisableDrsTracing) {
         foreach ($l in (Get-GuestOutput -VmName $t.vmName -DomainName $dom -Block $drsTracingBlock -ArgList @($mode) -Tag "trace-$($t.siteCode)")) { Write-Host "    $l" }
         $sq = Resolve-SqlVm -SiteVm $t -AllVms $allVms
         foreach ($l in (Get-GuestOutput -VmName $sq.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($t.siteCode, $null, $null, $fnSql, $t.siteCode) -Tag "fn-$($t.siteCode)")) { Write-Host "    $l" }
+        # ExecuteNonQuery reports -1 for DDL, which says nothing about what the function now returns.
+        foreach ($l in (Get-GuestOutput -VmName $sq.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($t.siteCode, $null, $null, 'SELECT dbo.fnIsDebugLoggingEnabled()', $t.siteCode) -Tag "fnread-$($t.siteCode)")) { Write-Host "    readback $l" }
     }
     Write-Host ''
     Write-Host 'SMS_REPLICATION_CONFIGURATION_MONITOR picks these up on its next cycle; no service is restarted here.' -ForegroundColor Yellow
