@@ -39,8 +39,12 @@ if ($CSName) {
     # Wait for ScriptWorkflow.json to exist on CAS
     $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
     Write-DscStatus "Waiting for $CSName to finish SUM Configuration. Current Status: $($CSConfiguration.InstallSUP.Status)."
+    $sumWaitStart = Get-Date
     while ($CSConfiguration.InstallSUP.Status -ne "Completed") {
-        Write-DscStatus "Waiting for $CSName to finish SUM Configuration. Current Status: $($CSConfiguration.InstallSUP.Status)" -NoLog -RetrySeconds 30
+        # Elapsed goes in the TEXT and the line is logged: with constant text and -NoLog this
+        # wait left ONE host record and ONE guest line for 451s (measured cstest2 PS1 08-15).
+        $sumWaitMin = [int]((Get-Date) - $sumWaitStart).TotalMinutes
+        Write-DscStatus "Waiting for $CSName to finish SUM Configuration (${sumWaitMin}m elapsed, CAS InstallSUP=$($CSConfiguration.InstallSUP.Status))" -RetrySeconds 30
         Start-Sleep -Seconds 30
         try {
             $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Stop | ConvertFrom-Json
@@ -49,6 +53,7 @@ if ($CSName) {
             Write-DscStatus "Failed to check Status on $CSName from $CSConfigurationFile. $_"
         }
     }
+    Write-DscStatus "$CSName finished SUM Configuration ($([int]((Get-Date) - $sumWaitStart).TotalMinutes)m elapsed)."
 }
 
 # Read Site Code from registry
