@@ -1194,11 +1194,11 @@ function Restart-UnresponsiveVm {
             Write-Log "VM $VmName did not become responsive within $WaitTimeSeconds seconds" -Warning
         }
         catch {
-            Write-Log "Error restarting VM ${VmName}: $_" -Error
+            Write-Log "Error restarting VM ${VmName}: $_" -Failure
         }
     }
     
-    Write-Log "VM $VmName failed to become responsive after $MaxRetries attempts" -Error
+    Write-Log "VM $VmName failed to become responsive after $MaxRetries attempts" -Failure
     return $false
 }
 

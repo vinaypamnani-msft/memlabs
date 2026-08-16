@@ -3712,7 +3712,7 @@ function Get-ConfigurationData {
                     $restarted = Restart-UnresponsiveVm -VmName $dc.NodeName -WaitTimeSeconds 90
         
                     if (-not $restarted) {
-                        Write-Log "[Phase $Phase]: $($dc.NodeName): VM failed to become responsive after restart" -Error
+                        Write-Log "[Phase $Phase]: $($dc.NodeName): VM failed to become responsive after restart" -Failure
                         # You might want to throw an exception here or handle the failure
                     }
                     else {
@@ -3733,7 +3733,7 @@ function Get-ConfigurationData {
                 }
             }
             catch {
-                Write-Log "[Phase $Phase]: $($dc.NodeName): Error during VM connectivity test: $_" -Error
+                Write-Log "[Phase $Phase]: $($dc.NodeName): Error during VM connectivity test: $_" -Failure
             }
             finally {
                 Write-Progress2 "Preparing Phase $Phase" -Status "Done Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent -Log
