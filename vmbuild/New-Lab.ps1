@@ -1491,23 +1491,36 @@ finally {
 
             # This block was the scaffold that found the Phase 11 session leak, and it
             # shouted because the counts were in the hundreds. Post-fix the launcher
-            # still legitimately holds ONE out-of-process runspace for the engine-event
-            # log-flush handler (the same PSEventJob that Write-PowerShellJobLeakDiag
-            # already excludes as a phantom leak), so warning on it trains people to
-            # ignore the whole family. Warn only when the numbers are actionable:
-            # disposal is demonstrably failing, something is parked, or there is more
-            # than that one known-benign runspace. Otherwise keep the full detail at
-            # LogOnly so a regression is still reconstructable from the log.
+            # still legitimately holds a small, stable population of runspaces, so
+            # warning on it trains people to ignore the whole family. Warn only when the
+            # numbers are actionable: disposal is demonstrably failing, something is
+            # parked, or the undisposed share of sessions created is out of proportion.
+            # Otherwise keep the full detail at LogOnly so a regression is still
+            # reconstructable from the log.
             $ledger = $null
             try { $ledger = Get-VmSessionStats } catch { }
             $disposalFailing = $false
+            $leakDisproportionate = $false
             if ($ledger) {
                 $disposalFailing = ([int]$ledger['disposeLeftOpen'] -gt 0) -or
                                    ([int]$ledger['disposeThrew'] -gt 0) -or
                                    ([int]$ledger['disposeNoOwner'] -gt 0)
+
+                # `$rsLeft.Count -gt 1` was meant to read "more than the one benign
+                # log-flush runspace", but the launcher's real floor is 13 (two runspaces
+                # per undisposed session), so the term was a constant $true: 118 of 118
+                # runs over 5 days printed this whole block to the console and not one of
+                # them was a growing leak -- leftOpen/noOwner/threw/parked were 0 every
+                # time. Measure the leak against session TRAFFIC instead. Steady state is
+                # 0.7-4.2% of sessions created (a fixed ~14 that did not grow across 600
+                # further creations); the two genuine anomalies in the window were 40% and
+                # 82%. Any cut between those silences the noise and keeps both.
+                $created = [int]$ledger['created']
+                $net = $created - [int]$ledger['disposeCalls']
+                $leakDisproportionate = ($net -ge 10) -and ($created -gt 0) -and (($net / $created) -ge 0.25)
             }
             $parked = @($global:ps_orphanRunspaces).Count
-            $actionable = $disposalFailing -or ($parked -gt 0) -or ($rsLeft.Count -gt 1)
+            $actionable = $disposalFailing -or ($parked -gt 0) -or $leakDisproportionate
             $sev = if ($actionable) { @{ Warning = $true } } else { @{ LogOnly = $true } }
 
             Write-Log "[JobLeak] after session cleanup: $($rsLeft.Count) runspace(s) still open besides the default [$byState]; $parked parked awaiting reclaim. Each carries its own command + format tables (~8MB)." @sev
@@ -1549,9 +1562,12 @@ finally {
                     Write-Log "[JobLeak] session ledger: created=$($st['created']) disposeCalls=$($st['disposeCalls']) leftOpen=$($st['disposeLeftOpen']) noOwner=$($st['disposeNoOwner']) threw=$($st['disposeThrew']) raceLost=$($st['cacheRaceLost']) cacheEvicted=$($st['cacheEvicted']) workerCleanups=$($st['workerCleanups']) workerDisposed=$($st['workerDisposed'])" @sev
                     # Net undisposed per creating caller -- names the leaking path.
                     $bc = $st['byCaller']
-                    $net = @($bc.Keys | Where-Object { [int]$bc[$_] -gt 0 } | Sort-Object { - [int]$bc[$_] } | Select-Object -First 8 |
+                    $byCaller = @($bc.Keys | Where-Object { [int]$bc[$_] -gt 0 } | Sort-Object { - [int]$bc[$_] } | Select-Object -First 8 |
                             ForEach-Object { "$_=$([int]$bc[$_])" })
-                    if ($net.Count -gt 0) { Write-Log "[JobLeak] undisposed by caller: $($net -join ' ')" -Warning }
+                    # @sev, not an unconditional -Warning: the same steady-state callers
+                    # (Wait-Phase, Confirm-IsoVisibleInGuest, Remove-ForestTrust) named
+                    # themselves on all 118 runs without the total ever moving.
+                    if ($byCaller.Count -gt 0) { Write-Log "[JobLeak] undisposed by caller: $($byCaller -join ' ')" @sev }
                 }
                 catch { }
             }

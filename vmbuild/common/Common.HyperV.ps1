@@ -622,7 +622,10 @@ function Write-PowerShellJobLeakDiag {
         }
 
         $summary = "[JobLeak] $Context`: $($jobs.Count) job(s) in the table ($($result.RunningJobs) still Running), $($rows.Count) pwsh descendant process(es) holding ${totalMB}MB."
-        if ($rows.Count -gt 0 -or $result.RunningJobs -gt 0) { Write-Log $summary -Warning }
+        # -Quiet marks a BASELINE snapshot taken before cleanup, where jobs still Running is
+        # the expected state. Warning there announced the thing the next 20 lines go on to fix:
+        # all 7 console appearances of this line in 5 days were the 'before' call.
+        if (-not $Quiet -and ($rows.Count -gt 0 -or $result.RunningJobs -gt 0)) { Write-Log $summary -Warning }
         else { Write-Log $summary -LogOnly }
 
         # Pair each job with the worker process started closest to it. The job
