@@ -162,54 +162,119 @@ $ensureClientPkgCoverage = {
         return 'distributed'
     }
 
+    # Which boundary-group site systems are DPs has to be resolved against the
+    # SITE DATABASE views (SMS_BoundaryGroupSiteSystems / SMS_DistributionPointInfo),
+    # and hman populates those a minute or more AFTER a role is committed to the
+    # site control file. A single read taken seconds after Install-DP can show a DP
+    # this very phase just created as absent. On 2026-08-14 that failed a whole
+    # Phase 8 (PT2/PRI: Get-CMDistributionPoint confirmed the DP at 10:12:28, this
+    # gate declared the group DP-less at 10:13:25). So: re-read on a budget, union a
+    # second instrument that is NOT DB-lagged, and never let a failed query become a
+    # negative answer. Reliability over speed -- the wait only happens when
+    # something looks missing.
+    $expectedBgNames = @($bgs.SiteCode | Where-Object { $_ } | Select-Object -Unique)
+    $shortOf = { param($name) ("$name" -split '\.')[0].ToUpper() }
+    $configDpHosts = @{}
+    foreach ($v in @($deployConfig.virtualMachines)) {
+        if ($v.installDP -eq $true -and $v.vmName) { $configDpHosts[(& $shortOf $v.vmName)] = $true }
+    }
+
+    $resolveDeadline = (Get-Date).AddMinutes(10)
     $bgDpFqdns = @()
     $bgLinks = @()
     $expectedBgObjects = @()
-    try {
-        $expectedBgNames = @($bgs.SiteCode | Where-Object { $_ } | Select-Object -Unique)
-        $expectedBgObjects = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop |
-            Where-Object { $expectedBgNames -contains $_.Name })
-        $expectedBgIds = @($expectedBgObjects | ForEach-Object { $_.GroupID })
-        $bgLinks = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop |
-            Where-Object { $expectedBgIds -contains $_.GroupID })
-        $bgDpFqdns = @($bgLinks |
-                ForEach-Object { & $fqdnOf $_.ServerNALPath } | Where-Object { $_ } | Select-Object -Unique)
+    $dpHostSet = @{}
+    $groupsWithoutDps = @()
+    $dpSources = ''
+    while ($true) {
+        try {
+            $expectedBgObjects = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop |
+                Where-Object { $expectedBgNames -contains $_.Name })
+            $expectedBgIds = @($expectedBgObjects | ForEach-Object { $_.GroupID })
+            $bgLinks = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop |
+                Where-Object { $expectedBgIds -contains $_.GroupID })
+            $bgDpFqdns = @($bgLinks |
+                    ForEach-Object { & $fqdnOf $_.ServerNALPath } | Where-Object { $_ } | Select-Object -Unique)
+        }
+        catch { Write-DscStatus "Client pkg coverage: could not enumerate boundary-group site systems: $($_.Exception.Message)"; return }
+
+        # SMS_DistributionPointInfo is the DB view (authoritative, lagged).
+        # SMS_SystemResourceList is derived from the site control file and flips as
+        # soon as Add-CMDistributionPoint commits -- the same source that told
+        # Install-DP the role was registered. Either one seeing the server is proof
+        # it holds the DP role; keys are short host names because the two classes
+        # disagree on FQDN vs NetBIOS.
+        $dpHostSet = @{}
+        $dpSources = @()
+        $dpQueryErrors = @()
+        foreach ($q in @(
+                @{ Name = 'SMS_DistributionPointInfo'; Class = 'SMS_DistributionPointInfo'; Filter = $null },
+                @{ Name = 'SMS_SystemResourceList'; Class = 'SMS_SystemResourceList'; Filter = "RoleName='SMS Distribution Point'" }
+            )) {
+            try {
+                $seen = 0
+                foreach ($d in @(Get-WmiObject -Namespace $ns -Class $q.Class -Filter $q.Filter -ErrorAction Stop)) {
+                    $df = & $fqdnOf $d.NALPath
+                    if (-not $df -and $d.ServerName) { $df = "$($d.ServerName)" }
+                    if ($df) { $dpHostSet[(& $shortOf $df)] = $true; $seen++ }
+                }
+                $dpSources += "$($q.Name)=$seen"
+            }
+            catch { $dpQueryErrors += "$($q.Name): $($_.Exception.Message)" }
+        }
+        $dpSources = ($dpSources + $dpQueryErrors) -join ' '
+
+        $existingExpectedBgNames = @($expectedBgObjects | ForEach-Object { $_.Name })
+        $groupsWithoutDps = @($expectedBgNames | Where-Object { $existingExpectedBgNames -notcontains $_ })
+        foreach ($expectedBg in $expectedBgObjects) {
+            $linkedDps = @($bgLinks | Where-Object { $_.GroupID -eq $expectedBg.GroupID } |
+                    ForEach-Object { & $fqdnOf $_.ServerNALPath } |
+                    Where-Object { $_ -and $dpHostSet.ContainsKey((& $shortOf $_)) } |
+                    Select-Object -Unique)
+            if ($linkedDps.Count -eq 0) { $groupsWithoutDps += $expectedBg.Name }
+        }
+        if ($groupsWithoutDps.Count -eq 0 -or (Get-Date) -ge $resolveDeadline) { break }
+
+        $remainMin = [int][math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $resolveDeadline).TotalMinutes)
+        Write-DscStatus "Client pkg coverage: boundary group(s) $($groupsWithoutDps -join ', ') show no DP yet [$dpSources] -- the site DB view trails role registration, re-reading in 30s [~${remainMin}m left]"
+        Start-Sleep -Seconds 30
     }
-    catch { Write-DscStatus "Client pkg coverage: could not enumerate boundary-group site systems: $($_.Exception.Message)"; return }
+
+    # Budget spent. Only now can "no DP" be a claim about the world rather than
+    # about the view's lag -- and only for a group this deploy never gave a DP.
+    if ($groupsWithoutDps.Count -gt 0) {
+        $configCovered = @()
+        foreach ($groupName in @($groupsWithoutDps | Select-Object -Unique)) {
+            $bgObj = @($expectedBgObjects | Where-Object { $_.Name -eq $groupName })
+            if ($bgObj.Count -eq 0) { continue }
+            $cfgDps = @($bgLinks | Where-Object { $_.GroupID -eq $bgObj[0].GroupID } |
+                    ForEach-Object { & $fqdnOf $_.ServerNALPath } |
+                    Where-Object { $_ -and $configDpHosts.ContainsKey((& $shortOf $_)) } |
+                    Select-Object -Unique)
+            if ($cfgDps.Count -eq 0) { continue }
+            $configCovered += $groupName
+            foreach ($cfgDp in $cfgDps) { $dpHostSet[(& $shortOf $cfgDp)] = $true }
+        }
+        if ($configCovered.Count -gt 0) {
+            Write-DscStatus "Client pkg coverage: boundary group(s) $($configCovered -join ', ') still show no DP in WMI after 10 min [$dpSources], but this deploy declares installDP on their site system(s) -- proceeding on the config and letting the content wait below decide. Phase 11 re-validates DP registration." -Warning
+        }
+        $stillEmpty = @($groupsWithoutDps | Where-Object { $configCovered -notcontains $_ } | Select-Object -Unique)
+        if ($stillEmpty.Count -gt 0) {
+            Write-DscStatus "Client pkg coverage: boundary group(s) have NO Distribution Point after 10 min of re-reads, and this deploy declares none for them: $($stillEmpty -join ', ') [$dpSources]. Clients in these groups cannot locate the client package." -Failure
+            return
+        }
+    }
 
     # SMS_BoundaryGroupSiteSystems lists ALL site systems in a boundary group --
-    # DPs, MPs AND SUPs (memlabs adds all three: Get-CMDistributionPoint +
-    # Get-CMManagementPoint + Get-CMSoftwareUpdatePoint). The client PACKAGE is
-    # DP content and only ever reports Installed on a DISTRIBUTION POINT, so an
-    # MP/SUP-only site system (e.g. an HA Primary like the site server itself,
-    # whose content library is remote and which has NO DP role) can never satisfy
-    # this check -- it would spin all $maxTries and warn. Intersect with the real
-    # DP list (SMS_DistributionPointInfo) so coverage only waits on actual DPs.
-    $dpFqdnSet = @{}
-    foreach ($d in @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPointInfo -ErrorAction SilentlyContinue)) {
-        $df = & $fqdnOf $d.NALPath
-        if (-not $df -and $d.ServerName) { $df = "$($d.ServerName)" }
-        if ($df) { $dpFqdnSet[$df.ToUpper()] = $true }
-    }
-    $nonDp = @($bgDpFqdns | Where-Object { -not $dpFqdnSet.ContainsKey($_.ToUpper()) })
+    # DPs, MPs AND SUPs (memlabs adds all three). The client PACKAGE is DP content
+    # and only ever reports Installed on a DISTRIBUTION POINT, so a site system with
+    # no DP role (e.g. an HA Primary whose content library is remote) can never
+    # satisfy this check and would spin all $maxTries and warn.
+    $nonDp = @($bgDpFqdns | Where-Object { -not $dpHostSet.ContainsKey((& $shortOf $_)) })
     if ($nonDp.Count -gt 0) {
-        Write-DscStatus "Client pkg coverage: excluding $($nonDp.Count) boundary-group site system(s) that are MP/SUP-only, not DPs (no client-package content lands there): $($nonDp -join ', ')"
+        Write-DscStatus "Client pkg coverage: excluding $($nonDp.Count) boundary-group site system(s) that hold no DP role (no client-package content lands there): $($nonDp -join ', ')"
     }
-    $bgDpFqdns = @($bgDpFqdns | Where-Object { $dpFqdnSet.ContainsKey($_.ToUpper()) })
-
-    $existingExpectedBgNames = @($expectedBgObjects | ForEach-Object { $_.Name })
-    $groupsWithoutDps = @($expectedBgNames | Where-Object { $existingExpectedBgNames -notcontains $_ })
-    foreach ($expectedBg in $expectedBgObjects) {
-        $linkedDps = @($bgLinks | Where-Object { $_.GroupID -eq $expectedBg.GroupID } |
-                ForEach-Object { & $fqdnOf $_.ServerNALPath } |
-                Where-Object { $_ -and $dpFqdnSet.ContainsKey($_.ToUpper()) } |
-                Select-Object -Unique)
-        if ($linkedDps.Count -eq 0) { $groupsWithoutDps += $expectedBg.Name }
-    }
-    if ($groupsWithoutDps.Count -gt 0) {
-        Write-DscStatus "Client pkg coverage: boundary group(s) have NO registered Distribution Point after membership reconciliation: $($groupsWithoutDps -join ', '). Clients in these groups cannot locate the client package." -Failure
-        return
-    }
+    $bgDpFqdns = @($bgDpFqdns | Where-Object { $dpHostSet.ContainsKey((& $shortOf $_)) })
     if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems in expected boundary groups to cover." -Failure; return }
 
     # A SECONDARY-site DP only receives the client package via slow inter-site
