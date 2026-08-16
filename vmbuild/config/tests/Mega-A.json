@@ -25,7 +25,7 @@
       "vmName": "DC1",
       "role": "DC",
       "operatingSystem": "Server 2025",
-      "memory": "4GB",
+      "memory": "3GB",
       "virtualProcs": 2,
       "tpmEnabled": false,
       "InstallCA": true,
