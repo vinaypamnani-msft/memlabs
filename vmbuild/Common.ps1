@@ -4028,6 +4028,15 @@ function Invoke-IsolatedCim {
         return (& $invoker)
     }
     finally {
+        # A Windows-only module auto-import creates WinPSCompatSession inside this
+        # runspace. Closing the wrapper alone leaves that session's two transport
+        # threads alive, retaining the disposed runspace and its full session state.
+        try {
+            $ps.Commands.Clear()
+            $null = $ps.AddScript("Get-PSSession -Name 'WinPSCompatSession*' -ErrorAction SilentlyContinue | Remove-PSSession -ErrorAction SilentlyContinue")
+            $null = $ps.Invoke()
+        }
+        catch { }
         try { $ps.Runspace.Close() } catch {}
         try { $ps.Dispose() } catch {}
     }
@@ -8017,10 +8026,11 @@ function New-PSSessionWithTimeout {
 }
 
 # Runspaces that could not be disposed at the moment they were abandoned.
-# RunspaceFactory::CreateRunspace() is the ONLY runspace API in this codebase that
-# leaks 1:1 when not explicitly disposed -- [PowerShell]::Create()+Dispose() and
-# Start-ThreadJob both reclaim cleanly (measured, temp/probe-runspace-creators.ps1)
-# -- and New-PSSessionWithTimeout is its only caller. Both of its abandon paths
+# RunspaceFactory::CreateRunspace() leaks 1:1 when not explicitly disposed, and
+# New-PSSessionWithTimeout is its only caller. A bare [PowerShell]::Create() also
+# reclaims cleanly on Dispose(), but not after a Windows-only module auto-imports
+# WinPSCompatSession: that session's transport threads must be stopped first (as
+# Invoke-IsolatedCim now does). Both New-PSSessionWithTimeout abandon paths
 # (connect timeout, and a session evicted with -LeakSession) used to drop the
 # runspace on the floor, where it stayed for the life of the shell holding its own
 # command + format + module tables, ~8MB each. A 5.5h Mega build ended with 121
