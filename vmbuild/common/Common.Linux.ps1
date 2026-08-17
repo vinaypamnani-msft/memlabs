@@ -1181,6 +1181,65 @@ function Get-LinuxDomainJoinSeedArgs {
     }
 }
 
+function Test-LinuxSerialTapEnabled {
+    <#
+    .SYNOPSIS
+        Decide whether to wire COM1 and run the serial console tap.
+
+    .DESCRIPTION
+        OFF by default since 2026-08-17. Ubuntu cloud images boot with
+        `console=ttyS0`, so the guest's kernel console goes to the named pipe
+        the tap serves -- the tap is not a passive observer, it is the reader
+        the guest's console depends on.
+
+        Across the Wacky-A runs: every tap session on the run that PASSED ended
+        cleanly ('read returned 0' / 'ExitAfterMinutes'), and every session on
+        the two runs that FAILED stopped mid-stream with no
+        '=== capture ended ===' marker -- the tap has catch+finally that write
+        one, so a missing marker means the process was killed. ZZ-TOFU's
+        framebuffer froze at the instant its tap stopped and had not advanced
+        38 minutes later, and Stop-VM -Force then timed out.
+
+        That is correlation, not proof -- ZZ-SQUID survived the same mid-stream
+        tap death on 08-17. But a diagnostic that is a live candidate for
+        hanging the guest it observes should not be on by default.
+
+        Enable per call (-EnableSerialTap), per config
+        (vmOptions.enableSerialTap), or host-wide with MEMLABS_LINUX_SERIALTAP=1.
+        The env var is the one that reaches the per-VM worker processes without
+        touching job dispatch, same precedent as MEMLABS_VHDXCOPY_SLOTS.
+
+    .OUTPUTS
+        [pscustomobject] Enabled + Source, so callers log WHY and not just whether.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$EnableSerialTap,
+
+        [Parameter(Mandatory = $false)]
+        [psobject]$DeployConfig
+    )
+
+    if ($EnableSerialTap.IsPresent) {
+        return [pscustomobject]@{ Enabled = $true; Source = '-EnableSerialTap' }
+    }
+
+    if ($DeployConfig -and $DeployConfig.PSObject.Properties['vmOptions'] -and $DeployConfig.vmOptions) {
+        $p = $DeployConfig.vmOptions.PSObject.Properties['enableSerialTap']
+        if ($p -and $p.Value) {
+            return [pscustomobject]@{ Enabled = $true; Source = 'vmOptions.enableSerialTap' }
+        }
+    }
+
+    $envVal = "$($env:MEMLABS_LINUX_SERIALTAP)".Trim()
+    if ($envVal -and $envVal -notin @('0', 'false', 'no', 'off')) {
+        return [pscustomobject]@{ Enabled = $true; Source = "MEMLABS_LINUX_SERIALTAP=$envVal" }
+    }
+
+    return [pscustomobject]@{ Enabled = $false; Source = 'default (off)' }
+}
+
 function New-LinuxVirtualMachine {
     <#
     .SYNOPSIS
@@ -1224,6 +1283,11 @@ function New-LinuxVirtualMachine {
 
         [Parameter(Mandatory = $false)]
         [switch]$ForceNew,
+
+        # Wire COM1 to a named pipe and run the console recorder. Off by
+        # default -- see Test-LinuxSerialTapEnabled for why.
+        [Parameter(Mandatory = $false)]
+        [switch]$EnableSerialTap,
 
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
@@ -1380,38 +1444,43 @@ function New-LinuxVirtualMachine {
 
         Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | Out-Null
 
-        # Wire COM1 to a named pipe so the host can capture the kernel +
-        # cloud-init console stream live. Ubuntu cloud images already have
-        # `console=ttyS0` on the kernel cmdline, so everything from GRUB
-        # onward streams here. The pipe is server-side (we own the path);
-        # attach with `vmbuild\Get-LinuxSerialTap.ps1 -VmName <name>` from
-        # another pwsh tab BEFORE Start-VM to capture the full boot. If no
-        # one is listening, Hyper-V drops bytes silently -- no guest hang.
-        $serialPipe = "\\.\pipe\memlabs-$VmName-com1"
-        try {
-            Set-VMComPort -VMName $VmName -Number 1 -Path $serialPipe -ErrorAction Stop
-            Write-Log "$VmName`: COM1 -> $serialPipe (attach with Get-LinuxSerialTap.ps1)"
-
-            # Start the tap NOW, before Start-VM. Hyper-V is the pipe CLIENT, so with
-            # no server listening the whole cloud-init console stream is discarded --
-            # capturing at the SSH-readiness timeout 30min later would get nothing.
-            # Separate process (not a job) so it cannot leak a runspace into ours, and
-            # -ExitAfterMinutes so nothing has to chase it if we die first.
+        # COM1 is only wired when the tap is enabled. Leaving the port pointed
+        # at a pipe nobody serves is documented as harmless (Hyper-V discards),
+        # but the failure we are chasing lives in that plumbing, so the default
+        # path now does not create it at all.
+        $tapDecision = Test-LinuxSerialTapEnabled -EnableSerialTap:$EnableSerialTap -DeployConfig $DeployConfig
+        if (-not $tapDecision.Enabled) {
+            Write-Log "$VmName`: serial console tap disabled [$($tapDecision.Source)]; COM1 left unconfigured. Set MEMLABS_LINUX_SERIALTAP=1 to capture the boot console." -LogOnly
+        }
+        else {
+            # Ubuntu cloud images boot with `console=ttyS0`, so everything from
+            # GRUB onward streams to this pipe.
+            $serialPipe = "\\.\pipe\memlabs-$VmName-com1"
             try {
-                $tapScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'Get-LinuxSerialTap.ps1'
-                if (Test-Path $tapScript) {
-                    $tapProc = Start-Process -FilePath (Get-Process -Id $PID).Path `
-                        -ArgumentList @('-NoProfile', '-File', "`"$tapScript`"", '-VmName', $VmName, '-ExitAfterMinutes', '60', '-NoConsoleEcho') `
-                        -WindowStyle Hidden -PassThru -ErrorAction Stop
-                    Write-Log "$VmName`: serial console recorder started (pid $($tapProc.Id)) -> logs\linux-serial\$VmName.log" -LogOnly
+                Set-VMComPort -VMName $VmName -Number 1 -Path $serialPipe -ErrorAction Stop
+                Write-Log "$VmName`: COM1 -> $serialPipe [$($tapDecision.Source)]"
+
+                # Start the tap NOW, before Start-VM. Hyper-V is the pipe CLIENT, so with
+                # no server listening the whole cloud-init console stream is discarded --
+                # capturing at the SSH-readiness timeout 30min later would get nothing.
+                # Separate process (not a job) so it cannot leak a runspace into ours, and
+                # -ExitAfterMinutes so nothing has to chase it if we die first.
+                try {
+                    $tapScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'Get-LinuxSerialTap.ps1'
+                    if (Test-Path $tapScript) {
+                        $tapProc = Start-Process -FilePath (Get-Process -Id $PID).Path `
+                            -ArgumentList @('-NoProfile', '-File', "`"$tapScript`"", '-VmName', $VmName, '-ExitAfterMinutes', '60', '-NoConsoleEcho') `
+                            -WindowStyle Hidden -PassThru -ErrorAction Stop
+                        Write-Log "$VmName`: serial console recorder started (pid $($tapProc.Id)) -> logs\linux-serial\$VmName.log" -LogOnly
+                    }
+                }
+                catch {
+                    Write-Log "$VmName`: could not start serial console recorder: $($_.Exception.Message)" -Warning -LogOnly
                 }
             }
             catch {
-                Write-Log "$VmName`: could not start serial console recorder: $($_.Exception.Message)" -Warning -LogOnly
+                Write-Log "$VmName`: Set-VMComPort failed: $_" -Warning
             }
-        }
-        catch {
-            Write-Log "$VmName`: Set-VMComPort failed: $_" -Warning
         }
 
         # Disable Secure Boot. Ubuntu cloud images do ship a Microsoft-signed
@@ -2177,6 +2246,14 @@ function Wait-LinuxVmReady {
                 return
             }
             $info = Get-Item $serialLog
+            # The tap APPENDS across runs and is off by default now, so this
+            # file is very often a previous boot's console. Printing it under
+            # this run's timeout is how the 08-08 boot got attributed to the
+            # 08-16 failure. Both times are Local kind -- do not mix in a UTC one.
+            if ($info.LastWriteTime -lt $startedAt) {
+                Write-Log "$VmName`: serial capture at $Reason is STALE -- last written $($info.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')), before this wait began $($startedAt.ToString('yyyy-MM-dd HH:mm:ss')). Nothing from this boot was captured (tap disabled, or it never started); NOT printing the previous boot." -LogOnly
+                return
+            }
             $ageMin = [int]((Get-Date) - $info.LastWriteTime).TotalMinutes
             Write-Log "$VmName`: serial console capture at $Reason -- $($info.Length) bytes, last written $($info.LastWriteTime.ToString('HH:mm:ss')) (${ageMin}m ago)" -LogOnly
             $tail = @(Get-Content $serialLog -Tail 60 -ErrorAction SilentlyContinue | Where-Object { "$_".Trim() })

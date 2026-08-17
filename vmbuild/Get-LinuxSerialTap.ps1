@@ -4,16 +4,30 @@
     console (and optionally a file).
 
 .DESCRIPTION
-    New-LinuxVirtualMachine wires every Linux VM's COM1 to
-    \\.\pipe\memlabs-<VmName>-com1. This script implements the pipe SERVER
-    end: it creates the named pipe and waits for Hyper-V (the client) to
-    connect when the VM boots, then streams everything the guest writes to
-    ttyS0 -- GRUB, kernel messages, cloud-init logs, login prompts -- to
-    stdout and optionally tees it to a file.
+    New-LinuxVirtualMachine wires a Linux VM's COM1 to
+    \\.\pipe\memlabs-<VmName>-com1 ONLY when the serial tap is enabled
+    (-EnableSerialTap, vmOptions.enableSerialTap, or MEMLABS_LINUX_SERIALTAP=1).
+    It is OFF by default as of 2026-08-17 -- see Test-LinuxSerialTapEnabled in
+    Common.Linux.ps1. With the tap off there is no pipe to attach to.
+
+    This script implements the pipe SERVER end: it creates the named pipe and
+    waits for Hyper-V (the client) to connect when the VM boots, then streams
+    everything the guest writes to ttyS0 -- GRUB, kernel messages, cloud-init
+    logs, login prompts -- to stdout and optionally tees it to a file.
 
     Start this BEFORE Start-VM (or before redeploying) to capture the full
     boot sequence. Ctrl-C to detach; the VM keeps running, the pipe just
     closes on its end.
+
+    WARNING: the guest boots with `console=ttyS0`, so this process is the
+    reader its kernel console depends on -- it is not a passive observer. On
+    both failing Wacky-A runs every tap died mid-boot (no '=== capture ended
+    ==='  marker, i.e. killed) and the guest froze at that instant. Unproven
+    as cause, but do not assume attaching is free.
+
+    NOTE: the log file is APPENDED across runs. Split on the
+    '=== connected <timestamp> ===' markers before attributing anything to a
+    particular boot.
 
 .PARAMETER VmName
     The Hyper-V VM name (matches what New-LinuxVirtualMachine produced).
