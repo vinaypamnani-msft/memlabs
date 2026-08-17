@@ -9545,7 +9545,8 @@ function Install-Tools {
                 }
 
                 $ToolList += $tool
-                Write-Log -LogOnly "[Injecting tool] Injecting $($tool.Name) to $($vm.vmName) Percent: $percent"
+                # List-building only -- the copy/skip decision happens later in Copy-ToolToVM.
+                Write-Log -LogOnly "[Injecting tool] Queued $($tool.Name) for $($vm.vmName) Percent: $percent"
                 #Write-Progress2 "Injecting tool" -Status "Injecting $($tool.Name) to $($vm.vmName)" -Log -percentcomplete $percent
 
             }
@@ -9553,7 +9554,8 @@ function Install-Tools {
             if ($vm.operatingSystem -like "*2016*") {
                 $fast = $false
             }
-            $worked = Copy-ToolToVM -Tool $ToolList -VMName $vm.vmName -WhatIf:$WhatIf -Fast:$fast -Force:$Force
+            $toolOutcome = $null
+            $worked = Copy-ToolToVM -Tool $ToolList -VMName $vm.vmName -WhatIf:$WhatIf -Fast:$fast -Force:$Force -Outcome ([ref]$toolOutcome)
             if (-not $worked) {
                 $success = $false
                 Write-Progress2 "Injecting tools" -Status "Failed to Inject at least one tool to $VmName" -Log
@@ -9572,13 +9574,21 @@ function Install-Tools {
 
             }
             else {
-                #Write-Progress2 "Injecting tools" -Status "Injected $($tool.Name) to $VmName" -Log
-                Write-Log "$vmName`: Successfully injected '$($ToolList.Name -Join ",")'" -Success
+                switch ($toolOutcome) {
+                    'Skipped' { Write-Log "$vmName`: Tools already current, nothing copied: '$($ToolList.Name -Join ",")'" -Success }
+                    'NothingToDo' { Write-Log "$vmName`: No tools applicable, nothing copied." -Success }
+                    default { Write-Log "$vmName`: Successfully injected '$($ToolList.Name -Join ",")'" -Success }
+                }
 
             }
 
             if ($success) {
-                Write-Progress2 "Injecting tools" -Status "All Tools successfully copied to  $VmName" -Log -Completed
+                if ($toolOutcome -eq 'Copied') {
+                    Write-Progress2 "Injecting tools" -Status "All Tools successfully copied to  $VmName" -Log -Completed
+                }
+                else {
+                    Write-Progress2 "Injecting tools" -Status "All Tools already current on $VmName" -Log -Completed
+                }
                 return $true
             }
             else {
@@ -10001,8 +10011,16 @@ function Copy-ToolToVM {
         [Parameter(Mandatory = $false, HelpMessage = "Fast.. Might hang.")]
         [switch]$Fast,
         [Parameter(Mandatory = $false, HelpMessage = "Force copy even if hash matches.")]
-        [switch]$Force
+        [switch]$Force,
+        [Parameter(Mandatory = $false, HelpMessage = "Receives 'Copied', 'Skipped', 'NothingToDo' or 'Failed'.")]
+        [ref]$Outcome
     )
+
+    # Return stays a plain bool on purpose: the caller's failure test is `if (-not $worked)`,
+    # and any richer type is truthy, which once made that test false on failure (see caller).
+    # Copied-vs-skipped travels through $Outcome instead. Defaulted to Failed so an
+    # unanticipated exit reports failure rather than a stale value.
+    if ($null -ne $Outcome) { $Outcome.Value = 'Failed' }
 
     $vm = Get-VMListEntryWithLiveState -VmName $VMName -Caller 'ToolCopy'
 
@@ -10095,6 +10113,7 @@ function Copy-ToolToVM {
 
     if ($commonEntries.Count -eq 0 -and $extraEntries.Count -eq 0) {
         Write-Log "$vmName`: No tools to inject." -Verbose
+        if ($null -ne $Outcome) { $Outcome.Value = 'NothingToDo' }
         return $true
     }
 
@@ -10137,6 +10156,7 @@ function Copy-ToolToVM {
             $noteFingerprint = (Get-VMNote -VMName $vm.vmName -ErrorAction SilentlyContinue).ToolsFingerprint
             if ($noteFingerprint -and $noteFingerprint -eq $combinedFingerprint) {
                 Write-Log "$vmName`: Tools unchanged (VM note fingerprint match). Skipping." -Success
+                if ($null -ne $Outcome) { $Outcome.Value = 'Skipped' }
                 return $true
             }
         }
@@ -10155,6 +10175,7 @@ function Copy-ToolToVM {
                     if (-not $hashCheck.ScriptBlockFailed -and $hashCheck.ScriptBlockOutput -eq $cachedBundleHash) {
                         Write-Log "$vmName`: Tools unchanged (source fingerprint + VM hash match). Skipping." -Success
                         try { Update-VMNoteProperty -VmName $vm.vmName -PropertyName 'ToolsFingerprint' -PropertyValue $combinedFingerprint } catch { }
+                        if ($null -ne $Outcome) { $Outcome.Value = 'Skipped' }
                         return $true
                     }
                 }
@@ -10430,6 +10451,7 @@ function Copy-ToolToVM {
     finally {
         $ProgressPreference = $progressPref
     }
+    if ($success -and $null -ne $Outcome) { $Outcome.Value = 'Copied' }
     return $success
 }
 
