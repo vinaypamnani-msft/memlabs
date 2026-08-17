@@ -73,6 +73,110 @@ Write-DscStatus "$Tag Starting perfloading"
     # Set the current location to be the site code.
     Set-Location "$($SiteCode):\" @initParams
 
+    function Sync-MemLabsScriptLibrary {
+        param([string]$ScriptPath = 'C:\tools\Scripts')
+
+        $started = Get-Date
+        $approvalQueue = New-Object System.Collections.Generic.List[object]
+        $imported = 0
+        $alreadyPresent = 0
+        $importFailed = 0
+
+        # One provider read is both faster and a better instrument than 105
+        # independent existence probes. If this read fails, let ScriptWorkflow's
+        # whole-Perfloading retry handle the provider failure rather than treating
+        # an unknown inventory as an empty script library.
+        $existingByName = @{}
+        foreach ($existingScript in @(Get-CMScript -Fast -ErrorAction Stop)) {
+            if ($existingScript.ScriptName) {
+                $existingByName["$($existingScript.ScriptName)"] = $existingScript
+            }
+        }
+
+        foreach ($scriptFile in @(Get-ChildItem -Path $ScriptPath -Recurse -Filter '*.ps1')) {
+            $scriptName = 'MEMLABS-' + [System.IO.Path]::GetFileNameWithoutExtension($scriptFile.FullName)
+            $scriptObject = $existingByName[$scriptName]
+            if ($scriptObject) {
+                $alreadyPresent++
+            }
+            else {
+                try {
+                    $scriptContent = Get-Content -Path $scriptFile.FullName -Raw
+                    $scriptObject = New-CMScript -ScriptName $scriptName -ScriptText $scriptContent -Fast -ErrorAction Stop
+                    if (-not $scriptObject -or -not $scriptObject.ScriptGuid) {
+                        throw "New-CMScript returned no ScriptGuid"
+                    }
+                    $existingByName[$scriptName] = $scriptObject
+                    $imported++
+                    Write-DscStatus "$Tag Successfully imported: $scriptName"
+                }
+                catch {
+                    $importFailed++
+                    Write-DscStatus "$Tag Failed to import: $scriptName. Error: $($_.Exception.Message)" -Warning
+                    continue
+                }
+            }
+
+            $approvalState = 0
+            try { $approvalState = [int]$scriptObject.ApprovalState } catch {}
+            if ($approvalState -ne 3 -and $scriptObject.ScriptGuid) {
+                $approvalQueue.Add([pscustomobject]@{ Name = $scriptName; Guid = "$($scriptObject.ScriptGuid)" })
+            }
+        }
+
+        $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+        Write-DscStatus "$Tag Script library reconcile: $imported imported, $alreadyPresent already present, $importFailed import failed, $($approvalQueue.Count) awaiting approval in ${elapsed}s"
+        return [pscustomobject]@{
+            Imported       = $imported
+            AlreadyPresent = $alreadyPresent
+            ImportFailed    = $importFailed
+            ApprovalQueue   = $approvalQueue.ToArray()
+        }
+    }
+
+    function Approve-MemLabsScriptQueue {
+        param([object[]]$Queue)
+
+        $started = Get-Date
+        $approved = 0
+        $failed = 0
+        $policyBlocked = 0
+        for ($index = 0; $index -lt @($Queue).Count; $index++) {
+            $entry = $Queue[$index]
+            try {
+                Approve-CMScript -ScriptGuid $entry.Guid -Comment 'MEMLABS auto approved' -ErrorAction Stop | Out-Null
+                $readBack = Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction Stop
+                if (-not $readBack -or [int]$readBack.ApprovalState -ne 3) {
+                    throw "approval returned without ApprovalState=3"
+                }
+                $approved++
+            }
+            catch {
+                $approvalError = $_.Exception.Message
+                if ($approvalError -match "Author can't approve their scripts") {
+                    # TwoKeyApproval is hierarchy policy and can lag the SCI write
+                    # on a fresh child. Every remaining call uses the same author
+                    # and policy, so more identical failures prove nothing.
+                    $policyBlocked = @($Queue).Count - $index
+                    Write-DscStatus "$Tag Script approval deferred: provider still requires a different approver after the TwoKeyApproval write. Stopped after one policy-blocked call; $policyBlocked script(s) remain unapproved and will be retried on the next Phase 8 pass." -Warning
+                    break
+                }
+                $failed++
+                Write-DscStatus "$Tag Failed to approve script '$($entry.Name)': $approvalError" -Warning
+            }
+        }
+
+        $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+        Write-DscStatus "$Tag Script approval reconcile: $approved approved, $failed failed, $policyBlocked policy-blocked in ${elapsed}s"
+        return [pscustomobject]@{
+            Approved      = $approved
+            Failed        = $failed
+            PolicyBlocked = $policyBlocked
+        }
+    }
+
+    $scriptApprovalQueue = @()
+
     # Self-healing setup for the Office Install Targets collection. Called both
     # before the Office app deployment is created (so the deployment has a real
     # target on fresh labs) and again later for non-Office paths. Always runs:
@@ -665,63 +769,8 @@ Write-DscStatus "$Tag Starting perfloading"
     Write-DscStatus "$Tag TwoKeyApproval reconciliation complete."
 
 
-    ## Scripts ( used our scripts from Wiki)
-
-    # Get all PowerShell script files (.ps1) in the folder and its sub folders
-    $scriptReconcileTimer = [System.Diagnostics.Stopwatch]::StartNew()
-    $ScriptFiles = @(Get-ChildItem -Path C:\tools\Scripts -Recurse -Filter *.ps1)
-    $existingScriptNames = @{}
-    $scriptInventoryLoaded = $false
-    try {
-        foreach ($existingScript in @(Get-CMScript -Fast -ErrorAction Stop)) {
-            if ($existingScript.ScriptName) { $existingScriptNames["$($existingScript.ScriptName)"] = $true }
-        }
-        $scriptInventoryLoaded = $true
-    }
-    catch {
-        Write-DscStatus "$Tag WARNING: Could not load the script library in one query; falling back to per-script checks: $($_.Exception.Message)"
-    }
-    $scriptsImported = 0
-    $scriptsSkipped = 0
-    $scriptsFailed = 0
-
-    # Loop through each script file and import it into SCCM
-    foreach ($ScriptFile in $ScriptFiles) {
-        $ScriptName = "MEMLABS-" + [System.IO.Path]::GetFileNameWithoutExtension($ScriptFile.FullName)
-
-        # Create a new script in SCCM using New-CMScript
-        try {
-            $scriptExists = if ($scriptInventoryLoaded) {
-                $existingScriptNames.ContainsKey($ScriptName)
-            }
-            else {
-                $null -ne (Get-CMScript -ScriptName $ScriptName -Fast -ErrorAction Stop)
-            }
-            if ($scriptExists) {
-                $scriptsSkipped++
-                continue
-            }
-
-            $ScriptContent = Get-Content -Path $ScriptFile.FullName -Raw
-            $script = New-CMScript -ScriptName "$ScriptName" -ScriptText $ScriptContent -Fast
-            $scriptsImported++
-            $existingScriptNames[$ScriptName] = $true
-            if ($script -and $script.ScriptGuid) {
-                Write-DscStatus "$Tag Successfully imported: $ScriptName"
-                # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesn't have that feature yet) Tim help needed here
-                Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved"
-            }
-            else {
-                Write-DscStatus "$Tag Imported $ScriptName but New-CMScript returned no ScriptGuid — skipping auto-approve"
-            }
-        }
-        catch {
-            $scriptsFailed++
-            Write-DscStatus "$Tag Failed to import: $ScriptName. Error: $_"
-        }
-    }
-    $scriptReconcileTimer.Stop()
-    Write-DscStatus "$Tag Script library reconcile: $scriptsImported imported, $scriptsSkipped already present, $scriptsFailed failed in $([math]::Round($scriptReconcileTimer.Elapsed.TotalSeconds, 1))s"
+    $scriptLibraryResult = Sync-MemLabsScriptLibrary
+    $scriptApprovalQueue = @($scriptLibraryResult.ApprovalQueue)
 
     } # end Primary-only TwoKeyApproval + CM-script library block
 
@@ -2715,15 +2764,10 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     # CMDeviceCollection)" guard skipped it -- leaving the collection permanently
     # empty. Checking for existence is not a reason to skip populating members.
     $existingCollectionsByName = @{}
-    $collectionInventoryLoaded = $false
-    try {
-        foreach ($existingCollection in @(Get-CMDeviceCollection -Name "MEMLABS-*" -ErrorAction Stop)) {
-            if ($existingCollection.Name) { $existingCollectionsByName["$($existingCollection.Name)"] = $existingCollection }
-        }
-        $collectionInventoryLoaded = $true
-    }
-    catch {
-        Write-DscStatus "$Tag WARNING: Could not load MEMLABS collections in one query; falling back to per-collection checks: $($_.Exception.Message)"
+    # A failed inventory is UNKNOWN, not an empty site. Let ScriptWorkflow retry
+    # Perfloading instead of falling back to ambiguous per-collection absence.
+    foreach ($existingCollection in @(Get-CMDeviceCollection -ErrorAction Stop)) {
+        if ($existingCollection.Name) { $existingCollectionsByName["$($existingCollection.Name)"] = $existingCollection }
     }
     $collectionsCreated = 0
     $collectionsSkipped = 0
@@ -2737,12 +2781,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
 
         try {
             # Ensure the collection exists.
-            $col = if ($collectionInventoryLoaded) {
-                $existingCollectionsByName[$CollectionName]
-            }
-            else {
-                Get-CMDeviceCollection -Name $CollectionName -ErrorAction Stop
-            }
+            $col = $existingCollectionsByName[$CollectionName]
             if (-not $col) {
                 $col = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
                 $existingCollectionsByName[$CollectionName] = $col
@@ -3358,7 +3397,13 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     $collection = Get-CMCollection -Name "All Unknown Computers"
     if ($Collection -and $Collection.CollectionID) {
         try { Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID } catch {}
-    }    
+    }
+
+    # Delay approval until the other provider operations have given the
+    # TwoKeyApproval write time to become effective on a new hierarchy child.
+    if (@($scriptApprovalQueue).Count -gt 0) {
+        $null = Approve-MemLabsScriptQueue -Queue $scriptApprovalQueue
+    }
 
     $perfloadingTimer.Stop()
     Write-DscStatus "$Tag Completed the perf loading the environment in $($perfloadingTimer.Elapsed.ToString('hh\:mm\:ss'))"

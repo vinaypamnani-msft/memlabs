@@ -1511,6 +1511,106 @@ function Get-WsusTaxonomyCategoryCount {
     return -1
 }
 
+function Get-WsusTaxonomyCategoryCountBounded {
+    param(
+        [string]$ServerName = $env:COMPUTERNAME,
+        [int]$PortNumber = 8530,
+        [int]$TimeoutSeconds = 30,
+        [scriptblock]$ProbeScript
+    )
+
+    if (-not $ProbeScript) {
+        $ProbeScript = {
+            param($probeServerName, $probePortNumber)
+            $isLocal = ($probeServerName -eq $env:COMPUTERNAME) -or ($probeServerName -eq 'localhost') -or ($probeServerName -eq '.')
+            if ($isLocal) {
+                try {
+                    [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+                    $ws = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+                    if ($ws) { return @($ws.GetUpdateCategories()).Count }
+                }
+                catch {}
+            }
+            try {
+                $ws = Get-WsusServer -Name $probeServerName -PortNumber $probePortNumber -ErrorAction Stop
+                if ($ws) { return @($ws.GetUpdateCategories()).Count }
+            }
+            catch {}
+            try {
+                $ws = Get-WsusServer -Name $probeServerName -PortNumber 8531 -UseSsl -ErrorAction Stop
+                if ($ws) { return @($ws.GetUpdateCategories()).Count }
+            }
+            catch {}
+            return -1
+        }
+    }
+
+    $started = Get-Date
+    $process = $null
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $probeText = $ProbeScript.ToString()
+        $probeBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeText))
+        $serverBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ServerName))
+        $childCommand = @"
+`$probeText = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$probeBase64'))
+`$serverName = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$serverBase64'))
+`$probe = [scriptblock]::Create(`$probeText)
+& `$probe `$serverName $PortNumber
+"@
+        $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
+        $enginePath = $null
+        try { $enginePath = (Get-Process -Id $PID -ErrorAction Stop).Path } catch {}
+        if (-not $enginePath) {
+            $engineName = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
+            $enginePath = Join-Path $PSHOME $engineName
+        }
+        $process = Start-Process -FilePath $enginePath `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand) `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru -ErrorAction Stop
+
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch {}
+            try { [void]$process.WaitForExit(2000) } catch {}
+            return [pscustomobject]@{
+                Count      = -1
+                ElapsedSec = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+                TimedOut   = $true
+                Error      = ''
+            }
+        }
+        $process.WaitForExit()
+        $process.Refresh()
+        $exitCode = [int]$process.ExitCode
+
+        $count = -1
+        foreach ($value in @([System.IO.File]::ReadAllLines($stdoutPath))) {
+            $parsed = 0
+            if ([int]::TryParse("$value".Trim(), [ref]$parsed)) { $count = $parsed }
+        }
+        $stderr = ([System.IO.File]::ReadAllText($stderrPath)).Trim()
+        return [pscustomobject]@{
+            Count      = $count
+            ElapsedSec = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+            TimedOut   = $false
+            Error      = $(if ($exitCode -ne 0) { "probe process exit=${exitCode}: $stderr" } else { '' })
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Count      = -1
+            ElapsedSec = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+            TimedOut   = $false
+            Error      = $_.Exception.Message
+        }
+    }
+    finally {
+        if ($process) { try { $process.Dispose() } catch {} }
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Start-WsusBaselineImportBackground {
     # Launch `wsusutil import` against C:\staging\wsus\WsusCategoriesBaseline.cab
     # in the background and persist PID + start time + expected-count to a
@@ -1697,8 +1797,9 @@ function Wait-WsusBaselineImport {
                     Start-Sleep -Seconds 5
                     if (([DateTime]::UtcNow - $lastLogUtc).TotalSeconds -ge 60) {
                         $remSec = [math]::Max(0, ($deadlineUtc - [DateTime]::UtcNow).TotalSeconds)
-                        $liveCount = Get-WsusTaxonomyCategoryCount
-                        Write-DscStatus "$Tag Baseline import still running (pid=$importPid, TaxonomyCats=$liveCount, $([math]::Round($remSec/60,1)) min remaining)..."
+                        $liveProbe = Get-WsusTaxonomyCategoryCountBounded
+                        $probeState = if ($liveProbe.TimedOut) { 'timeout' } elseif ($liveProbe.Error) { "error=$($liveProbe.Error)" } else { 'ok' }
+                        Write-DscStatus "$Tag Baseline import still running (pid=$importPid, TaxonomyCats=$($liveProbe.Count), TaxonomyProbe=$($liveProbe.ElapsedSec)s/$probeState, $([math]::Round($remSec/60,1)) min remaining)..."
                         $lastLogUtc = [DateTime]::UtcNow
                     }
                 }
@@ -1708,24 +1809,35 @@ function Wait-WsusBaselineImport {
 
     # Verify the import actually completed (not just "process gone").
     $elapsedMin   = [math]::Round(([DateTime]::UtcNow - $startTimeUtc).TotalMinutes, 1)
+    $logProbeStart = Get-Date
     $logSuccess   = Test-WsusBaselineImportSuccess -ImportLog $importLog
-    $postCount    = Get-WsusTaxonomyCategoryCount
+    $logProbeSec  = [math]::Round(((Get-Date) - $logProbeStart).TotalSeconds, 1)
+    $postProbe    = Get-WsusTaxonomyCategoryCountBounded
+    $postCount    = $postProbe.Count
     $countLanded  = ($postCount -ge $expectedCount)
+    $probeTiming  = "logProbe=${logProbeSec}s taxonomyProbe=$($postProbe.ElapsedSec)s"
 
     if ($logSuccess -and $countLanded) {
-        Write-DscStatus "$Tag Baseline import verified (elapsed=${elapsedMin}min, TaxonomyCats=$postCount, log='Successfully imported metadata')."
+        Write-DscStatus "$Tag Baseline import verified (elapsed=${elapsedMin}min, TaxonomyCats=$postCount, log='Successfully imported metadata', $probeTiming)."
         Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
         return
     }
 
     if ($countLanded -and -not $logSuccess) {
-        Write-DscStatus "$Tag Baseline import looks landed (TaxonomyCats=$postCount >= $expectedCount) but no success marker in $importLog. Proceeding."
+        Write-DscStatus "$Tag Baseline import looks landed (TaxonomyCats=$postCount >= $expectedCount) but no success marker in $importLog ($probeTiming). Proceeding."
+        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    if ($postProbe.TimedOut -or $postProbe.Error) {
+        $probeFailure = if ($postProbe.TimedOut) { 'timed out' } else { "failed: $($postProbe.Error)" }
+        Write-DscStatus "$Tag WARN: Baseline import process ended but the taxonomy verification probe $probeFailure after $($postProbe.ElapsedSec)s (logSuccess=$logSuccess, $probeTiming). The taxonomy is UNKNOWN, not absent; not launching a duplicate import."
         Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
         return
     }
 
     # Partial import (process ended without populating the taxonomy).
-    Write-DscStatus "$Tag WARN: Baseline import did not complete (elapsed=${elapsedMin}min, TaxonomyCats=$postCount, expected>=$expectedCount, logSuccess=$logSuccess). Likely killed by reboot or wsusutil error."
+    Write-DscStatus "$Tag WARN: Baseline import did not complete (elapsed=${elapsedMin}min, TaxonomyCats=$postCount, expected>=$expectedCount, logSuccess=$logSuccess, $probeTiming). Likely killed by reboot or wsusutil error."
 
     if ($RetryOnPartial -gt 0) {
         Write-DscStatus "$Tag Retrying wsusutil import synchronously (one shot)..."
@@ -1756,12 +1868,13 @@ function Wait-WsusBaselineImport {
                 Write-DscStatus "$Tag WARN: wsusutil import retry exceeded $retryDeadlineMin min and was killed. Proceeding with whatever taxonomy is loaded."
                 return
             }
-            $finalCount = Get-WsusTaxonomyCategoryCount
+            $finalProbe = Get-WsusTaxonomyCategoryCountBounded
+            $finalCount = $finalProbe.Count
             if ($retry.ExitCode -eq 0 -and $finalCount -ge $expectedCount) {
-                Write-DscStatus "$Tag Baseline import retry succeeded (exit=0, TaxonomyCats=$finalCount)."
+                Write-DscStatus "$Tag Baseline import retry succeeded (exit=0, TaxonomyCats=$finalCount, taxonomyProbe=$($finalProbe.ElapsedSec)s)."
             }
             else {
-                Write-DscStatus "$Tag WARN: Baseline import retry ended exit=$($retry.ExitCode), TaxonomyCats=$finalCount. Proceeding; CM sync may need extra cycles to populate categories."
+                Write-DscStatus "$Tag WARN: Baseline import retry ended exit=$($retry.ExitCode), TaxonomyCats=$finalCount, taxonomyProbe=$($finalProbe.ElapsedSec)s$(if ($finalProbe.TimedOut) { '/timeout' } else { '' }). Proceeding; CM sync may need extra cycles to populate categories."
             }
         }
         catch {

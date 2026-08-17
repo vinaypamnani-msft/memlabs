@@ -269,7 +269,7 @@ $ensureClientPkgCoverage = {
     # DPs, MPs AND SUPs (memlabs adds all three). The client PACKAGE is DP content
     # and only ever reports Installed on a DISTRIBUTION POINT, so a site system with
     # no DP role (e.g. an HA Primary whose content library is remote) can never
-    # satisfy this check and would spin all $maxTries and warn.
+    # satisfy this check and would run to the coverage deadline and warn.
     $nonDp = @($bgDpFqdns | Where-Object { -not $dpHostSet.ContainsKey((& $shortOf $_)) })
     if ($nonDp.Count -gt 0) {
         Write-DscStatus "Client pkg coverage: excluding $($nonDp.Count) boundary-group site system(s) that hold no DP role (no client-package content lands there): $($nonDp -join ', ')"
@@ -364,12 +364,13 @@ $ensureClientPkgCoverage = {
     # (PkgServers) targeting row alive and flip RefreshNow on it so distmgr re-processes
     # the package now instead of waiting out its 3600s sleep / 30-min retry backoff.
     $lastArm = @{}   # DP-upper -> when RefreshNow was last flipped for that DP
-    $maxTries = 24
+    $extendedCoverageWait = $false
     # A CAS/parent-owned package (e.g. the client package under a child primary) has NO
     # local content yet (StoredPkgVersion=0); its content must first replicate DOWN from
     # the parent before it can land on a local DP. That inter-site transfer is slow, so
     # give it a much larger budget and (below) never tear down the targeting meanwhile.
-    $maxTriesContentPending = 90
+    $normalWaitMinutes = 12
+    $contentPendingWaitMinutes = 45
     # A secondary-site DP needs that same budget even when THIS site already holds the
     # content, because it is one MORE inter-site hop (parent distmgr -> secondary
     # despool -> secondary distmgr -> secondary DP) and the StoredPkgVersion escalation
@@ -380,9 +381,9 @@ $ensureClientPkgCoverage = {
     # breaks the moment every DP reports Installed, so the larger budget only costs
     # wall-clock when the content genuinely has not landed.
     if ($secKeptDps.Count -gt 0) {
-        $maxTries = $maxTriesContentPending
+        $extendedCoverageWait = $true
         $secWhere = if ($secLinkSites.Count -gt 0) { @($secLinkSites.Keys) -join ', ' } else { $secKeptDps -join ', ' }
-        Write-DscStatus "Client pkg coverage: covering secondary-site DP(s) $secWhere -- content needs an extra parent->secondary hop, so allowing up to $maxTries tries."
+        Write-DscStatus "Client pkg coverage: covering secondary-site DP(s) $secWhere -- content needs an extra parent->secondary hop, so using the ${contentPendingWaitMinutes}-minute wall-clock deadline."
     }
 
     # MEASURED 2026-08-14 (cstest2 PS2, DRSSentMessages capture covering the whole wait): the parent
@@ -534,15 +535,23 @@ $ensureClientPkgCoverage = {
             try { [System.IO.File]::Delete($wakeFile) } catch { }
         }
     }
-    for ($try = 1; $try -le $maxTries; $try++) {
+    $coverageStart = Get-Date
+    $coverageDeadline = $coverageStart.AddMinutes($(if ($extendedCoverageWait) { $contentPendingWaitMinutes } else { $normalWaitMinutes }))
+    $try = 0
+    while ((Get-Date) -lt $coverageDeadline) {
+        $try++
         # Is the client package content present at THIS site yet? StoredPkgVersion=0
         # means it is still replicating down from a parent/CAS site.
         $storedVer = 0
         try { $sp = Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue | Select-Object -First 1; if ($sp) { $storedVer = [int]$sp.StoredPkgVersion } } catch {}
         $contentPendingFromParent = ($storedVer -lt 1)
-        if ($contentPendingFromParent -and $maxTries -lt $maxTriesContentPending) {
-            $maxTries = $maxTriesContentPending
-            Write-DscStatus "Client pkg coverage: client package content has not replicated down to site $SiteCode yet (StoredPkgVersion=0; source is a parent/CAS site). Waiting for the parent to send content (up to ~45 min) and NOT tearing down the DP targeting that signals it."
+        if ($contentPendingFromParent -and -not $extendedCoverageWait) {
+            $extendedCoverageWait = $true
+            # Extend from the ORIGINAL wait start, not from discovery time. A
+            # slow WMI call must not silently turn a 45-minute promise into a
+            # try-count whose wall-clock duration is unknowable.
+            $coverageDeadline = $coverageStart.AddMinutes($contentPendingWaitMinutes)
+            Write-DscStatus "Client pkg coverage: client package content has not replicated down to site $SiteCode yet (StoredPkgVersion=0; source is a parent/CAS site). Waiting for the parent to send content until the ${contentPendingWaitMinutes}-minute deadline and NOT tearing down the DP targeting that signals it."
         }
         # Only the parent can start this send, and only after something wakes its distmgr.
         if ($contentPendingFromParent -and (-not $lastParentPoke -or ((Get-Date) - $lastParentPoke).TotalMinutes -ge 5)) {
@@ -632,8 +641,11 @@ $ensureClientPkgCoverage = {
                 "$_ ($sw)"
             })
         $siteContentState = if ($contentPendingFromParent) { 'PENDING FROM PARENT' } else { 'LOCAL' }
-        Write-DscStatus "Client pkg coverage: waiting for client package on: $($waitDesc -join ', '); site $SiteCode content=$siteContentState (StoredPkgVersion=$storedVer) [$try/$maxTries]"
-        Start-Sleep -Seconds 30
+            $elapsedSec = [math]::Round(((Get-Date) - $coverageStart).TotalSeconds)
+            $remainingSec = [math]::Max(0, [math]::Floor(($coverageDeadline - (Get-Date)).TotalSeconds))
+            Write-DscStatus "Client pkg coverage: waiting for client package on: $($waitDesc -join ', '); site $SiteCode content=$siteContentState (StoredPkgVersion=$storedVer) [attempt $try, elapsed=${elapsedSec}s, deadlineRemaining=${remainingSec}s]"
+            if ($remainingSec -le 0) { break }
+            Start-Sleep -Seconds ([int][math]::Min(30, [math]::Max(1, $remainingSec)))
     }
 
     # Final state + rich DP-side diagnostics if anything is still not Installed --
@@ -653,7 +665,8 @@ $ensureClientPkgCoverage = {
     }
     $stillBad = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
     if ($stillBad.Count -gt 0) {
-        Write-DscStatus "Client pkg coverage: STILL not Installed after $maxTries tries on: $($stillBad -join ', ') [pkg $PackageID SourceVersion=$pkgSourceVersion]. Capturing DP-side diagnostics..." -Warning
+        $coverageElapsedSec = [math]::Round(((Get-Date) - $coverageStart).TotalSeconds)
+        Write-DscStatus "Client pkg coverage: STILL not Installed at the wall-clock deadline after ${coverageElapsedSec}s and $try attempt(s) on: $($stillBad -join ', ') [pkg $PackageID SourceVersion=$pkgSourceVersion]. Capturing DP-side diagnostics..." -Warning
         foreach ($dp in $stillBad) {
             $dpHost = ("$dp" -split '\.')[0]
             $u = $dp.ToUpper()

@@ -7619,9 +7619,12 @@ class InstallPBIRS {
                     # install that was actually fine (the LCM resume then passed once
                     # warm). Poll the endpoint within a budget before declaring failure.
                     $probeDeadline = (Get-Date).AddSeconds(180)
+                    $probeStarted = Get-Date
+                    $probeAttempts = 0
                     $probeErr = $null
                     $probeOk = $false
                     while ((Get-Date) -lt $probeDeadline) {
+                        $probeAttempts++
                         try {
                             $ssrsProxy = New-WebServiceProxy -Uri $soapUri -UseDefaultCredential -ErrorAction Stop
                             $itemType = $ssrsProxy.GetItemType("/")
@@ -7636,12 +7639,13 @@ class InstallPBIRS {
                         }
                         Start-Sleep -Seconds 10
                     }
+                    $probeElapsedSec = [math]::Round(((Get-Date) - $probeStarted).TotalSeconds, 1)
                     if ($probeOk) {
-                        Write-Status "PBIRS SOAP health check passed after install."
+                        Write-Status "PBIRS SOAP health check passed after install in ${probeElapsedSec}s ($probeAttempts attempt(s))."
                     }
                     else {
-                        Write-Status "PBIRS SOAP health check FAILED after install (retried until 180s budget): $probeErr"
-                        throw "PBIRS installed but portal is not functional. SOAP probe at $soapUri failed after 180s: $probeErr"
+                        Write-Status "PBIRS SOAP health check FAILED after install in ${probeElapsedSec}s ($probeAttempts attempt(s), 180s budget): $probeErr"
+                        throw "PBIRS installed but portal is not functional. SOAP probe at $soapUri failed after ${probeElapsedSec}s/$probeAttempts attempt(s): $probeErr"
                     }
                 }
                 finally {

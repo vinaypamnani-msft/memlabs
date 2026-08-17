@@ -3832,37 +3832,96 @@ function Test-CMSiteFunctionality {
                     $results.Passed = $false
                     $results.Details.Add("FAIL: Child site '$childSC' not found in parent '$parentSC' after $maxSiteAttempts attempts")
                 }
+            }
 
-                # --- DRS replication link ---
+            # --- DRS replication links ---
+            # Sample every pending child in one pass, then sleep once. A sleep
+            # inside the child loop multiplies the validation cost by the number
+            # of Primaries. The summary status is recency-derived and can say
+            # Failed while a new link is actively initializing, so compare its
+            # real init percentage and directional sync timestamps before warning.
+            $maxLinkAttempts = 3
+            $linkRetryDelay = 30
+            $pendingLinks = @($childCodes)
+            $lastSignature = @{}
+            $linkProgressing = @{}
+            $lastLink = @{}
+            foreach ($childSC in $childCodes) {
+                $results.LinkActive[$childSC] = $false
+                $linkProgressing[$childSC] = $false
                 $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$parentSC' -Class SMS_ReplicationLinkSummary -Filter `"Site2 = '$childSC'`"")
-                try {
-                    $link = Get-WmiObject -Namespace "root\SMS\site_$parentSC" -Class SMS_ReplicationLinkSummary `
-                        -Filter "Site2 = '$childSC'" -ErrorAction Stop
-                    if (-not $link) {
-                        $results.Details.Add("WARN: No DRS replication link found for $parentSC -> $childSC")
-                    }
-                    else {
-                        $ls = [int]$link.LinkStatus
-                        $s1s2 = [int]$link.Site1ToSite2GlobalState
-                        $s2s1 = [int]$link.Site2ToSite1GlobalState
-                        $lsName = if ($statusName.ContainsKey($ls)) { $statusName[$ls] } else { "Unknown($ls)" }
-                        $s1Name = if ($statusName.ContainsKey($s1s2)) { $statusName[$s1s2] } else { "Unknown($s1s2)" }
-                        $s2Name = if ($statusName.ContainsKey($s2s1)) { $statusName[$s2s1] } else { "Unknown($s2s1)" }
+            }
 
-                        if ($ls -eq 2 -and $s1s2 -eq 2 -and $s2s1 -eq 2) {
-                            $results.LinkActive[$childSC] = $true
-                            $results.Details.Add("OK: DRS link $parentSC -> $childSC is Active")
+            for ($linkAttempt = 1; $linkAttempt -le $maxLinkAttempts -and $pendingLinks.Count -gt 0; $linkAttempt++) {
+                $stillPending = New-Object System.Collections.Generic.List[string]
+                foreach ($childSC in $pendingLinks) {
+                    try {
+                        $link = Get-WmiObject -Namespace "root\SMS\site_$parentSC" -Class SMS_ReplicationLinkSummary `
+                            -Filter "Site2 = '$childSC'" -ErrorAction Stop
+                        if (-not $link) {
+                            $results.Details.Add("INFO: No DRS link row for $parentSC -> $childSC (sample $linkAttempt/$maxLinkAttempts)")
+                            $stillPending.Add($childSC)
+                            continue
                         }
-                        elseif ($ls -in $failedStates -or $s1s2 -in $failedStates -or $s2s1 -in $failedStates) {
-                            $results.Details.Add("WARN: DRS link $parentSC -> $childSC has failures: Link=$lsName, S1->S2=$s1Name, S2->S1=$s2Name")
+
+                        $lastLink[$childSC] = $link
+                        $linkStatus = [int]$link.LinkStatus
+                        $parentToChild = [int]$link.Site1ToSite2GlobalState
+                        $childToParent = [int]$link.Site2ToSite1GlobalState
+                        $initPercent = "$($link.GlobalInitPercentage)"
+                        $parentSync = "$($link.Site1ToSite2GlobalSyncTime)"
+                        $childSync = "$($link.Site2ToSite1GlobalSyncTime)"
+                        $siteSync = "$($link.Site2ToSite1SiteSyncTime)"
+                        $signature = "$linkStatus|$parentToChild|$childToParent|$initPercent|$parentSync|$childSync|$siteSync"
+                        if ($lastSignature.ContainsKey($childSC) -and $lastSignature[$childSC] -ne $signature) {
+                            $linkProgressing[$childSC] = $true
+                        }
+                        $lastSignature[$childSC] = $signature
+
+                        $linkName = if ($statusName.ContainsKey($linkStatus)) { $statusName[$linkStatus] } else { "Unknown($linkStatus)" }
+                        $parentName = if ($statusName.ContainsKey($parentToChild)) { $statusName[$parentToChild] } else { "Unknown($parentToChild)" }
+                        $childName = if ($statusName.ContainsKey($childToParent)) { $statusName[$childToParent] } else { "Unknown($childToParent)" }
+                        $results.Details.Add("INFO: DRS sample $linkAttempt/$maxLinkAttempts $parentSC -> $childSC`: Link=$linkName, S1->S2=$parentName, S2->S1=$childName, Init=$initPercent, LastP2C=$parentSync, LastC2P=$childSync, LastSite=$siteSync")
+
+                        if ($linkStatus -eq 2 -and $parentToChild -eq 2 -and $childToParent -eq 2) {
+                            $results.LinkActive[$childSC] = $true
+                            $results.Details.Add("OK: DRS link $parentSC -> $childSC is Active (sample $linkAttempt)")
                         }
                         else {
-                            $results.Details.Add("WARN: DRS link $parentSC -> $childSC is not yet Active: Link=$lsName, S1->S2=$s1Name, S2->S1=$s2Name")
+                            $stillPending.Add($childSC)
                         }
                     }
+                    catch {
+                        $results.Details.Add("INFO: DRS link query for $parentSC -> $childSC failed (sample $linkAttempt/$maxLinkAttempts): $($_.Exception.Message)")
+                        $stillPending.Add($childSC)
+                    }
                 }
-                catch {
-                    $results.Details.Add("WARN: Could not query DRS link $parentSC -> $childSC`: $($_.Exception.Message)")
+                $pendingLinks = $stillPending.ToArray()
+                if ($pendingLinks.Count -gt 0 -and $linkAttempt -lt $maxLinkAttempts) {
+                    Start-Sleep -Seconds $linkRetryDelay
+                }
+            }
+
+            foreach ($childSC in $pendingLinks) {
+                $link = $lastLink[$childSC]
+                if (-not $link) {
+                    $results.Details.Add("WARN: No DRS replication link found for $parentSC -> $childSC after $maxLinkAttempts samples")
+                    continue
+                }
+                $linkStatus = [int]$link.LinkStatus
+                $parentToChild = [int]$link.Site1ToSite2GlobalState
+                $childToParent = [int]$link.Site2ToSite1GlobalState
+                $linkName = if ($statusName.ContainsKey($linkStatus)) { $statusName[$linkStatus] } else { "Unknown($linkStatus)" }
+                $parentName = if ($statusName.ContainsKey($parentToChild)) { $statusName[$parentToChild] } else { "Unknown($parentToChild)" }
+                $childName = if ($statusName.ContainsKey($childToParent)) { $statusName[$childToParent] } else { "Unknown($childToParent)" }
+                if ($linkProgressing[$childSC]) {
+                    $results.Details.Add("INFO: DRS link $parentSC -> $childSC is not Active yet but initialization advanced across samples: Link=$linkName, S1->S2=$parentName, S2->S1=$childName, Init=$($link.GlobalInitPercentage)")
+                }
+                elseif ($linkStatus -in $failedStates -or $parentToChild -in $failedStates -or $childToParent -in $failedStates) {
+                    $results.Details.Add("WARN: DRS link $parentSC -> $childSC has static failures after $maxLinkAttempts samples: Link=$linkName, S1->S2=$parentName, S2->S1=$childName, Init=$($link.GlobalInitPercentage)")
+                }
+                else {
+                    $results.Details.Add("WARN: DRS link $parentSC -> $childSC is not yet Active and showed no progress across $maxLinkAttempts samples: Link=$linkName, S1->S2=$parentName, S2->S1=$childName, Init=$($link.GlobalInitPercentage)")
                 }
             }
 
@@ -7700,6 +7759,75 @@ $Phase11WsusStallCollector = {
     return $out
 }
 
+$Phase11CmWsusSyncCollector = {
+    # Runs ON the ConfigMgr site server. The SUP collector explains what WSUS
+    # did; WCM.log and wsyncmgr.log explain who asked it to stop and why CM's
+    # SMS_SUPSyncStatus projection did not leave a running state afterward.
+    $out = @{}
+    $diag = New-Object System.Collections.Generic.List[string]
+    $lines = New-Object System.Collections.Generic.List[string]
+    $smsDir = $null
+    foreach ($keyPath in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+        try { $smsDir = (Get-ItemProperty -Path $keyPath -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+        if ($smsDir) { break }
+    }
+    $siteCode = $null
+    try { $siteCode = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop).'Site Code' } catch {}
+    $lines.Add("CapturedUtc=$([DateTime]::UtcNow.ToString('o')) SiteCode=$siteCode SmsDir=$smsDir")
+
+    if ($siteCode) {
+        try {
+            $syncRows = @(Get-WmiObject -Namespace "root\SMS\site_$siteCode" -Class SMS_SUPSyncStatus -ErrorAction Stop)
+            if ($syncRows.Count -eq 0) { $lines.Add('SMS_SUPSyncStatus: NO ROWS') }
+            foreach ($syncRow in $syncRows) {
+                $lines.Add("SMS_SUPSyncStatus: SiteCode=$($syncRow.SiteCode) State=$($syncRow.LastSyncState) StateTime=$($syncRow.LastSyncStateTime) Error=$($syncRow.LastSyncErrorCode) WSUS=$($syncRow.WSUSServerName) Source=$($syncRow.WSUSSourceServer)")
+            }
+        }
+        catch { $diag.Add("SMS_SUPSyncStatus query failed: $($_.Exception.Message)") }
+
+        try {
+            $components = @(Get-WmiObject -Namespace "root\SMS\site_$siteCode" -Class SMS_ComponentSummarizer `
+                    -Filter "ComponentName='SMS_WSUS_SYNC_MANAGER' OR ComponentName='SMS_WSUS_CONFIGURATION_MANAGER'" -ErrorAction Stop)
+            foreach ($component in $components) {
+                $lines.Add("Component: $($component.ComponentName) State=$($component.State) Errors=$($component.Errors) Warnings=$($component.Warnings) LastContacted=$($component.LastContacted)")
+            }
+        }
+        catch { $diag.Add("SMS_ComponentSummarizer query failed: $($_.Exception.Message)") }
+    }
+
+    try {
+        $smsExec = Get-Service -Name SMS_EXECUTIVE -ErrorAction SilentlyContinue
+        if ($smsExec) { $lines.Add("SMS_EXECUTIVE=$($smsExec.Status)") }
+        $smsProc = Get-Process -Name smsexec -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($smsProc) { $lines.Add("smsexec pid=$($smsProc.Id) started=$($smsProc.StartTime.ToString('yyyy-MM-dd HH:mm:ss'))") }
+    }
+    catch { $diag.Add("SMS_EXECUTIVE process probe failed: $($_.Exception.Message)") }
+
+    if ($smsDir) {
+        $logDir = Join-Path $smsDir 'Logs'
+        foreach ($logName in @('WCM.log', 'WCM.lo_', 'wsyncmgr.log', 'wsyncmgr.lo_')) {
+            $logPath = Join-Path $logDir $logName
+            if (-not (Test-Path -LiteralPath $logPath)) { continue }
+            try { $out[$logName] = ((Get-Content -LiteralPath $logPath -Tail 4000 -ErrorAction Stop) -join "`r`n") }
+            catch { $diag.Add("$logName read failed: $($_.Exception.Message)") }
+        }
+        try {
+            $syncInbox = Join-Path $smsDir 'inboxes\wsyncmgr.box'
+            if (Test-Path -LiteralPath $syncInbox) {
+                $inboxFiles = @(Get-ChildItem -LiteralPath $syncInbox -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 20)
+                $lines.Add("wsyncmgr.box files=$($inboxFiles.Count)")
+                foreach ($file in $inboxFiles) { $lines.Add("  $($file.Name) $($file.Length) bytes $($file.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))") }
+            }
+        }
+        catch { $diag.Add("wsyncmgr.box inventory failed: $($_.Exception.Message)") }
+    }
+    else { $diag.Add('ConfigMgr installation directory not found') }
+
+    $out['CmWsusSync.txt'] = ($lines -join "`r`n")
+    $out['_cm-wsus-collector-diag.txt'] = ($diag -join "`r`n")
+    return $out
+}
+
 $Phase11SecondaryCertDiagCollector = {
     # Diagnose a Secondary site whose distmgr is wedged repeating
     #   "site exchange certificate is not found. Can not decrypt the data."
@@ -9613,14 +9741,50 @@ function Test-PullDPConfiguration {
     return (Format-TestResult -VMName $VMName -RoleLabel 'PullDP' -Result $result)
 }
 
+function Get-ClientPackageValidationScope {
+    param(
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $siteCode = "$($CurrentItem.siteCode)"
+    # A CAS's package summarizer contains replicated rows for child Primaries,
+    # but those rows can lag while the child's own provider is already current.
+    # Every Primary runs this same Phase 11 check, so delegate each child Primary
+    # to its local provider. A Primary still owns directly attached Secondary
+    # sites because Secondary roles do not run this package check themselves.
+    $ownedSiteCodes = @($siteCode)
+    try {
+        $ownedSiteCodes += @($DeployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'Secondary' -and $_.parentSiteCode -and $_.parentSiteCode -eq $siteCode
+            } | Select-Object -ExpandProperty siteCode)
+    }
+    catch {}
+    $ownedSiteCodes = @($ownedSiteCodes | Where-Object { $_ } | Select-Object -Unique)
+    $ownedSiteUpper = @($ownedSiteCodes | ForEach-Object { "$($_)".ToUpper() })
+
+    $ownedDpNames = @($DeployConfig.virtualMachines | Where-Object {
+            if (-not $_.vmName -or -not $_.siteCode) { return $false }
+            $isDp = ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Secondary')
+            return $isDp -and ($ownedSiteUpper -contains "$($_.siteCode)".ToUpper())
+        } | Select-Object -ExpandProperty vmName | Select-Object -Unique)
+
+    return [pscustomobject]@{
+        SiteCodes = $ownedSiteCodes
+        DpNames   = $ownedDpNames
+    }
+}
+
 function Test-CMClientPackageDistribution {
     <#
     .SYNOPSIS
         Verifies the ConfigMgr client package(s) are distributed to their DPs and
         that no package is in a terminal distribution-failed state site-wide.
     .DESCRIPTION
-        Runs against the Primary/CAS itself (the site DB is authoritative for
-        distribution status). The ConfigMgr Client Package + Client Upgrade
+        Runs against the Primary/CAS itself. The local site DB is authoritative
+        for its own site and directly attached Secondary sites; a CAS does not
+        judge child-Primary DPs from lagging replicated summarizer rows. The
+        ConfigMgr Client Package + Client Upgrade
         Package must be Installed on the DPs clients reach, or ccmsetup loops in
         GetDPLocations with empty <LocationRecords/> (0x87d00215) -- the exact
         failure seen on internet/PKI clients when a pull DP is behind. On failure
@@ -9638,23 +9802,11 @@ function Test-CMClientPackageDistribution {
     $domain = $DeployConfig.vmOptions.domainName
     $siteCode = $CurrentItem.siteCode
 
-    # Everything this check reads is HIERARCHY-wide, so in a cumulative lab it is handed
-    # every DP and boundary group any earlier test left in the domain. Scope the verdict to
-    # what this run owns: its own site plus child sites present in THIS config (same rule
-    # Test-CMSiteWideFunctionality uses for expected boundary groups), plus the DP VMs the
-    # config actually declares. A 6-VM CS1+PS1 config was failed by boundary group 'PS3',
-    # whose DP is not in the config at all.
-    $ownedSiteCodes = @($siteCode)
-    try {
-        $ownedSiteCodes += @($DeployConfig.virtualMachines | Where-Object {
-                $_.role -in @('Primary', 'Secondary') -and $_.parentSiteCode -and $_.parentSiteCode -eq $siteCode
-            } | Select-Object -ExpandProperty siteCode)
-    }
-    catch {}
-    $ownedSiteCodes = @($ownedSiteCodes | Where-Object { $_ } | Select-Object -Unique)
-    $ownedDpNames = @($DeployConfig.virtualMachines | Where-Object {
-            $_.vmName -and ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Secondary')
-        } | Select-Object -ExpandProperty vmName | Select-Object -Unique)
+    # The provider classes below are hierarchy-wide. Resolve which rows this
+    # provider can judge authoritatively before entering the guest scriptblock.
+    $validationScope = Get-ClientPackageValidationScope -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    $ownedSiteCodes = @($validationScope.SiteCodes)
+    $ownedDpNames = @($validationScope.DpNames)
     $ownedSiteCsv = ($ownedSiteCodes -join ',')
     $ownedDpCsv = ($ownedDpNames -join ',')
 
@@ -11024,11 +11176,17 @@ function Test-CMSiteWideFunctionality {
             try {
                 $scripts = @(Get-WmiObject -Namespace $ns -Class SMS_Scripts `
                     -Filter "ScriptName LIKE 'MEMLABS-%'" -ErrorAction Stop)
-                if ($scripts.Count -ge 5) {
-                    $results.Details.Add("OK: $($scripts.Count) MEMLABS script(s) imported")
+                $approvedScripts = @($scripts | Where-Object { [int]$_.ApprovalState -eq 3 })
+                $unapprovedScripts = @($scripts | Where-Object { [int]$_.ApprovalState -ne 3 })
+                if ($scripts.Count -ge 5 -and $unapprovedScripts.Count -eq 0) {
+                    $results.Details.Add("OK: all $($scripts.Count) MEMLABS script(s) imported and approved (ApprovalState=3)")
+                }
+                elseif ($scripts.Count -ge 5) {
+                    $unapprovedNames = @($unapprovedScripts | Select-Object -First 8 -ExpandProperty ScriptName)
+                    $results.Details.Add("WARN: $($unapprovedScripts.Count)/$($scripts.Count) MEMLABS script(s) are imported but NOT approved/runnable (ApprovalState != 3): $($unapprovedNames -join ', '). Re-run Phase 8 after TwoKeyApproval hierarchy policy propagates, or approve them with a different identity.")
                 }
                 elseif ($scripts.Count -ge 1) {
-                    $results.Details.Add("WARN: Only $($scripts.Count) MEMLABS script(s) found (expected 50+)")
+                    $results.Details.Add("WARN: Only $($scripts.Count) MEMLABS script(s) found (expected 50+); $($approvedScripts.Count) approved")
                 }
                 else {
                     $results.Details.Add("WARN: No MEMLABS-* scripts found")
@@ -11211,31 +11369,69 @@ function Test-CMSiteWideFunctionality {
                         # not stuck); only a sync that is genuinely not moving warns.
                         $wsusDiag = ""
                         $progressing = $false
+                        $wsusNativeRunning = $false
+                        $wsusNativeIdle = $false
+                        $wsusLastResult = 'Unknown'
+                        $wsusLastSync = ''
                         if ($supServer) {
                             try {
                                 $wsusSrv = Get-WsusServer -Name $supServer -PortNumber $wsusPort -UseSsl:$wsusUseSsl -ErrorAction Stop
                                 $sub = $wsusSrv.GetSubscription()
                                 $wsusState = $sub.GetSynchronizationStatus().ToString()
-                                $prog1 = $sub.GetSynchronizationProgress()
-                                $p1 = [int]$prog1.ProcessedItems
-                                $total = [int]$prog1.TotalItems
                                 if ($wsusState -match 'Running|Progress|Syncing') {
+                                    $wsusNativeRunning = $true
+                                    $prog1 = $sub.GetSynchronizationProgress()
+                                    $p1 = [int]$prog1.ProcessedItems
+                                    $total = [int]$prog1.TotalItems
                                     Start-Sleep -Seconds 12
-                                    $prog2 = $sub.GetSynchronizationProgress()
-                                    $p2 = [int]$prog2.ProcessedItems
-                                    if ($p2 -gt $p1) { $progressing = $true }
-                                    $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($prog2.Phase), Items=$p2/$total (+$($p2 - $p1) in 12s)]"
+                                    $wsusState = $sub.GetSynchronizationStatus().ToString()
+                                    if ($wsusState -match 'Running|Progress|Syncing') {
+                                        $prog2 = $sub.GetSynchronizationProgress()
+                                        $p2 = [int]$prog2.ProcessedItems
+                                        if ($p2 -gt $p1) { $progressing = $true }
+                                        $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($prog2.Phase), Items=$p2/$total (+$($p2 - $p1) in 12s)]"
+                                    }
+                                    else {
+                                        $wsusNativeRunning = $false
+                                        $wsusNativeIdle = $true
+                                    }
                                 }
                                 else {
-                                    $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($prog1.Phase), Items=$p1/$total]"
+                                    # Confirm idle over the same interval used for a
+                                    # running-progress sample. A sync can start between
+                                    # the CM query and this WSUS-native read.
+                                    Start-Sleep -Seconds 12
+                                    $wsusState = $sub.GetSynchronizationStatus().ToString()
+                                    if ($wsusState -match 'Running|Progress|Syncing') {
+                                        $wsusNativeRunning = $true
+                                        $prog2 = $sub.GetSynchronizationProgress()
+                                        $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($prog2.Phase), Items=$($prog2.ProcessedItems)/$($prog2.TotalItems) (started during 12s confirmation)]"
+                                    }
+                                    else { $wsusNativeIdle = $true }
+                                }
+                                try {
+                                    $lastHistory = @($sub.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
+                                    if ($lastHistory.Count -gt 0) {
+                                        $wsusLastResult = "$($lastHistory[0].Result)"
+                                        $wsusLastSync = "$($lastHistory[0].StartTime)->$($lastHistory[0].EndTime)"
+                                    }
+                                }
+                                catch {}
+                                if ($wsusNativeIdle) {
+                                    $idleProgress = $sub.GetSynchronizationProgress()
+                                    $wsusDiag = " [WSUS@$supServer`: $wsusState, Phase=$($idleProgress.Phase), Items=$($idleProgress.ProcessedItems)/$($idleProgress.TotalItems), LastResult=$wsusLastResult, LastSync=$wsusLastSync]"
                                 }
                             }
                             catch {
                                 $wsusDiag = " [WSUS-native progress not collected from '$($supServer):$wsusPort': $($_.Exception.Message)]"
                             }
                         }
-                        if ($progressing) {
-                            $results.Details.Add("OK: SUP sync at '$sName' actively progressing after $([math]::Round($age.TotalMinutes,0)) min$wsusDiag (initial full catalog sync; not stuck)")
+                        if ($wsusNativeRunning) {
+                            $activity = if ($progressing) { 'and counters advanced' } else { '(Categories can legitimately show no item delta)' }
+                            $results.Details.Add("OK: SUP sync at '$sName' after $([math]::Round($age.TotalMinutes,0)) min; native WSUS confirms Running $activity$wsusDiag")
+                        }
+                        elseif ($wsusNativeIdle) {
+                            $results.Details.Add("WARN: CM/WSUS desync: CM has reported '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime), but native WSUS was confirmed idle over 12s. LastResult=$wsusLastResult LastSync=$wsusLastSync$wsusDiag")
                         }
                         else {
                             $results.Details.Add("WARN: SUP sync at '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime)$wsusDiag — may be slow or stuck")
@@ -11597,19 +11793,23 @@ function Test-CMSiteWideFunctionality {
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
-    # A sync that reports Running with ProcessedItems frozen (+0 over the sample) is
-    # not "slow", it is stuck -- seen at 90 min / 1006 of 2544 and 50 min / 1638 of
-    # 3648. The WSUS API can only say THAT it stopped, never why, and the answer lives
-    # on the SUP: WsusPool hitting its private-memory cap and recycling into 503s is
-    # the classic cause. Collect from the SUP itself, not the site server.
+    # Capture both sides when CM reports a long-running sync that native WSUS
+    # cannot confirm. SUP-side evidence explains the native sync; site-server
+    # WCM/wsyncmgr evidence explains who stopped it and why CM stayed stale.
     try {
         $stallLine = $null
         if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Details) {
-            $stallLine = @($result.ScriptBlockOutput.Details | Where-Object { $_ -match 'WARN: SUP sync at .* may be slow or stuck' }) | Select-Object -First 1
+            $stallLine = @($result.ScriptBlockOutput.Details | Where-Object {
+                    $_ -match 'WARN: CM/WSUS desync:' -or $_ -match 'WARN: SUP sync at .* may be slow or stuck'
+                }) | Select-Object -First 1
         }
-        if ($stallLine -and $supVmObj -and $supVmObj.vmName) {
-            Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: SUP sync appears stuck -- collecting WsusPool/IIS/SoftwareDistribution forensics from '$($supVmObj.vmName)'"
-            $null = Save-Phase11GuestLogs -VMName $supVmObj.vmName -DomainName $domain -RoleLabel 'SUP-SyncStall' -Collector $Phase11WsusStallCollector -TimeoutSeconds 240
+        if ($stallLine) {
+            Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: SUP sync state is not corroborated -- collecting WCM/wsyncmgr evidence from the site server"
+            $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'SUP-CMState' -Collector $Phase11CmWsusSyncCollector -TimeoutSeconds 240
+            if ($supVmObj -and $supVmObj.vmName) {
+                Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: collecting WsusPool/IIS/SoftwareDistribution evidence from SUP '$($supVmObj.vmName)'"
+                $null = Save-Phase11GuestLogs -VMName $supVmObj.vmName -DomainName $domain -RoleLabel 'SUP-SyncStall' -Collector $Phase11WsusStallCollector -TimeoutSeconds 240
+            }
         }
     }
     catch { }

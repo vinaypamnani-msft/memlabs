@@ -1507,7 +1507,19 @@ $global:VM_Create = {
                         $gUtc = [datetime]::Parse($guestTz.UtcNow, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
                         $clockSkewSec = [int][math]::Abs(($gUtc - [datetime]::UtcNow).TotalSeconds)
                         if ($clockSkewSec -gt 120) {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): guest UTC clock differs from the host's by ${clockSkewSec}s. Host and guest log timestamps cannot be correlated no matter what the timezone bias says -- check Hyper-V time synchronization on this VM." -Warning -OutputStream
+                            $recheckAfterJoin = (-not $isWorkgroup) -and ($currentItem.role -notin @('DC', 'BDC', 'OtherDC'))
+                            if ($recheckAfterJoin) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): pre-domain guest UTC clock differs from the host's by ${clockSkewSec}s. Phase 1 timestamps for this VM are not correlatable; Phase 2 will recheck after domain join before deciding this is actionable." -LogOnly
+                                try {
+                                    # New-VmNote later rebuilds the note from this
+                                    # config object, so stamp the source it copies.
+                                    $currentItem | Add-Member -MemberType NoteProperty -Name 'clockSkewNeedsRecheck' -Value $true -Force
+                                }
+                                catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): could not persist clock-skew recheck flag: $($_.Exception.Message)" -LogOnly }
+                            }
+                            else {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): guest UTC clock differs from the host's by ${clockSkewSec}s. Host and guest log timestamps cannot be correlated no matter what the timezone bias says -- check Hyper-V time synchronization on this VM." -Warning -OutputStream
+                            }
                         }
                     }
                     catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): could not compare guest UTC clock to host: $($_.Exception.Message)" -LogOnly }
@@ -6002,6 +6014,9 @@ $global:VM_Config = {
         $dscResumeMax = 1                  # gentle in-place resumes before escalating a stranded PendingConfiguration to a reboot
         $dscResumeTotal = 0                # in-place resumes across the WHOLE phase (per-episode count resets on every status change)
         $dscResumeTotalMax = 3             # hard cap: a node that inches forward one status line per resume must still escalate
+        $dscResumeAwaitingProgress = $false # closure is emitted only when status advances after an in-place resume
+        $dscResumeStartedUtc = $null
+        $dscResumeFromStatus = ''
         $lastLcmSampleTime = [DateTime]::MinValue  # throttle for the guest LCM-state poll
         $certPulseDone = $false   # one-shot guard for the PKI cert pre-stage handshake
         $sqlSetupSummaryDumped = $false   # one-shot: dump SQL Setup Summary.txt to the build log on the first SQL-install stall
@@ -6567,6 +6582,13 @@ $global:VM_Config = {
                             break
                         }
 
+                        if ($dscResumeAwaitingProgress) {
+                            $resumeElapsedSec = if ($dscResumeStartedUtc) { [math]::Round(([DateTime]::UtcNow - $dscResumeStartedUtc).TotalSeconds, 1) } else { 0 }
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): RECOVERED: DSC in-place resume advanced after ${resumeElapsedSec}s from '$dscResumeFromStatus' to '$($currentStatusTrimmed.Trim())'." -Success -OutputStream
+                            $dscResumeAwaitingProgress = $false
+                            $dscResumeStartedUtc = $null
+                            $dscResumeFromStatus = ''
+                        }
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
                         $previousStatus = $currentStatus
                         $lastStatusChangeTime = [DateTime]::UtcNow
@@ -6869,6 +6891,9 @@ $global:VM_Config = {
                                 # TIER 1: gentle in-place resume (fire-and-forget, bounded). No reboot.
                                 $dscResumeCount++
                                 $dscResumeTotal++
+                                $dscResumeAwaitingProgress = $true
+                                $dscResumeStartedUtc = [DateTime]::UtcNow
+                                $dscResumeFromStatus = $currentStatus.Trim()
                                 $detailText = ''
                                 if ($lcmDetail) { $detailText = " LCM was inside '$lcmDetail'." }
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM stranded PendingConfiguration for ${pendingMins}m (no reboot owed) with status unchanged for ${staleMins}m ('$($currentStatus.Trim())').$detailText Resuming the pending config in place: Stop + Start-DscConfiguration -UseExisting (resume $dscResumeCount/$dscResumeMax this stall, $dscResumeTotal/$dscResumeTotalMax this phase)." -Warning -OutputStream
@@ -7057,6 +7082,9 @@ $global:VM_Config = {
                             }
                             else {
                                 # TIER 2: the in-place resume did not clear it -- escalate to a VM restart.
+                                $dscResumeAwaitingProgress = $false
+                                $dscResumeStartedUtc = $null
+                                $dscResumeFromStatus = ''
                                 $staleRestartCount++
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: in-place resume did not clear the stranded PendingConfiguration (${pendingMins}m) -- restarting VM so the boot-resume path re-applies pending.mof (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
                                 Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "DSC stranded PendingConfiguration" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
@@ -7846,7 +7874,54 @@ $global:VM_Config = {
                 }
             }
 
+            # New-VmNote rebuilds the note rather than merging arbitrary fields.
+            # Capture this transient handoff flag before that rewrite.
+            $clockSkewNeedsRecheck = $false
+            if ($Phase -eq 2) {
+                try {
+                    $priorClockNote = Get-VMNote -VMName $currentItem.vmName
+                    $clockSkewNeedsRecheck = ($priorClockNote -and $priorClockNote.clockSkewNeedsRecheck -eq $true)
+                }
+                catch {}
+            }
+
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -Phase $Phase
+
+            # A domain-bound VM can be minutes off during Phase 1 before it has
+            # joined and discovered domain time. Recheck only VMs that actually
+            # crossed the threshold; do not add a PSDirect call to every Phase 2
+            # job. Persistent post-join skew is actionable, while convergence is
+            # closed explicitly as recovered.
+            if ($complete -and $Phase -eq 2 -and $clockSkewNeedsRecheck) {
+                $clockNote = $null
+                try { $clockNote = Get-VMNote -VMName $currentItem.vmName } catch {}
+                if ($clockNote) {
+                    # Preserve unresolved state unless the recheck proves recovery.
+                    $clockNote | Add-Member -MemberType NoteProperty -Name 'clockSkewNeedsRecheck' -Value $true -Force
+                    Set-VMNote -VMName $currentItem.vmName -vmNote $clockNote
+                    $clockCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -SuppressLog -ScriptBlock {
+                        [DateTime]::UtcNow.ToString('o')
+                    }
+                    if (-not $clockCheck.ScriptBlockFailed -and $clockCheck.ScriptBlockOutput) {
+                        try {
+                            $guestUtc = [datetime]::Parse("$($clockCheck.ScriptBlockOutput | Select-Object -First 1)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+                            $postJoinSkewSec = [int][math]::Abs(($guestUtc - [datetime]::UtcNow).TotalSeconds)
+                            if ($postJoinSkewSec -le 120) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): RECOVERED: post-domain clock skew is ${postJoinSkewSec}s (within 120s); the Phase 1 skew converged after domain join." -Success -OutputStream
+                                $clockNote.clockSkewNeedsRecheck = $false
+                                Set-VMNote -VMName $currentItem.vmName -vmNote $clockNote
+                            }
+                            else {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): post-domain guest UTC clock still differs from the host by ${postJoinSkewSec}s. This persisted after domain join; check Hyper-V time synchronization and w32time." -Warning -OutputStream
+                            }
+                        }
+                        catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): post-domain clock recheck could not parse guest UTC: $($_.Exception.Message)" -Warning -OutputStream }
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): post-domain clock recheck could not reach the guest; the Phase 1 skew remains unresolved." -Warning -OutputStream
+                    }
+                }
+            }
         }
 
         if (-not $complete) {
