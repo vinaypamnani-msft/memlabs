@@ -186,6 +186,24 @@ function Remove-VirtualMachine {
         [switch] $SkipProxyCleanup
     )
 
+    function Test-VMReachedOff {
+        param (
+            [Microsoft.HyperV.PowerShell.VirtualMachine] $VM,
+            [int] $TimeoutSeconds = 30
+        )
+        $elapsed = 0
+        while ($elapsed -lt $TimeoutSeconds) {
+            Start-Sleep -Seconds 1
+            $elapsed += 1
+            $refreshed = Get-VM -Name $VM.Name -ErrorAction SilentlyContinue
+            if (-not $refreshed -or $refreshed.State -eq "Off") {
+                Write-Log "VM '$($VM.Name)' is now Off." -SubActivity
+                return $true
+            }
+        }
+        return $false
+    }
+
     # Helper: ensure VM is fully stopped with timeout.
     # Since we're deleting the VM, skip the graceful shutdown and TurnOff directly
     # (no point waiting for the guest OS to shut down cleanly).
@@ -198,28 +216,60 @@ function Remove-VirtualMachine {
         if ($VM.State -eq "Off") { return $true }
 
         Write-Log "VM '$($VM.Name)' is in state '$($VM.State)'. Forcing power off (delete in progress)..." -SubActivity
+
+        if ($WhatIf) {
+            $VM | Stop-VM -TurnOff -Force -WhatIf -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            return $true
+        }
+
+        # -AsJob + Wait-Job, not a bare call: when the VM worker process is wedged
+        # Stop-VM never returns, and an unbounded call makes the poll loop and the
+        # worker-process kill below -- the only things that recover it -- unreachable.
+        # -ErrorAction/-WarningAction silence errors; they do not bound a hang.
         try {
-            $VM | Stop-VM -TurnOff -Force -WhatIf:$WhatIf -WarningAction SilentlyContinue -ErrorAction Stop
+            $stopJob = $VM | Stop-VM -TurnOff -Force -WarningAction SilentlyContinue -AsJob
+            $null = $stopJob | Wait-Job -Timeout $TimeoutSeconds
+            if ($stopJob.State -eq 'Running') {
+                Write-Log "VM '$($VM.Name)': TurnOff did not return within $TimeoutSeconds seconds; escalating." -Warning
+                Stop-Job $stopJob -ErrorAction SilentlyContinue
+            }
+            elseif ($stopJob.State -eq 'Failed') {
+                # Hyper-V's -AsJob returns a VMJob, which does not always populate ChildJobs.
+                $reason = if (@($stopJob.ChildJobs).Count) { $stopJob.ChildJobs[0].JobStateInfo.Reason.Message } else { $stopJob.JobStateInfo.Reason.Message }
+                Write-Log "TurnOff failed: $reason" -Warning
+            }
+            Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
         }
         catch {
-            Write-Log "TurnOff failed: $($_.Exception.Message)" -Warning
+            Write-Log "TurnOff threw $($_.Exception.GetType().Name): $($_.Exception.Message)" -Warning
         }
 
-        if ($WhatIf) { return $true }
+        if (Test-VMReachedOff -VM $VM -TimeoutSeconds $TimeoutSeconds) { return $true }
 
-        # Poll until Off or timeout
-        $elapsed = 0
-        while ($elapsed -lt $TimeoutSeconds) {
-            Start-Sleep -Seconds 1
-            $elapsed += 1
-            $refreshed = Get-VM -Name $VM.Name -ErrorAction SilentlyContinue
-            if (-not $refreshed -or $refreshed.State -eq "Off") {
-                Write-Log "VM '$($VM.Name)' is now Off." -SubActivity
-                return $true
+        # Nuclear option, same rung Stop-VM2 ends on: kill this VM's worker process.
+        # Safe here because the VM is being deleted regardless. Target vmwp.exe by
+        # VM id -- never vmms.exe, which is shared by every VM on the host.
+        Write-Log "VM '$($VM.Name)' did not reach Off state within $TimeoutSeconds seconds. Killing its worker process." -Warning
+        try {
+            $vmId = $VM.Id.ToString()
+            $targetProc = Get-CimInstance Win32_Process -Filter "Name='vmwp.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -match [regex]::Escape($vmId) }
+            if ($targetProc) {
+                Stop-Process -Id $targetProc.ProcessId -Force -ErrorAction Stop
+                if (Test-VMReachedOff -VM $VM -TimeoutSeconds $TimeoutSeconds) {
+                    Write-Log "VM '$($VM.Name)' stopped after killing worker process (PID $($targetProc.ProcessId))." -Warning
+                    return $true
+                }
+            }
+            else {
+                Write-Log "VM '$($VM.Name)': no vmwp.exe found for id $vmId." -Warning
             }
         }
+        catch {
+            Write-Log "VM '$($VM.Name)': could not kill worker process: $($_.Exception.Message)" -Warning
+        }
 
-        Write-Log "VM '$($VM.Name)' did not reach Off state within $TimeoutSeconds seconds." -Warning
+        Write-Log "VM '$($VM.Name)' could not be forced Off." -Warning
         return $false
     }
 
