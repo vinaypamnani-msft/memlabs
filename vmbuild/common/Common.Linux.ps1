@@ -533,7 +533,20 @@ chpasswd:
         'linux-tools-virtual',
         'linux-cloud-tools-virtual'
     ) + $ExtraPackages | Select-Object -Unique
-    $packagesYaml = ($packages | ForEach-Object { "  - $_" }) -join "`n"
+
+    # These go through roles/ensure-packages.sh as the FIRST runcmd rather than
+    # cloud-init's 'packages:' module. The module always runs apt-get update +
+    # an install transaction, so a fully-baked image still paid a network round
+    # trip and a large dpkg write on every first boot -- the single biggest
+    # chunk of Linux first boot, landing while Phase 1 copies every other VM's
+    # base image. The script skips apt entirely when nothing is missing, so the
+    # baked set (bake/02-base-packages.sh) costs a few `dpkg -s` calls.
+    # It must be the first runcmd: the items below enable services it installs.
+    $ensurePackagesScript = Get-LinuxScript -Name 'roles/ensure-packages' -IncludeAptRetry -Variables @{
+        MEMLABS_PACKAGES = ($packages -join ' ')
+    }
+    $ensurePackagesLf = $ensurePackagesScript -replace "`r`n", "`n"
+    $ensurePackagesB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($ensurePackagesLf))
 
     # Build the shared Samba-ensure script (with the apt-retry/dpkg-recovery
     # helpers inlined) and base64-encode it for a single runcmd line. The same
@@ -544,6 +557,16 @@ chpasswd:
     $ensureSambaB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($ensureSambaLf))
 
     $runcmd = @(
+        # DNS first: systemd-resolved consults FallbackDNS only when no
+        # DHCP/static DNS answers, so the write_files dropin has to be live
+        # before anything tries to resolve archive.ubuntu.com. It used to sit
+        # below the package step, which left the very first apt of the boot
+        # resolving against whatever was there.
+        'systemctl restart systemd-resolved || true',
+        # Then packages: installs anything the baked image is missing, and is a
+        # no-op (no apt at all) once bake/02-base-packages.sh ships them. Must
+        # stay ahead of the service-enable lines below, which need them.
+        "bash -c 'echo $ensurePackagesB64 | base64 -d > /root/memlabs-ensure-packages.sh && chmod 0700 /root/memlabs-ensure-packages.sh && /root/memlabs-ensure-packages.sh; rm -f /root/memlabs-ensure-packages.sh' || true",
         'systemctl enable --now qemu-guest-agent || true',
         'systemctl enable --now ssh || true',
         # linux-cloud-tools-virtual / linux-tools-virtual are kernel-FLAVOR
@@ -571,10 +594,6 @@ chpasswd:
         # baked tools one version stale.
         'dpkg -s "linux-cloud-tools-$(uname -r)" >/dev/null 2>&1 || apt-get install -y "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)" || true',
         'ufw allow OpenSSH || true',
-        # systemd-resolved consults FallbackDNS only when no DHCP/static DNS
-        # answers. Restart so the dropin in write_files is picked up before
-        # cloud-init's package_update tries to resolve archive.ubuntu.com.
-        'systemctl restart systemd-resolved || true',
         # Pick up the /etc/systemd/system/hv-kvp-daemon.service override
         # written above. Do NOT restart the unit from runcmd -- if the
         # /dev/vmbus/hv_kvp device node hasn't appeared yet (hv_utils KVP
@@ -981,10 +1000,11 @@ write_files:
         read only = no
         valid users = vmbuildadmin
 
-package_update: true
+# roles/ensure-packages.sh (first runcmd) owns package installation and runs
+# apt-get update only when something is actually missing, so a baked image does
+# no apt on first boot at all.
+package_update: false
 package_upgrade: false
-packages:
-$packagesYaml
 
 runcmd:
 $runcmdYaml
@@ -1644,6 +1664,168 @@ function Get-LinuxVmWaitTimeout {
     return $base
 }
 
+function Get-LinuxGuestActivitySnapshot {
+    <#
+    .SYNOPSIS
+        Host-side sample of whether a Linux guest is doing any work.
+
+    .DESCRIPTION
+        Every in-guest liveness signal we have -- sshd on TCP/22, the Hyper-V
+        heartbeat IC, the KVP-reported IP -- comes up LATE in a Linux first
+        boot, after systemd, hv_utils and cloud-init. Under heavy host I/O a
+        healthy guest can be many minutes away from all three, so "none of them
+        answered yet" does not mean the guest is dead. Wacky-A 2026-08-16
+        power-cycled ZZ-TOFU and ZZ-SQUID on exactly that reasoning
+        (heartbeat='LostCommunication' at 890s) and discarded their boot progress.
+
+        These counters need nothing inside the guest: the hypervisor bills the
+        virtual processors, the VHDX grows as the guest writes, and the serial
+        tap file grows as it prints. A guest that is merely slow still moves
+        them; a wedged guest does not.
+
+        Every probe is independently guarded and reports $null when it could not
+        be read. $null means UNKNOWN, never idle -- see Test-LinuxGuestActivityMoved.
+        Returns $null overall only when the VM itself cannot be read.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName
+    )
+
+    $vm = $null
+    try { $vm = Get-VM -Name $VmName -ErrorAction Stop } catch { return $null }
+    if (-not $vm) { return $null }
+
+    # Cumulative virtual-processor run time is the strongest signal: monotonic
+    # and precise, so it still moves for a guest starved down to a few ms/s.
+    # (Get-VM).CPUUsage cannot do that job alone -- it is an integer percent of
+    # the WHOLE host, so a 2-vCPU guest crawling on a 16-core host rounds to 0,
+    # which is exactly the guest we must not plug-pull.
+    $cpuRunTime = $null
+    try {
+        $wql = "Name LIKE '{0}:Hv VP%'" -f ($VmName -replace "'", "''")
+        $vps = @(Get-CimInstance -ClassName Win32_PerfRawData_HvStats_HyperVHypervisorVirtualProcessor -Filter $wql -ErrorAction Stop)
+        if ($vps.Count -gt 0) {
+            $tot = [double]0
+            foreach ($vp in $vps) { $tot += [double]$vp.PercentTotalRunTime }
+            $cpuRunTime = $tot
+        }
+    }
+    catch { $cpuRunTime = $null }
+
+    $cpuPercent = $null
+    try { $cpuPercent = [int]$vm.CPUUsage } catch { $cpuPercent = $null }
+
+    $hb = $null
+    try { $hb = "$($vm.Heartbeat)" } catch { $hb = $null }
+
+    # NTFS can hold back LastWriteTime while a handle is open, so treat the
+    # VHDX as a corroborating signal only -- never the sole basis for a verdict.
+    $diskBytes = $null
+    $diskWriteTicks = $null
+    try {
+        $seen = 0
+        $sum = [long]0
+        $newest = [long]0
+        foreach ($d in @(Get-VMHardDiskDrive -VM $vm -ErrorAction Stop)) {
+            if (-not $d.Path) { continue }
+            $fi = Get-Item -LiteralPath $d.Path -ErrorAction SilentlyContinue
+            if (-not $fi) { continue }
+            $seen++
+            $sum += [long]$fi.Length
+            if ($fi.LastWriteTimeUtc.Ticks -gt $newest) { $newest = $fi.LastWriteTimeUtc.Ticks }
+        }
+        if ($seen -gt 0) { $diskBytes = $sum; $diskWriteTicks = $newest }
+    }
+    catch { $diskBytes = $null; $diskWriteTicks = $null }
+
+    $serialBytes = $null
+    try {
+        $serialLog = Join-Path (Split-Path $PSScriptRoot -Parent) "logs\linux-serial\$VmName.log"
+        $sfi = Get-Item -LiteralPath $serialLog -ErrorAction SilentlyContinue
+        if ($sfi) { $serialBytes = [long]$sfi.Length }
+    }
+    catch { $serialBytes = $null }
+
+    return [pscustomobject]@{
+        State          = "$($vm.State)"
+        Heartbeat      = $hb
+        CpuRunTime     = $cpuRunTime
+        CpuPercent     = $cpuPercent
+        DiskBytes      = $diskBytes
+        DiskWriteTicks = $diskWriteTicks
+        SerialBytes    = $serialBytes
+    }
+}
+
+function Get-LinuxGuestActivityReadable {
+    <#
+    .SYNOPSIS
+        Names of the activity signals that actually returned a value.
+
+    .DESCRIPTION
+        A stall verdict derived from probes that all failed to read is a
+        measurement of nothing dressed up as a measurement of zero. Callers log
+        this so a run where every probe was blind is visible as such instead of
+        looking like a confident "guest is idle".
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [psobject]$Snapshot
+    )
+
+    if ($null -eq $Snapshot) { return @() }
+    $names = @()
+    foreach ($p in 'CpuRunTime', 'CpuPercent', 'DiskBytes', 'DiskWriteTicks', 'SerialBytes') {
+        if ($null -ne $Snapshot.$p) { $names += $p }
+    }
+    return $names
+}
+
+function Test-LinuxGuestActivityMoved {
+    <#
+    .SYNOPSIS
+        $true if any host-visible counter shows the guest did work since $Previous.
+
+    .DESCRIPTION
+        Fails SAFE: a probe that could not be read on either sample returns
+        $true, so a blind sample can never be the reason a guest is plug-pulled.
+        Only an all-signals-readable, all-signals-flat comparison returns $false.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [psobject]$Previous,
+
+        [Parameter(Mandatory = $false)]
+        [psobject]$Current
+    )
+
+    if ($null -eq $Previous -or $null -eq $Current) { return $true }
+
+    # A healthy heartbeat is proof of life regardless of the counters.
+    if ("$($Current.Heartbeat)" -like 'Ok*') { return $true }
+
+    # Burning measurable CPU right now counts on its own.
+    if ($null -ne $Current.CpuPercent -and $Current.CpuPercent -gt 0) { return $true }
+
+    $sawReadablePair = $false
+    foreach ($p in 'CpuRunTime', 'DiskBytes', 'DiskWriteTicks', 'SerialBytes') {
+        $a = $Previous.$p
+        $b = $Current.$p
+        if ($null -eq $a -or $null -eq $b) { continue }
+        $sawReadablePair = $true
+        if ($b -ne $a) { return $true }
+    }
+
+    # Nothing was readable on both samples -> unknown, not idle.
+    if (-not $sawReadablePair) { return $true }
+
+    return $false
+}
+
 function Get-LinuxHeadStartSeconds {
     <#
     .SYNOPSIS
@@ -1662,6 +1844,14 @@ function Get-LinuxHeadStartSeconds {
 
         Returns 0 when there is nothing to protect (no Linux VMs) or the
         deploy is small enough that contention is not a factor.
+
+        SIZING: the window has to cover a Linux FIRST BOOT, not just the VM
+        creation call. Observed cold-build SSH-ready times on LABHOST are
+        ~550s quiet / >1680s under a 22-VHDX copy storm, so the original
+        10s/VM capped at 300s (= 150s for a 23-VM deploy) protected only the
+        first tenth of what it was aimed at, and Wacky-A 2026-08-16 lost
+        ZZ-TOFU with all 19 Windows copies landing mid-boot. 20s/VM capped at
+        600s gives 300s at 23 VMs and 580s at 37.
     #>
     [CmdletBinding()]
     param (
@@ -1673,10 +1863,10 @@ function Get-LinuxHeadStartSeconds {
         [int]$Threshold = 8,
 
         [Parameter(Mandatory = $false)]
-        [int]$SecondsPerVm = 10,
+        [int]$SecondsPerVm = 20,
 
         [Parameter(Mandatory = $false)]
-        [int]$MaxSeconds = 300
+        [int]$MaxSeconds = 600
     )
 
     $vms = @($DeployConfig.virtualMachines)
@@ -1817,7 +2007,21 @@ function Wait-LinuxVmReady {
         # or the Hyper-V Data Exchange service is unhappy. Without this,
         # a fully-up VM with broken KVP looks identical to a dead VM.
         [Parameter(Mandatory = $false)]
-        [string]$ExpectedIPAddress
+        [string]$ExpectedIPAddress,
+
+        # A guest is only declared dead after EVERY host-visible activity
+        # counter has been flat for this long. Replaces the old "53% of the
+        # budget has elapsed" rule, which fired on wall-clock alone and so
+        # scaled with host load in exactly the wrong direction.
+        [Parameter(Mandatory = $false)]
+        [int]$StallSeconds = 300,
+
+        # Power-cycles allowed per wait. A guest can wedge again on the retry
+        # boot (ZZ-TOFU wedged on both of its boots on 2026-08-16) and the old
+        # single-shot latch left the remaining budget burning against a guest
+        # nothing was going to recover.
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRestarts = 2
     )
 
     $sshExe = Get-LinuxSshExePath
@@ -1839,8 +2043,7 @@ function Wait-LinuxVmReady {
     $loggedKnownHostsForIp = $null
     $lastSshErrLogSec = -9999
     $sshErrLogIntervalSec = 30
-    $restartAttempted = $false
-    $restartAfterSec = [int]($TimeoutSeconds * 0.53)  # ~53% of total; 900s→477s, 1800s→954s
+    $restartAfterSec = [int]($TimeoutSeconds * 0.53)  # earliest a power-cycle may be considered; the stall test still has to agree
     # Track whether the guest has shown any sign of life (sshd accepted a
     # TCP/22 connection at least once). A VM that is merely slow to finish
     # cloud-init under heavy host I/O load looks "stuck" to the restart
@@ -1848,6 +2051,24 @@ function Wait-LinuxVmReady {
     # restarts the cold-boot clock — exactly the wrong move under load.
     # We only power-cycle VMs that have NEVER shown sshd listening.
     $sawSignOfLife = $false
+
+    # Host-visible activity tracking. $restartAfterSec is now only the EARLIEST
+    # moment a power-cycle may be considered; the decision itself needs
+    # $StallSeconds of proven inactivity on top of it, so a guest that is
+    # merely crawling under I/O contention is never plug-pulled.
+    $restartCount = 0
+    $lastActivitySampleSec = 0
+    $lastActivity = Get-LinuxGuestActivitySnapshot -VmName $VmName
+    $lastActivityAt = Get-Date
+    $activitySignals = @(Get-LinuxGuestActivityReadable -Snapshot $lastActivity)
+    if ($activitySignals.Count -eq 0) {
+        # Not fatal, but it means the stall detector is blind and will never
+        # authorise a power-cycle. Say so rather than let it look like a pass.
+        Write-Log "$VmName`: no host-visible activity counters readable — stall detection is BLIND; will wait out the full budget instead of power-cycling." -Warning
+    }
+    else {
+        Write-Log "$VmName`: activity signals available: $($activitySignals -join ', ')" -LogOnly
+    }
 
     # Emit the serial console tail into the build log. Called at the power-cycle
     # decision as well as the final timeout: the 08-06 stress run cycled OREGANO at
@@ -2034,40 +2255,58 @@ function Wait-LinuxVmReady {
             write-progress2 "Wait for Linux VM" -Status "$VmName`: waiting for cloud-init / DHCP (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
         }
 
-        # ── Mid-wait restart: if SSH hasn't come up after 8 minutes, the
-        # VM may be stuck at a maintenance prompt or fsck wait. Power-cycle
-        # it once and use the remaining ~7 minutes for the retry.
-        if (-not $restartAttempted -and $elapsed -ge $restartAfterSec) {
-            $restartAttempted = $true
-            # Decide whether the guest is ALIVE before touching power. A hard
-            # -TurnOff is a plug-pull: if the guest is alive but busy (classic
-            # case: first-boot cloud-init mid 'packages:' apt install, or the
-            # Proxy's 188-package squid install), pulling the plug while dpkg is
-            # writing /var/lib/dpkg/status truncates it ("end of file after
-            # field name ''") and permanently breaks apt on the VM -- the proven
-            # root cause of the recurring Proxy samba/dpkg failures.
-            #
-            # sshd being seen (sawSignOfLife) proves alive, but sshd comes up
-            # LATE (after cloud-init installs packages). The Hyper-V heartbeat IC
-            # comes up as soon as the kernel + hv_utils load -- well before a big
-            # first-boot apt finishes -- so also treat a healthy heartbeat as
-            # "alive but slow" and DO NOT restart. A clean timeout failure is far
-            # better than silently corrupting the dpkg DB.
-            $guestAlive = $sawSignOfLife
-            $hb = $null
-            if (-not $guestAlive) {
-                try { $hb = (Get-VM -Name $VmName -ErrorAction SilentlyContinue).Heartbeat } catch { }
-                if ("$hb" -like 'Ok*') { $guestAlive = $true }
+        # ── Activity sampling. Sampled on its own cadence (not every poll) so
+        # the CIM/Hyper-V queries stay cheap with several Linux VMs in flight.
+        if ($elapsed - $lastActivitySampleSec -ge 30) {
+            $lastActivitySampleSec = $elapsed
+            $nowAct = Get-LinuxGuestActivitySnapshot -VmName $VmName
+            if (Test-LinuxGuestActivityMoved -Previous $lastActivity -Current $nowAct) {
+                $lastActivityAt = Get-Date
             }
-            if ($guestAlive) {
-                # sshd seen or heartbeat healthy -> guest is alive, just slow
-                # (heavy host I/O contention). Restarting would throw away boot
-                # progress AND risk truncating the dpkg DB. Keep waiting.
-                $aliveWhy = $(if ($sawSignOfLife) { 'sshd accepted TCP/22' } else { "heartbeat='$hb'" })
-                Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s, but guest is alive ($aliveWhy) — NOT restarting (a hard reset mid first-boot apt would corrupt the dpkg DB); continuing to wait." -Warning
+            if ($null -ne $nowAct) { $lastActivity = $nowAct }
+        }
+        $stalledSec = [int]((Get-Date) - $lastActivityAt).TotalSeconds
+
+        # ── Mid-wait restart. Gated on PROVEN inactivity, not on the clock.
+        #
+        # The old rule fired at 53% of the budget on wall-clock alone, using
+        # "sshd seen OR heartbeat Ok" as the liveness test. Both of those come
+        # up late in a Linux first boot, so under host I/O contention a healthy
+        # guest reads as dead exactly when it most needs to be left alone:
+        # 2026-08-16 power-cycled ZZ-TOFU and ZZ-SQUID at 890s on
+        # heartbeat='LostCommunication', discarding both boots.
+        #
+        # A hard -TurnOff is a plug-pull: pulling it while dpkg is writing
+        # /var/lib/dpkg/status truncates it ("end of file after field name ''")
+        # and permanently breaks apt on the VM -- the proven root cause of the
+        # recurring Proxy samba/dpkg failures. So the bar to touch power is now
+        # $StallSeconds with every readable host counter flat, which a crawling
+        # guest cannot trip and a wedged one trips reliably.
+        if ($restartCount -lt $MaxRestarts -and $elapsed -ge $restartAfterSec -and -not $sawSignOfLife -and $stalledSec -ge $StallSeconds) {
+            $hb = "$($lastActivity.Heartbeat)"
+            $readable = @(Get-LinuxGuestActivityReadable -Snapshot $lastActivity)
+
+            # Host still mid base-image copy storm? Those robocopy streams are
+            # what starves the guest in the first place, so require twice the
+            # quiet before blaming the guest -- "wait for the load to drop
+            # before calling it dead". Read-only and self-guarding: an
+            # unreadable process list just leaves the base requirement in place.
+            $busyCopies = 0
+            try { $busyCopies = @(Get-Process -Name 'robocopy' -ErrorAction SilentlyContinue).Count } catch { $busyCopies = 0 }
+            $effectiveStall = $(if ($busyCopies -gt 0) { $StallSeconds * 2 } else { $StallSeconds })
+
+            if ($readable.Count -eq 0) {
+                # Nothing was measured. A verdict here would be a guess with a
+                # plug-pull attached, so decline and let the timeout own it.
+                Write-Log "$VmName`: ${stalledSec}s with no SSH, but NO activity counter was readable — refusing to power-cycle on an unmeasured guest; waiting out the budget." -Warning
+            }
+            elseif ($stalledSec -lt $effectiveStall) {
+                Write-Log "$VmName`: flat for ${stalledSec}s but $busyCopies base-image copy/copies still running — holding off the power-cycle until ${effectiveStall}s of quiet." -LogOnly
             }
             else {
-                Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s and no sign of life (heartbeat='$hb') — power-cycling and retrying" -Warning
+                $restartCount++
+                Write-Log "$VmName`: no activity on any of [$($readable -join ', ')] for ${stalledSec}s (heartbeat='$hb', copies=$busyCopies) — guest appears wedged; power-cycle $restartCount of $MaxRestarts" -Warning
+
                 # Capture BEFORE the stop: this is the moment we declare the guest dead,
                 # and a TurnOff destroys whatever the console was about to tell us.
                 & $emitSerialTail 'power-cycle decision'
@@ -2099,6 +2338,12 @@ function Wait-LinuxVmReady {
                 $lastReportedIp = $null
                 $loggedKnownHostsForIp = $null
                 $lastHeartbeatSec = $elapsed
+                # The retry boot gets a fresh stall window; without this reset
+                # the already-expired one would re-fire on the next sample and
+                # spend every remaining restart in a single burst.
+                $lastActivity = $null
+                $lastActivityAt = Get-Date
+                $lastActivitySampleSec = $elapsed
             }
         }
 
