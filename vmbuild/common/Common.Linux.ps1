@@ -1784,15 +1784,29 @@ function Get-LinuxGuestActivityReadable {
     return $names
 }
 
-function Test-LinuxGuestActivityMoved {
+function Get-LinuxGuestActivityDelta {
     <#
     .SYNOPSIS
-        $true if any host-visible counter shows the guest did work since $Previous.
+        Compare two activity snapshots and report whether the guest did real work.
 
     .DESCRIPTION
-        Fails SAFE: a probe that could not be read on either sample returns
-        $true, so a blind sample can never be the reason a guest is plug-pulled.
-        Only an all-signals-readable, all-signals-flat comparison returns $false.
+        The first version of this asked "did any counter CHANGE", which can never
+        report a stall: PercentTotalRunTime is a CUMULATIVE 100ns counter and the
+        VHDX mtime advances on any flush, so both move for a VM that is merely
+        powered on. ZZ-TOFU sat 1310s past the restart floor on 2026-08-17 with the
+        stall clock resetting on every sample, so its retry never fired at all.
+
+        So the counters become RATES measured against floors:
+          CpuBusyPercent  - percent of ONE virtual processor, summed across VPs
+          DiskGrowthBytes - dynamic VHDX growth over the window
+          SerialGrowth    - bytes the guest printed to the console
+        DiskWriteTicks stays in the snapshot for the log but is deliberately NOT a
+        decision input: it moves on any flush, guest work or not.
+
+        Fails SAFE in both directions -- no comparable sample, or nothing readable
+        on both ends, yields Moved=$true. Only a measured, all-below-floor window
+        yields $false, and .Why always carries the numbers behind the verdict so
+        the decision can be audited from the build log.
     #>
     [CmdletBinding()]
     param (
@@ -1800,30 +1814,99 @@ function Test-LinuxGuestActivityMoved {
         [psobject]$Previous,
 
         [Parameter(Mandatory = $false)]
-        [psobject]$Current
+        [psobject]$Current,
+
+        [Parameter(Mandatory = $false)]
+        [double]$ElapsedSeconds = 0,
+
+        # Percent of one virtual processor. A guest blocked on starved I/O sits
+        # near 0; anything genuinely booting is far above this.
+        [Parameter(Mandatory = $false)]
+        [double]$CpuBusyFloorPercent = 2.0,
+
+        [Parameter(Mandatory = $false)]
+        [long]$DiskGrowthFloorBytes = 1MB
     )
 
-    if ($null -eq $Previous -or $null -eq $Current) { return $true }
-
-    # A healthy heartbeat is proof of life regardless of the counters.
-    if ("$($Current.Heartbeat)" -like 'Ok*') { return $true }
-
-    # Burning measurable CPU right now counts on its own.
-    if ($null -ne $Current.CpuPercent -and $Current.CpuPercent -gt 0) { return $true }
-
-    $sawReadablePair = $false
-    foreach ($p in 'CpuRunTime', 'DiskBytes', 'DiskWriteTicks', 'SerialBytes') {
-        $a = $Previous.$p
-        $b = $Current.$p
-        if ($null -eq $a -or $null -eq $b) { continue }
-        $sawReadablePair = $true
-        if ($b -ne $a) { return $true }
+    $r = [ordered]@{
+        Moved             = $true
+        Why               = 'unknown'
+        CpuBusyPercent    = $null
+        DiskGrowthBytes   = $null
+        SerialGrowthBytes = $null
+        Heartbeat         = $null
+        Measured          = @()
     }
 
-    # Nothing was readable on both samples -> unknown, not idle.
-    if (-not $sawReadablePair) { return $true }
+    if ($null -eq $Previous -or $null -eq $Current) {
+        $r.Why = 'no comparable sample yet'
+        return [pscustomobject]$r
+    }
+    $r.Heartbeat = "$($Current.Heartbeat)"
+    if ($ElapsedSeconds -le 0) {
+        $r.Why = 'zero-length window'
+        return [pscustomobject]$r
+    }
+    if ("$($Current.Heartbeat)" -like 'Ok*') {
+        $r.Why = "heartbeat='$($Current.Heartbeat)'"
+        return [pscustomobject]$r
+    }
 
-    return $false
+    $measured = [System.Collections.Generic.List[string]]::new()
+
+    $busy = $null
+    if ($null -ne $Previous.CpuRunTime -and $null -ne $Current.CpuRunTime) {
+        $d = [double]$Current.CpuRunTime - [double]$Previous.CpuRunTime
+        if ($d -lt 0) { $d = 0 }  # counter restarts with the VM across a power-cycle
+        $busy = [math]::Round(($d / ($ElapsedSeconds * 1e7)) * 100, 2)
+        $measured.Add('cpu')
+    }
+    elseif ($null -ne $Current.CpuPercent) {
+        $busy = [double]$Current.CpuPercent
+        $measured.Add('cpu%')
+    }
+    $r.CpuBusyPercent = $busy
+
+    $disk = $null
+    if ($null -ne $Previous.DiskBytes -and $null -ne $Current.DiskBytes) {
+        $disk = [long]$Current.DiskBytes - [long]$Previous.DiskBytes
+        if ($disk -lt 0) { $disk = 0 }
+        $measured.Add('disk')
+    }
+    $r.DiskGrowthBytes = $disk
+
+    $serial = $null
+    if ($null -ne $Previous.SerialBytes -and $null -ne $Current.SerialBytes) {
+        $serial = [long]$Current.SerialBytes - [long]$Previous.SerialBytes
+        if ($serial -lt 0) { $serial = 0 }
+        $measured.Add('serial')
+    }
+    $r.SerialGrowthBytes = $serial
+
+    $r.Measured = $measured.ToArray()
+    if ($measured.Count -eq 0) {
+        $r.Why = 'no signal readable on both samples'
+        return [pscustomobject]$r
+    }
+
+    $hits = [System.Collections.Generic.List[string]]::new()
+    if ($null -ne $busy -and $busy -ge $CpuBusyFloorPercent) { $hits.Add("cpu=$busy% >= $CpuBusyFloorPercent%") }
+    if ($null -ne $disk -and $disk -ge $DiskGrowthFloorBytes) { $hits.Add("disk=+$disk B >= $DiskGrowthFloorBytes B") }
+    if ($null -ne $serial -and $serial -gt 0) { $hits.Add("serial=+$serial B") }
+
+    $cpuTxt = $(if ($null -ne $busy) { "$busy%" } else { 'n/a' })
+    $diskTxt = $(if ($null -ne $disk) { "+$disk B" } else { 'n/a' })
+    $serialTxt = $(if ($null -ne $serial) { "+$serial B" } else { 'n/a' })
+
+    if ($hits.Count -gt 0) {
+        $r.Moved = $true
+        $r.Why = ($hits -join ', ')
+    }
+    else {
+        $r.Moved = $false
+        $r.Why = "below floors over ${ElapsedSeconds}s: cpu=$cpuTxt (floor $CpuBusyFloorPercent%) disk=$diskTxt (floor $DiskGrowthFloorBytes B) serial=$serialTxt"
+    }
+    return [pscustomobject]$r
 }
 
 function Get-LinuxHeadStartSeconds {
@@ -2021,7 +2104,12 @@ function Wait-LinuxVmReady {
         # single-shot latch left the remaining budget burning against a guest
         # nothing was going to recover.
         [Parameter(Mandatory = $false)]
-        [int]$MaxRestarts = 2
+        [int]$MaxRestarts = 2,
+
+        # Minimum gap between power-cycles, so a retry boot gets a real chance
+        # before the next trigger is even evaluated.
+        [Parameter(Mandatory = $false)]
+        [int]$RestartCooldownSeconds = 300
     )
 
     $sshExe = Get-LinuxSshExePath
@@ -2057,7 +2145,13 @@ function Wait-LinuxVmReady {
     # $StallSeconds of proven inactivity on top of it, so a guest that is
     # merely crawling under I/O contention is never plug-pulled.
     $restartCount = 0
+    $nextRestartAllowedSec = 0
     $lastActivitySampleSec = 0
+    $lastActivityLogSec = -9999
+    $lastActivityWhy = 'not sampled yet'
+    # KVP reporting an IP proves the guest reached userspace far enough to run
+    # hv_kvp_daemon, so the backstop below must not fire once we have seen one.
+    $sawKvpIp = $false
     $lastActivity = Get-LinuxGuestActivitySnapshot -VmName $VmName
     $lastActivityAt = Get-Date
     $activitySignals = @(Get-LinuxGuestActivityReadable -Snapshot $lastActivity)
@@ -2106,6 +2200,7 @@ function Wait-LinuxVmReady {
         $ipSource = $null
         if ($ip) {
             $ipSource = 'kvp'
+            $sawKvpIp = $true
         }
         elseif ($ExpectedIPAddress) {
             $ip = $ExpectedIPAddress
@@ -2258,59 +2353,90 @@ function Wait-LinuxVmReady {
         # ── Activity sampling. Sampled on its own cadence (not every poll) so
         # the CIM/Hyper-V queries stay cheap with several Linux VMs in flight.
         if ($elapsed - $lastActivitySampleSec -ge 30) {
+            $windowSec = $elapsed - $lastActivitySampleSec
             $lastActivitySampleSec = $elapsed
             $nowAct = Get-LinuxGuestActivitySnapshot -VmName $VmName
-            if (Test-LinuxGuestActivityMoved -Previous $lastActivity -Current $nowAct) {
-                $lastActivityAt = Get-Date
+            $delta = Get-LinuxGuestActivityDelta -Previous $lastActivity -Current $nowAct -ElapsedSeconds $windowSec
+            $lastActivityWhy = $delta.Why
+            if ($delta.Moved) { $lastActivityAt = Get-Date }
+            # Logged on a slow cadence even when nothing is wrong: without the
+            # actual rates in the log there is no way to calibrate the floors,
+            # and no way to explain afterwards why a cycle did or did not fire.
+            if ($elapsed - $lastActivityLogSec -ge 120) {
+                $lastActivityLogSec = $elapsed
+                Write-Log "$VmName`: activity @${elapsed}s moved=$($delta.Moved) measured=[$($delta.Measured -join ',')] $($delta.Why)" -LogOnly
             }
             if ($null -ne $nowAct) { $lastActivity = $nowAct }
         }
         $stalledSec = [int]((Get-Date) - $lastActivityAt).TotalSeconds
 
-        # ── Mid-wait restart. Gated on PROVEN inactivity, not on the clock.
+        # ── Mid-wait restart. Two independent triggers:
         #
-        # The old rule fired at 53% of the budget on wall-clock alone, using
-        # "sshd seen OR heartbeat Ok" as the liveness test. Both of those come
-        # up late in a Linux first boot, so under host I/O contention a healthy
-        # guest reads as dead exactly when it most needs to be left alone:
-        # 2026-08-16 power-cycled ZZ-TOFU and ZZ-SQUID at 890s on
-        # heartbeat='LostCommunication', discarding both boots.
+        # STALL: every measurable activity rate below its floor for $StallSeconds.
+        # Fires early and only when the counters actually say so.
+        #
+        # BACKSTOP: 70% of the budget gone with sshd never seen AND KVP never
+        # reporting an IP. This exists because the stall test is only as good as
+        # its instruments, and on 2026-08-17 it was not good at all -- it was
+        # comparing cumulative counters that advance for any powered-on VM, so it
+        # never fired and ZZ-TOFU silently lost the retry the old wall-clock rule
+        # used to give it. A watchdog whose only trigger depends on an instrument
+        # is one bad instrument away from doing nothing, so the backstop
+        # deliberately depends on nothing but the clock and two facts that are
+        # hard evidence of a guest that never reached userspace.
         #
         # A hard -TurnOff is a plug-pull: pulling it while dpkg is writing
-        # /var/lib/dpkg/status truncates it ("end of file after field name ''")
-        # and permanently breaks apt on the VM -- the proven root cause of the
-        # recurring Proxy samba/dpkg failures. So the bar to touch power is now
-        # $StallSeconds with every readable host counter flat, which a crawling
-        # guest cannot trip and a wedged one trips reliably.
-        if ($restartCount -lt $MaxRestarts -and $elapsed -ge $restartAfterSec -and -not $sawSignOfLife -and $stalledSec -ge $StallSeconds) {
+        # /var/lib/dpkg/status truncates it and permanently breaks apt on the VM.
+        # That is why the stop below is graceful first, TurnOff only as fallback.
+        $backstopAfterSec = [int]($TimeoutSeconds * 0.70)
+        $stallDue = ($elapsed -ge $restartAfterSec -and -not $sawSignOfLife -and $stalledSec -ge $StallSeconds)
+        $backstopDue = ($elapsed -ge $backstopAfterSec -and -not $sawSignOfLife -and -not $sawKvpIp)
+
+        # Without this the backstop conditions are still true on the very next
+        # poll and both restarts would be spent inside 20 seconds, before the
+        # retry boot has had any chance at all.
+        $cooldownOk = ($elapsed -ge $nextRestartAllowedSec)
+
+        if ($restartCount -lt $MaxRestarts -and $cooldownOk -and ($stallDue -or $backstopDue)) {
             $hb = "$($lastActivity.Heartbeat)"
-            $readable = @(Get-LinuxGuestActivityReadable -Snapshot $lastActivity)
+            $doCycle = $false
+            $reason = ''
 
-            # Host still mid base-image copy storm? Those robocopy streams are
-            # what starves the guest in the first place, so require twice the
-            # quiet before blaming the guest -- "wait for the load to drop
-            # before calling it dead". Read-only and self-guarding: an
-            # unreadable process list just leaves the base requirement in place.
-            $busyCopies = 0
-            try { $busyCopies = @(Get-Process -Name 'robocopy' -ErrorAction SilentlyContinue).Count } catch { $busyCopies = 0 }
-            $effectiveStall = $(if ($busyCopies -gt 0) { $StallSeconds * 2 } else { $StallSeconds })
-
-            if ($readable.Count -eq 0) {
-                # Nothing was measured. A verdict here would be a guess with a
-                # plug-pull attached, so decline and let the timeout own it.
-                Write-Log "$VmName`: ${stalledSec}s with no SSH, but NO activity counter was readable — refusing to power-cycle on an unmeasured guest; waiting out the budget." -Warning
-            }
-            elseif ($stalledSec -lt $effectiveStall) {
-                Write-Log "$VmName`: flat for ${stalledSec}s but $busyCopies base-image copy/copies still running — holding off the power-cycle until ${effectiveStall}s of quiet." -LogOnly
+            if ($backstopDue) {
+                $doCycle = $true
+                $reason = "backstop: ${elapsed}s of ${TimeoutSeconds}s, sshd never answered and KVP never reported an IP (heartbeat='$hb', last activity: $lastActivityWhy)"
             }
             else {
+                # Host still mid base-image copy storm? Those robocopy streams are
+                # what starves the guest in the first place, so require twice the
+                # quiet before blaming the guest. Only the stall path defers --
+                # the backstop must not be postponable or it stops being a net.
+                $busyCopies = 0
+                try { $busyCopies = @(Get-Process -Name 'robocopy' -ErrorAction SilentlyContinue).Count } catch { $busyCopies = 0 }
+                $effectiveStall = $(if ($busyCopies -gt 0) { $StallSeconds * 2 } else { $StallSeconds })
+                $readable = @(Get-LinuxGuestActivityReadable -Snapshot $lastActivity)
+
+                if ($readable.Count -eq 0) {
+                    Write-Log "$VmName`: ${stalledSec}s with no SSH, but NO activity counter was readable — leaving the decision to the backstop at ${backstopAfterSec}s." -Warning
+                }
+                elseif ($stalledSec -lt $effectiveStall) {
+                    Write-Log "$VmName`: flat for ${stalledSec}s but $busyCopies base-image copy/copies still running — holding off until ${effectiveStall}s of quiet." -LogOnly
+                }
+                else {
+                    $doCycle = $true
+                    $reason = "no measurable activity for ${stalledSec}s on [$($readable -join ', ')] (heartbeat='$hb', copies=$busyCopies, $lastActivityWhy)"
+                }
+            }
+
+            if ($doCycle) {
                 $restartCount++
-                Write-Log "$VmName`: no activity on any of [$($readable -join ', ')] for ${stalledSec}s (heartbeat='$hb', copies=$busyCopies) — guest appears wedged; power-cycle $restartCount of $MaxRestarts" -Warning
+                $nextRestartAllowedSec = $elapsed + $RestartCooldownSeconds
+                Write-Log "$VmName`: power-cycle $restartCount of $MaxRestarts — $reason" -Warning
 
                 # Capture BEFORE the stop: this is the moment we declare the guest dead,
                 # and a TurnOff destroys whatever the console was about to tell us.
                 & $emitSerialTail 'power-cycle decision'
-                write-progress2 "Wait for Linux VM" -Status "$VmName`: restarting VM (no SSH after ${restartAfterSec}s)..." -force
+                write-progress2 "Wait for Linux VM" -Status "$VmName`: restarting VM (no SSH after ${elapsed}s)..." -force
                 try {
                     # Try a GRACEFUL shutdown first (systemd stops apt/dpkg
                     # cleanly and flushes the filesystem to the VHDX). Only fall
