@@ -46,7 +46,12 @@ param (
     [switch]$LeaveRunning,
 
     [Parameter(Mandatory = $false)]
-    [switch]$RestartAfter
+    [switch]$RestartAfter,
+
+    # How long to wait for a graceful stop before pulling power. Only used when
+    # the guest is actually answering its heartbeat.
+    [Parameter(Mandatory = $false)]
+    [int]$StopTimeoutSeconds = 60
 )
 
 $ErrorActionPreference = 'Stop'
@@ -242,13 +247,43 @@ if (-not (Test-Path $Destination)) { New-Item -ItemType Directory -Path $Destina
 Write-Host "Destination: $Destination" -ForegroundColor DarkGray
 
 $weStopped = $false
+$hardOff = $false
 if ($vm.State -ne 'Off') {
     if ($LeaveRunning) {
-        throw "VM is $($vm.State) and -LeaveRunning specified; cannot mount a locked VHDX. Stop the VM or omit -LeaveRunning."
+        throw "VM is $($vm.State) and -LeaveRunning specified. -LeaveRunning only mounts a VM that is ALREADY off; a running VM holds a write lock on the VHDX. Omit -LeaveRunning to let this script stop it."
     }
-    Write-Host "Stopping $VmName ..." -ForegroundColor Yellow
-    Stop-VM -Name $VmName -Force -ErrorAction Stop
+
+    # The whole reason we are here is usually that the guest is wedged, and
+    # Stop-VM -Force is an ACPI *request* -- a frozen guest never answers it, so
+    # it blocks for the Hyper-V timeout and then throws 0x800705B4. Ask nicely
+    # only when the heartbeat says someone is home; otherwise pull power, which
+    # is the only thing that works on a hung guest and costs nothing because a
+    # frozen kernel is not flushing anything anyway.
+    $hb = "$($vm.Heartbeat)"
+    if ($hb -like 'Ok*') {
+        Write-Host "Stopping $VmName gracefully (heartbeat='$hb', up to ${StopTimeoutSeconds}s) ..." -ForegroundColor Yellow
+        $stopJob = Stop-VM -Name $VmName -Force -AsJob -WarningAction SilentlyContinue
+        $null = Wait-Job -Job $stopJob -Timeout $StopTimeoutSeconds
+        Remove-Job -Job $stopJob -Force -ErrorAction SilentlyContinue
+    }
+    else {
+        Write-Host "heartbeat='$hb' -- guest is not answering ACPI; skipping the graceful request." -ForegroundColor Yellow
+    }
+
+    if ((Get-VM -Name $VmName -ErrorAction Stop).State -ne 'Off') {
+        Write-Host "Guest did not stop; forcing power off (TurnOff)." -ForegroundColor Yellow
+        Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop
+        $hardOff = $true
+    }
+
+    $state = (Get-VM -Name $VmName -ErrorAction Stop).State
+    if ($state -ne 'Off') { throw "'$VmName' is still $state after both a graceful stop and TurnOff; refusing to mount a locked VHDX." }
     $weStopped = $true
+
+    if ($hardOff) {
+        # Say this once, loudly: it changes how the collected files should be read.
+        Write-Host "NOTE: power was pulled, so on-disk state is whatever had been flushed. Missing/short logs are expected and are NOT proof the guest never wrote them." -ForegroundColor Yellow
+    }
 }
 
 $mounted = $null
