@@ -135,9 +135,26 @@ if (Test-Path -LiteralPath $sqlInstanceKey) {
 $contentDirPattern = '^(SCCMContentLib|SMS_DP\$|SMSPKG.*|SMSSIG\$|SMS_CCM|RemoteInstall|WSUS|WSUSContent)$'
 foreach ($disk in @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue)) {
     $root = "$($disk.DeviceID)\"
-    Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match $contentDirPattern } |
-        ForEach-Object { $paths.Add($_.FullName) }
+
+    # -Directory is a DYNAMIC parameter contributed by the FileSystem provider,
+    # so a root PowerShell cannot resolve fails during parameter BINDING -- which
+    # happens before -ErrorAction is in effect, and is terminating. The
+    # -ErrorAction SilentlyContinue that used to be the only guard here could
+    # never have caught it. ZZ-CREPE had a DriveType=3 disk whose root would not
+    # resolve on 2026-08-17; the bind error killed the whole script, so Defender
+    # was left untuned and Phase 10 maintenance failed for the VM.
+    if (-not (Test-Path -LiteralPath $root)) {
+        Write-Step "Skipping $root - WMI reports a fixed disk but the root does not resolve"
+        continue
+    }
+    try {
+        Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $contentDirPattern } |
+            ForEach-Object { $paths.Add($_.FullName) }
+    }
+    catch {
+        Write-Step "Skipping $root - enumeration failed: $($_.Exception.Message)"
+    }
 }
 
 $preference = Get-MpPreference -ErrorAction SilentlyContinue
