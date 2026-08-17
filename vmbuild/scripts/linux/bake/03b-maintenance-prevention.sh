@@ -39,6 +39,34 @@ if ! grep -q 'rootflags=data=journal' "$GRUB_FILE"; then
     echo "root fs: enabled data=journal,commit=1 via rootflags (full data journaling)"
 fi
 
+# Make a hard hang SAY something. These VMs log
+# "NMI watchdog: Perf NMI watchdog permanently disabled" at boot because the
+# synthetic CPU exposes no PMU, so the hardware lockup detector is never armed
+# and a frozen kernel produces total silence -- ZZ-TOFU froze mid-systemd on
+# 2026-08-16 and 08-17 and printed nothing at all, on any channel, ever.
+#
+#   softlockup_panic=1   the SOFT lockup detector is timer-based, so unlike the
+#                        NMI one it still works without a PMU. Panic => backtrace.
+#   unknown_nmi_panic=1  makes a host-injected NMI (tools/Debug-VmHungGuest.ps1)
+#                        produce a full trace instead of a one-line "received
+#                        for unknown reason".
+#   panic=0              halt on panic instead of rebooting, so the trace stays
+#                        on the console for a screenshot.
+#
+# This has to be BAKED: the hang happens on first boot, long before any
+# cloud-init runcmd could edit grub, and a cmdline change needs a reboot anyway.
+# Cost when nothing is wrong: nothing. Cost when something is: a named function
+# instead of a blank screen.
+if ! grep -q 'softlockup_panic=1' "$GRUB_FILE"; then
+    if grep -q '^GRUB_CMDLINE_LINUX=' "$GRUB_FILE"; then
+        sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 softlockup_panic=1 unknown_nmi_panic=1 panic=0"/' "$GRUB_FILE"
+    else
+        echo 'GRUB_CMDLINE_LINUX="softlockup_panic=1 unknown_nmi_panic=1 panic=0"' >> "$GRUB_FILE"
+    fi
+    update-grub
+    echo "lockup detection: softlockup_panic=1 unknown_nmi_panic=1 panic=0 (no PMU here, so the NMI watchdog cannot arm itself)"
+fi
+
 # Tell systemd to never drop to emergency/rescue on failure — just reboot
 mkdir -p /etc/systemd/system.conf.d
 cat > /etc/systemd/system.conf.d/no-emergency.conf << 'EOF'
