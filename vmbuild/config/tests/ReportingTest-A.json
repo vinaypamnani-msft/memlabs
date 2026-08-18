@@ -125,6 +125,7 @@
       "installSUP": false,
       "installRP": true,
       "siteCode": "PS2",
+      "network": "192.168.2.0",
       "enablePullDP": false
     },
     {

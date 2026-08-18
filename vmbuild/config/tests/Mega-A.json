@@ -178,6 +178,7 @@
       "installSUP": true,
       "installRP": false,
       "siteCode": "PS2",
+      "network": "10.0.2.0",
       "enablePullDP": false,
       "InstallSMSProv": false,
       "wsusDataBaseServer": "PS2SQLAO1",

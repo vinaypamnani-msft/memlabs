@@ -125,6 +125,21 @@ function Get-NetworkForVM {
                 return $ss.Network
             }
         }
+        "SiteSystem" {
+            # sitesAndNetworks maps exactly one subnet per site code, so a DP/MP left
+            # on the default network sits inside another site's boundary.
+            # Get-SiteServerForSiteCode throws when the site code resolves to nothing.
+            try {
+                $SS = Get-SiteServerForSiteCode -siteCode $vm.SiteCode -deployConfig $ConfigToModify -type VM
+            }
+            catch {
+                Write-Log "Get-NetworkForVM: no site server found for site code '$($vm.SiteCode)'; leaving $($vm.vmName) on $currentNetwork." -LogOnly
+                return $null
+            }
+            if ($ss.network -ne $currentNetwork) {
+                return $ss.Network
+            }
+        }
         Default {
             if (-not $ReturnIfNotNeeded) {
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm
@@ -640,6 +655,12 @@ function Add-NewVMForRole {
             $siteCode = $virtualMachine.siteCode
             if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $siteCode) -eq "Secondary") {
                 $virtualMachine.installMP = $false
+            }
+            if (-not $network) {
+                $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig -ReturnIfNotNeeded:$true
+                if ($network) {
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
+                }
             }
         }
         "FileServer" {
