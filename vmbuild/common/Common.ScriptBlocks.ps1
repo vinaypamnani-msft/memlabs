@@ -1675,6 +1675,18 @@ $global:VM_Create = {
                 $diskInitSuccess = $false
                 $cimWmiRestarted = $false
                 $cimRebooted = $false
+                # One snapshot scriptblock reused for the per-attempt failure dump AND
+                # for a FINAL dump after the last retry -- the per-attempt one runs
+                # BEFORE the WMI-restart/reboot, so if CIM is wedged it returns nothing;
+                # the final one runs AFTER the reboot when CIM is healthy, so the log
+                # always ends with a real disk picture before the build halts.
+                $diskDiagSb = {
+                    $out = [System.Collections.Generic.List[string]]::new()
+                    foreach ($d in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) { $out.Add("Disk#$($d.Number) $([math]::Round($d.Size / 1GB, 1))GB Style=$($d.PartitionStyle) OpStatus=$($d.OperationalStatus) Offline=$($d.IsOffline)") }
+                    foreach ($p in @(Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.Size -gt 100MB } | Sort-Object DiskNumber, PartitionNumber)) { $out.Add("Part Disk#$($p.DiskNumber)/$($p.PartitionNumber) Letter='$($p.DriveLetter)' $([math]::Round($p.Size / 1GB, 1))GB Type=$($p.Type)") }
+                    foreach ($v in @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter })) { $out.Add("Vol $($v.DriveLetter): $([math]::Round($v.Size / 1GB, 1))GB fs='$($v.FileSystem)' '$($v.FileSystemLabel)'") }
+                    $out.ToArray()
+                }
                 while (-not $diskInitSuccess -and $diskInitAttempts -lt $diskInitMaxAttempts) {
                     $diskInitAttempts++
                     if ($diskInitAttempts -gt 1) {
@@ -1790,14 +1802,28 @@ $global:VM_Create = {
                         }
 
                         # Read the disk back and record the ground truth for this letter.
+                        # Include the shape (the disk's PartitionStyle behind the letter,
+                        # and whether a RAW disk of the size is still sitting there) so a
+                        # verify-fail is self-explaining even if the later host-side
+                        # snapshot can't run (wedged CIM).
                         $finalVol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                        $letterStyle = ''
+                        $rawOfSizeLeft = $false
+                        try {
+                            $lp = Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                            if ($lp) { $letterStyle = "$((Get-Disk -Number $lp.DiskNumber -ErrorAction SilentlyContinue).PartitionStyle)" }
+                            $rawOfSizeLeft = [bool](Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.PartitionStyle -eq 'RAW' -and $_.Size -eq $size } | Select-Object -First 1)
+                        }
+                        catch {}
                         $verdict.Add([pscustomobject]@{
-                                Letter     = "$letter"
-                                Present    = [bool]$finalVol
-                                FileSystem = if ($finalVol) { "$($finalVol.FileSystem)" } else { '' }
-                                SizeGB     = if ($finalVol) { [math]::Round($finalVol.Size / 1GB, 1) } else { 0 }
-                                Ok         = ($finalVol -and $finalVol.FileSystem -eq 'NTFS')
-                                Error      = $initError
+                                Letter      = "$letter"
+                                Present     = [bool]$finalVol
+                                FileSystem  = if ($finalVol) { "$($finalVol.FileSystem)" } else { '' }
+                                SizeGB      = if ($finalVol) { [math]::Round($finalVol.Size / 1GB, 1) } else { 0 }
+                                Ok          = ($finalVol -and $finalVol.FileSystem -eq 'NTFS')
+                                DiskStyle   = $letterStyle
+                                RawOfSize   = $rawOfSizeLeft
+                                Error       = $initError
                             })
                     }
 
@@ -1826,7 +1852,7 @@ $global:VM_Create = {
                     }
                     elseif ($diskInitAttempts -lt $diskInitMaxAttempts) {
                         if ($null -ne $diskVerdict) {
-                            $badDetail = ($unformatted | ForEach-Object { "$($_.Letter): present=$($_.Present) fs='$($_.FileSystem)'$(if ($_.Error) { " err='$($_.Error)'" })" }) -join '; '
+                            $badDetail = ($unformatted | ForEach-Object { "$($_.Letter): present=$($_.Present) fs='$($_.FileSystem)' diskStyle='$($_.DiskStyle)' rawOfSizeLeft=$($_.RawOfSize)$(if ($_.Error) { " err='$($_.Error)'" })" }) -join '; '
                             if (-not $badDetail -and $diskVerdict.Count -ne $diskEntries.Count) { $badDetail = "verdict covered $($diskVerdict.Count)/$($diskEntries.Count) disk(s)" }
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init verify FAILED (attempt $diskInitAttempts): $badDetail" -Warning
                         }
@@ -1835,14 +1861,10 @@ $global:VM_Create = {
                         # Snapshot the guest's disk/partition/volume state on a failed
                         # attempt so a half-initialized disk (letter present, no NTFS)
                         # is captured in the log instead of inferred after the fact.
+                        # Best-effort: if CIM is wedged this returns nothing, and the
+                        # final post-reboot snapshot below covers that case.
                         try {
-                            $snap = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Disk init diag snapshot" -AsJob -TimeoutSeconds 120 -ScriptBlock {
-                                $out = [System.Collections.Generic.List[string]]::new()
-                                foreach ($d in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) { $out.Add("Disk#$($d.Number) $([math]::Round($d.Size/1GB,1))GB Style=$($d.PartitionStyle) OpStatus=$($d.OperationalStatus) Offline=$($d.IsOffline)") }
-                                foreach ($p in @(Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.Size -gt 100MB } | Sort-Object DiskNumber, PartitionNumber)) { $out.Add("Part Disk#$($p.DiskNumber)/$($p.PartitionNumber) Letter='$($p.DriveLetter)' $([math]::Round($p.Size/1GB,1))GB Type=$($p.Type)") }
-                                foreach ($v in @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter })) { $out.Add("Vol $($v.DriveLetter): $([math]::Round($v.Size/1GB,1))GB fs='$($v.FileSystem)' '$($v.FileSystemLabel)'") }
-                                $out.ToArray()
-                            }
+                            $snap = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Disk init diag snapshot" -AsJob -TimeoutSeconds 120 -ScriptBlock $diskDiagSb
                             if (-not $snap.ScriptBlockFailed -and $snap.ScriptBlockOutput) {
                                 foreach ($line in @($snap.ScriptBlockOutput)) { Write-Log "[Phase $Phase]: $($currentItem.vmName): DISKDIAG $line" -LogOnly }
                             }
@@ -1866,7 +1888,21 @@ $global:VM_Create = {
                     }
                 }
                 if (-not $diskInitSuccess) {
-                    $failDetail = if ($null -ne $diskVerdict) { ($diskVerdict | ForEach-Object { "$($_.Letter): present=$($_.Present) fs='$($_.FileSystem)' ok=$($_.Ok)" }) -join '; ' } else { "$($result.ScriptBlockOutput)" }
+                    # Final disk picture AFTER the retry ladder (WMI restart + reboot)
+                    # has run, so it is captured even if every per-attempt snapshot hit
+                    # a wedged CIM server -- the build is about to halt and this is the
+                    # last, most-recoverable read of the disk state.
+                    try {
+                        $finalSnap = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Disk init final diag" -AsJob -TimeoutSeconds 120 -ScriptBlock $diskDiagSb
+                        if (-not $finalSnap.ScriptBlockFailed -and $finalSnap.ScriptBlockOutput) {
+                            foreach ($line in @($finalSnap.ScriptBlockOutput)) { Write-Log "[Phase $Phase]: $($currentItem.vmName): DISKDIAG(final) $line" -LogOnly }
+                        }
+                        else {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DISKDIAG(final) unavailable -- guest did not return disk state (CIM likely still wedged)" -LogOnly
+                        }
+                    }
+                    catch {}
+                    $failDetail = if ($null -ne $diskVerdict) { ($diskVerdict | ForEach-Object { "$($_.Letter): present=$($_.Present) fs='$($_.FileSystem)' diskStyle='$($_.DiskStyle)' rawOfSizeLeft=$($_.RawOfSize) ok=$($_.Ok)$(if ($_.Error) { " err='$($_.Error)'" })" }) -join '; ' } else { "job did not return a verdict (failed/timed out): $($result.ScriptBlockOutput)" }
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks after $diskInitMaxAttempts attempts. $failDetail" -Failure -OutputStream
                     return
                 }
