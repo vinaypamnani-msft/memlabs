@@ -11378,8 +11378,80 @@ function Test-CMSiteWideFunctionality {
                         }
                     }
                 }
-                elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
-                    $stateNames = @{ 6701='Started'; 6704='Syncing WSUS'; 6705='Syncing DB'; 6706='Syncing Internet WSUS' }
+                elseif ([int]$syncStatus.LastSyncState -eq 6705) {
+                    # 6705 = "Synchronizing SMS database": WSUS's own sync (WSUS <-
+                    # upstream/MU) is COMPLETE and CM's SMS_WSUS_SYNC_MANAGER
+                    # (wsyncmgr) is importing the synced metadata into the CM DB.
+                    # Native WSUS is IDLE during this phase BY DESIGN, so the
+                    # WSUS-native "desync" test is the wrong instrument here -- measure
+                    # CM-side import progress from wsyncmgr.log (which runs on THIS
+                    # site server) instead. wacky ZZ-BIGMAC 2026-08-17 warned
+                    # "CM/WSUS desync ... 136 min" while wsyncmgr was at 97% and still
+                    # advancing. Timestamps are labelled local vs UTC to avoid the
+                    # three-zone confusion in that same message.
+                    $syncTime = [Management.ManagementDateTimeConverter]::ToDateTime($syncStatus.LastSyncStateTime)
+                    $age = (Get-Date) - $syncTime
+                    $sName = 'Syncing DB'
+                    $sinceLocal = $syncTime.ToString('yyyy-MM-dd HH:mm:ss')
+                    if ($age.TotalMinutes -le 30) {
+                        $results.Details.Add("OK: SUP sync in progress ($sName, $([math]::Round($age.TotalMinutes,1)) min; native WSUS idle is expected during the CM database import)")
+                    }
+                    else {
+                        # wsyncmgr.log logs "processed N out of M items (P%)" with a
+                        # CMTrace local timestamp. Two reads ~12s apart catch a fast
+                        # mover; recency of the last activity catches a slow-but-healthy
+                        # import (progress lines are minutes apart). Guarded so a read/
+                        # parse error degrades to INFO -- a diagnostic must never throw.
+                        try {
+                            $wsyncPath = $null
+                            foreach ($k in 'HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup') {
+                                $sd = $null
+                                try { $sd = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+                                if ($sd) { $cand = Join-Path $sd 'Logs\wsyncmgr.log'; if (Test-Path $cand) { $wsyncPath = $cand; break } }
+                            }
+                            $readWsync = {
+                                param($path)
+                                $processed = $null; $total = $null; $pct = $null; $lastTs = $null; $lastLine = ''
+                                if ($path -and (Test-Path $path)) {
+                                    $tail = @(Get-Content -Path $path -Tail 400 -ErrorAction SilentlyContinue)
+                                    foreach ($ln in $tail) {
+                                        if ($ln -match 'processed (\d+) out of (\d+) items(?:\s*\((\d+)%\))?') { $processed = [int]$Matches[1]; $total = [int]$Matches[2]; if ($Matches[3]) { $pct = [int]$Matches[3] } }
+                                    }
+                                    for ($i = $tail.Count - 1; $i -ge 0; $i--) {
+                                        if ($tail[$i] -match '<(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2}):(\d{2})') {
+                                            try { $lastTs = [datetime]::new([int]$Matches[3], [int]$Matches[1], [int]$Matches[2], [int]$Matches[4], [int]$Matches[5], [int]$Matches[6]) } catch {}
+                                            $lastLine = $tail[$i]; break
+                                        }
+                                    }
+                                }
+                                [pscustomobject]@{ Processed = $processed; Total = $total; Pct = $pct; LastTs = $lastTs; LastLine = $lastLine }
+                            }
+                            $s1 = & $readWsync $wsyncPath
+                            Start-Sleep -Seconds 12
+                            $s2 = & $readWsync $wsyncPath
+                            $advancing = ($null -ne $s1.Processed -and $null -ne $s2.Processed -and $s2.Processed -gt $s1.Processed)
+                            $recent = ($null -ne $s2.LastTs -and ((Get-Date) - $s2.LastTs).TotalMinutes -lt 10)
+                            $progDesc = if ($null -ne $s2.Processed) { "wsyncmgr processed $($s2.Processed)/$($s2.Total)$(if ($null -ne $s2.Pct) { " ($($s2.Pct)%)" })" } else { 'wsyncmgr progress line not found' }
+                            $lastActDesc = if ($null -ne $s2.LastTs) { "last wsyncmgr activity $($s2.LastTs.ToString('yyyy-MM-dd HH:mm:ss')) local" } else { 'wsyncmgr activity timestamp unreadable' }
+                            $deltaBit = if ($advancing) { "; +$($s2.Processed - $s1.Processed) items in 12s" } else { '' }
+                            if (-not $wsyncPath) {
+                                $results.Details.Add("INFO: SUP at '$sName' (6705) for $([math]::Round($age.TotalMinutes,0)) min (since $sinceLocal local); native WSUS idle is expected during the CM database import, and wsyncmgr.log was not found to confirm CM-side progress")
+                            }
+                            elseif ($advancing -or $recent) {
+                                $results.Details.Add("OK: SUP at '$sName' (6705) for $([math]::Round($age.TotalMinutes,0)) min (since $sinceLocal local); native WSUS idle is expected in this phase and the CM database import is progressing [$progDesc; $lastActDesc$deltaBit]")
+                            }
+                            else {
+                                $results.Details.Add("WARN: SUP at '$sName' (6705) for $([math]::Round($age.TotalMinutes,0)) min (since $sinceLocal local) with no confirmed CM-side progress -- native WSUS is idle (expected in this phase), so the CM database import appears stalled [$progDesc; $lastActDesc]")
+                                if ($s2.LastLine) { $results.Details.Add("  DIAG wsyncmgr last line: $($s2.LastLine.Trim())") }
+                            }
+                        }
+                        catch {
+                            $results.Details.Add("INFO: SUP at '$sName' (6705) for $([math]::Round($age.TotalMinutes,0)) min (since $sinceLocal local); native WSUS idle is expected during the CM database import, but the wsyncmgr.log progress check errored: $($_.Exception.Message)")
+                        }
+                    }
+                }
+                elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6706)) {
+                    $stateNames = @{ 6701 = 'Started'; 6704 = 'Syncing WSUS'; 6706 = 'Syncing Internet WSUS' }
                     $sName = if ($stateNames.ContainsKey([int]$syncStatus.LastSyncState)) { $stateNames[[int]$syncStatus.LastSyncState] } else { "state $($syncStatus.LastSyncState)" }
                     $syncTime = [Management.ManagementDateTimeConverter]::ToDateTime($syncStatus.LastSyncStateTime)
                     $age = (Get-Date) - $syncTime
@@ -11461,10 +11533,10 @@ function Test-CMSiteWideFunctionality {
                             $results.Details.Add("OK: SUP sync at '$sName' after $([math]::Round($age.TotalMinutes,0)) min; native WSUS confirms Running $activity$wsusDiag")
                         }
                         elseif ($wsusNativeIdle) {
-                            $results.Details.Add("WARN: CM/WSUS desync: CM has reported '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime), but native WSUS was confirmed idle over 12s. LastResult=$wsusLastResult LastSync=$wsusLastSync$wsusDiag")
+                            $results.Details.Add("WARN: CM/WSUS desync: CM has reported '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $($syncTime.ToString('yyyy-MM-dd HH:mm:ss')) local), but native WSUS was confirmed idle over 12s. LastResult=$wsusLastResult LastSync(UTC)=$wsusLastSync$wsusDiag")
                         }
                         else {
-                            $results.Details.Add("WARN: SUP sync at '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime)$wsusDiag — may be slow or stuck")
+                            $results.Details.Add("WARN: SUP sync at '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $($syncTime.ToString('yyyy-MM-dd HH:mm:ss')) local)$wsusDiag — may be slow or stuck")
                         }
                     }
                     else {
