@@ -42,6 +42,7 @@ Write-DscStatus "$Tag Starting perfloading"
     # Read Site Code from registry
     #Write-DscStatus "$Tag Setting PS Drive for ConfigMgr" -NoStatus
     $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+    $HierarchySiteCode = if ($ThisVM.parentSiteCode) { "$($ThisVM.parentSiteCode)" } else { "$SiteCode" }
     $ProviderMachineName = $ThisMachineName + "." + $DomainFullName # SMS Provider machine name
 
     # Get CM module path
@@ -201,10 +202,10 @@ Write-DscStatus "$Tag Starting perfloading"
                 if (-not $diagDumped) {
                     $diagDumped = $true
                     try {
-                        $sdInst = @(Get-CimInstance -ClassName SMS_SCI_SiteDefinition -Namespace "ROOT\SMS\site_$SiteCode" -Filter "FileType=2 AND SiteCode='$SiteCode'" -ErrorAction Stop) | Select-Object -First 1
+                        $sdInst = @(Get-CimInstance -ClassName SMS_SCI_SiteDefinition -Namespace "ROOT\SMS\site_$SiteCode" -Filter "FileType=2 AND SiteCode='$HierarchySiteCode'" -ErrorAction Stop) | Select-Object -First 1
                         $tkVal = ($sdInst.Props | Where-Object { $_.PropertyName -eq 'TwoKeyApproval' } | Select-Object -First 1).Value
                         $asVal = (Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction SilentlyContinue).ApprovalState
-                        Write-DscStatus "$Tag Approval DIAG: master SCI TwoKeyApproval='$tkVal'; script '$($entry.Name)' ApprovalState='$asVal'" -Warning
+                        Write-DscStatus "$Tag Approval DIAG: hierarchy site '$HierarchySiteCode' master SCI TwoKeyApproval='$tkVal'; script '$($entry.Name)' ApprovalState='$asVal'" -Warning
                     }
                     catch { Write-DscStatus "$Tag Approval DIAG read failed: $($_.Exception.Message)" -Warning }
                 }
@@ -754,11 +755,10 @@ Write-DscStatus "$Tag Starting perfloading"
     } # end Primary-only apps/packages block
 
     ## Hierarchy auto-approval (TwoKeyApproval) + CM-script library import.
-    ## Both are Primary-tier in MEMLABS: New-CMScript on a CAS in a hierarchy
-    ## is a no-op (CM Scripts are authored on the Primary; the CAS has no
-    ## script library role), so the import block silently fails on every
-    ## name and bloats the log. The TwoKeyApproval setting pairs with the
-    ## script library and only matters where scripts actually live.
+    ## Script import is Primary-tier: New-CMScript on a CAS in a hierarchy is
+    ## a no-op because the CAS has no script library role. TwoKeyApproval is a
+    ## hierarchy setting owned by the top-level site, even though approvals run
+    ## against each Primary's script library, so this block targets both scopes.
     if ($CurrentRole -ne "CAS") {
 
     ## Changing the auto-approval setting on Hierarchy settings
@@ -768,13 +768,17 @@ Write-DscStatus "$Tag Starting perfloading"
 
     Write-DscStatus "$Tag Current namespace is: $namespace and class name is: $classname"
 
+    # The provider enforces this hierarchy setting from the top-level site row.
+    # On a child Primary, writing its local row reads back cleanly but has no effect.
+    Write-DscStatus "$Tag TwoKeyApproval policy owner: hierarchy site '$HierarchySiteCode' (local site '$SiteCode')."
+
     # Fetch the EDITABLE master copy. SMS_SCI_SiteDefinition has two rows per site
     # -- FileType=1 (deployed, read-only) and FileType=2 (master, what the console/
     # SDK edits and the provider compiles down). An unfiltered read can return BOTH
     # and write the wrong one, so match the FileType=2 idiom used by EnableEHTTP/
     # EnableHTTPS/InstallSecondarySiteServer, and VERIFY the write took effect
     # (wacky ZZ-GYRO 2026-08-17: 105 script approvals failed on this child site).
-    $instance = @(Get-CimInstance -ClassName $className -Namespace $namespace -Filter "FileType=2 AND SiteCode='$SiteCode'" -ErrorAction SilentlyContinue) | Select-Object -First 1
+    $instance = @(Get-CimInstance -ClassName $className -Namespace $namespace -Filter "FileType=2 AND SiteCode='$HierarchySiteCode'" -ErrorAction SilentlyContinue) | Select-Object -First 1
 
     if ($null -ne $instance) {
         Write-DscStatus "$Tag Master SCI (FileType=2) found: reconciling TwoKeyApproval."
@@ -817,7 +821,7 @@ Write-DscStatus "$Tag Starting perfloading"
         # is exactly what leaves author self-approval blocked and every Approve-CMScript
         # failing later.
         try {
-            $vInst = @(Get-CimInstance -ClassName $className -Namespace $namespace -Filter "FileType=2 AND SiteCode='$SiteCode'" -ErrorAction Stop) | Select-Object -First 1
+            $vInst = @(Get-CimInstance -ClassName $className -Namespace $namespace -Filter "FileType=2 AND SiteCode='$HierarchySiteCode'" -ErrorAction Stop) | Select-Object -First 1
             $vProp = $vInst.Props | Where-Object { $_.PropertyName -eq 'TwoKeyApproval' } | Select-Object -First 1
             if ($vProp -and [int]$vProp.Value -eq 0) { Write-DscStatus "$Tag TwoKeyApproval verified = 0 in master SCI (FileType=2)." }
             else { Write-DscStatus "$Tag WARNING: TwoKeyApproval did NOT take -- master SCI shows '$(if ($vProp) { $vProp.Value } else { '<missing>' })'; author self-approval will be blocked." -Warning }
@@ -825,7 +829,7 @@ Write-DscStatus "$Tag Starting perfloading"
         catch { Write-DscStatus "$Tag WARNING: TwoKeyApproval verify read failed: $($_.Exception.Message)" -Warning }
     }
     else {
-        Write-DscStatus "$Tag WARNING: master SCI (SMS_SCI_SiteDefinition FileType=2, SiteCode=$SiteCode) not found -- cannot disable TwoKeyApproval; script approval will need a different identity." -Warning
+        Write-DscStatus "$Tag WARNING: master SCI (SMS_SCI_SiteDefinition FileType=2, SiteCode=$HierarchySiteCode) not found -- cannot disable TwoKeyApproval; script approval will need a different identity." -Warning
     }
     Write-DscStatus "$Tag TwoKeyApproval reconciliation complete."
 

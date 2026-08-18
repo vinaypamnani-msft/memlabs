@@ -10604,6 +10604,7 @@ function Test-CMSiteWideFunctionality {
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
     $siteCode = $CurrentItem.siteCode
+    $hierarchySiteCode = if ($CurrentItem.parentSiteCode) { "$($CurrentItem.parentSiteCode)" } else { "$siteCode" }
     $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
     $role = $CurrentItem.role
 
@@ -10718,7 +10719,7 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner)
+        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner)
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
@@ -11227,17 +11228,18 @@ function Test-CMSiteWideFunctionality {
                 }
                 elseif ($scripts.Count -ge 5) {
                     $unapprovedNames = @($unapprovedScripts | Select-Object -First 8 -ExpandProperty ScriptName)
-                    # Read the EFFECTIVE two-key-approval policy (master SCI, FileType=2)
-                    # so the WARN names the likely cause instead of guessing:
+                    # Read the EFFECTIVE two-key-approval policy from the top-level
+                    # site's master SCI. The provider enforces that hierarchy row;
+                    # a child Primary's local row can read 0 while approval is blocked.
                     # TwoKeyApproval=1 => author self-approval is blocked (perfloading's
                     # SCI write didn't take); =0 => approval failed for another reason,
                     # named by the Phase 8 '[perfloading] Failed to approve script' line.
                     $tkHint = 'two-key-approval policy unknown'
                     try {
-                        $siteDef = @(Get-WmiObject -Namespace $ns -Class SMS_SCI_SiteDefinition -Filter "FileType=2 AND SiteCode='$sc'" -ErrorAction Stop) | Select-Object -First 1
+                        $siteDef = @(Get-WmiObject -Namespace $ns -Class SMS_SCI_SiteDefinition -Filter "FileType=2 AND SiteCode='$hierarchySc'" -ErrorAction Stop) | Select-Object -First 1
                         $tkProp = $siteDef.Props | Where-Object { $_.PropertyName -eq 'TwoKeyApproval' } | Select-Object -First 1
                         $tkVal = if ($tkProp) { "$($tkProp.Value)" } else { '<missing>' }
-                        $tkHint = if ($tkVal -eq '0') { "TwoKeyApproval=0 (self-approve allowed) -- the failure is NOT the two-key policy" } elseif ($tkVal -eq '1') { "TwoKeyApproval=1 -- author self-approval is BLOCKED; perfloading's policy write did not take effect" } else { "TwoKeyApproval=$tkVal" }
+                        $tkHint = if ($tkVal -eq '0') { "hierarchy site $hierarchySc TwoKeyApproval=0 (self-approve allowed) -- the failure is NOT the two-key policy" } elseif ($tkVal -eq '1') { "hierarchy site $hierarchySc TwoKeyApproval=1 -- author self-approval is BLOCKED; perfloading's policy write did not take effect" } else { "hierarchy site $hierarchySc TwoKeyApproval=$tkVal" }
                     }
                     catch {}
                     $results.Details.Add("WARN: $($unapprovedScripts.Count)/$($scripts.Count) MEMLABS script(s) imported but NOT approved (ApprovalState != 3): $($unapprovedNames -join ', '). $tkHint. See the Phase 8 '[perfloading] Failed to approve script' / 'Approval DIAG' lines for the SMS provider error (ExtStatus/ErrorCode) that names the cause; re-running Phase 8 retries approval.")
@@ -11939,7 +11941,7 @@ function Test-CMSiteWideFunctionality {
 
     $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient) `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient) `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
