@@ -1695,6 +1695,17 @@ $global:VM_Create = {
                     $ProgressPreference = "SilentlyContinue"
                     try { Import-Module Storage } catch {}
 
+                    # Return a per-disk verdict so the HOST can decide success --
+                    # never let "the scriptblock didn't throw" stand in for "the
+                    # disk is actually a formatted NTFS volume on its letter". A
+                    # prior attempt that TIMED OUT on the host keeps running in the
+                    # guest and can leave a disk half-initialized (GPT + drive
+                    # letter but no filesystem); the RAW selector then matches
+                    # nothing on the retry, so without this verdict the retry would
+                    # report success having formatted nothing. See wacky ZZ-CREPE
+                    # 2026-08-17.
+                    $verdict = [System.Collections.Generic.List[object]]::new()
+
                     foreach ($entry in $entries) {
                         $letter = $entry.Letter
                         $size = ($entry.Size / 1)
@@ -1707,6 +1718,14 @@ $global:VM_Create = {
                             $letter = $availableLetters[0]
                         }
 
+                        # Idempotent init that RECOVERS a half-initialized disk instead
+                        # of skipping it. Three shapes can exist when we arrive:
+                        #   1. RAW disk of the right size          -> full init
+                        #   2. GPT disk, our letter, no NTFS vol   -> format in place
+                        #   3. GPT disk, no letter, right size     -> letter + format
+                        # (2)/(3) are exactly the leftovers a timed-out-but-still-running
+                        # prior attempt produces; formatting a data disk that never held
+                        # data loses nothing.
                         try {
                             $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
                         }
@@ -1718,39 +1737,124 @@ $global:VM_Create = {
                             } catch {}
                             $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
                         }
-                        if ($rawdisk) {
-                            try {
+
+                        $initError = $null
+                        try {
+                            if ($rawdisk) {
                                 $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | Out-Null
                             }
-                            catch {
-                                try {
-                                    (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
-                                    Get-Disk | Update-Disk
-                                    Start-Sleep -Seconds 10
-                                } catch {}
-                                $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | Out-Null
+                            else {
+                                # No RAW disk of this size -- either already done, or a
+                                # half-initialized leftover. Recover a lettered-but-
+                                # unformatted partition, or a lettertless partition on a
+                                # right-sized GPT disk, so the retry actually finishes.
+                                $vol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                                if ($vol -and $vol.FileSystem -ne 'NTFS') {
+                                    $part = Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                                    if ($part) {
+                                        Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | Out-Null
+                                    }
+                                }
+                                elseif (-not $vol) {
+                                    $gptDisk = Get-Disk | Where-Object { $_.PartitionStyle -eq 'GPT' -and $_.Size -eq $size } | Select-Object -First 1
+                                    if ($gptDisk) {
+                                        $cand = Get-Partition -DiskNumber $gptDisk.Number -ErrorAction SilentlyContinue | Where-Object { -not $_.DriveLetter -and $_.Size -gt 1GB -and $_.Type -notin 'Reserved', 'System' } | Sort-Object Size -Descending | Select-Object -First 1
+                                        if ($cand) {
+                                            Set-Partition -DiskNumber $cand.DiskNumber -PartitionNumber $cand.PartitionNumber -NewDriveLetter $letter -ErrorAction Stop
+                                            Start-Sleep -Seconds 2
+                                            $reVol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                                            if (-not $reVol -or $reVol.FileSystem -ne 'NTFS') {
+                                                $part = Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                                                if ($part) { Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | Out-Null }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
+                        catch {
+                            $initError = "$($_.Exception.Message)"
+                            try {
+                                (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
+                                Get-Disk | Update-Disk
+                                Start-Sleep -Seconds 10
+                            } catch {}
+                            $retryRaw = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
+                            try {
+                                if ($retryRaw) {
+                                    $retryRaw | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | Out-Null
+                                    $initError = $null
+                                }
+                            }
+                            catch { $initError = "$($_.Exception.Message)" }
+                        }
+
+                        # Read the disk back and record the ground truth for this letter.
+                        $finalVol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                        $verdict.Add([pscustomobject]@{
+                                Letter     = "$letter"
+                                Present    = [bool]$finalVol
+                                FileSystem = if ($finalVol) { "$($finalVol.FileSystem)" } else { '' }
+                                SizeGB     = if ($finalVol) { [math]::Round($finalVol.Size / 1GB, 1) } else { 0 }
+                                Ok         = ($finalVol -and $finalVol.FileSystem -eq 'NTFS')
+                                Error      = $initError
+                            })
                     }
 
                     # Create NO_SMS_ON_DRIVE.SMS
                     New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue | Out-Null
 
                     $ProgressPreference = $OriginalPref
+                    # Emit the verdict LAST so it is the terminal object the host reads.
+                    Write-Output $verdict.ToArray()
                 } -ArgumentList @(, $diskEntries)
+
+                    # Verify from the guest's own read-back, not merely "the job didn't
+                    # fail". A clean job that formatted nothing (RAW selector matched a
+                    # half-initialized leftover) must count as a FAILED attempt so the
+                    # retry ladder runs. $diskVerdict is null when the job itself
+                    # failed/timed out -- treated as a failure with no per-disk detail.
+                    $diskVerdict = $null
                     if (-not $result.ScriptBlockFailed) {
+                        $diskVerdict = @($result.ScriptBlockOutput | Where-Object { $_ -and $_.PSObject.Properties['Ok'] })
+                    }
+                    $unformatted = @($diskVerdict | Where-Object { -not $_.Ok })
+                    $diskVerifyOk = ($null -ne $diskVerdict) -and ($diskVerdict.Count -eq $diskEntries.Count) -and ($unformatted.Count -eq 0)
+
+                    if ($diskVerifyOk) {
                         $diskInitSuccess = $true
                     }
                     elseif ($diskInitAttempts -lt $diskInitMaxAttempts) {
+                        if ($null -ne $diskVerdict) {
+                            $badDetail = ($unformatted | ForEach-Object { "$($_.Letter): present=$($_.Present) fs='$($_.FileSystem)'$(if ($_.Error) { " err='$($_.Error)'" })" }) -join '; '
+                            if (-not $badDetail -and $diskVerdict.Count -ne $diskEntries.Count) { $badDetail = "verdict covered $($diskVerdict.Count)/$($diskEntries.Count) disk(s)" }
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init verify FAILED (attempt $diskInitAttempts): $badDetail" -Warning
+                        }
                         $diskErrText = "$($result.ScriptBlockOutput) $($result.ErrorDetails -join ' ')"
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init failed (attempt $diskInitAttempts): $diskErrText" -Warning
-                        # The guest's Storage stack depends on WMI/CIM/VDS. When that's
-                        # wedged the call either fails with "Cannot connect to CIM server /
-                        # message filter" or just times out silently (the -AsJob timeout
-                        # above). PSDirect still works, so recover the guest in-place
-                        # (restart WMI, then reboot) instead of failing the phase and
-                        # rolling back every VM. Escalate on ANY repeated failure, since a
-                        # silent timeout carries no CIM error text to match on.
+                        # Snapshot the guest's disk/partition/volume state on a failed
+                        # attempt so a half-initialized disk (letter present, no NTFS)
+                        # is captured in the log instead of inferred after the fact.
+                        try {
+                            $snap = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Disk init diag snapshot" -AsJob -TimeoutSeconds 120 -ScriptBlock {
+                                $out = [System.Collections.Generic.List[string]]::new()
+                                foreach ($d in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) { $out.Add("Disk#$($d.Number) $([math]::Round($d.Size/1GB,1))GB Style=$($d.PartitionStyle) OpStatus=$($d.OperationalStatus) Offline=$($d.IsOffline)") }
+                                foreach ($p in @(Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.Size -gt 100MB } | Sort-Object DiskNumber, PartitionNumber)) { $out.Add("Part Disk#$($p.DiskNumber)/$($p.PartitionNumber) Letter='$($p.DriveLetter)' $([math]::Round($p.Size/1GB,1))GB Type=$($p.Type)") }
+                                foreach ($v in @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter })) { $out.Add("Vol $($v.DriveLetter): $([math]::Round($v.Size/1GB,1))GB fs='$($v.FileSystem)' '$($v.FileSystemLabel)'") }
+                                $out.ToArray()
+                            }
+                            if (-not $snap.ScriptBlockFailed -and $snap.ScriptBlockOutput) {
+                                foreach ($line in @($snap.ScriptBlockOutput)) { Write-Log "[Phase $Phase]: $($currentItem.vmName): DISKDIAG $line" -LogOnly }
+                            }
+                        }
+                        catch {}
+                        # A failed attempt is one of two things: the guest Storage
+                        # stack is WEDGED (job failed / timed out silently -- WMI/CIM/VDS
+                        # gone), or a prior TIMED-OUT job is still running in the guest and
+                        # left a disk half-initialized (job returned but a letter is not
+                        # NTFS). The WMI restart, then reboot, clears BOTH: it revives a
+                        # wedged CIM server and it kills a lingering abandoned job so the
+                        # next attempt's in-scriptblock recovery can finish the format.
                         if (-not $cimWmiRestarted) {
                             $cimWmiRestarted = $true
                             Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase | Out-Null
@@ -1762,7 +1866,8 @@ $global:VM_Create = {
                     }
                 }
                 if (-not $diskInitSuccess) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks after $diskInitMaxAttempts attempts. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    $failDetail = if ($null -ne $diskVerdict) { ($diskVerdict | ForEach-Object { "$($_.Letter): present=$($_.Present) fs='$($_.FileSystem)' ok=$($_.Ok)" }) -join '; ' } else { "$($result.ScriptBlockOutput)" }
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks after $diskInitMaxAttempts attempts. $failDetail" -Failure -OutputStream
                     return
                 }
                 Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Done" -Completed -Log -force
