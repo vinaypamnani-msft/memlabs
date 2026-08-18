@@ -11213,7 +11213,20 @@ function Test-CMSiteWideFunctionality {
                 }
                 elseif ($scripts.Count -ge 5) {
                     $unapprovedNames = @($unapprovedScripts | Select-Object -First 8 -ExpandProperty ScriptName)
-                    $results.Details.Add("WARN: $($unapprovedScripts.Count)/$($scripts.Count) MEMLABS script(s) are imported but NOT approved/runnable (ApprovalState != 3): $($unapprovedNames -join ', '). Re-run Phase 8 after TwoKeyApproval hierarchy policy propagates, or approve them with a different identity.")
+                    # Read the EFFECTIVE two-key-approval policy (master SCI, FileType=2)
+                    # so the WARN names the likely cause instead of guessing:
+                    # TwoKeyApproval=1 => author self-approval is blocked (perfloading's
+                    # SCI write didn't take); =0 => approval failed for another reason,
+                    # named by the Phase 8 '[perfloading] Failed to approve script' line.
+                    $tkHint = 'two-key-approval policy unknown'
+                    try {
+                        $siteDef = @(Get-WmiObject -Namespace $ns -Class SMS_SCI_SiteDefinition -Filter "FileType=2 AND SiteCode='$sc'" -ErrorAction Stop) | Select-Object -First 1
+                        $tkProp = $siteDef.Props | Where-Object { $_.PropertyName -eq 'TwoKeyApproval' } | Select-Object -First 1
+                        $tkVal = if ($tkProp) { "$($tkProp.Value)" } else { '<missing>' }
+                        $tkHint = if ($tkVal -eq '0') { "TwoKeyApproval=0 (self-approve allowed) -- the failure is NOT the two-key policy" } elseif ($tkVal -eq '1') { "TwoKeyApproval=1 -- author self-approval is BLOCKED; perfloading's policy write did not take effect" } else { "TwoKeyApproval=$tkVal" }
+                    }
+                    catch {}
+                    $results.Details.Add("WARN: $($unapprovedScripts.Count)/$($scripts.Count) MEMLABS script(s) imported but NOT approved (ApprovalState != 3): $($unapprovedNames -join ', '). $tkHint. See the Phase 8 '[perfloading] Failed to approve script' / 'Approval DIAG' lines for the SMS provider error (ExtStatus/ErrorCode) that names the cause; re-running Phase 8 retries approval.")
                 }
                 elseif ($scripts.Count -ge 1) {
                     $results.Details.Add("WARN: Only $($scripts.Count) MEMLABS script(s) found (expected 50+); $($approvedScripts.Count) approved")

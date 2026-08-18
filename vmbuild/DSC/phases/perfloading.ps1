@@ -134,6 +134,37 @@ Write-DscStatus "$Tag Starting perfloading"
         }
     }
 
+    # Extract the REAL SMS provider error from an approval failure. Approve-CMScript
+    # surfaces only "The SMS Provider reported an error" in $_.Exception.Message; the
+    # cause lives in the WMI ExtendedStatus / inner-exception chain / error id, which
+    # the old catch discarded -- so 105 failures said nothing. Walk it into one line.
+    function Get-CmProviderError {
+        param($ErrorRecord)
+        $parts = [System.Collections.Generic.List[string]]::new()
+        $ex = $ErrorRecord.Exception
+        $depth = 0
+        while ($ex -and $depth -lt 6) {
+            $parts.Add("[$($ex.GetType().Name)] $($ex.Message)")
+            foreach ($pn in 'ErrorCode', 'StatusCode', 'HResult') {
+                try { $pv = $ex.PSObject.Properties[$pn]; if ($pv -and $null -ne $pv.Value -and "$($pv.Value)" -ne '0') { $parts.Add("$pn=$($pv.Value)") } } catch {}
+            }
+            # SMS provider ManagementException carries an SMS_ExtendedStatus object.
+            try {
+                $ei = $ex.PSObject.Properties['ErrorInformation']
+                if ($ei -and $ei.Value) {
+                    $d = $ei.Value
+                    $desc = try { $d['Description'] } catch { $null }
+                    $op = try { $d['Operation'] } catch { $null }
+                    $code = try { $d['StatusCode'] } catch { $null }
+                    if ($desc -or $op -or $code) { $parts.Add("ExtStatus: Desc='$desc' Op='$op' StatusCode=$code") }
+                }
+            } catch {}
+            $ex = $ex.InnerException; $depth++
+        }
+        if ($ErrorRecord.FullyQualifiedErrorId) { $parts.Add("FQEID=$($ErrorRecord.FullyQualifiedErrorId)") }
+        return ($parts -join ' | ')
+    }
+
     function Approve-MemLabsScriptQueue {
         param([object[]]$Queue)
 
@@ -141,6 +172,7 @@ Write-DscStatus "$Tag Starting perfloading"
         $approved = 0
         $failed = 0
         $policyBlocked = 0
+        $diagDumped = $false
         for ($index = 0; $index -lt @($Queue).Count; $index++) {
             $entry = $Queue[$index]
             try {
@@ -152,7 +184,7 @@ Write-DscStatus "$Tag Starting perfloading"
                 $approved++
             }
             catch {
-                $approvalError = $_.Exception.Message
+                $approvalError = Get-CmProviderError $_
                 if ($approvalError -match "Author can't approve their scripts") {
                     # TwoKeyApproval is hierarchy policy and can lag the SCI write
                     # on a fresh child. Every remaining call uses the same author
@@ -160,6 +192,21 @@ Write-DscStatus "$Tag Starting perfloading"
                     $policyBlocked = @($Queue).Count - $index
                     Write-DscStatus "$Tag Script approval deferred: provider still requires a different approver after the TwoKeyApproval write. Stopped after one policy-blocked call; $policyBlocked script(s) remain unapproved and will be retried on the next Phase 8 pass." -Warning
                     break
+                }
+                # On the FIRST non-policy failure, dump the context ONCE so the log
+                # names WHY: the effective TwoKeyApproval value in the master SCI
+                # (FileType=2) and this script's live ApprovalState. A generic
+                # provider error with TwoKeyApproval=1 points at the policy write;
+                # with =0 it points elsewhere (and the ExtStatus above names it).
+                if (-not $diagDumped) {
+                    $diagDumped = $true
+                    try {
+                        $sdInst = @(Get-CimInstance -ClassName SMS_SCI_SiteDefinition -Namespace "ROOT\SMS\site_$SiteCode" -Filter "FileType=2 AND SiteCode='$SiteCode'" -ErrorAction Stop) | Select-Object -First 1
+                        $tkVal = ($sdInst.Props | Where-Object { $_.PropertyName -eq 'TwoKeyApproval' } | Select-Object -First 1).Value
+                        $asVal = (Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction SilentlyContinue).ApprovalState
+                        Write-DscStatus "$Tag Approval DIAG: master SCI TwoKeyApproval='$tkVal'; script '$($entry.Name)' ApprovalState='$asVal'" -Warning
+                    }
+                    catch { Write-DscStatus "$Tag Approval DIAG read failed: $($_.Exception.Message)" -Warning }
                 }
                 $failed++
                 Write-DscStatus "$Tag Failed to approve script '$($entry.Name)': $approvalError" -Warning
@@ -721,11 +768,16 @@ Write-DscStatus "$Tag Starting perfloading"
 
     Write-DscStatus "$Tag Current namespace is: $namespace and class name is: $classname"
 
-    # Fetch the instance of the class
-    $instance = Get-CimInstance -ClassName $className -Namespace $namespace -Filter "SiteCode like '$SiteCode'"
+    # Fetch the EDITABLE master copy. SMS_SCI_SiteDefinition has two rows per site
+    # -- FileType=1 (deployed, read-only) and FileType=2 (master, what the console/
+    # SDK edits and the provider compiles down). An unfiltered read can return BOTH
+    # and write the wrong one, so match the FileType=2 idiom used by EnableEHTTP/
+    # EnableHTTPS/InstallSecondarySiteServer, and VERIFY the write took effect
+    # (wacky ZZ-GYRO 2026-08-17: 105 script approvals failed on this child site).
+    $instance = @(Get-CimInstance -ClassName $className -Namespace $namespace -Filter "FileType=2 AND SiteCode='$SiteCode'" -ErrorAction SilentlyContinue) | Select-Object -First 1
 
     if ($null -ne $instance) {
-        Write-DscStatus "$Tag Instance found: modifying existing instance."
+        Write-DscStatus "$Tag Master SCI (FileType=2) found: reconciling TwoKeyApproval."
 
         # Get the Props array
         $propsArray = $instance.Props
@@ -743,8 +795,8 @@ Write-DscStatus "$Tag Starting perfloading"
                     Write-DscStatus "$Tag Setting TwoKeyApproval to 0 to allow author self-approval."
                     $propsArray[$i].Value = 0
                     $instance.Props = $propsArray
-                    Set-CimInstance -InputObject $instance
-                    Write-DscStatus "$Tag TwoKeyApproval value updated successfully."
+                    try { Set-CimInstance -InputObject $instance -ErrorAction Stop; Write-DscStatus "$Tag TwoKeyApproval value updated." }
+                    catch { Write-DscStatus "$Tag WARNING: TwoKeyApproval Set-CimInstance failed: $($_.Exception.Message)" -Warning }
                 }
                 break
             }
@@ -752,19 +804,28 @@ Write-DscStatus "$Tag Starting perfloading"
 
         if (-not $propertyFound) {
             Write-DscStatus "$Tag Property 'TwoKeyApproval' not found in existing instance. Adding it."
-      
+
             $class = Get-CimClass -ClassName "SMS_EmbeddedProperty" -Namespace $namespace
             $i = New-CimInstance -CimClass $class -Property @{PropertyName = "TwoKeyApproval"; Value = "0"; Value1 = $null; Value2 = $null }
             $propsArray += $i
             $instance.Props = $propsArray
-            Set-CimInstance -InputObject $instance
-            Write-DscStatus "$Tag TwoKeyApproval property added and value set successfully."
-
+            try { Set-CimInstance -InputObject $instance -ErrorAction Stop; Write-DscStatus "$Tag TwoKeyApproval property added." }
+            catch { Write-DscStatus "$Tag WARNING: TwoKeyApproval add Set-CimInstance failed: $($_.Exception.Message)" -Warning }
         }
-        
+
+        # Read the master SCI back and confirm the write took -- a silent no-op here
+        # is exactly what leaves author self-approval blocked and every Approve-CMScript
+        # failing later.
+        try {
+            $vInst = @(Get-CimInstance -ClassName $className -Namespace $namespace -Filter "FileType=2 AND SiteCode='$SiteCode'" -ErrorAction Stop) | Select-Object -First 1
+            $vProp = $vInst.Props | Where-Object { $_.PropertyName -eq 'TwoKeyApproval' } | Select-Object -First 1
+            if ($vProp -and [int]$vProp.Value -eq 0) { Write-DscStatus "$Tag TwoKeyApproval verified = 0 in master SCI (FileType=2)." }
+            else { Write-DscStatus "$Tag WARNING: TwoKeyApproval did NOT take -- master SCI shows '$(if ($vProp) { $vProp.Value } else { '<missing>' })'; author self-approval will be blocked." -Warning }
+        }
+        catch { Write-DscStatus "$Tag WARNING: TwoKeyApproval verify read failed: $($_.Exception.Message)" -Warning }
     }
     else {
-        Write-DscStatus "$Tag Instance not found. Manually approve the scripts"
+        Write-DscStatus "$Tag WARNING: master SCI (SMS_SCI_SiteDefinition FileType=2, SiteCode=$SiteCode) not found -- cannot disable TwoKeyApproval; script approval will need a different identity." -Warning
     }
     Write-DscStatus "$Tag TwoKeyApproval reconciliation complete."
 
