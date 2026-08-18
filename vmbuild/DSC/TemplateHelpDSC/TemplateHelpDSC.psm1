@@ -4075,14 +4075,81 @@ class InitializeDisks {
             return
         }
 
-        # Loop through disks
+        # Loop through disks. Each pass must leave the letter as a formatted NTFS
+        # volume or the whole resource FAILS -- a data disk ConfigMgr/SQL/WSUS can't
+        # use is worse than a stopped build (they silently place content on C:).
+        # Recover the leftover shapes a timed-out Phase 1 host-init job produces
+        # instead of silently no-op'ing: the old 'if ($rawdisk)' with no else did
+        # nothing when the disk was already GPT (abandoned run initialized it), so
+        # Set() "succeeded" having formatted nothing (wacky ZZ-CREPE 2026-08-17).
         $count = 0
-        $label = "DATA"
+        $failedDisks = [System.Collections.Generic.List[string]]::new()
         foreach ($disk in $_Disks.psobject.properties) {
-            Write-Status "Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)"
-            $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $disk.Value } | Select-Object -First 1
-            $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $disk.Name | Format-Volume -FileSystem NTFS -NewFileSystemLabel "$label`_$count" -Confirm:$false -Force
+            $letter = $disk.Name
+            $size = $disk.Value
+            $label = "DATA`_$count"
+            Write-Status "Initializing disk '$letter' (size $size, label $label)"
+            try {
+                $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
+                if ($rawdisk) {
+                    $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | Out-Null
+                }
+                else {
+                    # No RAW disk of this size -- either already done, or a half-init
+                    # leftover: a lettered-but-unformatted partition (format in place),
+                    # or a lettertless partition on a right-sized GPT disk (assign
+                    # letter + format). Formatting a data disk that never held data
+                    # loses nothing.
+                    $vol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($vol -and $vol.FileSystem -ne 'NTFS') {
+                        $part = Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($part) { Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | Out-Null }
+                    }
+                    elseif (-not $vol) {
+                        $gptDisk = Get-Disk | Where-Object { $_.PartitionStyle -eq 'GPT' -and $_.Size -eq $size } | Select-Object -First 1
+                        if ($gptDisk) {
+                            $cand = Get-Partition -DiskNumber $gptDisk.Number -ErrorAction SilentlyContinue | Where-Object { -not $_.DriveLetter -and $_.Size -gt 1GB -and $_.Type -notin 'Reserved', 'System' } | Sort-Object Size -Descending | Select-Object -First 1
+                            if ($cand) {
+                                Set-Partition -DiskNumber $cand.DiskNumber -PartitionNumber $cand.PartitionNumber -NewDriveLetter $letter -ErrorAction Stop
+                                Start-Sleep -Seconds 2
+                                $reVol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                                if (-not $reVol -or $reVol.FileSystem -ne 'NTFS') {
+                                    $part = Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                                    if ($part) { Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | Out-Null }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-Status "Disk '$letter' init error: $($_.Exception.Message)"
+            }
+
+            # Verify this disk from a read-back -- never trust that the cmdlets ran.
+            $finalVol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $finalVol -or $finalVol.FileSystem -ne 'NTFS') {
+                $failedDisks.Add("$letter (present=$([bool]$finalVol) fs='$(if ($finalVol) { $finalVol.FileSystem } else { '' })')")
+            }
+            else {
+                Write-Status "OK: disk '$letter' is NTFS $([math]::Round($finalVol.Size / 1GB, 1))GB"
+            }
             $count++
+        }
+
+        # Fail LOUD with the full disk picture if any configured disk is still not a
+        # usable NTFS volume -- the throw fails the DSC resource, which fails Phase 2
+        # and halts the build with these diagnostics in DSC_Status.txt, instead of
+        # letting a bad disk slip through to Phase 11.
+        if ($failedDisks.Count -gt 0) {
+            Write-Status "FAIL: InitializeDisks could not make NTFS: $($failedDisks -join '; ') -- dumping disk state:"
+            try {
+                foreach ($d in @(Get-Disk -ErrorAction SilentlyContinue | Sort-Object Number)) { Write-Status "  DIAG Disk#$($d.Number) $([math]::Round($d.Size / 1GB, 1))GB Style=$($d.PartitionStyle) OpStatus=$($d.OperationalStatus) Offline=$($d.IsOffline)" }
+                foreach ($p in @(Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.Size -gt 100MB } | Sort-Object DiskNumber, PartitionNumber)) { Write-Status "  DIAG Part Disk#$($p.DiskNumber)/$($p.PartitionNumber) Letter='$($p.DriveLetter)' $([math]::Round($p.Size / 1GB, 1))GB Type=$($p.Type)" }
+                foreach ($v in @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter })) { Write-Status "  DIAG Vol $($v.DriveLetter): $([math]::Round($v.Size / 1GB, 1))GB fs='$($v.FileSystem)' '$($v.FileSystemLabel)'" }
+            }
+            catch { Write-Status "  DIAG enumeration failed: $($_.Exception.Message)" }
+            throw "InitializeDisks: $($failedDisks.Count) disk(s) not usable NTFS after init: $($failedDisks -join '; '). See the DIAG lines above for the full Get-Disk/Get-Partition/Get-Volume state."
         }
 
         # Create NO_SMS_ON_DRIVE.SMS
@@ -4091,18 +4158,27 @@ class InitializeDisks {
 
     [bool] Test() {
 
-        # Check if there are any RAW disks
-        Write-Verbose "Testing if any Raw disks are left"
-        $Validate = Get-Disk | Where-Object partitionstyle -eq 'RAW'
-
-        If (!($null -eq $Validate)) {
-            Write-Verbose "Disks are not initialized"
-            return $false
-        }
-        Else {
-            Write-Verbose "Disks are initialized"
+        # Verify each CONFIGURED disk letter is a formatted NTFS volume -- not just
+        # "no RAW disks left globally". The old RAW-only check returned $true for a
+        # half-initialized disk (already GPT, drive letter assigned, but never
+        # formatted), so Set() was skipped and a bad disk passed as InDesiredState
+        # (wacky ZZ-CREPE 2026-08-17). A RAW/unassigned disk has no volume on its
+        # letter, so this also catches the fresh-disk state the RAW check covered.
+        $_VM = $this.VM | ConvertFrom-Json
+        $_Disks = $_VM.additionalDisks
+        if ($null -eq $_Disks) {
+            Write-Verbose "No disks to initialize."
             return $true
         }
+        foreach ($disk in $_Disks.psobject.properties) {
+            $vol = Get-Volume -DriveLetter $disk.Name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $vol -or $vol.FileSystem -ne 'NTFS') {
+                Write-Verbose "Disk '$($disk.Name)' is not a usable NTFS volume yet (present=$([bool]$vol) fs='$(if ($vol) { $vol.FileSystem } else { '' })')"
+                return $false
+            }
+        }
+        Write-Verbose "All configured disks are formatted NTFS volumes"
+        return $true
     }
 
     [InitializeDisks] Get() {
