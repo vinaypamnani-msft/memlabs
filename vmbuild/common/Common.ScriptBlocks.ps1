@@ -7037,7 +7037,10 @@ $global:VM_Config = {
                                 $dscResumeFromStatus = $currentStatus.Trim()
                                 $detailText = ''
                                 if ($lcmDetail) { $detailText = " LCM was inside '$lcmDetail'." }
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM stranded PendingConfiguration for ${pendingMins}m (no reboot owed) with status unchanged for ${staleMins}m ('$($currentStatus.Trim())').$detailText Resuming the pending config in place: Stop + Start-DscConfiguration -UseExisting (resume $dscResumeCount/$dscResumeMax this stall, $dscResumeTotal/$dscResumeTotalMax this phase)." -Warning -OutputStream
+                                # Do not classify the attempt before its outcome is known. Status
+                                # progress emits RECOVERED/Success; failure to progress emits the
+                                # Tier-2 restart warning below, and exhausted recovery still FAILs.
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM stranded PendingConfiguration for ${pendingMins}m (no reboot owed) with status unchanged for ${staleMins}m ('$($currentStatus.Trim())').$detailText Resuming the pending config in place: Stop + Start-DscConfiguration -UseExisting (resume $dscResumeCount/$dscResumeMax this stall, $dscResumeTotal/$dscResumeTotalMax this phase)." -LogOnly
                                 # Capture the tail of the guest's most recent DSC ConfigurationStatus record
                                 # (C:\Windows\System32\Configuration\ConfigurationStatus\*.json -- the actual last
                                 # LCM run, what Get-DscConfigurationStatus reads) so the build log shows which
