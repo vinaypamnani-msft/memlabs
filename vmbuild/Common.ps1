@@ -2415,7 +2415,11 @@ function Test-NetworkFastPath {
         [Parameter(Mandatory = $true)]
         [string]$NetworkSubnet,
         [Parameter(Mandatory = $false)]
-        [hashtable]$Cache
+        [hashtable]$Cache,
+        [Parameter(Mandatory = $false, HelpMessage = "Owning domain. Omit for switches shared across domains (Internet/Cluster/ClusterV2/External).")]
+        [string]$DomainName,
+        [Parameter(Mandatory = $false, HelpMessage = "Expected DHCP scope DNS server (option 6). Omit for scopes with no DNS option (Internet/Cluster).")]
+        [string]$DNSServer
     )
 
     if (-not $Cache) { return $false }
@@ -2424,6 +2428,15 @@ function Test-NetworkFastPath {
     $sw = $Cache.Switches | Where-Object { $_.Name -like "*$NetworkName*" } | Select-Object -First 1
     if (-not $sw) {
         Write-Log "  Fast-path miss: switch '$NetworkName' not in cache." -LogOnly
+        return $false
+    }
+
+    # 1b. Switch is stamped with THIS domain?
+    # Test-NetworkSwitch owns the decision (blank / 'Unknown network' notes get
+    # adopted and re-stamped, a different domain aborts the deploy), so any
+    # mismatch just falls through to it rather than being judged here.
+    if ($DomainName -and $sw.Notes -ne $DomainName) {
+        Write-Log "  Fast-path miss: switch '$NetworkName' notes are '$($sw.Notes)', expected '$DomainName'." -LogOnly
         return $false
     }
 
@@ -2454,9 +2467,25 @@ function Test-NetworkFastPath {
             Write-Log "  Fast-path miss: DHCP scope '$NetworkSubnet' not in cache." -LogOnly
             return $false
         }
+
+        # 5. Scope DNS option points at THIS domain's DC?
+        # Existence is not correctness: a scope left behind by a previous lab that
+        # owned this subnet keeps that lab's DNS server (option 6), so every VM on
+        # the subnet leases a dead resolver, DC Locator never finds a PDC, and the
+        # domain join hangs. Comparison mirrors Test-DHCPScope so a fast-path pass
+        # means the full path would also have said "already present".
+        if ($DNSServer) {
+            $scopeOptions = Get-DhcpServerv4OptionValue -ScopeId $NetworkSubnet -ErrorAction SilentlyContinue
+            $currentDns = ($scopeOptions | Where-Object OptionID -eq 6).Value
+            if ($currentDns -ne $DNSServer) {
+                Write-Log "  Fast-path miss: scope '$NetworkSubnet' DNS option is '$currentDns', expected '$DNSServer'." -LogOnly
+                return $false
+            }
+        }
     }
 
     # All checks passed — emit the same log lines the full path would.
+    Write-Log "  Fast-path hit for '$NetworkName': switch/IP/NAT/scope/notes/DNS verified from cache." -LogOnly
     Write-Log "HyperV Network switch for '$NetworkName' already exists."
     if ($NetworkName -ne 'ClusterV2') {
         Write-GreenCheck "'$NetworkSubnet ($NetworkName)' scope is already present in DHCP."

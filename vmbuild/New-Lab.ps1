@@ -846,9 +846,18 @@ try {
         }
     }
 
+    # The DC's address on its own subnet is the DNS server every scope in this
+    # domain must hand out. Resolved once so the fast path can reject a scope
+    # whose option 6 still points at a previous lab's DC.
+    $DNSServer = $null
+    $DC = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" } | Select-Object -First 1
+    if ($DC -and $DC.Network) {
+        $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+    }
+
     # Test if hyper-v switch exists, if not create it
     $AddedScopes = @($deployConfig.vmOptions.network)
-    if (-not (Test-NetworkFastPath -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -Cache $_netCache)) {
+    if (-not (Test-NetworkFastPath -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -Cache $_netCache -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer)) {
         $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
         if (-not $worked) {
             exit 1
@@ -862,9 +871,7 @@ try {
                 continue
             }
             $AddedScopes += $virtualMachine.network
-            if (-not (Test-NetworkFastPath -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -Cache $_netCache)) {
-                $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
-                $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+            if (-not (Test-NetworkFastPath -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -Cache $_netCache -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer)) {
                 $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
                 if (-not $worked) {
                     exit 1
