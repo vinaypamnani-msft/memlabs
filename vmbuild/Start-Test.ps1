@@ -326,6 +326,20 @@ function Resolve-TestConfigNetworks {
     }
 
     $existingVMs = @(Get-List -Type VM -SmartUpdate)
+
+    # Live VMs cannot see a subnet whose lab was deleted but whose switch/scope
+    # survived, and that leftover collides just as hard -- its DHCP scope still
+    # hands out the dead lab's DNS server. Value is the owning domain (switch
+    # note), or empty when nothing claims it.
+    $hostSubnets = @{}
+    foreach ($sw in @(Get-VMSwitch -SwitchType Internal -ErrorAction SilentlyContinue)) {
+        if ($sw.Name -match '^\d{1,3}(\.\d{1,3}){3}$') { $hostSubnets[$sw.Name] = "$($sw.Notes)" }
+    }
+    foreach ($scope in @(Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)) {
+        $scopeId = "$($scope.ScopeId)"
+        if ($scopeId -and -not $hostSubnets.ContainsKey($scopeId)) { $hostSubnets[$scopeId] = '' }
+    }
+
     $networkUses = @([PSCustomObject]@{ Source = $defaultNetwork; VM = $null })
     foreach ($vm in @($Config.virtualMachines)) {
         $vmNetwork = $defaultNetwork
@@ -380,12 +394,28 @@ function Resolve-TestConfigNetworks {
             $_.Network -eq $sourceNetwork -and -not [string]::IsNullOrWhiteSpace("$($_.Domain)")
         } | ForEach-Object { "$($_.Domain)" } | Sort-Object -Unique)
 
-        if ($owners -contains $domainName -or $owners.Count -eq 0) {
+        if ($owners -contains $domainName) {
             $script:TestNetworkMap[$mapKey] = $sourceNetwork
             continue
         }
 
-        $reservedTargets = @($script:TestNetworkMap.Values)
+        if ($owners.Count -eq 0) {
+            $hostNote = $hostSubnets[$sourceNetwork]
+            if ($null -eq $hostNote -or $hostNote -eq $domainName) {
+                $script:TestNetworkMap[$mapKey] = $sourceNetwork
+                continue
+            }
+            if ([string]::IsNullOrWhiteSpace($hostNote)) {
+                $owners = @("an orphaned switch/scope on this host")
+            }
+            else {
+                $owners = @($hostNote)
+            }
+        }
+
+        # Get-ValidSubnets only excludes host subnets that still have a vSwitch
+        # adapter IP, so hand it every subnet the host knows about.
+        $reservedTargets = @($script:TestNetworkMap.Values) + @($hostSubnets.Keys)
         $targetNetwork = @(Get-ValidSubnets -ConfigToCheck $Config -ExcludeList $reservedTargets | Select-Object -First 1)[0]
         if ([string]::IsNullOrWhiteSpace("$targetNetwork")) {
             throw "$ConfigName cannot replace fixture subnet $sourceNetwork, which is owned by [$($owners -join ', ')]: no unused subnet is available."
