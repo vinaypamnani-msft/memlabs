@@ -11532,15 +11532,21 @@ function Test-CMSiteWideFunctionality {
                 # WARN to INFO for a still-replicating downstream (a genuine
                 # downstream sync FAILURE still WARNs via the per-VM SUP check's
                 # Result=Failed path and the SMS_SUPSyncStatus 6703 branch).
-                $isDownstreamSup = $false; $upstreamSupName = $null
+                # Capture the raw topology signals ($supTopoDiag) that decide
+                # downstream-vs-standalone, so a genuine 'subscription empty' WARN
+                # can show WHY it wasn't classified downstream -- if GetConfiguration
+                # throws, $isDownstreamSup silently stays $false and a child SUP is
+                # mis-warned; the diag makes that visible instead of guessing.
+                $isDownstreamSup = $false; $upstreamSupName = $null; $supTopoDiag = 'SUP topology unknown'
                 try {
                     $wsusCfgChk = $wsusSrv.GetConfiguration()
+                    $supTopoDiag = "SyncFromMU=$($wsusCfgChk.SyncFromMicrosoftUpdate); Upstream='$($wsusCfgChk.UpstreamWsusServerName)'"
                     if ((-not $wsusCfgChk.SyncFromMicrosoftUpdate) -and $wsusCfgChk.UpstreamWsusServerName) {
                         $isDownstreamSup = $true
                         $upstreamSupName = $wsusCfgChk.UpstreamWsusServerName
                     }
                 }
-                catch {}
+                catch { $supTopoDiag = "WSUS GetConfiguration failed: $($_.Exception.Message)" }
 
                 # ---- gather raw signals (each guarded; never throws) ----
                 $taxCats = $null; $taxClas = $null
@@ -11612,7 +11618,16 @@ function Test-CMSiteWideFunctionality {
                 }
                 elseif ($haveCm) {
                     if ($cmProdCount -eq 0 -or $cmClassCount -eq 0) {
-                        $results.Details.Add("WARN: CM SUP has nothing subscribed [CM-Products=$cmProdCount; CM-Classifications=$cmClassCount; WSUS-Sub=$subCats/$subClas$wcmBit] - configure SUP products/classifications")
+                        if ($isDownstreamSup) {
+                            # Downstream SUP: products/classifications replicate from
+                            # the upstream SUP, not configured locally -- an empty
+                            # subscription on the first pass is pending, not a failure
+                            # (matches Test A taxonomy / Test C sync-history handling).
+                            $results.Details.Add("INFO: WSUS/CM subscription not yet replicated on this downstream SUP [CM-Sub=$cmProdCount/$cmClassCount; WSUS-Sub=$subCats/$subClas$wcmBit] - replicates from upstream '$upstreamSupName'; populates after the first upstream sync completes")
+                        }
+                        else {
+                            $results.Details.Add("WARN: CM SUP has nothing subscribed [CM-Products=$cmProdCount; CM-Classifications=$cmClassCount; WSUS-Sub=$subCats/$subClas$wcmBit; $supTopoDiag] - configure SUP products/classifications")
+                        }
                     }
                     elseif ($subCats -eq $cmProdCount -and $subClas -eq $cmClassCount) {
                         $results.Details.Add("OK: WSUS subscription matches CM SUP config [Products=$cmProdCount; Classifications=$cmClassCount$wcmBit]")
@@ -11627,8 +11642,14 @@ function Test-CMSiteWideFunctionality {
                     if (($subCats -is [int] -and $subCats -gt 0) -and ($subClas -is [int] -and $subClas -gt 0)) {
                         $results.Details.Add("OK: WSUS subscription set [Products=$subCats; Classifications=$subClas$wcmBit] (CM-side parity not checked - cmdlets unavailable)")
                     }
+                    elseif ($isDownstreamSup) {
+                        # Downstream SUP: the subscription replicates from the upstream
+                        # and hasn't arrived yet on this first pass -- pending, not a
+                        # failure (matches Test A / Test C downstream handling).
+                        $results.Details.Add("INFO: WSUS subscription not yet replicated on this downstream SUP [SubCats=$subCats; SubClas=$subClas$wcmBit] - replicates from upstream '$upstreamSupName'; populates after the first upstream sync completes")
+                    }
                     else {
-                        $results.Details.Add("WARN: WSUS subscription empty [SubCats=$subCats; SubClas=$subClas$wcmBit]")
+                        $results.Details.Add("WARN: WSUS subscription empty [SubCats=$subCats; SubClas=$subClas$wcmBit; $supTopoDiag]")
                     }
                 }
 
