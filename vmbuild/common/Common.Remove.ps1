@@ -821,12 +821,20 @@ function Remove-Domain {
 
     # Capture scopes BEFORE deleting VMs — once VMs are gone, Get-List
     # can't discover which switches belonged to this domain.
-    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster" -and $_ -ne "ClusterV2" } # Internet/Cluster subnets could be shared between multiple domains
+    $scopesToDelete = @(Get-List -Type UniqueSwitch -DomainName $DomainName)
+    # Get-List only sees LIVE VMs, so a subnet whose VMs were already deleted is
+    # invisible to it. The vSwitch note carries the owning domain, so use it too.
+    $scopesToDelete += @(Get-VMSwitch -SwitchType Internal -ErrorAction SilentlyContinue |
+        Where-Object { $_.Notes -eq $DomainName } | Select-Object -ExpandProperty Name)
+    # Internet/Cluster subnets could be shared between multiple domains
+    $scopesToDelete = @($scopesToDelete | Where-Object { $_ -and $_ -notin @("Internet", "Cluster", "ClusterV2") } | Sort-Object -Unique)
     $vmStorageRoot = if ($all) { Get-MemlabsVmStorageRoot -NoPrompt } else { $null }
 
     try {
 
-    if ($DC) {
+    # A subset removal leaves the domain standing, so only tear the trust down
+    # when the whole domain goes or its DC does.
+    if ($all -or $DC) {
         Remove-ForestTrust -DomainName $DomainName
     }
 
@@ -918,7 +926,10 @@ function Remove-Domain {
         }
     }
 
-    if ($DC) {
+    # Gate on $all, not on the DC: a missing DC used to leak the whole domain's
+    # networking, and a subset removal that happened to include the DC used to
+    # delete the switches out from under the VMs that were staying.
+    if ($all) {
         if ($scopesToDelete) {
             Write-Log "Removing ALL DHCP Scopes for '$DomainName'" -Activity
             foreach ($scope in $scopesToDelete) {
@@ -931,6 +942,9 @@ function Remove-Domain {
             foreach ($scope in $scopesToDelete) {
                 Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
             }
+        }
+        else {
+            Write-Log "No DHCP scopes or Hyper-V switches are attributable to '$DomainName'." -Warning
         }
     }
 
