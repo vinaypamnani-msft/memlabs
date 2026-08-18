@@ -11383,16 +11383,19 @@ function Test-CMSiteWideFunctionality {
                                     }
                                     $supFailDiag = " [WSUS history: $($parts -join ' ')]"
 
-                                    # Is CM's record already stale? A later WSUS cycle that
-                                    # succeeded, or one running right now, means the failure has
-                                    # been superseded and there is nothing to act on.
+                                    # Is CM's record already stale? A WSUS cycle that completed
+                                    # successfully after CM stamped the failure, or one running
+                                    # right now, supersedes that record. The successful cycle may
+                                    # have started before the CM failure (cstest2: 02:39 start,
+                                    # 02:44 CM failure, 02:47 successful completion), so compare
+                                    # its END time rather than requiring a later start.
                                     $liveState = ''
                                     try { $liveState = "$($subF.GetSynchronizationStatus())" } catch { }
                                     if ($liveState -match 'Running|Progress|Syncing') {
                                         $superseded = "WSUS is running a new sync now ($liveState)"
                                     }
-                                    elseif ("$($h.Result)" -match 'Succeeded' -and $supFailTime -and $hStart -and $hStart -gt $supFailTime) {
-                                        $superseded = "a later WSUS sync succeeded at $($hStart.ToString('yyyy-MM-dd HH:mm:ss'))"
+                                    elseif ("$($h.Result)" -match 'Succeeded' -and $supFailTime -and $hEnd -and $hEnd -gt $supFailTime) {
+                                        $superseded = "WSUS completed a successful sync at $($hEnd.ToString('yyyy-MM-dd HH:mm:ss')) SUP-local"
                                     }
                                 }
                                 else { $supFailDiag = ' [WSUS history: no entries]' }
