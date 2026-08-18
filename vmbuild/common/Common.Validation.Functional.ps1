@@ -10362,10 +10362,40 @@ function Test-AdditionalDisks {
                 }
             }
             if ($vol.FileSystem -ne 'NTFS') {
-                $results.Details.Add("WARN: Volume '$letter`:' filesystem is '$($vol.FileSystem)' (expected NTFS)")
+                # A data disk that is present but not NTFS is UNUSABLE, not a
+                # warning: it is RAW/unformatted (FileSystem '' , Size 0) or a
+                # wrong filesystem, which means Phase 1 disk init never finished.
+                # ConfigMgr/SQL/WSUS then skip this drive and place their content on
+                # another volume (typically C:), so a DP content library or a SQL/
+                # WSUS data dir lands on the wrong disk. That is exactly how wacky
+                # ZZ-CREPE 2026-08-17 shipped a DP with SMS on C: and no content
+                # library. Must FAIL so the build stops here instead of passing.
+                $results.Passed = $false
+                $fsShown = if ($vol.FileSystem) { $vol.FileSystem } else { 'RAW/unformatted' }
+                $results.Details.Add("FAIL: Volume '$letter`:' filesystem is '$($vol.FileSystem)' (expected NTFS) -- data disk is $fsShown; Phase 1 disk init did not complete, so ConfigMgr/SQL/WSUS will place content on the wrong volume. Re-run or re-create the VM.")
+                # In-guest disk/partition state so a future hit shows WHY: a RAW disk
+                # that was never initialized vs a partition that exists (has the
+                # letter) but was never Format-Volume'd.
+                try {
+                    $dp = Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($dp) {
+                        $dd = Get-Disk -Number $dp.DiskNumber -ErrorAction SilentlyContinue
+                        $results.Details.Add("  DIAG Disk#$($dp.DiskNumber): Style=$($dd.PartitionStyle) $([math]::Round($dd.Size / 1GB, 1))GB OpStatus=$($dd.OperationalStatus) Offline=$($dd.IsOffline)")
+                        $results.Details.Add("  DIAG Partition Disk#$($dp.DiskNumber)/Part#$($dp.PartitionNumber): $([math]::Round($dp.Size / 1GB, 1))GB Type=$($dp.Type) (partition exists but volume is not NTFS -> Format-Volume never ran)")
+                    }
+                    else {
+                        $results.Details.Add("  DIAG no partition carries letter '$letter`:'; RAW/unpartitioned disk(s):")
+                        foreach ($rd in @(Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.PartitionStyle -eq 'RAW' } | Sort-Object Number)) {
+                            $results.Details.Add("  DIAG RAW Disk#$($rd.Number): $([math]::Round($rd.Size / 1GB, 1))GB OpStatus=$($rd.OperationalStatus) (never initialized)")
+                        }
+                    }
+                }
+                catch {}
             }
-            $sizeGB = [math]::Round($vol.Size / 1GB, 1)
-            $results.Details.Add("OK: Volume '$letter`:' present ($sizeGB GB, $($vol.FileSystem) $($vol.FileSystemLabel))")
+            else {
+                $sizeGB = [math]::Round($vol.Size / 1GB, 1)
+                $results.Details.Add("OK: Volume '$letter`:' present ($sizeGB GB, $($vol.FileSystem) $($vol.FileSystemLabel))")
+            }
         }
 
         return $results
