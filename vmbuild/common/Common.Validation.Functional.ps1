@@ -11146,7 +11146,21 @@ function Test-CMSiteWideFunctionality {
                     $results.Details.Add("OK: $($tsList.Count) MEMLABS task sequence(s) found")
                 }
                 else {
-                    $results.Details.Add("WARN: No MEMLABS-* task sequences found")
+                    # TS creation in Phase 8 (perfloading) is gated on OSD media under
+                    # <CM install drive>\OSD -- probe it here so the WARN names the cause:
+                    # media absent -> Phase 1 copy gap; media present -> TS creation
+                    # itself failed (e.g. a transient SQL deadlock).
+                    $osdHint = 'OSD media state unknown'
+                    try {
+                        $osdDrive = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' | Split-Path -Qualifier
+                        $osdFolder = "$osdDrive\OSD"
+                        $w11 = Test-Path "$osdFolder\Windows 11 24h2\sources\install.wim"
+                        $w10 = Test-Path "$osdFolder\Windows 10 22h2\sources\install.wim"
+                        if ($w11 -and $w10) { $osdHint = "OSD media IS present under '$osdFolder' -- TS creation itself failed in Phase 8 (check the perfloading task-sequence logs, e.g. a transient SQL deadlock)" }
+                        else { $osdHint = "OSD media MISSING under '$osdFolder' (win11 install.wim=$w11; win10 install.wim=$w10) -- Phase 8 skipped TS creation; see the Phase 8 '[perfloading] OSD media missing' + 'OSD DIAG' lines for why the Phase 1 copy is gone" }
+                    }
+                    catch {}
+                    $results.Details.Add("WARN: No MEMLABS-* task sequences found. $osdHint.")
                 }
             }
             catch {

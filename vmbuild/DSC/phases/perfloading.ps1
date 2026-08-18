@@ -1083,15 +1083,39 @@ Write-DscStatus "$Tag Starting perfloading"
 
     Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
 
-    # OSD ISOs are copied to the top-level site server only (Phase 1).
-    # On a child Primary under a CAS the OSD folder exists but is empty,
-    # so skip OS-package/task-sequence creation when the media isn't there.
+    # Phase 1 copies the Win10/Win11 OSD ISOs to <CM install drive>\OSD for EVERY
+    # Primary when PrePopulateObjects is set (which gated entry to perfloading), so
+    # by here a Primary SHOULD have the media. A miss is a real gap, not an expected
+    # child-primary case -- capture exactly what's present so the next run shows
+    # WHICH file went missing and whether the whole folder was emptied
+    # (wacky ZZ-GYRO 2026-08-17 skipped all task sequences on this signal).
     $win11OsdPath = Join-Path $folderPath "Windows 11 24h2"
     $win10OsdPath = Join-Path $folderPath "Windows 10 22h2"
     $hasOsdMedia = (Test-Path "$win11OsdPath\sources\install.wim") -and (Test-Path "$win10OsdPath\sources\install.wim")
 
     if (-not $hasOsdMedia) {
-        Write-DscStatus "$Tag OSD media not found in $folderPath — skipping OS packages and task sequences (ISOs only copied to top-level site)"
+        $w11 = Test-Path "$win11OsdPath\sources\install.wim"
+        $w10 = Test-Path "$win10OsdPath\sources\install.wim"
+        $cfgDrive = if ($CMInstallDir) { (Split-Path -Path $CMInstallDir -Qualifier) } else { '<unset>' }
+        $freeGB = try { [math]::Round((Get-PSDrive -Name ($DriveLetter.TrimEnd(':')) -ErrorAction Stop).Free / 1GB, 1) } catch { '?' }
+        Write-DscStatus "$Tag WARNING: OSD media missing under '$folderPath' -- skipping OS packages and task sequences. win11 install.wim=$w11; win10 install.wim=$w10; OSD drive '$DriveLetter' free=${freeGB}GB; config CMInstallDir drive '$cfgDrive'. Phase 1 copies OSD to the CMInstallDir drive only when the VM is (re)created, so a rerun will NOT restore it -- rebuild the site server or re-copy the ISOs." -Warning
+        # Enumerate the OSD tree so a partial/misplaced copy or an emptied folder is visible.
+        try {
+            if (Test-Path $folderPath) {
+                $kids = @(Get-ChildItem -Path $folderPath -ErrorAction SilentlyContinue | Select-Object -First 20)
+                if ($kids.Count -eq 0) {
+                    Write-DscStatus "$Tag OSD DIAG: '$folderPath' exists but is EMPTY -- Phase 1's copy is gone (removed after copy, or a rerun skipped the copy after a wipe)." -Warning
+                }
+                else {
+                    foreach ($k in $kids) { Write-DscStatus "$Tag OSD DIAG: contains '$($k.Name)$(if ($k.PSIsContainer) { '\' })'" }
+                    $wims = @(Get-ChildItem -Path $folderPath -Recurse -Filter 'install.wim' -ErrorAction SilentlyContinue | Select-Object -First 8)
+                    if ($wims.Count -eq 0) { Write-DscStatus "$Tag OSD DIAG: no install.wim anywhere under '$folderPath' (recursive) -- the media never fully landed." }
+                    else { foreach ($w in $wims) { Write-DscStatus "$Tag OSD DIAG: install.wim at '$($w.FullName)' ($([math]::Round($w.Length / 1GB, 2))GB)" } }
+                }
+            }
+            else { Write-DscStatus "$Tag OSD DIAG: '$folderPath' does NOT exist." -Warning }
+        }
+        catch { Write-DscStatus "$Tag OSD DIAG enumeration failed: $($_.Exception.Message)" -Warning }
     }
     else {
 
