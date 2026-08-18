@@ -1253,22 +1253,72 @@ function Add-ExistingVMsToDeployConfig {
     # Add DCs from other domains, if needed
     $dc = $config.virtualMachines | Where-Object { $_.role -eq "DC" }
 
-    # Add Primary to list when new VMs need BLM collection membership (Phase 8 EnableBLM)
-    # OR when new VMs need the ConfigMgr client pushed to them (Phase 8 ScriptWorkflow ->
-    # PushClients). Without the hidden Primary in the config, Get-Phase8ConfigurationData
-    # has no Primary node to add, so Phase 8 is skipped entirely and PushClients never
-    # runs for a client added to an already-deployed domain. Keep the pushable-role list
-    # in sync with Get-Phase8ConfigurationData.
+    # Add Primary to list when new VMs need BLM collection membership (Phase 8 EnableBLM),
+    # ConfigMgr client push (Phase 8 PushClients), or OSD content/PXE reconciliation.
+    # Without a hidden Primary, Get-Phase8ConfigurationData returns no nodes and Phase 8
+    # is skipped. OSD also needs same-subnet DP objects in deployConfig so perfloading can
+    # map each live CM DP back to its VM subnet; mark those support nodes metadata-only so
+    # they inform the Primary's run without receiving their own Phase 8 DSC job.
     $newBLMVMs = @($config.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
     $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
     $newPushVMs = @($config.virtualMachines | Where-Object {
             $_.role -in $pushableRoles -and -not $_.hidden -and ($_.pushClient -ne $false)
         })
+    $newOsdVMs = @($config.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
+    $phase8PrimaryNames = @()
     if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0) {
-        $existingPrimary = Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role "Primary"
-        if ($existingPrimary) {
-            $primaryName = if ($existingPrimary -is [array]) { $existingPrimary[0] } else { $existingPrimary }
-            Add-ExistingVMToDeployConfig -vmName $primaryName -configToModify $config
+        $phase8PrimaryNames += @(Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role "Primary" | Select-Object -First 1)
+    }
+    $existingOsdDps = @()
+    if ($newOsdVMs.Count -gt 0) {
+        $osdDefaultNetwork = "$($config.vmOptions.network)"
+        $newOsdNetworks = @($newOsdVMs | ForEach-Object {
+                if ($_.network) { "$($_.network)" } else { $osdDefaultNetwork }
+            } | Where-Object { $_ } | Select-Object -Unique)
+        $existingDomainVMsForOsd = @(Get-List -Type VM -DomainName $config.vmOptions.domainName)
+        $existingOsdDps = @($existingDomainVMsForOsd | Where-Object {
+                if (-not ($_.installDP -or $_.enablePullDP)) { return $false }
+                $dpNetwork = if ($_.network) { "$($_.network)" } else { $osdDefaultNetwork }
+                return $newOsdNetworks -contains $dpNetwork
+            })
+        $configuredOsdDps = @($config.virtualMachines | Where-Object {
+                if (-not ($_.installDP -or $_.enablePullDP)) { return $false }
+                $dpNetwork = if ($_.network) { "$($_.network)" } else { $osdDefaultNetwork }
+                return $newOsdNetworks -contains $dpNetwork
+            })
+        $allSiteServersForOsd = @($config.virtualMachines) + @($existingDomainVMsForOsd)
+        $osdOwnerPrimaryCodes = @()
+        foreach ($osdDp in @($configuredOsdDps) + @($existingOsdDps)) {
+            $ownerSiteCode = "$($osdDp.siteCode)"
+            if (-not $ownerSiteCode) { continue }
+            $owningSecondary = $allSiteServersForOsd | Where-Object {
+                $_.role -eq 'Secondary' -and $_.siteCode -eq $ownerSiteCode
+            } | Select-Object -First 1
+            if ($owningSecondary -and $owningSecondary.parentSiteCode) {
+                $ownerSiteCode = "$($owningSecondary.parentSiteCode)"
+            }
+            $osdOwnerPrimaryCodes += $ownerSiteCode
+        }
+        $osdOwnerPrimaryCodes = @($osdOwnerPrimaryCodes | Where-Object { $_ } | Select-Object -Unique)
+        $phase8PrimaryNames += @($existingDomainVMsForOsd | Where-Object {
+                $_.role -eq 'Primary' -and $_.siteCode -in $osdOwnerPrimaryCodes
+            } | ForEach-Object { $_.vmName })
+    }
+
+    foreach ($primaryName in @($phase8PrimaryNames | Where-Object { $_ } | Select-Object -Unique)) {
+        Add-ExistingVMToDeployConfig -vmName $primaryName -configToModify $config
+    }
+
+    if ($newOsdVMs.Count -gt 0) {
+        foreach ($existingOsdDp in $existingOsdDps) {
+            $dpAlreadyInConfig = $config.virtualMachines.vmName -contains $existingOsdDp.vmName
+            Add-ExistingVMToDeployConfig -vmName $existingOsdDp.vmName -configToModify $config
+            $metadataDp = $config.virtualMachines | Where-Object {
+                -not $dpAlreadyInConfig -and $_.vmName -eq $existingOsdDp.vmName -and $_.hidden -and $_.role -ne 'Primary'
+            } | Select-Object -First 1
+            if ($metadataDp) {
+                $metadataDp | Add-Member -MemberType NoteProperty -Name 'osdMetadataOnly' -Value $true -Force
+            }
         }
     }
 

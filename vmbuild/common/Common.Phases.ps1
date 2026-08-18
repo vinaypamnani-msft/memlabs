@@ -4183,10 +4183,10 @@ function Get-Phase8ConfigurationData {
 
     }
 
-    # Even when cmOptions.Install is false (existing CM), include the hidden Primary
-    # if there are new VMs with BitLocker=true that need BLM collection membership,
-    # or new VMs that need client push. This allows ScriptWorkFlow re-run on the Primary
-    # to handle EnableBLM and PushClients for newly added VMs.
+    # Even when cmOptions.Install is false (existing CM), include hidden Primary nodes
+    # when new VMs need BLM membership, client push, or OSD content/PXE reconciliation.
+    # OSD add-deltas inject every existing Primary because the target DP can belong to
+    # any child site; other add workflows retain the existing single-Primary behavior.
     if ($NumberOfNodesAdded -eq 0) {
         $newBLMVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
         # Per-VM pushClient opt-in (null/absent treated as $true for back-compat)
@@ -4194,15 +4194,22 @@ function Get-Phase8ConfigurationData {
         $newPushVMs = @($deployConfig.virtualMachines | Where-Object {
                 $_.role -in $pushableRoles -and -not $_.hidden -and ($_.pushClient -ne $false)
             })
-        if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0) {
-            $hiddenPrimary = $deployConfig.virtualMachines | Where-Object {
+        $newOsdVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
+        if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0 -or $newOsdVMs.Count -gt 0) {
+            $hiddenPrimaries = @($deployConfig.virtualMachines | Where-Object {
                 $_.role -eq "Primary" -and $_.hidden -and
                 (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
-            } | Select-Object -First 1
-            if ($hiddenPrimary) {
+            })
+            if ($newOsdVMs.Count -eq 0) {
+                $hiddenPrimaries = @($hiddenPrimaries | Select-Object -First 1)
+            }
+            foreach ($hiddenPrimary in $hiddenPrimaries) {
+                if ($cd.AllNodes.NodeName -contains $hiddenPrimary.vmName) { continue }
                 $cd.AllNodes += @{ NodeName = $hiddenPrimary.vmName; Role = $hiddenPrimary.Role }
+                $NumberOfNodesAdded++
+            }
+            if ($NumberOfNodesAdded -gt 0) {
                 $cd.AllNodes += @{ NodeName = "*"; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
-                $NumberOfNodesAdded = 1
             }
         }
     }

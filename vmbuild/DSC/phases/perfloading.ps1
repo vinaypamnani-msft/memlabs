@@ -864,7 +864,12 @@ Write-DscStatus "$Tag Starting perfloading"
     # add an OSDClient on a DP's subnet and re-run to distribute + enable PXE.
     $OsdDpGroupName = "OSD DPS"
     $osdDefaultNet = $deployConfig.vmOptions.network
-    $osdNetOf = { param($vm) if ($vm.network) { "$($vm.network)" } else { "$osdDefaultNet" } }
+    $osdNetOf = {
+        param($vm)
+        if ($vm.network) { return "$($vm.network)" }
+        if ($vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
+        return "$osdDefaultNet"
+    }
     $osdSubnets = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | ForEach-Object { & $osdNetOf $_ } | Where-Object { $_ } | Select-Object -Unique)
     $osdDistTarget = $null
     $hasOsdTargets = $false
@@ -879,11 +884,15 @@ Write-DscStatus "$Tag Starting perfloading"
             $dpShort = ($dpFqdn -split '\.')[0]
             $dpVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $dpShort } | Select-Object -First 1
             if (-not $dpVm) { continue }
-            if ($osdSubnets -contains (& $osdNetOf $dpVm)) { $osdDps += [PSCustomObject]@{ Fqdn = $dpFqdn; Short = $dpShort } }
+            $dpSubnet = & $osdNetOf $dpVm
+            if ($osdSubnets -contains $dpSubnet) { $osdDps += [PSCustomObject]@{ Fqdn = $dpFqdn; Short = $dpShort; Subnet = $dpSubnet } }
         }
         $osdDps = @($osdDps | Sort-Object Short -Unique)
-        if ($osdDps.Count -eq 0) {
-            Write-DscStatus "$Tag WARNING: OSDClient exists but NO DP is on its subnet(s) $($osdSubnets -join ', ') -- OSD content NOT distributed and PXE cannot work. Add a DP (SiteSystem) on the OSDClient's subnet."
+        $coveredOsdSubnets = @($osdDps | ForEach-Object { $_.Subnet } | Where-Object { $_ } | Select-Object -Unique)
+        $uncoveredOsdSubnets = @($osdSubnets | Where-Object { $coveredOsdSubnets -notcontains $_ })
+        if ($uncoveredOsdSubnets.Count -gt 0) {
+            Write-DscStatus "$Tag OSDClient subnet(s) have no live ConfigMgr DP: $($uncoveredOsdSubnets -join ', '). OSD content cannot reach those clients and PXE cannot work. Add/install a DP on every listed subnet, then re-run Phase 8." -Failure
+            return
         }
         else {
             if ("$OsdDpGroupName" -notin @((Get-CMDistributionPointGroup -ErrorAction SilentlyContinue).Name)) {
@@ -939,26 +948,37 @@ Write-DscStatus "$Tag Starting perfloading"
             # that hid the boot image from the OSDClient-subnet DP). Check per-DP so a
             # partial failure is caught, not just a fully-empty group.
             try {
-                $osdGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$OsdDpGroupName'" -ErrorAction SilentlyContinue
-                $osdMemberKeys = @{}
-                if ($osdGrpWmi) {
-                    foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction SilentlyContinue)) {
-                        $memberHostName = & $serverFromNal $memberRow.DPNALPath
-                        if (-not $memberHostName) { continue }
-                        $osdMemberKeys[$memberHostName.ToUpper()] = $true
-                        $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
+                $missingOsdGroupMembers = @()
+                for ($osdGroupTry = 1; $osdGroupTry -le 6; $osdGroupTry++) {
+                    $osdGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$OsdDpGroupName'" -ErrorAction Stop
+                    $osdMemberKeys = @{}
+                    if ($osdGrpWmi) {
+                        foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction Stop)) {
+                            $memberHostName = & $serverFromNal $memberRow.DPNALPath
+                            if (-not $memberHostName) { continue }
+                            $osdMemberKeys[$memberHostName.ToUpper()] = $true
+                            $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
+                        }
+                    }
+                    $missingOsdGroupMembers = @($osdDps | Where-Object {
+                            -not ($osdMemberKeys.ContainsKey($_.Fqdn.ToUpper()) -or $osdMemberKeys.ContainsKey($_.Short.ToUpper()))
+                        })
+                    if ($missingOsdGroupMembers.Count -eq 0) { break }
+                    if ($osdGroupTry -lt 6) {
+                        Write-DscStatus "$Tag Waiting for '$OsdDpGroupName' membership to include: $(($missingOsdGroupMembers.Fqdn) -join ', ') (attempt $osdGroupTry/6)"
+                        Start-Sleep -Seconds 10
                     }
                 }
-                foreach ($d in $osdDps) {
-                    if (-not ($osdMemberKeys.ContainsKey($d.Fqdn.ToUpper()) -or $osdMemberKeys.ContainsKey($d.Short.ToUpper()))) {
-                        Write-DscStatus "$Tag WARNING: OSD DP '$($d.Fqdn)' is NOT a member of '$OsdDpGroupName' after add -- OSD content distribution to the group will miss it"
-                    }
-                    else {
-                        Write-DscStatus "$Tag Verified OSD DP '$($d.Fqdn)' is a member of '$OsdDpGroupName'"
-                    }
+                if ($missingOsdGroupMembers.Count -gt 0) {
+                    Write-DscStatus "$Tag OSD DP(s) are not members of '$OsdDpGroupName' after 6 reads: $(($missingOsdGroupMembers.Fqdn) -join ', '). Distribution to the group would miss required OSDClient subnet(s)." -Failure
+                    return
                 }
+                Write-DscStatus "$Tag Verified every OSD DP is a member of '$OsdDpGroupName': $(($osdDps.Fqdn) -join ', ')"
             }
-            catch { Write-DscStatus "$Tag Could not verify '$OsdDpGroupName' membership: $($_.Exception.Message)" }
+            catch {
+                Write-DscStatus "$Tag Could not verify '$OsdDpGroupName' membership; refusing to report OSD coverage without measuring it: $($_.Exception.Message)" -Failure
+                return
+            }
             $osdDistTarget = $OsdDpGroupName
             $hasOsdTargets = $true
         }
@@ -989,6 +1009,8 @@ Write-DscStatus "$Tag Starting perfloading"
     foreach ($BootImage in $BootImages) {
         $biName = $BootImage.Name
         $packageId = $BootImage.PackageID
+        $commandSupportChanged = $false
+        $commandSupportPreviousSourceVersion = $null
 
         # Enable Command Support (F8 debug shell in WinPE)
         if ([bool]$BootImage.EnableLabShell) {
@@ -996,11 +1018,18 @@ Write-DscStatus "$Tag Starting perfloading"
         }
         else {
             try {
-                Set-CMBootImage -Id $packageId -EnableCommandSupport $true
+                $bootImageBeforeUpdate = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+                if (-not $bootImageBeforeUpdate -or -not "$($bootImageBeforeUpdate.SourceVersion)") {
+                    throw "Could not read the pre-update boot-image SourceVersion"
+                }
+                $commandSupportPreviousSourceVersion = [int]$bootImageBeforeUpdate.SourceVersion
+                Set-CMBootImage -Id $packageId -EnableCommandSupport $true -ErrorAction Stop
+                $commandSupportChanged = $true
                 Write-DscStatus "$Tag Enabled command support for boot image: $biName ($packageId)"
             }
             catch {
-                Write-DscStatus "$Tag WARNING: Failed to enable command support for boot image: $biName ($packageId). Error: $_"
+                Write-DscStatus "$Tag Failed to enable command support for boot image '$biName' ($packageId): $_" -Failure
+                return
             }
         }
 
@@ -1029,6 +1058,7 @@ Write-DscStatus "$Tag Starting perfloading"
         else {
             $osdDpFqdns = @($osdDps | ForEach-Object { "$($_.Fqdn)" } | Where-Object { $_ })
             $distributedFqdns = @()
+            $dpTargets = @()
             try {
                 $dpTargets = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
                 foreach ($t in $dpTargets) {
@@ -1057,6 +1087,85 @@ Write-DscStatus "$Tag Starting perfloading"
                     }
                 }
             }
+
+            # Set-CMBootImage changes the provider property, but clients keep using
+            # the old WIM until Update Distribution Points rebuilds and republishes it.
+            # Publish only after the assignment above exists. A newly targeted DP also
+            # needs this update when command support was enabled on an earlier run that
+            # had no OSD targets yet.
+            $bootImagePublicationNeeded = $commandSupportChanged -or $missingOsdDps.Count -gt 0
+            if ($bootImagePublicationNeeded) {
+                $bootImagePublicationStarted = $false
+                $bootImagePublicationError = $null
+                for ($bootPublishTry = 1; $bootPublishTry -le 6 -and -not $bootImagePublicationStarted; $bootPublishTry++) {
+                    try {
+                        Update-CMDistributionPoint -BootImageId $packageId -Confirm:$false -ErrorAction Stop
+                        $bootImagePublicationStarted = $true
+                    }
+                    catch {
+                        $bootImagePublicationError = $_
+                        if ($bootPublishTry -lt 6) { Start-Sleep -Seconds 10 }
+                    }
+                }
+                if (-not $bootImagePublicationStarted) {
+                    Write-DscStatus "$Tag Could not rebuild and publish boot image '$biName' ($packageId) after its OSD DP assignment was created: $bootImagePublicationError" -Failure
+                    return
+                }
+                Write-DscStatus "$Tag Started boot image publication after OSD DP targeting: $biName ($packageId)"
+            }
+
+            # A targeting row only proves that distribution was requested. Require
+            # every OSDClient-subnet DP to report Installed at the boot image's
+            # current source version before Phase 8 can claim usable PXE coverage.
+            $bootCoverageWaitMinutes = 15
+            $expectedRemoteSiteDp = @($dpTargets | Where-Object {
+                    $targetServer = & $serverFromNal $_.ServerNALPath
+                    $targetServer -in $osdDpFqdns -and $_.SiteCode -and $_.SiteCode -ne $SiteCode
+                } | Select-Object -First 1)
+            if ($ThisVM.parentSiteCode -or $expectedRemoteSiteDp.Count -gt 0) {
+                $bootCoverageWaitMinutes = 45
+            }
+            $bootCoverageDeadline = (Get-Date).AddMinutes($bootCoverageWaitMinutes)
+            $bootCoverageAttempt = 0
+            $bootCoverageProblems = @()
+            do {
+                $bootCoverageAttempt++
+                $bootCoverageProblems = @()
+                $currentBootImage = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                $bootSourceVersion = if ($currentBootImage) { "$($currentBootImage.SourceVersion)" } else { '' }
+                if (-not $bootSourceVersion) {
+                    $bootCoverageProblems += 'boot-image SourceVersion could not be read'
+                }
+                elseif ($commandSupportChanged -and [int]$bootSourceVersion -le $commandSupportPreviousSourceVersion) {
+                    $bootCoverageProblems += "boot-image SourceVersion has not advanced after enabling command support (still $bootSourceVersion, previous $commandSupportPreviousSourceVersion)"
+                }
+                else {
+                    $bootDpRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
+                    foreach ($expectedDp in $osdDpFqdns) {
+                        $dpRow = @($bootDpRows | Where-Object { (& $serverFromNal $_.ServerNALPath) -ieq $expectedDp } | Select-Object -First 1)
+                        if ($dpRow.Count -eq 0) {
+                            $bootCoverageProblems += "$expectedDp (no status row)"
+                        }
+                        elseif ([int]$dpRow[0].State -ne 0) {
+                            $bootCoverageProblems += "$expectedDp (State=$($dpRow[0].State), DPVersion=$($dpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                        }
+                        elseif (-not "$($dpRow[0].SourceVersion)" -or [int]$dpRow[0].SourceVersion -lt [int]$bootSourceVersion) {
+                            $bootCoverageProblems += "$expectedDp (Installed but stale: DPVersion=$($dpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                        }
+                    }
+                }
+                if ($bootCoverageProblems.Count -eq 0) { break }
+                $remainingBootCoverageSec = [math]::Floor(($bootCoverageDeadline - (Get-Date)).TotalSeconds)
+                if ($remainingBootCoverageSec -le 0) { break }
+                Write-DscStatus "$Tag Waiting for boot image '$biName' ($packageId) on every OSD DP: $($bootCoverageProblems -join '; ') (attempt $bootCoverageAttempt, ${remainingBootCoverageSec}s remaining)"
+                Start-Sleep -Seconds ([int][math]::Min(30, $remainingBootCoverageSec))
+            } while ((Get-Date) -lt $bootCoverageDeadline)
+
+            if ($bootCoverageProblems.Count -gt 0) {
+                Write-DscStatus "$Tag Boot image '$biName' ($packageId) did not reach every required OSD DP at the current source version within $bootCoverageWaitMinutes minutes: $($bootCoverageProblems -join '; ')" -Failure
+                return
+            }
+            Write-DscStatus "$Tag Verified boot image '$biName' ($packageId) SourceVersion=$bootSourceVersion is Installed on every OSD DP: $($osdDpFqdns -join ', ')"
         }
     }
 

@@ -11000,6 +11000,36 @@ function Test-CMSiteWideFunctionality {
 
         # 6. Boot images — should exist; on Primary check distribution + command support
         try {
+            $dpNameOf = {
+                param($nal)
+                if ($nal -match '\\\\([^\\"\]]+)') { return $Matches[1] } else { return "$nal" }
+            }
+            $expectedOsdDpNames = @()
+            if ($isPrimary -and $expectOsd) {
+                try {
+                    $osdDpGroup = Get-WmiObject -Namespace $ns -Class SMS_DistributionPointGroup -Filter "Name='OSD DPS'" -ErrorAction Stop | Select-Object -First 1
+                    if (-not $osdDpGroup) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: OSDClient exists but distribution point group 'OSD DPS' was not found")
+                    }
+                    else {
+                        $expectedOsdDpNames = @(Get-WmiObject -Namespace $ns -Class SMS_DPGroupMembers -Filter "GroupID='$($osdDpGroup.GroupID)'" -ErrorAction Stop |
+                            ForEach-Object { & $dpNameOf $_.DPNALPath } | Where-Object { $_ } | Select-Object -Unique)
+                        if ($expectedOsdDpNames.Count -eq 0) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: OSDClient exists but distribution point group 'OSD DPS' has no members")
+                        }
+                        else {
+                            $results.Details.Add("CMD: Require current boot-image content on every OSD DP: $($expectedOsdDpNames -join ', ')")
+                        }
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Could not measure 'OSD DPS' membership: $($_.Exception.Message)")
+                }
+            }
+
             $bootImgs = @(Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -ErrorAction Stop)
             if ($bootImgs.Count -ge 1) {
                 $results.Details.Add("OK: $($bootImgs.Count) boot image(s) found")
@@ -11020,12 +11050,6 @@ function Test-CMSiteWideFunctionality {
                         # SMS_DistributionPoint to see whether the package has been *targeted*
                         # to any DP at all — distinguishes "no targeting" from "in progress".
                         try {
-                            # Parse a DP server name out of a ServerNALPath like
-                            # ["Display=\\PL-PATTYDP.dom\"]MSWNET:...\\PL-PATTYDP.dom\
-                            $dpNameOf = {
-                                param($nal)
-                                if ($nal -match '\\\\([^\\"\]]+)') { return $Matches[1] } else { return "$nal" }
-                            }
                             $allDp = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
                                 -Filter "PackageID='$($bi.PackageID)'" -ErrorAction Stop)
                             $installed = @($allDp | Where-Object { $_.State -eq 0 })
@@ -11046,8 +11070,43 @@ function Test-CMSiteWideFunctionality {
                                     $failed = @($allDp | Where-Object { $_.State -in 3, 6, 8 })
                                 }
                             }
+
+                            $requiredOsdCoverageProblems = @()
+                            if ($expectOsd -and $biName -notmatch 'arm64') {
+                                $bootSourceVersion = "$($bi.SourceVersion)"
+                                if ($expectedOsdDpNames.Count -eq 0) {
+                                    $requiredOsdCoverageProblems += "no measured OSD DP members"
+                                }
+                                elseif (-not $bootSourceVersion) {
+                                    $requiredOsdCoverageProblems += "boot-image SourceVersion could not be read"
+                                }
+                                else {
+                                    foreach ($expectedDpName in $expectedOsdDpNames) {
+                                        $expectedDpShort = ($expectedDpName -split '\.')[0]
+                                        $requiredDpRow = @($allDp | Where-Object {
+                                                $rowName = & $dpNameOf $_.ServerNALPath
+                                                $rowName -ieq $expectedDpName -or ($rowName -split '\.')[0] -ieq $expectedDpShort
+                                            } | Select-Object -First 1)
+                                        if ($requiredDpRow.Count -eq 0) {
+                                            $requiredOsdCoverageProblems += "$expectedDpName (no status row)"
+                                        }
+                                        elseif ([int]$requiredDpRow[0].State -ne 0) {
+                                            $requiredOsdCoverageProblems += "$expectedDpName (State=$($requiredDpRow[0].State), DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                        }
+                                        elseif (-not "$($requiredDpRow[0].SourceVersion)" -or [int]$requiredDpRow[0].SourceVersion -lt [int]$bootSourceVersion) {
+                                            $requiredOsdCoverageProblems += "$expectedDpName (Installed but stale: DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                        }
+                                    }
+                                }
+                            }
+
                             if ($installed.Count -ge 1 -and $failed.Count -eq 0 -and $inProgress.Count -eq 0) {
-                                $results.Details.Add("OK: Boot image '$biName' distributed to $($installed.Count) DP(s)")
+                                if ($expectOsd -and $biName -notmatch 'arm64') {
+                                    $results.Details.Add("INFO: Boot image '$biName' has Installed status on $($installed.Count) DP(s); required OSD DP coverage is evaluated below")
+                                }
+                                else {
+                                    $results.Details.Add("OK: Boot image '$biName' distributed to $($installed.Count) DP(s)")
+                                }
                             }
                             elseif ($failed.Count -ge 1) {
                                 # State 3/6/8 (InstallFailed/RemovalFailed/ContentValidationFailed)
@@ -11096,7 +11155,12 @@ function Test-CMSiteWideFunctionality {
 
                             elseif ($inProgress.Count -ge 1) {
                                 # Pending/Retrying/Validating -- distribution is actively being processed.
-                                $results.Details.Add("OK: Boot image '$biName' distribution in progress on $($inProgress.Count) DP(s) [Installed=$($installed.Count)]")
+                                if ($expectOsd -and $biName -notmatch 'arm64') {
+                                    $results.Details.Add("INFO: Boot image '$biName' distribution is still in progress on $($inProgress.Count) DP(s) [Installed=$($installed.Count)]; required OSD DP coverage is not ready")
+                                }
+                                else {
+                                    $results.Details.Add("OK: Boot image '$biName' distribution in progress on $($inProgress.Count) DP(s) [Installed=$($installed.Count)]")
+                                }
                             }
                             else {
                                 # No summarizer rows at all -- either truly not targeted yet,
@@ -11108,7 +11172,12 @@ function Test-CMSiteWideFunctionality {
                                 }
                                 catch { $targeted = @() }
                                 if ($targeted.Count -ge 1) {
-                                    $results.Details.Add("OK: Boot image '$biName' targeted to $($targeted.Count) DP(s); distribution pending (DistMgr has not yet posted status)")
+                                    if ($expectOsd -and $biName -notmatch 'arm64') {
+                                        $results.Details.Add("INFO: Boot image '$biName' is targeted to $($targeted.Count) DP(s), but distribution status is still pending; required OSD DP coverage is not ready")
+                                    }
+                                    else {
+                                        $results.Details.Add("OK: Boot image '$biName' targeted to $($targeted.Count) DP(s); distribution pending (DistMgr has not yet posted status)")
+                                    }
                                 }
                                 elseif (-not $expectOsd) {
                                     $results.Details.Add("INFO: Boot image '$biName' not distributed to any DP -- no OSDClient in this lab (OSD content is only distributed to an OSDClient-subnet DP to save space)")
@@ -11123,19 +11192,47 @@ function Test-CMSiteWideFunctionality {
                                     $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) is not on any DP yet, so PXE can't work. An OSDClient exists, so perfloading distributes it to the OSDClient-subnet DP during Phase 8 -- re-run to distribute. If it persists, confirm a DP shares the OSDClient's subnet.")
                                 }
                             }
+
+                            if ($expectOsd -and $biName -notmatch 'arm64') {
+                                if ($requiredOsdCoverageProblems.Count -gt 0) {
+                                    $results.Passed = $false
+                                    $results.Details.Add("FAIL: Boot image '$biName' ($($bi.PackageID)) is not current on every required OSD DP: $($requiredOsdCoverageProblems -join '; ')")
+                                }
+                                else {
+                                    $results.Details.Add("OK: Boot image '$biName' ($($bi.PackageID)) SourceVersion=$bootSourceVersion is Installed on every required OSD DP")
+                                }
+                            }
                         }
                         catch {
-                            $results.Details.Add("WARN: Could not query distribution status for boot image '$biName': $($_.Exception.Message)")
+                            if ($expectOsd -and $biName -notmatch 'arm64') {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: Could not measure required OSD DP distribution status for boot image '$biName': $($_.Exception.Message)")
+                            }
+                            else {
+                                $results.Details.Add("WARN: Could not query distribution status for boot image '$biName': $($_.Exception.Message)")
+                            }
                         }
                     }
                 }
             }
             else {
-                $results.Details.Add("WARN: No boot images found")
+                if ($isPrimary -and $expectOsd) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: No boot images found for required OSD coverage")
+                }
+                else {
+                    $results.Details.Add("WARN: No boot images found")
+                }
             }
         }
         catch {
-            $results.Details.Add("WARN: SMS_BootImagePackage query failed: $($_.Exception.Message)")
+            if ($isPrimary -and $expectOsd) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: SMS_BootImagePackage query failed; required OSD coverage was not measured: $($_.Exception.Message)")
+            }
+            else {
+                $results.Details.Add("WARN: SMS_BootImagePackage query failed: $($_.Exception.Message)")
+            }
         }
 
         # 7. Task sequences (Primary only) — MEMLABS-* should exist
