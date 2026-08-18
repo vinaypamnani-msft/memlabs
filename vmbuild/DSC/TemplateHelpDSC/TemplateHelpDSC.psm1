@@ -121,54 +121,35 @@ function Copy-MemlabsCachedFile {
 }
 
 
-function Initialize-MemlabsCachedHashSidecar {
-    param([string] $Url, [string] $Dest, [string] $ExpectedHash)
-    if (-not (Test-Path $Dest) -or [string]::IsNullOrWhiteSpace($ExpectedHash)) { return $false }
-    # Every bail-out here silently costs a full SHA1 of the CU on the next Test(), which is how
-    # this could fail on every run while looking like it worked. Each exit names itself.
-    $leaf = Split-Path $Dest -Leaf
+function Get-DownloadFileExpectedSha1 {
+    param([string] $Url)
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $null }
     try {
-        $drive = $null
-        foreach ($cd in (Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=5" -ErrorAction SilentlyContinue)) {
-            if ($cd.VolumeName -eq 'MEMLABSCACHE' -and $cd.DeviceID) { $drive = $cd.DeviceID; break }
-        }
-        if (-not $drive) { Write-Status "SIDECAR restore skipped for ${leaf}: no MEMLABSCACHE volume mounted"; return $false }
-
-        $manifestPath = Join-Path "$drive\" 'manifest.json'
-        if (-not (Test-Path $manifestPath)) { Write-Status "SIDECAR restore skipped for ${leaf}: no manifest.json on $drive"; return $false }
-        $manifest = Get-Content -Path $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json
-        $entry = $null
-        $urlTrim = $Url.Trim()
-        foreach ($prop in $manifest.files.psobject.properties) {
-            if ($prop.Name -eq $Url -or [string]::Equals($prop.Name.Trim(), $urlTrim, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $entry = $prop.Value
-                break
-            }
-        }
-        if (-not $entry -or -not $entry.file -or -not $entry.sha1) { Write-Status "SIDECAR restore skipped for ${leaf}: URL not in manifest (or entry missing file/sha1)"; return $false }
-        if (-not [string]::Equals([string]$entry.sha1, $ExpectedHash, [System.StringComparison]::OrdinalIgnoreCase)) { Write-Status "SIDECAR restore skipped for ${leaf}: manifest sha1 $($entry.sha1) != expected $ExpectedHash"; return $false }
-
-        $src = Join-Path "$drive\" $entry.file
-        if (-not (Test-Path $src)) { Write-Status "SIDECAR restore skipped for ${leaf}: cache file missing at $src"; return $false }
-        $srcItem = Get-Item $src -ErrorAction Stop
-        $destItem = Get-Item $Dest -ErrorAction Stop
-        if ($srcItem.Length -ne $destItem.Length -or $srcItem.LastWriteTimeUtc -ne $destItem.LastWriteTimeUtc) {
-            # A copy that does not preserve LastWriteTime makes this permanently unequal.
-            Write-Status "SIDECAR restore skipped for ${leaf}: src/dest differ (len $($srcItem.Length)/$($destItem.Length), lastWriteUtc $($srcItem.LastWriteTimeUtc.ToString('o'))/$($destItem.LastWriteTimeUtc.ToString('o')))"
-            return $false
-        }
-        if ($entry.size -and ([int64]$destItem.Length -ne [int64]$entry.size)) { Write-Status "SIDECAR restore skipped for ${leaf}: manifest size $($entry.size) != dest $($destItem.Length)"; return $false }
-
-        @(
-            $ExpectedHash.ToLowerInvariant()
-            $destItem.Length.ToString()
-            $destItem.LastWriteTimeUtc.ToString('o')
-        ) | Out-File -FilePath "$Dest.SHA1" -Force
-        return $true
+        $leaf = [System.IO.Path]::GetFileName(([uri]$Url).AbsolutePath)
     }
     catch {
-        Write-Status "SIDECAR restore skipped for ${leaf}: $($_.Exception.Message)"
-        return $false
+        return $null
+    }
+    if ($leaf -match '-x64_([\da-fA-F]{40})\.exe$') {
+        return $Matches[1].ToLowerInvariant()
+    }
+    return $null
+}
+
+function Write-DownloadFileHashSidecar {
+    param([string] $FilePath, [string] $VerifiedHash)
+    $leaf = Split-Path $FilePath -Leaf
+    try {
+        $fileItem = Get-Item $FilePath -ErrorAction Stop
+        @(
+            $VerifiedHash.ToLowerInvariant()
+            $fileItem.Length.ToString()
+            $fileItem.LastWriteTimeUtc.ToString('o')
+        ) | Out-File -FilePath "$FilePath.SHA1" -Force -ErrorAction Stop
+        Write-Verbose "SIDECAR wrote $FilePath.SHA1 (size $($fileItem.Length), lastWriteUtc $($fileItem.LastWriteTimeUtc.ToString('o')))"
+    }
+    catch {
+        Write-Status "SIDECAR write FAILED for ${leaf}: $($_.Exception.Message)"
     }
 }
 
@@ -316,11 +297,12 @@ function Invoke-DownloadFile {
     }
 
     if ((Test-Path $dest)) {
-        $pattern = "https://.*/sqlserver.*-.*-x64_(.*).exe"
-        if ($url -match $pattern) {
-            $hash = get-filehash -Algorithm SHA1 $dest
-            if ($hash.Hash.ToLowerInvariant() -eq $matches[1]) {
-                Write-Verbose "Hash check passed for $dest ($($hash.Hash))"
+        $expectedHash = Get-DownloadFileExpectedSha1 -Url $url
+        if ($expectedHash) {
+            $actualHash = (Get-FileHash -Algorithm SHA1 -Path $dest -ErrorAction Stop).Hash.ToLowerInvariant()
+            if ($actualHash -eq $expectedHash) {
+                Write-Verbose "Hash check passed for $dest ($actualHash)"
+                Write-DownloadFileHashSidecar -FilePath $dest -VerifiedHash $actualHash
             }
             else {
                 $badfile = $dest + ".bad"
@@ -328,8 +310,8 @@ function Invoke-DownloadFile {
                     remove-item $badfile -force
                 }
                 rename-item $dest $badfile
-                write-status "Hash check failed for $dest ($($hash.Hash))"
-                throw "Hash check failed for $dest ($($hash.Hash))"
+                write-status "Hash check failed for $dest ($actualHash)"
+                throw "Hash check failed for $dest ($actualHash)"
             }
         }
         If ((Get-Item $dest).length -gt 0kb) {
@@ -2909,8 +2891,8 @@ class DownloadFile {
 
         # Verify SHA1 hash for files with an embedded hash in the filename
         # (e.g. sqlserver2016-kb5014351-x64_{sha1hash}.exe)
-        if ($this.DownloadUrl -match '-x64_([\da-fA-F]{40})\.exe$') {
-            $expectedHash = $Matches[1].ToLowerInvariant()
+        $expectedHash = Get-DownloadFileExpectedSha1 -Url $this.DownloadUrl
+        if ($expectedHash) {
             $fileItem = Get-Item $this.FilePath
             $hashCachePath = "$($this.FilePath).SHA1"
 
@@ -2928,9 +2910,12 @@ class DownloadFile {
                         # shifted by the UTC offset, so this never equalled LastWriteTimeUtc on a
                         # non-UTC guest and the sidecar re-hashed the whole CU every run.
                         $cachedLastWrite = [datetime]::Parse($cacheLines[2].Trim(), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-                        if ($fileItem.Length -eq $cachedSize -and $fileItem.LastWriteTimeUtc -eq $cachedLastWrite) {
+                        if ($cachedHash -ne $expectedHash) {
+                            $sidecarMiss = "hash differs (filename $expectedHash, sidecar $cachedHash)"
+                        }
+                        elseif ($fileItem.Length -eq $cachedSize -and $fileItem.LastWriteTimeUtc -eq $cachedLastWrite) {
                             $useCachedHash = $true
-                            $actualHash = $cachedHash
+                            $actualHash = $expectedHash
                             $sidecarMiss = ''
                         }
                         elseif ($fileItem.Length -ne $cachedSize) {
@@ -2958,14 +2943,7 @@ class DownloadFile {
             }
 
             if (-not $useCachedHash) {
-                if (Initialize-MemlabsCachedHashSidecar -Url $this.DownloadUrl -Dest $this.FilePath -ExpectedHash $expectedHash) {
-                    $actualHash = $expectedHash
-                    $useCachedHash = $true
-                    Write-Verbose "Restored SHA1 cache for $(Split-Path $this.FilePath -Leaf) from matching MemLabs cache metadata"
-                }
-                else {
-                    $actualHash = (Get-FileHash $this.FilePath -Algorithm SHA1).Hash.ToLowerInvariant()
-                }
+                $actualHash = (Get-FileHash $this.FilePath -Algorithm SHA1 -ErrorAction Stop).Hash.ToLowerInvariant()
             }
 
             if ($actualHash -ne $expectedHash) {
@@ -2977,14 +2955,7 @@ class DownloadFile {
 
             # Write/update the sidecar cache so subsequent runs skip hashing
             if (-not $useCachedHash) {
-                try {
-                    @($actualHash, $fileItem.Length.ToString(), $fileItem.LastWriteTimeUtc.ToString('o')) | Out-File -FilePath $hashCachePath -Force
-                    Write-Verbose "SIDECAR wrote $hashCachePath (size $($fileItem.Length), lastWriteUtc $($fileItem.LastWriteTimeUtc.ToString('o')))"
-                }
-                catch {
-                    # A failed write means every later run re-hashes, so this is not verbose-only.
-                    Write-Status "SIDECAR write FAILED for $(Split-Path $this.FilePath -Leaf): $($_.Exception.Message)"
-                }
+                Write-DownloadFileHashSidecar -FilePath $this.FilePath -VerifiedHash $actualHash
             }
 
             Write-Verbose "SHA1 hash verified for $(Split-Path $this.FilePath -Leaf)"
