@@ -271,16 +271,32 @@ if ($Configuration.InstallSCCM.Status -eq 'Completed') {
     # with SQLAO listeners where raw System.Data.SqlClient can fail due to
     # Kerberos issues against the listener VNN.
     $siteHealthy = $false
+    $wmiSiteError = $null
     if ($regPresent) {
-        try {
-            $wmiSite = Get-CimInstance -Namespace "root\SMS\Site_$SiteCode" -Class "SMS_Site" -ErrorAction Stop
-            if ($wmiSite) {
-                $siteHealthy = $true
-                Write-DscStatus "InstallSCCM.Status='Completed' -- WMI confirms site $SiteCode is operational (SMS_Site present)"
+        # After a reboot the SMS Provider can take a few minutes to register its
+        # namespace, so one miss is not an answer. A site that finished setup
+        # always has root\SMS\Site_<code>; one that died in Init_Database never does.
+        # 15x30s matches Get-SMSProvider's own 450s budget, so this gate can never
+        # reject a site that the provider wait further down would have accepted.
+        for ($wmiTry = 1; $wmiTry -le 15; $wmiTry++) {
+            try {
+                $wmiSite = Get-CimInstance -Namespace "root\SMS\Site_$SiteCode" -Class "SMS_Site" -ErrorAction Stop
+                if ($wmiSite) {
+                    $siteHealthy = $true
+                    Write-DscStatus "InstallSCCM.Status='Completed' -- WMI confirms site $SiteCode is operational (SMS_Site present, attempt $wmiTry)"
+                    break
+                }
             }
+            catch {
+                $wmiSiteError = $_.Exception.Message
+            }
+            if ($wmiTry -eq 1) {
+                Write-DscStatus "Registry present but WMI SMS_Site check failed: $wmiSiteError. Retrying for up to 7 min before falling back to the SQL probe..."
+            }
+            if ($wmiTry -lt 15) { Start-Sleep -Seconds 30 }
         }
-        catch {
-            Write-DscStatus "Registry present but WMI SMS_Site check failed: $($_.Exception.Message). Falling back to SQL probe..."
+        if (-not $siteHealthy) {
+            Write-DscStatus "WMI SMS_Site for site $SiteCode never appeared after 15 attempts (last error: $wmiSiteError). Falling back to SQL probe..."
         }
     }
 
@@ -337,21 +353,25 @@ if ($Configuration.InstallSCCM.Status -eq 'Completed') {
             }
         }
 
-        # Decision matrix:
-        #   reg=Y  db=Y             -> OK, CM is installed
-        #   reg=N  db=Y             -> FAIL, partial/corrupt install needs checkpoint
-        #   reg=N  db=N  sql=Y      -> safe retry, nothing committed
-        #   reg=Y  db=N  sql=Y      -> safe retry, DB was dropped
-        #   any    any   sql=N      -> FAIL, can't confirm state
-        if ($regPresent -and $dbExists) {
-            # CM is genuinely installed, nothing to do.
-        }
-        elseif (-not $sqlReachable) {
+        # Decision matrix (only reached when SMS_Site could NOT be read, so a
+        # completed install has already been ruled out by the strongest oracle):
+        #   db=Y                    -> FAIL, partial/corrupt install needs checkpoint
+        #   db=N  sql=Y             -> safe retry, nothing committed
+        #   any   sql=N             -> FAIL, can't confirm state
+        if (-not $sqlReachable) {
             Write-DscStatus "InstallSCCM.Status='Completed' but SQL is unreachable (tried: $($sqlProbeTargets -join ', ')). Cannot confirm whether [$cmDbName] exists; refusing to retry blind. Check SQL connectivity or restore the Phase 8 checkpoint." -Failure
             return
         }
-        elseif ($dbExists -and -not $regPresent) {
-            Write-DscStatus "InstallSCCM.Status='Completed' but registry key SMS\Identification is missing while [$cmDbName] exists on [$sqlDataSource]. This indicates a partial/corrupt install. Restore the Phase 8 checkpoint on this VM and re-run the deployment." -Failure
+        elseif ($dbExists) {
+            # Setup writes SMS\Identification and creates CM_<site> early, so a
+            # present registry key proves nothing about how far it got.
+            $partialDetail = if ($regPresent) {
+                "registry key SMS\Identification is present and [$cmDbName] exists on [$sqlDataSource], but the site's WMI namespace root\SMS\Site_$SiteCode does not -- setup.exe committed the database and then died before the site came up"
+            }
+            else {
+                "registry key SMS\Identification is missing while [$cmDbName] exists on [$sqlDataSource]"
+            }
+            Write-DscStatus "InstallSCCM.Status='Completed' but $partialDetail. This is a partial/corrupt install; setup.exe cannot be safely re-run over it. Restore the Phase 8 checkpoint on this VM (or drop [$cmDbName] from every replica) and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got." -Failure
             return
         }
         else {
@@ -1198,6 +1218,23 @@ WHERE drs.is_suspended = 1
                     return
                 }
             }
+        }
+    }
+
+    # setup.exe returning is not setup.exe succeeding -- a database-init fatal ends
+    # with "Contact your SQL administrator" in its own log and nothing else. Marking
+    # Completed here strands the site for good: every later re-run takes the
+    # "already installed" path and waits for an SMS Provider that will never exist.
+    # Same tail and patterns the host monitor uses, so both sides agree on "fatal".
+    if (Test-Path 'C:\ConfigMgrSetup.log') {
+        $setupFatal = Get-Content 'C:\ConfigMgrSetup.log' -Tail 30 -ErrorAction SilentlyContinue |
+            Select-String "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights" |
+            Select-Object -First 1
+        if ($setupFatal) {
+            # Leave Status='Running' and the breadcrumb in place: re-entry then takes
+            # the partial-install path, which knows a checkpoint restore is required.
+            Write-DscStatus "setup.exe returned but ConfigMgrSetup.log reports a fatal -- NOT marking the install complete: $(($setupFatal.Line -split '\$\$<')[0].Trim()). Check C:\ConfigMgrSetup.log." -Failure
+            return
         }
     }
 

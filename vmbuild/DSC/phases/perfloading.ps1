@@ -1017,19 +1017,36 @@ Write-DscStatus "$Tag Starting perfloading"
             Write-DscStatus "$Tag Command support already enabled for boot image: $biName ($packageId) -- skipping provider write"
         }
         else {
-            try {
-                $bootImageBeforeUpdate = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
-                if (-not $bootImageBeforeUpdate -or -not "$($bootImageBeforeUpdate.SourceVersion)") {
-                    throw "Could not read the pre-update boot-image SourceVersion"
+            # A boot image the site created minutes ago can still be rejected as
+            # "legacy (WinPE 3.1 or earlier)" -- the same asynchrony the wait above
+            # covers for the image APPEARING, one step later. Retry on the same
+            # 12x30s budget instead of reading one answer as final.
+            $commandSupportError = $null
+            for ($csTry = 1; $csTry -le 12; $csTry++) {
+                try {
+                    $bootImageBeforeUpdate = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+                    if (-not $bootImageBeforeUpdate -or -not "$($bootImageBeforeUpdate.SourceVersion)") {
+                        throw "Could not read the pre-update boot-image SourceVersion"
+                    }
+                    $commandSupportPreviousSourceVersion = [int]$bootImageBeforeUpdate.SourceVersion
+                    Set-CMBootImage -Id $packageId -EnableCommandSupport $true -ErrorAction Stop
+                    $commandSupportChanged = $true
+                    $commandSupportError = $null
+                    Write-DscStatus "$Tag Enabled command support for boot image: $biName ($packageId) on attempt $csTry"
+                    break
                 }
-                $commandSupportPreviousSourceVersion = [int]$bootImageBeforeUpdate.SourceVersion
-                Set-CMBootImage -Id $packageId -EnableCommandSupport $true -ErrorAction Stop
-                $commandSupportChanged = $true
-                Write-DscStatus "$Tag Enabled command support for boot image: $biName ($packageId)"
+                catch {
+                    $commandSupportError = "$_"
+                    if ($csTry -lt 12) {
+                        Write-DscStatus "$Tag Command support not accepted yet for boot image '$biName' ($packageId) (attempt $csTry/12): $commandSupportError"
+                        Start-Sleep -Seconds 30
+                    }
+                }
             }
-            catch {
-                Write-DscStatus "$Tag Failed to enable command support for boot image '$biName' ($packageId): $_" -Failure
-                return
+            if ($commandSupportError) {
+                # F8 is a debugging convenience; PXE, distribution and OSD do not need it,
+                # so a fully installed site must not be failed over this.
+                Write-DscStatus "$Tag WARNING: Could not enable command support for boot image '$biName' ($packageId) after 12 attempts: $commandSupportError. The F8 shell will be unavailable in WinPE; boot image content and PXE are unaffected."
             }
         }
 

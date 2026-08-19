@@ -2180,8 +2180,8 @@ function Save-CMSetupSqlFailureEvidence {
     <#
     .SYNOPSIS
         Names the SQL Server error that killed ConfigMgr Setup's database
-        initialization, and for corruption-class errors captures the SQL-side
-        evidence needed to decide whether the database is really damaged.
+        initialization, and for corruption-class and connection-loss errors
+        captures the SQL-side evidence needed to decide what actually happened.
     .DESCRIPTION
         A database-initialization failure ends ConfigMgrSetup.log with
         "Contact your SQL administrator", which is all the orchestrator has
@@ -2196,6 +2196,10 @@ function Save-CMSetupSqlFailureEvidence {
         collected, so every past occurrence was undiagnosable after the fact.
         Each SQL host's ERRORLOG is pulled and DBCC CHECKDB is run on the site
         database while the lab is still standing.
+
+        A dropped connection (10054 and friends) has the same shape: the client
+        only knows the socket died, so the ERRORLOG is pulled for that class too,
+        without CHECKDB.
     #>
     [CmdletBinding()]
     param(
@@ -2249,7 +2253,28 @@ function Save-CMSetupSqlFailureEvidence {
     # Storage/page-integrity errors. Everything else (permissions, timeouts,
     # bad parameters) is answered by ConfigMgrSetup.log alone.
     $corruptionErrors = @(605, 823, 824, 825, 829, 5180, 7105, 8646, 8909, 8928, 9100)
-    if ($corruptionErrors -notcontains $sqlErrNum) { return }
+
+    # "the remote host forcibly closed the connection" is a statement ABOUT SQL
+    # Server, and ConfigMgrSetup.log cannot adjudicate it: an AG role change, an
+    # engine crash, an OOM kill and a stalled scheduler are indistinguishable from
+    # the client. Same collection as the corruption class, minus CHECKDB -- the
+    # database is not suspected of damage, only the session.
+    $connectionLossErrors = @(64, 121, 232, 233, 258, 10053, 10054, 10060)
+
+    # The client-side number never appears in the ERRORLOG, so scan for the
+    # server-side events that actually explain a dropped session.
+    $connectionLossScanNumbers = @(701, 802, 845, 9001, 17053, 17189, 17830, 17886, 18056)
+    $connectionLossScanPattern = 'is changing roles|availability (group|replica).*(offline|resolving|not (healthy|synchron))|SQL Server (is starting|shutdown has been initiated)|non-yielding|Deadlocked Schedulers|insufficient system memory|Failed (to )?allocate|fatal error occurred while (reading|writing)|forcefully terminat|taking longer than \d+ seconds'
+
+    $scanNumbers = $corruptionErrors
+    $scanPattern = $null
+    $runCheckDb = $true
+    if ($corruptionErrors -notcontains $sqlErrNum) {
+        if ($connectionLossErrors -notcontains $sqlErrNum) { return }
+        $scanNumbers = $connectionLossScanNumbers
+        $scanPattern = $connectionLossScanPattern
+        $runCheckDb = $false
+    }
 
     $sqlHosts = New-Object System.Collections.Generic.List[string]
     $siteVm = $null
@@ -2270,7 +2295,7 @@ function Save-CMSetupSqlFailureEvidence {
     $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
 
     $collect = {
-        param($errNum, $corruptionList)
+        param($errNum, $scanNumberList, $extraScanPattern, $withCheckDb)
         $out = [ordered]@{
             ErrorLogPath = $null
             ErrorLog     = $null
@@ -2306,8 +2331,9 @@ function Save-CMSetupSqlFailureEvidence {
             # invisible to any read of the current file. Scan every generation.
             if ($out.ErrorLogPath) {
                 $logFolder = Split-Path -Parent $out.ErrorLogPath
-                $nums = @($corruptionList | ForEach-Object { [string][int]$_ })
+                $nums = @($scanNumberList | ForEach-Object { [string][int]$_ })
                 $rx = 'Error:\s*(' + ($nums -join '|') + ')\s*,'
+                if ($extraScanPattern) { $rx = $rx + '|' + $extraScanPattern }
                 # An error number alone does not say WHY. A 9100 can be emitted
                 # only after an engine assertion -- e.g. "COnDiskHistogram::
                 # AddValue - Statistics corruption" -- and that line, plus the
@@ -2349,6 +2375,11 @@ function Save-CMSetupSqlFailureEvidence {
                     catch { }
                 }
             }
+
+            # Connection-loss class: the ERRORLOG generations above are the whole
+            # answer; the database is not suspected of damage, so stop before the
+            # 15-minutes-per-database CHECKDB.
+            if (-not $withCheckDb) { return [pscustomobject]$out }
 
             $server = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
             $cn = New-Object System.Data.SqlClient.SqlConnection "Server=$server;Database=master;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=30"
@@ -2438,7 +2469,7 @@ WHERE d.name LIKE 'CM[_]%'
     foreach ($sqlHost in ($sqlHosts | Where-Object { $_ } | Select-Object -Unique)) {
         $res = $null
         try {
-            $res = Invoke-VmCommand -VmName $sqlHost -VmDomainName $DomainName -SuppressLog -DisplayName "Collect SQL evidence from $sqlHost" -ScriptBlock $collect -ArgumentList $sqlErrNum, $corruptionErrors
+            $res = Invoke-VmCommand -VmName $sqlHost -VmDomainName $DomainName -SuppressLog -DisplayName "Collect SQL evidence from $sqlHost" -ScriptBlock $collect -ArgumentList $sqlErrNum, $scanNumbers, $scanPattern, $runCheckDb
         }
         catch {
             Write-Log "[Phase $Phase]: $VmName`: SQL evidence from $sqlHost`: PSDirect call threw: $($_.Exception.Message)" -Warning -OutputStream
@@ -2488,7 +2519,7 @@ WHERE d.name LIKE 'CM[_]%'
                 catch { Write-Log "[Phase $Phase]: $VmName`: failed to write $($d.Name): $_" -Warning }
             }
         }
-        if (@($e.SuspectPages).Count -eq 0) {
+        if ($runCheckDb -and @($e.SuspectPages).Count -eq 0) {
             Write-Log "[Phase $Phase]: $VmName`: msdb.dbo.suspect_pages on $sqlHost is EMPTY -- the engine has never recorded a page-level fault here" -OutputStream
         }
         foreach ($sp in @($e.SuspectPages)) {
@@ -2506,6 +2537,19 @@ WHERE d.name LIKE 'CM[_]%'
                 }
             }
         }
+    }
+
+    if (-not $runCheckDb) {
+        # The client only saw the socket die. Whether the reason is in the pulled
+        # ERRORLOGs is a fact worth stating either way -- 0 matches is not a
+        # finding of "nothing happened on the server".
+        $verdict = "DIAG: SQL error $sqlErrNum means SQL Server closed the connection; ConfigMgrSetup.log cannot say why (an AG role change, an engine crash, an OOM kill and a stalled scheduler all look like this from the client). ERRORLOG scan: $logHits server-side event line(s), $assertLines assertion/dump line(s)."
+        if ($logHits -eq 0 -and $assertLines -eq 0) {
+            $verdict += " Nothing matched the known causes, which is NOT the same as nothing happening -- read the pulled ERRORLOG copies around the setup window before blaming the network."
+        }
+        $verdict += " The site DB is partially committed either way, so a retry needs Phase 8 with -restore (or drop the CM database from every replica first)."
+        Write-Log "[Phase $Phase]: $VmName`: $verdict" -OutputStream
+        return
     }
 
     if ($sawCorruption) {
