@@ -3952,6 +3952,76 @@ function Remove-DnsRecord {
     }
 }
 
+function Remove-StaleAdComputer {
+    <#
+    .SYNOPSIS
+        Deletes a leftover AD computer object so a rebuilt VM/cluster can claim
+        the name again.
+    .DESCRIPTION
+        Nothing removes AD objects when a VM is deleted, and the only place that
+        would re-disable a prestaged one -- ADComputer's EnabledOnCreation -- is
+        a no-op on an object that already exists. A cluster name object (CNO)
+        that a prior build ENABLED therefore survives a rebuild and makes
+        New-Cluster fail with "An enabled computer account (object) for '<name>'
+        was found."
+
+        Absence and failure are reported differently on purpose: a lookup that
+        could not run must never be logged as "nothing to clean".
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$DCName,
+        [Parameter(Mandatory = $true)]
+        [string]$Domain,
+        [Parameter(Mandatory = $true)]
+        [string]$ComputerName,
+        [Parameter(Mandatory = $false)]
+        [string]$Reason
+    )
+
+    $removeBlock = {
+        $name = $using:ComputerName
+        try {
+            $obj = Get-ADComputer -Identity $name -ErrorAction Stop
+        }
+        catch {
+            # Matched by name, not a typed catch: the AD types are only loadable
+            # once the module is imported, so a typed clause can silently not match.
+            if ($_.Exception.GetType().Name -eq 'ADIdentityNotFoundException') {
+                return [pscustomobject]@{ Outcome = 'NotPresent' }
+            }
+            return [pscustomobject]@{ Outcome = 'LookupFailed'; Error = $_.Exception.Message }
+        }
+        if (-not $obj) { return [pscustomobject]@{ Outcome = 'NotPresent' } }
+        try {
+            # A CNO can own child objects (the VCOs it created), which plain
+            # Remove-ADComputer refuses to delete.
+            Remove-ADObject -Identity $obj.DistinguishedName -Recursive -Confirm:$false -ErrorAction Stop
+            [pscustomobject]@{ Outcome = 'Removed'; Enabled = $obj.Enabled; Dn = $obj.DistinguishedName }
+        }
+        catch {
+            [pscustomobject]@{ Outcome = 'RemoveFailed'; Enabled = $obj.Enabled; Error = $_.Exception.Message }
+        }
+    }
+
+    $suffix = if ($Reason) { " ($Reason)" } else { '' }
+    $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $removeBlock -SuppressLog
+    if ($result.ScriptBlockFailed -or -not $result.ScriptBlockOutput) {
+        Write-OrangePoint "Could not check AD for a stale computer object '$ComputerName'$suffix -- it may still block a rebuild. Check it manually on $DCName."
+        return
+    }
+
+    $out = $result.ScriptBlockOutput
+    switch ($out.Outcome) {
+        'NotPresent' { Write-Log "No stale AD computer object '$ComputerName'$suffix." -LogOnly }
+        'Removed' { Write-GreenCheck "Removed stale AD computer object '$ComputerName'$suffix (was Enabled=$($out.Enabled))" }
+        'LookupFailed' { Write-OrangePoint "Could not read AD computer object '$ComputerName'$suffix`: $($out.Error). Not treating this as 'absent'; check it manually on $DCName." }
+        'RemoveFailed' { Write-OrangePoint "Failed to remove stale AD computer object '$ComputerName'$suffix`: $($out.Error). Remove it manually on $DCName or the rebuild will fail." }
+        default { Write-OrangePoint "Unexpected result checking AD computer object '$ComputerName'$suffix`: $($out.Outcome)" }
+    }
+}
+
 function Get-DhcpScopeDescription {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]

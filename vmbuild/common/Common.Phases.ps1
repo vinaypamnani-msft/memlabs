@@ -897,6 +897,9 @@ function Start-Phase {
     # Remove DNS records for VM's in this config, if existing DC
     if ($deployConfig.parameters.ExistingDCName -and $Phase -eq 1) {
         $existingDC = $deployConfig.parameters.ExistingDCName
+        # Which VMs are already on this host decides both which VMs get cleaned
+        # and, below, whether a SQLAO cluster still has a surviving node.
+        $existingVmNameSet = @((Get-List -Type VM -SmartUpdate -DomainName $deployConfig.vmOptions.domainName).vmName)
         # Scope DNS removal to ONLY the VMs Phase 1 will actually (re)create.
         if ($global:ForcePhase1VmNames -and $global:ForcePhase1VmNames.Count -gt 0) {
             # Phase 1 was forced for specific VMs only (e.g. AADClient cleanup).
@@ -909,7 +912,6 @@ function Start-Phase {
             # $existingVMs check. Removing DNS for VMs we aren't touching
             # de-registers healthy, running machines and forces a needless
             # domain-wide DNS re-registration cycle on every partial re-run.
-            $existingVmNameSet = @((Get-List -Type VM -SmartUpdate -DomainName $deployConfig.vmOptions.domainName).vmName)
             $dnsTargets = @($deployConfig.virtualMachines | Where-Object { -not ($_.hidden) -and ($_.vmName -notin $existingVmNameSet) })
             if ($dnsTargets.Count -gt 0) {
                 Write-Log "[Phase $Phase] Removing DNS records for VM(s) to be created: $(($dnsTargets.vmName) -join ', ')"
@@ -937,6 +939,23 @@ function Start-Phase {
                 }
                 if ($item.AlwaysOnListenerName) {
                     Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.AlwaysOnListenerName
+                }
+
+                # The CNO/VCO computer objects outlive the VMs too, and unlike the
+                # DNS records nothing ever puts them back into a usable state: the
+                # DC prestages them with ADComputer's EnabledOnCreation, which does
+                # nothing to an object that already exists, so the CNO stays ENABLED
+                # from the last build and New-Cluster refuses it. Only purge when no
+                # node of this cluster survives -- if the partner VM is still here it
+                # may be running the cluster, and deleting its CNO would break it.
+                $partnerSurvives = $item.OtherNode -and ($item.OtherNode -in $existingVmNameSet)
+                foreach ($adName in @($item.ClusterName, $item.AlwaysOnListenerName)) {
+                    if (-not $adName) { continue }
+                    if ($partnerSurvives) {
+                        Write-Log "[Phase $Phase] Keeping AD computer object '$adName': partner node '$($item.OtherNode)' still exists, so the cluster may be live." -LogOnly
+                        continue
+                    }
+                    Remove-StaleAdComputer -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -ComputerName $adName -Reason "SQLAO rebuild of $($item.vmName)"
                 }
             }
         }
