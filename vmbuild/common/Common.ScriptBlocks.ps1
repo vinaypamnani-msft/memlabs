@@ -7138,7 +7138,30 @@ $global:VM_Config = {
                                         $since = $f.LastWriteTime.AddMinutes(-5)
                                         & $add "ConfigurationStatus record: $($f.Name) (last resource record written $($f.LastWriteTime), $([Math]::Round($f.Length/1KB))KB)"
                                         $raw = $null
-                                        try { $raw = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop }
+                                        $rawBytes = $null
+                                        $encNote = 'unknown'
+                                        # Decode by BOM/shape rather than letting Get-Content guess: PS5.1 only
+                                        # auto-detects when a BOM is present, and a wrong guess makes BOTH the
+                                        # JSON parse and the ResourceId regex fail, which reads as a corrupt file.
+                                        try {
+                                            $rawBytes = [System.IO.File]::ReadAllBytes($f.FullName)
+                                            if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
+                                                $encNote = 'utf8-bom'; $raw = [System.Text.Encoding]::UTF8.GetString($rawBytes, 3, $rawBytes.Length - 3)
+                                            }
+                                            elseif ($rawBytes.Length -ge 2 -and $rawBytes[0] -eq 0xFF -and $rawBytes[1] -eq 0xFE) {
+                                                $encNote = 'utf16le-bom'; $raw = [System.Text.Encoding]::Unicode.GetString($rawBytes, 2, $rawBytes.Length - 2)
+                                            }
+                                            elseif ($rawBytes.Length -ge 2 -and $rawBytes[0] -eq 0xFE -and $rawBytes[1] -eq 0xFF) {
+                                                $encNote = 'utf16be-bom'; $raw = [System.Text.Encoding]::BigEndianUnicode.GetString($rawBytes, 2, $rawBytes.Length - 2)
+                                            }
+                                            elseif ($rawBytes.Length -ge 4 -and $rawBytes[1] -eq 0 -and $rawBytes[3] -eq 0) {
+                                                $encNote = 'utf16le-nobom'; $raw = [System.Text.Encoding]::Unicode.GetString($rawBytes)
+                                            }
+                                            else {
+                                                $encNote = 'utf8-nobom'; $raw = [System.Text.Encoding]::UTF8.GetString($rawBytes)
+                                            }
+                                            if ($raw) { $raw = $raw.Trim([char]0xFEFF, [char]0x20, [char]0x09, [char]0x0D, [char]0x0A) }
+                                        }
                                         catch { & $add "  read failed even after stop: $($_.Exception.Message)" }
                                         if ($raw) {
                                             $recs = @()
@@ -7148,7 +7171,15 @@ $global:VM_Config = {
                                             # foreach enumerates correctly on both 5.1 and 7; this runs in-guest
                                             # under 5.1.
                                             try { foreach ($item in ($raw | ConvertFrom-Json)) { $recs += $item } }
-                                            catch { & $add "  parse failed: $($_.Exception.Message)" }
+                                            catch {
+                                                & $add "  parse failed (decoded as $encNote): $($_.Exception.Message)"
+                                                # Make the next occurrence decidable instead of arguable: the first
+                                                # bytes say encoding-vs-truncation outright.
+                                                $hexHead = (@($rawBytes | Select-Object -First 16) | ForEach-Object { $_.ToString('x2') }) -join ' '
+                                                & $add "  first 16 bytes: $hexHead"
+                                                $peek = $raw.Substring(0, [Math]::Min(100, $raw.Length))
+                                                & $add "  first chars: $($peek -replace '[\r\n]', ' ')"
+                                            }
                                             if ($recs.Count -gt 0) {
                                                 $dur = {
                                                     param($r)
