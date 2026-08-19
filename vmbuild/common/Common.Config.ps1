@@ -4007,6 +4007,8 @@ Function Write-GreenCheck {
         [Parameter()]
         [switch] $NoIndent,
         [Parameter()]
+        [switch] $WriteLog,
+        [Parameter()]
         [string] $ForegroundColor,
         [Parameter()]
         [int] $indent = 2
@@ -4030,6 +4032,9 @@ Function Write-GreenCheck {
     }
     if (!$NoNewLine) {
         Write-Host
+    }
+    if ($WriteLog.IsPresent) {
+        Write-Log $text -LogOnly
     }
 }
 

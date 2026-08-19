@@ -4006,19 +4006,23 @@ function Remove-StaleAdComputer {
     }
 
     $suffix = if ($Reason) { " ($Reason)" } else { '' }
+    # Every outcome goes through Write-Log as well as the console: this call decides
+    # whether a rebuild can form its cluster, and Write-GreenCheck/Write-OrangePoint
+    # are console-only, so a failure here would otherwise leave no record anywhere.
+    Write-Log "Checking $DCName for a stale AD computer object '$ComputerName'$suffix..." -LogOnly
     $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $removeBlock -SuppressLog
     if ($result.ScriptBlockFailed -or -not $result.ScriptBlockOutput) {
-        Write-OrangePoint "Could not check AD for a stale computer object '$ComputerName'$suffix -- it may still block a rebuild. Check it manually on $DCName."
+        Write-OrangePoint "Could not check AD for a stale computer object '$ComputerName'$suffix -- it may still block a rebuild. Check it manually on $DCName." -WriteLog
         return
     }
 
     $out = $result.ScriptBlockOutput
     switch ($out.Outcome) {
         'NotPresent' { Write-Log "No stale AD computer object '$ComputerName'$suffix." -LogOnly }
-        'Removed' { Write-GreenCheck "Removed stale AD computer object '$ComputerName'$suffix (was Enabled=$($out.Enabled))" }
-        'LookupFailed' { Write-OrangePoint "Could not read AD computer object '$ComputerName'$suffix`: $($out.Error). Not treating this as 'absent'; check it manually on $DCName." }
-        'RemoveFailed' { Write-OrangePoint "Failed to remove stale AD computer object '$ComputerName'$suffix`: $($out.Error). Remove it manually on $DCName or the rebuild will fail." }
-        default { Write-OrangePoint "Unexpected result checking AD computer object '$ComputerName'$suffix`: $($out.Outcome)" }
+        'Removed' { Write-GreenCheck "Removed stale AD computer object '$ComputerName'$suffix (was Enabled=$($out.Enabled))" -WriteLog }
+        'LookupFailed' { Write-OrangePoint "Could not read AD computer object '$ComputerName'$suffix`: $($out.Error). Not treating this as 'absent'; check it manually on $DCName." -WriteLog }
+        'RemoveFailed' { Write-OrangePoint "Failed to remove stale AD computer object '$ComputerName'$suffix`: $($out.Error). Remove it manually on $DCName or the rebuild will fail." -WriteLog }
+        default { Write-OrangePoint "Unexpected result checking AD computer object '$ComputerName'$suffix`: $($out.Outcome)" -WriteLog }
     }
 }
 

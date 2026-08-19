@@ -6076,6 +6076,35 @@ class JoinClusterByIP {
                     if (-not $_gw) {
                         Write-Status "WARNING: NIC hosting $_clusterPrefix* (ifIndex $($_hostingNic.InterfaceIndex), IP $($_hostingNic.IPAddress)) has no default gateway; WSFC may classify it Cluster-only and reject the cluster IP. Proceeding -- New-Cluster will report the authoritative result."
                     }
+
+                    # A CNO left ENABLED by a previous incarnation of this lab makes
+                    # New-Cluster fail forever with "An enabled computer account
+                    # (object) for '<name>' was found". Nothing puts it back: the DC
+                    # prestages with ADComputer's EnabledOnCreation, which is a no-op
+                    # on an object that already exists. We are creating this cluster
+                    # right now and Get-Cluster above proved it is not already formed
+                    # here, so an enabled CNO is leftover state -- disable it, which is
+                    # exactly what the error message asks a human to do. Prestaged
+                    # (disabled) objects are left alone; so is any failure to reach AD.
+                    try {
+                        $_cno = Get-ADComputer -Identity $_ClusterName -ErrorAction Stop
+                        if ($_cno.Enabled) {
+                            Write-Status "Cluster name object '$_ClusterName' already exists in AD and is ENABLED -- leftover from a previous build. Disabling it so New-Cluster can claim the name."
+                            Set-ADComputer -Identity $_cno.DistinguishedName -Enabled $false -ErrorAction Stop
+                            Write-Status "Disabled stale cluster name object '$_ClusterName'"
+                        }
+                        else {
+                            Write-Status "Cluster name object '$_ClusterName' is prestaged and disabled -- as expected"
+                        }
+                    }
+                    catch {
+                        if ($_.Exception.GetType().Name -eq 'ADIdentityNotFoundException') {
+                            Write-Status "No existing cluster name object '$_ClusterName' in AD; New-Cluster will create it"
+                        }
+                        else {
+                            Write-Status "WARNING: could not check the cluster name object '$_ClusterName' in AD: $($_.Exception.Message). Proceeding -- New-Cluster will report the authoritative result."
+                        }
+                    }
                 }
                 Write-Status "Creating cluster '$_ClusterName' on '$_NodeName' with IP $_ClusterIP"
                 try {
