@@ -1146,6 +1146,52 @@ Write-DscStatus "$Tag Starting perfloading"
                     if ($connection) { try { $connection.Close() } catch { } }
                 }
             }
+            $bootParentSite = "$($ThisVM.parentSiteCode)"
+            $bootParentFqdn = if ($ThisVM.thisParams) { "$($ThisVM.thisParams.ParentSiteServer)" } else { '' }
+            if ($bootParentSite -and -not $bootParentFqdn) {
+                try {
+                    $bootParentSiteInfo = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Site -Filter "SiteCode='$bootParentSite'" -ErrorAction Stop | Select-Object -First 1
+                    if ($bootParentSiteInfo) { $bootParentFqdn = "$($bootParentSiteInfo.ServerName)" }
+                }
+                catch {
+                    Write-DscStatus "$Tag Boot image coverage: could not resolve parent site server for $bootParentSite from SMS_Site: $($_.Exception.Message)"
+                }
+            }
+            $notifyBootParentDistmgr = {
+                if (-not $bootParentSite -or -not $bootParentFqdn) {
+                    Write-DscStatus "$Tag Boot image coverage: parent package notification skipped because parent identity is incomplete (site='$bootParentSite', server='$bootParentFqdn')"
+                    return
+                }
+                try {
+                    $parentBootImage = Get-WmiObject -ComputerName $bootParentFqdn -Namespace "root\SMS\site_$bootParentSite" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+                    if (-not $parentBootImage) {
+                        Write-DscStatus "$Tag Boot image coverage: parent site $bootParentSite ($bootParentFqdn) has no SMS_BootImagePackage row for $packageId; cannot notify its distmgr"
+                        return
+                    }
+                    $notificationResult = $parentBootImage.AddChangeNotification()
+                    Write-DscStatus "$Tag Boot image coverage: asked parent site $bootParentSite ($bootParentFqdn) to queue $packageId in distmgr (AddChangeNotification=$($notificationResult.ReturnValue))"
+                }
+                catch {
+                    Write-DscStatus "$Tag Boot image coverage: parent package notification failed on $bootParentFqdn for $packageId`: $($_.Exception.Message)"
+                }
+            }
+            $wakeBootParentDistmgr = {
+                if (-not $bootParentSite -or -not $bootParentFqdn) {
+                    Write-DscStatus "$Tag Boot image coverage: parent distmgr inbox wake skipped because parent identity is incomplete (site='$bootParentSite', server='$bootParentFqdn')"
+                    return
+                }
+                $wakeFile = "\\$bootParentFqdn\SMS_$bootParentSite\inboxes\distmgr.box\memlabs-boot-wake-$([guid]::NewGuid().ToString('N')).MEMLABS"
+                try {
+                    [System.IO.File]::WriteAllText($wakeFile, "memlabs boot image wake $packageId")
+                    Write-DscStatus "$Tag Boot image coverage: woke parent site $bootParentSite ($bootParentFqdn) distmgr inbox for $packageId"
+                }
+                catch {
+                    Write-DscStatus "$Tag Boot image coverage: parent distmgr inbox wake failed on $bootParentFqdn for $packageId`: $($_.Exception.Message)"
+                }
+                finally {
+                    try { [System.IO.File]::Delete($wakeFile) } catch { }
+                }
+            }
             $bootCoverageWaitMinutes = 15
             $expectedRemoteSiteDp = @($dpTargets | Where-Object {
                     $targetServer = & $serverFromNal $_.ServerNALPath
@@ -1158,9 +1204,10 @@ Write-DscStatus "$Tag Starting perfloading"
             $bootCoverageAttempt = 0
             $bootCoverageProblems = @()
             $bootCoverageObservedSourceVersion = ''
-            $bootCoverageVersionSeenAt = $null
             $bootCoverageLastArm = @{}
             $bootStoredVersion = ''
+            $bootLastParentNotify = $null
+            $bootLastParentInboxWake = $null
             do {
                 $bootCoverageAttempt++
                 $bootCoverageProblems = @()
@@ -1181,7 +1228,6 @@ Write-DscStatus "$Tag Starting perfloading"
                 else {
                     if ($bootCoverageObservedSourceVersion -ne $bootSourceVersion) {
                         $bootCoverageObservedSourceVersion = $bootSourceVersion
-                        $bootCoverageVersionSeenAt = Get-Date
                         $bootCoverageLastArm = @{}
                     }
                     $bootDpRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
@@ -1209,6 +1255,14 @@ Write-DscStatus "$Tag Starting perfloading"
                 # still lacks the parent-owned content, also flush the two DRS groups
                 # that carry DP/site-control targeting to the parent.
                 $bootContentPendingFromParent = [bool]($ThisVM.parentSiteCode -and $bootSourceVersion -and $bootStoredVersion -and [int]$bootStoredVersion -lt [int]$bootSourceVersion)
+                if ($bootContentPendingFromParent -and (-not $bootLastParentNotify -or ((Get-Date) - $bootLastParentNotify).TotalMinutes -ge 5)) {
+                    & $notifyBootParentDistmgr
+                    $bootLastParentNotify = Get-Date
+                }
+                if ($bootContentPendingFromParent -and (-not $bootLastParentInboxWake -or ((Get-Date) - $bootLastParentInboxWake).TotalMinutes -ge 8)) {
+                    & $wakeBootParentDistmgr
+                    $bootLastParentInboxWake = Get-Date
+                }
                 $bootArmMinutes = if ($bootContentPendingFromParent) { 10 } else { 5 }
                 $bootRearmedDps = @()
                 foreach ($incompleteDp in @($bootIncompleteDps | Select-Object -Unique)) {
@@ -1221,13 +1275,13 @@ Write-DscStatus "$Tag Starting perfloading"
                             Write-DscStatus "$Tag Boot image coverage: re-established missing target for '$biName' ($packageId) on $incompleteDp"
                         }
                         else {
-                            $lastArm = if ($bootCoverageLastArm.ContainsKey($armKey)) { $bootCoverageLastArm[$armKey] } else { $bootCoverageVersionSeenAt }
-                            if (-not $lastArm -or ((Get-Date) - $lastArm).TotalMinutes -lt $bootArmMinutes) { continue }
+                            $lastArm = if ($bootCoverageLastArm.ContainsKey($armKey)) { $bootCoverageLastArm[$armKey] } else { $null }
+                            if ($lastArm -and ((Get-Date) - $lastArm).TotalMinutes -lt $bootArmMinutes) { continue }
                             foreach ($targetRow in $targetRows) {
                                 $targetRow.RefreshNow = $true
                                 [void]$targetRow.Put()
                             }
-                            Write-DscStatus "$Tag Boot image coverage: re-armed '$biName' ($packageId) on $incompleteDp with RefreshNow after ${bootArmMinutes}m at SourceVersion=$bootSourceVersion (StoredPkgVersion=$bootStoredVersion)"
+                            Write-DscStatus "$Tag Boot image coverage: re-armed '$biName' ($packageId) on $incompleteDp with RefreshNow at SourceVersion=$bootSourceVersion (retry cadence=${bootArmMinutes}m, StoredPkgVersion=$bootStoredVersion)"
                         }
                         $bootCoverageLastArm[$armKey] = Get-Date
                         $bootRearmedDps += $incompleteDp
@@ -1240,6 +1294,10 @@ Write-DscStatus "$Tag Starting perfloading"
                     foreach ($drsGroup in @('Site Control Data', 'Configuration Data')) {
                         & $pushBootCoverageDrsChanges $drsGroup
                     }
+                    # The wake above can beat DRS arrival. Run both parent wakes again
+                    # on the next poll, after the refreshed target can be visible there.
+                    $bootLastParentNotify = $null
+                    $bootLastParentInboxWake = $null
                 }
                 $remainingBootCoverageSec = [math]::Floor(($bootCoverageDeadline - (Get-Date)).TotalSeconds)
                 if ($remainingBootCoverageSec -le 0) { break }
