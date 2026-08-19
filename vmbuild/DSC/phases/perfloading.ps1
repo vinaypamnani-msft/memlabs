@@ -1127,8 +1127,8 @@ Write-DscStatus "$Tag Starting perfloading"
                     $sqlInstance = $sqlServer
                     $databaseName = $databaseRaw
                     if ($databaseRaw -match '\\') {
-                        $sqlInstance = "$sqlServer\$($databaseRaw.Split('\\')[0])"
-                        $databaseName = $databaseRaw.Split('\\')[1]
+                        $sqlInstance = "$sqlServer\$($databaseRaw.Split('\')[0])"
+                        $databaseName = $databaseRaw.Split('\')[1]
                     }
                     $connection = New-Object System.Data.SqlClient.SqlConnection "Server=$sqlInstance;Initial Catalog=$databaseName;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
                     $connection.Open()
