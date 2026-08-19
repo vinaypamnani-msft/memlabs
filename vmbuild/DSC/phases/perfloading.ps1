@@ -1174,6 +1174,32 @@ Write-DscStatus "$Tag Starting perfloading"
                     Write-DscStatus "$Tag Boot image coverage: could not resolve parent site server for $bootParentSite from SMS_Site: $($_.Exception.Message)"
                 }
             }
+            $rearmBootParentTargets = {
+                param([string[]]$DistributionPointFqdns)
+                if (-not $bootParentSite -or -not $bootParentFqdn) {
+                    Write-DscStatus "$Tag Boot image coverage: parent target re-arm skipped because parent identity is incomplete (site='$bootParentSite', server='$bootParentFqdn')"
+                    return
+                }
+                try {
+                    $parentTargets = @(Get-WmiObject -ComputerName $bootParentFqdn -Namespace "root\SMS\site_$bootParentSite" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction Stop |
+                            Where-Object { (& $serverFromNal $_.ServerNALPath) -in $DistributionPointFqdns })
+                    if ($parentTargets.Count -eq 0) {
+                        Write-DscStatus "$Tag Boot image coverage: parent site $bootParentSite ($bootParentFqdn) has no SMS_DistributionPoint target for $packageId on $($DistributionPointFqdns -join ', '); cannot re-arm the CAS operational target"
+                        return
+                    }
+                    $rearmed = @()
+                    foreach ($parentTarget in $parentTargets) {
+                        $targetFqdn = & $serverFromNal $parentTarget.ServerNALPath
+                        $parentTarget.RefreshNow = $true
+                        [void]$parentTarget.Put()
+                        $rearmed += $targetFqdn
+                    }
+                    Write-DscStatus "$Tag Boot image coverage: re-armed parent site $bootParentSite operational target for $packageId with RefreshNow on $($rearmed -join ', ')"
+                }
+                catch {
+                    Write-DscStatus "$Tag Boot image coverage: parent target re-arm failed on $bootParentFqdn for ${packageId}: $($_.Exception.Message)"
+                }
+            }
             $notifyBootParentDistmgr = {
                 if (-not $bootParentSite -or -not $bootParentFqdn) {
                     Write-DscStatus "$Tag Boot image coverage: parent package notification skipped because parent identity is incomplete (site='$bootParentSite', server='$bootParentFqdn')"
@@ -1223,6 +1249,7 @@ Write-DscStatus "$Tag Starting perfloading"
             $bootCoverageObservedSourceVersion = ''
             $bootCoverageLastArm = @{}
             $bootStoredVersion = ''
+            $bootLastParentTargetArm = $null
             $bootLastParentNotify = $null
             $bootLastParentInboxWake = $null
             do {
@@ -1272,6 +1299,10 @@ Write-DscStatus "$Tag Starting perfloading"
                 # still lacks the parent-owned content, also flush the two DRS groups
                 # that carry DP/site-control targeting to the parent.
                 $bootContentPendingFromParent = [bool]($ThisVM.parentSiteCode -and $bootSourceVersion -and $bootStoredVersion -and [int]$bootStoredVersion -lt [int]$bootSourceVersion)
+                if ($bootContentPendingFromParent -and (-not $bootLastParentTargetArm -or ((Get-Date) - $bootLastParentTargetArm).TotalMinutes -ge 10)) {
+                    & $rearmBootParentTargets @($bootIncompleteDps | Select-Object -Unique)
+                    $bootLastParentTargetArm = Get-Date
+                }
                 if ($bootContentPendingFromParent -and (-not $bootLastParentNotify -or ((Get-Date) - $bootLastParentNotify).TotalMinutes -ge 5)) {
                     & $notifyBootParentDistmgr
                     $bootLastParentNotify = Get-Date
@@ -1313,6 +1344,7 @@ Write-DscStatus "$Tag Starting perfloading"
                     }
                     # The wake above can beat DRS arrival. Run both parent wakes again
                     # on the next poll, after the refreshed target can be visible there.
+                    $bootLastParentTargetArm = $null
                     $bootLastParentNotify = $null
                     $bootLastParentInboxWake = $null
                 }
