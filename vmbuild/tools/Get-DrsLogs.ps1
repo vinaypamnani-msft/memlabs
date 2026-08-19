@@ -20,6 +20,8 @@
 
     Decision chain, source-verified in distmgr.cpp -- this is what the poll is aimed at:
       ~14640 outer gate     : pkg.SourceSite == thisSite && Action != DELETE && StoreFlag != NO_SRC
+            ~4698  target join    : PkgServers INNER JOIN DistributionPoints ON NALPath; a missing DP row
+                                                            silently removes the child site before the send decision is evaluated
       ~27862 bServerChange  : FALSE iff PkgSrvAction == NONE, or (UPDATE && UpdateMask == 0)
       ~27908 bResendPkg     : TRUE iff pkgUpdateMask & PKG_UPDATE_SOURCE, or
                               (& PKG_UPDATE_LASTREFRESH && StoreFlag == PKG_STORAGE_DIRECT)
@@ -304,10 +306,23 @@ $sqlSnapBlock = {
         catch { if ($keep) { $out.Add("$title ERROR: " + $_.Exception.Message) } else { $out.Add('  ERROR: ' + $_.Exception.Message) } }
     }
     if ($PkgId) {
-        $keep = 'Action|Mask|Version|SiteCode|SourceSite|Flags|Status|Refresh|Type|PkgID|^ID$|Priority|Time|Date'
+        $keep = 'Action|Mask|Version|SiteCode|SourceSite|Flags|Status|Refresh|Type|PkgID|^ID$|Priority|Time|Date|NALPath|DPID|ServerName|DistmgrJoin'
         Q "SELECT * FROM PkgStatus_G WHERE ID = @p" 'PkgStatus_G' $keep $PkgId
         Q "SELECT * FROM PkgServers_G WHERE PkgID = @p" 'PkgServers_G' $keep $PkgId
         Q "SELECT * FROM PkgServers_L WHERE PkgID = @p" 'PkgServers_L' $keep $PkgId
+        # This is the exact INNER JOIN prerequisite used by distmgr's
+        # FindFirstPkgServer. LEFT JOIN here so the diagnostic preserves the
+        # PkgServers row and names a missing DistributionPoints partner instead
+        # of reproducing the product's silent zero-row result.
+        Q @"
+SELECT ps.PkgID, ps.NALPath, ps.SiteCode AS PkgServerSiteCode,
+       ps.SourceSite, ps.LastRefresh, ps.RefreshTrigger, ps.UpdateMask, ps.Action,
+       CASE WHEN dp.NALPath IS NULL THEN 'BLOCKED_NO_DISTRIBUTIONPOINT' ELSE 'JOINABLE' END AS DistmgrJoin,
+       dp.*
+FROM dbo.PkgServers_L AS ps
+LEFT JOIN dbo.DistributionPoints AS dp ON dp.NALPath = ps.NALPath
+WHERE ps.PkgID = @p
+"@ 'PkgServerDistmgrJoin' $keep $PkgId
         Q "SELECT * FROM SMSPackages WHERE PkgID = @p" 'SMSPackages' $keep $PkgId
         # Type: 1 Package, 2 Program, 4 Package Server (DP), 8 Access account (PkgNotification.h).
         Q "SELECT * FROM PkgNotification WHERE PkgID = @p" 'PkgNotification' $keep $PkgId
@@ -428,6 +443,15 @@ $pkgLogBlock = {
         if (-not (Test-Path $f)) { continue }
         foreach ($x in @(Get-Content -LiteralPath $f -Tail 400 -ErrorAction SilentlyContinue | Where-Object { $_ -match [regex]::Escape($PkgId) })) {
             $o.Add("LOG $n :: " + (($x -replace '\s+', ' ').Trim()))
+        }
+    }
+    # The CAS HMAN transition creates the DistributionPoints join partner.
+    # It is site-scoped rather than package-scoped, so it never contains PkgId.
+    $hman = Join-Path $d 'Logs\hman.log'
+    if (Test-Path $hman) {
+        foreach ($x in @(Get-Content -LiteralPath $hman -Tail 1000 -ErrorAction SilentlyContinue |
+                Where-Object { $_ -match 'Distribution Points of site' } | Select-Object -Last 20)) {
+            $o.Add("LOG hman.log :: " + (($x -replace '\s+', ' ').Trim()))
         }
     }
     foreach ($base in @($d, 'E:\SMSPKG', 'C:\SMSPKG', (Join-Path $d 'inboxes\despoolr.box\receive'))) {
