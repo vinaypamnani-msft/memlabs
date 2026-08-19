@@ -7306,6 +7306,39 @@ $global:VM_Config = {
                                 } -SuppressLog
                                 if (-not $dscEventsTail.ScriptBlockFailed -and $dscEventsTail.ScriptBlockOutput) {
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC evidence captured at the stranded point (post-stop, files unlocked):`r`n$($dscEventsTail.ScriptBlockOutput)" -LogOnly
+
+                                    # A record we could not read is the one worth keeping. Nothing else ever
+                                    # copies ConfigurationStatus off a guest, so every past occurrence died
+                                    # with the VM and the cause stayed a guess. Pull the bytes once.
+                                    if ("$($dscEventsTail.ScriptBlockOutput)" -match 'parse failed') {
+                                        $dscRecordGrab = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -SuppressLog -ScriptBlock {
+                                            $scPath = Join-Path $env:windir 'System32\Configuration\ConfigurationStatus'
+                                            $rf = Get-ChildItem -Path $scPath -Filter '*.details.json' -ErrorAction SilentlyContinue |
+                                                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                                            if (-not $rf) { return $null }
+                                            try {
+                                                $b = [System.IO.File]::ReadAllBytes($rf.FullName)
+                                                if ($b.Length -gt 4MB) { $b = $b[0..(4MB - 1)] }
+                                                [pscustomobject]@{ Name = $rf.Name; Bytes = [Convert]::ToBase64String($b); Truncated = ($rf.Length -gt 4MB) }
+                                            }
+                                            catch { [pscustomobject]@{ Name = $rf.Name; Error = $_.Exception.Message } }
+                                        }
+                                        $grab = if ($dscRecordGrab) { $dscRecordGrab.ScriptBlockOutput } else { $null }
+                                        $dscGrabLogDir = $null
+                                        if ($Common -and $Common.LogPath) { $dscGrabLogDir = Split-Path $Common.LogPath -Parent }
+                                        if ($grab -and $grab.Bytes -and $dscGrabLogDir -and (Test-Path $dscGrabLogDir)) {
+                                            $dscGrabDest = Join-Path $dscGrabLogDir "$($currentItem.vmName)-Phase$Phase-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$($grab.Name)"
+                                            try {
+                                                [System.IO.File]::WriteAllBytes($dscGrabDest, [Convert]::FromBase64String($grab.Bytes))
+                                                Write-Log "[Phase $Phase]: $($currentItem.vmName): Pulled the unparseable ConfigurationStatus record -> $dscGrabDest$(if ($grab.Truncated) { ' (first 4MB)' })" -OutputStream
+                                            }
+                                            catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): could not write the pulled ConfigurationStatus record: $($_.Exception.Message)" -Warning }
+                                        }
+                                        else {
+                                            $dscGrabWhy = if (-not $grab) { 'the guest returned nothing' } elseif ($grab.Error) { "the guest could not read it: $($grab.Error)" } else { 'no host log folder was resolvable' }
+                                            Write-Log "[Phase $Phase]: $($currentItem.vmName): could NOT pull the unparseable ConfigurationStatus record -- $dscGrabWhy. Its bytes are still only on the guest." -Warning -OutputStream
+                                        }
+                                    }
                                 }
                                 else {
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: could not capture ConfigurationStatus/event evidence at stranded point." -LogOnly
