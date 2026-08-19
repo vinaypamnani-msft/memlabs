@@ -1154,39 +1154,6 @@ function Start-Phase {
 
     $result = Resolve-WaitPhaseResult -Raw (Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig) -Phase $Phase
 
-    # A worker process that DIED is not a VM that failed. The disposed-PSJob callback
-    # fires on a threadpool thread, so no try/catch in the worker can survive it, and one
-    # dead worker was discarding a whole phase of healthy VMs. Re-dispatch just those VMs
-    # once; every phase is already idempotent (that is what -startPhase resume relies on).
-    $crashedVMs = @($result.Crashed | Sort-Object -Unique)
-    if ($crashedVMs.Count -gt 0) {
-        # $null = on every one of these: Start-Phase's return value is the phase pass/fail
-        # gate and -OutputStream writes to the success stream, which turns it into an array.
-        $null = Write-Log "[Phase $Phase] $($crashedVMs.Count) worker process(es) died without reporting a failure ($($crashedVMs -join ', ')). Re-dispatching those VMs once." -Warning -OutputStream
-        # These per-run "already did this VM" markers are stamped at DISPATCH time, so they
-        # record intent, not completion -- a worker that died mid-copy still left its VM in
-        # $global:DSC_Copied, and the re-dispatch then skipped the DSC copy and died on a
-        # missing C:\staging\DSC\DSC.zip. Nothing a dead worker claimed is verifiable, so
-        # forget the claims for these VMs only.
-        foreach ($cvm in $crashedVMs) {
-            $global:DSC_Copied = @($global:DSC_Copied | Where-Object { $_ -and $_ -ne $cvm })
-            $global:WU_Quieted = @($global:WU_Quieted | Where-Object { $_ -and $_ -ne $cvm })
-        }
-        $retry = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig -OnlyVMs $crashedVMs
-        if ($retry -and $retry.Applicable -and @($retry.Jobs).Count -gt 0) {
-            $retryResult = Resolve-WaitPhaseResult -Raw (Wait-Phase -Phase $Phase -Jobs $retry.Jobs -AdditionalData $retry.AdditionalData -DeployConfig $deployConfig) -Phase $Phase
-            # The retry supersedes the crash: drop those from the original failure count
-            # and fold in whatever the second attempt actually produced.
-            $result.Failed = [Math]::Max(0, $result.Failed - $crashedVMs.Count) + $retryResult.Failed
-            $result.Success += $retryResult.Success
-            $result.Warning += $retryResult.Warning
-            $null = Write-Log "[Phase $Phase] Re-dispatch finished; $($retryResult.Success) success, $($retryResult.Warning) warnings, $($retryResult.Failed) failures." -OutputStream
-        }
-        else {
-            $null = Write-Log "[Phase $Phase] Re-dispatch produced no jobs; leaving the original failure in place." -Warning
-        }
-    }
-
     # Phase 2 builds tool zips keyed by fingerprint. Clean up any stale
     # zips from previous runs that are no longer referenced.
     if ($Phase -eq 2) {
@@ -2904,8 +2871,7 @@ function Wait-Phase {
             Success = 0
             Warning = 0
             Elapsed = $null
-            # VMs whose per-VM CHILD PROCESS died rather than whose configuration failed.
-            # Nothing about the VM is known to be wrong, so the caller may re-dispatch it.
+            # VMs whose per-VM CHILD PROCESS exhausted its one immediate re-dispatch.
             Crashed = [System.Collections.ArrayList]@()
         }
 
@@ -2916,6 +2882,12 @@ function Wait-Phase {
         # WaitForAll itself is RetryCount 7200 x 5s = 10 HOURS. Track VMs that have
         # DEFINITIVELY failed so a wait that can never be satisfied can be cut short.
         $failedVmNames = @{}
+
+        # A worker process can die from an unhandled engine callback without its VM
+        # configuration failing. Re-dispatch it here, while dependent jobs are still
+        # alive; deferring until Wait-Phase returned stranded those jobs behind a DSC
+        # WaitForAll that could not finish without the crashed VM.
+        $crashRedispatched = @{}
 
         # Track how many output objects we've already displayed per job so
         # warnings/errors from running jobs appear in real-time instead of
@@ -3165,12 +3137,24 @@ function Wait-Phase {
                     Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
 
                     # The WORKER PROCESS died, it did not report a configuration failure --
-                    # an unhandled exception on a threadpool thread (the disposed-PSJob
-                    # callback) bypasses every try/catch and takes the process with it. That
-                    # says nothing about the VM, so it is retryable; a real DSC failure is not.
-                    if ($fvmName -and $jobOutput -match 'background process reported an error|Unhandled exception') {
-                        [void]$return.Crashed.Add($fvmName)
-                        Write-Log "[Phase $Phase]: ${fvmName}: worker process died rather than reporting a failure; eligible for one re-dispatch." -Warning
+                    # an unhandled exception on a threadpool thread bypasses every try/catch
+                    # and takes the process with it. Re-dispatch once immediately: another VM
+                    # may already be waiting on this one inside a 10-hour DSC WaitForAll, so a
+                    # retry deferred until Wait-Phase returns is unreachable recovery.
+                    $workerCrashed = $fvmName -and $jobOutput -match 'background process reported an error|Unhandled exception'
+                    $redispatchCrashedVm = $false
+                    $fvmKey = if ($fvmName) { $fvmName.ToUpperInvariant() } else { $null }
+                    if ($workerCrashed) {
+                        if (-not $crashRedispatched.ContainsKey($fvmKey)) {
+                            $crashRedispatched[$fvmKey] = $true
+                            $redispatchCrashedVm = $true
+                            Write-Log "[Phase $Phase]: ${fvmName}: worker process died rather than reporting a failure; re-dispatching it immediately once so phase dependencies can continue." -Warning
+                        }
+                        else {
+                            [void]$return.Crashed.Add($fvmName)
+                            $failedVmNames[$fvmKey] = Get-Date
+                            Write-Log "[Phase $Phase]: ${fvmName}: replacement worker process also died; no further re-dispatch will be attempted." -Failure
+                        }
                     }
 
                     # Capture per-VM timing for failed jobs too
@@ -3192,6 +3176,33 @@ function Wait-Phase {
                     # lingers in the session until New-Lab's end-of-run sweep, so jobs from
                     # every phase pile up (e.g. 19+18+6+6 = 49 at "Removing N job(s)").
                     try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+
+                    if ($redispatchCrashedVm) {
+                        # These lists are stamped at DISPATCH time and therefore record
+                        # intent, not completion. The replacement must re-prove both claims.
+                        $global:DSC_Copied = @($global:DSC_Copied | Where-Object { $_ -and $_ -ne $fvmName })
+                        $global:WU_Quieted = @($global:WU_Quieted | Where-Object { $_ -and $_ -ne $fvmName })
+
+                        $replacement = $null
+                        $replacementError = $null
+                        try {
+                            $replacement = Start-PhaseJobs -Phase $Phase -deployConfig $DeployConfig -OnlyVMs @($fvmName)
+                            $replacementJobs = @($replacement.Jobs)
+                            if ($replacement -and $replacement.Applicable -and $replacement.Failed -eq 0 -and $replacementJobs.Count -eq 1) {
+                                [void]$jobs.Add($replacementJobs[0])
+                                Write-Log "[Phase $Phase]: ${fvmName}: immediate re-dispatch created replacement job $($replacementJobs[0].Id)." -LogOnly
+                                continue
+                            }
+                            $replacementError = "dispatch returned Applicable=$($replacement.Applicable), Failed=$($replacement.Failed), Jobs=$($replacementJobs.Count); expected exactly one job with no dispatch failure"
+                        }
+                        catch {
+                            $replacementError = "$($_.Exception.GetType().FullName): $($_.Exception.Message)"
+                        }
+
+                        [void]$return.Crashed.Add($fvmName)
+                        $failedVmNames[$fvmKey] = Get-Date
+                        Write-Log "[Phase $Phase]: ${fvmName}: immediate worker re-dispatch failed: $replacementError" -Failure
+                    }
                     $return.Failed++
                 }
             }
