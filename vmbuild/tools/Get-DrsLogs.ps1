@@ -279,6 +279,7 @@ $sqlSnapBlock = {
             $cn.Open()
             $cmd = $cn.CreateCommand(); $cmd.CommandText = $q; $cmd.CommandTimeout = 60
             if ($p) { [void]$cmd.Parameters.AddWithValue('@p', $p) }
+            if ($q -match '@site\b') { [void]$cmd.Parameters.AddWithValue('@site', $siteCode) }
             $r = $cmd.ExecuteReader()
             # Procs like spDiagDRS return MANY result sets; reading only the first silently drops the
             # rest and looks like a complete answer.
@@ -306,8 +307,10 @@ $sqlSnapBlock = {
         catch { if ($keep) { $out.Add("$title ERROR: " + $_.Exception.Message) } else { $out.Add('  ERROR: ' + $_.Exception.Message) } }
     }
     if ($PkgId) {
-        $keep = 'Action|Mask|Version|SiteCode|SourceSite|Flags|Status|Refresh|Type|PkgID|^ID$|Priority|Time|Date|NALPath|DPID|ServerName|DistmgrJoin'
+        $keep = 'Action|Mask|Version|SiteCode|SourceSite|Flags|Status|Refresh|Type|PkgID|^ID$|Priority|Time|Date|NALPath|DPID|ServerName|DistmgrJoin|SiteNumber|Available|Operation|RowXml|SendingSite|TargetSite|ProcessedTime'
         Q "SELECT * FROM PkgStatus_G WHERE ID = @p" 'PkgStatus_G' $keep $PkgId
+        Q "SELECT PkgID, SiteNumber, PkgVersion FROM dbo.PkgStatusHist WHERE PkgID = @p ORDER BY PkgVersion, SiteNumber" 'PkgStatusHist' $keep $PkgId
+        Q "SELECT p.PkgID, p.SourceVersion, dbo.fnIsPkgVersionAvailable(@p, @site, p.SourceVersion) AS Available FROM dbo.SMSPackages AS p WHERE p.PkgID = @p" 'fnIsPkgVersionAvailable' $keep $PkgId
         Q "SELECT * FROM PkgServers_G WHERE PkgID = @p" 'PkgServers_G' $keep $PkgId
         Q "SELECT * FROM PkgServers_L WHERE PkgID = @p" 'PkgServers_L' $keep $PkgId
         # This is the exact INNER JOIN prerequisite used by distmgr's
@@ -326,6 +329,11 @@ WHERE ps.PkgID = @p
         Q "SELECT * FROM SMSPackages WHERE PkgID = @p" 'SMSPackages' $keep $PkgId
         # Type: 1 Package, 2 Program, 4 Package Server (DP), 8 Access account (PkgNotification.h).
         Q "SELECT * FROM PkgNotification WHERE PkgID = @p" 'PkgNotification' $keep $PkgId
+    # The child can retain the PCK forever while fnIsPkgVersionAvailable is
+    # false. Preserve the exact package-status rows offered by the CAS so a
+    # missing child row can be attributed to extraction versus apply.
+    Q "SELECT m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@Type','NVARCHAR(64)') AS Operation, CONVERT(NVARCHAR(500), R.Y.query('.')) AS RowXml FROM dbo.DRSSentMessages AS m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) CROSS APPLY T.X.nodes('row') R(Y) WHERE T.X.value('./@TableName','NVARCHAR(256)') = 'PkgStatus_G' AND R.Y.value('./@ID','NVARCHAR(8)') = @p ORDER BY m.ID" 'DRSSentMessages-PkgStatus_G' $keep $PkgId
+    Q "SELECT m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@Type','NVARCHAR(64)') AS Operation, CONVERT(NVARCHAR(500), R.Y.query('.')) AS RowXml FROM dbo.DRSSentMessages AS m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) CROSS APPLY T.X.nodes('row') R(Y) WHERE T.X.value('./@TableName','NVARCHAR(256)') = 'PkgStatusHist' AND R.Y.value('./@PkgID','NVARCHAR(8)') = @p ORDER BY m.ID" 'DRSSentMessages-PkgStatusHist' $keep $PkgId
         # Second mode of the same proc: all three params non-null jumps to SEARCHFORDATA, which reports
         # this specific row's replication state rather than the site's general state.
         Q "EXEC dbo.spDiagDRS N'PkgServers_G', N'PkgID', @p" 'spDiagDRS-PkgServers_G' $keep $PkgId
@@ -1200,7 +1208,7 @@ foreach ($vm in $logTargets) {
         $sqlSession = if ($sqlVm.vmName -eq $vm.vmName) { $session } else { Get-VmSession -VmName $sqlVm.vmName -VmDomainName $dom }
         if ($sqlSession) {
             Write-Host "  SQL snapshot from $($sqlVm.vmName)..." -ForegroundColor DarkGray
-            $snap = Invoke-Command -Session $sqlSession -ScriptBlock $sqlSnapBlock -ArgumentList $vm.siteCode
+            $snap = Invoke-Command -Session $sqlSession -ScriptBlock $sqlSnapBlock -ArgumentList $vm.siteCode, $PackageId
             $snapPath = Join-Path $dest "replication-state-$stamp.txt"
             Set-Content -Path $snapPath -Value $snap -Encoding utf8
             Write-Host "  wrote $(Split-Path $snapPath -Leaf)" -ForegroundColor Gray
