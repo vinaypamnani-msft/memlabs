@@ -6202,6 +6202,10 @@ $global:VM_Config = {
         $dscResumeAwaitingProgress = $false # closure is emitted only when status advances after an in-place resume
         $dscResumeStartedUtc = $null
         $dscResumeFromStatus = ''
+        # Every status this phase has already emitted. A resumed config that lands on one
+        # of them has re-run from the top, not advanced -- "different from last poll" alone
+        # cannot tell those apart, and reading a re-run as progress resets every stall clock.
+        $dscSeenStatuses = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
         $lastLcmSampleTime = [DateTime]::MinValue  # throttle for the guest LCM-state poll
         $certPulseDone = $false   # one-shot guard for the PKI cert pre-stage handshake
         $sqlSetupSummaryDumped = $false   # one-shot: dump SQL Setup Summary.txt to the build log on the first SQL-install stall
@@ -6767,9 +6771,20 @@ $global:VM_Config = {
                             break
                         }
 
+                        $dscConfigReRan = $false
+                        $dscStatusIsNew = $dscSeenStatuses.Add($currentStatusTrimmed.Trim())
                         if ($dscResumeAwaitingProgress) {
                             $resumeElapsedSec = if ($dscResumeStartedUtc) { [math]::Round(([DateTime]::UtcNow - $dscResumeStartedUtc).TotalSeconds, 1) } else { 0 }
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): RECOVERED: DSC in-place resume advanced after ${resumeElapsedSec}s from '$dscResumeFromStatus' to '$($currentStatusTrimmed.Trim())'." -Success -OutputStream
+                            if ($dscStatusIsNew) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): RECOVERED: DSC in-place resume advanced after ${resumeElapsedSec}s from '$dscResumeFromStatus' to '$($currentStatusTrimmed.Trim())'." -Success -OutputStream
+                            }
+                            else {
+                                # Back on a status this phase already emitted: the resume replayed
+                                # the configuration instead of moving through it. Keep the stall
+                                # clocks running so the budget escalates rather than restarting.
+                                $dscConfigReRan = $true
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: in-place resume RE-RAN the configuration after ${resumeElapsedSec}s -- '$($currentStatusTrimmed.Trim())' was already reported this phase, so this is a replay, not progress. Not resetting the stall clocks." -Warning -OutputStream
+                            }
                             $dscResumeAwaitingProgress = $false
                             $dscResumeStartedUtc = $null
                             $dscResumeFromStatus = ''
@@ -6779,11 +6794,13 @@ $global:VM_Config = {
                         $lastStatusChangeTime = [DateTime]::UtcNow
                         $lastStaleWarningTime = [DateTime]::MinValue
                         $deadWorkflowConfirmations = 0
-                        $lcmIdleSince = $null   # status advanced -> work is progressing; reset every stuck clock
-                        $lcmRebootPendingSince = $null
-                        $lcmPendingNoRebootSince = $null
-                        $dscResumeCount = 0
-                        $forcedRestartCount = 0 # real progress -> reset the reboot-of-last-resort budget
+                        if (-not $dscConfigReRan) {
+                            $lcmIdleSince = $null   # status advanced -> work is progressing; reset every stuck clock
+                            $lcmRebootPendingSince = $null
+                            $lcmPendingNoRebootSince = $null
+                            $dscResumeCount = 0
+                            $forcedRestartCount = 0 # real progress -> reset the reboot-of-last-resort budget
+                        }
 
                         # Cross-tier PKI pre-stage. The guest ScriptWorkflow emits this
                         # sentinel right before client push, then sleeps ~60s. It cannot
