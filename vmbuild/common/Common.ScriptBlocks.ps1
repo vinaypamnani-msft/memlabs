@@ -7138,30 +7138,10 @@ $global:VM_Config = {
                                         $since = $f.LastWriteTime.AddMinutes(-5)
                                         & $add "ConfigurationStatus record: $($f.Name) (last resource record written $($f.LastWriteTime), $([Math]::Round($f.Length/1KB))KB)"
                                         $raw = $null
-                                        $rawBytes = $null
-                                        $encNote = 'unknown'
-                                        # Decode by BOM/shape rather than letting Get-Content guess: PS5.1 only
-                                        # auto-detects when a BOM is present, and a wrong guess makes BOTH the
-                                        # JSON parse and the ResourceId regex fail, which reads as a corrupt file.
-                                        try {
-                                            $rawBytes = [System.IO.File]::ReadAllBytes($f.FullName)
-                                            if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
-                                                $encNote = 'utf8-bom'; $raw = [System.Text.Encoding]::UTF8.GetString($rawBytes, 3, $rawBytes.Length - 3)
-                                            }
-                                            elseif ($rawBytes.Length -ge 2 -and $rawBytes[0] -eq 0xFF -and $rawBytes[1] -eq 0xFE) {
-                                                $encNote = 'utf16le-bom'; $raw = [System.Text.Encoding]::Unicode.GetString($rawBytes, 2, $rawBytes.Length - 2)
-                                            }
-                                            elseif ($rawBytes.Length -ge 2 -and $rawBytes[0] -eq 0xFE -and $rawBytes[1] -eq 0xFF) {
-                                                $encNote = 'utf16be-bom'; $raw = [System.Text.Encoding]::BigEndianUnicode.GetString($rawBytes, 2, $rawBytes.Length - 2)
-                                            }
-                                            elseif ($rawBytes.Length -ge 4 -and $rawBytes[1] -eq 0 -and $rawBytes[3] -eq 0) {
-                                                $encNote = 'utf16le-nobom'; $raw = [System.Text.Encoding]::Unicode.GetString($rawBytes)
-                                            }
-                                            else {
-                                                $encNote = 'utf8-nobom'; $raw = [System.Text.Encoding]::UTF8.GetString($rawBytes)
-                                            }
-                                            if ($raw) { $raw = $raw.Trim([char]0xFEFF, [char]0x20, [char]0x09, [char]0x0D, [char]0x0A) }
-                                        }
+                                        # No encoding/shape heuristics here: the whole file is copied to the
+                                        # host below, so anything this in-guest pass cannot read is answered by
+                                        # the artifact rather than by guessing at it.
+                                        try { $raw = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop }
                                         catch { & $add "  read failed even after stop: $($_.Exception.Message)" }
                                         if ($raw) {
                                             $recs = @()
@@ -7172,13 +7152,12 @@ $global:VM_Config = {
                                             # under 5.1.
                                             try { foreach ($item in ($raw | ConvertFrom-Json)) { $recs += $item } }
                                             catch {
-                                                & $add "  parse failed (decoded as $encNote): $($_.Exception.Message)"
+                                                & $add "  parse failed: $($_.Exception.Message) -- see the copied record in the host log folder"
                                                 # Make the next occurrence decidable instead of arguable: the first
                                                 # bytes say encoding-vs-truncation outright.
-                                                $hexHead = (@($rawBytes | Select-Object -First 16) | ForEach-Object { $_.ToString('x2') }) -join ' '
-                                                & $add "  first 16 bytes: $hexHead"
-                                                $peek = $raw.Substring(0, [Math]::Min(100, $raw.Length))
-                                                & $add "  first chars: $($peek -replace '[\r\n]', ' ')"
+                                                $hexHead = ''
+                                                try { $hexHead = (@([System.IO.File]::ReadAllBytes($f.FullName) | Select-Object -First 16) | ForEach-Object { $_.ToString('x2') }) -join ' ' } catch { }
+                                                if ($hexHead) { & $add "  first 16 bytes: $hexHead" }
                                             }
                                             if ($recs.Count -gt 0) {
                                                 $dur = {
@@ -7307,37 +7286,35 @@ $global:VM_Config = {
                                 if (-not $dscEventsTail.ScriptBlockFailed -and $dscEventsTail.ScriptBlockOutput) {
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC evidence captured at the stranded point (post-stop, files unlocked):`r`n$($dscEventsTail.ScriptBlockOutput)" -LogOnly
 
-                                    # A record we could not read is the one worth keeping. Nothing else ever
-                                    # copies ConfigurationStatus off a guest, so every past occurrence died
-                                    # with the VM and the cause stayed a guess. Pull the bytes once.
-                                    if ("$($dscEventsTail.ScriptBlockOutput)" -match 'parse failed') {
-                                        $dscRecordGrab = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -SuppressLog -ScriptBlock {
-                                            $scPath = Join-Path $env:windir 'System32\Configuration\ConfigurationStatus'
-                                            $rf = Get-ChildItem -Path $scPath -Filter '*.details.json' -ErrorAction SilentlyContinue |
-                                                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                                            if (-not $rf) { return $null }
-                                            try {
-                                                $b = [System.IO.File]::ReadAllBytes($rf.FullName)
-                                                if ($b.Length -gt 4MB) { $b = $b[0..(4MB - 1)] }
-                                                [pscustomobject]@{ Name = $rf.Name; Bytes = [Convert]::ToBase64String($b); Truncated = ($rf.Length -gt 4MB) }
-                                            }
-                                            catch { [pscustomobject]@{ Name = $rf.Name; Error = $_.Exception.Message } }
+                                    # Copy the record itself, always. Nothing else ever takes a
+                                    # ConfigurationStatus file off a guest, so anything the in-guest pass
+                                    # could not read used to die with the VM.
+                                    $dscRecordGrab = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -SuppressLog -ScriptBlock {
+                                        $scPath = Join-Path $env:windir 'System32\Configuration\ConfigurationStatus'
+                                        $rf = Get-ChildItem -Path $scPath -Filter '*.details.json' -ErrorAction SilentlyContinue |
+                                            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                                        if (-not $rf) { return $null }
+                                        try {
+                                            $b = [System.IO.File]::ReadAllBytes($rf.FullName)
+                                            if ($b.Length -gt 4MB) { $b = $b[0..(4MB - 1)] }
+                                            [pscustomobject]@{ Name = $rf.Name; Bytes = [Convert]::ToBase64String($b); Truncated = ($rf.Length -gt 4MB) }
                                         }
-                                        $grab = if ($dscRecordGrab) { $dscRecordGrab.ScriptBlockOutput } else { $null }
-                                        $dscGrabLogDir = $null
-                                        if ($Common -and $Common.LogPath) { $dscGrabLogDir = Split-Path $Common.LogPath -Parent }
-                                        if ($grab -and $grab.Bytes -and $dscGrabLogDir -and (Test-Path $dscGrabLogDir)) {
-                                            $dscGrabDest = Join-Path $dscGrabLogDir "$($currentItem.vmName)-Phase$Phase-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$($grab.Name)"
-                                            try {
-                                                [System.IO.File]::WriteAllBytes($dscGrabDest, [Convert]::FromBase64String($grab.Bytes))
-                                                Write-Log "[Phase $Phase]: $($currentItem.vmName): Pulled the unparseable ConfigurationStatus record -> $dscGrabDest$(if ($grab.Truncated) { ' (first 4MB)' })" -OutputStream
-                                            }
-                                            catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): could not write the pulled ConfigurationStatus record: $($_.Exception.Message)" -Warning }
+                                        catch { [pscustomobject]@{ Name = $rf.Name; Error = $_.Exception.Message } }
+                                    }
+                                    $grab = if ($dscRecordGrab) { $dscRecordGrab.ScriptBlockOutput } else { $null }
+                                    $dscGrabLogDir = $null
+                                    if ($Common -and $Common.LogPath) { $dscGrabLogDir = Split-Path $Common.LogPath -Parent }
+                                    if ($grab -and $grab.Bytes -and $dscGrabLogDir -and (Test-Path $dscGrabLogDir)) {
+                                        $dscGrabDest = Join-Path $dscGrabLogDir "$($currentItem.vmName)-Phase$Phase-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$($grab.Name)"
+                                        try {
+                                            [System.IO.File]::WriteAllBytes($dscGrabDest, [Convert]::FromBase64String($grab.Bytes))
+                                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Copied the ConfigurationStatus record -> $dscGrabDest$(if ($grab.Truncated) { ' (first 4MB)' })" -OutputStream
                                         }
-                                        else {
-                                            $dscGrabWhy = if (-not $grab) { 'the guest returned nothing' } elseif ($grab.Error) { "the guest could not read it: $($grab.Error)" } else { 'no host log folder was resolvable' }
-                                            Write-Log "[Phase $Phase]: $($currentItem.vmName): could NOT pull the unparseable ConfigurationStatus record -- $dscGrabWhy. Its bytes are still only on the guest." -Warning -OutputStream
-                                        }
+                                        catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): could not write the copied ConfigurationStatus record: $($_.Exception.Message)" -Warning }
+                                    }
+                                    else {
+                                        $dscGrabWhy = if (-not $grab) { 'the guest returned nothing' } elseif ($grab.Error) { "the guest could not read it: $($grab.Error)" } else { 'no host log folder was resolvable' }
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): could NOT copy the ConfigurationStatus record -- $dscGrabWhy. Its bytes are still only on the guest." -Warning -OutputStream
                                     }
                                 }
                                 else {
