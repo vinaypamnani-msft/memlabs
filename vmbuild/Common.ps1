@@ -3982,6 +3982,8 @@ function Remove-StaleAdComputer {
 
     $removeBlock = {
         $name = $using:ComputerName
+        # Reported on failure: "denied" is only actionable once you know who was denied.
+        $whoami = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { 'unknown' }
         try {
             # ProtectedFromAccidentalDeletion is not in the default property set, so it
             # has to be asked for by name or it always reads back as empty.
@@ -3993,31 +3995,73 @@ function Remove-StaleAdComputer {
             if ($_.Exception.GetType().Name -eq 'ADIdentityNotFoundException') {
                 return [pscustomobject]@{ Outcome = 'NotPresent' }
             }
-            return [pscustomobject]@{ Outcome = 'LookupFailed'; Error = $_.Exception.Message }
+            return [pscustomobject]@{ Outcome = 'LookupFailed'; Error = $_.Exception.Message; Identity = $whoami }
         }
         if (-not $obj) { return [pscustomobject]@{ Outcome = 'NotPresent' } }
-        # That flag is a Deny ACE on Delete/DeleteTree which stops even a Domain Admin,
-        # and Failover Clustering sets it on the objects it manages. One protected node
-        # anywhere in the subtree fails the whole -Recursive delete, so clear the subtree.
-        $wasProtected = $false
-        try {
-            foreach ($p in @(Get-ADObject -SearchBase $obj.DistinguishedName -SearchScope Subtree -Filter * -Properties ProtectedFromAccidentalDeletion -ErrorAction Stop |
-                        Where-Object { $_.ProtectedFromAccidentalDeletion })) {
-                Set-ADObject -Identity $p.DistinguishedName -ProtectedFromAccidentalDeletion $false -ErrorAction Stop
-                $wasProtected = $true
+        $dn = $obj.DistinguishedName
+        $cleared = New-Object System.Collections.Generic.List[string]
+
+        # A Deny ACE beats Domain Admin. ProtectedFromAccidentalDeletion only reports the
+        # one shape ADUC writes (Deny Everyone on Delete AND DeleteTree) -- Failover
+        # Clustering and dsacls write others that read back as $false yet still block the
+        # delete, so match on the rights themselves instead of on the property.
+        function Clear-DeleteDeny {
+            param([string]$TargetDn)
+            $mask = [System.DirectoryServices.ActiveDirectoryRights]::Delete -bor
+            [System.DirectoryServices.ActiveDirectoryRights]::DeleteTree -bor
+            [System.DirectoryServices.ActiveDirectoryRights]::DeleteChild -bor
+            [System.DirectoryServices.ActiveDirectoryRights]::GenericAll
+            $sd = (Get-ADObject -Identity $TargetDn -Properties nTSecurityDescriptor -ErrorAction Stop).nTSecurityDescriptor
+            $deny = @($sd.Access | Where-Object { $_.AccessControlType -eq 'Deny' -and (($_.ActiveDirectoryRights -band $mask) -ne 0) })
+            if ($deny.Count -eq 0) { return @() }
+            $removed = foreach ($ace in $deny) {
+                $sd.RemoveAccessRuleSpecific($ace)
+                "$($ace.IdentityReference) deny($($ace.ActiveDirectoryRights)) on $TargetDn"
+            }
+            Set-ADObject -Identity $TargetDn -Replace @{ nTSecurityDescriptor = $sd } -ErrorAction Stop
+            @($removed)
+        }
+
+        $err = $null
+        $tried = New-Object System.Collections.Generic.List[string]
+        # Pass 3 drops -Recursive on purpose: that switch issues an LDAP tree delete, which
+        # needs Delete Subtree, while a plain delete needs only Delete. A deny that covers
+        # just DeleteTree blocks the first and not the second.
+        for ($pass = 1; $pass -le 3; $pass++) {
+            $recursive = ($pass -lt 3)
+            try {
+                # A CNO owns the VCOs it created, which a leaf-only delete refuses to remove.
+                Remove-ADObject -Identity $dn -Recursive:$recursive -Confirm:$false -ErrorAction Stop
+                return [pscustomobject]@{
+                    Outcome = 'Removed'; Enabled = $obj.Enabled; Dn = $dn; Identity = $whoami
+                    Cleared = @($cleared); Tried = @($tried); Recursive = $recursive
+                }
+            }
+            catch {
+                $err = $_.Exception.Message
+                $tried.Add("pass$pass recursive=$recursive -> $err")
+                if ($err -notmatch 'Access is denied|insufficient access') { break }
+                if ($pass -ne 1) { continue }
+                try {
+                    # A deny anywhere in the subtree fails the whole -Recursive delete, and a
+                    # DeleteChild deny on the parent blocks it without touching the object.
+                    $targets = New-Object System.Collections.Generic.List[string]
+                    $targets.Add(($dn -replace '^.+?(?<!\\),', ''))
+                    foreach ($o in @(Get-ADObject -SearchBase $dn -SearchScope Subtree -Filter * -ErrorAction Stop)) {
+                        $targets.Add($o.DistinguishedName)
+                    }
+                    foreach ($t in $targets) {
+                        foreach ($c in @(Clear-DeleteDeny -TargetDn $t | Where-Object { $_ })) { $cleared.Add($c) }
+                    }
+                }
+                catch {
+                    $tried.Add("deny-ACE sweep failed -> $($_.Exception.Message)")
+                }
             }
         }
-        catch {
-            return [pscustomobject]@{ Outcome = 'RemoveFailed'; Enabled = $obj.Enabled; Error = "could not clear ProtectedFromAccidentalDeletion: $($_.Exception.Message)" }
-        }
-        try {
-            # A CNO can own child objects (the VCOs it created), which plain
-            # Remove-ADComputer refuses to delete.
-            Remove-ADObject -Identity $obj.DistinguishedName -Recursive -Confirm:$false -ErrorAction Stop
-            [pscustomobject]@{ Outcome = 'Removed'; Enabled = $obj.Enabled; Dn = $obj.DistinguishedName; WasProtected = $wasProtected }
-        }
-        catch {
-            [pscustomobject]@{ Outcome = 'RemoveFailed'; Enabled = $obj.Enabled; Error = $_.Exception.Message }
+        [pscustomobject]@{
+            Outcome = 'RemoveFailed'; Enabled = $obj.Enabled; Dn = $dn; Identity = $whoami
+            Cleared = @($cleared); Tried = @($tried); Error = $err
         }
     }
 
@@ -4033,11 +4077,18 @@ function Remove-StaleAdComputer {
     }
 
     $out = $result.ScriptBlockOutput
+    $clearedAces = @($out.Cleared | Where-Object { $_ })
     switch ($out.Outcome) {
         'NotPresent' { Write-Log "No stale AD computer object '$ComputerName'$suffix." -LogOnly }
-        'Removed' { Write-GreenCheck "Removed stale AD computer object '$ComputerName'$suffix (was Enabled=$($out.Enabled)$(if ($out.WasProtected) { ', accidental-deletion protection cleared' }))" -WriteLog }
+        'Removed' { Write-GreenCheck "Removed stale AD computer object '$ComputerName'$suffix (was Enabled=$($out.Enabled)$(if ($clearedAces.Count) { ", after clearing $($clearedAces.Count) deny ACE(s): $($clearedAces -join '; ')" }))" -WriteLog }
         'LookupFailed' { Write-OrangePoint "Could not read AD computer object '$ComputerName'$suffix`: $($out.Error). Not treating this as 'absent'; check it manually on $DCName." -WriteLog }
-        'RemoveFailed' { Write-OrangePoint "Failed to remove stale AD computer object '$ComputerName'$suffix`: $($out.Error). Remove it manually on $DCName or the rebuild will fail." -WriteLog }
+        'RemoveFailed' {
+            # Which of the two it was decides the fix, so never collapse them into "denied".
+            $why = if ($clearedAces.Count) { "Cleared $($clearedAces.Count) deny ACE(s) and it was STILL refused: $($clearedAces -join '; ')." }
+            else { 'No deny ACE on Delete/DeleteTree/DeleteChild was found on it, its subtree or its parent, so this is not accidental-deletion protection.' }
+            Write-OrangePoint "Failed to remove stale AD computer object '$ComputerName'$suffix`: $($out.Error). Ran as $($out.Identity) against $($out.Dn). $why Remove it manually on $DCName or the rebuild will fail." -WriteLog
+            Write-Log "Remove-StaleAdComputer '$ComputerName' attempts: $(@($out.Tried) -join ' | ')" -LogOnly
+        }
         default { Write-OrangePoint "Unexpected result checking AD computer object '$ComputerName'$suffix`: $($out.Outcome)" -WriteLog }
     }
     # Returned so the caller can name everything that will still block the rebuild.
