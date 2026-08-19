@@ -7433,6 +7433,7 @@ function Invoke-VmCommand {
                         Write-Log "$VmName`: Job '$DisplayName' Failed State: $($job.State)" -LogOnly
                         $failed = $true
                         $return.ScriptBlockFailed = $true
+                        $jobTimedOut = ($job.State -eq "Running")
                         # -ErrorVariable on Invoke-Command -AsJob only captures errors raised
                         # while STARTING the job; anything the remote pipeline throws lands on
                         # the child job, so $Err2 is empty for every real job failure and the
@@ -7450,7 +7451,10 @@ function Invoke-VmCommand {
                             if ($reasonParts.Count -gt 0) { $jobFailureReason = $reasonParts -join '; ' }
                         }
                         catch {}
-                        if ($Err2.Count -ne 0) {
+                        if ($jobTimedOut) {
+                            $OutErr = "remote pipeline still running after ${TimeoutSeconds}s"
+                        }
+                        elseif ($Err2.Count -ne 0) {
                             $OutErr = "$($Err2[0].ToString().Trim())"
                         }
                         elseif ($jobFailureReason) {
@@ -7459,16 +7463,18 @@ function Invoke-VmCommand {
                         else {
                             $OutErr = "Unknown Error"
                         }
-                        if (-not $SuppressLog) {
+                        if (-not $SuppressLog -and -not $jobTimedOut) {
                             Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $OutErr." -Failure
                         }
                         # "Unknown Error" means the child job's Reason AND Error stream were
                         # both empty -- 626 of these in 72h (561 on one VM) with nothing to act
-                        # on. Dump what the job object still knows while it is alive; Remove-Job
-                        # below disposes it. Deliberately a SEPARATE line, not appended to
-                        # $OutErr: the channel-broken classifier below regex-matches $OutErr for
-                        # words like 'transport'/'channel'/'broken' that appear in this text.
-                        if ($OutErr -eq 'Unknown Error') {
+                        # on. A Wait-Job timeout is different: Running is the expected state and
+                        # there is no error record to find. Dump both shapes while the job object
+                        # is alive, but label a timeout accurately and include the last progress
+                        # record so the remote stage that stopped moving survives abandonment.
+                        # Keep this SEPARATE from $OutErr: the channel-broken classifier below
+                        # regex-matches $OutErr for transport words that can appear in this text.
+                        if ($jobTimedOut -or $OutErr -eq 'Unknown Error') {
                             try {
                                 $f = @("job=[state=$($job.State) status='$($job.StatusMessage)' loc='$($job.Location)' hasData=$($job.HasMoreData)")
                                 try { if ($job.PSBeginTime -and $job.PSEndTime) { $f += "ran=$([math]::Round((($job.PSEndTime) - ($job.PSBeginTime)).TotalSeconds,1))s" } elseif ($job.PSBeginTime) { $f += "began=$($job.PSBeginTime.ToString('HH:mm:ss.fff')) neverEnded" } else { $f += 'neverBegan' } } catch { }
@@ -7483,15 +7489,31 @@ function Invoke-VmCommand {
                                         try { $counts += "$s=$(@($cj.$s).Count)" } catch { $counts += "$s=?" }
                                     }
                                     $f += "child${ci}=[state=$($cj.State) reasonType=$rt $($counts -join ' ') hasData=$($cj.HasMoreData)]"
+                                    if ($jobTimedOut) {
+                                        try {
+                                            $lastProgress = @($cj.Progress)[-1]
+                                            if ($lastProgress) {
+                                                $progressActivity = "$($lastProgress.Activity)" -replace '\s+', ' '
+                                                $progressStatus = "$($lastProgress.StatusDescription)" -replace '\s+', ' '
+                                                $progressCurrent = "$($lastProgress.CurrentOperation)" -replace '\s+', ' '
+                                                $f += "child${ci}LastProgress=[activity='$progressActivity' status='$progressStatus' current='$progressCurrent' percent=$($lastProgress.PercentComplete)]"
+                                            }
+                                        }
+                                        catch { $lastProgress = $null }
+                                    }
                                 }
                                 # Session state at the moment of failure is the key correlate:
                                 # a Broken/Closed transport explains an empty error stream.
                                 try { $f += "session=[state=$($ps.State) avail=$($ps.Availability) rs=$($ps.Runspace.RunspaceStateInfo.State)/$($ps.Runspace.RunspaceAvailability)]" } catch { $f += 'session=[unreadable]' }
-                                Write-Log "$VmName`: 'Unknown Error' autopsy for '$DisplayName': $($f -join ' ')" -Warning -LogOnly
+                                if ($jobTimedOut) {
+                                    Write-Log "$VmName`: Timeout autopsy for '$DisplayName' (limit=${TimeoutSeconds}s): $($f -join ' ')" -LogOnly
+                                }
+                                else {
+                                    Write-Log "$VmName`: 'Unknown Error' autopsy for '$DisplayName': $($f -join ' ')" -Warning -LogOnly
+                                }
                             }
                             catch { }
                         }
-                        $jobTimedOut = ($job.State -eq "Running")
                         # Was this terminal failure caused by a broken PSDirect/VMBus channel
                         # (vs an ordinary scriptblock error)? Inspect the job's failure reason
                         # + error streams NOW, while the job is still alive (Remove-Job below
