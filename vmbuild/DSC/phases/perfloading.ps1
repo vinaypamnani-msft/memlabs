@@ -1217,19 +1217,29 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 finally { if ($connection) { $connection.Dispose() } }
                 return $state
             }
-            $hasBootDespoolMetadataStall = {
+            $getBootDespoolMetadataState = {
                 param([int]$SourceVersion)
+                $state = [pscustomobject]@{
+                    Measured = $false
+                    Matched = $false
+                    Error = $null
+                }
                 try {
                     $smsInstallDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory'
                     $despoolLog = Join-Path $smsInstallDir 'Logs\despool.log'
-                    if (-not (Test-Path -LiteralPath $despoolLog)) { return $false }
+                    if (-not (Test-Path -LiteralPath $despoolLog)) {
+                        $state.Error = "despool.log was not found at '$despoolLog'"
+                        return $state
+                    }
                     $packagePattern = [regex]::Escape($packageId)
-                    return @(
-                        Get-Content -LiteralPath $despoolLog -Tail 3000 -ErrorAction SilentlyContinue |
+                    $state.Matched = @(
+                        Get-Content -LiteralPath $despoolLog -Tail 3000 -ErrorAction Stop |
                             Where-Object { $_ -match "package\[$packagePattern\].*information hasn't arrived yet for this version \[$SourceVersion\]" }
                     ).Count -gt 0
+                    $state.Measured = $true
                 }
-                catch { return $false }
+                catch { $state.Error = $_.Exception.Message }
+                return $state
             }
             $initializeBootMetadataFromParent = {
                 if (-not $bootParentSite -or -not $bootParentFqdn) {
@@ -1334,6 +1344,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             $bootCoverageLastArm = @{}
             $bootStoredVersion = ''
             $bootMetadataRecoveryStarted = $false
+            $bootMetadataOrphanConfirmations = 0
             $bootMetadataLastProbe = $null
             $bootLastParentTargetArm = $null
             $bootLastParentNotify = $null
@@ -1389,18 +1400,27 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     -not $bootMetadataRecoveryStarted -and
                     (-not $bootMetadataLastProbe -or ((Get-Date) - $bootMetadataLastProbe).TotalMinutes -ge 1)) {
                     $bootMetadataLastProbe = Get-Date
-                    if (& $hasBootDespoolMetadataStall ([int]$bootSourceVersion)) {
-                        $metadataState = & $getBootMetadataState ([int]$bootSourceVersion)
-                        if (-not $metadataState.Measured) {
-                            Write-DscStatus "$Tag Boot image metadata recovery: despool is waiting for $packageId version $bootSourceVersion, but the package metadata query failed; nothing was reinitialized. Error='$($metadataState.Error)'"
+                    $metadataState = & $getBootMetadataState ([int]$bootSourceVersion)
+                    if (-not $metadataState.Measured) {
+                        $bootMetadataOrphanConfirmations = 0
+                        Write-DscStatus "$Tag Boot image metadata recovery: package metadata was NOT measured for $packageId version $bootSourceVersion; nothing was reinitialized. Error='$($metadataState.Error)'"
+                    }
+                    elseif ($metadataState.Available -eq 0 -and $metadataState.GlobalRows -eq 0 -and $metadataState.LocalRows -gt 0 -and $metadataState.HistoryRows -gt 0) {
+                        $bootMetadataOrphanConfirmations++
+                        $despoolState = & $getBootDespoolMetadataState ([int]$bootSourceVersion)
+                        $despoolEvidence = if (-not $despoolState.Measured) {
+                            "NOT measured ($($despoolState.Error))"
                         }
-                        elseif ($metadataState.Available -eq 0 -and $metadataState.GlobalRows -eq 0 -and $metadataState.LocalRows -gt 0 -and $metadataState.HistoryRows -gt 0) {
-                            Write-DscStatus "$Tag Boot image metadata recovery: measured orphan metadata for $packageId version $bootSourceVersion (Available=0, PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows))"
-                            if (& $initializeBootMetadataFromParent) { $bootMetadataRecoveryStarted = $true }
+                        elseif ($despoolState.Matched) { 'matched retained-package wait' }
+                        else { 'measured, retained-package wait not present in tail' }
+                        Write-DscStatus "$Tag Boot image metadata recovery: measured orphan metadata for $packageId version $bootSourceVersion (Available=0, PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows), confirmation=$bootMetadataOrphanConfirmations/2, despool=$despoolEvidence)"
+                        if ($bootMetadataOrphanConfirmations -ge 2 -and (& $initializeBootMetadataFromParent)) {
+                            $bootMetadataRecoveryStarted = $true
                         }
-                        else {
-                            Write-DscStatus "$Tag Boot image metadata recovery: despool is waiting, but the orphan-row signature is not proven (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows)); no reinitialization"
-                        }
+                    }
+                    else {
+                        $bootMetadataOrphanConfirmations = 0
+                        Write-DscStatus "$Tag Boot image metadata recovery: orphan-row signature is not proven (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows)); no reinitialization"
                     }
                 }
                 if ($bootContentPendingFromParent -and (-not $bootLastParentTargetArm -or ((Get-Date) - $bootLastParentTargetArm).TotalMinutes -ge 10)) {
