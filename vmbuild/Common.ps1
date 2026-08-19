@@ -4095,6 +4095,87 @@ function Remove-StaleAdComputer {
     "$($out.Outcome)"
 }
 
+function Clear-SqlAoBackupShare {
+    <#
+    .SYNOPSIS
+        Deletes a previous build's AG seeding backups from the file server.
+    .DESCRIPTION
+        The file server usually survives a SQLAO rebuild, and Phase 5 creates the
+        backup folder with a DSC File resource set to Ensure=Present, which creates
+        but never purges. ConfigMgr setup then seeds the secondary replica with
+
+            BACKUP DATABASE/LOG  ->  \\<fs>\<cluster>-Backup\CM_<site>.bak/.trn
+            RESTORE LOG [CM_<site>] FROM DISK = N'...trn' WITH NORECOVERY
+
+        and that RESTORE names no backup set, so it reads the FIRST one in the file.
+        A .trn left by the previous incarnation of the database is therefore restored
+        instead of the one setup just wrote, and SQL fails it with 3154 "the backup
+        set holds a backup of a database other than the existing 'CM_<site>'" --
+        reported only as the generic 3013 "RESTORE LOG is terminating abnormally".
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$FileServerVM,
+        [Parameter(Mandatory = $true)]
+        [string]$Domain,
+        [Parameter(Mandatory = $true)]
+        [string]$BackupLocalPath,
+        [Parameter(Mandatory = $false)]
+        [string]$Reason
+    )
+
+    $clearBlock = {
+        $path = $using:BackupLocalPath
+        if (-not (Test-Path -LiteralPath $path)) {
+            return [pscustomobject]@{ Outcome = 'NotPresent'; Path = $path }
+        }
+        try {
+            $stale = @(Get-ChildItem -Path (Join-Path $path '*') -Include '*.bak', '*.trn' -File -ErrorAction Stop)
+        }
+        catch {
+            return [pscustomobject]@{ Outcome = 'ScanFailed'; Path = $path; Error = $_.Exception.Message }
+        }
+        if ($stale.Count -eq 0) {
+            return [pscustomobject]@{ Outcome = 'AlreadyEmpty'; Path = $path }
+        }
+        $removed = New-Object System.Collections.Generic.List[string]
+        $failed = New-Object System.Collections.Generic.List[string]
+        foreach ($f in $stale) {
+            try {
+                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+                $removed.Add("$($f.Name) ($([int]($f.Length / 1MB))MB, $($f.LastWriteTime.ToString('yyyy-MM-dd HH:mm')))")
+            }
+            catch {
+                $failed.Add("$($f.Name): $($_.Exception.Message)")
+            }
+        }
+        [pscustomobject]@{
+            Outcome = $(if ($failed.Count) { 'PartialFailure' } else { 'Cleared' })
+            Path    = $path; Removed = @($removed); Failed = @($failed)
+        }
+    }
+
+    $suffix = if ($Reason) { " ($Reason)" } else { '' }
+    Write-Log "Checking $FileServerVM for stale AG seeding backups in '$BackupLocalPath'$suffix..." -LogOnly
+    $result = Invoke-VmCommand -VmName $FileServerVM -VmDomainName $Domain -ScriptBlock $clearBlock -SuppressLog
+    if ($result.ScriptBlockFailed -or -not $result.ScriptBlockOutput) {
+        Write-OrangePoint "Could not check $FileServerVM for stale AG seeding backups in '$BackupLocalPath'$suffix -- a leftover .trn there fails the Phase 8 restore with SQL 3154. Clear it manually." -WriteLog
+        return 'NoResponse'
+    }
+
+    $out = $result.ScriptBlockOutput
+    switch ($out.Outcome) {
+        'NotPresent' { Write-Log "No AG backup folder '$BackupLocalPath' on $FileServerVM yet$suffix." -LogOnly }
+        'AlreadyEmpty' { Write-Log "No stale AG seeding backups in '$BackupLocalPath' on $FileServerVM$suffix." -LogOnly }
+        'Cleared' { Write-GreenCheck "Removed $(@($out.Removed).Count) stale AG seeding backup(s) from $FileServerVM`:$BackupLocalPath$suffix -- $(@($out.Removed) -join '; ')" -WriteLog }
+        'ScanFailed' { Write-OrangePoint "Could not read '$BackupLocalPath' on $FileServerVM$suffix`: $($out.Error). Not treating this as 'clean'; a leftover .trn fails the Phase 8 restore with SQL 3154." -WriteLog }
+        'PartialFailure' { Write-OrangePoint "Removed $(@($out.Removed).Count) stale AG seeding backup(s) from $FileServerVM but $(@($out.Failed).Count) could NOT be deleted$suffix`: $(@($out.Failed) -join '; '). Phase 8 may fail its restore with SQL 3154." -WriteLog }
+        default { Write-OrangePoint "Unexpected result clearing AG seeding backups on $FileServerVM$suffix`: $($out.Outcome)" -WriteLog }
+    }
+    "$($out.Outcome)"
+}
+
 function Get-DhcpScopeDescription {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "DHCP Scope ID.")]

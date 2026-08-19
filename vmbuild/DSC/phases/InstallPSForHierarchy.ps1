@@ -235,6 +235,32 @@ CurrentBranch=1
     # Install CM
     $CMInstallationFile = "$cmsourcepath\SMSSETUP\BIN\X64\Setup.exe"
 
+    # ConfigMgr seeds the AG secondary through this share, and its RESTORE LOG names no
+    # backup set, so it reads the FIRST one in the file. A .bak/.trn left by a previous
+    # build is restored instead of the one setup just wrote, and SQL rejects it with 3154
+    # -- surfaced only as the generic 3013. Phase 5 creates the share with a DSC File
+    # resource set to Ensure=Present, which never purges, so nothing else clears it.
+    if ($installToAO -and $agBackupShare) {
+        try {
+            $staleSeed = @(Get-ChildItem -Path (Join-Path $agBackupShare '*') -Include '*.bak', '*.trn' -File -ErrorAction Stop)
+            if ($staleSeed.Count -eq 0) {
+                Write-DscStatus "AG seeding share '$agBackupShare' holds no leftover backups."
+            }
+            foreach ($s in $staleSeed) {
+                try {
+                    Remove-Item -LiteralPath $s.FullName -Force -ErrorAction Stop
+                    Write-DscStatus "Deleted stale AG seeding backup '$($s.Name)' ($([int]($s.Length / 1MB))MB, written $($s.LastWriteTime.ToString('yyyy-MM-dd HH:mm')))"
+                }
+                catch {
+                    Write-DscStatus "WARNING: could not delete stale AG seeding backup '$($s.Name)': $($_.Exception.Message). If it predates this build, Init_Database will fail with SQL 3154."
+                }
+            }
+        }
+        catch {
+            Write-DscStatus "WARNING: could not read AG seeding share '$agBackupShare': $($_.Exception.Message). A leftover .trn there fails Init_Database with SQL 3154."
+        }
+    }
+
     # Write Setup entry, which causes the job on host to overwrite status with entries from ConfigMgrSetup.log
     Write-DscStatusSetup
 

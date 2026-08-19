@@ -959,6 +959,15 @@ function Start-Phase {
                     $adOutcome = Remove-StaleAdComputer -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -ComputerName $adName -Reason "SQLAO rebuild of $($item.vmName)"
                     if ("$adOutcome" -notin @('Removed', 'NotPresent')) { $blockingAdObjects.Add($adName) }
                 }
+
+                # The file server normally survives the rebuild, so its AG seeding
+                # backups outlive the database they were taken from. Purged even when
+                # the partner node survives: unlike the CNO these are inert files that
+                # setup rewrites, and a stale one is exactly what fails the restore.
+                if ($item.ClusterName -and $item.FileServerVM) {
+                    $clusterNoPrefix = $item.ClusterName.Replace($deployConfig.vmOptions.prefix, '')
+                    Clear-SqlAoBackupShare -FileServerVM $item.FileServerVM -Domain $deployConfig.vmOptions.domainName -BackupLocalPath "F:\$clusterNoPrefix-Backup" -Reason "SQLAO rebuild of $($item.vmName)" | Out-Null
+                }
             }
         }
 
