@@ -11004,6 +11004,60 @@ function Test-CMSiteWideFunctionality {
                 param($nal)
                 if ($nal -match '\\\\([^\\"\]]+)') { return $Matches[1] } else { return "$nal" }
             }
+            $getBootMetadataState = {
+                param([string]$PackageId, [int]$SourceVersion)
+                $state = [pscustomobject]@{
+                    Measured = $false
+                    Available = $null
+                    GlobalRows = $null
+                    LocalRows = $null
+                    HistoryRows = $null
+                    Error = $null
+                }
+                $connection = $null
+                try {
+                    $sqlReg = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+                    $server = "$($sqlReg.Server)"
+                    $dbRaw = "$($sqlReg.'Database Name')"
+                    $dataSource = $server
+                    $database = $dbRaw
+                    if ($dbRaw -match '\\') {
+                        $dataSource = "$server\$($dbRaw.Split('\')[0])"
+                        $database = $dbRaw.Split('\')[1]
+                    }
+                    $sqlPort = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server\Site System SQL Account' -Name 'Port' -ErrorAction SilentlyContinue).'Port'
+                    if ($sqlPort -and "$sqlPort" -ne '1433') { $dataSource = "$dataSource,$sqlPort" }
+
+                    $connection = New-Object System.Data.SqlClient.SqlConnection "Server=$dataSource;Initial Catalog=$database;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
+                    $connection.Open()
+                    $command = $connection.CreateCommand()
+                    $command.CommandText = @'
+SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Available,
+       (SELECT COUNT(*) FROM dbo.PkgStatus_G WHERE ID=@pkg AND Type=1 AND SiteCode=@site) AS GlobalRows,
+       (SELECT COUNT(*) FROM dbo.PkgStatus_L WHERE ID=@pkg AND Type=1 AND SiteCode=@site) AS LocalRows,
+       (SELECT COUNT(*) FROM dbo.PkgStatusHist WHERE PkgID=@pkg AND PkgVersion=@version
+          AND dbo.fnGetSiteCodeBySiteNumber(SiteNumber)=@site) AS HistoryRows
+'@
+                    $command.CommandTimeout = 30
+                    [void]$command.Parameters.AddWithValue('@pkg', $PackageId)
+                    [void]$command.Parameters.AddWithValue('@site', $sc)
+                    [void]$command.Parameters.AddWithValue('@version', $SourceVersion)
+                    $reader = $command.ExecuteReader()
+                    try {
+                        if ($reader.Read()) {
+                            $state.Available = [int]$reader['Available']
+                            $state.GlobalRows = [int]$reader['GlobalRows']
+                            $state.LocalRows = [int]$reader['LocalRows']
+                            $state.HistoryRows = [int]$reader['HistoryRows']
+                            $state.Measured = $true
+                        }
+                    }
+                    finally { $reader.Close() }
+                }
+                catch { $state.Error = $_.Exception.Message }
+                finally { if ($connection) { $connection.Dispose() } }
+                return $state
+            }
             $expectedOsdDpNames = @()
             if ($isPrimary -and $expectOsd) {
                 try {
@@ -11074,6 +11128,7 @@ function Test-CMSiteWideFunctionality {
                             $requiredOsdCoverageProblems = @()
                             if ($expectOsd -and $biName -notmatch 'arm64') {
                                 $bootSourceVersion = "$($bi.SourceVersion)"
+                                $bootStoredVersion = "$($bi.StoredPkgVersion)"
                                 if ($expectedOsdDpNames.Count -eq 0) {
                                     $requiredOsdCoverageProblems += "no measured OSD DP members"
                                 }
@@ -11197,6 +11252,22 @@ function Test-CMSiteWideFunctionality {
                                 if ($requiredOsdCoverageProblems.Count -gt 0) {
                                     $results.Passed = $false
                                     $results.Details.Add("FAIL: Boot image '$biName' ($($bi.PackageID)) is not current on every required OSD DP: $($requiredOsdCoverageProblems -join '; ')")
+                                    $bootContentPendingFromParent = [bool]($hierarchySc -ne $sc -and $bootSourceVersion -and $bootStoredVersion -and [int]$bootStoredVersion -lt [int]$bootSourceVersion)
+                                    if ($bootContentPendingFromParent) {
+                                        $metadataState = & $getBootMetadataState "$($bi.PackageID)" ([int]$bootSourceVersion)
+                                        if (-not $metadataState.Measured) {
+                                            $results.Details.Add("DIAG: Parent-owned boot-image metadata was NOT measured for '$biName': $($metadataState.Error)")
+                                        }
+                                        elseif ($metadataState.Available -eq 0 -and $metadataState.GlobalRows -eq 0 -and $metadataState.LocalRows -gt 0 -and $metadataState.HistoryRows -gt 0) {
+                                            $results.Details.Add("FAIL: Boot image '$biName' is blocked by orphan package metadata at child site $sc (fnIsPkgVersionAvailable=0, PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), PkgStatusHist=$($metadataState.HistoryRows)). Phase 8 must reinitialize the 'Configuration Data' replication group before despool can import the retained package.")
+                                        }
+                                        else {
+                                            $results.Details.Add("DIAG: Boot-image metadata at child site ${sc}: fnIsPkgVersionAvailable=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), PkgStatusHist=$($metadataState.HistoryRows) (not the orphan-row signature)")
+                                        }
+                                    }
+                                    elseif ($hierarchySc -ne $sc -and -not $bootStoredVersion) {
+                                        $results.Details.Add("DIAG: Parent-owned boot-image metadata was NOT measured for '$biName' because StoredPkgVersion could not be read")
+                                    }
                                 }
                                 else {
                                     $results.Details.Add("OK: Boot image '$biName' ($($bi.PackageID)) SourceVersion=$bootSourceVersion is Installed on every required OSD DP")
