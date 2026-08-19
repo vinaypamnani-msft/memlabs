@@ -1174,6 +1174,90 @@ Write-DscStatus "$Tag Starting perfloading"
                     Write-DscStatus "$Tag Boot image coverage: could not resolve parent site server for $bootParentSite from SMS_Site: $($_.Exception.Message)"
                 }
             }
+            $getBootMetadataState = {
+                param([int]$SourceVersion)
+                $state = [pscustomobject]@{
+                    Measured = $false
+                    Available = $null
+                    GlobalRows = $null
+                    LocalRows = $null
+                    HistoryRows = $null
+                    Error = $null
+                }
+                $connection = $null
+                try {
+                    $dataSource = Get-VmSqlConnectionTarget -SiteVm $ThisVM -DeployConfig $deployConfig -DomainFullName $DomainFullName
+                    $connection = New-Object System.Data.SqlClient.SqlConnection "Server=$dataSource;Initial Catalog=CM_$SiteCode;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
+                    $connection.Open()
+                    $command = $connection.CreateCommand()
+                    $command.CommandText = @'
+SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Available,
+       (SELECT COUNT(*) FROM dbo.PkgStatus_G WHERE ID=@pkg AND Type=1 AND SiteCode=@site) AS GlobalRows,
+       (SELECT COUNT(*) FROM dbo.PkgStatus_L WHERE ID=@pkg AND Type=1 AND SiteCode=@site) AS LocalRows,
+       (SELECT COUNT(*) FROM dbo.PkgStatusHist WHERE PkgID=@pkg AND PkgVersion=@version
+          AND dbo.fnGetSiteCodeBySiteNumber(SiteNumber)=@site) AS HistoryRows
+'@
+                    $command.CommandTimeout = 30
+                    [void]$command.Parameters.AddWithValue('@pkg', $packageId)
+                    [void]$command.Parameters.AddWithValue('@site', $SiteCode)
+                    [void]$command.Parameters.AddWithValue('@version', $SourceVersion)
+                    $reader = $command.ExecuteReader()
+                    try {
+                        if ($reader.Read()) {
+                            $state.Available = [int]$reader['Available']
+                            $state.GlobalRows = [int]$reader['GlobalRows']
+                            $state.LocalRows = [int]$reader['LocalRows']
+                            $state.HistoryRows = [int]$reader['HistoryRows']
+                            $state.Measured = $true
+                        }
+                    }
+                    finally { $reader.Close() }
+                }
+                catch { $state.Error = $_.Exception.Message }
+                finally { if ($connection) { $connection.Dispose() } }
+                return $state
+            }
+            $hasBootDespoolMetadataStall = {
+                param([int]$SourceVersion)
+                try {
+                    $smsInstallDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory'
+                    $despoolLog = Join-Path $smsInstallDir 'Logs\despool.log'
+                    if (-not (Test-Path -LiteralPath $despoolLog)) { return $false }
+                    $packagePattern = [regex]::Escape($packageId)
+                    return @(
+                        Get-Content -LiteralPath $despoolLog -Tail 3000 -ErrorAction SilentlyContinue |
+                            Where-Object { $_ -match "package\[$packagePattern\].*information hasn't arrived yet for this version \[$SourceVersion\]" }
+                    ).Count -gt 0
+                }
+                catch { return $false }
+            }
+            $initializeBootMetadataFromParent = {
+                if (-not $bootParentSite -or -not $bootParentFqdn) {
+                    Write-DscStatus "$Tag Boot image metadata recovery skipped because parent identity is incomplete (site='$bootParentSite', server='$bootParentFqdn')"
+                    return $false
+                }
+                try {
+                    $groups = @(Get-WmiObject -ComputerName $bootParentFqdn -Namespace "root\SMS\site_$bootParentSite" -Class SMS_ReplicationGroup -ErrorAction Stop |
+                            Where-Object { $_.ReplicationGroup -eq 'Configuration Data' })
+                    if ($groups.Count -ne 1) {
+                        Write-DscStatus "$Tag Boot image metadata recovery found $($groups.Count) 'Configuration Data' replication groups at parent site $bootParentSite; expected exactly one and made no change"
+                        return $false
+                    }
+                    $group = $groups[0]
+                    $result = Invoke-WmiMethod -ComputerName $bootParentFqdn -Namespace "root\SMS\site_$bootParentSite" `
+                        -Class SMS_ReplicationGroup -Name InitializeData -ArgumentList @([uint32]$group.ID, $bootParentSite, $SiteCode) -ErrorAction Stop
+                    if ([int]$result.ReturnValue -ne 0) {
+                        Write-DscStatus "$Tag Boot image metadata recovery: InitializeData for 'Configuration Data' returned $($result.ReturnValue) (parent=$bootParentSite child=$SiteCode)"
+                        return $false
+                    }
+                    Write-DscStatus "$Tag Boot image metadata recovery: reinitializing 'Configuration Data' from parent $bootParentSite to child $SiteCode (group ID=$($group.ID)) so the BCP apply replaces the orphan PkgStatus_L identity for $packageId"
+                    return $true
+                }
+                catch {
+                    Write-DscStatus "$Tag Boot image metadata recovery failed: $($_.Exception.Message)"
+                    return $false
+                }
+            }
             $rearmBootParentTargets = {
                 param([string[]]$DistributionPointFqdns)
                 if (-not $bootParentSite -or -not $bootParentFqdn) {
@@ -1249,6 +1333,8 @@ Write-DscStatus "$Tag Starting perfloading"
             $bootCoverageObservedSourceVersion = ''
             $bootCoverageLastArm = @{}
             $bootStoredVersion = ''
+            $bootMetadataRecoveryVersion = $null
+            $bootMetadataLastProbe = $null
             $bootLastParentTargetArm = $null
             $bootLastParentNotify = $null
             $bootLastParentInboxWake = $null
@@ -1299,6 +1385,24 @@ Write-DscStatus "$Tag Starting perfloading"
                 # still lacks the parent-owned content, also flush the two DRS groups
                 # that carry DP/site-control targeting to the parent.
                 $bootContentPendingFromParent = [bool]($ThisVM.parentSiteCode -and $bootSourceVersion -and $bootStoredVersion -and [int]$bootStoredVersion -lt [int]$bootSourceVersion)
+                if ($bootContentPendingFromParent -and
+                    "$bootMetadataRecoveryVersion" -ne "$bootSourceVersion" -and
+                    (-not $bootMetadataLastProbe -or ((Get-Date) - $bootMetadataLastProbe).TotalMinutes -ge 1)) {
+                    $bootMetadataLastProbe = Get-Date
+                    if (& $hasBootDespoolMetadataStall ([int]$bootSourceVersion)) {
+                        $metadataState = & $getBootMetadataState ([int]$bootSourceVersion)
+                        if (-not $metadataState.Measured) {
+                            Write-DscStatus "$Tag Boot image metadata recovery: despool is waiting for $packageId version $bootSourceVersion, but the package metadata query failed; nothing was reinitialized. Error='$($metadataState.Error)'"
+                        }
+                        elseif ($metadataState.Available -eq 0 -and $metadataState.GlobalRows -eq 0 -and $metadataState.LocalRows -gt 0 -and $metadataState.HistoryRows -gt 0) {
+                            Write-DscStatus "$Tag Boot image metadata recovery: measured orphan metadata for $packageId version $bootSourceVersion (Available=0, PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows))"
+                            if (& $initializeBootMetadataFromParent) { $bootMetadataRecoveryVersion = "$bootSourceVersion" }
+                        }
+                        else {
+                            Write-DscStatus "$Tag Boot image metadata recovery: despool is waiting, but the orphan-row signature is not proven (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows)); no reinitialization"
+                        }
+                    }
+                }
                 if ($bootContentPendingFromParent -and (-not $bootLastParentTargetArm -or ((Get-Date) - $bootLastParentTargetArm).TotalMinutes -ge 10)) {
                     & $rearmBootParentTargets @($bootIncompleteDps | Select-Object -Unique)
                     $bootLastParentTargetArm = Get-Date
