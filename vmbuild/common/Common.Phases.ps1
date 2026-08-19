@@ -920,6 +920,7 @@ function Start-Phase {
                 Write-Log "[Phase $Phase] No new VMs to create; skipping DNS record removal."
             }
         }
+        $blockingAdObjects = New-Object System.Collections.Generic.List[string]
         foreach ($item in $dnsTargets) {
             Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
 
@@ -955,9 +956,16 @@ function Start-Phase {
                         Write-Log "[Phase $Phase] Keeping AD computer object '$adName': partner node '$($item.OtherNode)' still exists, so the cluster may be live." -LogOnly
                         continue
                     }
-                    Remove-StaleAdComputer -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -ComputerName $adName -Reason "SQLAO rebuild of $($item.vmName)"
+                    $adOutcome = Remove-StaleAdComputer -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -ComputerName $adName -Reason "SQLAO rebuild of $($item.vmName)"
+                    if ("$adOutcome" -notin @('Removed', 'NotPresent')) { $blockingAdObjects.Add($adName) }
                 }
             }
+        }
+
+        # Phase 1 counts only its VM jobs, so without this a run that already knows
+        # Phase 5 cannot form its cluster still prints "0 warnings" and scrolls past.
+        if ($blockingAdObjects.Count -gt 0) {
+            Write-Log "[Phase $Phase] $($blockingAdObjects.Count) stale AD object(s) could NOT be removed and WILL block the SQLAO rebuild at Phase 5: $($blockingAdObjects -join ', '). Remove them on $existingDC (clear ProtectedFromAccidentalDeletion first) before continuing." -Warning
         }
     }
 

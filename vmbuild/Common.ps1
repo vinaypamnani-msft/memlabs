@@ -4029,7 +4029,7 @@ function Remove-StaleAdComputer {
     $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $removeBlock -SuppressLog
     if ($result.ScriptBlockFailed -or -not $result.ScriptBlockOutput) {
         Write-OrangePoint "Could not check AD for a stale computer object '$ComputerName'$suffix -- it may still block a rebuild. Check it manually on $DCName." -WriteLog
-        return
+        return 'NoResponse'
     }
 
     $out = $result.ScriptBlockOutput
@@ -4040,6 +4040,8 @@ function Remove-StaleAdComputer {
         'RemoveFailed' { Write-OrangePoint "Failed to remove stale AD computer object '$ComputerName'$suffix`: $($out.Error). Remove it manually on $DCName or the rebuild will fail." -WriteLog }
         default { Write-OrangePoint "Unexpected result checking AD computer object '$ComputerName'$suffix`: $($out.Outcome)" -WriteLog }
     }
+    # Returned so the caller can name everything that will still block the rebuild.
+    "$($out.Outcome)"
 }
 
 function Get-DhcpScopeDescription {
