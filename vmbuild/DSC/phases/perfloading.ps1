@@ -1333,7 +1333,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             $bootCoverageObservedSourceVersion = ''
             $bootCoverageLastArm = @{}
             $bootStoredVersion = ''
-            $bootMetadataRecoveryVersion = $null
+            $bootMetadataRecoveryStarted = $false
             $bootMetadataLastProbe = $null
             $bootLastParentTargetArm = $null
             $bootLastParentNotify = $null
@@ -1386,7 +1386,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 # that carry DP/site-control targeting to the parent.
                 $bootContentPendingFromParent = [bool]($ThisVM.parentSiteCode -and $bootSourceVersion -and $bootStoredVersion -and [int]$bootStoredVersion -lt [int]$bootSourceVersion)
                 if ($bootContentPendingFromParent -and
-                    "$bootMetadataRecoveryVersion" -ne "$bootSourceVersion" -and
+                    -not $bootMetadataRecoveryStarted -and
                     (-not $bootMetadataLastProbe -or ((Get-Date) - $bootMetadataLastProbe).TotalMinutes -ge 1)) {
                     $bootMetadataLastProbe = Get-Date
                     if (& $hasBootDespoolMetadataStall ([int]$bootSourceVersion)) {
@@ -1396,7 +1396,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         }
                         elseif ($metadataState.Available -eq 0 -and $metadataState.GlobalRows -eq 0 -and $metadataState.LocalRows -gt 0 -and $metadataState.HistoryRows -gt 0) {
                             Write-DscStatus "$Tag Boot image metadata recovery: measured orphan metadata for $packageId version $bootSourceVersion (Available=0, PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows))"
-                            if (& $initializeBootMetadataFromParent) { $bootMetadataRecoveryVersion = "$bootSourceVersion" }
+                            if (& $initializeBootMetadataFromParent) { $bootMetadataRecoveryStarted = $true }
                         }
                         else {
                             Write-DscStatus "$Tag Boot image metadata recovery: despool is waiting, but the orphan-row signature is not proven (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows)); no reinitialization"
