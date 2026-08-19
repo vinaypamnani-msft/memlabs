@@ -40,6 +40,7 @@ $allowed = @(
     'Write-DhcpDiagLine'                     # nested emitter of Write-DhcpLeaseFailureDiag
     'Write-DhcpLeaseFailureDiag'             # called bare from the VM_Config job scriptblock
     'Save-CMSetupLogsFromVm'                 # called bare from the VM_Config job scriptblock
+    'Save-CMSetupSqlFailureEvidence'         # called bare from the VM_Config job scriptblock
     'Save-CMClientPackagePrestageLogsFromVm' # called bare from the VM_Config job scriptblock
 )
 
