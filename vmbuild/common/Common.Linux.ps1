@@ -2122,7 +2122,39 @@ function Wait-LinuxCloudInitComplete {
         write-progress2 "Wait for Linux VM" -Status "$VmName`: waiting for cloud-init to finish (status: $dispNow, ${elapsedNow}s / ${TimeoutSeconds}s)" -force
         Start-Sleep -Seconds 8
     }
-    Write-Log "$VmName`: cloud-init still not done after ${TimeoutSeconds}s; proceeding anyway" -Warning
+    $timeoutState = if ($lastState) { $lastState } else { 'unreachable' }
+    Write-Log "$VmName`: cloud-init still not done after ${TimeoutSeconds}s (last status: $timeoutState, ssh $IPAddress); proceeding anyway" -Warning
+
+    try {
+        $diag = Invoke-LinuxVmCommand -VmName $VmName -IPAddress $IPAddress -SuppressLog `
+            -Sudo -TimeoutSeconds 30 -DisplayName 'cloud-init timeout diagnostics' `
+            -BashCommand @'
+echo "=== CLOCK ==="
+printf 'guest-local='; date --iso-8601=seconds
+printf 'utc='; date --utc --iso-8601=seconds
+echo "=== CLOUD-INIT STATUS ==="
+cloud-init status --long 2>&1 || true
+echo "=== ACTIVE CLOUD-INIT PROCESSES ==="
+ps -eo pid,ppid,etimes,stat,args | grep -E '[c]loud-init|/var/lib/cloud/instance/scripts/runcmd' || echo "none"
+echo "=== FAILED SYSTEMD UNITS ==="
+systemctl --no-pager --full --failed 2>&1 || true
+echo "=== APT/DPKG LOCK HOLDERS ==="
+fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>&1 || echo "none"
+echo "=== CLOUD-INIT LOG (last 40 lines) ==="
+tail -40 /var/log/cloud-init.log 2>&1 || true
+'@
+        if ($diag -and $diag.ScriptBlockOutput) {
+            foreach ($diagLine in ($diag.ScriptBlockOutput -split "`n")) {
+                Write-Log "$VmName`: cloud-init-timeout-diag> $($diagLine.TrimEnd("`r"))" -LogOnly
+            }
+        }
+        else {
+            Write-Log "$VmName`: cloud-init timeout diagnostics returned no output (ssh $IPAddress)." -LogOnly
+        }
+    }
+    catch {
+        Write-Log "$VmName`: cloud-init timeout diagnostics failed (ssh $IPAddress): $($_.Exception.Message)" -LogOnly
+    }
     return $false
 }
 
