@@ -3983,7 +3983,9 @@ function Remove-StaleAdComputer {
     $removeBlock = {
         $name = $using:ComputerName
         try {
-            $obj = Get-ADComputer -Identity $name -ErrorAction Stop
+            # ProtectedFromAccidentalDeletion is not in the default property set, so it
+            # has to be asked for by name or it always reads back as empty.
+            $obj = Get-ADComputer -Identity $name -Properties ProtectedFromAccidentalDeletion -ErrorAction Stop
         }
         catch {
             # Matched by name, not a typed catch: the AD types are only loadable
@@ -3994,11 +3996,25 @@ function Remove-StaleAdComputer {
             return [pscustomobject]@{ Outcome = 'LookupFailed'; Error = $_.Exception.Message }
         }
         if (-not $obj) { return [pscustomobject]@{ Outcome = 'NotPresent' } }
+        # That flag is a Deny ACE on Delete/DeleteTree which stops even a Domain Admin,
+        # and Failover Clustering sets it on the objects it manages. One protected node
+        # anywhere in the subtree fails the whole -Recursive delete, so clear the subtree.
+        $wasProtected = $false
+        try {
+            foreach ($p in @(Get-ADObject -SearchBase $obj.DistinguishedName -SearchScope Subtree -Filter * -Properties ProtectedFromAccidentalDeletion -ErrorAction Stop |
+                        Where-Object { $_.ProtectedFromAccidentalDeletion })) {
+                Set-ADObject -Identity $p.DistinguishedName -ProtectedFromAccidentalDeletion $false -ErrorAction Stop
+                $wasProtected = $true
+            }
+        }
+        catch {
+            return [pscustomobject]@{ Outcome = 'RemoveFailed'; Enabled = $obj.Enabled; Error = "could not clear ProtectedFromAccidentalDeletion: $($_.Exception.Message)" }
+        }
         try {
             # A CNO can own child objects (the VCOs it created), which plain
             # Remove-ADComputer refuses to delete.
             Remove-ADObject -Identity $obj.DistinguishedName -Recursive -Confirm:$false -ErrorAction Stop
-            [pscustomobject]@{ Outcome = 'Removed'; Enabled = $obj.Enabled; Dn = $obj.DistinguishedName }
+            [pscustomobject]@{ Outcome = 'Removed'; Enabled = $obj.Enabled; Dn = $obj.DistinguishedName; WasProtected = $wasProtected }
         }
         catch {
             [pscustomobject]@{ Outcome = 'RemoveFailed'; Enabled = $obj.Enabled; Error = $_.Exception.Message }
@@ -4019,7 +4035,7 @@ function Remove-StaleAdComputer {
     $out = $result.ScriptBlockOutput
     switch ($out.Outcome) {
         'NotPresent' { Write-Log "No stale AD computer object '$ComputerName'$suffix." -LogOnly }
-        'Removed' { Write-GreenCheck "Removed stale AD computer object '$ComputerName'$suffix (was Enabled=$($out.Enabled))" -WriteLog }
+        'Removed' { Write-GreenCheck "Removed stale AD computer object '$ComputerName'$suffix (was Enabled=$($out.Enabled)$(if ($out.WasProtected) { ', accidental-deletion protection cleared' }))" -WriteLog }
         'LookupFailed' { Write-OrangePoint "Could not read AD computer object '$ComputerName'$suffix`: $($out.Error). Not treating this as 'absent'; check it manually on $DCName." -WriteLog }
         'RemoveFailed' { Write-OrangePoint "Failed to remove stale AD computer object '$ComputerName'$suffix`: $($out.Error). Remove it manually on $DCName or the rebuild will fail." -WriteLog }
         default { Write-OrangePoint "Unexpected result checking AD computer object '$ComputerName'$suffix`: $($out.Outcome)" -WriteLog }
