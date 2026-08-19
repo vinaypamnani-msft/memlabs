@@ -1117,6 +1117,35 @@ Write-DscStatus "$Tag Starting perfloading"
             # A targeting row only proves that distribution was requested. Require
             # every OSDClient-subnet DP to report Installed at the boot image's
             # current source version before Phase 8 can claim usable PXE coverage.
+            $pushBootCoverageDrsChanges = {
+                param([string]$Group)
+                $connection = $null
+                try {
+                    $sqlReg = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+                    $sqlServer = $sqlReg.Server
+                    $databaseRaw = $sqlReg.'Database Name'
+                    $sqlInstance = $sqlServer
+                    $databaseName = $databaseRaw
+                    if ($databaseRaw -match '\\') {
+                        $sqlInstance = "$sqlServer\$($databaseRaw.Split('\\')[0])"
+                        $databaseName = $databaseRaw.Split('\\')[1]
+                    }
+                    $connection = New-Object System.Data.SqlClient.SqlConnection "Server=$sqlInstance;Initial Catalog=$databaseName;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
+                    $connection.Open()
+                    $command = $connection.CreateCommand()
+                    $command.CommandText = 'EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup'
+                    $command.CommandTimeout = 120
+                    [void]$command.Parameters.AddWithValue('@ReplicationGroup', $Group)
+                    [void]$command.ExecuteNonQuery()
+                    Write-DscStatus "$Tag Boot image coverage: pushed DRS group '$Group' so parent site $($ThisVM.parentSiteCode) receives the refreshed DP target without waiting for scheduled replication"
+                }
+                catch {
+                    Write-DscStatus "$Tag Boot image coverage: could not push DRS group '$Group': $($_.Exception.Message). The normal replication schedule still owns convergence."
+                }
+                finally {
+                    if ($connection) { try { $connection.Close() } catch { } }
+                }
+            }
             $bootCoverageWaitMinutes = 15
             $expectedRemoteSiteDp = @($dpTargets | Where-Object {
                     $targetServer = & $serverFromNal $_.ServerNALPath
@@ -1128,11 +1157,21 @@ Write-DscStatus "$Tag Starting perfloading"
             $bootCoverageDeadline = (Get-Date).AddMinutes($bootCoverageWaitMinutes)
             $bootCoverageAttempt = 0
             $bootCoverageProblems = @()
+            $bootCoverageObservedSourceVersion = ''
+            $bootCoverageVersionSeenAt = $null
+            $bootCoverageLastArm = @{}
+            $bootStoredVersion = ''
             do {
                 $bootCoverageAttempt++
                 $bootCoverageProblems = @()
+                $bootIncompleteDps = @()
                 $currentBootImage = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
                 $bootSourceVersion = if ($currentBootImage) { "$($currentBootImage.SourceVersion)" } else { '' }
+                $bootStoredVersion = if ($currentBootImage) { "$($currentBootImage.StoredPkgVersion)" } else { '' }
+                if (-not $bootStoredVersion) {
+                    $bootPackageRow = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Package -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($bootPackageRow) { $bootStoredVersion = "$($bootPackageRow.StoredPkgVersion)" }
+                }
                 if (-not $bootSourceVersion) {
                     $bootCoverageProblems += 'boot-image SourceVersion could not be read'
                 }
@@ -1140,24 +1179,71 @@ Write-DscStatus "$Tag Starting perfloading"
                     $bootCoverageProblems += "boot-image SourceVersion has not advanced after enabling command support (still $bootSourceVersion, previous $commandSupportPreviousSourceVersion)"
                 }
                 else {
+                    if ($bootCoverageObservedSourceVersion -ne $bootSourceVersion) {
+                        $bootCoverageObservedSourceVersion = $bootSourceVersion
+                        $bootCoverageVersionSeenAt = Get-Date
+                        $bootCoverageLastArm = @{}
+                    }
                     $bootDpRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
                     foreach ($expectedDp in $osdDpFqdns) {
                         $dpRow = @($bootDpRows | Where-Object { (& $serverFromNal $_.ServerNALPath) -ieq $expectedDp } | Select-Object -First 1)
                         if ($dpRow.Count -eq 0) {
                             $bootCoverageProblems += "$expectedDp (no status row)"
+                            $bootIncompleteDps += $expectedDp
                         }
                         elseif ([int]$dpRow[0].State -ne 0) {
                             $bootCoverageProblems += "$expectedDp (State=$($dpRow[0].State), DPVersion=$($dpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                            $bootIncompleteDps += $expectedDp
                         }
                         elseif (-not "$($dpRow[0].SourceVersion)" -or [int]$dpRow[0].SourceVersion -lt [int]$bootSourceVersion) {
                             $bootCoverageProblems += "$expectedDp (Installed but stale: DPVersion=$($dpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                            $bootIncompleteDps += $expectedDp
                         }
                     }
                 }
                 if ($bootCoverageProblems.Count -eq 0) { break }
+
+                # ContentValidating can sit until ConfigMgr's 30-minute retry or
+                # hierarchy replication schedule fires. Re-arm the existing target
+                # without rebuilding the WIM or changing SourceVersion. If the site
+                # still lacks the parent-owned content, also flush the two DRS groups
+                # that carry DP/site-control targeting to the parent.
+                $bootContentPendingFromParent = [bool]($ThisVM.parentSiteCode -and $bootSourceVersion -and $bootStoredVersion -and [int]$bootStoredVersion -lt [int]$bootSourceVersion)
+                $bootArmMinutes = if ($bootContentPendingFromParent) { 10 } else { 5 }
+                $bootRearmedDps = @()
+                foreach ($incompleteDp in @($bootIncompleteDps | Select-Object -Unique)) {
+                    $armKey = $incompleteDp.ToUpper()
+                    try {
+                        $targetRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
+                                Where-Object { (& $serverFromNal $_.ServerNALPath) -ieq $incompleteDp })
+                        if ($targetRows.Count -eq 0) {
+                            Start-CMContentDistribution -BootImageId $packageId -DistributionPointName $incompleteDp -ErrorAction Stop
+                            Write-DscStatus "$Tag Boot image coverage: re-established missing target for '$biName' ($packageId) on $incompleteDp"
+                        }
+                        else {
+                            $lastArm = if ($bootCoverageLastArm.ContainsKey($armKey)) { $bootCoverageLastArm[$armKey] } else { $bootCoverageVersionSeenAt }
+                            if (-not $lastArm -or ((Get-Date) - $lastArm).TotalMinutes -lt $bootArmMinutes) { continue }
+                            foreach ($targetRow in $targetRows) {
+                                $targetRow.RefreshNow = $true
+                                [void]$targetRow.Put()
+                            }
+                            Write-DscStatus "$Tag Boot image coverage: re-armed '$biName' ($packageId) on $incompleteDp with RefreshNow after ${bootArmMinutes}m at SourceVersion=$bootSourceVersion (StoredPkgVersion=$bootStoredVersion)"
+                        }
+                        $bootCoverageLastArm[$armKey] = Get-Date
+                        $bootRearmedDps += $incompleteDp
+                    }
+                    catch {
+                        Write-DscStatus "$Tag Boot image coverage: re-arm failed for $incompleteDp`: $($_.Exception.Message)"
+                    }
+                }
+                if ($bootRearmedDps.Count -gt 0 -and $bootContentPendingFromParent) {
+                    foreach ($drsGroup in @('Site Control Data', 'Configuration Data')) {
+                        & $pushBootCoverageDrsChanges $drsGroup
+                    }
+                }
                 $remainingBootCoverageSec = [math]::Floor(($bootCoverageDeadline - (Get-Date)).TotalSeconds)
                 if ($remainingBootCoverageSec -le 0) { break }
-                Write-DscStatus "$Tag Waiting for boot image '$biName' ($packageId) on every OSD DP: $($bootCoverageProblems -join '; ') (attempt $bootCoverageAttempt, ${remainingBootCoverageSec}s remaining)"
+                Write-DscStatus "$Tag Waiting for boot image '$biName' ($packageId) on every OSD DP: $($bootCoverageProblems -join '; ') (SiteStoredVersion=$bootStoredVersion, attempt $bootCoverageAttempt, ${remainingBootCoverageSec}s remaining)"
                 Start-Sleep -Seconds ([int][math]::Min(30, $remainingBootCoverageSec))
             } while ((Get-Date) -lt $bootCoverageDeadline)
 
