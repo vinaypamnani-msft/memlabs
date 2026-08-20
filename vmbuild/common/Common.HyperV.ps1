@@ -1287,6 +1287,45 @@ function Repair-VmCimServer {
     return $false
 }
 
+function Remove-HyperVJob {
+    <#
+    .SYNOPSIS
+        Disposes a Hyper-V -AsJob job only once Hyper-V is finished with it.
+    .DESCRIPTION
+        Hyper-V's -AsJob returns a VMJob whose operation completes on a threadpool
+        thread: VirtualizationCmdletBase.PerformOperationForJob -> VmJob.Complete()
+        -> Job.SetJobState(). Remove-Job on a job Wait-Job timed out on disposes the
+        object that callback is about to touch, so SetJobState throws
+        PSObjectDisposedException on a thread with no handler above it and the whole
+        process dies -- no catch, no crashlog, mid-run. Neither Stop-Job nor -Force
+        makes it safe: nothing in PowerShell can cancel the operation already running
+        inside vmms.
+
+        So dispose only a job that has already reached Completed or Failed, and
+        abandon anything else. A leaked Job object costs a few KB until the process
+        exits; the alternative has taken down a lab teardown.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [object] $Job,
+        [Parameter(Mandatory = $false)]
+        [string] $Context = 'Hyper-V job'
+    )
+
+    if (-not $Job) { return }
+
+    $jobState = ''
+    try { $jobState = [string]$Job.State } catch { }
+
+    if ($jobState -in @('Completed', 'Failed')) {
+        Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    Write-Log "${Context}: Hyper-V job is '$jobState', not finished; abandoning it rather than disposing it." -LogOnly
+}
+
 function Stop-VM2 {
     [CmdletBinding()]
     param (
@@ -1379,8 +1418,7 @@ function Stop-VM2 {
                     # -AsJob so a wedged VM doesn't block forever
                     $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
                     $null = $stopJob | Wait-Job -Timeout 15
-                    if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
-                    Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
+                    Remove-HyperVJob -Job $stopJob -Context "${Name}: TurnOff"
                 }
                 catch {
                     Write-Log "${Name}: TurnOff attempt threw $($_.Exception.GetType().Name): $_ | $($_.ScriptStackTrace -replace '\s+', ' '); continuing to escalation." -Warning
@@ -1411,13 +1449,12 @@ function Stop-VM2 {
                     $null = $gracefulJob | Wait-Job -Timeout $GracefulTimeoutSeconds
                     if ($gracefulJob.State -eq 'Running') {
                         Write-Log "${Name}: Graceful stop did not complete within ${GracefulTimeoutSeconds}s; escalating." -Warning
-                        Stop-Job $gracefulJob -ErrorAction SilentlyContinue
                         $StopError = @("Stop-VM did not complete within ${GracefulTimeoutSeconds}s")
                     }
                     elseif ($gracefulJob.State -eq 'Failed') {
                         $StopError = @("$($gracefulJob.ChildJobs[0].JobStateInfo.Reason.Message)")
                     }
-                    Remove-Job $gracefulJob -Force -ErrorAction SilentlyContinue
+                    Remove-HyperVJob -Job $gracefulJob -Context "${Name}: graceful stop"
                 }
                 catch {
                     $StopError = @("graceful Stop-VM threw $($_.Exception.GetType().Name): $_")
@@ -1438,8 +1475,7 @@ function Stop-VM2 {
                 try {
                     $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
                     $null = $stopJob | Wait-Job -Timeout 15
-                    if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
-                    Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
+                    Remove-HyperVJob -Job $stopJob -Context "${Name}: escalation TurnOff"
                 }
                 catch {
                     Write-Log "${Name}: escalation TurnOff threw $($_.Exception.GetType().Name): $_; falling through to the worker-process kill." -Warning
@@ -1601,8 +1637,7 @@ function Restart-VM2Smart {
             $gracefulNote = " (job=$jobState after ${gracefulSeconds}s"
             if ($jobError) { $gracefulNote += "; error: $jobError" }
             $gracefulNote += ')'
-            if ($gracefulJob.State -eq 'Running') { Stop-Job $gracefulJob -ErrorAction SilentlyContinue }
-            Remove-Job $gracefulJob -Force -ErrorAction SilentlyContinue
+            Remove-HyperVJob -Job $gracefulJob -Context "${Name}: Restart ($Reason) graceful shutdown"
         }
         catch {
             $gracefulNote = " (Stop-VM threw: $($_.Exception.Message))"

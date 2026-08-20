@@ -693,6 +693,7 @@ function Invoke-StopVMs {
         $vmList = get-list -type vm -DomainName $domain -SmartUpdate
     }
     $vmNames = @()
+    $stopJobs = @()
     foreach ($vm in $vmList) {
         $vm2 = $null
         if ($vm -is [String]) {
@@ -707,19 +708,22 @@ function Invoke-StopVMs {
                 Write-GreenCheck "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
             }
             $vmNames += $vm2.Name
-            stop-vm -VM $VM2 -force -AsJob | Out-Null
+            $stopJobs += @(stop-vm -VM $VM2 -force -AsJob)
         }
     }
 
     # Show-JobsProgress but break out early when all target VMs are actually off.
     # Stop-VM jobs can hang even after the VM has stopped (Hyper-V WMI quirk).
-    $jobs = get-job | Where-Object { $_.state -ne "completed" -and $_.state -ne "stopped" -and $_.state -ne "failed" }
-    [int]$total = $jobs.count -as [int]
+    # Count only this call's jobs: abandoned stragglers from an earlier call are
+    # deliberately left in the session (see the disposal note below) and must not be
+    # mistaken for work in progress here.
+    $jobs = @($stopJobs | Where-Object { $_.State -notin @('Completed', 'Stopped', 'Failed') })
+    [int]$total = $jobs.Count
     if ($total -gt 0) {
         $stallCheck = [System.Diagnostics.Stopwatch]::StartNew()
         [int]$lastRunning = $total
         while ($true) {
-            [int]$runningjobs = (get-job | Where-Object { $_.state -ne "completed" -and $_.state -ne "stopped" -and $_.state -ne "failed" }).Count -as [int]
+            [int]$runningjobs = @($stopJobs | Where-Object { $_.State -notin @('Completed', 'Stopped', 'Failed') }).Count
             if ($runningjobs -eq 0) { break }
 
             $percent = [math]::Round((($total - $runningjobs) / $total * 100), 2)
@@ -735,8 +739,8 @@ function Invoke-StopVMs {
             if ($stallCheck.Elapsed.TotalSeconds -ge 30 -and $vmNames.Count -gt 0) {
                 $stillRunning = @($vmNames | ForEach-Object { Get-VM2 -Name $_ -ErrorAction SilentlyContinue } | Where-Object { $_.State -eq "Running" })
                 if ($stillRunning.Count -eq 0) {
-                    # All VMs are off; stop the zombie jobs and break out
-                    get-job | Where-Object { $_.state -ne "completed" -and $_.state -ne "stopped" -and $_.state -ne "failed" } | Stop-Job -ErrorAction SilentlyContinue
+                    # All VMs are off; the zombie jobs are Hyper-V's problem now. Leave
+                    # them alone -- see the disposal note below.
                     break
                 }
                 $stallCheck.Restart()
@@ -747,10 +751,13 @@ function Invoke-StopVMs {
         Write-Progress2 -activity "Stopping VMs" -Completed
     }
 
-    try {
-        get-job | remove-job -Force | Out-Null
+    # Reap only jobs Hyper-V has finished with. A Stop-VM VMJob still in flight
+    # completes on a threadpool thread that calls SetJobState on this object; dispose
+    # it first and that callback throws PSObjectDisposedException with no handler
+    # above it, killing the process. The stragglers go when this process does.
+    foreach ($doneJob in @($stopJobs | Where-Object { $_.State -in @('Completed', 'Failed') })) {
+        try { Remove-Job -Job $doneJob -Force -ErrorAction SilentlyContinue } catch {}
     }
-    catch {}
     # Invalidate the Get-List cache so the refresh below picks up
     # the new VM states without being blocked by the throttle.
     $global:vm_List_LastUpdate = $null

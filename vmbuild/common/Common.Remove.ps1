@@ -232,7 +232,6 @@ function Remove-VirtualMachine {
             $null = $stopJob | Wait-Job -Timeout $TimeoutSeconds
             if ($stopJob.State -eq 'Running') {
                 Write-Log "VM '$($VM.Name)': TurnOff did not return within $TimeoutSeconds seconds; escalating." -Warning
-                Stop-Job $stopJob -ErrorAction SilentlyContinue
             }
             else {
                 $turnOffAnswered = $true
@@ -242,7 +241,11 @@ function Remove-VirtualMachine {
                     Write-Log "TurnOff failed: $reason" -Warning
                 }
             }
-            Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
+            # Never dispose a TurnOff Hyper-V is still working on: its threadpool
+            # completion callback would land on a freed VMJob and take the process out
+            # with an unhandled PSObjectDisposedException -- which is exactly what
+            # happened part-way through a domain teardown.
+            Remove-HyperVJob -Job $stopJob -Context "VM '$($VM.Name)': TurnOff"
         }
         catch {
             Write-Log "TurnOff threw $($_.Exception.GetType().Name): $($_.Exception.Message)" -Warning
