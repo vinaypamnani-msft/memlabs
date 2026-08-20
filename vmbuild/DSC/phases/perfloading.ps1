@@ -63,7 +63,9 @@ Write-DscStatus "$Tag Starting perfloading"
     while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
         $psDriveFailcount++
         if ($psDriveFailcount -gt 20) {
-            Write-DscStatus "$Tag Failed to get the PS Drive for site $SiteCode.  Install may have failed. Check C:\ConfigMgrSetup.log" -NoStatus
+            # -Failure, not -NoStatus: returning here skips EVERY object perfloading
+            # creates, and without JOBFAILURE the host records the phase as a success.
+            Write-DscStatus "$Tag Failed to get the PS Drive for site $SiteCode after 20 attempts. Install may have failed. Check C:\ConfigMgrSetup.log. No MEMLABS objects were created." -Failure
             return
         }
         Write-DscStatus "$Tag Retry in 10s to Set PS Drive" -NoStatus
@@ -897,8 +899,11 @@ Write-DscStatus "$Tag Starting perfloading"
         $coveredOsdSubnets = @($osdDps | ForEach-Object { $_.Subnet } | Where-Object { $_ } | Select-Object -Unique)
         $uncoveredOsdSubnets = @($osdSubnets | Where-Object { $coveredOsdSubnets -notcontains $_ })
         if ($uncoveredOsdSubnets.Count -gt 0) {
-            Write-DscStatus "$Tag OSDClient subnet(s) have no live ConfigMgr DP: $($uncoveredOsdSubnets -join ', '). OSD content cannot reach those clients and PXE cannot work. Add/install a DP on every listed subnet, then re-run Phase 8." -Failure
-            return
+            # Was -Failure + return, which ended the script here and took the OSD share, the
+            # boot image, both OS packages, all seven task sequences, the collections, the
+            # baselines and the SUP/ADR work with it. Phase 11 owns this verdict: it compares
+            # the config's OSDClient subnets against 'OSD DPS' membership and FAILs.
+            Write-DscStatus "$Tag OSDClient subnet(s) have no live ConfigMgr DP: $($uncoveredOsdSubnets -join ', '). OSD content cannot reach those clients and PXE cannot work, so it is created but NOT distributed. Add/install a DP on every listed subnet, then re-run Phase 8. Phase 11 validation FAILS on this." -Warning
         }
         else {
             if ("$OsdDpGroupName" -notin @((Get-CMDistributionPointGroup -ErrorAction SilentlyContinue).Name)) {
@@ -976,17 +981,17 @@ Write-DscStatus "$Tag Starting perfloading"
                     }
                 }
                 if ($missingOsdGroupMembers.Count -gt 0) {
-                    Write-DscStatus "$Tag OSD DP(s) are not members of '$OsdDpGroupName' after 6 reads: $(($missingOsdGroupMembers.Fqdn) -join ', '). Distribution to the group would miss required OSDClient subnet(s)." -Failure
-                    return
+                    Write-DscStatus "$Tag OSD DP(s) are not members of '$OsdDpGroupName' after 6 reads: $(($missingOsdGroupMembers.Fqdn) -join ', '). Distribution to the group would miss required OSDClient subnet(s), so OSD content is NOT distributed. Phase 11 validation FAILS on this." -Warning
                 }
-                Write-DscStatus "$Tag Verified every OSD DP is a member of '$OsdDpGroupName': $(($osdDps.Fqdn) -join ', ')"
+                else {
+                    Write-DscStatus "$Tag Verified every OSD DP is a member of '$OsdDpGroupName': $(($osdDps.Fqdn) -join ', ')"
+                    $osdDistTarget = $OsdDpGroupName
+                    $hasOsdTargets = $true
+                }
             }
             catch {
-                Write-DscStatus "$Tag Could not verify '$OsdDpGroupName' membership; refusing to report OSD coverage without measuring it: $($_.Exception.Message)" -Failure
-                return
+                Write-DscStatus "$Tag Could not verify '$OsdDpGroupName' membership, so OSD content is NOT distributed rather than reported as covered without measuring it: $($_.Exception.Message). Phase 11 validation FAILS on this." -Warning
             }
-            $osdDistTarget = $OsdDpGroupName
-            $hasOsdTargets = $true
         }
     }
 
@@ -1031,7 +1036,7 @@ Write-DscStatus "$Tag Starting perfloading"
     $commandSupportChanged = $false
     $commandSupportPreviousSourceVersion = $null
 
-    $existingMemlabsTaskSequences = @(Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" })
+    $existingMemlabsTaskSequences = @(Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" -and "$($_.PackageID)" -like "$SiteCode*" })
     $BootImage = @(Get-CMBootImage | Where-Object { $_.Name -eq $memlabsBootImageName }) | Select-Object -First 1
 
     if ($existingMemlabsTaskSequences.Count -gt 0 -and -not $BootImage) {
@@ -1086,10 +1091,15 @@ Write-DscStatus "$Tag Starting perfloading"
                     $packageId = ''
                 }
                 elseif ("$($createdBootImage.SourceSite)" -ne $SiteCode) {
-                    Write-DscStatus "$Tag WARNING: boot image $packageId reports SourceSite='$($createdBootImage.SourceSite)', not this site '$SiteCode'. Distributing it from here would hit the same PkgServers_L dead end, so it is not usable." -Warning
-                    $packageId = ''
+                    # Discarding the package costs the site every task sequence, so confirm the
+                    # mismatch with a second read instead of acting on one enumeration.
+                    try { $createdBootImage.Get() } catch { }
+                    if ("$($createdBootImage.SourceSite)" -ne $SiteCode) {
+                        Write-DscStatus "$Tag WARNING: boot image $packageId reports SourceSite='$($createdBootImage.SourceSite)' on two reads, not this site '$SiteCode'. Distributing it from here would hit the same PkgServers_L dead end, so it is not usable." -Warning
+                        $packageId = ''
+                    }
                 }
-                else {
+                if ($packageId) {
                     Write-DscStatus "$Tag Created boot image '$biName' ($packageId) from the local ADK WinPE: SourceSite=$SiteCode SourceVersion=$($createdBootImage.SourceVersion) PkgSourcePath='$($createdBootImage.PkgSourcePath)'"
                     # ConfigMgr copies the template to boot.<PackageID>.wim beside it, so the
                     # staged file is now a duplicate ~336MB the package does not read.
@@ -1255,10 +1265,9 @@ Write-DscStatus "$Tag Starting perfloading"
                     $bootCoverageProblems = @()
                     $bootIncompleteDps = @()
                     $currentBootImage = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
-                    # StoredPkgVersion is a lazy SMS provider property, so a filtered enumeration
-                    # leaves it blank until Get() is called. The old fallback read SMS_Package,
-                    # which is a SIBLING of SMS_BootImagePackage under SMS_PackageBaseclass and
-                    # can never return a boot image -- it printed a blank on every run.
+                    # Get() refreshes the instance and populates the lazy properties. The old
+                    # fallback read SMS_Package, a SIBLING of SMS_BootImagePackage under
+                    # SMS_PackageBaseclass, which can never return a boot image at all.
                     if ($currentBootImage) { try { $currentBootImage.Get() } catch { } }
                     $bootSourceVersion = if ($currentBootImage) { "$($currentBootImage.SourceVersion)" } else { '' }
                     $bootStoredVersion = if ($currentBootImage) { "$($currentBootImage.StoredPkgVersion)" } else { '' }
@@ -1429,7 +1438,9 @@ Write-DscStatus "$Tag Starting perfloading"
     $tsMaxAttempts = 3
     while ($true) {
     $tsAttempt++
-    $taskSequences = Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" }
+    # Task sequences are global objects: an unfiltered read at a child Primary also returns
+    # the ones another site created, which would make this site skip its own.
+    $taskSequences = Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" -and "$($_.PackageID)" -like "$SiteCode*" }
 
     if (!$taskSequences) {
     try {
@@ -1460,6 +1471,12 @@ Write-DscStatus "$Tag Starting perfloading"
         $win10OSimagepackageID = & $resolveSitePackageId 'Windows 10 OS image' (Get-CMOperatingSystemImage -Name "windows 10")
         $ClientPackagePackageId = & $resolveSitePackageId 'Configuration Manager Client Package' (Get-CMPackage -Fast -Name "Configuration Manager Client Package")
         $UserStateMigrationToolPackageId = & $resolveSitePackageId 'User State Migration Tool' (Get-CMPackage -Fast -Name "User State Migration Tool for Windows")
+        if (-not $BootImagePackageID) {
+            # Five of the seven task sequences take -BootImagePackageId. Creating the other two
+            # would leave a partial set that Phase 11 counts as present, so build none.
+            Write-DscStatus "$Tag WARNING: no boot image resolved for '$memlabsBootImageName', so NO task sequences are created -- a partial set would read as success. Fix the boot image (see the boot-image warnings above) and re-run Phase 8. Phase 11 validation FAILS on this." -Warning
+            break
+        }
         $win11UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 11 24h2\sources\install.wim"
         $win10UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 10 22h2\sources\install.wim"
         $clientProps = 'CCMDEBUGLOGGING="1" CCMLOGGINGENABLED="TRUE" CCMLOGLEVEL="0" CCMLOGMAXHISTORY="5" CCMLOGMAXSIZE="10000000" SMSCACHESIZE="15000"'
@@ -1670,7 +1687,9 @@ Write-DscStatus "$Tag Starting perfloading"
         $tsTransient = ($tsErr -match 'deadlock') -or ($tsErr -match 'Error waiting for query to return') -or ($tsErr -match '\b1205\b')
         if ($tsTransient -and $tsAttempt -lt $tsMaxAttempts) {
             Write-DscStatus "$Tag WARNING: Transient deadlock creating task sequences (attempt $tsAttempt of $tsMaxAttempts); cleaning up partial TSes and retrying in 30s: $_"
-            try { Get-CMTaskSequence -Fast | Where-Object { $_.Name -like 'MEMLABS-*' } | ForEach-Object { Remove-CMTaskSequence -TaskSequencePackageId $_.PackageID -Force -ErrorAction SilentlyContinue } } catch {}
+            # Scoped to this site's PackageIDs: an unfiltered sweep would delete the task
+            # sequences another Primary in the same hierarchy created.
+            try { Get-CMTaskSequence -Fast | Where-Object { $_.Name -like 'MEMLABS-*' -and "$($_.PackageID)" -like "$SiteCode*" } | ForEach-Object { Remove-CMTaskSequence -TaskSequencePackageId $_.PackageID -Force -ErrorAction SilentlyContinue } } catch {}
             Start-Sleep -Seconds 30
             continue
         }
@@ -3487,9 +3506,12 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             }
         }
         if ($accepted.Count -eq 0) {
-            Write-DscStatus "$Tag WARNING: 0 of $($products.Count) requested products were accepted by Set-CMSoftwareUpdatePointComponent -- the WSUS catalog has none of these names. This means Sync 1 didn't actually populate the catalog (cab import failed/skipped AND the MU categories sync didn't complete). Skipping WCM wait -- there is nothing to push. SUP will be subscribed to the 3 default classifications only ($($parameters.AddUpdateClassification -join ', ')); Phase 11 will WARN on subscription parity until the catalog is repaired. Rejected: $($rejected -join ', ')"
-            return
+            # Was a bare return, which ended perfloading here and also skipped the ADR block,
+            # the All Unknown Computers update and the CM-script approval queue -- silently,
+            # because no JOBFAILURE was written.
+            Write-DscStatus "$Tag WARNING: 0 of $($products.Count) requested products were accepted by Set-CMSoftwareUpdatePointComponent -- the WSUS catalog has none of these names. This means Sync 1 didn't actually populate the catalog (cab import failed/skipped AND the MU categories sync didn't complete). Skipping the WCM wait and sync trigger -- there is nothing to push -- and continuing with the rest of perfloading. SUP will be subscribed to the 3 default classifications only ($($parameters.AddUpdateClassification -join ', ')); Phase 11 will WARN on subscription parity until the catalog is repaired. Rejected: $($rejected -join ', ')"
         }
+        else {
         if ($rejected.Count -gt 0) {
             Write-DscStatus "$Tag WARNING: $($accepted.Count) of $($products.Count) requested products accepted; $($rejected.Count) rejected (not in WSUS catalog): $($rejected -join ', '). Continuing with the $($accepted.Count) that did bind."
         }
@@ -3588,6 +3610,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             }
             Write-DscStatus "$Tag WCM timeout diag: $($diag -join ' | ')"
         }
+        } # end accepted-products block
     }
     if ($Sups) {
         # Define ADR Names

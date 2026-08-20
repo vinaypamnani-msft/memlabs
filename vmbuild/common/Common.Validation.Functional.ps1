@@ -10678,6 +10678,37 @@ function Test-CMSiteWideFunctionality {
     # intentionally not distributed anywhere -- that's INFO, not a WARN.
     $hasOsdClient = [bool]($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | Select-Object -First 1)
 
+    # perfloading used to abort Phase 8 outright when an OSDClient subnet had no DP, or when
+    # a DP failed to join 'OSD DPS'. It now warns and carries on, so these become Phase 11's
+    # to detect -- and they must be measured against the CONFIG, because reading the group's
+    # own membership can only ever confirm itself.
+    $osdDefaultNet = "$($DeployConfig.vmOptions.network)"
+    $osdNetOfVm = {
+        param($vm)
+        if ($vm.network) { return "$($vm.network)" }
+        if ($vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
+        return $osdDefaultNet
+    }
+    $expectedOsdDpCsv = ''
+    $uncoveredOsdSubnetCsv = ''
+    try {
+        $osdClientSubnets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
+            ForEach-Object { & $osdNetOfVm $_ } | Where-Object { $_ } | Select-Object -Unique)
+        if ($osdClientSubnets.Count -gt 0) {
+            $configDpVms = @($DeployConfig.virtualMachines | Where-Object {
+                    $_.vmName -and ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Secondary')
+                })
+            $osdDpVms = @($configDpVms | Where-Object { $osdClientSubnets -contains (& $osdNetOfVm $_) })
+            $coveredOsdSubnets = @($osdDpVms | ForEach-Object { & $osdNetOfVm $_ } | Select-Object -Unique)
+            $uncoveredOsdSubnetCsv = (@($osdClientSubnets | Where-Object { $coveredOsdSubnets -notcontains $_ }) -join '|')
+            $expectedOsdDpCsv = (@($osdDpVms | Where-Object { "$($_.siteCode)" -eq $siteCode } |
+                    ForEach-Object { "$($_.vmName).$domain" } | Select-Object -Unique) -join '|')
+        }
+    }
+    catch {
+        Write-Log "[Phase $Phase] $VMName [$role ($siteCode)]: Could not derive expected OSD DP coverage from the config: $($_.Exception.Message)" -Warning -LogOnly
+    }
+
     # Expected boundary groups + their subnet boundaries, mirroring
     # InstallBoundaryGroups.ps1: one boundary group named by site code, each
     # containing an IPRange boundary for that site's subnet (.1-.254 over /24).
@@ -10728,7 +10759,7 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner)
+        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv)
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
@@ -10748,6 +10779,8 @@ function Test-CMSiteWideFunctionality {
         $wsusUseSsl = [bool]$usePki
         $expectedApps = if ([string]::IsNullOrEmpty($expectedAppsCsv)) { @() } else { @($expectedAppsCsv -split '\|') }
         $expectedBoundaries = if ([string]::IsNullOrEmpty($expectedBgCsv)) { @() } else { @($expectedBgCsv -split '\|') }
+        $configOsdDpNames = if ([string]::IsNullOrEmpty($expectedOsdDpCsv)) { @() } else { @($expectedOsdDpCsv -split '\|') }
+        $uncoveredOsdSubnets = if ([string]::IsNullOrEmpty($uncoveredOsdSubnetCsv)) { @() } else { @($uncoveredOsdSubnetCsv -split '\|') }
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         $ns = "root\SMS\site_$sc"
@@ -11069,6 +11102,10 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             }
             $expectedOsdDpNames = @()
             if ($isPrimary -and $expectOsd) {
+                if ($uncoveredOsdSubnets.Count -gt 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: OSDClient subnet(s) have no distribution point at all: $($uncoveredOsdSubnets -join ', '). PXE is a subnet-local broadcast, so those clients can never boot. Add a DP on every listed subnet.")
+                }
                 try {
                     $osdDpGroup = Get-WmiObject -Namespace $ns -Class SMS_DistributionPointGroup -Filter "Name='OSD DPS'" -ErrorAction Stop | Select-Object -First 1
                     if (-not $osdDpGroup) {
@@ -11078,6 +11115,18 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     else {
                         $expectedOsdDpNames = @(Get-WmiObject -Namespace $ns -Class SMS_DPGroupMembers -Filter "GroupID='$($osdDpGroup.GroupID)'" -ErrorAction Stop |
                             ForEach-Object { & $dpNameOf $_.DPNALPath } | Where-Object { $_ } | Select-Object -Unique)
+                        # The group's own membership cannot testify that it is complete. Judge it
+                        # against the DPs the config puts on an OSDClient subnet, and require
+                        # coverage on those even when the join silently failed.
+                        $missingOsdGroupDps = @($configOsdDpNames | Where-Object {
+                                $wantShort = ($_ -split '\.')[0]
+                                -not ($expectedOsdDpNames | Where-Object { $_ -ieq $wantShort -or ($_ -split '\.')[0] -ieq $wantShort })
+                            })
+                        if ($missingOsdGroupDps.Count -gt 0) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: distribution point group 'OSD DPS' is missing $($missingOsdGroupDps.Count) DP(s) the config puts on an OSDClient subnet: $($missingOsdGroupDps -join ', '). Distribution to the group is a no-op for those, so OSD content never reaches the client.")
+                            $expectedOsdDpNames = @(@($expectedOsdDpNames) + @($missingOsdGroupDps) | Where-Object { $_ } | Select-Object -Unique)
+                        }
                         if ($expectedOsdDpNames.Count -eq 0) {
                             $results.Passed = $false
                             $results.Details.Add("FAIL: OSDClient exists but distribution point group 'OSD DPS' has no members")
@@ -11103,7 +11152,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             $memlabsBootImageName = "MEMLABS $sc Boot Image (x64)"
             $tsBootImageIds = @()
             try {
-                $tsBootImageIds = @(Get-WmiObject -Namespace $ns -Class SMS_TaskSequencePackage -Filter "Name LIKE 'MEMLABS-%'" -ErrorAction Stop |
+                $tsBootImageIds = @(Get-WmiObject -Namespace $ns -Class SMS_TaskSequencePackage -Filter "Name LIKE 'MEMLABS-%' AND PackageID LIKE '$sc%'" -ErrorAction Stop |
                     ForEach-Object { "$($_.BootImageID)" } | Where-Object { $_ } | Select-Object -Unique)
             }
             catch { }
@@ -11126,6 +11175,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         # WMI queries. Fetch the full instance to get its real value.
                         try { $bi.Get() } catch {}
                         $cmdSupport = [bool]$bi.EnableLabShell
+                        # Ownership is the whole point of building the image locally: a package
+                        # this site does not own cannot be distributed from here.
+                        $results.Details.Add("DIAG: Boot image '$biName' ($($bi.PackageID)) SourceSite=$($bi.SourceSite) SourceVersion=$($bi.SourceVersion) StoredPkgVersion=$($bi.StoredPkgVersion) (site-owned=$("$($bi.SourceSite)" -eq $sc))")
                         if (-not $cmdSupport) {
                             $results.Details.Add("WARN: Boot image '$biName' does not have command support enabled")
                         }
@@ -11346,27 +11398,50 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
         # 7. Task sequences (Primary only) — MEMLABS-* should exist
         if ($isPrimary) {
             try {
+                # Task sequences are global objects, so an unfiltered read at a child Primary
+                # also returns another site's -- which would let this site's missing set pass.
                 $tsList = @(Get-WmiObject -Namespace $ns -Class SMS_TaskSequencePackage `
-                    -Filter "Name LIKE 'MEMLABS-%'" -ErrorAction Stop)
-                if ($tsList.Count -ge 1) {
-                    $results.Details.Add("OK: $($tsList.Count) MEMLABS task sequence(s) found")
+                    -Filter "Name LIKE 'MEMLABS-%' AND PackageID LIKE '$sc%'" -ErrorAction Stop)
+                # perfloading creates exactly these seven. Counting >= 1 as OK let a partial
+                # set (e.g. the two upgrade TSes created before a boot-image failure aborted
+                # the rest) report success.
+                $expectedTsNames = @(
+                    'MEMLABS-w11-In-Place Upgrade Task Sequence',
+                    'MEMLABS-w10-In-Place Upgrade Task Sequence',
+                    'MEMLABS-w11-Build and capture',
+                    'MEMLABS-w10-Build and capture',
+                    'MEMLABS-w11-Install OS image',
+                    'MEMLABS-w10-Install OS image',
+                    'MEMLABS-Custom TS Example'
+                )
+                $tsPresentNames = @($tsList | ForEach-Object { "$($_.Name)" })
+                $missingTsNames = @($expectedTsNames | Where-Object { $tsPresentNames -notcontains $_ })
+                if ($missingTsNames.Count -eq 0) {
+                    $results.Details.Add("OK: all $($expectedTsNames.Count) MEMLABS task sequence(s) found")
                 }
                 else {
                     # TS creation in Phase 8 (perfloading) is gated on OSD media under
-                    # <CM install drive>\OSD -- probe it here so the WARN names the cause:
+                    # <CM install drive>\OSD -- probe it here so the message names the cause:
                     # media absent -> Phase 1 copy gap; media present -> TS creation
-                    # itself failed (e.g. a transient SQL deadlock).
+                    # itself failed (e.g. a transient SQL deadlock or an unresolved boot image).
                     $osdHint = 'OSD media state unknown'
                     try {
                         $osdDrive = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' | Split-Path -Qualifier
                         $osdFolder = "$osdDrive\OSD"
                         $w11 = Test-Path "$osdFolder\Windows 11 24h2\sources\install.wim"
                         $w10 = Test-Path "$osdFolder\Windows 10 22h2\sources\install.wim"
-                        if ($w11 -and $w10) { $osdHint = "OSD media IS present under '$osdFolder' -- TS creation itself failed in Phase 8 (check the perfloading task-sequence logs, e.g. a transient SQL deadlock)" }
+                        if ($w11 -and $w10) { $osdHint = "OSD media IS present under '$osdFolder' -- TS creation itself failed in Phase 8 (check the perfloading task-sequence and boot-image lines, e.g. a transient SQL deadlock or 'no boot image resolved')" }
                         else { $osdHint = "OSD media MISSING under '$osdFolder' (win11 install.wim=$w11; win10 install.wim=$w10) -- Phase 8 skipped TS creation; see the Phase 8 '[perfloading] OSD media missing' + 'OSD DIAG' lines for why the Phase 1 copy is gone" }
                     }
                     catch {}
-                    $results.Details.Add("WARN: No MEMLABS-* task sequences found. $osdHint.")
+                    $tsMessage = "$($tsPresentNames.Count) of $($expectedTsNames.Count) MEMLABS task sequences exist at site ${sc}; missing: $($missingTsNames -join ', '). $osdHint."
+                    if ($expectOsd) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: $tsMessage")
+                    }
+                    else {
+                        $results.Details.Add("WARN: $tsMessage")
+                    }
                 }
             }
             catch {
@@ -12149,7 +12224,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
 
     $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient) `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
