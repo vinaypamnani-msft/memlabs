@@ -386,20 +386,26 @@ Write-DscStatus "$Tag Starting perfloading"
             # members are silently skipped. Field repro: the manual recovery that
             # finally got Office onto MOCHI was a second Invoke-CMCollectionUpdate
             # followed by client policy reset -- nothing more.
+            $liveMembers = -1
             try {
                 $tgtCol = Get-CMDeviceCollection -Name $CollectionName -ErrorAction SilentlyContinue
                 if ($tgtCol) {
                     Invoke-CMCollectionUpdate -CollectionId $tgtCol.CollectionID -ErrorAction SilentlyContinue
-                    $deadline = (Get-Date).AddSeconds(90)
-                    $live = 0
+                    $deadline = (Get-Date).AddSeconds(300)
+                    $liveMembers = 0
                     do {
                         Start-Sleep -Seconds 5
-                        $live = @(Get-CMCollectionMember -CollectionId $tgtCol.CollectionID -ErrorAction SilentlyContinue).Count
-                    } while ($live -lt 1 -and (Get-Date) -lt $deadline)
-                    Write-DscStatus "$Tag Pre-Put '$CollectionName' live membership: $live"
+                        $liveMembers = @(Get-CMCollectionMember -CollectionId $tgtCol.CollectionID -ErrorAction SilentlyContinue).Count
+                    } while ($liveMembers -lt 1 -and (Get-Date) -lt $deadline)
+                    Write-DscStatus "$Tag Pre-Put '$CollectionName' live membership: $liveMembers"
                 }
             }
             catch { }
+
+            if ($liveMembers -eq 0) {
+                Write-DscStatus "$Tag WARNING: '$CollectionName' still has 0 live members after 5 minutes, so re-authoring the '$AppName' deployment would project it to nobody. Skipped the Put -- Office policy will NOT reach these clients until this runs against a populated collection (re-run Phase 8, or Invoke-CMCollectionUpdate then re-create the deployment). Phase 11 reports 'Office deployment policy not visible' until then."
+                return
+            }
 
             $escaped = $assignmentName.Replace("'", "''")
             $ass = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_ApplicationAssignment `

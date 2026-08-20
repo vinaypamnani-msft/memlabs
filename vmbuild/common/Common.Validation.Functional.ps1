@@ -9100,12 +9100,21 @@ function Test-DomainMemberFunctionality {
                         # race (targets added to the collection while still non-clients, so
                         # policypv never projected the assignment to them).
                         try {
-                            $ds = @(Get-WmiObject -Namespace $ns -Class SMS_DeploymentSummary -Filter "CollectionID='$cid' AND SoftwareName LIKE 'MEMLABS-Microsoft365Apps%'" -ErrorAction Stop) | Select-Object -First 1
-                            if ($ds) {
+                            $dsRows = @(Get-WmiObject -Namespace $ns -Class SMS_DeploymentSummary -Filter "CollectionID='$cid' AND SoftwareName LIKE 'MEMLABS-Microsoft365Apps%'" -ErrorAction Stop)
+                            $ds = if ($dsRows.Count -gt 0) { $dsRows[0] } else { $null }
+                            # The SMS provider hands back these counters only on a full
+                            # instance fetch; a lazy row renders every one of them blank.
+                            if ($ds) { try { $dsFull = [wmi]$ds.__PATH; $dsFull.Get(); $ds = $dsFull } catch { } }
+                            $dsCounters = @('NumberTargeted', 'NumberSuccess', 'NumberInProgress', 'NumberErrors', 'NumberUnknown')
+                            $dsUnset = @($dsCounters | Where-Object { -not $ds -or $null -eq $ds.$_ -or "$($ds.$_)" -eq '' })
+                            if ($ds -and $dsUnset.Count -eq 0) {
                                 $d.Add("DIAG: deployment summary Targeted=$($ds.NumberTargeted) Success=$($ds.NumberSuccess) InProgress=$($ds.NumberInProgress) Errors=$($ds.NumberErrors) Unknown=$($ds.NumberUnknown)")
                                 if ([int]$ds.NumberTargeted -gt 0 -and [int]$ds.NumberSuccess -eq 0 -and [int]$ds.NumberInProgress -eq 0 -and [int]$ds.NumberErrors -eq 0) {
                                     $d.Add("DIAG: >>> ROOT CAUSE: all $($ds.NumberTargeted) targeted client(s) are Unknown -- the MP serves 'No new assignments' to the client's policy request. This is the app-policy projection race: the target(s) were added to the collection while still NON-clients, so policypv never projected the assignment. Remedy: FULL collection eval (Invoke-CMCollectionUpdate) + re-create the deployment; durable fix is the Client=1 membership gate in perfloading.")
                                 }
+                            }
+                            elseif ($ds) {
+                                $d.Add("DIAG: SMS_DeploymentSummary row exists for $cid but $($dsUnset -join ', ') came back empty, so the projection state was NOT MEASURED -- do not read these as zero. The deployment summarizer has most likely not run since the deployment was created.")
                             }
                             else {
                                 $d.Add("DIAG: no SMS_DeploymentSummary row for collection $cid / MEMLABS-Microsoft365Apps (deployment not summarized yet)")
