@@ -118,22 +118,82 @@ function Invoke-GitMaintenance {
         Write-LogMessage "git gc threw: $_" -Level 'WARNING'
     }
 
-    # Exclude .git from Windows Defender real-time scanning.
-    # Defender holds file handles during scan, contributing to pack-file
-    # locking when git rewrites packs.
-    $repoGitDir = Join-Path $repoRoot '.git'
-    if (Test-Path $repoGitDir) {
+    # Keep Defender away from the host's high-I/O memlabs paths. In addition to
+    # pack-file locking under .git, scanning VM disks, base images and ISO build
+    # trees adds latency to every guest I/O or large host-side copy.
+    $defenderPaths = New-Object System.Collections.Generic.List[string]
+    function Add-DefenderPathCandidate {
+        param([string]$Path)
+
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
         try {
-            $prefs = Get-MpPreference -ErrorAction Stop
-            if ($prefs.ExclusionPath -notcontains $repoGitDir) {
-                Add-MpPreference -ExclusionPath $repoGitDir -ErrorAction Stop
-                Write-LogMessage "Added Defender exclusion for $repoGitDir"
-            }
+            $fullPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Path))
+            $pathRoot = [System.IO.Path]::GetPathRoot($fullPath)
+            if ([string]::IsNullOrWhiteSpace($pathRoot) -or -not [System.IO.Directory]::Exists($pathRoot)) { return }
+            if ($fullPath.Length -gt $pathRoot.Length) { $fullPath = $fullPath.TrimEnd('\') }
+            $defenderPaths.Add($fullPath)
         }
         catch {
-            # Non-fatal: Defender may not be present or we may lack permissions
-            Write-LogMessage "Could not configure Defender exclusion: $_" -Level 'WARNING'
+            Write-LogMessage "Could not resolve Defender exclusion candidate '$Path': $_" -Level 'WARNING'
         }
+    }
+
+    foreach ($path in @(
+            (Join-Path $repoRoot '.git')
+            (Join-Path $scriptPath 'azureFiles')
+            (Join-Path $scriptPath 'baseimagestaging\vhdx-base')
+            (Join-Path $scriptPath 'baseimagestaging\vm')
+            (Join-Path $scriptPath 'baseimagestaging\wim')
+        )) {
+        Add-DefenderPathCandidate -Path $path
+    }
+
+    # Match Get-MemlabsVmStorageRoot's non-interactive resolution order without
+    # loading Common.ps1 (this maintenance script is intentionally standalone).
+    $vmStorageRoot = $env:MEMLABS_VM_STORAGE_ROOT
+    if ([string]::IsNullOrWhiteSpace($vmStorageRoot)) {
+        $dataRoot = $env:MEMLABS_DATA_ROOT
+        if ([string]::IsNullOrWhiteSpace($dataRoot)) {
+            $programData = if ([string]::IsNullOrWhiteSpace($env:ProgramData)) { 'C:\ProgramData' } else { $env:ProgramData }
+            $dataRoot = Join-Path $programData 'memlabs'
+        }
+        $hostSettingsPath = Join-Path $dataRoot 'host-settings.json'
+        if (Test-Path -LiteralPath $hostSettingsPath) {
+            try {
+                $hostSettings = Get-Content -LiteralPath $hostSettingsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                if ($hostSettings.PSObject.Properties['vmStorageRoot']) {
+                    $savedVmStorageRoot = [string]$hostSettings.vmStorageRoot
+                    $savedPathRoot = [System.IO.Path]::GetPathRoot($savedVmStorageRoot)
+                    if ($savedPathRoot -and [System.IO.Directory]::Exists($savedPathRoot)) {
+                        $vmStorageRoot = $savedVmStorageRoot
+                    }
+                }
+            }
+            catch {
+                Write-LogMessage "Could not read VM storage root from $hostSettingsPath`: $_" -Level 'WARNING'
+            }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($vmStorageRoot) -and [System.IO.Directory]::Exists('E:\')) {
+        $vmStorageRoot = 'E:\VirtualMachines'
+    }
+    Add-DefenderPathCandidate -Path $vmStorageRoot
+
+    try {
+        $prefs = Get-MpPreference -ErrorAction Stop
+        $existingPaths = @($prefs.ExclusionPath | Where-Object { $_ })
+        $newPaths = @($defenderPaths | Sort-Object -Unique | Where-Object { $existingPaths -notcontains $_ })
+        if ($newPaths.Count -gt 0) {
+            Add-MpPreference -ExclusionPath $newPaths -ErrorAction Stop
+            Write-LogMessage "Added Defender exclusions: $($newPaths -join '; ')"
+        }
+        else {
+            Write-LogMessage 'Defender exclusions already current.'
+        }
+    }
+    catch {
+        # Non-fatal: Defender may not be present or we may lack permissions
+        Write-LogMessage "Could not configure Defender exclusions: $_" -Level 'WARNING'
     }
 
     Write-LogMessage 'Git maintenance completed.'
