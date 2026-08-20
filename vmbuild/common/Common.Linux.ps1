@@ -264,6 +264,18 @@ public class MemlabsIsoFile {
             $fsi.Root.AddTree($SourceDir, $false)
             $result = $fsi.CreateResultImage()
             [MemlabsIsoFile]::Create($OutputIsoPath, $result.ImageStream, $result.BlockSize, $result.TotalBlocks)
+
+            # MemlabsIsoFile.Create ignores IStream.Read's HRESULT, so a short read writes a
+            # truncated image and returns normally. Compare SHORTER-than-claimed only: IMAPI
+            # may pad, and failing every build on a padding assumption is worse than the bug.
+            # Delete before throwing -- the cloud-init callers write straight to the final
+            # path, so a surviving stub would be reused as a cached artifact.
+            $expectedBytes = [int64]$result.BlockSize * [int64]$result.TotalBlocks
+            $writtenBytes = (Get-Item -LiteralPath $OutputIsoPath -ErrorAction Stop).Length
+            if ($writtenBytes -lt $expectedBytes) {
+                Remove-Item -LiteralPath $OutputIsoPath -Force -ErrorAction SilentlyContinue
+                throw "ISO write was short for '$OutputIsoPath': wrote $writtenBytes bytes but IMAPI reported $($result.TotalBlocks) blocks x $($result.BlockSize) = $expectedBytes. Truncated image deleted rather than published."
+            }
         }
         finally {
             [System.Runtime.InteropServices.Marshal]::ReleaseComObject($fsi) | Out-Null
