@@ -13313,6 +13313,9 @@ function Test-SQLAOPostPhase5 {
     .DESCRIPTION
         Catches SQLAO failures early (cluster, AG, listener, shares) so
         the build can stop before Phase 8 rather than wasting hours.
+        AG health is scoped to replica connectivity and TESTDB, the database
+        owned by Phase 5; later-phase database state is reported but cannot
+        make an otherwise idempotent Phase 5 rerun fail.
         Runs from the host via Invoke-VmCommand against the primary
         SQLAO node only. Returns $true if all checks pass.
     #>
@@ -13419,9 +13422,11 @@ function Test-SQLAOPostPhase5 {
                     }
                 }
 
-                # 3. AG replica health (bounded settle period, no remediation)
-                $results.Details.Add("CMD: AG replica health query (up to 5 attempts, 20s apart)")
+                # 3. Phase 5-owned AG health (bounded settle period, no remediation)
+                $results.Details.Add("CMD: AG replica connectivity + TESTDB health query (up to 5 attempts, 20s apart)")
                 try {
+                    $phase5DatabaseName = 'TESTDB'
+                    $escapedAgName = $agName.Replace("'", "''")
                     $healthQuery = @"
 SELECT ag.name AS GroupName,
        rs.role_desc AS Role,
@@ -13431,9 +13436,25 @@ SELECT ag.name AS GroupName,
 FROM sys.dm_hadr_availability_replica_states rs
 JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
 JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
+WHERE ag.name = N'$escapedAgName'
+"@
+                    $dbStateQuery = @"
+SELECT ar.replica_server_name AS Replica,
+       adb.database_name,
+       drs.synchronization_state_desc,
+       drs.synchronization_health_desc,
+       drs.is_suspended,
+       drs.suspend_reason_desc
+FROM sys.dm_hadr_database_replica_states drs
+JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
+JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
+JOIN sys.availability_replicas ar ON drs.replica_id = ar.replica_id
+WHERE ag.name = N'$escapedAgName'
+ORDER BY ar.replica_server_name, adb.database_name
 "@
                     $maxHealthAttempts = 5
                     $ag = @()
+                    $dbStates = @()
                     $healthy = $false
                     for ($attempt = 1; $attempt -le $maxHealthAttempts; $attempt++) {
                         $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
@@ -13448,58 +13469,75 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                             break
                         }
 
-                        $unhealthy = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
-                        if ($unhealthy.Count -eq 0) {
+                        $dbStates = @(Invoke-Sqlcmd -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                        $disconnected = @($ag | Where-Object { $_.ConnState -ne 'CONNECTED' })
+                        $testDbStates = @($dbStates | Where-Object { $_.database_name -eq $phase5DatabaseName })
+                        $testDbReplicas = @($testDbStates | ForEach-Object { "$($_.Replica)" })
+                        $missingTestDb = @($ag | Where-Object { $testDbReplicas -notcontains "$($_.Replica)" })
+                        $unhealthyTestDb = @($testDbStates | Where-Object {
+                                $_.synchronization_state_desc -ne 'SYNCHRONIZED' -or
+                                $_.synchronization_health_desc -ne 'HEALTHY' -or
+                                $_.is_suspended
+                            })
+                        $phase5Healthy = $disconnected.Count -eq 0 -and $missingTestDb.Count -eq 0 -and $unhealthyTestDb.Count -eq 0
+
+                        if ($phase5Healthy) {
                             $healthy = $true
                             if ($attempt -gt 1) {
-                                $results.Details.Add("OK: AG replica health settled on attempt $attempt/$maxHealthAttempts")
+                                $results.Details.Add("OK: Phase 5-owned AG health settled on attempt $attempt/$maxHealthAttempts")
                             }
                             foreach ($r in $ag) {
-                                $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
+                                $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) is $($r.ConnState) (aggregate health=$($r.Health); TESTDB health checked separately)")
+                            }
+                            foreach ($dbState in $testDbStates) {
+                                $results.Details.Add("OK: Phase 5 DB '$($dbState.database_name)' on '$($dbState.Replica)' — sync=$($dbState.synchronization_state_desc), health=$($dbState.synchronization_health_desc)")
+                            }
+                            $laterPhaseIssues = @($dbStates | Where-Object {
+                                    $_.database_name -ne $phase5DatabaseName -and
+                                    ($_.synchronization_state_desc -ne 'SYNCHRONIZED' -or
+                                        $_.synchronization_health_desc -ne 'HEALTHY' -or
+                                        $_.is_suspended)
+                                })
+                            foreach ($dbState in $laterPhaseIssues) {
+                                $suspendInfo = if ($dbState.is_suspended) { " (SUSPENDED: $($dbState.suspend_reason_desc))" } else { '' }
+                                $results.Details.Add("WARN: Later-phase DB '$($dbState.database_name)' on '$($dbState.Replica)' is sync=$($dbState.synchronization_state_desc), health=$($dbState.synchronization_health_desc)$suspendInfo; it does not belong to Phase 5 and does not invalidate this rerun. Its owning phase must recover it before that phase can pass.")
                             }
                             break
                         }
 
                         if ($attempt -lt $maxHealthAttempts) {
-                            $healthSummary = (@($unhealthy | ForEach-Object { "$($_.Replica)=$($_.ConnState)/$($_.Health)" }) -join ', ')
-                            $results.Details.Add("WARN: AG health attempt $attempt/$maxHealthAttempts not healthy ($healthSummary); waiting 20s")
+                            $healthSummary = @(
+                                @($disconnected | ForEach-Object { "$($_.Replica)=conn:$($_.ConnState)" })
+                                @($missingTestDb | ForEach-Object { "$($_.Replica)=${phase5DatabaseName}:MISSING" })
+                                @($unhealthyTestDb | ForEach-Object { "$($_.Replica)=${phase5DatabaseName}:$($_.synchronization_state_desc)/$($_.synchronization_health_desc)" })
+                            ) -join ', '
+                            $results.Details.Add("WARN: Phase 5-owned AG health attempt $attempt/$maxHealthAttempts not ready ($healthSummary); waiting 20s")
                             Start-Sleep -Seconds 20
                         }
                         else {
                             $results.Passed = $false
                             foreach ($r in $ag) {
-                                $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
-                                $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
+                                $level = if ($r.ConnState -ne 'CONNECTED') { 'FAIL' } else { 'OK' }
+                                $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), aggregate health=$($r.Health)")
+                            }
+                            foreach ($r in $missingTestDb) {
+                                $results.Details.Add("FAIL: Phase 5 DB '$phase5DatabaseName' has no state row for replica '$($r.Replica)'")
+                            }
+                            foreach ($dbState in $testDbStates) {
+                                $suspendInfo = if ($dbState.is_suspended) { " (SUSPENDED: $($dbState.suspend_reason_desc))" } else { '' }
+                                $level = if ($dbState.synchronization_state_desc -ne 'SYNCHRONIZED' -or $dbState.synchronization_health_desc -ne 'HEALTHY' -or $dbState.is_suspended) { 'FAIL' } else { 'OK' }
+                                $results.Details.Add("${level}: Phase 5 DB '$($dbState.database_name)' on '$($dbState.Replica)' — sync=$($dbState.synchronization_state_desc), health=$($dbState.synchronization_health_desc)$suspendInfo")
                             }
                         }
                     }
 
                     if (-not $healthy) {
-                        $dbStateQuery = @"
-SELECT ar.replica_server_name AS Replica,
-       adb.database_name,
-       drs.synchronization_state_desc,
-       drs.synchronization_health_desc,
-       drs.is_suspended,
-       drs.suspend_reason_desc
-FROM sys.dm_hadr_database_replica_states drs
-JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
-JOIN sys.availability_replicas ar ON drs.replica_id = ar.replica_id
-ORDER BY ar.replica_server_name, adb.database_name
-"@
-                        try {
-                            $dbStates = @(Invoke-Sqlcmd -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
-                            if ($dbStates.Count -eq 0) {
-                                $results.Details.Add("WARN: Database-state query returned no rows; replica-level failure remains unexplained")
-                            }
-                            foreach ($dbState in $dbStates) {
-                                $suspendInfo = if ($dbState.is_suspended) { " (SUSPENDED: $($dbState.suspend_reason_desc))" } else { '' }
-                                $level = if ($dbState.synchronization_health_desc -ne 'HEALTHY' -or $dbState.is_suspended) { 'FAIL' } else { 'OK' }
-                                $results.Details.Add("${level}: DB '$($dbState.database_name)' on '$($dbState.Replica)' — sync=$($dbState.synchronization_state_desc), health=$($dbState.synchronization_health_desc)$suspendInfo")
-                            }
+                        if ($dbStates.Count -eq 0) {
+                            $results.Details.Add("WARN: Database-state query returned no rows; Phase 5-owned database health was not measured")
                         }
-                        catch {
-                            $results.Details.Add("WARN: Database-state diagnostics failed: $($_.Exception.Message)")
+                        foreach ($dbState in @($dbStates | Where-Object { $_.database_name -ne $phase5DatabaseName })) {
+                            $suspendInfo = if ($dbState.is_suspended) { " (SUSPENDED: $($dbState.suspend_reason_desc))" } else { '' }
+                            $results.Details.Add("INFO: Non-Phase-5 DB '$($dbState.database_name)' on '$($dbState.Replica)' — sync=$($dbState.synchronization_state_desc), health=$($dbState.synchronization_health_desc)$suspendInfo")
                         }
                     }
                 }
