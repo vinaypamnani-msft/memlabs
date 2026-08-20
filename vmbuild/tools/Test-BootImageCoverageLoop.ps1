@@ -97,8 +97,15 @@ $stateBlock = {
         $boot = Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -Filter "PackageID='$pkgId'" -ErrorAction SilentlyContinue | Select-Object -First 1
     }
     else {
+        # Phase 8 creates "MEMLABS <site> Boot Image (x64)" and owns it. Labs built before
+        # that change still pin the CAS-owned default, so fall back rather than reporting
+        # a name miss as "no boot image".
         $boot = @(Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -eq 'Boot image (x64)' }) | Select-Object -First 1
+                Where-Object { $_.Name -eq "MEMLABS $siteCode Boot Image (x64)" }) | Select-Object -First 1
+        if (-not $boot) {
+            $boot = @(Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -eq 'Boot image (x64)' }) | Select-Object -First 1
+        }
     }
     if (-not $boot) { $out.Add('__ABSENT__ no x64 boot image found'); return $out.ToArray() }
 
@@ -138,7 +145,10 @@ $resetBlock = {
     $ns = "root\SMS\site_$siteCode"
     $boot = $null
     if ($pkgId) { $boot = Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -Filter "PackageID='$pkgId'" -ErrorAction SilentlyContinue | Select-Object -First 1 }
-    else { $boot = @(Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Boot image (x64)' }) | Select-Object -First 1 }
+    else {
+        $boot = @(Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "MEMLABS $siteCode Boot Image (x64)" }) | Select-Object -First 1
+        if (-not $boot) { $boot = @(Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Boot image (x64)' }) | Select-Object -First 1 }
+    }
     if (-not $boot) { $out.Add('__ABSENT__ no x64 boot image found'); return $out.ToArray() }
     $pkg = "$($boot.PackageID)"
 

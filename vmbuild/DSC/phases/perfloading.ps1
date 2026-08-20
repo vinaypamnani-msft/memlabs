@@ -990,42 +990,129 @@ Write-DscStatus "$Tag Starting perfloading"
         }
     }
 
-    # Get all boot images. On a child Primary in a hierarchy, boot images
-    # are replicated from the CAS and may not be available immediately.
-    $BootImages = @(Get-CMBootImage)
-    if ($BootImages.Count -eq 0 -and $ThisVM.parentSiteCode) {
-        Write-DscStatus "$Tag No boot images found yet (child Primary — waiting for CAS replication)"
-        for ($biWait = 1; $biWait -le 12; $biWait++) {
-            Start-Sleep -Seconds 30
-            $BootImages = @(Get-CMBootImage)
-            if ($BootImages.Count -gt 0) {
-                Write-DscStatus "$Tag Boot images appeared after ${biWait} wait(s)"
-                break
+    #Tim is copying the iso directly at phase 1
+    Write-DscStatus "$Tag ISO files are already copied from phase 1"
+
+    $DriveLetter = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" | Select-Object -ExpandProperty "Installation Directory" | Split-Path -Qualifier
+
+    Write-DscStatus "$Tag SCCM is installed on the drive -  $DriveLetter"
+
+    # Define the folder path and share name
+    $folderPath = "$DriveLetter\OSD"
+    $shareName = "OSD"
+
+    Write-DscStatus "$Tag sharing the OSD folder as - $folderPath"
+
+    # Create the folder if it doesn't exist
+    if (-not (Test-Path -Path $folderPath)) {
+        New-Item -ItemType Directory -Path $folderPath
+        Write-DscStatus "$Tag OSD folder does not exist and creating one"
+    }
+
+    # Create the share with read access for "Everyone"
+    if (-not (Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue)) {
+        New-SmbShare -Name $shareName -Path $folderPath -FullAccess @("Administrators", "Everyone")
+    }
+
+    Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
+
+    # --- Boot image: created here, owned by THIS site ---------------------------
+    # A CAS-owned boot image cannot be distributed from a child. Start-CMContentDistribution
+    # run at the child writes the destination row only to PkgServers_L, which is not a
+    # replicated article, so the owning CAS never learns the DP exists, never sends content,
+    # and never advances SourceVersion (measured 2026-08-20 on burnin.sandwich.lab and
+    # OSDTest-A -- 45 minutes burned each time, from opposite configurations). Sourcing from
+    # the local ADK WinPE makes owner == this site, exactly like the OS image and OS upgrade
+    # packages below, which have never shown the symptom. Standalone primaries take the same
+    # path on purpose: a branch that only runs in hierarchies only gets tested in hierarchies.
+    $memlabsBootImageName = "MEMLABS $SiteCode Boot Image (x64)"
+    $biName = $memlabsBootImageName
+    $packageId = ''
+    $commandSupportChanged = $false
+    $commandSupportPreviousSourceVersion = $null
+
+    $existingMemlabsTaskSequences = @(Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" })
+    $BootImage = @(Get-CMBootImage | Where-Object { $_.Name -eq $memlabsBootImageName }) | Select-Object -First 1
+
+    if ($existingMemlabsTaskSequences.Count -gt 0 -and -not $BootImage) {
+        # Legacy lab. New-CMTaskSequence below is existence-guarded, so these task sequences
+        # keep referencing the boot image they were built with -- a new image nothing points
+        # at would be ~700MB of waste plus another object for Phase 11 to flag. Rebuild the
+        # lab rather than converting it: Set-CMTaskSequence -BootImagePackageId across five
+        # TSes fails in ways that leave a TS unusable.
+        $legacyBootImageIds = @($existingMemlabsTaskSequences | ForEach-Object { "$($_.BootImageID)" } | Where-Object { $_ } | Select-Object -Unique)
+        Write-DscStatus "$Tag $($existingMemlabsTaskSequences.Count) MEMLABS task sequence(s) already exist and pin boot image(s) $(if ($legacyBootImageIds.Count) { $legacyBootImageIds -join ', ' } else { '<none readable>' }), and '$memlabsBootImageName' does not exist. This lab predates site-owned boot images -- leaving its boot image alone. Rebuild the lab to get one this site owns." -Warning
+    }
+    elseif ($BootImage) {
+        $packageId = "$($BootImage.PackageID)"
+        Write-DscStatus "$Tag Boot image '$biName' ($packageId) already exists at this site -- skipping creation"
+    }
+    else {
+        # InstallADK runs in Phase 3/8/9 so the ADK FEATURE is guaranteed, but TemplateHelpDSC
+        # tests the 'Windows Preinstallation Environment' FOLDER, not this file. Directory
+        # existence is not file existence, so a miss here is a real site-install gap.
+        $adkWinPeWim = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment\amd64\en-us\winpe.wim'
+        $bootStageDir = Join-Path $folderPath 'boot\x64'
+        $stagedBootWim = Join-Path $bootStageDir 'boot.wim'
+        $bootStageError = $null
+        if (-not (Test-Path -LiteralPath $adkWinPeWim)) {
+            $bootStageError = "the ADK WinPE image is absent at '$adkWinPeWim' -- the ADK feature installed without its WinPE payload"
+        }
+        else {
+            try {
+                if (-not (Test-Path -LiteralPath $bootStageDir)) { [void](New-Item -ItemType Directory -Path $bootStageDir -Force -ErrorAction Stop) }
+                Copy-Item -LiteralPath $adkWinPeWim -Destination $stagedBootWim -Force -ErrorAction Stop
+                Write-DscStatus "$Tag Staged the ADK WinPE image to '$stagedBootWim' ($([math]::Round((Get-Item -LiteralPath $stagedBootWim).Length / 1MB))MB)"
+            }
+            catch { $bootStageError = "could not stage '$adkWinPeWim' to '$stagedBootWim': $($_.Exception.Message)" }
+        }
+        if ($bootStageError) {
+            Write-DscStatus "$Tag WARNING: no boot image was created because $bootStageError. No task sequence will have a boot image and Phase 11 validation FAILS on it." -Warning
+        }
+        else {
+            try {
+                $newBootImage = New-CMBootImage -Path "\\$ThisMachineName\$shareName\boot\x64\boot.wim" -Index 1 -Name $memlabsBootImageName -ErrorAction Stop
+                $packageId = "$($newBootImage.PackageID)"
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: New-CMBootImage rejected the staged ADK WinPE image: $($_.Exception.Message). No boot image was created and Phase 11 validation FAILS on it." -Warning
+            }
+            if ($packageId) {
+                # The cmdlet's own return object is not evidence. Re-read from WMI and require
+                # SourceSite to be this site -- that is the entire premise of the design.
+                $createdBootImage = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $createdBootImage) {
+                    Write-DscStatus "$Tag WARNING: New-CMBootImage returned $packageId but SMS_BootImagePackage has no row for it -- treating the boot image as not created." -Warning
+                    $packageId = ''
+                }
+                elseif ("$($createdBootImage.SourceSite)" -ne $SiteCode) {
+                    Write-DscStatus "$Tag WARNING: boot image $packageId reports SourceSite='$($createdBootImage.SourceSite)', not this site '$SiteCode'. Distributing it from here would hit the same PkgServers_L dead end, so it is not usable." -Warning
+                    $packageId = ''
+                }
+                else {
+                    Write-DscStatus "$Tag Created boot image '$biName' ($packageId) from the local ADK WinPE: SourceSite=$SiteCode SourceVersion=$($createdBootImage.SourceVersion) PkgSourcePath='$($createdBootImage.PkgSourcePath)'"
+                    # ConfigMgr copies the template to boot.<PackageID>.wim beside it, so the
+                    # staged file is now a duplicate ~336MB the package does not read.
+                    try { Remove-Item -LiteralPath $stagedBootWim -Force -ErrorAction Stop; Write-DscStatus "$Tag Removed the staged template '$stagedBootWim'; the package keeps its own copy at '$($createdBootImage.PkgSourcePath)'" }
+                    catch { Write-DscStatus "$Tag Could not remove the staged template '$stagedBootWim': $($_.Exception.Message). Harmless apart from ~336MB of disk." }
+                    $BootImage = Get-CMBootImage -Id $packageId
+                }
             }
         }
     }
-    if ($BootImages.Count -eq 0) {
-        Write-DscStatus "$Tag WARNING: No boot images found — skipping boot image configuration"
+
+    if (-not $packageId) {
+        Write-DscStatus "$Tag No site-owned boot image is available -- skipping command support, distribution and the coverage wait."
     }
     else {
-        Write-DscStatus "$Tag Found $($BootImages.Count) boot image(s): $(($BootImages | ForEach-Object { $_.Name }) -join ', ')"
-    }
-
-    # Loop through each boot image: enable command support, then distribute
-    foreach ($BootImage in $BootImages) {
-        $biName = $BootImage.Name
-        $packageId = $BootImage.PackageID
-        $commandSupportChanged = $false
-        $commandSupportPreviousSourceVersion = $null
 
         # Enable Command Support (F8 debug shell in WinPE)
         if ([bool]$BootImage.EnableLabShell) {
             Write-DscStatus "$Tag Command support already enabled for boot image: $biName ($packageId) -- skipping provider write"
         }
         else {
-            # A boot image the site created minutes ago can still be rejected as
-            # "legacy (WinPE 3.1 or earlier)" -- the same asynchrony the wait above
-            # covers for the image APPEARING, one step later. Retry on the same
+            # A boot image the site created seconds ago can still be rejected as
+            # "legacy (WinPE 3.1 or earlier)" while the provider settles. Retry on a
             # 12x30s budget instead of reading one answer as final.
             $commandSupportError = $null
             for ($csTry = 1; $csTry -le 12; $csTry++) {
@@ -1056,41 +1143,15 @@ Write-DscStatus "$Tag Starting perfloading"
             }
         }
 
-        # memlabs OSDClients are all x64 Gen2 VMs -- there is no arm64 PXE target,
-        # so don't waste DP space distributing the arm64 boot image (command support
-        # was still enabled above so it's usable if an arm64 client is ever added).
-        if ($biName -match 'arm64') {
-            Write-DscStatus "$Tag Skipping distribution of arm64 boot image '$biName' ($packageId) -- memlabs OSDClients are x64 (no arm64 PXE target)"
-            continue
-        }
-
-        # Distribute the boot image to the OSD DP group (the DP(s) that share an
-        # OSDClient's subnet). Only SKIP when the content is already on EVERY OSD
-        # DP -- verified per-DP, not "any row exists". The old pre-check treated
-        # ANY SMS_DistributionPoint row for this PackageID as "done", but these
-        # boot images are often CAS-owned (e.g. BUN000xx under a child Primary),
-        # so that table can carry a hierarchy-replicated / stale assignment for a
-        # DIFFERENT (CAS or removed) DP. That false positive made perfloading skip
-        # the real distribution, leaving the OSD DP PXE-enabled but with NO boot-
-        # image content -- exactly what Phase 11 later flags as "not distributed
-        # to any DP". Match the actual OSD DP server(s) so we distribute whenever
-        # the content is missing on one of them.
+        # Distribute to the OSD DP group (the DP(s) that share an OSDClient's subnet).
+        # Only SKIP when the content is already on EVERY OSD DP -- verified per-DP, not
+        # "any row exists", because a single stale row for a removed DP used to read as
+        # "done" and leave the OSD DP PXE-enabled with no boot-image content.
         if (-not $hasOsdTargets) {
             Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing boot image '$biName' ($packageId) (saves space); it will distribute + PXE-enable when an OSDClient is added on a DP subnet"
         }
         else {
             $osdDpFqdns = @($osdDps | ForEach-Object { "$($_.Fqdn)" } | Where-Object { $_ })
-            $bootParentSite = "$($ThisVM.parentSiteCode)"
-            $bootParentFqdn = if ($ThisVM.thisParams) { "$($ThisVM.thisParams.ParentSiteServer)" } else { '' }
-            if ($bootParentSite -and -not $bootParentFqdn) {
-                try {
-                    $bootParentSiteInfo = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Site -Filter "SiteCode='$bootParentSite'" -ErrorAction Stop | Select-Object -First 1
-                    if ($bootParentSiteInfo) { $bootParentFqdn = "$($bootParentSiteInfo.ServerName)" }
-                }
-                catch {
-                    Write-DscStatus "$Tag Boot image coverage: could not resolve parent site server for $bootParentSite from SMS_Site: $($_.Exception.Message)"
-                }
-            }
             $distributedFqdns = @()
             $dpTargets = @()
             try {
@@ -1107,12 +1168,6 @@ Write-DscStatus "$Tag Starting perfloading"
                 Write-DscStatus "$Tag Boot image already on all OSD DP(s) ($($osdDpFqdns -join ', ')): $biName ($packageId) -- skipping"
             }
             else {
-                # Distribution stays at THIS site on purpose. Creating the destination at the
-                # owning CAS instead leaves Update-CMDistributionPoint below with no local
-                # targeting row to refresh, so SourceVersion never advances and the coverage
-                # gate fails outright (burnin.sandwich.lab 2026-08-20, 05:45 -> 06:31). The
-                # PkgStatus_G split that owner-first was meant to prevent is handled by the
-                # metadata recovery in the coverage wait, which is proven to clear it.
                 $bootDistError = $null
                 try {
                     Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName $osdDistTarget
@@ -1150,417 +1205,139 @@ Write-DscStatus "$Tag Starting perfloading"
             }
             if ($osdDpFqdns.Count -gt 0 -and $unTargetedOsdDps.Count -gt 0) {
                 Write-DscStatus "$Tag Boot image '$biName' ($packageId) has NO content destination on $($unTargetedOsdDps -join ', ') after 3 confirmations$(if ($bootDistError) { " (distribution error: $bootDistError)" }). Content is never installed to an untargeted DP, so the coverage wait cannot clear -- skipping it rather than spending the full budget. PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
-                continue
-            }
-
-            # Set-CMBootImage changes the provider property, but clients keep using
-            # the old WIM until Update Distribution Points rebuilds and republishes it.
-            # Publish only after the assignment above exists. A newly targeted DP also
-            # needs this update when command support was enabled on an earlier run that
-            # had no OSD targets yet.
-            $bootImagePublicationNeeded = $commandSupportChanged -or $missingOsdDps.Count -gt 0
-            if ($bootImagePublicationNeeded) {
-                $bootImagePublicationStarted = $false
-                $bootImagePublicationError = $null
-                for ($bootPublishTry = 1; $bootPublishTry -le 6 -and -not $bootImagePublicationStarted; $bootPublishTry++) {
-                    try {
-                        Update-CMDistributionPoint -BootImageId $packageId -Confirm:$false -ErrorAction Stop
-                        $bootImagePublicationStarted = $true
-                    }
-                    catch {
-                        $bootImagePublicationError = $_
-                        if ($bootPublishTry -lt 6) { Start-Sleep -Seconds 10 }
-                    }
-                }
-                if (-not $bootImagePublicationStarted) {
-                    # Same reasoning as the coverage wait below: a boot image problem must not
-                    # cost the site its OSD content. Phase 11 fails on the resulting DP state.
-                    Write-DscStatus "$Tag Could not rebuild and publish boot image '$biName' ($packageId) after its OSD DP assignment was created: $bootImagePublicationError. Continuing; Phase 11 validation FAILS on the resulting DP coverage." -Warning
-                }
-                else {
-                    Write-DscStatus "$Tag Started boot image publication after OSD DP targeting: $biName ($packageId)"
-                }
-            }
-
-            # A targeting row only proves that distribution was requested. Require
-            # every OSDClient-subnet DP to report Installed at the boot image's
-            # current source version before Phase 8 can claim usable PXE coverage.
-            $pushBootCoverageDrsChanges = {
-                param([string]$Group)
-                $connection = $null
-                try {
-                    $sqlReg = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
-                    $sqlServer = $sqlReg.Server
-                    $databaseRaw = $sqlReg.'Database Name'
-                    $sqlInstance = $sqlServer
-                    $databaseName = $databaseRaw
-                    if ($databaseRaw -match '\\') {
-                        $sqlInstance = "$sqlServer\$($databaseRaw.Split('\')[0])"
-                        $databaseName = $databaseRaw.Split('\')[1]
-                    }
-                    $connection = New-Object System.Data.SqlClient.SqlConnection "Server=$sqlInstance;Initial Catalog=$databaseName;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
-                    $connection.Open()
-                    $command = $connection.CreateCommand()
-                    $command.CommandText = 'EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup'
-                    $command.CommandTimeout = 120
-                    [void]$command.Parameters.AddWithValue('@ReplicationGroup', $Group)
-                    [void]$command.ExecuteNonQuery()
-                    Write-DscStatus "$Tag Boot image coverage: pushed DRS group '$Group' so parent site $($ThisVM.parentSiteCode) receives the refreshed DP target without waiting for scheduled replication"
-                }
-                catch {
-                    Write-DscStatus "$Tag Boot image coverage: could not push DRS group '$Group': $($_.Exception.Message). The normal replication schedule still owns convergence."
-                }
-                finally {
-                    if ($connection) { try { $connection.Close() } catch { } }
-                }
-            }
-            $getBootMetadataState = {
-                param([int]$SourceVersion)
-                $state = [pscustomobject]@{
-                    Measured = $false
-                    Available = $null
-                    GlobalRows = $null
-                    LocalRows = $null
-                    HistoryRows = $null
-                    Error = $null
-                }
-                $connection = $null
-                try {
-                    $dataSource = Get-VmSqlConnectionTarget -SiteVm $ThisVM -DeployConfig $deployConfig -DomainFullName $DomainFullName
-                    $connection = New-Object System.Data.SqlClient.SqlConnection "Server=$dataSource;Initial Catalog=CM_$SiteCode;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
-                    $connection.Open()
-                    $command = $connection.CreateCommand()
-                    $command.CommandText = @'
-SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Available,
-       (SELECT COUNT(*) FROM dbo.PkgStatus_G WHERE ID=@pkg AND Type=1 AND SiteCode=@site) AS GlobalRows,
-       (SELECT COUNT(*) FROM dbo.PkgStatus_L WHERE ID=@pkg AND Type=1 AND SiteCode=@site) AS LocalRows,
-       (SELECT COUNT(*) FROM dbo.PkgStatusHist WHERE PkgID=@pkg AND PkgVersion=@version
-          AND dbo.fnGetSiteCodeBySiteNumber(SiteNumber)=@site) AS HistoryRows
-'@
-                    $command.CommandTimeout = 30
-                    [void]$command.Parameters.AddWithValue('@pkg', $packageId)
-                    [void]$command.Parameters.AddWithValue('@site', $SiteCode)
-                    [void]$command.Parameters.AddWithValue('@version', $SourceVersion)
-                    $reader = $command.ExecuteReader()
-                    try {
-                        if ($reader.Read()) {
-                            $state.Available = [int]$reader['Available']
-                            $state.GlobalRows = [int]$reader['GlobalRows']
-                            $state.LocalRows = [int]$reader['LocalRows']
-                            $state.HistoryRows = [int]$reader['HistoryRows']
-                            $state.Measured = $true
-                        }
-                    }
-                    finally { $reader.Close() }
-                }
-                catch { $state.Error = $_.Exception.Message }
-                finally { if ($connection) { $connection.Dispose() } }
-                return $state
-            }
-            $getBootDespoolMetadataState = {
-                param([int]$SourceVersion)
-                $state = [pscustomobject]@{
-                    Measured = $false
-                    Matched = $false
-                    Error = $null
-                }
-                try {
-                    $smsInstallDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory'
-                    $despoolLog = Join-Path $smsInstallDir 'Logs\despool.log'
-                    if (-not (Test-Path -LiteralPath $despoolLog)) {
-                        $state.Error = "despool.log was not found at '$despoolLog'"
-                        return $state
-                    }
-                    $packagePattern = [regex]::Escape($packageId)
-                    $state.Matched = @(
-                        Get-Content -LiteralPath $despoolLog -Tail 3000 -ErrorAction Stop |
-                            Where-Object { $_ -match "package\[$packagePattern\].*information hasn't arrived yet for this version \[$SourceVersion\]" }
-                    ).Count -gt 0
-                    $state.Measured = $true
-                }
-                catch { $state.Error = $_.Exception.Message }
-                return $state
-            }
-            $initializeBootMetadataFromParent = {
-                if (-not $bootParentSite -or -not $bootParentFqdn) {
-                    Write-DscStatus "$Tag Boot image metadata recovery skipped because parent identity is incomplete (site='$bootParentSite', server='$bootParentFqdn')"
-                    return $false
-                }
-                try {
-                    $groups = @(Get-WmiObject -ComputerName $bootParentFqdn -Namespace "root\SMS\site_$bootParentSite" -Class SMS_ReplicationGroup -ErrorAction Stop |
-                            Where-Object { $_.ReplicationGroup -eq 'Configuration Data' })
-                    if ($groups.Count -ne 1) {
-                        Write-DscStatus "$Tag Boot image metadata recovery found $($groups.Count) 'Configuration Data' replication groups at parent site $bootParentSite; expected exactly one and made no change"
-                        return $false
-                    }
-                    $group = $groups[0]
-                    $result = Invoke-WmiMethod -ComputerName $bootParentFqdn -Namespace "root\SMS\site_$bootParentSite" `
-                        -Class SMS_ReplicationGroup -Name InitializeData -ArgumentList @([uint32]$group.ID, $bootParentSite, $SiteCode) -ErrorAction Stop
-                    if ([int]$result.ReturnValue -ne 0) {
-                        Write-DscStatus "$Tag Boot image metadata recovery: InitializeData for 'Configuration Data' returned $($result.ReturnValue) (parent=$bootParentSite child=$SiteCode)"
-                        return $false
-                    }
-                    Write-DscStatus "$Tag Boot image metadata recovery: reinitializing 'Configuration Data' from parent $bootParentSite to child $SiteCode (group ID=$($group.ID)) so the BCP apply replaces this site's own PkgStatus_G row for $packageId, which collides with the parent's on PkgStatus_G_AK (ID,Type,SiteCode,PkgServer,Personality) and blocks the PkgStatusHist row batched with it"
-                    return $true
-                }
-                catch {
-                    Write-DscStatus "$Tag Boot image metadata recovery failed: $($_.Exception.Message)"
-                    return $false
-                }
-            }
-            $rearmBootParentTargets = {
-                param([string[]]$DistributionPointFqdns)
-                if (-not $bootParentSite -or -not $bootParentFqdn) {
-                    Write-DscStatus "$Tag Boot image coverage: parent target re-arm skipped because parent identity is incomplete (site='$bootParentSite', server='$bootParentFqdn')"
-                    return
-                }
-                try {
-                    $parentTargets = @(Get-WmiObject -ComputerName $bootParentFqdn -Namespace "root\SMS\site_$bootParentSite" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction Stop |
-                            Where-Object { (& $serverFromNal $_.ServerNALPath) -in $DistributionPointFqdns })
-                    if ($parentTargets.Count -eq 0) {
-                        Write-DscStatus "$Tag Boot image coverage: parent site $bootParentSite ($bootParentFqdn) has no SMS_DistributionPoint target for $packageId on $($DistributionPointFqdns -join ', '); cannot re-arm the CAS operational target"
-                        return
-                    }
-                    $rearmed = @()
-                    foreach ($parentTarget in $parentTargets) {
-                        $targetFqdn = & $serverFromNal $parentTarget.ServerNALPath
-                        $parentTarget.RefreshNow = $true
-                        [void]$parentTarget.Put()
-                        $rearmed += $targetFqdn
-                    }
-                    Write-DscStatus "$Tag Boot image coverage: re-armed parent site $bootParentSite operational target for $packageId with RefreshNow on $($rearmed -join ', ')"
-                }
-                catch {
-                    Write-DscStatus "$Tag Boot image coverage: parent target re-arm failed on $bootParentFqdn for ${packageId}: $($_.Exception.Message)"
-                }
-            }
-            $notifyBootParentDistmgr = {
-                if (-not $bootParentSite -or -not $bootParentFqdn) {
-                    Write-DscStatus "$Tag Boot image coverage: parent package notification skipped because parent identity is incomplete (site='$bootParentSite', server='$bootParentFqdn')"
-                    return
-                }
-                try {
-                    $parentBootImage = Get-WmiObject -ComputerName $bootParentFqdn -Namespace "root\SMS\site_$bootParentSite" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
-                    if (-not $parentBootImage) {
-                        Write-DscStatus "$Tag Boot image coverage: parent site $bootParentSite ($bootParentFqdn) has no SMS_BootImagePackage row for $packageId; cannot notify its distmgr"
-                        return
-                    }
-                    $notificationResult = $parentBootImage.AddChangeNotification()
-                    Write-DscStatus "$Tag Boot image coverage: asked parent site $bootParentSite ($bootParentFqdn) to queue $packageId in distmgr (AddChangeNotification=$($notificationResult.ReturnValue))"
-                }
-                catch {
-                    Write-DscStatus "$Tag Boot image coverage: parent package notification failed on $bootParentFqdn for $packageId`: $($_.Exception.Message)"
-                }
-            }
-            $wakeBootParentDistmgr = {
-                if (-not $bootParentSite -or -not $bootParentFqdn) {
-                    Write-DscStatus "$Tag Boot image coverage: parent distmgr inbox wake skipped because parent identity is incomplete (site='$bootParentSite', server='$bootParentFqdn')"
-                    return
-                }
-                $wakeFile = "\\$bootParentFqdn\SMS_$bootParentSite\inboxes\distmgr.box\memlabs-boot-wake-$([guid]::NewGuid().ToString('N')).MEMLABS"
-                try {
-                    [System.IO.File]::WriteAllText($wakeFile, "memlabs boot image wake $packageId")
-                    Write-DscStatus "$Tag Boot image coverage: woke parent site $bootParentSite ($bootParentFqdn) distmgr inbox for $packageId"
-                }
-                catch {
-                    Write-DscStatus "$Tag Boot image coverage: parent distmgr inbox wake failed on $bootParentFqdn for $packageId`: $($_.Exception.Message)"
-                }
-                finally {
-                    try { [System.IO.File]::Delete($wakeFile) } catch { }
-                }
-            }
-            $bootCoverageWaitMinutes = 15
-            $expectedRemoteSiteDp = @($dpTargets | Where-Object {
-                    $targetServer = & $serverFromNal $_.ServerNALPath
-                    $targetServer -in $osdDpFqdns -and $_.SiteCode -and $_.SiteCode -ne $SiteCode
-                } | Select-Object -First 1)
-            if ($ThisVM.parentSiteCode -or $expectedRemoteSiteDp.Count -gt 0) {
-                $bootCoverageWaitMinutes = 45
-            }
-            $bootCoverageDeadline = (Get-Date).AddMinutes($bootCoverageWaitMinutes)
-            $bootCoverageAttempt = 0
-            $bootCoverageProblems = @()
-            $bootCoverageObservedSourceVersion = ''
-            $bootCoverageLastArm = @{}
-            $bootStoredVersion = ''
-            $bootMetadataRecoveryStarted = $false
-            $bootMetadataConflictConfirmations = 0
-            $bootMetadataLastProbe = $null
-            $bootLastParentTargetArm = $null
-            $bootLastParentNotify = $null
-            $bootLastParentInboxWake = $null
-            do {
-                $bootCoverageAttempt++
-                $bootCoverageProblems = @()
-                $bootIncompleteDps = @()
-                $currentBootImage = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
-                $bootSourceVersion = if ($currentBootImage) { "$($currentBootImage.SourceVersion)" } else { '' }
-                $bootStoredVersion = if ($currentBootImage) { "$($currentBootImage.StoredPkgVersion)" } else { '' }
-                if (-not $bootStoredVersion) {
-                    $bootPackageRow = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Package -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if ($bootPackageRow) { $bootStoredVersion = "$($bootPackageRow.StoredPkgVersion)" }
-                }
-                if (-not $bootSourceVersion) {
-                    $bootCoverageProblems += 'boot-image SourceVersion could not be read'
-                }
-                elseif ($commandSupportChanged -and [int]$bootSourceVersion -le $commandSupportPreviousSourceVersion) {
-                    $bootCoverageProblems += "boot-image SourceVersion has not advanced after enabling command support (still $bootSourceVersion, previous $commandSupportPreviousSourceVersion)"
-                }
-                else {
-                    if ($bootCoverageObservedSourceVersion -ne $bootSourceVersion) {
-                        $bootCoverageObservedSourceVersion = $bootSourceVersion
-                        $bootCoverageLastArm = @{}
-                    }
-                    $bootDpRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
-                    foreach ($expectedDp in $osdDpFqdns) {
-                        $dpRow = @($bootDpRows | Where-Object { (& $serverFromNal $_.ServerNALPath) -ieq $expectedDp } | Select-Object -First 1)
-                        if ($dpRow.Count -eq 0) {
-                            $bootCoverageProblems += "$expectedDp (no status row)"
-                            $bootIncompleteDps += $expectedDp
-                        }
-                        elseif ([int]$dpRow[0].State -ne 0) {
-                            $bootCoverageProblems += "$expectedDp (State=$($dpRow[0].State), DPVersion=$($dpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
-                            $bootIncompleteDps += $expectedDp
-                        }
-                        elseif (-not "$($dpRow[0].SourceVersion)" -or [int]$dpRow[0].SourceVersion -lt [int]$bootSourceVersion) {
-                            $bootCoverageProblems += "$expectedDp (Installed but stale: DPVersion=$($dpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
-                            $bootIncompleteDps += $expectedDp
-                        }
-                    }
-                }
-                if ($bootCoverageProblems.Count -eq 0) { break }
-
-                # ContentValidating can sit until ConfigMgr's 30-minute retry or
-                # hierarchy replication schedule fires. Re-arm the existing target
-                # without rebuilding the WIM or changing SourceVersion. If the site
-                # still lacks the parent-owned content, also flush the two DRS groups
-                # that carry DP/site-control targeting to the parent.
-                $bootContentPendingFromParent = [bool]($ThisVM.parentSiteCode -and $bootSourceVersion -and $bootStoredVersion -and [int]$bootStoredVersion -lt [int]$bootSourceVersion)
-                if ($bootContentPendingFromParent -and
-                    -not $bootMetadataRecoveryStarted -and
-                    (-not $bootMetadataLastProbe -or ((Get-Date) - $bootMetadataLastProbe).TotalMinutes -ge 1)) {
-                    $bootMetadataLastProbe = Get-Date
-                    $metadataState = & $getBootMetadataState ([int]$bootSourceVersion)
-                    if (-not $metadataState.Measured) {
-                        $bootMetadataConflictConfirmations = 0
-                        Write-DscStatus "$Tag Boot image metadata recovery: package metadata was NOT measured for $packageId version $bootSourceVersion; nothing was reinitialized. Error='$($metadataState.Error)'"
-                    }
-                    elseif ($metadataState.GlobalRows -ge 1 -and $metadataState.HistoryRows -eq 0) {
-                        # fnIsPkgVersionAvailable INNER JOINs PkgStatus_G to PkgStatusHist, and
-                        # only tr_PkgStatus_ins mints a history row (Type=1 AND Status=1). A
-                        # PkgStatus_G row with no history row for this version can therefore
-                        # never become available here, however long despool retries.
-                        $bootMetadataConflictConfirmations++
-                        $despoolState = & $getBootDespoolMetadataState ([int]$bootSourceVersion)
-                        $despoolEvidence = if (-not $despoolState.Measured) {
-                            "NOT measured ($($despoolState.Error))"
-                        }
-                        elseif ($despoolState.Matched) { 'matched retained-package wait' }
-                        else { 'measured, retained-package wait not present in tail' }
-                        Write-DscStatus "$Tag Boot image metadata recovery: $packageId version $bootSourceVersion has a PkgStatus_G row but NO PkgStatusHist row, so fnIsPkgVersionAvailable can never return 1 (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows), confirmation=$bootMetadataConflictConfirmations/3, despool=$despoolEvidence)"
-                        if ($bootMetadataConflictConfirmations -ge 3 -and (& $initializeBootMetadataFromParent)) {
-                            $bootMetadataRecoveryStarted = $true
-                        }
-                    }
-                    else {
-                        $bootMetadataConflictConfirmations = 0
-                        Write-DscStatus "$Tag Boot image metadata recovery: no terminal metadata signature -- a PkgStatusHist row for version $bootSourceVersion is present or no PkgStatus_G row exists yet, so replication can still resolve this (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows)); no reinitialization"
-                    }
-                }
-                if ($bootContentPendingFromParent -and $bootIncompleteDps.Count -gt 0 -and (-not $bootLastParentTargetArm -or ((Get-Date) - $bootLastParentTargetArm).TotalMinutes -ge 10)) {
-                    & $rearmBootParentTargets @($bootIncompleteDps | Select-Object -Unique)
-                    $bootLastParentTargetArm = Get-Date
-                }
-                if ($bootContentPendingFromParent -and (-not $bootLastParentNotify -or ((Get-Date) - $bootLastParentNotify).TotalMinutes -ge 5)) {
-                    & $notifyBootParentDistmgr
-                    $bootLastParentNotify = Get-Date
-                }
-                if ($bootContentPendingFromParent -and (-not $bootLastParentInboxWake -or ((Get-Date) - $bootLastParentInboxWake).TotalMinutes -ge 8)) {
-                    & $wakeBootParentDistmgr
-                    $bootLastParentInboxWake = Get-Date
-                }
-                $bootArmMinutes = if ($bootContentPendingFromParent) { 10 } else { 5 }
-                $bootRearmedDps = @()
-                foreach ($incompleteDp in @($bootIncompleteDps | Select-Object -Unique)) {
-                    $armKey = $incompleteDp.ToUpper()
-                    try {
-                        $targetRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
-                                Where-Object { (& $serverFromNal $_.ServerNALPath) -ieq $incompleteDp })
-                        if ($targetRows.Count -eq 0) {
-                            Start-CMContentDistribution -BootImageId $packageId -DistributionPointName $incompleteDp -ErrorAction Stop
-                            Write-DscStatus "$Tag Boot image coverage: re-established missing target for '$biName' ($packageId) on $incompleteDp"
-                        }
-                        else {
-                            $lastArm = if ($bootCoverageLastArm.ContainsKey($armKey)) { $bootCoverageLastArm[$armKey] } else { $null }
-                            if ($lastArm -and ((Get-Date) - $lastArm).TotalMinutes -lt $bootArmMinutes) { continue }
-                            foreach ($targetRow in $targetRows) {
-                                $targetRow.RefreshNow = $true
-                                [void]$targetRow.Put()
-                            }
-                            Write-DscStatus "$Tag Boot image coverage: re-armed '$biName' ($packageId) on $incompleteDp with RefreshNow at SourceVersion=$bootSourceVersion (retry cadence=${bootArmMinutes}m, StoredPkgVersion=$bootStoredVersion)"
-                        }
-                        $bootCoverageLastArm[$armKey] = Get-Date
-                        $bootRearmedDps += $incompleteDp
-                    }
-                    catch {
-                        Write-DscStatus "$Tag Boot image coverage: re-arm failed for $incompleteDp`: $($_.Exception.Message)"
-                    }
-                }
-                if ($bootRearmedDps.Count -gt 0 -and $bootContentPendingFromParent) {
-                    foreach ($drsGroup in @('Site Control Data', 'Configuration Data')) {
-                        & $pushBootCoverageDrsChanges $drsGroup
-                    }
-                    # The wake above can beat DRS arrival. Run both parent wakes again
-                    # on the next poll, after the refreshed target can be visible there.
-                    $bootLastParentTargetArm = $null
-                    $bootLastParentNotify = $null
-                    $bootLastParentInboxWake = $null
-                }
-                $remainingBootCoverageSec = [math]::Floor(($bootCoverageDeadline - (Get-Date)).TotalSeconds)
-                if ($remainingBootCoverageSec -le 0) { break }
-                Write-DscStatus "$Tag Waiting for boot image '$biName' ($packageId) on every OSD DP: $($bootCoverageProblems -join '; ') (SiteStoredVersion=$bootStoredVersion, attempt $bootCoverageAttempt, ${remainingBootCoverageSec}s remaining)"
-                Start-Sleep -Seconds ([int][math]::Min(30, $remainingBootCoverageSec))
-            } while ((Get-Date) -lt $bootCoverageDeadline)
-
-            if ($bootCoverageProblems.Count -gt 0) {
-                # Deliberately not -Failure: this used to end the script here, which also skipped
-                # the OSD share, both OS packages and all five task sequences. Phase 11 owns the
-                # failure -- it builds $requiredOsdCoverageProblems per expected OSD DP, so it
-                # reports "(no status row)" and fails even with no summarizer or targeting row.
-                Write-DscStatus "$Tag Boot image '$biName' ($packageId) did not reach every required OSD DP at the current source version within $bootCoverageWaitMinutes minutes: $($bootCoverageProblems -join '; '). Continuing so the rest of perfloading runs; PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
             }
             else {
-                Write-DscStatus "$Tag Verified boot image '$biName' ($packageId) SourceVersion=$bootSourceVersion is Installed on every OSD DP: $($osdDpFqdns -join ', ')"
+                # Set-CMBootImage changes the provider property, but clients keep using
+                # the old WIM until Update Distribution Points rebuilds and republishes it.
+                # Publish only after the assignment above exists. A newly targeted DP also
+                # needs this update when command support was enabled on an earlier run that
+                # had no OSD targets yet.
+                $bootImagePublicationNeeded = $commandSupportChanged -or $missingOsdDps.Count -gt 0
+                if ($bootImagePublicationNeeded) {
+                    $bootImagePublicationStarted = $false
+                    $bootImagePublicationError = $null
+                    for ($bootPublishTry = 1; $bootPublishTry -le 6 -and -not $bootImagePublicationStarted; $bootPublishTry++) {
+                        try {
+                            Update-CMDistributionPoint -BootImageId $packageId -Confirm:$false -ErrorAction Stop
+                            $bootImagePublicationStarted = $true
+                        }
+                        catch {
+                            $bootImagePublicationError = $_
+                            if ($bootPublishTry -lt 6) { Start-Sleep -Seconds 10 }
+                        }
+                    }
+                    if (-not $bootImagePublicationStarted) {
+                        # Same reasoning as the coverage wait below: a boot image problem must not
+                        # cost the site its OSD content. Phase 11 fails on the resulting DP state.
+                        Write-DscStatus "$Tag Could not rebuild and publish boot image '$biName' ($packageId) after its OSD DP assignment was created: $bootImagePublicationError. Continuing; Phase 11 validation FAILS on the resulting DP coverage." -Warning
+                    }
+                    else {
+                        Write-DscStatus "$Tag Started boot image publication after OSD DP targeting: $biName ($packageId)"
+                    }
+                }
+
+                # A targeting row only proves that distribution was requested. Require
+                # every OSDClient-subnet DP to report Installed at the boot image's
+                # current source version before Phase 8 can claim usable PXE coverage.
+                # 15 minutes with no cross-site hop left in the path: the source WIM, the
+                # package owner and the DP are all reachable from here. The 45-minute
+                # escalation for hierarchies existed only for the CAS content transfer.
+                $bootCoverageWaitMinutes = 15
+                $bootCoverageDeadline = (Get-Date).AddMinutes($bootCoverageWaitMinutes)
+                $bootCoverageAttempt = 0
+                $bootCoverageProblems = @()
+                $bootCoverageObservedSourceVersion = ''
+                $bootCoverageLastArm = @{}
+                $bootStoredVersion = ''
+                $bootSourceVersion = ''
+                do {
+                    $bootCoverageAttempt++
+                    $bootCoverageProblems = @()
+                    $bootIncompleteDps = @()
+                    $currentBootImage = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                    # StoredPkgVersion is a lazy SMS provider property, so a filtered enumeration
+                    # leaves it blank until Get() is called. The old fallback read SMS_Package,
+                    # which is a SIBLING of SMS_BootImagePackage under SMS_PackageBaseclass and
+                    # can never return a boot image -- it printed a blank on every run.
+                    if ($currentBootImage) { try { $currentBootImage.Get() } catch { } }
+                    $bootSourceVersion = if ($currentBootImage) { "$($currentBootImage.SourceVersion)" } else { '' }
+                    $bootStoredVersion = if ($currentBootImage) { "$($currentBootImage.StoredPkgVersion)" } else { '' }
+                    if (-not $bootSourceVersion) {
+                        $bootCoverageProblems += 'boot-image SourceVersion could not be read'
+                    }
+                    elseif ($commandSupportChanged -and [int]$bootSourceVersion -le $commandSupportPreviousSourceVersion) {
+                        $bootCoverageProblems += "boot-image SourceVersion has not advanced after enabling command support (still $bootSourceVersion, previous $commandSupportPreviousSourceVersion)"
+                    }
+                    else {
+                        if ($bootCoverageObservedSourceVersion -ne $bootSourceVersion) {
+                            $bootCoverageObservedSourceVersion = $bootSourceVersion
+                            $bootCoverageLastArm = @{}
+                        }
+                        $bootDpRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
+                        foreach ($expectedDp in $osdDpFqdns) {
+                            $dpRow = @($bootDpRows | Where-Object { (& $serverFromNal $_.ServerNALPath) -ieq $expectedDp } | Select-Object -First 1)
+                            if ($dpRow.Count -eq 0) {
+                                $bootCoverageProblems += "$expectedDp (no status row)"
+                                $bootIncompleteDps += $expectedDp
+                            }
+                            elseif ([int]$dpRow[0].State -ne 0) {
+                                $bootCoverageProblems += "$expectedDp (State=$($dpRow[0].State), DPVersion=$($dpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                $bootIncompleteDps += $expectedDp
+                            }
+                            elseif (-not "$($dpRow[0].SourceVersion)" -or [int]$dpRow[0].SourceVersion -lt [int]$bootSourceVersion) {
+                                $bootCoverageProblems += "$expectedDp (Installed but stale: DPVersion=$($dpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                $bootIncompleteDps += $expectedDp
+                            }
+                        }
+                    }
+                    if ($bootCoverageProblems.Count -eq 0) { break }
+
+                    # ContentValidating can sit until ConfigMgr's 30-minute retry fires. Re-arm
+                    # the existing target without rebuilding the WIM or changing SourceVersion.
+                    foreach ($incompleteDp in @($bootIncompleteDps | Select-Object -Unique)) {
+                        $armKey = $incompleteDp.ToUpper()
+                        try {
+                            $targetRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
+                                    Where-Object { (& $serverFromNal $_.ServerNALPath) -ieq $incompleteDp })
+                            if ($targetRows.Count -eq 0) {
+                                Start-CMContentDistribution -BootImageId $packageId -DistributionPointName $incompleteDp -ErrorAction Stop
+                                Write-DscStatus "$Tag Boot image coverage: re-established missing target for '$biName' ($packageId) on $incompleteDp"
+                            }
+                            else {
+                                $lastArm = if ($bootCoverageLastArm.ContainsKey($armKey)) { $bootCoverageLastArm[$armKey] } else { $null }
+                                if ($lastArm -and ((Get-Date) - $lastArm).TotalMinutes -lt 5) { continue }
+                                foreach ($targetRow in $targetRows) {
+                                    $targetRow.RefreshNow = $true
+                                    [void]$targetRow.Put()
+                                }
+                                Write-DscStatus "$Tag Boot image coverage: re-armed '$biName' ($packageId) on $incompleteDp with RefreshNow at SourceVersion=$bootSourceVersion (StoredPkgVersion=$bootStoredVersion)"
+                            }
+                            $bootCoverageLastArm[$armKey] = Get-Date
+                        }
+                        catch {
+                            Write-DscStatus "$Tag Boot image coverage: re-arm failed for $incompleteDp`: $($_.Exception.Message)"
+                        }
+                    }
+                    $remainingBootCoverageSec = [math]::Floor(($bootCoverageDeadline - (Get-Date)).TotalSeconds)
+                    if ($remainingBootCoverageSec -le 0) { break }
+                    Write-DscStatus "$Tag Waiting for boot image '$biName' ($packageId) on every OSD DP: $($bootCoverageProblems -join '; ') (SiteStoredVersion=$bootStoredVersion, attempt $bootCoverageAttempt, ${remainingBootCoverageSec}s remaining)"
+                    Start-Sleep -Seconds ([int][math]::Min(30, $remainingBootCoverageSec))
+                } while ((Get-Date) -lt $bootCoverageDeadline)
+
+                if ($bootCoverageProblems.Count -gt 0) {
+                    # Deliberately not -Failure: this used to end the script here, which also skipped
+                    # the OSD share, both OS packages and all five task sequences. Phase 11 owns the
+                    # failure -- it builds $requiredOsdCoverageProblems per expected OSD DP, so it
+                    # reports "(no status row)" and fails even with no summarizer or targeting row.
+                    Write-DscStatus "$Tag Boot image '$biName' ($packageId) did not reach every required OSD DP at the current source version within $bootCoverageWaitMinutes minutes: $($bootCoverageProblems -join '; '). Continuing so the rest of perfloading runs; PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
+                }
+                else {
+                    Write-DscStatus "$Tag Verified boot image '$biName' ($packageId) SourceVersion=$bootSourceVersion is Installed on every OSD DP: $($osdDpFqdns -join ', ')"
+                }
             }
         }
     }
 
-
-    #Tim is copying the iso directly at phase 1
-    Write-DscStatus "$Tag ISO files are already copied from phase 1"
-
-    $DriveLetter = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" | Select-Object -ExpandProperty "Installation Directory" | Split-Path -Qualifier
-
-    Write-DscStatus "$Tag SCCM is installed on the drive -  $DriveLetter"
-
-    # Define the folder path and share name
-    $folderPath = "$DriveLetter\OSD"
-    $shareName = "OSD"
-
-    Write-DscStatus "$Tag sharing the OSD folder as - $folderPath"
-
-    # Create the folder if it doesn't exist
-    if (-not (Test-Path -Path $folderPath)) {
-        New-Item -ItemType Directory -Path $folderPath
-        Write-DscStatus "$Tag OSD folder does not exist and creating one"
-    }
-
-    # Create the share with read access for "Everyone"
-    if (-not (Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue)) {
-        New-SmbShare -Name $shareName -Path $folderPath -FullAccess @("Administrators", "Everyone")
-    }
-
-    Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
 
     # Phase 1 copies the Win10/Win11 OSD ISOs to <CM install drive>\OSD for EVERY
     # Primary when PrePopulateObjects is set (which gated entry to perfloading), so
@@ -1678,7 +1455,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
         }
         $win11UpgradePackageID = & $resolveSitePackageId 'Windows 11 upgrade package' (Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade")
         $win10UpgradePackageID = & $resolveSitePackageId 'Windows 10 upgrade package' (Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade")
-        $BootImagePackageID = & $resolveSitePackageId 'Boot image (x64)' (Get-CMBootImage | Where-Object { $_.Name -eq "Boot image (x64)" })
+        $BootImagePackageID = & $resolveSitePackageId "Boot image ($memlabsBootImageName)" (Get-CMBootImage | Where-Object { $_.Name -eq $memlabsBootImageName })
         $win11OSimagepackageID = & $resolveSitePackageId 'Windows 11 OS image' (Get-CMOperatingSystemImage -Name "windows 11")
         $win10OSimagepackageID = & $resolveSitePackageId 'Windows 10 OS image' (Get-CMOperatingSystemImage -Name "windows 10")
         $ClientPackagePackageId = & $resolveSitePackageId 'Configuration Manager Client Package' (Get-CMPackage -Fast -Name "Configuration Manager Client Package")

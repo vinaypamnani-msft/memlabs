@@ -11093,7 +11093,30 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 }
             }
 
-            $bootImgs = @(Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -ErrorAction Stop)
+            $allBootImgs = @(Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -ErrorAction Stop)
+            # Scope to the boot image this site actually uses. Phase 8 creates
+            # "MEMLABS <site> Boot Image (x64)" and owns it; a child primary ALSO sees the
+            # CAS's replicated defaults, and flagging those for command support or OSD DP
+            # coverage is noise about packages this site neither owns nor deploys.
+            # If nothing matches, evaluate everything and say so -- an empty filter is not
+            # evidence that the lab has no boot image.
+            $memlabsBootImageName = "MEMLABS $sc Boot Image (x64)"
+            $tsBootImageIds = @()
+            try {
+                $tsBootImageIds = @(Get-WmiObject -Namespace $ns -Class SMS_TaskSequencePackage -Filter "Name LIKE 'MEMLABS-%'" -ErrorAction Stop |
+                    ForEach-Object { "$($_.BootImageID)" } | Where-Object { $_ } | Select-Object -Unique)
+            }
+            catch { }
+            $bootImgs = @($allBootImgs | Where-Object { "$($_.Name)" -eq $memlabsBootImageName -or $tsBootImageIds -contains "$($_.PackageID)" })
+            if ($bootImgs.Count -eq 0) {
+                $bootImgs = $allBootImgs
+                if ($allBootImgs.Count -ge 1) {
+                    $results.Details.Add("INFO: no boot image matched '$memlabsBootImageName' or a MEMLABS task sequence reference, so all $($allBootImgs.Count) visible boot image(s) are evaluated")
+                }
+            }
+            elseif ($allBootImgs.Count -gt $bootImgs.Count) {
+                $results.Details.Add("CMD: Evaluating $($bootImgs.Count) of $($allBootImgs.Count) visible boot image(s) -- the one(s) this site owns or its task sequences reference: $(($bootImgs | ForEach-Object { "$($_.Name) ($($_.PackageID))" }) -join ', ')")
+            }
             if ($bootImgs.Count -ge 1) {
                 $results.Details.Add("OK: $($bootImgs.Count) boot image(s) found")
                 if ($isPrimary) {
@@ -11263,12 +11286,17 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                     $results.Details.Add("FAIL: Boot image '$biName' ($($bi.PackageID)) is not current on every required OSD DP: $($requiredOsdCoverageProblems -join '; ')")
                                     $bootContentPendingFromParent = [bool]($hierarchySc -ne $sc -and $bootSourceVersion -and $bootStoredVersion -and [int]$bootStoredVersion -lt [int]$bootSourceVersion)
                                     if ($bootContentPendingFromParent) {
+                                        # Only reachable for a boot image this site does NOT own --
+                                        # a legacy lab built before Phase 8 created its own. Phase 8
+                                        # no longer reinitializes replication to repair it; the fix
+                                        # is to rebuild the lab. These lines are evidence, not a
+                                        # second failure: $results.Passed is already false.
                                         $metadataState = & $getBootMetadataState "$($bi.PackageID)" ([int]$bootSourceVersion)
                                         if (-not $metadataState.Measured) {
                                             $results.Details.Add("DIAG: Parent-owned boot-image metadata was NOT measured for '$biName': $($metadataState.Error)")
                                         }
                                         elseif ($metadataState.Available -eq 0 -and $metadataState.GlobalRows -eq 0 -and $metadataState.LocalRows -gt 0 -and $metadataState.HistoryRows -gt 0) {
-                                            $results.Details.Add("FAIL: Boot image '$biName' is blocked by orphan package metadata at child site $sc (fnIsPkgVersionAvailable=0, PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), PkgStatusHist=$($metadataState.HistoryRows)). Phase 8 must reinitialize the 'Configuration Data' replication group before despool can import the retained package.")
+                                            $results.Details.Add("DIAG: Boot image '$biName' is parent-owned and blocked by orphan package metadata at child site $sc (fnIsPkgVersionAvailable=0, PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), PkgStatusHist=$($metadataState.HistoryRows)). A site-owned boot image cannot reach this state -- rebuild the lab.")
                                         }
                                         else {
                                             $results.Details.Add("DIAG: Boot-image metadata at child site ${sc}: fnIsPkgVersionAvailable=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), PkgStatusHist=$($metadataState.HistoryRows) (not the orphan-row signature)")
