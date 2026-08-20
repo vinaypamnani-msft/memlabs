@@ -1,0 +1,68 @@
+{
+  "cmOptions": {
+    "version": "2509",
+    "install": true,
+    "pushClientToDomainMembers": false,
+    "EVALVersion": false,
+    "UsePKI": true,
+    "PrePopulateObjects": true
+  },
+  "vmOptions": {
+    "prefix": "OTC-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "osdsolo.com",
+    "adminName": "admin",
+    "network": "192.168.61.0",
+    "timeZone": "Eastern Standard Time",
+    "domainNetBiosName": "osdsolo",
+    "locale": "en-US"
+  },
+  "virtualMachines": [
+    {
+      "vmName": "DC1",
+      "operatingSystem": "Server 2022",
+      "role": "DC",
+      "memory": "2GB",
+      "virtualProcs": 4
+    },
+    {
+      "vmName": "PS1SITE",
+      "role": "Primary",
+      "siteCode": "PS1",
+      "operatingSystem": "Server 2022",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "memory": "12GB",
+      "virtualProcs": 8,
+      "sqlPort": "1433",
+      "InstallRP": false,
+      "InstallSUP": false
+    },
+    {
+      "vmName": "DPMP1",
+      "operatingSystem": "Server 2022",
+      "role": "SiteSystem",
+      "siteCode": "PS1",
+      "installMP": true,
+      "installDP": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "InstallRP": false,
+      "InstallSUP": false
+    },
+    {
+      "vmName": "OSD1",
+      "role": "OSDClient",
+      "memory": "2GB",
+      "virtualProcs": 4
+    }
+  ]
+}
