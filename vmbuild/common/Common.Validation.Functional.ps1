@@ -8986,7 +8986,7 @@ function Test-DomainMemberFunctionality {
                 $hint = if ($officeInAssignments.Count -gt 0) {
                     "Office assignment is in policy ($($officeInAssignments[0])) but CCM_Application hasn't materialized yet — App Deployment Eval likely still running; usually resolves within a few minutes"
                 } elseif ($assignCount -gt 0) {
-                    "policy received but no Office assignment in it — Primary's MEMLABS-Office Install Targets deployment isn't targeting this client (collection membership eval may still be running on the Primary; check ZZ-GYRO OfficeCollection sub-test)"
+                    "policy received but no Office assignment in it — the Primary's MEMLABS-Office Install Targets deployment is not targeting this client yet (collection membership eval may still be running on the Primary; see the 'OfficeCollection' sub-test against the Primary site server in this same Phase 11 run)"
                 } else {
                     "no application policy received — VM likely not yet in MEMLABS-Office Install Targets collection (update collection membership on the Primary)"
                 }
