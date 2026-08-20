@@ -1091,13 +1091,6 @@ Write-DscStatus "$Tag Starting perfloading"
                     Write-DscStatus "$Tag Boot image coverage: could not resolve parent site server for $bootParentSite from SMS_Site: $($_.Exception.Message)"
                 }
             }
-            $bootOwnerSite = ''
-            try {
-                $bootOwnerRow = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Package -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
-                if ($bootOwnerRow) { $bootOwnerSite = "$($bootOwnerRow.SourceSite)" }
-            }
-            catch { }
-            if (-not $bootOwnerSite -and $packageId.Length -ge 3) { $bootOwnerSite = $packageId.Substring(0, 3) }
             $distributedFqdns = @()
             $dpTargets = @()
             try {
@@ -1114,51 +1107,23 @@ Write-DscStatus "$Tag Starting perfloading"
                 Write-DscStatus "$Tag Boot image already on all OSD DP(s) ($($osdDpFqdns -join ', ')): $biName ($packageId) -- skipping"
             }
             else {
-                # Create the destination at the site that OWNS the package. Creating it here
-                # starts this child's distmgr first, so the child inserts its own
-                # PkgStatus_G row before the owner's arrives; the owner's row for this same
-                # site then collides on PkgStatus_G_AK (ID,Type,SiteCode,PkgServer,Personality)
-                # and the DRS batch carrying the PkgStatusHist row dies with it. Without that
-                # history row fnIsPkgVersionAvailable never returns 1 and despool holds the
-                # .PCK forever. Owner-first means the child UPDATES that row instead.
-                $bootDistributedAtOwner = $false
-                if ($bootOwnerSite -and $bootOwnerSite -ne $SiteCode -and $bootParentFqdn -and $missingOsdDps.Count -gt 0) {
-                    $bootOwnerDriveCreated = $false
-                    $bootOwnerLocationPushed = $false
-                    try {
-                        if (-not (Get-PSDrive -Name $bootOwnerSite -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-                            [void](New-PSDrive -Name $bootOwnerSite -PSProvider CMSite -Root $bootParentFqdn -Scope Script -ErrorAction Stop)
-                            $bootOwnerDriveCreated = $true
-                        }
-                        Push-Location "$($bootOwnerSite):\" -ErrorAction Stop
-                        $bootOwnerLocationPushed = $true
-                        foreach ($ownerDp in $missingOsdDps) {
-                            Start-CMContentDistribution -BootImageId $packageId -DistributionPointName $ownerDp -ErrorAction Stop
-                        }
-                        $bootDistributedAtOwner = $true
-                        Write-DscStatus "$Tag Started distribution for boot image '$biName' ($packageId) AT ITS OWNING SITE $bootOwnerSite ($bootParentFqdn) on $($missingOsdDps -join ', ') so the owner authors the PkgStatus rows for $SiteCode first"
-                    }
-                    catch {
-                        Write-DscStatus "$Tag Boot image '$biName' ($packageId) is owned by $bootOwnerSite but distributing at the owner failed, falling back to this site (a PkgStatus_G identity split is then possible): $($_.Exception.Message)"
-                    }
-                    finally {
-                        if ($bootOwnerLocationPushed) { try { Pop-Location } catch { } }
-                        if ($bootOwnerDriveCreated) { try { Remove-PSDrive -Name $bootOwnerSite -Force -ErrorAction Stop } catch { } }
-                    }
+                # Distribution stays at THIS site on purpose. Creating the destination at the
+                # owning CAS instead leaves Update-CMDistributionPoint below with no local
+                # targeting row to refresh, so SourceVersion never advances and the coverage
+                # gate fails outright (burnin.sandwich.lab 2026-08-20, 05:45 -> 06:31). The
+                # PkgStatus_G split that owner-first was meant to prevent is handled by the
+                # metadata recovery in the coverage wait, which is proven to clear it.
+                try {
+                    Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName $osdDistTarget
+                    Write-DscStatus "$Tag Successfully started distribution for boot image '$biName' ($packageId) to '$osdDistTarget'$(if ($missingOsdDps.Count) { " (missing on: $($missingOsdDps -join ', '))" })"
                 }
-                if (-not $bootDistributedAtOwner) {
-                    try {
-                        Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName $osdDistTarget
-                        Write-DscStatus "$Tag Successfully started distribution for boot image '$biName' ($packageId) to '$osdDistTarget'$(if ($missingOsdDps.Count) { " (missing on: $($missingOsdDps -join ', '))" })"
+                catch {
+                    $biDistMsg = "$_"
+                    if ($biDistMsg -match 'already been distributed' -or $biDistMsg -match 'No content destination was found') {
+                        Write-DscStatus "$Tag Boot image already distributed: $biName ($packageId) -- skipping"
                     }
-                    catch {
-                        $biDistMsg = "$_"
-                        if ($biDistMsg -match 'already been distributed' -or $biDistMsg -match 'No content destination was found') {
-                            Write-DscStatus "$Tag Boot image already distributed: $biName ($packageId) -- skipping"
-                        }
-                        else {
-                            Write-DscStatus "$Tag WARNING: Failed to start distribution for boot image: $biName ($packageId). Error: $_"
-                        }
+                    else {
+                        Write-DscStatus "$Tag WARNING: Failed to start distribution for boot image: $biName ($packageId). Error: $_"
                     }
                 }
             }
