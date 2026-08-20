@@ -103,12 +103,15 @@ $stateBlock = {
     if (-not $boot) { $out.Add('__ABSENT__ no x64 boot image found'); return $out.ToArray() }
 
     $pkg = "$($boot.PackageID)"
+    # SMS_Package is a SIBLING of SMS_BootImagePackage under SMS_PackageBaseclass, so filtering
+    # it by a boot image's PackageID returns nothing -- StoredPkgVersion and SourceSite printed
+    # blank on every run until 2026-08-20. Get() also populates the lazy EnableLabShell.
+    try { $boot.Get() } catch { }
     $srcVer = "$($boot.SourceVersion)"
     $labShell = "$($boot.EnableLabShell)"
-    $stored = ''
-    $pkgRow = Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$pkg'" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($pkgRow) { $stored = "$($pkgRow.StoredPkgVersion)" }
-    $out.Add("PKG $pkg SourceVersion=$srcVer StoredPkgVersion=$stored EnableLabShell=$labShell SourceSite=$(if ($pkgRow) { $pkgRow.SourceSite })")
+    $stored = "$($boot.StoredPkgVersion)"
+    $srcSite = "$($boot.SourceSite)"
+    $out.Add("PKG $pkg SourceVersion=$srcVer StoredPkgVersion=$stored EnableLabShell=$labShell SourceSite=$srcSite")
 
     $targets = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$pkg'" -ErrorAction SilentlyContinue)
     if ($targets.Count -eq 0) { $out.Add('TARGET none -- no content destination exists') }

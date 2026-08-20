@@ -1113,19 +1113,44 @@ Write-DscStatus "$Tag Starting perfloading"
                 # gate fails outright (burnin.sandwich.lab 2026-08-20, 05:45 -> 06:31). The
                 # PkgStatus_G split that owner-first was meant to prevent is handled by the
                 # metadata recovery in the coverage wait, which is proven to clear it.
+                $bootDistError = $null
                 try {
                     Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName $osdDistTarget
                     Write-DscStatus "$Tag Successfully started distribution for boot image '$biName' ($packageId) to '$osdDistTarget'$(if ($missingOsdDps.Count) { " (missing on: $($missingOsdDps -join ', '))" })"
                 }
                 catch {
-                    $biDistMsg = "$_"
-                    if ($biDistMsg -match 'already been distributed' -or $biDistMsg -match 'No content destination was found') {
+                    $bootDistError = "$_"
+                    if ($bootDistError -match 'already been distributed') {
                         Write-DscStatus "$Tag Boot image already distributed: $biName ($packageId) -- skipping"
                     }
                     else {
-                        Write-DscStatus "$Tag WARNING: Failed to start distribution for boot image: $biName ($packageId). Error: $_"
+                        # 'No content destination was found' used to be treated as "already
+                        # distributed". It is the opposite -- what a child returns for a package
+                        # it cannot target -- and we only get here when a DP was missing.
+                        Write-DscStatus "$Tag WARNING: Failed to start distribution for boot image: $biName ($packageId). Error: $bootDistError"
                     }
                 }
+            }
+
+            # Content is never installed to a DP with no targeting row, so if the required OSD
+            # DPs still have none, the coverage wait below is unwinnable. Confirm 3x first so a
+            # provider-write race is not mistaken for proof.
+            $unTargetedOsdDps = @()
+            for ($targetTry = 1; $targetTry -le 3; $targetTry++) {
+                if ($targetTry -gt 1) { Start-Sleep -Seconds 10 }
+                $targetedNow = @()
+                try {
+                    foreach ($t in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)) {
+                        if ("$($t.ServerNALPath)" -match '\\\\([^\\"]+)') { $targetedNow += $matches[1] }
+                    }
+                }
+                catch { }
+                $unTargetedOsdDps = @($osdDpFqdns | Where-Object { $fq = $_; -not ($targetedNow | Where-Object { $_ -eq $fq }) })
+                if ($unTargetedOsdDps.Count -eq 0) { break }
+            }
+            if ($osdDpFqdns.Count -gt 0 -and $unTargetedOsdDps.Count -gt 0) {
+                Write-DscStatus "$Tag Boot image '$biName' ($packageId) has NO content destination on $($unTargetedOsdDps -join ', ') after 3 confirmations$(if ($bootDistError) { " (distribution error: $bootDistError)" }). Content is never installed to an untargeted DP, so the coverage wait cannot clear -- skipping it rather than spending the full budget. PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
+                continue
             }
 
             # Set-CMBootImage changes the provider property, but clients keep using
@@ -1148,10 +1173,13 @@ Write-DscStatus "$Tag Starting perfloading"
                     }
                 }
                 if (-not $bootImagePublicationStarted) {
-                    Write-DscStatus "$Tag Could not rebuild and publish boot image '$biName' ($packageId) after its OSD DP assignment was created: $bootImagePublicationError" -Failure
-                    return
+                    # Same reasoning as the coverage wait below: a boot image problem must not
+                    # cost the site its OSD content. Phase 11 fails on the resulting DP state.
+                    Write-DscStatus "$Tag Could not rebuild and publish boot image '$biName' ($packageId) after its OSD DP assignment was created: $bootImagePublicationError. Continuing; Phase 11 validation FAILS on the resulting DP coverage." -Warning
                 }
-                Write-DscStatus "$Tag Started boot image publication after OSD DP targeting: $biName ($packageId)"
+                else {
+                    Write-DscStatus "$Tag Started boot image publication after OSD DP targeting: $biName ($packageId)"
+                }
             }
 
             # A targeting row only proves that distribution was requested. Require
@@ -1495,10 +1523,15 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             } while ((Get-Date) -lt $bootCoverageDeadline)
 
             if ($bootCoverageProblems.Count -gt 0) {
-                Write-DscStatus "$Tag Boot image '$biName' ($packageId) did not reach every required OSD DP at the current source version within $bootCoverageWaitMinutes minutes: $($bootCoverageProblems -join '; ')" -Failure
-                return
+                # Deliberately not -Failure: this used to end the script here, which also skipped
+                # the OSD share, both OS packages and all five task sequences. Phase 11 owns the
+                # failure -- it builds $requiredOsdCoverageProblems per expected OSD DP, so it
+                # reports "(no status row)" and fails even with no summarizer or targeting row.
+                Write-DscStatus "$Tag Boot image '$biName' ($packageId) did not reach every required OSD DP at the current source version within $bootCoverageWaitMinutes minutes: $($bootCoverageProblems -join '; '). Continuing so the rest of perfloading runs; PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
             }
-            Write-DscStatus "$Tag Verified boot image '$biName' ($packageId) SourceVersion=$bootSourceVersion is Installed on every OSD DP: $($osdDpFqdns -join ', ')"
+            else {
+                Write-DscStatus "$Tag Verified boot image '$biName' ($packageId) SourceVersion=$bootSourceVersion is Installed on every OSD DP: $($osdDpFqdns -join ', ')"
+            }
         }
     }
 
