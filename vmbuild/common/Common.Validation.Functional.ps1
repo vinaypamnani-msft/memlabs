@@ -13419,8 +13419,8 @@ function Test-SQLAOPostPhase5 {
                     }
                 }
 
-                # 3. AG replica health (single attempt, no remediation — just report)
-                $results.Details.Add("CMD: AG replica health query")
+                # 3. AG replica health (bounded settle period, no remediation)
+                $results.Details.Add("CMD: AG replica health query (up to 5 attempts, 20s apart)")
                 try {
                     $healthQuery = @"
 SELECT ag.name AS GroupName,
@@ -13432,19 +13432,74 @@ FROM sys.dm_hadr_availability_replica_states rs
 JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
 JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
 "@
-                    $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
-                    if (-not $ag -or $ag.Count -eq 0) {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: No availability group replicas found")
-                    }
-                    else {
-                        $unhealthy = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
-                        foreach ($r in $ag) {
-                            $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
-                            $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
-                        }
-                        if ($unhealthy.Count -gt 0) {
+                    $maxHealthAttempts = 5
+                    $ag = @()
+                    $healthy = $false
+                    for ($attempt = 1; $attempt -le $maxHealthAttempts; $attempt++) {
+                        $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                        if (-not $ag -or $ag.Count -eq 0) {
+                            if ($attempt -lt $maxHealthAttempts) {
+                                $results.Details.Add("WARN: AG health attempt $attempt/$maxHealthAttempts returned no replicas; waiting 20s")
+                                Start-Sleep -Seconds 20
+                                continue
+                            }
                             $results.Passed = $false
+                            $results.Details.Add("FAIL: No availability group replicas found after $maxHealthAttempts attempts")
+                            break
+                        }
+
+                        $unhealthy = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
+                        if ($unhealthy.Count -eq 0) {
+                            $healthy = $true
+                            if ($attempt -gt 1) {
+                                $results.Details.Add("OK: AG replica health settled on attempt $attempt/$maxHealthAttempts")
+                            }
+                            foreach ($r in $ag) {
+                                $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
+                            }
+                            break
+                        }
+
+                        if ($attempt -lt $maxHealthAttempts) {
+                            $healthSummary = (@($unhealthy | ForEach-Object { "$($_.Replica)=$($_.ConnState)/$($_.Health)" }) -join ', ')
+                            $results.Details.Add("WARN: AG health attempt $attempt/$maxHealthAttempts not healthy ($healthSummary); waiting 20s")
+                            Start-Sleep -Seconds 20
+                        }
+                        else {
+                            $results.Passed = $false
+                            foreach ($r in $ag) {
+                                $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
+                                $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
+                            }
+                        }
+                    }
+
+                    if (-not $healthy) {
+                        $dbStateQuery = @"
+SELECT ar.replica_server_name AS Replica,
+       adb.database_name,
+       drs.synchronization_state_desc,
+       drs.synchronization_health_desc,
+       drs.is_suspended,
+       drs.suspend_reason_desc
+FROM sys.dm_hadr_database_replica_states drs
+JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
+JOIN sys.availability_replicas ar ON drs.replica_id = ar.replica_id
+ORDER BY ar.replica_server_name, adb.database_name
+"@
+                        try {
+                            $dbStates = @(Invoke-Sqlcmd -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                            if ($dbStates.Count -eq 0) {
+                                $results.Details.Add("WARN: Database-state query returned no rows; replica-level failure remains unexplained")
+                            }
+                            foreach ($dbState in $dbStates) {
+                                $suspendInfo = if ($dbState.is_suspended) { " (SUSPENDED: $($dbState.suspend_reason_desc))" } else { '' }
+                                $level = if ($dbState.synchronization_health_desc -ne 'HEALTHY' -or $dbState.is_suspended) { 'FAIL' } else { 'OK' }
+                                $results.Details.Add("${level}: DB '$($dbState.database_name)' on '$($dbState.Replica)' — sync=$($dbState.synchronization_state_desc), health=$($dbState.synchronization_health_desc)$suspendInfo")
+                            }
+                        }
+                        catch {
+                            $results.Details.Add("WARN: Database-state diagnostics failed: $($_.Exception.Message)")
                         }
                     }
                 }
