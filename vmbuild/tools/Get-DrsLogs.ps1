@@ -139,7 +139,10 @@ New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
 # SMSProv.log records every provider Put/method call with its caller, which is the only log that
 # names WHO wrote a PkgServers row -- the one thing the 2026-08-14 cstest2 analysis could not
 # establish from DRS capture alone.
-$logNames = @('rcmctrl.log', 'rcmctrl.lo_', 'smsexec.log', 'hman.log', 'sender.log', 'despool.log', 'despoolr.log', 'replmgr.log', 'dataldr.log', 'ConfigMgrSetup.log', 'SMSProv.log', 'SMSProv.lo_', 'distmgr.log', 'distmgr.lo_')
+# sched.log is the gap between distmgr deciding to send and sender transmitting: it is where the
+# site-to-site send request is created, so a package absent from it never became a job at all.
+# PkgXferMgr.log is the site-server -> remote-DP transfer, i.e. the hop after the content arrives.
+$logNames = @('rcmctrl.log', 'rcmctrl.lo_', 'smsexec.log', 'hman.log', 'sender.log', 'despool.log', 'despoolr.log', 'replmgr.log', 'dataldr.log', 'ConfigMgrSetup.log', 'SMSProv.log', 'SMSProv.lo_', 'distmgr.log', 'distmgr.lo_', 'sched.log', 'sched.lo_', 'PkgXferMgr.log', 'PkgXferMgr.lo_')
 
 # ---- resolve topology ----
 function Resolve-SqlVm {
