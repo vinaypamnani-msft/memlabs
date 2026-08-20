@@ -1116,7 +1116,7 @@ Write-DscStatus "$Tag Starting perfloading"
                 # history row fnIsPkgVersionAvailable never returns 1 and despool holds the
                 # .PCK forever. Owner-first means the child UPDATES that row instead.
                 $bootDistributedAtOwner = $false
-                if ($bootOwnerSite -and $bootOwnerSite -ne $SiteCode -and $bootParentFqdn) {
+                if ($bootOwnerSite -and $bootOwnerSite -ne $SiteCode -and $bootParentFqdn -and $missingOsdDps.Count -gt 0) {
                     $bootOwnerDriveCreated = $false
                     $bootOwnerLocationPushed = $false
                     try {
