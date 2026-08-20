@@ -1655,13 +1655,30 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
 
         # Define variables for TS
         #$TaskSequenceName = "Windows 11 In-Place Upgrade Task Sequence"
-        $win11UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade" | Select-Object -ExpandProperty PackageID
-        $win10UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade" | Select-Object -ExpandProperty PackageID
-        $BootImagePackageID = Get-CMBootImage | Where-Object { $_.Name -eq "Boot image (x64)" }  | Select-Object -ExpandProperty PackageID
-        $win11OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 11" | Select-Object -ExpandProperty PackageID
-        $win10OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 10" | Select-Object -ExpandProperty PackageID
-        $ClientPackagePackageId = Get-CMPackage -Fast -Name "Configuration Manager Client Package" | Select-Object -ExpandProperty PackageID
-        $UserStateMigrationToolPackageId = Get-CMPackage -Fast -Name "User State Migration Tool for Windows" | Select-Object -ExpandProperty PackageID
+        # Every site in a hierarchy has its own same-named client/USMT/OS content, so a bare
+        # -ExpandProperty PackageID yields an ARRAY and silently poisons every WQL filter,
+        # cmdlet argument and task-sequence reference built from it.
+        $resolveSitePackageId = {
+            param([string]$Label, $Candidates)
+            $rows = @($Candidates | Where-Object { $_ -and "$($_.PackageID)" })
+            if ($rows.Count -eq 0) {
+                Write-DscStatus "$Tag $Label was not found, so its PackageID is empty"
+                return ''
+            }
+            $local = @($rows | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
+            $chosen = if ($local.Count -gt 0) { $local[0] } else { $rows[0] }
+            if ($rows.Count -gt 1) {
+                Write-DscStatus "$Tag $Label resolved to $($chosen.PackageID) from $($rows.Count) same-named packages ($(if ($local.Count) { "owned by this site $SiteCode" } else { "no $SiteCode-owned copy; using hierarchy-owned" }))"
+            }
+            return "$($chosen.PackageID)"
+        }
+        $win11UpgradePackageID = & $resolveSitePackageId 'Windows 11 upgrade package' (Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade")
+        $win10UpgradePackageID = & $resolveSitePackageId 'Windows 10 upgrade package' (Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade")
+        $BootImagePackageID = & $resolveSitePackageId 'Boot image (x64)' (Get-CMBootImage | Where-Object { $_.Name -eq "Boot image (x64)" })
+        $win11OSimagepackageID = & $resolveSitePackageId 'Windows 11 OS image' (Get-CMOperatingSystemImage -Name "windows 11")
+        $win10OSimagepackageID = & $resolveSitePackageId 'Windows 10 OS image' (Get-CMOperatingSystemImage -Name "windows 10")
+        $ClientPackagePackageId = & $resolveSitePackageId 'Configuration Manager Client Package' (Get-CMPackage -Fast -Name "Configuration Manager Client Package")
+        $UserStateMigrationToolPackageId = & $resolveSitePackageId 'User State Migration Tool' (Get-CMPackage -Fast -Name "User State Migration Tool for Windows")
         $win11UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 11 24h2\sources\install.wim"
         $win10UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 10 22h2\sources\install.wim"
         $clientProps = 'CCMDEBUGLOGGING="1" CCMLOGGINGENABLED="TRUE" CCMLOGLEVEL="0" CCMLOGMAXHISTORY="5" CCMLOGMAXSIZE="10000000" SMSCACHESIZE="15000"'

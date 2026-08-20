@@ -369,12 +369,19 @@ $startClientPackagePrestage = {
     param([string]$DistributionPointFqdn)
 
     try {
-        $clientPackage = Get-CMPackage -Fast -Name 'Configuration Manager Client Package' | Select-Object -First 1
+        # This block only runs on a child primary, and Get-CMPackage returns one client
+        # package per site, so an unfiltered -First 1 can pre-stage the CAS's package.
+        $allClientPackages = @(Get-CMPackage -Fast -Name 'Configuration Manager Client Package')
+        $localClientPackages = @($allClientPackages | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
+        $clientPackage = if ($localClientPackages.Count -gt 0) { $localClientPackages[0] } elseif ($allClientPackages.Count -gt 0) { $allClientPackages[0] } else { $null }
         if (-not $clientPackage) {
             Write-DscStatus "Client package pre-stage: package not found; the later coverage gate will retry."
             return $true
         }
         $packageId = "$($clientPackage.PackageID)"
+        if ($allClientPackages.Count -gt 1) {
+            Write-DscStatus "Client package pre-stage: chose $packageId from $($allClientPackages.Count) same-named packages ($(if ($localClientPackages.Count) { "owned by this site $SiteCode" } else { "no $SiteCode-owned copy; using hierarchy-owned" }))"
+        }
         $namespace = "root\SMS\site_$SiteCode"
         $packageState = Get-WmiObject -Namespace $namespace -Class SMS_Package -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $packageState) {

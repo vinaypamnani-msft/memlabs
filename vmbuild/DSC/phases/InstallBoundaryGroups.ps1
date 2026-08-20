@@ -130,9 +130,15 @@ $getMissingBoundaryGroupSiteSystems = {
 # Phase 8 re-run self-heals a stuck DP, not just a first deploy. Phase 8 is the right
 # home for this (content-distribution context + a generous wait budget).
 $ensureClientPkgCoverage = {
-    $pkg = Get-CMPackage -Fast -Name 'Configuration Manager Client Package'
-    if (-not $pkg) { Write-DscStatus "Client pkg coverage: client package not found."; return }
-    $PackageID = $pkg.PackageID
+    # Get-CMPackage returns one client package PER SITE in a hierarchy, so an unfiltered
+    # read makes $PackageID an array and every WQL filter built from it matches nothing.
+    $allClientPkgs = @(Get-CMPackage -Fast -Name 'Configuration Manager Client Package')
+    if ($allClientPkgs.Count -eq 0) { Write-DscStatus "Client pkg coverage: client package not found."; return }
+    $localClientPkgs = @($allClientPkgs | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
+    $PackageID = if ($localClientPkgs.Count -gt 0) { "$($localClientPkgs[0].PackageID)" } else { "$($allClientPkgs[0].PackageID)" }
+    if ($allClientPkgs.Count -gt 1) {
+        Write-DscStatus "Client pkg coverage: chose $PackageID from $($allClientPkgs.Count) same-named packages ($(if ($localClientPkgs.Count) { "owned by this site $SiteCode" } else { "no $SiteCode-owned copy; using hierarchy-owned" }))"
+    }
     $ns = "root\SMS\site_$SiteCode"
     $fqdnOf = { param($nal) if ("$nal" -match '\\([^\\"\]]+)') { $Matches[1] } else { $null } }
     $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
