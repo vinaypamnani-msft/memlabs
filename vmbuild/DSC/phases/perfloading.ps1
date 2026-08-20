@@ -1301,7 +1301,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         Write-DscStatus "$Tag Boot image metadata recovery: InitializeData for 'Configuration Data' returned $($result.ReturnValue) (parent=$bootParentSite child=$SiteCode)"
                         return $false
                     }
-                    Write-DscStatus "$Tag Boot image metadata recovery: reinitializing 'Configuration Data' from parent $bootParentSite to child $SiteCode (group ID=$($group.ID)) so the BCP apply replaces the orphan PkgStatus_L identity for $packageId"
+                    Write-DscStatus "$Tag Boot image metadata recovery: reinitializing 'Configuration Data' from parent $bootParentSite to child $SiteCode (group ID=$($group.ID)) so the BCP apply replaces this site's own PkgStatus_G row for $packageId, which collides with the parent's on PkgStatus_G_AK (ID,Type,SiteCode,PkgServer,Personality) and blocks the PkgStatusHist row batched with it"
                     return $true
                 }
                 catch {
@@ -1385,7 +1385,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             $bootCoverageLastArm = @{}
             $bootStoredVersion = ''
             $bootMetadataRecoveryStarted = $false
-            $bootMetadataOrphanConfirmations = 0
+            $bootMetadataConflictConfirmations = 0
             $bootMetadataLastProbe = $null
             $bootLastParentTargetArm = $null
             $bootLastParentNotify = $null
@@ -1443,7 +1443,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     $bootMetadataLastProbe = Get-Date
                     $metadataState = & $getBootMetadataState ([int]$bootSourceVersion)
                     if (-not $metadataState.Measured) {
-                        $bootMetadataOrphanConfirmations = 0
+                        $bootMetadataConflictConfirmations = 0
                         Write-DscStatus "$Tag Boot image metadata recovery: package metadata was NOT measured for $packageId version $bootSourceVersion; nothing was reinitialized. Error='$($metadataState.Error)'"
                     }
                     elseif ($metadataState.GlobalRows -ge 1 -and $metadataState.HistoryRows -eq 0) {
@@ -1451,20 +1451,20 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         # only tr_PkgStatus_ins mints a history row (Type=1 AND Status=1). A
                         # PkgStatus_G row with no history row for this version can therefore
                         # never become available here, however long despool retries.
-                        $bootMetadataOrphanConfirmations++
+                        $bootMetadataConflictConfirmations++
                         $despoolState = & $getBootDespoolMetadataState ([int]$bootSourceVersion)
                         $despoolEvidence = if (-not $despoolState.Measured) {
                             "NOT measured ($($despoolState.Error))"
                         }
                         elseif ($despoolState.Matched) { 'matched retained-package wait' }
                         else { 'measured, retained-package wait not present in tail' }
-                        Write-DscStatus "$Tag Boot image metadata recovery: $packageId version $bootSourceVersion has a PkgStatus_G row but NO PkgStatusHist row, so fnIsPkgVersionAvailable can never return 1 (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows), confirmation=$bootMetadataOrphanConfirmations/3, despool=$despoolEvidence)"
-                        if ($bootMetadataOrphanConfirmations -ge 3 -and (& $initializeBootMetadataFromParent)) {
+                        Write-DscStatus "$Tag Boot image metadata recovery: $packageId version $bootSourceVersion has a PkgStatus_G row but NO PkgStatusHist row, so fnIsPkgVersionAvailable can never return 1 (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows), confirmation=$bootMetadataConflictConfirmations/3, despool=$despoolEvidence)"
+                        if ($bootMetadataConflictConfirmations -ge 3 -and (& $initializeBootMetadataFromParent)) {
                             $bootMetadataRecoveryStarted = $true
                         }
                     }
                     else {
-                        $bootMetadataOrphanConfirmations = 0
+                        $bootMetadataConflictConfirmations = 0
                         Write-DscStatus "$Tag Boot image metadata recovery: no terminal metadata signature -- a PkgStatusHist row for version $bootSourceVersion is present or no PkgStatus_G row exists yet, so replication can still resolve this (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows)); no reinitialization"
                     }
                 }
