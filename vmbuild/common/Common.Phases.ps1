@@ -1097,6 +1097,32 @@ function Start-Phase {
     # -- before the parallel Phase 5 jobs fan out -- so every node gets a unique IP
     # with no mutex and no cross-job race. Only Phase 5 needs these.
     if ($Phase -eq 5) {
+        # Get-SQLAOConfig returns nothing when no cluster IP is known for an owner
+        # node, and the absence then travels silently: Get-Phase5ConfigurationData
+        # still adds the pair (and its file server) to AllNodes, so Phase5.ps1
+        # compiles NTFSAccessEntry/SmbShare/SqlRole resources with NULL keys and NULL
+        # array elements. The DC's multi-node MOF dies ~30s later with "identical key
+        # properties" and "Initializer not valid" -- an error that names neither the
+        # VM nor the cause, and that fails every HEALTHY cluster in the config too.
+        # Refuse to compile instead.
+        $sqlaoMissingConfig = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden -and -not ($_.thisParams -and $_.thisParams.SQLAO)
+            })
+        if ($sqlaoMissingConfig.Count -gt 0) {
+            foreach ($owner in $sqlaoMissingConfig) {
+                $ownerVm = Get-VM2 -Name $owner.vmName -Fallback
+                $reason = if ($ownerVm) {
+                    "no cluster IP is assigned to it. Cluster/AG IPs are allocated in Phase 1, which -StartPhase 5 skips"
+                }
+                else {
+                    "the VM does not exist in Hyper-V"
+                }
+                Write-RedX "[Phase 5] $($owner.vmName): cluster '$($owner.ClusterName)' has no SQLAO configuration -- $reason." -WriteLog
+            }
+            Write-RedX "[Phase 5] Aborting before the DSC compile: the above node(s) would produce an invalid MOF and fail every cluster in this config. Re-run from Phase 1 (or remove the incomplete SQLAO node(s) from the config)." -WriteLog
+            return $false
+        }
+
         $null = Set-SQLAOHeartbeatIPs -DeployConfig $deployConfig
     }
 
@@ -1400,6 +1426,22 @@ function Get-MissingDscDispatchNodes {
     }
 }
 
+function Get-MissingHyperVNodes {
+    param (
+        [object]$ConfigurationData
+    )
+
+    foreach ($node in $ConfigurationData.AllNodes) {
+        $nodeName = [string]$node.NodeName
+        if ([string]::IsNullOrWhiteSpace($nodeName)) { continue }
+        if ($nodeName -in @('*', 'LOCALHOST')) { continue }
+        # AllNodes may carry an FQDN; Hyper-V only knows the VM name.
+        $vmName = $nodeName.Split('.')[0]
+        # -Fallback so a VM that exists but has no memlabs note is not called missing.
+        if (-not (Get-VM2 -Name $vmName -Fallback)) { $vmName }
+    }
+}
+
 
 function Start-PhaseJobs {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '',
@@ -1513,6 +1555,25 @@ function Start-PhaseJobs {
             Write-Log "[Phase $Phase] ConfigurationData contains DSC node(s) with no dispatchable VM worker: $($missingDispatchNodes -join ', '). Aborting before the DC readiness handshake." -Failure
             return [PSCustomObject]@{
                 Failed         = $missingDispatchNodes.Count
+                Success        = 0
+                Jobs           = 0
+                Applicable     = $true
+                AdditionalData = $null
+            }
+        }
+
+        # The "Starting required VMs" preflight cannot see this: Get-CriticalVMs
+        # INTERSECTS the requested node names with Get-List, so a VM deleted
+        # out-of-band drops out of the list and Invoke-SmartStartVMs reports it as
+        # neither started nor failed. The phase then dispatches a job for it anyway
+        # (Start-PhaseJobs walks deployConfig, not Get-List), and on a multi-node
+        # compile its absent thisParams produce NULL resource keys that fail the MOF
+        # for every OTHER node too. Ask Hyper-V directly and stop here.
+        $missingHyperVNodes = @(Get-MissingHyperVNodes -ConfigurationData $ConfigurationData | Select-Object -Unique)
+        if ($missingHyperVNodes.Count -gt 0) {
+            Write-Log "[Phase $Phase] ConfigurationData contains DSC node(s) that do not exist in Hyper-V: $($missingHyperVNodes -join ', '). They cannot be configured and will fail the compile for every other node. Re-run from Phase 1 to re-create them, or remove them from the config." -Failure
+            return [PSCustomObject]@{
+                Failed         = $missingHyperVNodes.Count
                 Success        = 0
                 Jobs           = 0
                 Applicable     = $true
