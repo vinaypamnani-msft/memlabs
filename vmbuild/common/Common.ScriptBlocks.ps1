@@ -4081,6 +4081,18 @@ $global:VM_Config = {
                                     try {
                                         Copy-Item -Path (Join-Path $src '*') -Destination "C:\staging\DSC" -Recurse -Force -ErrorAction Stop
                                         if (-not (Test-Path "C:\staging\DSC\DSC.zip")) { return [PSCustomObject]@{ Ok = $false; Reason = 'DSC.zip missing after copy' } }
+                                        # Existence is not readability: the ISO can be mounted a second after it is
+                                        # built and copied while still short. That surfaces a minute later in
+                                        # Expand-Archive ("End of Central Directory record could not be found"),
+                                        # long past the direct-copy fallback below that would have recovered it.
+                                        $zipCheck = $null
+                                        try {
+                                            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+                                            $zipCheck = [System.IO.Compression.ZipFile]::OpenRead("C:\staging\DSC\DSC.zip")
+                                            if ($zipCheck.Entries.Count -le 0) { return [PSCustomObject]@{ Ok = $false; Reason = 'DSC.zip opened but has no entries' } }
+                                        }
+                                        catch { return [PSCustomObject]@{ Ok = $false; Reason = "DSC.zip is not a readable archive: $($_.Exception.Message)" } }
+                                        finally { if ($zipCheck) { $zipCheck.Dispose() } }
                                         return [PSCustomObject]@{ Ok = $true; Reason = '' }
                                     }
                                     catch { return [PSCustomObject]@{ Ok = $false; Reason = $_.Exception.Message } }
