@@ -219,59 +219,33 @@ else {
     }
 }
 
-# After HTTPS is enabled (either just now or on a prior run), wait for the
-# site component manager to republish the updated OperationalXml to AD.
 # ccmsetup reads SecurityModeMaskEx from the MP's AD object and needs
-# CCM_SSL_ENABLED (bit 0x1) set. Without this wait, PushClients may run
-# before AD is updated and ccmsetup fails with CCM_E_NO_CLIENT_PKI_CERT.
-# CAS has no Management Point, so there is no mSSMSManagementPoint AD
-# object to check. Skip the wait on CAS -- PushClients runs on the Primary.
+# CCM_SSL_ENABLED (bit 0x1) set, but the site component manager republishes the
+# OperationalXml on its own schedule and polling cannot make that happen sooner.
+# Nothing between here and PushClients reads the value, so record the state and
+# move on -- PushClients gates on every DC immediately before the only consumer.
+# CAS has no Management Point, so there is no mSSMSManagementPoint AD object.
 if ($isCas) {
-    Write-DscStatus "CAS has no MP -- skipping AD SecurityModeMaskEx wait."
+    Write-DscStatus "CAS has no MP -- skipping the AD SecurityModeMaskEx check."
 }
 elseif ($enabled -or (Test-Path $flagFile)) {
-    # Force AD replication so SCM's OperationalXml update propagates immediately
-    # instead of waiting for the next replication cycle (which can take minutes).
-    try {
-        $dcList = Get-ADDomainController -Filter * | Select-Object -ExpandProperty HostName
-        if ($dcList.Count -gt 1) {
-            Write-DscStatus "Forcing AD replication across $($dcList.Count) DCs to speed up OperationalXml propagation..."
-            foreach ($dc in $dcList) {
-                repadmin /syncall $dc /APed 2>&1 | Out-Null
-            }
-            Write-DscStatus "AD replication triggered."
-        }
-    }
-    catch {
-        Write-DscStatus "AD replication force failed: $_ (will rely on natural replication)"
-    }
-
-    $adWaitMax = 300  # 5 minutes
-    $adPoll = 10
-    $adElapsed = 0
     $adReady = $false
-    while ($adElapsed -lt $adWaitMax) {
-        try {
-            $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
-            $mpObj = Get-ADObject -Filter "objectClass -eq 'mSSMSManagementPoint' -and mSSMSSiteCode -eq '$SiteCode'" `
-                -SearchBase $searchBase -Properties mSSMSCapabilities -ErrorAction Stop | Select-Object -First 1
-            if ($mpObj -and $mpObj.mSSMSCapabilities) {
-                $maskMatch = [regex]::Match($mpObj.mSSMSCapabilities, '<SecurityModeMaskEx>(\d+)</SecurityModeMaskEx>')
-                if ($maskMatch.Success -and ([int]$maskMatch.Groups[1].Value -band 1)) {
-                    $adReady = $true
-                    break
-                }
+    try {
+        $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
+        $mpObj = Get-ADObject -Filter "objectClass -eq 'mSSMSManagementPoint' -and mSSMSSiteCode -eq '$SiteCode'" `
+            -SearchBase $searchBase -Properties mSSMSCapabilities -ErrorAction Stop | Select-Object -First 1
+        if ($mpObj -and $mpObj.mSSMSCapabilities) {
+            $maskMatch = [regex]::Match($mpObj.mSSMSCapabilities, '<SecurityModeMaskEx>(\d+)</SecurityModeMaskEx>')
+            if ($maskMatch.Success -and ([int]$maskMatch.Groups[1].Value -band 1)) {
+                $adReady = $true
             }
         }
-        catch { }
-        Write-DscStatus "Waiting for AD to reflect HTTPS mode (SecurityModeMaskEx CCM_SSL_ENABLED bit, ${adElapsed}s elapsed)" -RetrySeconds $adPoll
-        Start-Sleep -Seconds $adPoll
-        $adElapsed += $adPoll
     }
+    catch { }
     if ($adReady) {
-        Write-DscStatus "AD OperationalXml verified -- SecurityModeMaskEx has CCM_SSL_ENABLED."
+        Write-DscStatus "AD OperationalXml already current -- SecurityModeMaskEx has CCM_SSL_ENABLED."
     }
     else {
-        Write-DscStatus "WARNING: AD SecurityModeMaskEx still stale after ${adWaitMax}s. PushClients has its own replication check as a safety net."
+        Write-DscStatus "AD OperationalXml not republished yet. Not waiting here -- PushClients verifies every DC before it pushes."
     }
 }

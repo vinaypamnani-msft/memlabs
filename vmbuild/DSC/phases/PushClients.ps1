@@ -218,8 +218,10 @@ if ($usePKI -and $CurrentRole -ne "CAS") {
 
     $maxWaitMinutes = 10
     $pollSeconds = 15
-    $deadline = (Get-Date).AddMinutes($maxWaitMinutes)
+    $startedWaiting = Get-Date
+    $deadline = $startedWaiting.AddMinutes($maxWaitMinutes)
     $allGood = $false
+    $forcedReplication = $false
 
     while (-not $allGood -and (Get-Date) -lt $deadline) {
         $staleDCs = @()
@@ -253,7 +255,26 @@ if ($usePKI -and $CurrentRole -ne "CAS") {
             Write-DscStatus "[ClientPush] AD OperationalXml verified on $($allDCs.Count) DC(s) -- SecurityModeMaskEx has CCM_SSL_ENABLED."
         }
         else {
-            $elapsed = [math]::Round(((Get-Date) - $deadline.AddMinutes($maxWaitMinutes)).TotalSeconds)
+            if (-not $forcedReplication -and $allDCs.Count -gt 1) {
+                # Forcing replication only helps once SCM has actually republished, which
+                # is why it lives here rather than in EnableHTTPS. repadmin can block on
+                # RPC indefinitely, so bound it with a job.
+                $forcedReplication = $true
+                Write-DscStatus "[ClientPush] Forcing AD replication across $($allDCs.Count) DC(s)..."
+                try {
+                    $replJob = Start-Job -ScriptBlock {
+                        param($dcs)
+                        $dcs | ForEach-Object { repadmin /syncall $_ /APed 2>&1 | Out-Null }
+                    } -ArgumentList (, $allDCs)
+                    $null = Wait-Job $replJob -Timeout 60
+                    if ($replJob.State -eq 'Running') { Stop-Job $replJob -ErrorAction SilentlyContinue }
+                    Remove-Job $replJob -Force -ErrorAction SilentlyContinue
+                }
+                catch {
+                    Write-DscStatus "[ClientPush] AD replication force failed: $($_.Exception.Message) (relying on natural replication)"
+                }
+            }
+            $elapsed = [math]::Round(((Get-Date) - $startedWaiting).TotalSeconds)
             Write-DscStatus "[ClientPush] Waiting for AD replication ($($staleDCs.Count)/$($allDCs.Count) DC(s) stale, ${elapsed}s elapsed): $($staleDCs -join '; ')" -RetrySeconds $pollSeconds
             Start-Sleep -Seconds $pollSeconds
         }
