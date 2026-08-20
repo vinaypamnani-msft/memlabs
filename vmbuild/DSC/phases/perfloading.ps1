@@ -1074,6 +1074,24 @@ Write-DscStatus "$Tag Starting perfloading"
         }
         else {
             $osdDpFqdns = @($osdDps | ForEach-Object { "$($_.Fqdn)" } | Where-Object { $_ })
+            $bootParentSite = "$($ThisVM.parentSiteCode)"
+            $bootParentFqdn = if ($ThisVM.thisParams) { "$($ThisVM.thisParams.ParentSiteServer)" } else { '' }
+            if ($bootParentSite -and -not $bootParentFqdn) {
+                try {
+                    $bootParentSiteInfo = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Site -Filter "SiteCode='$bootParentSite'" -ErrorAction Stop | Select-Object -First 1
+                    if ($bootParentSiteInfo) { $bootParentFqdn = "$($bootParentSiteInfo.ServerName)" }
+                }
+                catch {
+                    Write-DscStatus "$Tag Boot image coverage: could not resolve parent site server for $bootParentSite from SMS_Site: $($_.Exception.Message)"
+                }
+            }
+            $bootOwnerSite = ''
+            try {
+                $bootOwnerRow = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Package -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+                if ($bootOwnerRow) { $bootOwnerSite = "$($bootOwnerRow.SourceSite)" }
+            }
+            catch { }
+            if (-not $bootOwnerSite -and $packageId.Length -ge 3) { $bootOwnerSite = $packageId.Substring(0, 3) }
             $distributedFqdns = @()
             $dpTargets = @()
             try {
@@ -1090,17 +1108,51 @@ Write-DscStatus "$Tag Starting perfloading"
                 Write-DscStatus "$Tag Boot image already on all OSD DP(s) ($($osdDpFqdns -join ', ')): $biName ($packageId) -- skipping"
             }
             else {
-                try {
-                    Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName $osdDistTarget
-                    Write-DscStatus "$Tag Successfully started distribution for boot image '$biName' ($packageId) to '$osdDistTarget'$(if ($missingOsdDps.Count) { " (missing on: $($missingOsdDps -join ', '))" })"
-                }
-                catch {
-                    $biDistMsg = "$_"
-                    if ($biDistMsg -match 'already been distributed' -or $biDistMsg -match 'No content destination was found') {
-                        Write-DscStatus "$Tag Boot image already distributed: $biName ($packageId) -- skipping"
+                # Create the destination at the site that OWNS the package. Creating it here
+                # starts this child's distmgr first, so the child inserts its own
+                # PkgStatus_G row before the owner's arrives; the owner's row for this same
+                # site then collides on PkgStatus_G_AK (ID,Type,SiteCode,PkgServer,Personality)
+                # and the DRS batch carrying the PkgStatusHist row dies with it. Without that
+                # history row fnIsPkgVersionAvailable never returns 1 and despool holds the
+                # .PCK forever. Owner-first means the child UPDATES that row instead.
+                $bootDistributedAtOwner = $false
+                if ($bootOwnerSite -and $bootOwnerSite -ne $SiteCode -and $bootParentFqdn) {
+                    $bootOwnerDriveCreated = $false
+                    $bootOwnerLocationPushed = $false
+                    try {
+                        if (-not (Get-PSDrive -Name $bootOwnerSite -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                            [void](New-PSDrive -Name $bootOwnerSite -PSProvider CMSite -Root $bootParentFqdn -Scope Script -ErrorAction Stop)
+                            $bootOwnerDriveCreated = $true
+                        }
+                        Push-Location "$($bootOwnerSite):\" -ErrorAction Stop
+                        $bootOwnerLocationPushed = $true
+                        foreach ($ownerDp in $missingOsdDps) {
+                            Start-CMContentDistribution -BootImageId $packageId -DistributionPointName $ownerDp -ErrorAction Stop
+                        }
+                        $bootDistributedAtOwner = $true
+                        Write-DscStatus "$Tag Started distribution for boot image '$biName' ($packageId) AT ITS OWNING SITE $bootOwnerSite ($bootParentFqdn) on $($missingOsdDps -join ', ') so the owner authors the PkgStatus rows for $SiteCode first"
                     }
-                    else {
-                        Write-DscStatus "$Tag WARNING: Failed to start distribution for boot image: $biName ($packageId). Error: $_"
+                    catch {
+                        Write-DscStatus "$Tag Boot image '$biName' ($packageId) is owned by $bootOwnerSite but distributing at the owner failed, falling back to this site (a PkgStatus_G identity split is then possible): $($_.Exception.Message)"
+                    }
+                    finally {
+                        if ($bootOwnerLocationPushed) { try { Pop-Location } catch { } }
+                        if ($bootOwnerDriveCreated) { try { Remove-PSDrive -Name $bootOwnerSite -Force -ErrorAction Stop } catch { } }
+                    }
+                }
+                if (-not $bootDistributedAtOwner) {
+                    try {
+                        Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName $osdDistTarget
+                        Write-DscStatus "$Tag Successfully started distribution for boot image '$biName' ($packageId) to '$osdDistTarget'$(if ($missingOsdDps.Count) { " (missing on: $($missingOsdDps -join ', '))" })"
+                    }
+                    catch {
+                        $biDistMsg = "$_"
+                        if ($biDistMsg -match 'already been distributed' -or $biDistMsg -match 'No content destination was found') {
+                            Write-DscStatus "$Tag Boot image already distributed: $biName ($packageId) -- skipping"
+                        }
+                        else {
+                            Write-DscStatus "$Tag WARNING: Failed to start distribution for boot image: $biName ($packageId). Error: $_"
+                        }
                     }
                 }
             }
@@ -1161,17 +1213,6 @@ Write-DscStatus "$Tag Starting perfloading"
                 }
                 finally {
                     if ($connection) { try { $connection.Close() } catch { } }
-                }
-            }
-            $bootParentSite = "$($ThisVM.parentSiteCode)"
-            $bootParentFqdn = if ($ThisVM.thisParams) { "$($ThisVM.thisParams.ParentSiteServer)" } else { '' }
-            if ($bootParentSite -and -not $bootParentFqdn) {
-                try {
-                    $bootParentSiteInfo = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_Site -Filter "SiteCode='$bootParentSite'" -ErrorAction Stop | Select-Object -First 1
-                    if ($bootParentSiteInfo) { $bootParentFqdn = "$($bootParentSiteInfo.ServerName)" }
-                }
-                catch {
-                    Write-DscStatus "$Tag Boot image coverage: could not resolve parent site server for $bootParentSite from SMS_Site: $($_.Exception.Message)"
                 }
             }
             $getBootMetadataState = {
@@ -1405,7 +1446,11 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         $bootMetadataOrphanConfirmations = 0
                         Write-DscStatus "$Tag Boot image metadata recovery: package metadata was NOT measured for $packageId version $bootSourceVersion; nothing was reinitialized. Error='$($metadataState.Error)'"
                     }
-                    elseif ($metadataState.Available -eq 0 -and $metadataState.GlobalRows -eq 0 -and $metadataState.LocalRows -gt 0 -and $metadataState.HistoryRows -gt 0) {
+                    elseif ($metadataState.GlobalRows -ge 1 -and $metadataState.HistoryRows -eq 0) {
+                        # fnIsPkgVersionAvailable INNER JOINs PkgStatus_G to PkgStatusHist, and
+                        # only tr_PkgStatus_ins mints a history row (Type=1 AND Status=1). A
+                        # PkgStatus_G row with no history row for this version can therefore
+                        # never become available here, however long despool retries.
                         $bootMetadataOrphanConfirmations++
                         $despoolState = & $getBootDespoolMetadataState ([int]$bootSourceVersion)
                         $despoolEvidence = if (-not $despoolState.Measured) {
@@ -1413,17 +1458,17 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         }
                         elseif ($despoolState.Matched) { 'matched retained-package wait' }
                         else { 'measured, retained-package wait not present in tail' }
-                        Write-DscStatus "$Tag Boot image metadata recovery: measured orphan metadata for $packageId version $bootSourceVersion (Available=0, PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows), confirmation=$bootMetadataOrphanConfirmations/2, despool=$despoolEvidence)"
-                        if ($bootMetadataOrphanConfirmations -ge 2 -and (& $initializeBootMetadataFromParent)) {
+                        Write-DscStatus "$Tag Boot image metadata recovery: $packageId version $bootSourceVersion has a PkgStatus_G row but NO PkgStatusHist row, so fnIsPkgVersionAvailable can never return 1 (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows), confirmation=$bootMetadataOrphanConfirmations/3, despool=$despoolEvidence)"
+                        if ($bootMetadataOrphanConfirmations -ge 3 -and (& $initializeBootMetadataFromParent)) {
                             $bootMetadataRecoveryStarted = $true
                         }
                     }
                     else {
                         $bootMetadataOrphanConfirmations = 0
-                        Write-DscStatus "$Tag Boot image metadata recovery: orphan-row signature is not proven (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows)); no reinitialization"
+                        Write-DscStatus "$Tag Boot image metadata recovery: no terminal metadata signature -- a PkgStatusHist row for version $bootSourceVersion is present or no PkgStatus_G row exists yet, so replication can still resolve this (Available=$($metadataState.Available), PkgStatus_G=$($metadataState.GlobalRows), PkgStatus_L=$($metadataState.LocalRows), History=$($metadataState.HistoryRows)); no reinitialization"
                     }
                 }
-                if ($bootContentPendingFromParent -and (-not $bootLastParentTargetArm -or ((Get-Date) - $bootLastParentTargetArm).TotalMinutes -ge 10)) {
+                if ($bootContentPendingFromParent -and $bootIncompleteDps.Count -gt 0 -and (-not $bootLastParentTargetArm -or ((Get-Date) - $bootLastParentTargetArm).TotalMinutes -ge 10)) {
                     & $rearmBootParentTargets @($bootIncompleteDps | Select-Object -Unique)
                     $bootLastParentTargetArm = Get-Date
                 }
