@@ -1322,6 +1322,19 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
+    # The BLM / client-push / OSD blocks above can pull domain-joined VMs into a config that
+    # was OSDClient-only when the DC decision was made at the top. Those VMs get their DSC
+    # PUSHED BY THE DC, so without it they sit until the local-compile fallback fires.
+    if (-not $dc) {
+        if ($config.virtualMachines | Where-Object { $_.role -notin ("OSDClient") }) {
+            $existingDCName = $config.parameters.ExistingDCName
+            if ($existingDCName) {
+                Add-ExistingVMToDeployConfig -vmName $existingDCName -configToModify $config
+                $dc = $config.virtualMachines | Where-Object { $_.role -eq "DC" }
+            }
+        }
+    }
+
     if ($dc) {
         if ($null -ne $dc.ForestTrust -and $dc.ForestTrust -ne "NONE") {
             $OtherDC = get-list -Type vm -DomainName $dc.ForestTrust | Where-Object { $_.Role -eq "DC" }
