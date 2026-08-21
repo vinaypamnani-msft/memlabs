@@ -1,0 +1,211 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/0.1.2-preview/CreateUIDefinition.MultiVm.json#",
+  "handler": "Microsoft.Azure.CreateUIDef",
+  "version": "0.1.2-preview",
+  "parameters": {
+    "config": {
+      "isWizard": false,
+      "basics": {
+        "description": "Creates a Hyper-V host VM in Azure for running MemLabs ConfigMgr labs.\n\n**The resource group name is used to name the virtual network, subnet and network security group**, so pick something recognisable. Inbound access is restricted to CorpNetPublic.",
+        "resourceGroup": {
+          "allowExisting": true
+        },
+        "location": {
+          "label": "Region",
+          "toolTip": "Region for the host VM and its network. Choose this before the size step - size availability varies by region.",
+          "resourceTypes": [
+            "Microsoft.Compute/virtualMachines"
+          ]
+        }
+      }
+    },
+    "basics": [
+      {
+        "name": "virtualMachineName",
+        "type": "Microsoft.Common.TextBox",
+        "label": "Host VM name",
+        "defaultValue": "LABHOST",
+        "toolTip": "Windows computer name of the Hyper-V host. 2-15 characters, letters, digits and hyphens.",
+        "constraints": {
+          "required": true,
+          "regex": "^[A-Za-z0-9][A-Za-z0-9-]{0,13}[A-Za-z0-9]$",
+          "validationMessage": "2-15 characters. Letters, digits and hyphens only, and it cannot start or end with a hyphen."
+        },
+        "visible": true
+      },
+      {
+        "name": "adminUsername",
+        "type": "Microsoft.Compute.UserNameTextBox",
+        "label": "Administrator username",
+        "toolTip": "Local administrator account created on the host VM. Avoid predictable names.",
+        "constraints": {
+          "required": true,
+          "regex": "^[a-zA-Z0-9]{3,20}$",
+          "validationMessage": "3-20 characters, letters and digits only."
+        },
+        "osPlatform": "Windows",
+        "visible": true
+      },
+      {
+        "name": "adminCredentials",
+        "type": "Microsoft.Compute.CredentialsCombo",
+        "label": {
+          "password": "Administrator password",
+          "confirmPassword": "Confirm password"
+        },
+        "toolTip": {
+          "password": "12-123 characters with 3 of: lowercase, uppercase, digit, special character."
+        },
+        "constraints": {
+          "required": true
+        },
+        "options": {
+          "hideConfirmation": false
+        },
+        "osPlatform": "Windows",
+        "visible": true
+      }
+    ],
+    "steps": [
+      {
+        "name": "hostConfig",
+        "label": "Host configuration",
+        "elements": [
+          {
+            "name": "vmSize",
+            "type": "Microsoft.Compute.SizeSelector",
+            "label": "Host VM size",
+            "toolTip": "Only sizes that support nested virtualization and at least 24 data disks are offered. All are 16 vCPU. 'a' = AMD, 'd' = local temp disk, 's' = Premium SSD capable.",
+            "recommendedSizes": [
+              "Standard_E16ds_v6",
+              "Standard_E16ads_v7",
+              "Standard_E16ds_v5"
+            ],
+            "constraints": {
+              "allowedSizes": [
+                "Standard_E16ds_v6",
+                "Standard_E16s_v6",
+                "Standard_E16ds_v5",
+                "Standard_E16s_v5",
+                "Standard_E16ds_v4",
+                "Standard_E16s_v4",
+                "Standard_E16ads_v7",
+                "Standard_E16as_v7",
+                "Standard_E16ads_v6",
+                "Standard_E16as_v6",
+                "Standard_E16ads_v5",
+                "Standard_E16as_v5",
+                "Standard_D16ds_v5",
+                "Standard_D16s_v5",
+                "Standard_D16ds_v4"
+              ]
+            },
+            "options": {
+              "hideDiskTypeFilter": true
+            },
+            "osPlatform": "Windows",
+            "count": 1,
+            "visible": true
+          },
+          {
+            "name": "sizeNote",
+            "type": "Microsoft.Common.InfoBox",
+            "visible": true,
+            "options": {
+              "icon": "Info",
+              "text": "Sizes not offered in the selected region are hidden. A size can still fail at deployment with an allocation error if the region is at capacity - pick another size or region if that happens."
+            }
+          },
+          {
+            "name": "hostVolumeFileSystem",
+            "type": "Microsoft.Common.DropDown",
+            "label": "E: volume file system",
+            "defaultValue": "NTFS",
+            "toolTip": "ReFS block-clones base-image copies on Server 2025, so VM creation is near-instant at no extra space cost. Do NOT enable Data Deduplication on ReFS.",
+            "constraints": {
+              "allowedValues": [
+                {
+                  "label": "NTFS (legacy behaviour)",
+                  "value": "NTFS"
+                },
+                {
+                  "label": "ReFS (fast VM creation via block cloning)",
+                  "value": "ReFS"
+                }
+              ],
+              "required": true
+            },
+            "visible": true
+          },
+          {
+            "name": "timeZone",
+            "type": "Microsoft.Common.DropDown",
+            "label": "Time zone",
+            "defaultValue": "Eastern Standard Time",
+            "toolTip": "Windows time zone for the host operating system.",
+            "constraints": {
+              "allowedValues": [
+                { "label": "UTC", "value": "UTC" },
+                { "label": "Hawaiian Standard Time", "value": "Hawaiian Standard Time" },
+                { "label": "Alaskan Standard Time", "value": "Alaskan Standard Time" },
+                { "label": "Pacific Standard Time", "value": "Pacific Standard Time" },
+                { "label": "Mountain Standard Time", "value": "Mountain Standard Time" },
+                { "label": "Central Standard Time", "value": "Central Standard Time" },
+                { "label": "Eastern Standard Time", "value": "Eastern Standard Time" },
+                { "label": "Atlantic Standard Time", "value": "Atlantic Standard Time" },
+                { "label": "GMT Standard Time", "value": "GMT Standard Time" },
+                { "label": "W. Europe Standard Time", "value": "W. Europe Standard Time" },
+                { "label": "Central Europe Standard Time", "value": "Central Europe Standard Time" },
+                { "label": "India Standard Time", "value": "India Standard Time" },
+                { "label": "China Standard Time", "value": "China Standard Time" },
+                { "label": "Tokyo Standard Time", "value": "Tokyo Standard Time" },
+                { "label": "AUS Eastern Standard Time", "value": "AUS Eastern Standard Time" },
+                { "label": "New Zealand Standard Time", "value": "New Zealand Standard Time" }
+              ],
+              "required": true
+            },
+            "visible": true
+          },
+          {
+            "name": "rdpPort",
+            "type": "Microsoft.Common.TextBox",
+            "label": "RDP port",
+            "defaultValue": "3389",
+            "toolTip": "Port the guest RDP listener binds to. Changed inside the VM only - the CorpNetPublic rule already allows every port, so no NSG rule is added.",
+            "constraints": {
+              "required": true,
+              "regex": "^(102[4-9]|10[3-9][0-9]|1[1-9][0-9]{2}|[2-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$",
+              "validationMessage": "Enter a port between 1024 and 65535."
+            },
+            "visible": true
+          },
+          {
+            "name": "branchName",
+            "type": "Microsoft.Common.DropDown",
+            "label": "MemLabs branch",
+            "defaultValue": "main",
+            "toolTip": "Branch the host provisioning scripts are downloaded from. Use main unless otherwise instructed.",
+            "constraints": {
+              "allowedValues": [
+                { "label": "main", "value": "main" },
+                { "label": "develop", "value": "develop" }
+              ],
+              "required": true
+            },
+            "visible": true
+          }
+        ]
+      }
+    ],
+    "outputs": {
+      "virtualMachineName": "[basics('virtualMachineName')]",
+      "adminUsername": "[basics('adminUsername')]",
+      "adminPassword": "[basics('adminCredentials').password]",
+      "vmSize": "[steps('hostConfig').vmSize]",
+      "hostVolumeFileSystem": "[steps('hostConfig').hostVolumeFileSystem]",
+      "timeZone": "[steps('hostConfig').timeZone]",
+      "rdpPort": "[int(steps('hostConfig').rdpPort)]",
+      "branchName": "[steps('hostConfig').branchName]"
+    }
+  }
+}
