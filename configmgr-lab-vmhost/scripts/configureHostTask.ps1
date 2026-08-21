@@ -1,7 +1,9 @@
 param(
     $ScriptUrl,
     [ValidateSet('NTFS', 'ReFS')]
-    [string]$FileSystem = 'NTFS'
+    [string]$FileSystem = 'NTFS',
+    [ValidateRange(1024, 65535)]
+    [int]$RdpPort = 3389
 )
 
 # Logging
@@ -56,6 +58,30 @@ function Register-ConfigureHostTask
     }
 }
 
+function Set-RdpListenerPort {
+    param (
+        [ValidateRange(1024, 65535)]
+        [int]$Port
+    )
+
+    $rdpTcp = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+    $ruleName = "MEMLABS-RDP-$Port"
+
+    # Firewall first: a failure after the port moves but before the port is open locks us out.
+    Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Any -ErrorAction Stop | Out-Null
+
+    Set-ItemProperty -Path $rdpTcp -Name 'PortNumber' -Value $Port -Type DWord -ErrorAction Stop
+
+    $applied = (Get-ItemProperty -Path $rdpTcp -Name 'PortNumber' -ErrorAction Stop).PortNumber
+    if ($applied -ne $Port) {
+        Write-HostLog "FAILED to set RDP port: wrote $Port, registry reads back $applied. RDP stays on the old port."
+        return
+    }
+
+    Write-HostLog "RDP listener port set to $Port, firewall rule '$ruleName' created. Takes effect on the restart below."
+}
+
 Write-HostLog "[ConfigureHostTask] START"
 
 # Download script
@@ -70,6 +96,19 @@ Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeM
 # Register scheduled task
 Write-HostLog "Registering scheduled task (E: will be formatted $FileSystem)"
 Register-ConfigureHostTask -FileSystem $FileSystem
+
+if ($RdpPort -eq 3389) {
+    Write-HostLog "RDP listener left on the default port 3389."
+}
+else {
+    Write-HostLog "Changing RDP listener port to $RdpPort"
+    try {
+        Set-RdpListenerPort -Port $RdpPort
+    }
+    catch {
+        Write-HostLog "FAILED to change RDP listener port to ${RdpPort}: $($_.Exception.Message). RDP stays on 3389."
+    }
+}
 
 Write-HostLog "Restarting the machine."
 & shutdown /r /t 30 /c "MEMLABS needs to restart the Azure Host VM. The machine will restart in less than a minute."

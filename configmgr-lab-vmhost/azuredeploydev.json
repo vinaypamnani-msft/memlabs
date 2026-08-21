@@ -20,8 +20,9 @@
     },
     "adminPassword": {
       "type": "securestring",
+      "minLength": 12,
       "metadata": {
-        "description": "Admin password of the VM"
+        "description": "Admin password of the VM. Azure requires 12-123 characters with 3 of: lowercase, uppercase, digit, special character."
       }
     },
     "windowsOSVersion": {
@@ -34,11 +35,62 @@
         "description": "Windows version for the VM."
       }
     },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_E16ds_v4",
+      "allowedValues": [
+        "Standard_E16ds_v6",
+        "Standard_E16s_v6",
+        "Standard_E16ds_v5",
+        "Standard_E16s_v5",
+        "Standard_E16ds_v4",
+        "Standard_E16s_v4",
+        "Standard_E16ads_v7",
+        "Standard_E16as_v7",
+        "Standard_E16ads_v6",
+        "Standard_E16as_v6",
+        "Standard_E16ads_v5",
+        "Standard_E16as_v5",
+        "Standard_D16ds_v5",
+        "Standard_D16s_v5",
+        "Standard_D16ds_v4"
+      ],
+      "metadata": {
+        "description": "Hyper-V host size, all 16 vCPU. E = 128 GB RAM, D = 64 GB. 'a' = AMD, 'd' = local temp disk, 's' = Premium SSD; the no-temp-disk sizes cost less and provisioning never uses the temp disk, but Windows then puts the pagefile on the 128 GB OS disk. Every listed size supports nested virtualization, Gen2, and at least the 24 data disks this template attaches. v6/v7 AMD sizes require an NVMe-capable OS image. SkuNotAvailable means the size isn't offered in that region."
+      }
+    },
     "timeZone": {
       "type": "string",
       "defaultValue": "Eastern Standard Time",
+      "allowedValues": [
+        "UTC",
+        "Hawaiian Standard Time",
+        "Alaskan Standard Time",
+        "Pacific Standard Time",
+        "Mountain Standard Time",
+        "Central Standard Time",
+        "Eastern Standard Time",
+        "Atlantic Standard Time",
+        "GMT Standard Time",
+        "W. Europe Standard Time",
+        "Central Europe Standard Time",
+        "India Standard Time",
+        "China Standard Time",
+        "Tokyo Standard Time",
+        "AUS Eastern Standard Time",
+        "New Zealand Standard Time"
+      ],
       "metadata": {
         "description": "Time Zone for the Operating System."
+      }
+    },
+    "rdpPort": {
+      "type": "int",
+      "defaultValue": 3389,
+      "minValue": 1024,
+      "maxValue": 65535,
+      "metadata": {
+        "description": "Port the guest RDP listener binds to. Changed inside the VM only; the AllowCorpnet rule already permits every port from CorpNetPublic, so no NSG change is made."
       }
     },
     "branchName": {
@@ -74,14 +126,13 @@
     "nsgId": "[resourceId(resourceGroup().name, 'Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]",
     "vnetId": "[resourceId(resourceGroup().name,'Microsoft.Network/virtualNetworks', variables('virtualNetworkName'))]",
     "subnetRef": "[concat(variables('vnetId'), '/subnets/', variables('subnetName'))]",
-    "vmSize": "Standard_E16ds_v4",
+    "vmSize": "[parameters('vmSize')]",
     "addressPrefix": "10.1.0.0/24",
     "subnetPrefix": "10.1.0.0/24",
     "dataDisksCount": 24,
     "dataDiskSize": 128,
     "dataDiskType": "StandardSSD_LRS",
     "location": "[resourceGroup().location]",
-    "windowsAdminCenterPort": "6516",
     "hostScript": "[concat('https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/', parameters('branchName'), '/configmgr-lab-vmhost/scripts/configureHostTask.ps1')]",
     "hostScriptParam": "[concat('https://raw.githubusercontent.com/vinaypamnani-msft/memlabs/', parameters('branchName'), '/configmgr-lab-vmhost/scripts/configureHost.ps1')]"
   },
@@ -89,7 +140,7 @@
     {
       "name": "[variables('networkInterfaceName')]",
       "type": "Microsoft.Network/networkInterfaces",
-      "apiVersion": "2020-05-01",
+      "apiVersion": "2023-11-01",
       "location": "[variables('location')]",
       "dependsOn": [
         "[concat('Microsoft.Network/networkSecurityGroups/', variables('networkSecurityGroupName'))]",
@@ -123,23 +174,10 @@
     {
       "name": "[variables('networkSecurityGroupName')]",
       "type": "Microsoft.Network/networkSecurityGroups",
-      "apiVersion": "2019-02-01",
+      "apiVersion": "2023-11-01",
       "location": "[variables('location')]",
       "properties": {
         "securityRules": [
-          {
-            "name": "windows-admin-center",
-            "properties": {
-              "priority": 900,
-              "access": "Allow",
-              "direction": "Inbound",
-              "destinationPortRange": "[variables('windowsAdminCenterPort')]",
-              "protocol": "Tcp",
-              "sourceAddressPrefix": "*",
-              "sourcePortRange": "*",
-              "destinationAddressPrefix": "*"
-            }
-          },
           {
             "name": "AllowCorpnet",
             "properties": {
@@ -167,7 +205,7 @@
     {
       "name": "[variables('virtualNetworkName')]",
       "type": "Microsoft.Network/virtualNetworks",
-      "apiVersion": "2020-05-01",
+      "apiVersion": "2023-11-01",
       "location": "[variables('location')]",
       "dependsOn": [
         "[resourceId('Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]"
@@ -197,7 +235,7 @@
     {
       "name": "[variables('publicIpAddressName')]",
       "type": "Microsoft.Network/publicIpAddresses",
-      "apiVersion": "2020-05-01",
+      "apiVersion": "2023-11-01",
       "location": "[variables('location')]",
       "properties": {
         "publicIPAddressVersion": "IPv4",
@@ -214,7 +252,7 @@
     {
       "name": "[concat(parameters('virtualMachineName'),'_DataDisk_',copyIndex())]",
       "type": "Microsoft.Compute/disks",
-      "apiVersion": "2020-09-30",
+      "apiVersion": "2023-04-02",
       "location": "[variables('location')]",
       "properties": {
         "diskSizeGB": "[variables('dataDiskSize')]",
@@ -241,7 +279,7 @@
     {
       "name": "[parameters('virtualMachineName')]",
       "type": "Microsoft.Compute/virtualMachines",
-      "apiVersion": "2021-03-01",
+      "apiVersion": "2023-09-01",
       "location": "[variables('location')]",
       "dependsOn": [
         "managedDiskResources",
@@ -324,7 +362,7 @@
     {
       "type": "Microsoft.Compute/virtualMachines/extensions",
       "name": "[concat(parameters('virtualMachineName'), '/AzurePolicyforWindows')]",
-      "apiVersion": "2019-07-01",
+      "apiVersion": "2023-09-01",
       "location": "[variables('location')]",
       "properties": {
         "publisher": "Microsoft.GuestConfiguration",
@@ -340,11 +378,10 @@
     },
     {
       "type": "Microsoft.Compute/virtualMachines/extensions",
-      "apiVersion": "2020-12-01",
+      "apiVersion": "2023-09-01",
       "name": "[concat( parameters('virtualMachineName'), '/configureHost' )]",
       "location": "[variables('location')]",
       "dependsOn": [
-          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AdminCenter' )]",
           "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AzurePolicyforWindows' )]"
       ],
       "properties": {
@@ -354,7 +391,7 @@
           "autoUpgradeMinorVersion":true,
           "settings": {
             "fileUris": ["[variables('hostScript')]"],
-            "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File configureHostTask.ps1 -ScriptUrl ', variables('hostScriptParam'), ' -FileSystem ', parameters('hostVolumeFileSystem'))]"
+            "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File configureHostTask.ps1 -ScriptUrl ', variables('hostScriptParam'), ' -FileSystem ', parameters('hostVolumeFileSystem'), ' -RdpPort ', string(parameters('rdpPort')))]"
           }
       }
     }
@@ -363,6 +400,14 @@
     "adminUsername": {
       "type": "string",
       "value": "[parameters('adminUsername')]"
+    },
+    "publicIpAddress": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Network/publicIpAddresses', variables('publicIpAddressName')), '2023-11-01').ipAddress]"
+    },
+    "rdpConnection": {
+      "type": "string",
+      "value": "[concat(reference(resourceId('Microsoft.Network/publicIpAddresses', variables('publicIpAddressName')), '2023-11-01').ipAddress, ':', string(parameters('rdpPort')))]"
     }
   }
 }
