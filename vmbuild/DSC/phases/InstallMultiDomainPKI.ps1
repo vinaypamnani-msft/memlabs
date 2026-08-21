@@ -286,14 +286,26 @@ if (Test-Path $cm_svc_file) {
         $maxWaitSec = 900
         $waited = 0
         $machinelist = @()
+        $listMeasured = $false
         while ($waited -lt $maxWaitSec) {
-            try { $machinelist = @((Get-CMDevice -CollectionName $CollectionName -ErrorAction Stop).Name) } catch {}
-            $present = @($externalClients | Where-Object { $machinelist -contains $_ })
-            if ($present.Count -ge $externalClients.Count) {
-                Write-DscStatus "External client push: all $($externalClients.Count) target(s) discovered"
-                break
+            # A swallowed failure here used to leave $machinelist holding the PREVIOUS poll,
+            # so the count below was reported as current from a query that never ran.
+            $listMeasured = $false
+            try {
+                $machinelist = @((Get-CMDevice -CollectionName $CollectionName -ErrorAction Stop).Name)
+                $listMeasured = $true
             }
-            Write-DscStatus "External client push: discovered $($present.Count)/$($externalClients.Count) target(s); waiting for forest discovery (${waited}s/${maxWaitSec}s)"
+            catch {
+                Write-DscStatus "External client push: Get-CMDevice on '$CollectionName' failed; discovery was NOT measured this pass: $_"
+            }
+            if ($listMeasured) {
+                $present = @($externalClients | Where-Object { $machinelist -contains $_ })
+                if ($present.Count -ge $externalClients.Count) {
+                    Write-DscStatus "External client push: all $($externalClients.Count) target(s) discovered"
+                    break
+                }
+                Write-DscStatus "External client push: discovered $($present.Count)/$($externalClients.Count) target(s); waiting for forest discovery (${waited}s/${maxWaitSec}s)"
+            }
             # Re-kick discovery roughly every 3 min.
             if (($waited % 180) -eq 0) {
                 try { Invoke-CMForestDiscovery -SiteCode $Externaldomainsitecode *>&1 | Out-Null } catch {}
@@ -303,9 +315,20 @@ if (Test-Path $cm_svc_file) {
             Start-Sleep -Seconds 30
             $waited += 30
         }
-        try { $machinelist = @((Get-CMDevice -CollectionName $CollectionName -ErrorAction Stop).Name) } catch {}
+        $listMeasured = $false
+        try {
+            $machinelist = @((Get-CMDevice -CollectionName $CollectionName -ErrorAction Stop).Name)
+            $listMeasured = $true
+        }
+        catch {
+            Write-DscStatus "External client push: final Get-CMDevice on '$CollectionName' failed: $_"
+        }
 
         foreach ($client in $externalClients) {
+            if (-not $listMeasured) {
+                Write-DscStatus "External client push: device list unavailable, so whether $client was discovered is UNKNOWN, not 'no'; leaving it to automatic client push"
+                continue
+            }
             if ($machinelist -notcontains $client) {
                 Write-DscStatus "External client push: $client not discovered within ${maxWaitSec}s; automatic client push will install it on the next discovery cycle"
                 continue
