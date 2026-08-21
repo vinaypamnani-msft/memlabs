@@ -3795,7 +3795,9 @@ function Get-ConfigurationData {
         Start-Sleep -Milliseconds 251
         Write-Progress2 "Preparing Phase $Phase" -Status "Verifying all required VMs are running" -PercentComplete $global:preparePhasePercent
 
-        $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
+        # A blank name is not a VM: it reaches Get-VM2/Test-VmResponsive and burns the
+        # hard-restart attempts before Get-MissingDscDispatchNodes gets to reject it.
+        $nodes = $cd.AllNodes.NodeName | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne "*" -and ($_ -ne "LOCALHOST") }
         if ($nodes) {
             $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
         }
@@ -4018,13 +4020,14 @@ function Get-Phase5ConfigurationData {
 
     $NumberOfNodesAdded = 0
     # Configuration Data
-    $cd = @{
-        AllNodes = @(
-            @{
-                NodeName = $dc.vmName
-                Role     = 'DC'
-            }
-        )
+    # An add-to-existing config need not carry the DC; $dc.vmName on $null would emit a
+    # node with an EMPTY NodeName, which reaches the VM responsiveness/restart path.
+    $cd = @{ AllNodes = @() }
+    if ($dc) {
+        $cd.AllNodes += @{
+            NodeName = $dc.vmName
+            Role     = 'DC'
+        }
     }
 
     $fileServersAdded = @()
@@ -4093,13 +4096,14 @@ function Get-Phase6ConfigurationData {
     $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
 
     # Configuration Data
-    $cd = @{
-        AllNodes = @(
-            @{
-                NodeName = $dc.vmName
-                Role     = 'DC'
-            }
-        )
+    # An add-to-existing config need not carry the DC; $dc.vmName on $null would emit a
+    # node with an EMPTY NodeName, which reaches the VM responsiveness/restart path.
+    $cd = @{ AllNodes = @() }
+    if ($dc) {
+        $cd.AllNodes += @{
+            NodeName = $dc.vmName
+            Role     = 'DC'
+        }
     }
 
     $NumberOfNodesAdded = 0
@@ -4145,13 +4149,14 @@ function Get-Phase7ConfigurationData {
     $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
 
     # Configuration Data
-    $cd = @{
-        AllNodes = @(
-            @{
-                NodeName = $dc.vmName
-                Role     = 'DC'
-            }
-        )
+    # An add-to-existing config need not carry the DC; $dc.vmName on $null would emit a
+    # node with an EMPTY NodeName, which reaches the VM responsiveness/restart path.
+    $cd = @{ AllNodes = @() }
+    if ($dc) {
+        $cd.AllNodes += @{
+            NodeName = $dc.vmName
+            Role     = 'DC'
+        }
     }
 
     $NumberOfNodesAdded = 0
@@ -4209,13 +4214,14 @@ function Get-Phase8ConfigurationData {
     $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
     $NumberOfNodesAdded = 0
     # Configuration Data
-    $cd = @{
-        AllNodes = @(
-            @{
-                NodeName = $dc.vmName
-                Role     = 'DC'
-            }
-        )
+    # An add-to-existing config need not carry the DC; $dc.vmName on $null would emit a
+    # node with an EMPTY NodeName, which reaches the VM responsiveness/restart path.
+    $cd = @{ AllNodes = @() }
+    if ($dc) {
+        $cd.AllNodes += @{
+            NodeName = $dc.vmName
+            Role     = 'DC'
+        }
     }
 
     if ($deployConfig.cmOptions.Install -ne $false) {
@@ -4364,13 +4370,14 @@ function Get-Phase9ConfigurationData {
     $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
     $NumberOfNodesAdded = 0
     # Configuration Data
-    $cd = @{
-        AllNodes = @(
-            @{
-                NodeName = $dc.vmName
-                Role     = 'DC'
-            }
-        )
+    # An add-to-existing config need not carry the DC; $dc.vmName on $null would emit a
+    # node with an EMPTY NodeName, which reaches the VM responsiveness/restart path.
+    $cd = @{ AllNodes = @() }
+    if ($dc) {
+        $cd.AllNodes += @{
+            NodeName = $dc.vmName
+            Role     = 'DC'
+        }
     }
 
     $MultiDomain = $false
