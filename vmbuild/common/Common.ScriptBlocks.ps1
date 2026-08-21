@@ -2352,6 +2352,7 @@ function Save-CMSetupSqlFailureEvidence {
             LogScanNote  = $null
             Assertions   = @()
             DumpFiles    = @()
+            DumpNote     = $null
             SuspectPages = @()
             Checks       = @()
             Error        = $null
@@ -2411,17 +2412,28 @@ function Save-CMSetupSqlFailureEvidence {
 
                 # SQLDump####.txt is the readable companion to the .mdmp and holds
                 # the assertion, the Input Buffer and the module stack. Small; the
-                # .mdmp is not collected.
-                foreach ($d in @(Get-ChildItem -LiteralPath $logFolder -Filter 'SQLDump*.txt' -File -ErrorAction SilentlyContinue |
-                            Sort-Object LastWriteTime -Descending | Select-Object -First 3)) {
+                # .mdmp is not collected. A severity-22 dump runs ~130 module frames
+                # plus registers, so 400 lines used to cut the stack off part way.
+                $dumps = @(Get-ChildItem -LiteralPath $logFolder -Filter 'SQLDump*.txt' -File -ErrorAction SilentlyContinue |
+                        Sort-Object LastWriteTime -Descending | Select-Object -First 3)
+                $out.DumpNote = "$($dumps.Count) SQLDump*.txt found in $logFolder"
+                foreach ($d in $dumps) {
                     try {
                         $out.DumpFiles += [pscustomobject]@{
-                            Name    = $d.Name
-                            Written = $d.LastWriteTime
-                            Text    = (Get-Content -LiteralPath $d.FullName -TotalCount 400 -ErrorAction SilentlyContinue) -join "`r`n"
+                            Name      = $d.Name
+                            Written   = $d.LastWriteTime
+                            Text      = (Get-Content -LiteralPath $d.FullName -TotalCount 2000 -ErrorAction SilentlyContinue) -join "`r`n"
+                            ReadError = $null
                         }
                     }
-                    catch { }
+                    catch {
+                        $out.DumpFiles += [pscustomobject]@{
+                            Name      = $d.Name
+                            Written   = $d.LastWriteTime
+                            Text      = $null
+                            ReadError = $_.Exception.Message
+                        }
+                    }
                 }
             }
 
@@ -2557,8 +2569,15 @@ WHERE d.name LIKE 'CM[_]%'
             if (-not $assertText -and $a -match '::\w+ - .*corruption') { $assertText = ($a -split '\|', 2)[-1].Trim() }
             Write-Log "[Phase $Phase]: $VmName`:   ASSERT $sqlHost`: $a" -OutputStream
         }
+        if ($e.DumpNote) {
+            Write-Log "[Phase $Phase]: $VmName`: SQL stack dumps on $sqlHost`: $($e.DumpNote)" -OutputStream
+        }
         foreach ($d in @($e.DumpFiles)) {
-            if (-not $d.Text) { continue }
+            if (-not $d.Text) {
+                $why = if ($d.ReadError) { $d.ReadError } else { 'read came back empty' }
+                Write-Log "[Phase $Phase]: $VmName`: SQL stack dump $($d.Name) on $sqlHost was NOT collected ($why) -- it is still on the VM at $($e.ErrorLogPath)." -Warning -OutputStream
+                continue
+            }
             if ($logDir -and (Test-Path $logDir)) {
                 $ddest = Join-Path $logDir "$sqlHost-Phase$Phase-$stamp-$($d.Name)"
                 try {
