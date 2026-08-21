@@ -627,19 +627,10 @@ function Remove-Orphaned {
     $vmNetworksInUse = Get-List -Type UniqueSwitch -SmartUpdate
     $vmNetworksInUse2 = $vmNetworksInUse -replace "Internet", "172.31.250.0"
 
-    Write-Log "Detecting orphaned DHCP Scopes" -Activity
-    $scopes = Get-DhcpServerv4Scope
-    foreach ($scope in $scopes) {
-        $scopeId = $scope.ScopeId.ToString() # This requires us to replace "Internet" with subnet
-        if ($vmNetworksInUse2 -notcontains $scopeId) {
-            $response = Read-YesOrNoWithTimeout -Prompt "  DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]" -HideHelp -Default "n"
-            if ($response -and $response.ToLowerInvariant() -eq "y") {
-                Remove-DhcpScope -ScopeId $scopeId -WhatIf:$WhatIf
-            }
-            Write-Host
-        }
-    }
-
+    # Switches are decided FIRST because Remove-VMSwitch2 takes the NAT and the DHCP scope with
+    # it, and a switch the operator KEEPS has to keep its scope and NAT too. Sweeping scopes and
+    # NATs first deleted half a network out from under a switch that was then left in place.
+    $keptSwitches = @()
     Write-Log "Detecting orphaned Hyper-V Switches" -Activity
     $switches = Get-VMSwitch -SwitchType Internal
     foreach ($switch in $switches) {
@@ -656,10 +647,37 @@ function Remove-Orphaned {
             if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-VMSwitch2 -NetworkName $switch.Name
             }
+            else {
+                $keptSwitches += $switch.Name
+            }
+            Write-Host
+        }
+    }
+    # Scope ids use the subnet where the switch uses the name 'Internet'.
+    $keptNetworks = @($keptSwitches | ForEach-Object { if ($_ -eq 'Internet') { '172.31.250.0' } else { $_ } })
+
+    $keptScopes = @()
+    Write-Log "Detecting orphaned DHCP Scopes" -Activity
+    $scopes = Get-DhcpServerv4Scope
+    foreach ($scope in $scopes) {
+        $scopeId = $scope.ScopeId.ToString() # This requires us to replace "Internet" with subnet
+        if ($vmNetworksInUse2 -notcontains $scopeId) {
+            if ($keptNetworks -contains $scopeId) {
+                Write-Log "  Keeping DHCP scope '$scopeId'; its Hyper-V switch was kept." -LogOnly
+                continue
+            }
+            $response = Read-YesOrNoWithTimeout -Prompt "  DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]" -HideHelp -Default "n"
+            if ($response -and $response.ToLowerInvariant() -eq "y") {
+                Remove-DhcpScope -ScopeId $scopeId -WhatIf:$WhatIf
+            }
+            else {
+                $keptScopes += $scopeId
+            }
             Write-Host
         }
     }
 
+    $keptNats = @()
     Write-Log "Detecting orphaned NAT entries" -Activity
     $natEntries = Get-NetNat -ErrorAction SilentlyContinue
     foreach ($nat in $natEntries) {
@@ -668,13 +686,30 @@ function Remove-Orphaned {
         # to something else (e.g. Docker, WSL).
         if ($nat.Name -notmatch '^\d+\.\d+\.\d+\.\d+$') { continue }
         if ($vmNetworksInUse2 -notcontains $nat.Name) {
+            if ($keptNetworks -contains $nat.Name) {
+                Write-Log "  Keeping NAT '$($nat.Name)'; its Hyper-V switch was kept." -LogOnly
+                continue
+            }
             $response = Read-YesOrNoWithTimeout -Prompt "  NAT entry '$($nat.Name)' ($($nat.InternalIPInterfaceAddressPrefix)) may be orphaned. Delete? [y/N]" -HideHelp -Default "n"
             if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-NetNat -Name $nat.Name -Confirm:$false -ErrorAction SilentlyContinue
                 Write-Log "Removed orphaned NAT entry '$($nat.Name)'" -SubActivity
             }
+            else {
+                $keptNats += $nat.Name
+            }
             Write-Host
         }
+    }
+
+    # The prompts above default to "no" and time out after 10s, so walking away silently keeps
+    # everything. Name what survived, or the leak is invisible.
+    $survived = @()
+    if ($keptSwitches.Count) { $survived += "switches: $($keptSwitches -join ', ')" }
+    if ($keptScopes.Count) { $survived += "DHCP scopes: $($keptScopes -join ', ')" }
+    if ($keptNats.Count) { $survived += "NATs: $($keptNats -join ', ')" }
+    if ($survived.Count) {
+        Write-Log "Orphan cleanup left these behind (not confirmed for deletion): $($survived -join ' | ')" -Warning
     }
 }
 

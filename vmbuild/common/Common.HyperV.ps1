@@ -193,31 +193,69 @@ function Remove-VMSwitch2 {
         [Parameter()]
         [switch] $WhatIf
     )
-    try {
-        $switch = Get-VMSwitch2 -NetworkName $NetworkName
-        if ($switch) {
-            Write-Log "Hyper-V VM Switch '$($switch.Name)' exists. Removing." -SubActivity
-            $switch | Remove-VMSwitch -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
-        }
 
-        # Always attempt NAT + DHCP cleanup for this network, even if the
-        # switch was already gone.  This closes the leak where a switch is
-        # removed but the NAT / DHCP scope survives.
-        if (-not $WhatIf) {
-            $nat = Get-NetNat -Name $NetworkName -ErrorAction SilentlyContinue
-            if ($nat) {
-                Write-Log "  Removing NAT '$NetworkName'" -SubActivity
-                Remove-NetNat -Name $NetworkName -Confirm:$false -ErrorAction SilentlyContinue
+    # Every removal here is read back. The previous version logged "Removing" before it tried,
+    # silenced the error and swallowed the exception, so a switch that could NOT be removed was
+    # indistinguishable in the log from one that was -- which is how networks got left behind
+    # while the teardown looked clean.
+    $leftBehind = @()
+
+    $switch = Get-VMSwitch2 -NetworkName $NetworkName
+    if ($switch) {
+        Write-Log "Hyper-V VM Switch '$($switch.Name)' exists. Removing." -SubActivity
+        $switchError = ''
+        try { $switch | Remove-VMSwitch -Force -ErrorAction Stop -WhatIf:$WhatIf }
+        catch { $switchError = $_.Exception.Message }
+
+        if (-not $WhatIf -and (Get-VMSwitch2 -NetworkName $NetworkName)) {
+            $stillConnected = @()
+            try {
+                $stillConnected = @(Get-VMNetworkAdapter -All -ErrorAction SilentlyContinue |
+                    Where-Object { $_.SwitchName -eq $NetworkName } |
+                    ForEach-Object { if ($_.VMName) { $_.VMName } else { "host:$($_.Name)" } } |
+                    Select-Object -Unique)
             }
-            $dhcp = Get-DhcpServerv4Scope -ScopeID $NetworkName -ErrorAction SilentlyContinue
-            if ($dhcp) {
-                Write-Log "  Removing DHCP scope '$NetworkName'" -SubActivity
-                $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
+            catch { }
+            $why = if ($switchError) { $switchError } else { 'Remove-VMSwitch reported no error' }
+            if ($stillConnected.Count) { $why += " -- still connected: $($stillConnected -join ', ')" }
+            Write-Log "Hyper-V VM Switch '$NetworkName' is STILL PRESENT after removal: $why" -Failure
+            $leftBehind += 'switch'
+        }
+        elseif ($switchError) {
+            Write-Log "Remove-VMSwitch '$NetworkName' reported: $switchError" -Warning
+        }
+    }
+
+    # Always attempt NAT + DHCP cleanup for this network, even if the
+    # switch was already gone.  This closes the leak where a switch is
+    # removed but the NAT / DHCP scope survives.
+    if (-not $WhatIf) {
+        $nat = Get-NetNat -Name $NetworkName -ErrorAction SilentlyContinue
+        if ($nat) {
+            Write-Log "  Removing NAT '$NetworkName'" -SubActivity
+            $natError = ''
+            try { Remove-NetNat -Name $NetworkName -Confirm:$false -ErrorAction Stop }
+            catch { $natError = $_.Exception.Message }
+            if (Get-NetNat -Name $NetworkName -ErrorAction SilentlyContinue) {
+                Write-Log "NAT '$NetworkName' is STILL PRESENT after removal.$(if ($natError) { " $natError" })" -Failure
+                $leftBehind += 'NAT'
+            }
+        }
+        $dhcp = Get-DhcpServerv4Scope -ScopeID $NetworkName -ErrorAction SilentlyContinue
+        if ($dhcp) {
+            Write-Log "  Removing DHCP scope '$NetworkName'" -SubActivity
+            $dhcpError = ''
+            try { $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction Stop }
+            catch { $dhcpError = $_.Exception.Message }
+            if (Get-DhcpServerv4Scope -ScopeID $NetworkName -ErrorAction SilentlyContinue) {
+                Write-Log "DHCP scope '$NetworkName' is STILL PRESENT after removal.$(if ($dhcpError) { " $dhcpError" })" -Failure
+                $leftBehind += 'DHCP scope'
             }
         }
     }
-    catch {
-        # We tried..
+
+    if ($leftBehind.Count) {
+        Write-Log "Network '$NetworkName' was NOT fully removed; $($leftBehind -join ' + ') remain. Manual cleanup required." -Failure
     }
 }
 
