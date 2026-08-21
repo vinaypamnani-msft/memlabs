@@ -269,6 +269,20 @@ if (-not (Test-Path ($vol + '\'))) {
 }
 Write-Info2 "Target volume: $vol"
 
+# ReFS shares base-image blocks natively via block cloning, with no chunk store that
+# can rot independently of the files pointing at it. Layering dedup on top is
+# redundant and reintroduces exactly the corruption class ReFS avoids.
+$volFsType = $null
+try { $volFsType = (Get-Volume -DriveLetter $vol.TrimEnd(':') -ErrorAction Stop).FileSystemType } catch {}
+if ($volFsType -and $volFsType -ne 'NTFS') {
+    Write-Warn2 "$vol is $volFsType, not NTFS."
+    if (-not ($CheckOnly -or $Disable)) {
+        Write-Bad "Refusing to enable deduplication on a $volFsType volume. Re-run with -CheckOnly to inspect, or -Disable to turn dedup off."
+        exit 2
+    }
+    Write-Info2 "Continuing: -CheckOnly / -Disable are read-only or cleanup paths."
+}
+
 Assert-DedupAvailable
 
 $before = Get-DedupSafety -Vol $vol

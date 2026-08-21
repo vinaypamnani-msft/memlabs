@@ -71,6 +71,17 @@
       "metadata": {
         "description": "ARM Template Version. Use main unless otherwise instructed."
       }
+    },
+    "hostVolumeFileSystem": {
+      "type": "string",
+      "defaultValue": "NTFS",
+      "allowedValues": [
+        "NTFS",
+        "ReFS"
+      ],
+      "metadata": {
+        "description": "File system for the E: VM-storage volume. ReFS block-clones base-image copies on Server 2025, so VM creation is near-instant and costs no extra space; do NOT enable Data Deduplication on it. NTFS is the legacy behaviour."
+      }
     }
   },
   "variables": {
@@ -394,7 +405,7 @@
           "autoUpgradeMinorVersion":true,
           "settings": {
             "fileUris": ["[variables('hostScript')]"],
-            "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File configureHostTask.ps1 -ScriptUrl ', variables('hostScriptParam'))]"
+            "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File configureHostTask.ps1 -ScriptUrl ', variables('hostScriptParam'), ' -FileSystem ', parameters('hostVolumeFileSystem'))]"
           }
       }
     }

@@ -1,5 +1,7 @@
 param(
-    $ScriptUrl
+    $ScriptUrl,
+    [ValidateSet('NTFS', 'ReFS')]
+    [string]$FileSystem = 'NTFS'
 )
 
 # Logging
@@ -12,6 +14,11 @@ function Write-HostLog {
 
 function Register-ConfigureHostTask
 {
+    param (
+        [ValidateSet('NTFS', 'ReFS')]
+        [string]$FileSystem = 'NTFS'
+    )
+
     $taskName = "configureHost"
     $filePath = "$env:windir\temp\configureHost.ps1"
 
@@ -22,7 +29,7 @@ function Register-ConfigureHostTask
 
     # Action
     $taskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $taskArgs = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
+    $taskArgs = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath -FileSystem $FileSystem"
     $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
 
     # Trigger
@@ -61,8 +68,8 @@ Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -I
 Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
 
 # Register scheduled task
-Write-HostLog "Registering scheduled task"
-Register-ConfigureHostTask
+Write-HostLog "Registering scheduled task (E: will be formatted $FileSystem)"
+Register-ConfigureHostTask -FileSystem $FileSystem
 
 Write-HostLog "Restarting the machine."
 & shutdown /r /t 30 /c "MEMLABS needs to restart the Azure Host VM. The machine will restart in less than a minute."

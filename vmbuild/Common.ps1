@@ -9386,6 +9386,16 @@ function Invoke-ChkdskScanForCorruption {
         return $false
     }
 
+    # ReFS has no chkdsk. Without this the scan below exits non-zero and the failure
+    # path reports "corruption remains" -- a verdict that was never measured.
+    $fsType = $null
+    try { $fsType = (Get-Volume -DriveLetter $drive.TrimEnd(':') -ErrorAction Stop).FileSystemType } catch {}
+    if ($fsType -and $fsType -ne 'NTFS') {
+        $letter = $drive.TrimEnd(':')
+        Write-Log "Invoke-ChkdskScanForCorruption: '$drive' is $fsType, not NTFS. chkdsk does not apply, so NOTHING WAS SCANNED -- this is UNKNOWN, not a clean bill of health. On ReFS check 'Repair-Volume -DriveLetter $letter -Scan' and the Microsoft-Windows-ReFS/Operational log instead." -Warning
+        return $false
+    }
+
     if (-not (Get-Command chkdsk.exe -ErrorAction SilentlyContinue)) {
         Write-Log "Invoke-ChkdskScanForCorruption: chkdsk.exe not available; skipping scan of '$drive'." -Warning
         return $false

@@ -60,8 +60,29 @@ param(
     # Friendly label shown in the WPF window title bar and embedded in the
     # per-run log file name. Normally a domain name; falls back to a VM
     # count if not supplied.
-    [string]$DomainLabel
+    [string]$DomainLabel,
+
+    # Run the space-reclaim passes even when the VHDX does not live on NTFS.
+    # On ReFS every reclaim mechanism here (defrag, zero-fill, Optimize-VHD)
+    # rewrites blocks, which un-shares block-clone extents and GROWS on-disk
+    # allocation instead of shrinking it.
+    [switch]$AllowReFS
 )
+
+function Get-VhdVolumeFileSystem {
+    # 'UNKNOWN' when it cannot be determined - callers must treat that as unsafe.
+    param([string]$Path)
+    try {
+        $root = [System.IO.Path]::GetPathRoot($Path)
+        if ([string]::IsNullOrWhiteSpace($root) -or $root.StartsWith('\\')) { return 'UNKNOWN' }
+        $letter = $root.TrimEnd('\').TrimEnd(':')
+        if ($letter.Length -ne 1) { return 'UNKNOWN' }
+        $vol = Get-Volume -DriveLetter $letter -ErrorAction Stop
+        if ($vol -and -not [string]::IsNullOrWhiteSpace($vol.FileSystemType)) { return [string]$vol.FileSystemType }
+        return 'UNKNOWN'
+    }
+    catch { return 'UNKNOWN' }
+}
 
 function Format-Size {
     param([long]$Bytes)
@@ -2013,12 +2034,17 @@ $btnXaml
                 try {
                     $VhdPath      = $disk.Path
                     $OptMode      = $Mode
-                    $DoDefrag     = -not $SkipDefrag
+                    $hostFs       = Get-VhdVolumeFileSystem -Path $VhdPath
+                    $refsGuard    = (-not $AllowReFS) -and ($hostFs -ne 'NTFS')
+                    if ($refsGuard) {
+                        Add-UiLog ("[GUARD] $($disk.VMName) - $($disk.FileName): host volume is $hostFs, not NTFS. Skipping defrag / zero-fill / Optimize-VHD (they un-share ReFS block clones and grow allocation). Offline cleanup still runs. Use -AllowReFS to override.")
+                    }
+                    $DoDefrag     = (-not $SkipDefrag) -and (-not $refsGuard)
                     $DoOfflineClean = -not $SkipOfflineClean
-                    $DoZeroFill   = -not $SkipZeroFill
+                    $DoZeroFill   = (-not $SkipZeroFill) -and (-not $refsGuard)
                     $JobVmName    = $disk.VMName
                     $job = Start-Job -ScriptBlock {
-                        param($p, $m, $defrag, $offlineClean, $zeroFill, $vmName)
+                        param($p, $m, $defrag, $offlineClean, $zeroFill, $vmName, $skipCompact)
                         # Do NOT set $ProgressPreference = 'SilentlyContinue'
                         # here - it suppresses Write-Progress records (both
                         # ours and Optimize-VHD's native progress) so the
@@ -2027,6 +2053,43 @@ $btnXaml
                         # $Job.ChildJobs[0].Progress so the UI bar moves.
                         $vhdName = [System.IO.Path]::GetFileName($p)
                         function Write-PhaseLog($msg) { Write-Output "::LOG::$vhdName : $msg" }
+
+                        function Get-VhdFailureDiagnosis($vhdPath, $err) {
+                            # Names the filter driver / error class behind a failure, so a corrupt
+                            # file is never reported as a generic compaction problem.
+                            $out = [System.Collections.Generic.List[string]]::new()
+                            $hr = 0
+                            try { $hr = [int]$err.Exception.HResult } catch { }
+                            if (($hr -band 0x7FFF0000) -eq 0x00070000) {
+                                switch ($hr -band 0xFFFF) {
+                                    1392 { $out.Add('0x80070570 ERROR_FILE_CORRUPT - the filesystem or a filter driver reports this file unreadable. The bytes could not be read at all; this is not a transient compaction failure.') }
+                                    23 { $out.Add('0x80070017 ERROR_CRC - a range of this file could not be read.') }
+                                    112 { $out.Add('0x80070070 ERROR_DISK_FULL - the host volume is out of space.') }
+                                    32 { $out.Add('0x80070020 ERROR_SHARING_VIOLATION - another process holds this file open.') }
+                                }
+                            }
+                            try {
+                                $item = Get-Item -LiteralPath $vhdPath -Force -ErrorAction Stop
+                                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                                    $raw = @(cmd /c "fsutil reparsepoint query `"$vhdPath`" 2>&1")
+                                    $tagLine = $raw | Select-String 'Reparse Tag Value' | Select-Object -First 1
+                                    $tag = if ($tagLine) { ($tagLine.ToString() -split ':')[-1].Trim() } else { 'unreadable' }
+                                    if ($tag -eq '0x80000013') {
+                                        $out.Add("REPARSE TAG $tag = Data Deduplication. This file is served from the dedup chunk store, so a corrupt or missing chunk makes ranges unreadable and Optimize-VHD cannot rewrite it. Check 'Get-DedupStatus' and run 'Start-DedupJob -Type Scrubbing -Full'.")
+                                    }
+                                    else {
+                                        $out.Add("REPARSE TAG $tag - a filter driver owns this file and may be the source of the error rather than the disk.")
+                                    }
+                                }
+                            } catch { }
+                            try {
+                                $lt = ([System.IO.Path]::GetPathRoot($vhdPath)).TrimEnd('\').TrimEnd(':')
+                                $v = Get-Volume -DriveLetter $lt -ErrorAction Stop
+                                $out.Add(("Host volume {0}: is {1}, {2:N1} GB free." -f $lt, $v.FileSystemType, ($v.SizeRemaining / 1GB)))
+                            } catch { }
+                            if ($out.Count -eq 0) { $out.Add('No additional detail available - the error did not carry a Win32 code and the file could not be inspected.') }
+                            return $out
+                        }
 
                         # --- Re-resolve $p before we touch it ---
                         # If $p ends in .avhdx, the prep job's settle gate let
@@ -2394,6 +2457,8 @@ $btnXaml
                                         $zfPath = "${letter}:\zero.tmp"
                                         Write-PhaseLog "Zero-fill ${letter}:"
                                         Write-Progress -Activity "Compact $p" -Status "Zero-fill ${letter}:" -PercentComplete (20 + (5 * $vi / [Math]::Max($volumes.Count, 1)))
+                                        $zfWritten = [long]0
+                                        $zfOutcome = 'stopped before writing anything'
                                         try {
                                             $stream = [System.IO.File]::Create($zfPath)
                                             try {
@@ -2401,9 +2466,14 @@ $btnXaml
                                                 while ($true) {
                                                     try {
                                                         $stream.Write($buf, 0, $buf.Length)
+                                                        $zfWritten += $buf.Length
                                                     }
                                                     catch [System.IO.IOException] {
-                                                        # disk full - expected
+                                                        # Filling the volume is the GOAL. Any other I/O error means the
+                                                        # volume went away mid-write and must not be read as success.
+                                                        $w32 = $_.Exception.HResult -band 0xFFFF
+                                                        if ($w32 -eq 112 -or $w32 -eq 39) { $zfOutcome = 'volume full (expected)' }
+                                                        else { $zfOutcome = ('I/O error 0x{0:X8}: {1}' -f $_.Exception.HResult, $_.Exception.Message) }
                                                         break
                                                     }
                                                 }
@@ -2413,12 +2483,21 @@ $btnXaml
                                             }
                                         }
                                         catch {
-                                            # best-effort; ignore
+                                            $zfOutcome = ("could not create {0}: {1}" -f $zfPath, $_.Exception.Message)
                                         }
                                         finally {
                                             if (Test-Path $zfPath) {
                                                 Remove-Item -Path $zfPath -Force -ErrorAction SilentlyContinue
                                             }
+                                        }
+                                        if ($zfWritten -eq 0) {
+                                            Write-PhaseLog ("  Zero-fill ${letter}: WROTE NOTHING - {0}. Optimize-VHD will reclaim little or nothing." -f $zfOutcome)
+                                        }
+                                        elseif ($zfOutcome -notlike 'volume full*') {
+                                            Write-PhaseLog ("  Zero-fill ${letter}: STOPPED EARLY after {0:N1} GB - {1}" -f ($zfWritten / 1GB), $zfOutcome)
+                                        }
+                                        else {
+                                            Write-PhaseLog ("  Zero-fill ${letter}: {0:N1} GB zeroed ({1})" -f ($zfWritten / 1GB), $zfOutcome)
                                         }
                                     }
                                 }
@@ -2460,7 +2539,7 @@ $btnXaml
                                                     Write-PhaseLog ("  -DiskNumber dismount FAILED: $($_.Exception.Message)")
                                                 }
                                             } elseif (-not $dismountOk) {
-                                                Write-PhaseLog ("Disk #{0} no longer present; dismount considered successful" -f $mountedDiskNumber)
+                                                Write-PhaseLog ("Disk #{0} is GONE: it was surprise-removed while we held it mounted, NOT dismounted cleanly. Any writes still in flight were lost, so the VHDX may be inconsistent and Optimize-VHD is likely to fail below." -f $mountedDiskNumber)
                                             }
                                         } catch {}
                                     }
@@ -2506,6 +2585,11 @@ $btnXaml
                         }
 
                         $preOptSize = try { (Get-Item -LiteralPath $p -ErrorAction Stop).Length } catch { 0 }
+                        if ($skipCompact) {
+                            Write-PhaseLog ("Optimize-VHD SKIPPED: host volume is not NTFS; compaction would un-share block clones. Size unchanged at {0:N1} GB." -f ($preOptSize/1GB))
+                            Write-Progress -Activity "Compact $p" -Status 'Skipped (non-NTFS host volume)' -PercentComplete 100
+                            return
+                        }
                         Write-PhaseLog ("Optimize-VHD ($m) starting (current size: {0:N1} GB)" -f ($preOptSize/1GB))
                         Write-Progress -Activity "Compact $p" -Status "Optimize-VHD ($m)" -PercentComplete 30
                         $optStart = Get-Date
@@ -2516,10 +2600,11 @@ $btnXaml
                             Write-PhaseLog ("Optimize-VHD complete in {0:N0}s; size {1:N1} GB -> {2:N1} GB (reclaimed {3:N1} GB)" -f ((Get-Date)-$optStart).TotalSeconds, ($preOptSize/1GB), ($postOptSize/1GB), ($reclaimed/1GB))
                         } catch {
                             Write-PhaseLog "Optimize-VHD FAILED: $($_.Exception.Message)"
+                            foreach ($d in (Get-VhdFailureDiagnosis $p $_)) { Write-PhaseLog "  DIAG: $d" }
                             throw
                         }
                         Write-Progress -Activity "Compact $p" -Status 'Done' -PercentComplete 100
-                    } -ArgumentList $VhdPath, $OptMode, $DoDefrag, $DoOfflineClean, $DoZeroFill, $JobVmName
+                    } -ArgumentList $VhdPath, $OptMode, $DoDefrag, $DoOfflineClean, $DoZeroFill, $JobVmName, $refsGuard
                     $disk.Job       = $job
                     $disk.Status    = 'Running'
                     $disk.StartTime = Get-Date
@@ -2850,13 +2935,30 @@ $btnXaml
 
     Add-UiLog ('')
     Add-UiLog ('=====================================================================================================')
-    Add-UiLog ('  Optimization Complete')
+    if ($failed.Count -gt 0) {
+        Add-UiLog ("  Optimization FINISHED WITH ERRORS - $($failed.Count) disk(s) FAILED")
+    }
+    else {
+        Add-UiLog ('  Optimization Complete')
+    }
     Add-UiLog ('=====================================================================================================')
     Add-UiLog ("  Domain   : $DomainLabel")
     Add-UiLog ("  Mode     : $Mode    MaxConcurrent: $MaxConcurrentJobs")
     Add-UiLog ("  Duration : $($duration.ToString('hh\:mm\:ss'))")
     Add-UiLog ("  Disks    : $($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled")
     Add-UiLog ("  VMs      : $($vmInfoList.Count) total, $($prepFailed.Count) prep-failed, $($forcedStops.Count) force-stopped")
+
+    $corrupt = @($failed | Where-Object { $_.Error -and ($_.Error -match '0x80070570|0x80070017|corrupted and unreadable|cyclic redundancy') })
+    if ($corrupt.Count -gt 0) {
+        Add-UiLog ('')
+        Add-UiLog ("  !! $($corrupt.Count) disk(s) failed with a CORRUPTION / UNREADABLE-RANGE error. Those bytes could not be")
+        Add-UiLog ('     read at all - this is NOT a transient compaction problem and re-running will not fix it.')
+        Add-UiLog ('     The per-disk "DIAG:" lines above name the error code and any filter driver. Then check:')
+        Add-UiLog ('       1. fsutil reparsepoint query <vhdx>          tag 0x80000013 = Data Deduplication owns the file')
+        Add-UiLog ('       2. Get-DedupStatus / Start-DedupJob -Type Scrubbing -Full     chunk store integrity')
+        Add-UiLog ('       3. System event log for disk / Ntfs / vhdmp errors during this run')
+        foreach ($c in $corrupt) { Add-UiLog ("       - $($c.VMName) / $($c.FileName)") }
+    }
 
     # Full-accounting totals: pre-merge (everything attached including
     # the AVHDX chain), post-merge (parent VHDX after Remove-VMCheckpoint
@@ -2987,13 +3089,23 @@ $btnXaml
     }
 
     $UiSync.OverallPercent = 100
-    $UiSync.StatusText     = "✅ Complete - you can now close this window.   ($($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled, $($forcedStops.Count) forced)"
+    if ($failed.Count -gt 0) {
+        $UiSync.StatusText = "⚠ Finished with $($failed.Count) FAILED - review the log before closing.   ($($successful.Count) completed, $($cancelled.Count) cancelled, $($forcedStops.Count) forced)"
+    }
+    else {
+        $UiSync.StatusText = "✅ Complete - you can now close this window.   ($($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled, $($forcedStops.Count) forced)"
+    }
     $UiSync.Jobs           = [System.Collections.ArrayList]::new()
     # Flips the StatusText to green/bold and appends "(Done)" to the
     # window title so the user knows they can close the window.
     $UiSync.Done           = $true
     Add-UiLog ('')
-    Add-UiLog ('>>> Optimization complete. You can now close this window. <<<')
+    if ($failed.Count -gt 0) {
+        Add-UiLog (">>> FINISHED WITH ERRORS: $($failed.Count) of $($successful.Count + $failed.Count + $cancelled.Count) disk(s) FAILED. Review the log above before closing. <<<")
+    }
+    else {
+        Add-UiLog ('>>> Optimization complete. You can now close this window. <<<')
+    }
 
     # Window stays open for log review - wait until the user closes it, then clean up
     while (-not $UiSync.WindowClosed) { Start-Sleep -Milliseconds 500 }
