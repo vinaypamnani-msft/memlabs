@@ -264,11 +264,7 @@ if ($vm.State -ne 'Off') {
         Write-Host "Stopping $VmName gracefully (heartbeat='$hb', up to ${StopTimeoutSeconds}s) ..." -ForegroundColor Yellow
         $stopJob = Stop-VM -Name $VmName -Force -AsJob -WarningAction SilentlyContinue
         $null = Wait-Job -Job $stopJob -Timeout $StopTimeoutSeconds
-        # Deliberately not removed. This is the wedged-guest path, so Wait-Job timing out
-        # is the expected case, and a VMJob Hyper-V is still working on completes on a
-        # threadpool thread that calls SetJobState on it -- dispose it first and that
-        # becomes an unhandled PSObjectDisposedException which kills the script outright.
-        # The job goes when this short-lived process does.
+        Remove-Job -Job $stopJob -Force -ErrorAction SilentlyContinue
     }
     else {
         Write-Host "heartbeat='$hb' -- guest is not answering ACPI; skipping the graceful request." -ForegroundColor Yellow
