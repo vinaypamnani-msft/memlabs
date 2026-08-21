@@ -1650,8 +1650,9 @@ Write-DscStatus "$Tag Starting perfloading"
         New-CMTaskSequence @customTS
         Write-DscStatus "$Tag Successfully created MEMLABS-Custom TS Example"
 
-        # Get all task sequences with names starting with "MEMLABS"
-        $taskSequences = Get-CMTaskSequence -Fast | Where-Object { $_.Name -like "MEMLABS*" }
+        # Deploy only this site's task sequences: they replicate globally, so an unfiltered
+        # read deploys another Primary's, whose boot image is not on this site's DPs.
+        $taskSequences = Get-CMTaskSequence -Fast | Where-Object { $_.Name -like "MEMLABS-*" -and "$($_.PackageID)" -like "$SiteCode*" }
 
         # Get the "All Unknown Computers" collection
         $unknownCollection = Get-CMDeviceCollection -Name "All Unknown Computers"
