@@ -845,11 +845,19 @@ function Remove-Domain {
 
     $all = $false
     Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
+    $domainVMs = @(Get-List -Type VM -DomainName $DomainName -ResetCache -SmartUpdate | Where-Object { $null -ne $_ })
     if ($VMList) {
-        $vmsToDelete = Get-List -Type VM -DomainName $DomainName -ResetCache -SmartUpdate | Where-Object { $_.vmName -in $VMList }
+        $vmsToDelete = @($domainVMs | Where-Object { $_.vmName -in $VMList })
+        # Selecting every VM in the domain IS a domain removal. genconfig's delete menu
+        # only offers a VM multi-select, so without this the switches, NATs and DHCP
+        # scopes were silently left behind whenever the operator picked them all.
+        if ($domainVMs.Count -gt 0 -and $vmsToDelete.Count -eq $domainVMs.Count) {
+            $all = $true
+            Write-Log "Selection covers all $($domainVMs.Count) VM(s) in '$DomainName'; treating this as a full domain removal so networks are cleaned up too." -Warning
+        }
     }
     else {
-        $vmsToDelete = Get-List -Type VM -DomainName $DomainName -ResetCache -SmartUpdate
+        $vmsToDelete = $domainVMs
         $all = $true
     }
     $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
