@@ -1770,6 +1770,9 @@ if ($UpdateRequired) {
         $smsExecSelfHealed = $false
         $lastMonitorState = $null
         $stateUnchangedSince = Get-Date
+        # False once a state refresh has failed: $updatepack is then a frozen snapshot, so
+        # "State unchanged" means "not read", which is not evidence of a wedge.
+        $stateReadOk = $true
         while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {
             if ($updatepack.Flag -eq 1) {
                 Write-DscStatus "Update State: PREREQ_ONLY"
@@ -1813,7 +1816,7 @@ if ($UpdateRequired) {
             # avoid disrupting a legitimate long-running install.
             $stuckState = ($updatepack.State -eq 196611) -or ($updatepack.State -eq 196609)
             $stuckThreshold = if ($updatepack.State -eq 196611) { 8 } else { 45 }
-            if ($stuckState -and $stateStuckMin -ge $stuckThreshold) {
+            if ($stuckState -and $stateReadOk -and $stateStuckMin -ge $stuckThreshold) {
                 $isTopLevel = $false
                 $curBuild = 0
                 try {
@@ -1902,10 +1905,15 @@ if ($UpdateRequired) {
 
             Write-DscStatus "Updating to '$($updatepack.Name)'. Current State: $($state[$updatepack.State]) ($([int]$elapsedMin)m/$monitorDeadlineMin`m)"
             Start-Sleep -Seconds 60
+            # Cleared first: a swallowed failure here used to leave the PREVIOUS poll's rows
+            # in $instance, so a dead query kept logging a stale timestamp as current progress.
+            $instance = $null
             try {
                 $instance = Get-CimInstance -Class SMS_CM_UpdatePackDetailedMonitoring -Namespace root/SMS/site_$sitecode -Filter "PackageGuid='$($updatepack.PackageGuid)'" | Where-Object { $_.Progress -and $_.Progress -lt 100 }
             }
-            catch {}
+            catch {
+                Write-DscStatus "Detailed update progress unavailable this poll: $_" -NoLog
+            }
             if ($instance) {
                 Write-DscStatus "$($instance[0].MessageTime.ToShortDateString()) $($instance[0].MessageTime.ToLongTimeString()) $($instance[0].Description)" -NoLog
             }
@@ -1913,8 +1921,12 @@ if ($UpdateRequired) {
 
             try {
                 $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+                $stateReadOk = $true
             }
-            catch {}
+            catch {
+                $stateReadOk = $false
+                Write-DscStatus "WARNING: could not refresh update state for '$($updatepack.Name)': $_. Every State value reported below is the last SUCCESSFUL read, not a current one."
+            }
         }
 
         if ($updatepack.State -eq 196612) {
