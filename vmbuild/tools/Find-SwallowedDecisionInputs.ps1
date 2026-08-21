@@ -71,8 +71,8 @@
       * Only plain `$var = ...` assignments are tracked. Property assignments
         (`$obj.Prop = ...`) are ignored -- the object still exists, only the
         property is unset, which is a weaker signal.
-      * Assignments made inside a nested scriptblock in the try are attributed to
-        the enclosing scope, which can under-report.
+      * Assignments made inside a nested scriptblock in the try are ignored: the try
+        throwing says nothing about whether a deferred -Action block ran.
       * ForEach-Object is a pipeline, not a LoopStatementAst, so the stale-in-loop
         rule does not apply inside one.
 #>
@@ -266,6 +266,15 @@ function Get-CatchShape {
             $reportCmds -contains $_ -or $Reporters.ContainsKey($_)
         })
     if ($loud.Count) { return $null }
+
+    # `catch { $results.Details.Add("FAIL: ...") }` is how the validation engine reports.
+    # It is a method call, not a command, so no Write-* rule sees it.
+    $adds = @($Catch.Body.FindAll({
+                $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+                "$($args[0].Member)" -eq 'Add'
+            }, $true))
+    if ($adds.Count) { return $null }
+
     if (@($names | Where-Object { $quietCmds -contains $_ }).Count) { return 'verbose-only' }
     return 'silent'
 }
@@ -292,6 +301,31 @@ function Test-IsUnconditionalInTry {
             $a -is [System.Management.Automation.Language.LoopStatementAst]) { return $false }
     }
     return $true
+}
+
+function Test-IsInNestedScriptBlock {
+    # `try { Register-EngineEvent -Action { $t = $null } } catch {}` -- the assignment runs
+    # at engine exit, not in the try's flow, so the try throwing says nothing about it.
+    # Must stop at THIS try: stopping at the first try found lands on an inner one and
+    # wrongly reports the assignment as belonging to the outer try as well.
+    param($Assignment, $Try)
+    foreach ($a in (Get-Ancestors -Node $Assignment)) {
+        if ($a -eq $Try) { return $false }
+        if ($a -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { return $true }
+    }
+    return $false
+}
+
+function Get-EnclosingScriptBlock {
+    # The scriptblock a try lives in, if any. Code outside it runs at a different time,
+    # so it cannot observe what the swallowed failure left behind.
+    param($Node, $ScopeAst)
+    foreach ($a in (Get-Ancestors -Node $Node)) {
+        if ($a -eq $ScopeAst) { break }
+        if ($a -is [System.Management.Automation.Language.FunctionDefinitionAst]) { break }
+        if ($a -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { return $a }
+    }
+    return $null
 }
 
 function Test-ReadGuardsLoopExit {
@@ -433,6 +467,19 @@ function Test-LoopBreaksOnSuccess {
         if ($bs) { break }
     }
 }
+function Test-CatchAdds {
+    $sink = New-Object System.Collections.Generic.List[string]
+    try { $cad = Get-C } catch { $sink.Add("failed: $_") }
+    if ($cad) { 'x' }
+}
+function Test-DeferredScriptBlock {
+    try { Register-Thing -Action { $dsb = 'set at exit' } } catch { }
+    if ($dsb) { 'x' }
+}
+function Test-ReadOutsideScriptBlock {
+    Register-Thing -Action { try { $ros = Get-Thing } catch { } }
+    if ($ros) { 'x' }
+}
 '@
     $fixtureAst = [System.Management.Automation.Language.Parser]::ParseInput($fixture, [ref]$null, [ref]$null)
     $sources = @([pscustomobject]@{ Name = '<self-test>'; Ast = $fixtureAst })
@@ -481,6 +528,7 @@ foreach ($source in $sources) {
             if (-not $name) { continue }
             if ($autoVars -contains $name.ToLowerInvariant()) { continue }
             if (Test-IsUnconditionalConstant -Assignment $a -Try $try) { continue }
+            if (Test-IsInNestedScriptBlock -Assignment $a -Try $try) { continue }
             $assigned[$name] = $true
             if (-not $refreshed.ContainsKey($name)) { $refreshed[$name] = $false }
             # `$ok = $true` is a success flag: carrying the old value means "still not
@@ -498,6 +546,7 @@ foreach ($source in $sources) {
         $scopeAssignments = @($scopeAst.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))
         $scopeForeach = @($scopeAst.FindAll({ $args[0] -is [System.Management.Automation.Language.ForEachStatementAst] }, $true))
         $scopeReads = @($scopeAst.FindAll({ $args[0] -is [System.Management.Automation.Language.VariableExpressionAst] }, $true))
+        $sbScope = Get-EnclosingScriptBlock -Node $try -ScopeAst $scopeAst
 
         foreach ($name in $assigned.Keys) {
             $preInit = $paramNames -contains $name
@@ -546,6 +595,8 @@ foreach ($source in $sources) {
                 if ($r.Extent.StartOffset -lt $windowStart) { continue }
                 if ($r.Extent.StartOffset -ge $nextAssign) { continue }
                 if ($r.VariablePath.UserPath -ne $name) { continue }
+                if ($sbScope -and ($r.Extent.StartOffset -lt $sbScope.Extent.StartOffset -or
+                        $r.Extent.EndOffset -gt $sbScope.Extent.EndOffset)) { continue }
                 if ($r.Extent.StartOffset -ge $try.Extent.StartOffset -and
                     $r.Extent.EndOffset -le $try.Extent.EndOffset) { continue }
                 if (Test-IsWriteTarget -Read $r) { continue }
@@ -601,7 +652,10 @@ if ($SelfTest.IsPresent) {
         $problems += "`$s`: expected HIGH/silent, got $($silent[0].Severity)/$($silent[0].Shape)"
     }
     foreach ($pair in @(@('rep', 'the catch calls Write-Host'), @('lr', 'the catch calls a local _Log reporter'),
-            @('ca', 'the catch assigns the variable itself'), @('cr', 'the catch returns'))) {
+            @('ca', 'the catch assigns the variable itself'), @('cr', 'the catch returns'),
+            @('cad', 'the catch reports via .Add()'),
+            @('dsb', 'the assignment is in a deferred scriptblock, not the try flow'),
+            @('ros', 'the read is outside the scriptblock the try lives in'))) {
         $hit = @($findings | Where-Object { $_.Variable -eq ('$' + $pair[0]) })
         if ($hit.Count -ne 0) { $problems += "`$$($pair[0]) was reported, but $($pair[1])" }
     }
