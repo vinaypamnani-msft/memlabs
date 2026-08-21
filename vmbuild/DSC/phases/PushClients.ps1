@@ -212,6 +212,25 @@ if ($usePKI -and $CurrentRole -ne "CAS") {
     # to be set. If we push before AD is updated, ccmsetup fails with
     # CCM_E_NO_CLIENT_PKI_CERT. Check ALL DCs to guard against replication lag.
     Write-DscStatus "[ClientPush] Verifying AD has HTTPS-mode OperationalXml on all DCs before pushing..."
+
+    # AD's SecurityModeMaskEx is published FROM the site's IISSSLState. If the site
+    # itself lost CCM_SSL_ENABLED (role installs revert it to the 1248 default), no
+    # amount of waiting or replication can make AD grow the bit -- the wait would be
+    # 10 minutes of dead time ending in the same answer.
+    $siteSslOk = $true
+    try {
+        $sslProp = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" |
+            Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq 'IISSSLState' } | Select-Object -First 1
+        if ($sslProp -and -not ([int]$sslProp.Value -band 1)) {
+            $siteSslOk = $false
+            Write-DscStatus "[ClientPush] WARNING: site IISSSLState=$($sslProp.Value) -- CCM_SSL_ENABLED (0x1) is NOT set, so AD can never publish it. HTTPS was reverted after EnableHTTPS ran; not waiting on AD."
+            Write-CmSslStateForensics -Tag '[ClientPush][SSLState]'
+        }
+    }
+    catch {
+        Write-DscStatus "[ClientPush] Could not read IISSSLState ($($_.Exception.Message)) -- the site's HTTPS state is UNKNOWN, not bad. Continuing with the AD wait."
+    }
+
     $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
     $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
     if ($allDCs.Count -eq 0) { $allDCs = @($env:LOGONSERVER -replace '\\\\','') }
@@ -223,7 +242,7 @@ if ($usePKI -and $CurrentRole -ne "CAS") {
     $allGood = $false
     $forcedReplication = $false
 
-    while (-not $allGood -and (Get-Date) -lt $deadline) {
+    while (-not $allGood -and $siteSslOk -and (Get-Date) -lt $deadline) {
         $staleDCs = @()
         foreach ($dc in $allDCs) {
             try {
@@ -281,7 +300,12 @@ if ($usePKI -and $CurrentRole -ne "CAS") {
     }
 
     if (-not $allGood) {
-        Write-DscStatus "[ClientPush] WARNING: AD OperationalXml still stale on some DCs after ${maxWaitMinutes}m. Client push may fail with CCM_E_NO_CLIENT_PKI_CERT if clients query a stale DC."
+        if (-not $siteSslOk) {
+            Write-DscStatus "[ClientPush] WARNING: the site is not in HTTPS mode, so ccmsetup will fail with CCM_E_NO_CLIENT_PKI_CERT. EnableHTTPS.ps1 has to re-apply HTTPS-only on this site."
+        }
+        else {
+            Write-DscStatus "[ClientPush] WARNING: AD OperationalXml still stale on some DCs after ${maxWaitMinutes}m. Client push may fail with CCM_E_NO_CLIENT_PKI_CERT if clients query a stale DC."
+        }
     }
 }
 

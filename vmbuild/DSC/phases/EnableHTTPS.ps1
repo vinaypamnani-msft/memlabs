@@ -53,7 +53,9 @@ Set-Location "$($SiteCode):\" @initParams
 # Keep setting it every 30 seconds, 10 times and bail...
 $enabled = $false
 $attempts = 0
-$maxAttempts = 5
+# Same budget as EnableEHTTP.ps1: role installs keep reverting the site control
+# file while they run, so a 5-attempt loop can lose the fight.
+$maxAttempts = 40
 # Don't stop on the first success -- site component manager can flip it back while
 # roles are still installing. Stop once it has held for a few consecutive checks.
 $stableChecks = 0
@@ -172,11 +174,21 @@ if (-not (Test-Path $CertPath)) {
 
 $flagFile = "C:\staging\DSC\EnableEHTTPorHTTPS.flag"
 
-# Check if the flag file exists
-if (Test-Path $flagFile) {
-    Write-DscStatus "HTTPS already enabled. Flag file exists. Skipping execution."
+# The flag only records that SOME earlier pass reached HTTPS mode. Installing the
+# MP/DP roles rewrites the site control file and reverts IISSSLState to the
+# install-time default (1248 = e-HTTP + switching mode, no PKI cert). This script
+# is invoked again after those installs precisely to catch that, so the decision
+# has to come from the live value, not from the flag.
+$prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
+if ($prop.Value -band 1) {
+    Write-DscStatus "HTTPS already enabled (IISSSLState=$($prop.Value)). Skipping execution."
+    $enabled = $true
 }
 else {
+    if (Test-Path $flagFile) {
+        Write-DscStatus "IISSSLState is $($prop.Value) but the flag file says an earlier pass enabled HTTPS -- something reverted it. Re-applying."
+        Write-CmSslStateForensics -Tag '[SSLState revert]'
+    }
     do {
         $attempts++   
         Write-DscStatus "Enable HTTPS"
@@ -205,7 +217,8 @@ else {
         Start-Sleep 10
 
         $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
-        $enabled = ($prop.Value -eq 63)
+        # Same bit ccmsetup and Phase 11 test; e-HTTP may legitimately stay on alongside it.
+        $enabled = [bool]($prop.Value -band 1)
         if ($enabled) { $stableChecks++ } else { $stableChecks = 0 }
         Write-DscStatus "IISSSLState Value is $($prop.Value). HTTPS enabled: $enabled (stable $stableChecks/$requiredStableChecks, attempt $attempts/$maxAttempts)" -RetrySeconds 15
     } until ($stableChecks -ge $requiredStableChecks -or $attempts -ge $maxAttempts)

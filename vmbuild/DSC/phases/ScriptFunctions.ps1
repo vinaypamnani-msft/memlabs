@@ -129,6 +129,22 @@ function Write-StatusLogEntry {
     }
 }
 
+function Get-CmSslStateNote {
+    # Short "  [ssl=63]" tag for the Invoke-DotSource boundary lines, so a revert of
+    # IISSSLState can be attributed to the script whose window it happened in.
+    # Reads SCM's registry mirror (sitecomp.cpp CSiteComponentManager::WriteToRegistry),
+    # NOT the site control file: this runs in the LOGGING path under ScriptWorkflow's
+    # top-level trap, and an SMS-provider WMI query has no timeout and can hang there.
+    # Cost of that choice: the value lags the SCF by SCM's detection interval.
+    $note = ''
+    try {
+        $v = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Components\SMS_SITE_COMPONENT_MANAGER' -Name 'IISSSLState' -ErrorAction Stop
+        if ($null -ne $v) { $note = "  [ssl=$v]" }
+    }
+    catch { $note = '' }
+    return $note
+}
+
 function Invoke-DotSource {
     # Wrapper for dot-sourcing scripts with error handling.
     # Catches parse errors, execution policy blocks, and other failures
@@ -191,7 +207,7 @@ function Invoke-DotSource {
     # and the scripts have their own retry logic; marking them as JOBFAILURE
     # would abort the phase prematurely.
     $__idsStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-DscStatus "[Invoke-DotSource] START $__idsScriptName" -NoStatus
+    Write-DscStatus "[Invoke-DotSource] START $__idsScriptName$(Get-CmSslStateNote)" -NoStatus
     try {
         & $Script @Arguments
     }
@@ -202,7 +218,88 @@ function Invoke-DotSource {
     finally {
         $__idsStopwatch.Stop()
         $__idsElapsed = $__idsStopwatch.Elapsed.ToString('hh\:mm\:ss')
-        Write-DscStatus "[Invoke-DotSource] END   $__idsScriptName  ($__idsElapsed elapsed)" -NoStatus
+        Write-DscStatus "[Invoke-DotSource] END   $__idsScriptName  ($__idsElapsed elapsed)$(Get-CmSslStateNote)" -NoStatus
+    }
+}
+
+function Write-CmSslStateForensics {
+    # Called when IISSSLState is found reverted. Names WHO rewrote the site control
+    # file. Everything lands via Write-DscStatus so it reaches the HOST jsonl and
+    # survives lab deletion. Read-only; never throws.
+    param([string]$Tag = '[SSLState]', [int]$TailLines = 4000)
+
+    try {
+        $sc = ''
+        try { $sc = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop } catch { }
+
+        # Full site-control picture first: which components carry which value.
+        if ($sc) {
+            try {
+                $rows = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SCI_Component -Filter "FileType=2 AND SiteCode='$sc'" -ErrorAction Stop)
+                $withSsl = @($rows | Where-Object { $_.Props | Where-Object { $_.PropertyName -eq 'IISSSLState' } })
+                Write-DscStatus "$Tag $($withSsl.Count) of $($rows.Count) site-control component(s) carry IISSSLState:"
+                foreach ($r in $withSsl) {
+                    $v = $r.Props | Where-Object { $_.PropertyName -eq 'IISSSLState' } | Select-Object -First 1
+                    Write-DscStatus "$Tag   $($r.ComponentName) [$($r.ItemName)] IISSSLState=$($v.Value)"
+                }
+            }
+            catch {
+                Write-DscStatus "$Tag site control read FAILED ($($_.Exception.Message)) -- the component values are UNKNOWN, not unchanged."
+            }
+        }
+        else {
+            Write-DscStatus "$Tag no 'Site Code' under HKLM:\SOFTWARE\Microsoft\SMS\Identification -- cannot read the site control file."
+        }
+
+        $logDir = ''
+        foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Setup', 'HKLM:\SOFTWARE\Microsoft\SMS\Identification')) {
+            $d = $null
+            try { $d = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
+            if ($d) { $logDir = Join-Path $d 'Logs'; break }
+        }
+        if (-not $logDir -or -not (Test-Path $logDir)) {
+            Write-DscStatus "$Tag ConfigMgr log directory not found -- no log evidence collected."
+            return
+        }
+
+        # SMSProv.log is the only log that names the CALLER of a site-control write.
+        # sitecomp.cpp logs the literal string 'Detected change in SSLState' when SCM
+        # notices the new value, which brackets the write from the consumer side.
+        $probes = @(
+            @{ Log = 'SMSProv.log'; Pattern = 'IISSSLState'; Keep = 25 },
+            @{ Log = 'sitecomp.log'; Pattern = 'SSLState|site control file'; Keep = 20 },
+            @{ Log = 'hman.log'; Pattern = 'site control|SSLState'; Keep = 15 }
+        )
+        foreach ($p in $probes) {
+            $found = $false
+            foreach ($name in @($p.Log, ($p.Log -replace '\.log$', '.lo_'))) {
+                $path = Join-Path $logDir $name
+                if (-not (Test-Path $path)) { continue }
+                $found = $true
+                try {
+                    $tail = @(Get-Content -LiteralPath $path -Tail $TailLines -ErrorAction Stop)
+                    $hits = @($tail | Select-String -Pattern $p.Pattern)
+                    if ($hits.Count -eq 0) {
+                        Write-DscStatus "$Tag $name : 0 of the last $($tail.Count) line(s) match '$($p.Pattern)'. That is a measured ABSENCE over that window only."
+                        continue
+                    }
+                    Write-DscStatus "$Tag $name : $($hits.Count) match(es) in the last $($tail.Count) line(s); newest $([Math]::Min($hits.Count, $p.Keep)):"
+                    foreach ($h in ($hits | Select-Object -Last $p.Keep)) {
+                        $line = ($h.Line -replace '^<!\[LOG\[', '' -replace '\]LOG\]!>', ' @ ')
+                        $line = ($line -replace '\s+', ' ').Trim()
+                        if ($line.Length -gt 400) { $line = $line.Substring(0, 400) + '...' }
+                        Write-DscStatus "$Tag   $line"
+                    }
+                }
+                catch {
+                    Write-DscStatus "$Tag $name : read FAILED ($($_.Exception.Message)) -- UNKNOWN, not absent."
+                }
+            }
+            if (-not $found) { Write-DscStatus "$Tag $($p.Log) : NOT FOUND in $logDir -- this component may not run on this server." }
+        }
+    }
+    catch {
+        Write-DscStatus "$Tag forensics collection failed: $($_.Exception.Message)"
     }
 }
 

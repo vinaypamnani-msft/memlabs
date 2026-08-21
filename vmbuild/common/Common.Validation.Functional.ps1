@@ -10928,6 +10928,7 @@ function Test-CMSiteWideFunctionality {
         # CCM_SSL_ENABLED (0x1) must be set for ccmsetup to use PKI certs.
         # IISSSLState=63 (0x3F) has all the right bits including 0x1.
         if ($usePki) {
+            $siteSslState = $null
             try {
                 $comp = Get-WmiObject -Namespace $ns -Class SMS_SCI_Component `
                     -Filter "FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND SiteCode='$sc'" `
@@ -10936,6 +10937,7 @@ function Test-CMSiteWideFunctionality {
                     $sslProp = $comp.Props | Where-Object { $_.PropertyName -eq 'IISSSLState' } | Select-Object -First 1
                     if ($sslProp) {
                         $sslVal = $sslProp.Value
+                        $siteSslState = [int]$sslVal
                         if ($sslVal -band 1) {
                             $results.Details.Add("OK: IISSSLState = $sslVal (CCM_SSL_ENABLED bit is set)")
                         }
@@ -10977,7 +10979,14 @@ function Test-CMSiteWideFunctionality {
                         }
                         else {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: AD SecurityModeMaskEx = $adMaskEx (CCM_SSL_ENABLED bit 0x1 NOT set). Site component manager has not republished after HTTPS was enabled. ccmsetup bootstrap will fail with CCM_E_NO_CLIENT_PKI_CERT.")
+                            # AD is published FROM IISSSLState, so an equal value is a current
+                            # read of a bad site state -- not a republish lag.
+                            if ($null -ne $siteSslState -and $adMaskEx -eq $siteSslState) {
+                                $results.Details.Add("FAIL: AD SecurityModeMaskEx = $adMaskEx (CCM_SSL_ENABLED bit 0x1 NOT set). This MATCHES the site's own IISSSLState, so AD is current and the SITE is not in HTTPS mode -- HTTPS was never applied or was reverted after EnableHTTPS ran. ccmsetup bootstrap will fail with CCM_E_NO_CLIENT_PKI_CERT.")
+                            }
+                            else {
+                                $results.Details.Add("FAIL: AD SecurityModeMaskEx = $adMaskEx (CCM_SSL_ENABLED bit 0x1 NOT set) while the site's IISSSLState = $siteSslState. Site component manager has not republished after HTTPS was enabled. ccmsetup bootstrap will fail with CCM_E_NO_CLIENT_PKI_CERT.")
+                            }
                         }
                     }
                     # Check CertificateIssuers is populated
