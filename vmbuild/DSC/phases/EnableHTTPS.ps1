@@ -75,9 +75,15 @@ if (-not $FirstRun) {
         }
     }
     else {
-        # On re-runs, still verify AD has the right state. If the site component
-        # manager hadn't republished when the first run completed, AD is stale and
-        # ccmsetup will fail with CCM_E_NO_CLIENT_PKI_CERT.
+        # On re-runs, check BOTH the site's own IISSSLState and the AD copy ccmsetup
+        # reads. AD is published FROM IISSSLState and lags it, so deciding on AD alone
+        # lets a re-run skip a site that a role install reverted moments earlier.
+        $siteOk = $false
+        try {
+            $reProp = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
+            $siteOk = [bool]($reProp.Value -band 1)
+        }
+        catch { }
         $adOk = $false
         try {
             $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
@@ -91,12 +97,12 @@ if (-not $FirstRun) {
             }
         }
         catch { }
-        if ($adOk) {
-            Write-DscStatus "Not the first run. AD SecurityModeMaskEx has CCM_SSL_ENABLED. Skipping."
+        if ($siteOk -and $adOk) {
+            Write-DscStatus "Not the first run. IISSSLState=$($reProp.Value) and AD SecurityModeMaskEx both have CCM_SSL_ENABLED. Skipping."
             return
         }
         else {
-            Write-DscStatus "Not the first run but AD SecurityModeMaskEx is stale (CCM_SSL_ENABLED bit missing). Will wait for republish."
+            Write-DscStatus "Not the first run: site CCM_SSL_ENABLED=$siteOk (IISSSLState=$($reProp.Value)), AD CCM_SSL_ENABLED=$adOk. Continuing."
         }
     }
 }
