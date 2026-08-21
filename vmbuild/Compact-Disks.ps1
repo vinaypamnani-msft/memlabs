@@ -136,6 +136,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
 
     $AttachedCount = $importedData.AttachedCount
     $DomainLabel   = $importedData.DomainLabel
+    # Null-filtered: @($null).Count is 1, which would report a phantom missing VM.
+    $MissingVMs    = @($importedData.MissingVMs | Where-Object { $_ })
     $ShutdownTimeoutSec = if ($importedData.ShutdownTimeoutSec) { [int]$importedData.ShutdownTimeoutSec } else { 300 }
 
     # Path to Common.ps1 - each prep job dot-sources it to gain access to
@@ -2955,6 +2957,9 @@ $btnXaml
     Add-UiLog ("  Duration : $($duration.ToString('hh\:mm\:ss'))")
     Add-UiLog ("  Disks    : $($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled")
     Add-UiLog ("  VMs      : $($vmInfoList.Count) total, $($prepFailed.Count) prep-failed, $($forcedStops.Count) force-stopped")
+    if ($MissingVMs.Count -gt 0) {
+        Add-UiLog ("  !! $($MissingVMs.Count) requested VM(s) DO NOT EXIST on this host and were never processed: $($MissingVMs -join ', ')")
+    }
 
     $corrupt = @($failed | Where-Object { $_.Error -and ($_.Error -match '0x80070570|0x80070017|corrupted and unreadable|cyclic redundancy') })
     if ($corrupt.Count -gt 0) {
@@ -3140,6 +3145,7 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "  Hyper-V VHD Optimization" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
 
+$missing = @()
 if ($VMNames -and $VMNames.Count -gt 0) {
     $vms = @(Get-VM -Name $VMNames -ErrorAction SilentlyContinue)
     $missing = @($VMNames | Where-Object { $_ -notin ($vms | ForEach-Object Name) })
@@ -3178,7 +3184,8 @@ elseif ($env:_COMPACT_DISKS_DOMAINLABEL) {
     $domainLabel = $env:_COMPACT_DISKS_DOMAINLABEL
 }
 elseif ($VMNames -and $VMNames.Count -gt 0) {
-    $domainLabel = "$($VMNames.Count) VM(s)"
+    # Resolved count, not requested - a label of "5 VM(s)" over a 4-VM run reads as a bug.
+    $domainLabel = "$($vms.Count) VM(s)"
 }
 # Clear so it doesn't leak to grandchild processes (the worker re-launch
 # below inherits env vars, but DomainLabel is plumbed through the clixml
@@ -3187,6 +3194,7 @@ Remove-Item Env:\_COMPACT_DISKS_DOMAINLABEL -ErrorAction SilentlyContinue
 
 @{
     VMs                 = @($vms | ForEach-Object { @{ VMName = $_.Name } })
+    MissingVMs          = @($missing)
     AttachedCount       = 0   # legacy field, kept for backward compat in the worker
     DomainLabel         = $domainLabel
     ShutdownTimeoutSec  = 300
