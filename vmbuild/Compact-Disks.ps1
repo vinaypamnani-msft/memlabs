@@ -2059,14 +2059,22 @@ $btnXaml
                             # file is never reported as a generic compaction problem.
                             $out = [System.Collections.Generic.List[string]]::new()
                             $hr = 0
+                            $w32 = -1
                             try { $hr = [int]$err.Exception.HResult } catch { }
                             if (($hr -band 0x7FFF0000) -eq 0x00070000) {
-                                switch ($hr -band 0xFFFF) {
-                                    1392 { $out.Add('0x80070570 ERROR_FILE_CORRUPT - the filesystem or a filter driver reports this file unreadable. The bytes could not be read at all; this is not a transient compaction failure.') }
-                                    23 { $out.Add('0x80070017 ERROR_CRC - a range of this file could not be read.') }
-                                    112 { $out.Add('0x80070070 ERROR_DISK_FULL - the host volume is out of space.') }
-                                    32 { $out.Add('0x80070020 ERROR_SHARING_VIOLATION - another process holds this file open.') }
-                                }
+                                $w32 = $hr -band 0xFFFF
+                            }
+                            else {
+                                # Optimize-VHD wraps the Win32 failure in a generic exception and
+                                # carries the code only in the message text.
+                                $m = [regex]::Match([string]$err.Exception.Message, '0x8007([0-9A-Fa-f]{4})')
+                                if ($m.Success) { $w32 = [Convert]::ToInt32($m.Groups[1].Value, 16) }
+                            }
+                            switch ($w32) {
+                                1392 { $out.Add('0x80070570 ERROR_FILE_CORRUPT - the filesystem or a filter driver reports this file unreadable. The bytes could not be read at all; this is not a transient compaction failure.') }
+                                23 { $out.Add('0x80070017 ERROR_CRC - a range of this file could not be read.') }
+                                112 { $out.Add('0x80070070 ERROR_DISK_FULL - the host volume is out of space.') }
+                                32 { $out.Add('0x80070020 ERROR_SHARING_VIOLATION - another process holds this file open.') }
                             }
                             try {
                                 $item = Get-Item -LiteralPath $vhdPath -Force -ErrorAction Stop
