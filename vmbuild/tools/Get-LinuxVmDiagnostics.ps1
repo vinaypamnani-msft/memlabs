@@ -264,7 +264,12 @@ if ($vm.State -ne 'Off') {
         Write-Host "Stopping $VmName gracefully (heartbeat='$hb', up to ${StopTimeoutSeconds}s) ..." -ForegroundColor Yellow
         $stopJob = Stop-VM -Name $VmName -Force -AsJob -WarningAction SilentlyContinue
         $null = Wait-Job -Job $stopJob -Timeout $StopTimeoutSeconds
-        Remove-Job -Job $stopJob -Force -ErrorAction SilentlyContinue
+        # Free it only once Hyper-V has finished: a VMJob still in flight completes on a
+        # threadpool thread that calls SetJobState on this object, and disposing it first
+        # makes that an unhandled PSObjectDisposedException which kills the script.
+        if ("$($stopJob.State)" -in @('Completed', 'Failed')) {
+            Remove-Job -Job $stopJob -Force -ErrorAction SilentlyContinue
+        }
     }
     else {
         Write-Host "heartbeat='$hb' -- guest is not answering ACPI; skipping the graceful request." -ForegroundColor Yellow

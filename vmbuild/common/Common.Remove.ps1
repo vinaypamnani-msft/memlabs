@@ -242,7 +242,7 @@ function Remove-VirtualMachine {
                     Write-Log "TurnOff failed: $reason" -Warning
                 }
             }
-            Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
+            Remove-CompletedHyperVJob -Job $stopJob -Context "VM '$($VM.Name)': TurnOff"
         }
         catch {
             Write-Log "TurnOff threw $($_.Exception.GetType().Name): $($_.Exception.Message)" -Warning
