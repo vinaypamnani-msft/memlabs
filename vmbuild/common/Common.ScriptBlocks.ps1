@@ -2034,18 +2034,20 @@ function Save-CMSetupLogsFromVm {
         host VMBuild log so operators can inspect them without RDP'ing in.
     .DESCRIPTION
         InstallCMLog.log (DSC wrapper transcript, normally <1 MB) is ALWAYS
-        pulled in full. ConfigMgrSetup.log is pulled FULL on failure and as
-        the last 5000 lines on success -- on CAS after a CB upgrade the full
-        file routinely runs 100-300 MB, so the tail keeps disk + PSDirect
-        serialization cost bounded while still preserving the operationally
-        useful end-of-install context.
+        pulled in full. ConfigMgrSetup.log is pulled FULL on failure AND on
+        success: the two regions where Init_Database has actually died -- the
+        Asset Intelligence import (~4% in) and index creation (~39% in) -- are
+        17k lines apart, so no tail window covers both, and a successful run
+        left no record of either. Above 64MB (a CAS after a CB upgrade routinely
+        runs 100-300 MB) it degrades to first 30000 + last 5000 lines, which
+        keeps both ends rather than trading one blind spot for another.
         DSC_Log.log is the TemplateHelpDSC resources' own Write-Status
         narrative -- a different file from InstallCMLog.log, and the only
         place a resource can say WHY it gave up. The host only ever samples
         the current status, so without this the reasoning is unrecoverable.
         Files land in (Split-Path $Common.LogPath -Parent) as:
-            <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.log          (Failure: full)
-            <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.tail5000.log (Success: tail)
+            <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.log          (full)
+            <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.head30000-tail5000.log (>64MB only)
             <VmName>-Phase<N>-<timestamp>-InstallCMLog.log            (always: full)
             <VmName>-Phase<N>-<timestamp>-DSC_Log.log                 (always: tail 4000)
     #>
@@ -2079,9 +2081,21 @@ function Save-CMSetupLogsFromVm {
                 if ($Mode -eq 'Failure') {
                     $out.SetupContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
                 }
+                elseif ($fi.Length -le 64MB) {
+                    # Whole file on success too: the AI import sits ~4% in and index
+                    # creation ~39% in, 17k lines apart, so no tail window covers both
+                    # regions where Init_Database has actually died.
+                    $out.SetupContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
+                }
                 else {
+                    # The content crosses PSDirect as one string, so a 100-300MB CAS log
+                    # gets both ends instead of one: Init_Database and index creation live
+                    # in the head, the upgrade outcome in the tail.
                     $out.SetupTail = $true
-                    $out.SetupContent = (Get-Content -LiteralPath $fi.FullName -Tail 5000 -ErrorAction SilentlyContinue) -join "`r`n"
+                    $head = @(Get-Content -LiteralPath $fi.FullName -TotalCount 30000 -ErrorAction SilentlyContinue)
+                    $tail = @(Get-Content -LiteralPath $fi.FullName -Tail 5000 -ErrorAction SilentlyContinue)
+                    $marker = "***** MEMLABS: middle omitted -- $($fi.Length) bytes in-VM, kept first 30000 + last 5000 lines *****"
+                    $out.SetupContent = (@($head) + @($marker) + @($tail)) -join "`r`n"
                 }
             }
         }
@@ -2129,12 +2143,12 @@ function Save-CMSetupLogsFromVm {
 
     if ($r.SetupExists) {
         if ($r.SetupContent) {
-            $suffix = if ($r.SetupTail) { 'ConfigMgrSetup.tail5000.log' } else { 'ConfigMgrSetup.log' }
+            $suffix = if ($r.SetupTail) { 'ConfigMgrSetup.head30000-tail5000.log' } else { 'ConfigMgrSetup.log' }
             $dest = Join-Path $logDir "$base-$suffix"
             try {
                 Set-Content -LiteralPath $dest -Value $r.SetupContent -Encoding UTF8 -ErrorAction Stop
                 $mb = [math]::Round($r.SetupBytes / 1MB, 2)
-                $note = if ($r.SetupTail) { "tail of ${mb}MB in-VM" } else { "full ${mb}MB" }
+                $note = if ($r.SetupTail) { "first 30000 + last 5000 lines of ${mb}MB in-VM" } else { "full ${mb}MB" }
                 Write-Log "[Phase $Phase]: $VmName`: Pulled ConfigMgrSetup.log ($note) -> $dest" -OutputStream
             }
             catch {
@@ -2224,7 +2238,10 @@ function Save-CMSetupSqlFailureEvidence {
         Write-Log "[Phase $Phase]: $VmName`: SQL failure evidence: could not re-read ConfigMgrSetup.log: $($_.Exception.Message)" -Warning
         return
     }
-    if (-not $tail) { return }
+    if (-not $tail) {
+        Write-Log "[Phase $Phase]: $VmName`: SQL failure evidence: ConfigMgrSetup.log tail came back EMPTY -- no SQL-side evidence was collected." -Warning -OutputStream
+        return
+    }
 
     $rxSqlError = [regex]'^\s*\*\*\*\s+\[[^\]]+\]\[(?<num>\d+)\](?<msg>.*?)\s*(\$\$<|$)'
     $rxStatement = [regex]'^\s*\*\*\*\s+(?<stmt>\S.*?)\s*(\$\$<|$)'
@@ -2243,10 +2260,40 @@ function Save-CMSetupSqlFailureEvidence {
         }
         break
     }
-    if (-not $sqlErrNum) { return }
 
-    Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup database initialization was killed by SQL Server error $sqlErrNum -- $sqlErrText" -OutputStream
+    # Setup prints "*** *** Unknown SQL Error!" + "ERROR: SQL Server error: <>" when the
+    # provider handed it an error record with no number and no text -- the shape of a
+    # session torn down mid-statement. It is the one failure with nothing for the class
+    # gates below to match, so without this it fell through to a silent return and the
+    # SQL host was never asked anything.
+    $rxUnnamed = [regex]'\*\*\*\s+\*\*\*\s+Unknown SQL Error|ERROR:\s*SQL Server error:\s*<\s*>'
+    $sqlErrUnnamed = $false
+    if (-not $sqlErrNum) {
+        for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+            if (-not $rxUnnamed.IsMatch($lines[$i])) { continue }
+            $sqlErrUnnamed = $true
+            for ($j = $i - 1; $j -ge 0 -and $j -ge ($i - 6); $j--) {
+                if ($rxUnnamed.IsMatch($lines[$j])) { continue }
+                $sm = $rxStatement.Match($lines[$j])
+                if ($sm.Success) { $sqlStmt = $sm.Groups['stmt'].Value; break }
+            }
+            break
+        }
+    }
+
+    if (-not $sqlErrNum -and -not $sqlErrUnnamed) {
+        Write-Log "[Phase $Phase]: $VmName`: SQL failure evidence: ConfigMgrSetup.log names no SQL error in its last 400 lines -- nothing to classify, so NO SQL-side evidence was collected. Read the pulled ConfigMgrSetup.log directly." -Warning -OutputStream
+        return
+    }
+
+    if ($sqlErrUnnamed) {
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup database initialization died on an UNNAMED SQL error -- Setup logged 'Unknown SQL Error' and an empty 'SQL Server error: <>', i.e. the provider gave it no number and no text." -OutputStream
+    }
+    else {
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup database initialization was killed by SQL Server error $sqlErrNum -- $sqlErrText" -OutputStream
+    }
     if ($sqlStmt) {
+        if ($sqlStmt.Length -gt 300) { $sqlStmt = $sqlStmt.Substring(0, 300) + ' ...[truncated]' }
         Write-Log "[Phase $Phase]: $VmName`: DIAG: failing statement -- $sqlStmt" -OutputStream
     }
 
@@ -2269,8 +2316,10 @@ function Save-CMSetupSqlFailureEvidence {
     $scanNumbers = $corruptionErrors
     $scanPattern = $null
     $runCheckDb = $true
-    if ($corruptionErrors -notcontains $sqlErrNum) {
-        if ($connectionLossErrors -notcontains $sqlErrNum) { return }
+    # An unnamed error implies no page damage, only a dead session, so it collects on
+    # the connection-loss path: ERRORLOG generations and dumps, no CHECKDB.
+    if ($sqlErrUnnamed -or ($corruptionErrors -notcontains $sqlErrNum)) {
+        if (-not $sqlErrUnnamed -and ($connectionLossErrors -notcontains $sqlErrNum)) { return }
         $scanNumbers = $connectionLossScanNumbers
         $scanPattern = $connectionLossScanPattern
         $runCheckDb = $false
@@ -2543,7 +2592,12 @@ WHERE d.name LIKE 'CM[_]%'
         # The client only saw the socket die. Whether the reason is in the pulled
         # ERRORLOGs is a fact worth stating either way -- 0 matches is not a
         # finding of "nothing happened on the server".
-        $verdict = "DIAG: SQL error $sqlErrNum means SQL Server closed the connection; ConfigMgrSetup.log cannot say why (an AG role change, an engine crash, an OOM kill and a stalled scheduler all look like this from the client). ERRORLOG scan: $logHits server-side event line(s), $assertLines assertion/dump line(s)."
+        $verdict = if ($sqlErrUnnamed) {
+            "DIAG: Setup could not name the error at all, which is what an aborted session looks like from the client -- ConfigMgrSetup.log cannot say why (an AG role change, an engine crash, an OOM kill and a stalled scheduler all look identical). ERRORLOG scan: $logHits server-side event line(s), $assertLines assertion/dump line(s)."
+        }
+        else {
+            "DIAG: SQL error $sqlErrNum means SQL Server closed the connection; ConfigMgrSetup.log cannot say why (an AG role change, an engine crash, an OOM kill and a stalled scheduler all look like this from the client). ERRORLOG scan: $logHits server-side event line(s), $assertLines assertion/dump line(s)."
+        }
         if ($logHits -eq 0 -and $assertLines -eq 0) {
             $verdict += " Nothing matched the known causes, which is NOT the same as nothing happening -- read the pulled ERRORLOG copies around the setup window before blaming the network."
         }
@@ -7773,8 +7827,9 @@ $global:VM_Config = {
 
         # Phase 8 CM-setup roles: pull ConfigMgrSetup.log + InstallCMLog.log
         # off the VM into the host log folder so operators don't have to RDP
-        # in to read them. Full ConfigMgrSetup.log on failure (incl. timeout),
-        # tail-5000 on success; InstallCMLog.log is always full.
+        # in to read them. Full ConfigMgrSetup.log on success as well as on
+        # failure -- a successful run is the baseline every failure is judged
+        # against, and it used to leave nothing. InstallCMLog.log is always full.
         # DCs are pulled after Phase 2 even on success: the cross-forest PKI and
         # AD-delegation resources can report in-desired-state having applied
         # nothing, so success is exactly the case whose reasoning we lose.

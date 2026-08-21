@@ -620,13 +620,96 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
             DependsOn        = $sqlDependency
         }
 
+        # Size against THIS VM, not a constant: validation allows SQL VMs down to 3GB
+        # (Secondary) and 4GB (SiteSystem), where a fixed 6144 hands SQL more memory
+        # than the VM has. The reserve is what Windows, WSFC/AG threads and Defender
+        # need to stay off the pagefile while SQL holds its buffer pool.
+        $sqlVmMemBytes = 0
+        try { $sqlVmMemBytes = [int64]($ThisVM.memory / 1) } catch { $sqlVmMemBytes = 0 }
+        if ($sqlVmMemBytes -le 0) { $sqlVmMemBytes = 8GB }
+        $sqlReserveBytes = [Math]::Max(2GB, [int64]($sqlVmMemBytes * 0.25))
+        if ($sqlReserveBytes -gt 8GB) { $sqlReserveBytes = 8GB }
+        $sqlMaxMemoryMB = [int](($sqlVmMemBytes - $sqlReserveBytes) / 1MB)
+        if ($sqlMaxMemoryMB -lt 1024) { $sqlMaxMemoryMB = 1024 }
+        $sqlMinMemoryMB = [Math]::Min(2048, $sqlMaxMemoryMB)
+
         SqlMemory SetSqlMemory {
             DependsOn    = '[SqlRole]SqlRole'
             Ensure       = 'Present'
             DynamicAlloc = $false
-            MinMemory    = 2048
-            MaxMemory    = 6144
+            MinMemory    = $sqlMinMemoryMB
+            MaxMemory    = $sqlMaxMemoryMB
             InstanceName = $SQLInstanceName
+        }
+
+        # Instant File Initialization. Without SeManageVolumePrivilege SQL zero-writes
+        # every byte of a new or growing DATA file, which is most of the cost of CM
+        # Setup creating the site database with large preallocation. Grant only -- the
+        # engine reads the privilege at service start, and SQL is restarted after this
+        # phase anyway; restarting here would blip an AG on a re-run.
+        Script GrantSqlInstantFileInit {
+            DependsOn  = '[SqlMemory]SetSqlMemory'
+            GetScript  = { @{ Result = '' } }
+            TestScript = {
+                $svcName = $using:cvSqlSvc
+                $acct = (Get-CimInstance -ClassName Win32_Service -Filter "Name='$svcName'" -ErrorAction SilentlyContinue).StartName
+                if (-not $acct) {
+                    Write-Verbose "IFI: service '$svcName' not found; nothing to grant."
+                    return $true
+                }
+                if ($acct -in @('LocalSystem', 'NT AUTHORITY\SYSTEM', 'NT AUTHORITY\System')) { return $true }
+                $exp = Join-Path $env:TEMP 'memlabs-ifi-test.inf'
+                Remove-Item -LiteralPath $exp -Force -ErrorAction SilentlyContinue
+                & secedit.exe /export /areas USER_RIGHTS /cfg $exp /quiet 2>&1 | Out-Null
+                if (-not (Test-Path -LiteralPath $exp)) {
+                    Write-Verbose 'IFI: secedit export produced no file; cannot evaluate.'
+                    return $true
+                }
+                $line = @(Get-Content -LiteralPath $exp -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\s*SeManageVolumePrivilege\s*=' })
+                if ($line.Count -eq 0) { return $false }
+                $members = @(($line[0] -split '=', 2)[1] -split ',' | ForEach-Object { $_.Trim().TrimStart('*') })
+                $sid = $null
+                try { $sid = (New-Object System.Security.Principal.NTAccount($acct)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $sid = $null }
+                if ($sid -and ($members -contains $sid)) { return $true }
+                return ($members -contains $acct)
+            }
+            SetScript  = {
+                $svcName = $using:cvSqlSvc
+                $acct = (Get-CimInstance -ClassName Win32_Service -Filter "Name='$svcName'" -ErrorAction SilentlyContinue).StartName
+                if (-not $acct) { return }
+                $sid = (New-Object System.Security.Principal.NTAccount($acct)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+                $exp = Join-Path $env:TEMP 'memlabs-ifi-export.inf'
+                Remove-Item -LiteralPath $exp -Force -ErrorAction SilentlyContinue
+                & secedit.exe /export /areas USER_RIGHTS /cfg $exp /quiet 2>&1 | Out-Null
+                $existing = ''
+                if (Test-Path -LiteralPath $exp) {
+                    $line = @(Get-Content -LiteralPath $exp -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\s*SeManageVolumePrivilege\s*=' })
+                    if ($line.Count -gt 0) { $existing = (($line[0] -split '=', 2)[1]).Trim() }
+                }
+                # Rewriting this right replaces its whole membership, so the existing
+                # holders have to be carried forward or they silently lose it.
+                $value = if ($existing) { "$existing,*$sid" } else { "*$sid" }
+                $inf = Join-Path $env:TEMP 'memlabs-ifi-apply.inf'
+                $db = Join-Path $env:TEMP 'memlabs-ifi.sdb'
+                Remove-Item -LiteralPath $db -Force -ErrorAction SilentlyContinue
+                @(
+                    '[Unicode]'
+                    'Unicode=yes'
+                    '[Version]'
+                    'signature="$CHICAGO$"'
+                    'Revision=1'
+                    '[Privilege Rights]'
+                    "SeManageVolumePrivilege = $value"
+                ) | Set-Content -LiteralPath $inf -Encoding Unicode -Force
+                & secedit.exe /configure /db $db /cfg $inf /areas USER_RIGHTS /quiet 2>&1 | Out-Null
+                $code = $LASTEXITCODE
+                if ($code -ne 0) {
+                    Write-Verbose "IFI: secedit /configure returned $code; '$acct' may not hold SeManageVolumePrivilege."
+                }
+                else {
+                    Write-Verbose "IFI: granted SeManageVolumePrivilege to '$acct'; effective at the next SQL service start."
+                }
+            }
         }
 
         if ($ThisVM.sqlPort) {
@@ -641,7 +724,7 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
             SQLInstanceName = $SQLInstanceName
             SQLInstancePort = $SQLport
             Ensure          = "Present"
-            DependsOn       = "[SqlMemory]SetSqlMemory"
+            DependsOn       = "[Script]GrantSqlInstantFileInit"
         }
 
         $nextDepend = '[ChangeSqlInstancePort]SqlInstancePort'
