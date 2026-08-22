@@ -9546,11 +9546,14 @@ function Get-Tools {
         if (-not $tool.md5) {
             Write-Log "Downloading/Verifying '$name' without hash" -SubActivity
             $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
+            # No hash to compare against, so we can never prove the staged copy is current.
+            $sourceRefreshed = $true
         }
         else {
             Write-Log "Downloading/Verifying '$name'" -SubActivity
             $tempworked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -hashAlg "MD5" -UseCDN:$UseCDN -WhatIf:$WhatIf
             $worked = $tempworked.success
+            $sourceRefreshed = [bool]$tempworked.download
         }
 
         if (-not $worked) {
@@ -9598,12 +9601,19 @@ function Get-Tools {
                     }
                 }
                 else {
-                    # Skip copy if the staged file has the same size and the
-                    # download hash hasn't changed
+                    # Skip copy if the source wasn't re-downloaded and the already-staged
+                    # file matches it in size. $fileDestination is normally the staging
+                    # FOLDER (Copy-Item drops the file into it), so the comparison has to
+                    # be against the staged FILE inside it -- comparing the folder itself
+                    # makes PSIsContainer true and the skip unreachable.
+                    $stagedFilePath = $fileDestination
+                    if (Test-Path -LiteralPath $fileDestination -PathType Container) {
+                        $stagedFilePath = Join-Path $fileDestination (Split-Path $downloadPath -Leaf)
+                    }
                     $skipCopy = $false
-                    if (Test-Path $fileDestination) {
-                        $srcItem = Get-Item $downloadPath
-                        $dstItem = Get-Item $fileDestination -ErrorAction SilentlyContinue
+                    if (-not $sourceRefreshed) {
+                        $srcItem = Get-Item -LiteralPath $downloadPath
+                        $dstItem = Get-Item -LiteralPath $stagedFilePath -ErrorAction SilentlyContinue
                         if ($dstItem -and -not $dstItem.PSIsContainer -and $dstItem.Length -eq $srcItem.Length) {
                             $skipCopy = $true
                         }
