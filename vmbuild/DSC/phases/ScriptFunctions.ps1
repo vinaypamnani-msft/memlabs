@@ -397,10 +397,13 @@ function Set-ScriptWorkflowStep {
 }
 
 # Launch InstallPassiveSiteServer.ps1 in a BACKGROUND JOB so the passive-site
-# install overlaps the (separate, also long) secondary-site install on the same
-# site server's single workflow thread. Measured on a child primary: secondary
-# ~1h08 + passive ~56m ran strictly back-to-back, so the passive was pure serial
-# tail on the Phase 8 critical path; overlapping removes ~the shorter one.
+# install overlaps the rest of the site server's single workflow thread -- the
+# secondary-site install when there is one, otherwise InstallRoles /
+# ConfigureMPReplica / ConfigureCMProxy / InstallBoundaryGroups. Measured on a
+# child primary: secondary ~1h08 + passive ~56m ran strictly back-to-back, so the
+# passive was pure serial tail on the Phase 8 critical path; overlapping removes
+# ~the shorter one. Same shape without a secondary: 2026-08-22 CS6-PS1SITE ran
+# InstallBoundaryGroups 864s and then passive 971s back-to-back.
 #
 # Runspace isolation is what makes this safe: the job's Set-CMSiteProvider imports
 # its OWN ConfigurationManager module + CMSite PSDrive (scope = the JOB's global),
@@ -432,10 +435,10 @@ function Start-ParallelPassiveJob {
     }
     catch { }
 
-    # Stamp Running now (single-threaded, before the secondary install starts).
+    # Stamp Running now (single-threaded, before the overlapped work starts).
     $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Running' -StampStartTime
 
-    Write-DscStatus "Parallel passive: launching InstallPassiveSiteServer.ps1 in a background job to overlap the secondary-site install."
+    Write-DscStatus "Parallel passive: launching InstallPassiveSiteServer.ps1 in a background job to overlap the rest of the Phase 8 workflow."
     return Start-Job -Name "InstallPassive" -ScriptBlock {
         param($jobConfigFilePath, $jobLogPath, $jobScriptRoot)
         . (Join-Path -Path $jobScriptRoot -ChildPath "ScriptFunctions.ps1")

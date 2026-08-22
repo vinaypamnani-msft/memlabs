@@ -192,14 +192,22 @@ else {
 
 # Parallel passive install (Phase 8 critical-path speedup, measured from
 # InstallCMLog: on a child primary the secondary (~1h08) and passive (~56m)
-# installs ran strictly back-to-back on this single workflow thread). When this
-# site server has BOTH a secondary AND a passive, launch the passive as a
-# background job (Start-ParallelPassiveJob) so it overlaps the secondary install;
-# join it at the end. Only when both exist -- a lone passive still runs inline at
-# the end exactly as before. Set $ParallelPassiveInstall = $false to revert to
+# installs ran strictly back-to-back on this single workflow thread). Launch the
+# passive as a background job (Start-ParallelPassiveJob) so it overlaps whatever
+# the main thread does next -- the secondary install when there is one, otherwise
+# InstallRoles + ConfigureMPReplica + ConfigureCMProxy + InstallBoundaryGroups --
+# and join it at the block below, before Perfloading.
+#
+# The gate used to also require $containsSecondary. A lone passive is the common
+# shape (17 of the 21 configs that define a PassiveSite have no Secondary) and it
+# was pure serial tail: 2026-08-22 measured InstallPassiveSiteServer.ps1 at 971s
+# (CS6-PS1SITE) / 1,015s (CT5-PS1SITE) sitting after InstallBoundaryGroups on the
+# Phase 8 critical path, against 867s / 1,171s of main-thread work it could have
+# hidden behind. The passive install runs on a DIFFERENT machine and needs nothing
+# those steps produce. Set $ParallelPassiveInstall = $false to revert to
 # fully-serial behavior.
 $ParallelPassiveInstall = $true
-$parallelPassive = [bool]($ParallelPassiveInstall -and $containsPassive -and $containsSecondary)
+$parallelPassive = [bool]($ParallelPassiveInstall -and $containsPassive)
 $passiveJob = $null
 
 
@@ -716,10 +724,11 @@ if ($containsPassive) {
 
     if ($passiveJob) {
         # Parallel mode: the passive install was launched as a background job
-        # BEFORE the secondary install (Start-ParallelPassiveJob), so the two
-        # overlapped. Join it now. The job ran with -SkipStatusFileUpdate, so the
-        # main thread owns the InstallPassive status (Running stamped at launch;
-        # Completed stamped below, gated on the role actually being present).
+        # BEFORE the secondary install / role + boundary-group block
+        # (Start-ParallelPassiveJob), so the two overlapped. Join it now. The job
+        # ran with -SkipStatusFileUpdate, so the main thread owns the
+        # InstallPassive status (Running stamped at launch; Completed stamped
+        # below, gated on the role actually being present).
         # InstallPassiveSiteServer.ps1 is internally bounded (75-min stall
         # watchdog + 2 RetryInstallation attempts), so 4h is pure backstop: it
         # only fires when the JOB itself is wedged, which an unbounded Wait-Job
