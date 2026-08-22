@@ -10106,6 +10106,7 @@ function Test-CMClientPackageDistribution {
         catch { Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: could not enumerate VMs in domain '$domain' to resolve failing DP(s): $($_.Exception.Message)" -Level Warning }
         $collectedFrom = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
         [void]$collectedFrom.Add($VMName)
+        $secCertBrokenDps = New-Object System.Collections.Generic.List[string]
 
         foreach ($dpShort in ($failing | Select-Object -Unique)) {
             $dpVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$dpShort".ToUpper()) } | Select-Object -First 1
@@ -10130,7 +10131,40 @@ function Test-CMClientPackageDistribution {
                 # the symptom.
                 if ("$($dpVm.role)" -eq 'Secondary') {
                     Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is a Secondary DP -- probing its site DB for the site exchange certificate (distmgr PFX-decrypt wedge)"
-                    $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-SecCert' -Collector $Phase11SecondaryCertDiagCollector -TimeoutSeconds 180
+                    $certPaths = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-SecCert' -Collector $Phase11SecondaryCertDiagCollector -TimeoutSeconds 180
+                    # The probe's verdict only ever reached a side file. burnin logged
+                    # "WARN: client package NOT Installed on BI-SECONDARY" and then
+                    # "All checks PASSED", while SecondaryCertDiag.txt already said
+                    # SiteExchangeCertificate rows=0 -- distmgr can decrypt nothing, so
+                    # that DP can NEVER receive content until the Secondary is recovered.
+                    # Read the verdict back here so it reaches the run log and the result.
+                    # Every read is guarded: a probe we cannot parse must not silently
+                    # clear the DP, and must not cost the rest of the collection either.
+                    try {
+                        $certFile = @($certPaths | Where-Object { "$_" -like '*SecondaryCertDiag.txt' }) | Select-Object -First 1
+                        if (-not $certFile) {
+                            Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' site-exchange-certificate probe returned no SecondaryCertDiag.txt; the missing-cert wedge is NOT ruled out for this DP." -Level Warning
+                        }
+                        else {
+                            $certLines = @(Get-Content -LiteralPath $certFile -ErrorAction Stop)
+                            $certCounts = (@($certLines | Where-Object { $_ -match 'SiteExchangeCertificate rows=' }) | Select-Object -First 1)
+                            $certSig = (@($certLines | Where-Object { $_ -match 'cert-decrypt-failure lines' }) | Select-Object -First 1)
+                            $evidence = (@($certCounts, $certSig | Where-Object { $_ }) | ForEach-Object { "$_".Trim() }) -join ' ; '
+                            if (@($certLines | Where-Object { $_ -match '=> VERDICT:' }).Count -gt 0) {
+                                $secCertBrokenDps.Add("$($dpVm.vmName) [$evidence]")
+                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' site DB is MISSING the site exchange certificate -- $evidence. See $certFile." -Level Failure
+                            }
+                            elseif (@($certLines | Where-Object { $_ -match 'site exchange certificate present' }).Count -gt 0) {
+                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' site exchange certificate is present -- $evidence. The DP is behind for another reason; see $certFile."
+                            }
+                            else {
+                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' certificate probe reached no verdict (SQL probe blocked?); see $certFile." -Level Warning
+                            }
+                        }
+                    }
+                    catch {
+                        Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - could not read the site-exchange-certificate verdict for '$($dpVm.vmName)': $($_.Exception.Message). The missing-cert wedge is NOT ruled out." -Level Warning
+                    }
                 }
             }
 
@@ -10176,6 +10210,22 @@ function Test-CMClientPackageDistribution {
                     Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: site $siteCode holds no copy of the client package -- collecting the sending side from parent site $parentCode ('$($parentVm.vmName)')"
                     $null = Save-Phase11GuestLogs -VMName $parentVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-ContentSource' -Collector $Phase11SmsSiteLogCollector
                 }
+            }
+        }
+
+        # A Secondary DP whose site DB lost the site exchange certificate cannot ever
+        # receive content -- that is terminal, not a distribution that is still catching
+        # up, so it must not ride out as a WARN under "All checks PASSED". Fold it into
+        # the guest result BEFORE Format-TestResult so the run reports ONE verdict.
+        if ($secCertBrokenDps.Count -gt 0) {
+            $failLine = "FAIL: $($secCertBrokenDps.Count) Secondary DP(s) can never receive content -- the site exchange certificate is missing from their own site DB, so distmgr cannot decrypt the DP identity cert: $($secCertBrokenDps -join '; '). Recover/reinstall the Secondary site to regenerate SiteExchangeCertificate + CM_RoleIdCertificates(RoleTypeID=4)."
+            if ($result.ScriptBlockOutput -is [hashtable]) {
+                $result.ScriptBlockOutput.Details = @($result.ScriptBlockOutput.Details) + @($failLine)
+                $result.ScriptBlockOutput.Passed = $false
+            }
+            else {
+                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: $failLine" -Level Failure
+                return $false
             }
         }
     }
