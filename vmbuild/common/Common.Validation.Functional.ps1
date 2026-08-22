@@ -9090,7 +9090,22 @@ function Test-DomainMemberFunctionality {
                     }
                     catch { $ass = $null }
                     if ($ass) {
-                        $d.Add("DIAG: Assignment '$($ass.AssignmentName)' AssignmentID=$($ass.AssignmentID) LastModified=$($ass.LastModificationTime)")
+                        # How old the deployment is decides whether an all-Unknown summary
+                        # means anything at all: Unknown is ALSO the initial state of every
+                        # new deployment, before policypv projects it and before the
+                        # deployment summarizer has run a cycle. burnin read Targeted=2
+                        # Unknown=2 five minutes after the assignment was re-Put and called
+                        # it a proven projection race.
+                        $verdictMinAgeMin = 30
+                        $assAgeMin = $null
+                        try {
+                            if ($ass.LastModificationTime) {
+                                $assAgeMin = [int]((Get-Date) - [System.Management.ManagementDateTimeConverter]::ToDateTime($ass.LastModificationTime)).TotalMinutes
+                            }
+                        }
+                        catch { $assAgeMin = $null }
+                        $ageText = if ($null -eq $assAgeMin) { 'age UNKNOWN -- LastModificationTime unparsable' } else { "authored/modified $assAgeMin min ago" }
+                        $d.Add("DIAG: Assignment '$($ass.AssignmentName)' AssignmentID=$($ass.AssignmentID) LastModified=$($ass.LastModificationTime) ($ageText)")
                         # Compliance/projection from SMS_DeploymentSummary -- the correct,
                         # always-available source (SMS_CIAssignmentTargetedMachines is not
                         # exposed by the SMS Provider on all builds -> "Invalid class").
@@ -9110,7 +9125,15 @@ function Test-DomainMemberFunctionality {
                             if ($ds -and $dsUnset.Count -eq 0) {
                                 $d.Add("DIAG: deployment summary Targeted=$($ds.NumberTargeted) Success=$($ds.NumberSuccess) InProgress=$($ds.NumberInProgress) Errors=$($ds.NumberErrors) Unknown=$($ds.NumberUnknown)")
                                 if ([int]$ds.NumberTargeted -gt 0 -and [int]$ds.NumberSuccess -eq 0 -and [int]$ds.NumberInProgress -eq 0 -and [int]$ds.NumberErrors -eq 0) {
-                                    $d.Add("DIAG: >>> ROOT CAUSE: all $($ds.NumberTargeted) targeted client(s) are Unknown -- the MP serves 'No new assignments' to the client's policy request. This is the app-policy projection race: the target(s) were added to the collection while still NON-clients, so policypv never projected the assignment. Remedy: FULL collection eval (Invoke-CMCollectionUpdate) + re-create the deployment; durable fix is the Client=1 membership gate in perfloading.")
+                                    if ($null -eq $assAgeMin) {
+                                        $d.Add("DIAG: >>> NOT CONCLUSIVE: all $($ds.NumberTargeted) targeted client(s) are Unknown, but the deployment could not be aged ($ageText), and Unknown is also the initial state of a new deployment. Not calling this the projection race on an unaged deployment.")
+                                    }
+                                    elseif ($assAgeMin -lt $verdictMinAgeMin) {
+                                        $d.Add("DIAG: >>> TOO EARLY TO JUDGE: all $($ds.NumberTargeted) targeted client(s) are Unknown, but this deployment was $ageText -- under the ${verdictMinAgeMin}min mark Unknown is indistinguishable from the normal initial state (policypv projection AND the deployment summarizer each still owe a cycle). This does NOT identify the projection race; re-run Phase 11 later to decide.")
+                                    }
+                                    else {
+                                        $d.Add("DIAG: >>> ROOT CAUSE: all $($ds.NumberTargeted) targeted client(s) are Unknown and the deployment was $ageText (past the ${verdictMinAgeMin}min projection/summarizer window) -- the MP serves 'No new assignments' to the client's policy request. This is the app-policy projection race: the target(s) were added to the collection while still NON-clients, so policypv never projected the assignment. Remedy: FULL collection eval (Invoke-CMCollectionUpdate) + re-create the deployment; durable fix is the Client=1 membership gate in perfloading.")
+                                    }
                                 }
                             }
                             elseif ($ds) {
@@ -9179,7 +9202,26 @@ function Test-DomainMemberFunctionality {
                         -ScriptBlock $officeServerDiag -ArgumentList $diagPrimary.siteCode, $VMName `
                         -DisplayName "Phase11-Office-ServerDiag" -SuppressLog -AsJob -TimeoutSeconds 180
                     if ($srvDiag.ScriptBlockOutput) {
-                        foreach ($ln in @($srvDiag.ScriptBlockOutput)) { $null = $result.ScriptBlockOutput.Details.Add($ln) }
+                        $diagLines = @($srvDiag.ScriptBlockOutput)
+                        foreach ($ln in $diagLines) { $null = $result.ScriptBlockOutput.Details.Add($ln) }
+
+                        # The client's 3-minute poll and the server DIAG answer the same
+                        # question. When the DIAG shows the deployment is too young for the
+                        # projection state to mean anything, the poll was simply early --
+                        # so the line stops counting as a phase warning, keeps every signal
+                        # it carried, and names the age that decided it. A deployment old
+                        # enough to judge still warns.
+                        $tooEarly = @($diagLines | Where-Object { "$_" -match 'TOO EARLY TO JUDGE' }) | Select-Object -First 1
+                        if ($tooEarly) {
+                            $age = if ("$tooEarly" -match 'authored/modified (\d+) min ago') { "$($Matches[1]) min" } else { 'under 30 min' }
+                            for ($di = 0; $di -lt $result.ScriptBlockOutput.Details.Count; $di++) {
+                                $line = "$($result.ScriptBlockOutput.Details[$di])"
+                                if ($line -match '^WARN: Office deployment policy not visible') {
+                                    $result.ScriptBlockOutput.Details[$di] = ($line -replace '^WARN: ', 'INFO: ') +
+                                        " -- NOT a warning: the Office deployment was only authored/modified $age before this check, so policy projection is still owed a cycle (see the TOO EARLY TO JUDGE line below)."
+                                }
+                            }
+                        }
                     }
                     else {
                         $null = $result.ScriptBlockOutput.Details.Add("DIAG: server-side Office diagnostic on $($diagPrimary.vmName) returned no output (see build log)")
