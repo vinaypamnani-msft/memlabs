@@ -439,12 +439,18 @@ function Start-ParallelPassiveJob {
     $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Running' -StampStartTime
 
     Write-DscStatus "Parallel passive: launching InstallPassiveSiteServer.ps1 in a background job to overlap the rest of the Phase 8 workflow."
-    return Start-Job -Name "InstallPassive" -ScriptBlock {
+    $passiveJobHandle = Start-Job -Name "InstallPassive" -ScriptBlock {
         param($jobConfigFilePath, $jobLogPath, $jobScriptRoot)
         . (Join-Path -Path $jobScriptRoot -ChildPath "ScriptFunctions.ps1")
         Set-Location $jobLogPath
         & (Join-Path -Path $jobScriptRoot -ChildPath "InstallPassiveSiteServer.ps1") -ConfigFilePath $jobConfigFilePath -LogPath $jobLogPath -SkipStatusFileUpdate
     } -ArgumentList $ConfigFilePath, $LogPath, $ScriptRoot
+
+    # In parallel mode the script runs under Start-Job, not Invoke-DotSource, so it
+    # emits no START/END elapsed pair. The join reads this to report what the
+    # overlap actually hid.
+    try { Add-Member -InputObject $passiveJobHandle -NotePropertyName 'MemlabsStartedAt' -NotePropertyValue (Get-Date) -Force } catch {}
+    return $passiveJobHandle
 }
 
 function Write-DscStatusSetup {

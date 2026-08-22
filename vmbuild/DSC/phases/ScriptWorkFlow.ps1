@@ -736,6 +736,7 @@ if ($containsPassive) {
         # the site (Get-CMSiteRole) below regardless of how the join ended.
         $passiveJobTimeout = 14400
         Write-DscStatus "Waiting for parallel InstallPassiveSiteServer.ps1 job to complete"
+        $passiveJoinSw = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             if (Wait-Job -Job $passiveJob -Timeout $passiveJobTimeout) {
                 # The job writes its own status/log to disk via Write-DscStatus; just
@@ -750,6 +751,14 @@ if ($containsPassive) {
         catch {
             Write-DscStatus "Parallel passive job: $_" -Warning
         }
+        $passiveJoinSw.Stop()
+
+        # waited ~0 means the overlap hid the whole passive install; anything larger is
+        # the residual that the surrounding work was too short to cover. Read BEFORE
+        # Remove-Job. -1, never 0, when the launch stamp is missing.
+        $passiveWaitedSec = [math]::Round($passiveJoinSw.Elapsed.TotalSeconds, 1)
+        $passiveJobTotalSec = if ($passiveJob.PSObject.Properties['MemlabsStartedAt']) { [math]::Round(((Get-Date) - $passiveJob.MemlabsStartedAt).TotalSeconds, 1) } else { -1 }
+        Write-DscStatus "Parallel passive: join waited=$($passiveWaitedSec)s; job ran $($passiveJobTotalSec)s in total"
         Remove-Job -Job $passiveJob -Force -ErrorAction SilentlyContinue
 
         # Ground-truth completion: only stamp Completed if the passive role is
