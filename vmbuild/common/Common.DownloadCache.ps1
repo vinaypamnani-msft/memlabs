@@ -426,6 +426,136 @@ function Get-MemlabsCacheStringHash {
     finally { $sha1.Dispose() }
 }
 
+function Test-VmMediaChangeReadiness {
+    # Gate every DVD-set mutation on the VM actually being in a state Hyper-V will
+    # accept one in. Set-VMDvdDrive / Add-VMDvdDrive throw on a Saved or Paused VM
+    # and race a VM that is still Starting or Stopping, and a mount performed at
+    # the wrong moment produces the worst outcome of all: it "succeeds" at the
+    # hypervisor while the guest never enumerates the disc, which then reads as a
+    # media fault. Off is deliberately OK -- a disc attached to a stopped VM is
+    # enumerated cleanly at boot (there is just nothing to probe in-guest yet).
+    #
+    # Waits (bounded) through transient states, resumes Paused/Saved, and returns a
+    # STRUCTURED result so callers can say WHY they did nothing. Never throws.
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [int]$TimeoutSeconds = 60
+    )
+    $result = @{
+        Ok         = $false
+        VmFound    = $false
+        State      = 'Unknown'
+        Running    = $false
+        Generation = 0
+        HotPlugOk  = $false
+        Uptime     = ''
+        Heartbeat  = ''
+        Reason     = ''
+        Actions    = @()
+    }
+    $deadline = (Get-Date).AddSeconds([Math]::Max(0, $TimeoutSeconds))
+    while ($true) {
+        $vm = $null
+        try { $vm = Get-VM2 -Name $VmName -Fallback }
+        catch { $result.Reason = "Get-VM failed: $($_.Exception.Message)"; return $result }
+        if (-not $vm) { $result.Reason = "VM not found in Hyper-V"; return $result }
+
+        $result.VmFound = $true
+        $result.State = "$($vm.State)"
+        $result.Generation = [int]$vm.Generation
+        try { $result.Uptime = "$($vm.Uptime)" } catch { }
+        try {
+            $hb = @($vm | Get-VMIntegrationService -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Heartbeat' })
+            if ($hb.Count -gt 0) { $result.Heartbeat = "enabled=$($hb[0].Enabled) status=$($hb[0].PrimaryStatusDescription)" }
+        }
+        catch { }
+
+        switch ("$($vm.State)") {
+            'Running' {
+                $result.Ok = $true
+                $result.Running = $true
+                # Gen1 uses IDE: media can be swapped in an existing drive while
+                # running, but a NEW drive cannot be hot-added (Mount-IsoOnVm case 3).
+                $result.HotPlugOk = ($result.Generation -ne 1)
+                return $result
+            }
+            'Off' {
+                $result.Ok = $true
+                $result.HotPlugOk = $true
+                return $result
+            }
+            'Paused' {
+                if ((Get-Date) -ge $deadline) { $result.Reason = "VM is Paused and could not be resumed in time"; return $result }
+                $result.Actions += 'Resume-VM (was Paused)'
+                try { Resume-VM -Name $VmName -ErrorAction Stop } catch { $result.Reason = "Resume-VM failed: $($_.Exception.Message)"; return $result }
+            }
+            { $_ -in 'Saved', 'FastSaved' } {
+                if ((Get-Date) -ge $deadline) { $result.Reason = "VM is $($vm.State) and could not be restored in time"; return $result }
+                $result.Actions += "Start-VM (was $($vm.State))"
+                try { Start-VM -Name $VmName -ErrorAction Stop } catch { $result.Reason = "Start-VM failed: $($_.Exception.Message)"; return $result }
+            }
+            default {
+                # Starting / Stopping / Saving / Pausing / Resuming / Reset /
+                # *Critical -- transient or broken. Wait it out, then report.
+                if ((Get-Date) -ge $deadline) {
+                    $result.Reason = "VM stayed in state '$($vm.State)' for $TimeoutSeconds`s"
+                    return $result
+                }
+                if ($result.Actions -notcontains "waited on state '$($vm.State)'") { $result.Actions += "waited on state '$($vm.State)'" }
+            }
+        }
+        Start-Sleep -Seconds 5
+    }
+}
+
+function Write-VmMediaHostDiag {
+    # Host-side answer to "was there anything to see?" -- logged whenever a guest
+    # media probe comes back empty. Without it a miss is indistinguishable from a
+    # VM that was off, wedged, or never had the disc attached at all.
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [string]$IsoPath,
+        [string]$Context = 'ISO',
+        [int]$Phase = 0
+    )
+    $tag = ""
+    if ($Phase -gt 0) { $tag = "[Phase $Phase]: " }
+    try {
+        $vm = Get-VM2 -Name $VmName -Fallback
+        if (-not $vm) {
+            Write-Log "$tag$($VmName): [$Context media host diag] VM not found in Hyper-V." -Warning
+            return
+        }
+        $hb = ''
+        try {
+            $svc = @($vm | Get-VMIntegrationService -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Heartbeat' })
+            if ($svc.Count -gt 0) { $hb = "heartbeat=$($svc[0].PrimaryStatusDescription) enabled=$($svc[0].Enabled)" }
+        }
+        catch { }
+        Write-Log "$tag$($VmName): [$Context media host diag] state=$($vm.State) status='$($vm.Status)' gen=$($vm.Generation) uptime=$($vm.Uptime) $hb" -Warning
+        $dvds = @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue)
+        if ($dvds.Count -eq 0) {
+            Write-Log "$tag$($VmName): [$Context media host diag] the VM has NO DVD drives attached." -Warning
+        }
+        foreach ($d in $dvds) {
+            $p = if ($d.Path) { $d.Path } else { '<empty>' }
+            Write-Log "$tag$($VmName): [$Context media host diag] DVD ctrl=$($d.ControllerNumber):$($d.ControllerLocation) type=$($d.ControllerType) path=$p" -Warning
+        }
+        if ($IsoPath) {
+            $isoInfo = 'MISSING ON HOST'
+            try {
+                $f = Get-Item -LiteralPath $IsoPath -ErrorAction Stop
+                $isoInfo = "size=$([Math]::Round($f.Length / 1MB))MB modified=$($f.LastWriteTime.ToString('s'))"
+            }
+            catch { }
+            Write-Log "$tag$($VmName): [$Context media host diag] ISO '$IsoPath' $isoInfo" -Warning
+        }
+    }
+    catch {
+        Write-Log "$tag$($VmName): [$Context media host diag] failed: $($_.Exception.Message)" -Warning
+    }
+}
+
 function Mount-IsoOnVm {
     # Idempotent, per-drive, multi-drive-safe ISO mount. Manages ONLY the DVD drive
     # that holds (or will hold) THIS exact ISO and never touches another disc:
@@ -451,7 +581,8 @@ function Mount-IsoOnVm {
         [Parameter(Mandatory)][string]$IsoPath,
         [string]$Context = "ISO",
         [int]$Phase = 0,
-        [switch]$RepresentIfAttached
+        [switch]$RepresentIfAttached,
+        [int]$ReadinessTimeoutSeconds = 60
     )
     if (-not $IsoPath -or -not (Test-Path $IsoPath)) {
         Write-Log "$($VmName): $Context ISO mount skipped -- path missing: $IsoPath" -LogOnly
@@ -459,6 +590,20 @@ function Mount-IsoOnVm {
     }
     $tag = ""
     if ($Phase -gt 0) { $tag = "[Phase $Phase]: " }
+
+    # PRECONDITION: the VM must be in a state Hyper-V will accept a DVD change in.
+    # A mount attempted on a Saved/Paused/half-started VM either throws or lands
+    # somewhere the guest never enumerates, and the failure then surfaces much later
+    # as an unexplained "media not visible in guest".
+    $ready = Test-VmMediaChangeReadiness -VmName $VmName -TimeoutSeconds $ReadinessTimeoutSeconds
+    if ($ready.Actions.Count -gt 0) {
+        Write-Log "$tag$($VmName): $Context ISO mount readiness: state=$($ready.State) [$($ready.Actions -join '; ')]" -LogOnly
+    }
+    if (-not $ready.Ok) {
+        Write-Log "$tag$($VmName): $Context ISO mount skipped -- VM is not in a state that accepts a DVD change (state=$($ready.State), $($ready.Reason))." -Warning
+        return $false
+    }
+
     # Re-present an already-attached disc so the guest gets a fresh media-arrival
     # event (see -RepresentIfAttached). Eject here; the loop below re-adds it.
     if ($RepresentIfAttached) {
@@ -546,19 +691,85 @@ function Confirm-IsoVisibleInGuest {
     # This front-loads visibility to the host -- where we hold the fresh-session
     # lever -- instead of relying solely on the in-guest DSC resource to re-find the
     # media, generalizing the CM media probe as a reusable postcondition.
+    #
+    # A MISS IS NOT A MEASUREMENT. The probe distinguishes, and reports, the three
+    # ways it can come back empty -- the guest answered and the disc genuinely is not
+    # there / the guest never answered (off, booting, wedged transport) / the guest
+    # rebooted underneath us -- because the correct response differs for each and the
+    # old version reported all three as "media NOT visible". Pass -Diagnostics a
+    # hashtable to read the classification back (Answered, Rebooted, Reason, Root).
     param(
         [Parameter(Mandatory)][string]$VmName,
         [Parameter(Mandatory)][string]$VmDomainName,
         [Parameter(Mandatory)][string]$MarkerRelativePath,
         [string]$Context = 'ISO',
         [int]$TimeoutSeconds = 120,
-        [int]$Phase = 0
+        [int]$Phase = 0,
+        [hashtable]$Diagnostics
     )
     $tag = ""
     if ($Phase -gt 0) { $tag = "[Phase $Phase]: " }
+    if ($null -ne $Diagnostics) {
+        $Diagnostics['Found'] = $false
+        $Diagnostics['Root'] = ''
+        $Diagnostics['Attempts'] = 0
+        $Diagnostics['Answered'] = 0
+        $Diagnostics['Rebooted'] = $false
+        $Diagnostics['Reason'] = ''
+    }
 
+    # Runs IN THE GUEST. Returns a flat hashtable (string scalars + string arrays
+    # only, so PSDirect serialization can't shear off a nested object) describing
+    # everything needed to tell a real media fault from an unreachable/rebooting
+    # guest. -deep adds the expensive collection (PnP status, System event log) and
+    # is only requested on the final attempt.
     $probe = {
-        param($marker)
+        param($marker, $deep)
+
+        $r = @{
+            Found         = $false
+            Root          = ''
+            Marker        = "$marker"
+            Computer      = "$env:COMPUTERNAME"
+            ProbePid      = "$PID"
+            UptimeSec     = -1
+            BootTimeUtc   = ''
+            PendingReboot = ''
+            Optical       = @()
+            Volumes       = @()
+            Letters       = @()
+            Listing       = @()
+            Assigned      = @()
+            Rescan        = @()
+            Events        = @()
+            Errors        = @()
+        }
+
+        $scan = {
+            foreach ($n in 67..90) {
+                $dl = [char]$n
+                try { if (Test-Path ("${dl}:\$marker")) { return "${dl}:" } } catch { }
+            }
+            return $null
+        }
+
+        # Boot time first: a drop in UptimeSec between attempts is the ONLY way the
+        # host can tell "the guest rebooted underneath the probe" from "the guest
+        # never had the disc".
+        try {
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            $r.BootTimeUtc = $os.LastBootUpTime.ToUniversalTime().ToString('s')
+            $r.UptimeSec = [int]((Get-Date) - $os.LastBootUpTime).TotalSeconds
+        }
+        catch { $r.Errors += "uptime: $($_.Exception.Message)" }
+
+        $root = & $scan
+        if ($root) {
+            $r.Found = $true
+            $r.Root = $root
+            return $r
+        }
+
         # Give any letterless optical volume a letter so the content probe sees it.
         try {
             $letterless = @(Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue | Where-Object { -not $_.DriveLetter })
@@ -567,37 +778,220 @@ function Confirm-IsoVisibleInGuest {
                 foreach ($n in 70..90) { $l = [char]$n; if (-not (Test-Path "${l}:\")) { $free += $l } }
                 $i = 0
                 foreach ($vol in $letterless) {
-                    if ($i -ge $free.Count) { break }
-                    Set-CimInstance -InputObject $vol -Property @{ DriveLetter = "$($free[$i]):" } -ErrorAction SilentlyContinue
+                    if ($i -ge $free.Count) { $r.Assigned += "no free letter left for '$($vol.Label)'"; break }
+                    $want = "$($free[$i]):"
+                    try {
+                        Set-CimInstance -InputObject $vol -Property @{ DriveLetter = $want } -ErrorAction Stop
+                        $r.Assigned += "letterless '$($vol.Label)' cap=$([Math]::Round($vol.Capacity / 1MB))MB -> $want"
+                    }
+                    catch { $r.Assigned += "letterless '$($vol.Label)' -> $want FAILED: $($_.Exception.Message)" }
                     $i++
                 }
             }
+            else { $r.Assigned += 'no letterless optical volumes' }
         }
-        catch { }
-        foreach ($n in 67..90) { $dl = [char]$n; if (Test-Path ("${dl}:\$marker")) { return "${dl}:" } }
-        # Nudge a device rescan and re-scan once more before giving up this attempt.
-        try { & pnputil.exe /scan-devices *>$null } catch { }
-        try { "rescan" | & diskpart.exe *>$null } catch { }
-        foreach ($n in 67..90) { $dl = [char]$n; if (Test-Path ("${dl}:\$marker")) { return "${dl}:" } }
-        return $null
+        catch { $r.Errors += "letter assign: $($_.Exception.Message)" }
+
+        $root = & $scan
+        if (-not $root) {
+            # Nudge a device rescan and re-scan once more before giving up this attempt.
+            # Both exit codes are recorded: a rescan that never ran (pnputil 5 =
+            # access denied, diskpart absent) is otherwise indistinguishable from a
+            # rescan that ran and found nothing. Output is CAPTURED, never sent to
+            # `*>$null` -- that form makes PowerShell 7 throw on a native command
+            # ("StandardOutputEncoding is only supported when standard output is
+            # redirected"), which is how the old diskpart rescan silently never ran.
+            $ep = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                try {
+                    $pnpOut = @(& pnputil.exe /scan-devices 2>&1)
+                    $r.Rescan += "pnputil /scan-devices exit=$LASTEXITCODE '$(($pnpOut | Select-Object -Last 1) -replace '\s+', ' ')'"
+                }
+                catch { $r.Rescan += "pnputil threw: $($_.Exception.Message)" }
+                $dpScript = Join-Path $env:TEMP "memlabs-rescan-$PID.txt"
+                try {
+                    Set-Content -LiteralPath $dpScript -Value 'rescan' -Encoding ASCII -Force
+                    $dpOut = @(& diskpart.exe /s $dpScript 2>&1 | Where-Object { "$_".Trim() })
+                    $r.Rescan += "diskpart rescan exit=$LASTEXITCODE '$(($dpOut | Select-Object -Last 1) -replace '\s+', ' ')'"
+                }
+                catch { $r.Rescan += "diskpart threw: $($_.Exception.Message)" }
+                finally { Remove-Item -LiteralPath $dpScript -Force -ErrorAction SilentlyContinue }
+            }
+            finally { $ErrorActionPreference = $ep }
+            $root = & $scan
+        }
+        if ($root) {
+            $r.Found = $true
+            $r.Root = $root
+            return $r
+        }
+
+        # ---- Miss. Collect what the guest DOES see so the log answers "why". ----
+        try {
+            $cd = @(Get-CimInstance -ClassName Win32_CDROMDrive -ErrorAction Stop)
+            if ($cd.Count -eq 0) { $r.Optical += 'Win32_CDROMDrive: none' }
+            foreach ($c in $cd) { $r.Optical += "$($c.Drive) mediaLoaded=$($c.MediaLoaded) status=$($c.Status) id='$($c.DeviceID)'" }
+        }
+        catch { $r.Errors += "Win32_CDROMDrive: $($_.Exception.Message)" }
+
+        try {
+            $vols = @(Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction Stop)
+            if ($vols.Count -eq 0) { $r.Volumes += 'Win32_Volume DriveType=5: none' }
+            foreach ($v in $vols) {
+                $dl = if ($v.DriveLetter) { $v.DriveLetter } else { '<none>' }
+                $r.Volumes += "$dl label='$($v.Label)' fs=$($v.FileSystem) cap=$([Math]::Round($v.Capacity / 1MB))MB"
+            }
+        }
+        catch { $r.Errors += "Win32_Volume: $($_.Exception.Message)" }
+
+        try {
+            foreach ($d in [System.IO.DriveInfo]::GetDrives()) {
+                if ($d.DriveType -ne [System.IO.DriveType]::CDRom) { continue }
+                $ready = $d.IsReady
+                $label = ''
+                if ($ready) { try { $label = $d.VolumeLabel } catch { } }
+                $r.Letters += "$($d.Name) ready=$ready label='$label'"
+            }
+            if ($r.Letters.Count -eq 0) { $r.Letters += '.NET DriveInfo: no CDRom drives' }
+        }
+        catch { $r.Errors += "DriveInfo: $($_.Exception.Message)" }
+
+        # Directory listing of every optical root -- proves whether a disc is
+        # mounted but holding the WRONG content (e.g. the cache disc, not SQL).
+        try {
+            foreach ($d in [System.IO.DriveInfo]::GetDrives()) {
+                if ($d.DriveType -ne [System.IO.DriveType]::CDRom -or -not $d.IsReady) { continue }
+                $names = @(Get-ChildItem -LiteralPath $d.RootDirectory.FullName -Force -ErrorAction SilentlyContinue |
+                        Select-Object -First 12 -ExpandProperty Name)
+                $r.Listing += "$($d.Name) [$($names -join ', ')]"
+            }
+            if ($r.Listing.Count -eq 0) { $r.Listing += 'no readable optical roots to list' }
+        }
+        catch { $r.Errors += "listing: $($_.Exception.Message)" }
+
+        try {
+            $pend = @()
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $pend += 'CBS' }
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $pend += 'WU' }
+            $pfro = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+            if ($pfro) { $pend += 'PendingFileRename' }
+            $r.PendingReboot = if ($pend.Count -gt 0) { $pend -join '+' } else { 'no' }
+        }
+        catch { $r.Errors += "pendingReboot: $($_.Exception.Message)" }
+
+        if ($deep) {
+            try {
+                if (Get-Command -Name Get-PnpDevice -ErrorAction SilentlyContinue) {
+                    foreach ($p in @(Get-PnpDevice -Class CDROM -ErrorAction SilentlyContinue)) {
+                        $r.Optical += "PnP '$($p.FriendlyName)' status=$($p.Status) problem=$($p.ProblemCode) id='$($p.InstanceId)'"
+                    }
+                }
+            }
+            catch { $r.Errors += "Get-PnpDevice: $($_.Exception.Message)" }
+            try {
+                $since = (Get-Date).AddMinutes(-20)
+                $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $since } -MaxEvents 200 -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ProviderName -match 'cdrom|storvsc|disk|partmgr|volmgr|Kernel-PnP|volsnap' } |
+                        Select-Object -First 15)
+                foreach ($e in $ev) {
+                    $m = "$($e.Message)" -replace '\s+', ' '
+                    if ($m.Length -gt 160) { $m = $m.Substring(0, 160) + '...' }
+                    $r.Events += "$($e.TimeCreated.ToString('HH:mm:ss')) $($e.ProviderName)/$($e.Id) $m"
+                }
+                if ($r.Events.Count -eq 0) { $r.Events += 'no storage/PnP System events in the last 20 min (the guest saw NO device or media arrival)' }
+            }
+            catch { $r.Errors += "Get-WinEvent: $($_.Exception.Message)" }
+        }
+
+        return $r
     }
 
     $deadline = (Get-Date).AddSeconds([int]$TimeoutSeconds)
     $attempt = 0
+    $answered = 0
+    $rebooted = $false
+    $lastUptime = -1
+    $lastOut = $null
+    $failReasons = New-Object System.Collections.Generic.List[string]
     while ((Get-Date) -lt $deadline) {
         $attempt++
         # Fresh session each attempt: a runspace created before the disc arrived
         # holds a stale optical view and would never see it (the whole bug class).
         Invoke-VmSessionRefreshAfterMediaChange -VmName $VmName
-        $r = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock $probe -ArgumentList @($MarkerRelativePath) -SuppressLog -DisplayName "$Context media visible? ($attempt)"
-        $root = $r.ScriptBlockOutput
-        if ($root -is [string] -and $root) {
-            Write-Log "$tag$($VmName): $Context media visible in guest at $root [attempt $attempt]." -LogOnly
+        $deep = ((Get-Date).AddSeconds(8) -ge $deadline)
+        $r = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock $probe -ArgumentList @($MarkerRelativePath, $deep) -SuppressLog -DisplayName "$Context media visible? ($attempt)"
+        $out = if ($r) { $r.ScriptBlockOutput } else { $null }
+
+        if (-not $r -or ($r.ScriptBlockFailed -and $out -isnot [hashtable])) {
+            # The guest never ran the probe. This is NOT evidence about the media.
+            $why = if (-not $r) { 'Invoke-VmCommand returned nothing' }
+            elseif ($r.ChannelBroken) { 'PSDirect transport broken (no session)' }
+            elseif ($r.TimedOut) { 'probe timed out' }
+            elseif ($r.ErrorDetails) { "error: $($r.ErrorDetails)" }
+            else { 'no session / no output' }
+            $failReasons.Add("attempt $attempt`: $why")
+            Write-Log "$tag$($VmName): $Context media probe could not run [attempt $attempt]: $why" -LogOnly
+            Start-Sleep -Seconds 8
+            continue
+        }
+
+        if ($out -isnot [hashtable]) {
+            $failReasons.Add("attempt $attempt`: guest returned '$($out.GetType().Name)' instead of a result")
+            Start-Sleep -Seconds 8
+            continue
+        }
+
+        $answered++
+        $lastOut = $out
+        $up = [int]$out.UptimeSec
+        if ($lastUptime -ge 0 -and $up -ge 0 -and $up -lt $lastUptime) {
+            $rebooted = $true
+            Write-Log "$tag$($VmName): $Context media probe: the guest REBOOTED mid-probe (uptime $lastUptime`s -> $up`s, boot $($out.BootTimeUtc)Z). A disc already inserted is not re-announced across a guest reboot." -Warning
+        }
+        $lastUptime = $up
+
+        if ($out.Found) {
+            Write-Log "$tag$($VmName): $Context media visible in guest at $($out.Root) [attempt $attempt, sessionPid=$($out.ProbePid), guest uptime $($up)s]." -LogOnly
+            if ($null -ne $Diagnostics) {
+                $Diagnostics['Found'] = $true
+                $Diagnostics['Root'] = "$($out.Root)"
+                $Diagnostics['Attempts'] = $attempt
+                $Diagnostics['Answered'] = $answered
+                $Diagnostics['Rebooted'] = $rebooted
+            }
             return $true
         }
         Start-Sleep -Seconds 8
     }
-    Write-Log "$tag$($VmName): $Context media NOT visible in guest after ~$([int]$TimeoutSeconds)s (marker '$MarkerRelativePath'); leaving it to the in-guest re-enumeration." -Warning
+
+    if ($null -ne $Diagnostics) {
+        $Diagnostics['Attempts'] = $attempt
+        $Diagnostics['Answered'] = $answered
+        $Diagnostics['Rebooted'] = $rebooted
+    }
+
+    if ($answered -eq 0) {
+        # Nothing was measured. Saying "media not visible" here would be a
+        # confident report about a probe that never ran.
+        $summary = if ($failReasons.Count -gt 0) { ($failReasons | Select-Object -Last 3) -join ' | ' } else { 'no reason captured' }
+        Write-Log "$tag$($VmName): $Context media state UNKNOWN -- the guest did not answer any of $attempt probe(s) in ~$([int]$TimeoutSeconds)s, so nothing about the media was measured. Last: $summary" -Warning
+        if ($null -ne $Diagnostics) { $Diagnostics['Reason'] = 'guest-unreachable' }
+        Write-VmMediaHostDiag -VmName $VmName -Context $Context -Phase $Phase
+        return $false
+    }
+
+    Write-Log "$tag$($VmName): $Context media NOT visible in guest after ~$([int]$TimeoutSeconds)s (marker '$MarkerRelativePath'); $answered of $attempt probe(s) answered$(if ($rebooted) { ', guest rebooted mid-probe' }); leaving it to the in-guest re-enumeration." -Warning
+    if ($null -ne $Diagnostics) { $Diagnostics['Reason'] = if ($rebooted) { 'guest-rebooted' } else { 'marker-absent' } }
+    if ($lastOut) {
+        Write-Log "$tag$($VmName): [$Context media guest diag] host=$($lastOut.Computer) sessionPid=$($lastOut.ProbePid) uptime=$($lastOut.UptimeSec)s boot=$($lastOut.BootTimeUtc)Z pendingReboot=$($lastOut.PendingReboot)" -Warning
+        foreach ($k in @('Optical', 'Volumes', 'Letters', 'Listing', 'Assigned', 'Rescan', 'Events', 'Errors')) {
+            foreach ($line in @($lastOut.$k)) {
+                if ($line) { Write-Log "$tag$($VmName): [$Context media guest diag] $k`: $line" -Warning }
+            }
+        }
+    }
+    Write-VmMediaHostDiag -VmName $VmName -Context $Context -Phase $Phase
     return $false
 }
 
@@ -684,6 +1078,11 @@ function Reset-AllDvdDrivesOnVm {
     )
     $tag = ""
     if ($Phase -gt 0) { $tag = "[Phase $Phase]: " }
+    $ready = Test-VmMediaChangeReadiness -VmName $VmName -TimeoutSeconds 60
+    if (-not $ready.Ok) {
+        Write-Log "$tag$($VmName): $Context DVD reset skipped -- VM is not in a state that accepts a DVD change (state=$($ready.State), $($ready.Reason))." -Warning
+        return $false
+    }
     try {
         # Capture the ISOs currently mounted (drop empty/orphan drives), and make
         # sure the required ISO is in the set to re-add.

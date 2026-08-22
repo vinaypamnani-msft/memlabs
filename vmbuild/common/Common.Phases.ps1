@@ -325,8 +325,15 @@ function Mount-SqlIsoForPhase {
         # -RepresentIfAttached: if a prior (killed) run left the SQL ISO inserted
         # across the guest's reboot, re-present it so the guest raises a fresh
         # media-arrival event and the Phase 4 DSC can see the disc.
+        $mountState = Test-VmMediaChangeReadiness -VmName $vm.vmName -TimeoutSeconds 120
+        if (-not $mountState.Ok) {
+            Write-Log "[Phase 4]: $($vm.vmName): cannot attach the SQL ISO -- VM state '$($mountState.State)' does not accept a DVD change ($($mountState.Reason)). SQL install will fail without media." -Failure
+            continue
+        }
+        Write-Log "[Phase 4]: $($vm.vmName): SQL ISO mount pre-check: state=$($mountState.State) gen=$($mountState.Generation) uptime=$($mountState.Uptime) $($mountState.Heartbeat)$(if ($mountState.Actions.Count) { " actions=[$($mountState.Actions -join '; ')]" })" -LogOnly
         if (-not (Mount-IsoOnVm -VmName $vm.vmName -IsoPath $sqlIsoPath -Context "SQL" -Phase 4 -RepresentIfAttached)) {
             Write-Log "[Phase 4]: $($vm.vmName): Failed mounting SQL ISO $sqlIsoPath as a DVD drive" -Failure
+            Write-VmMediaHostDiag -VmName $vm.vmName -IsoPath $sqlIsoPath -Context 'SQL' -Phase 4
             continue
         }
 
@@ -338,11 +345,30 @@ function Mount-SqlIsoForPhase {
         # clean DVD reset un-wedges a two-disc Gen2 enumeration; a persistent miss is
         # left to the in-guest helper (which polls + re-enumerates for 2 min). Never
         # fatal here -- a false host-side miss must not fail the mount.
+        #
+        # The mount runs BEFORE Start-PhaseJobs' "Starting required VMs" preflight, so
+        # a VM that is off / still booting is entirely normal here. Probing it would
+        # measure the transport, not the media, so skip when it isn't running and say
+        # so; the disc enumerates cleanly at boot.
         $sqlDomainName = if ($vm.Domain) { $vm.Domain } else { $deployConfig.vmOptions.domainName }
-        if (-not (Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $sqlDomainName -MarkerRelativePath 'setup.exe' -Context 'SQL' -Phase 4 -TimeoutSeconds 90)) {
-            Write-Log "[Phase 4]: $($vm.vmName): SQL media not yet visible in guest after mount; clean DVD reset + recheck." -Warning
+        if (-not $mountState.Running) {
+            Write-Log "[Phase 4]: $($vm.vmName): SQL ISO attached while the VM is '$($mountState.State)'; skipping the in-guest visibility probe (the disc enumerates at boot)." -LogOnly
+            continue
+        }
+        $mediaDiag = @{}
+        if (-not (Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $sqlDomainName -MarkerRelativePath 'setup.exe' -Context 'SQL' -Phase 4 -TimeoutSeconds 90 -Diagnostics $mediaDiag)) {
+            if ($mediaDiag['Reason'] -eq 'guest-unreachable') {
+                # Churning the optical stack cannot fix a guest that never answered,
+                # and repeated add/remove is itself what wedges Gen2 enumeration.
+                Write-Log "[Phase 4]: $($vm.vmName): skipping the DVD reset -- the guest answered none of $($mediaDiag['Attempts']) probe(s), so there is no evidence the media is the problem. Phase 4's in-guest AssignSqlIsoDriveLetter will re-enumerate." -Warning
+                continue
+            }
+            Write-Log "[Phase 4]: $($vm.vmName): SQL media not yet visible in guest after mount (guest answered $($mediaDiag['Answered']) of $($mediaDiag['Attempts']) probes, reason=$($mediaDiag['Reason'])); clean DVD reset + recheck." -Warning
             $null = Reset-AllDvdDrivesOnVm -VmName $vm.vmName -RequiredIsoPath $sqlIsoPath -Context "SQL" -Phase 4
-            $null = Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $sqlDomainName -MarkerRelativePath 'setup.exe' -Context 'SQL' -Phase 4 -TimeoutSeconds 60
+            $recheckDiag = @{}
+            if (Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $sqlDomainName -MarkerRelativePath 'setup.exe' -Context 'SQL' -Phase 4 -TimeoutSeconds 60 -Diagnostics $recheckDiag) {
+                Write-Log "[Phase 4]: $($vm.vmName): SQL media became visible at $($recheckDiag['Root']) after the DVD reset -- the guest had missed the media-arrival event on the existing drive and needed a device-arrival." -Warning
+            }
         }
     }
 }
@@ -641,6 +667,8 @@ function Set-CmMediaMountAndShare {
     $loopStart = Get-Date
     $mediaDeadline = $loopStart.AddMinutes(28)
     $attempt = 0
+    $answered = 0
+    $lastProbeFailure = ''
     $lastResetAt = [DateTime]::MinValue
     $lastRebootAt = [DateTime]::MinValue
     $rebootCount = 0
@@ -686,6 +714,17 @@ function Set-CmMediaMountAndShare {
         # setup binary on any drive letter, and returns the guest's optical diag.
         $probe = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $probeScript -ArgumentList @(60) -SuppressLog -DisplayName "Locate CM media ($attempt)"
         $out = $probe.ScriptBlockOutput
+        if ($out -is [hashtable]) { $answered++ }
+        else {
+            # Track WHY the guest said nothing. Without this the 28-minute failure
+            # cannot say whether the media was absent or the guest was never reachable.
+            $lastProbeFailure = if (-not $probe) { 'Invoke-VmCommand returned nothing' }
+            elseif ($probe.ChannelBroken) { 'PSDirect transport broken (no session)' }
+            elseif ($probe.TimedOut) { 'probe timed out' }
+            elseif ($probe.ErrorDetails) { "error: $($probe.ErrorDetails)" }
+            else { 'no session / no output' }
+            Write-Log "[Phase $Phase]: $($vmName): CM media probe could not run [attempt $attempt]: $lastProbeFailure" -LogOnly
+        }
         if ($out -is [hashtable] -and $out.Found) {
             $mediaRoot = [string]$out.Root
             Write-Log "[Phase $Phase]: $($vmName): CM media visible at $mediaRoot [attempt $attempt]." -LogOnly
@@ -743,7 +782,13 @@ function Set-CmMediaMountAndShare {
 
     if (-not $mediaRoot) {
         $waited = [int](((Get-Date) - $loopStart).TotalMinutes)
-        Write-RedX "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $attempt attempts over ~$waited min (clean DVD resets and guest reboots); the CMCB share (DC schema extension depends on it) cannot be created." -WriteLog -ForegroundColor Red
+        if ($answered -eq 0) {
+            Write-RedX "[Phase $Phase]: $($vmName): the guest answered NONE of $attempt CM media probes over ~$waited min, so the media state was never measured -- this is a guest/transport failure, not a media failure. Last: $lastProbeFailure. The CMCB share (DC schema extension depends on it) cannot be created." -WriteLog -ForegroundColor Red
+        }
+        else {
+            Write-RedX "[Phase $Phase]: $($vmName): CM media DVD never became visible in the guest after $attempt attempts over ~$waited min ($answered probe(s) answered; clean DVD resets and guest reboots); the CMCB share (DC schema extension depends on it) cannot be created." -WriteLog -ForegroundColor Red
+        }
+        Write-VmMediaHostDiag -VmName $vmName -IsoPath $isoPath -Context 'CM' -Phase $Phase
         return
     }
 
