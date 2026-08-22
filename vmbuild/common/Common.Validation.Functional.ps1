@@ -6903,7 +6903,13 @@ function Test-ForestTrustFunctionality {
                 # store checked above is only this machine's synced view of it.
                 try {
                     $ntAuth = [ADSI]"LDAP://CN=NTAuthCertificates,CN=Public Key Services,CN=Services,$(([ADSI]'LDAP://RootDSE').configurationNamingContext)"
-                    $ntCount = @($ntAuth.Properties['cACertificate'].Value | Where-Object { $_ -is [byte[]] }).Count
+                    # One published CA cert comes back as a single byte[]; piping that into
+                    # Where-Object unrolls it into individual bytes and counts 0, which read
+                    # as "EMPTY" on a forest whose publish had actually landed.
+                    $ntRaw = $ntAuth.Properties['cACertificate'].Value
+                    $ntCount = 0
+                    if ($ntRaw -is [byte[]]) { $ntCount = 1 }
+                    elseif ($ntRaw -is [System.Array]) { $ntCount = @($ntRaw | Where-Object { $_ -is [byte[]] }).Count }
                     if ($ntCount -gt 0) { $results.Details.Add("OK: this forest's AD NTAuthCertificates holds $ntCount CA cert(s)") }
                     else { $results.Details.Add("WARN: this forest's AD NTAuthCertificates is EMPTY (certutil -dspublish NtauthCA never landed)") }
                 }

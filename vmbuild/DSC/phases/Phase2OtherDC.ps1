@@ -166,6 +166,7 @@
                     TemplateName = "ConfigMgrClientDistributionPointCertificate"
                     GroupName    = "$DomainName\ConfigMgr IIS Servers"
                     GroupAlt     = "$DomainNetBios\ConfigMgr IIS Servers"
+                    RemoteCreds  = $DomainCreds
                     Permissions  = 'Read, Enroll'
                     PermissionsOnly = $true
                     SkipIfNotExist = $true
@@ -177,6 +178,7 @@
                     TemplateName = "ConfigMgrWebServerCertificate"
                     GroupName    = "$DomainName\ConfigMgr IIS Servers"
                     GroupAlt     = "$DomainNetBios\ConfigMgr IIS Servers"
+                    RemoteCreds  = $DomainCreds
                     Permissions  = 'Read, Enroll'
                     PermissionsOnly = $true
                     SkipIfNotExist = $true
@@ -189,6 +191,7 @@
                 TemplateName = "ConfigMgrClientCertificate"
                 GroupName    = "$DomainName\Domain Computers"
                 GroupAlt     = "$DomainNetBios\Domain Computers"
+                RemoteCreds  = $DomainCreds
                 Permissions  = 'Read, Enroll, AutoEnroll'
                 PermissionsOnly = $true
                 SkipIfNotExist = $true

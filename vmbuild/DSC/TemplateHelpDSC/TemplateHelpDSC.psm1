@@ -8287,6 +8287,115 @@ class AddCertificateTemplate {
     [DscProperty()]
     [bool]$SkipIfNotExist
 
+    # Only used to look up a principal that lives in another forest. The ACL write
+    # itself is always local to this CA.
+    [DscProperty()]
+    [System.Management.Automation.PSCredential]$RemoteCreds
+
+    # A cross-forest grant runs as SYSTEM on the CA, where the LSA name lookup for a
+    # principal in the trusted forest fails until the trust is fully usable -- and
+    # Phase 2 is exactly that window. LDAP against the principal's own domain with
+    # explicit credentials answers without needing the trust.
+    [string] ResolveIdentitySid([string]$ident) {
+        try {
+            $viaLsa = (New-Object System.Security.Principal.NTAccount($ident)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+            Write-Status "Identity '$ident' resolves to $viaLsa"
+            return $viaLsa
+        }
+        catch {
+            Write-Status "Identity '$ident' does NOT resolve on this CA: $($_.Exception.Message)"
+        }
+
+        $parts = $ident -split '\\', 2
+        # Only the DNS-qualified form gives LDAP something to bind to.
+        if ($parts.Count -ne 2 -or $parts[0] -notmatch '\.') { return '' }
+        $dom = $parts[0]
+        $leaf = $parts[1]
+        try {
+            $params = @{
+                Server      = $dom
+                LDAPFilter  = "(|(sAMAccountName=$leaf)(cn=$leaf))"
+                Properties  = 'objectSid'
+                ErrorAction = 'Stop'
+            }
+            if ($this.RemoteCreds) { $params['Credential'] = $this.RemoteCreds }
+            $hit = @(Get-ADObject @params) | Select-Object -First 1
+            $sidText = ''
+            if ($hit) { $sidText = "$($hit.objectSid.Value)" }
+            if ($sidText -notmatch '^S-1-5-') {
+                Write-Status "LDAP lookup of '$ident' against $dom produced no usable SID ('$sidText')"
+                return ''
+            }
+            Write-Status "Identity '$ident' resolved to $sidText via LDAP against $dom (the CA's LSA could not)"
+            return $sidText
+        }
+        catch {
+            Write-Status "LDAP SID lookup for '$ident' against $dom failed: $($_.Exception.Message)"
+            return ''
+        }
+    }
+
+    # Read-back is the only proof an ACE landed; PSPKI returns quietly either way.
+    [int] AceCountFor([string]$templateName, [string]$ident) {
+        $leaf = ($ident -split '\\')[-1]
+        return @((PSPKI\Get-CertificateTemplate -Name $templateName -ErrorAction Stop |
+                PSPKI\Get-CertificateTemplateAcl -ErrorAction Stop).Access |
+            Where-Object { "$($_.IdentityReference)" -eq $ident -or "$($_.IdentityReference)" -like "*\$leaf" }).Count
+    }
+
+    # PSPKI only accepts names, so a principal the CA cannot translate can never be
+    # granted through it. The template's DACL in AD is the same object the CA reads at
+    # enrollment time, so write the ACEs there by SID instead. Returns '' on success.
+    [string] GrantSidOnTemplate([string]$templateName, [string]$sidText, [string]$permissions) {
+        $enrollGuid = [guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55'
+        $autoEnrollGuid = [guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
+        $want = @($permissions -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($want.Count -eq 0) { return "no permissions requested" }
+        try {
+            # Interpolate, never -f: -f renders a PropertyValueCollection as its type
+            # name and silently builds an unbindable LDAP path.
+            $cfg = "$(([ADSI]'LDAP://RootDSE').configurationNamingContext)"
+            if ($cfg -notmatch '^CN=Configuration,DC=') { return "unusable configurationNamingContext '$cfg'" }
+            $tplPath = "LDAP://CN=$templateName,CN=Certificate Templates,CN=Public Key Services,CN=Services,$cfg"
+            if (-not [System.DirectoryServices.DirectoryEntry]::Exists($tplPath)) { return "template '$templateName' not present in $cfg" }
+
+            $tpl = [ADSI]$tplPath
+            $tpl.psbase.Options.SecurityMasks = [System.DirectoryServices.SecurityMasks]::Dacl
+            $sid = New-Object System.Security.Principal.SecurityIdentifier($sidText)
+            $sec = $tpl.psbase.ObjectSecurity
+            foreach ($w in $want) {
+                switch ($w) {
+                    'Read' { $sec.AddAccessRule((New-Object System.DirectoryServices.ActiveDirectoryAccessRule($sid, [System.DirectoryServices.ActiveDirectoryRights]::GenericRead, [System.Security.AccessControl.AccessControlType]::Allow))) }
+                    'Enroll' { $sec.AddAccessRule((New-Object System.DirectoryServices.ActiveDirectoryAccessRule($sid, [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight, [System.Security.AccessControl.AccessControlType]::Allow, $enrollGuid))) }
+                    'AutoEnroll' { $sec.AddAccessRule((New-Object System.DirectoryServices.ActiveDirectoryAccessRule($sid, [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight, [System.Security.AccessControl.AccessControlType]::Allow, $autoEnrollGuid))) }
+                    default { return "unsupported permission '$w'" }
+                }
+            }
+            $tpl.psbase.ObjectSecurity = $sec
+            $tpl.psbase.CommitChanges()
+
+            $granted = @()
+            $back = [ADSI]$tplPath
+            foreach ($ace in @($back.psbase.ObjectSecurity.Access | Where-Object { $null -ne $_ })) {
+                if ("$($ace.AccessControlType)" -ne 'Allow') { continue }
+                if ("$($ace.IdentityReference)" -ne $sidText) { continue }
+                $ot = "$($ace.ObjectType)"
+                if ($ot -eq "$enrollGuid") { $granted += 'Enroll' }
+                elseif ($ot -eq "$autoEnrollGuid") { $granted += 'AutoEnroll' }
+                elseif ("$($ace.ActiveDirectoryRights)" -match 'GenericRead|GenericAll') { $granted += 'Read' }
+            }
+            $missing = @($want | Where-Object { $granted -notcontains $_ })
+            if ($missing.Count -gt 0) {
+                return "committed but read-back shows [$($granted -join '+')], still missing [$($missing -join '+')]"
+            }
+            Write-Status "Read-back: $templateName grants $sidText $($granted -join '+') in AD"
+            return ''
+        }
+        catch {
+            return "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+        }
+    }
+
     [void] Set() {
 
         $_TemplateName = $this.TemplateName
@@ -8360,20 +8469,15 @@ class AddCertificateTemplate {
                     $templateFound = $true
 
                     foreach ($ident in $identities) {
+                        # Resolve first: a SID we can find ourselves is the fallback for
+                        # the cross-forest case, where PSPKI's name lookup cannot work.
+                        $identSid = $this.ResolveIdentitySid($ident)
+                        if ($identSid) { $anyResolved = $true }
+
+                        $pspkiThrew = $false
                         try {
                             Write-Status "PSPKI\Get-CertificateTemplateAcl -ErrorAction stop"
                             $templateacl = $template | PSPKI\Get-CertificateTemplateAcl -ErrorAction stop
-
-                            # A cross-forest grant lives or dies on this translation, and
-                            # PSPKI reports the failure as an opaque throw.
-                            try {
-                                $_sid = (New-Object System.Security.Principal.NTAccount($ident)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-                                $anyResolved = $true
-                                Write-Status "Identity '$ident' resolves to $_sid"
-                            }
-                            catch {
-                                Write-Status "Identity '$ident' does NOT resolve on this CA: $($_.Exception.Message)"
-                            }
 
                             Write-Status "PSPKI\Add-CertificateTemplateAcl -Identity $ident -AccessType Allow -AccessMask $_Permissions -ErrorAction stop"
                             $templateacl2 = $templateacl |  PSPKI\Add-CertificateTemplateAcl -Identity $ident -AccessType Allow -AccessMask $_Permissions -ErrorAction stop
@@ -8382,29 +8486,42 @@ class AddCertificateTemplate {
                             $templateacl2 | PSPKI\Set-CertificateTemplateAcl -ErrorAction stop
                         }
                         catch {
+                            $pspkiThrew = $true
                             $grantNotes += "$ident -> $($_.Exception.GetType().Name): $($_.Exception.Message)"
                             Write-Status "ACL grant for '$ident' on $_TemplateName FAILED: $($_.Exception.Message)"
-                            continue
                         }
 
                         # Set-CertificateTemplateAcl returning without throwing is not proof the
                         # ACE landed; only the read-back decides.
-                        $leaf = ($ident -split '\\')[-1]
-                        $_back = @()
-                        try {
-                            $_back = @((PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction Stop | PSPKI\Get-CertificateTemplateAcl -ErrorAction Stop).Access |
-                                    Where-Object { "$($_.IdentityReference)" -eq $ident -or "$($_.IdentityReference)" -like "*\$leaf" })
-                            Write-Status "Read-back: $_TemplateName now has $($_back.Count) ACE(s) for '$ident' [$(($_back | ForEach-Object { $_.Rights }) -join ' | ')]"
+                        if (-not $pspkiThrew) {
+                            $_back = 0
+                            try {
+                                $_back = $this.AceCountFor($_TemplateName, $ident)
+                                Write-Status "Read-back: $_TemplateName now has $_back ACE(s) for '$ident'"
+                            }
+                            catch {
+                                $grantNotes += "$ident -> read-back threw: $($_.Exception.Message)"
+                                Write-Status "Read-back of $_TemplateName ACL failed: $($_.Exception.Message)"
+                            }
+                            if ($_back -gt 0) {
+                                $success = $true
+                                break
+                            }
+                            $grantNotes += "$ident -> Set-CertificateTemplateAcl did not throw but read-back found 0 ACEs"
                         }
-                        catch {
-                            $grantNotes += "$ident -> read-back threw: $($_.Exception.Message)"
-                            Write-Status "Read-back of $_TemplateName ACL failed: $($_.Exception.Message)"
+
+                        # The name-based grant produced nothing. Write the ACEs straight onto
+                        # the template's AD object by SID, which needs no LSA lookup at all.
+                        if ($identSid) {
+                            $sidNote = $this.GrantSidOnTemplate($_TemplateName, $identSid, $_Permissions)
+                            if (-not $sidNote) {
+                                Write-Status "Granted '$_Permissions' on $_TemplateName to $identSid ($ident) by SID"
+                                $success = $true
+                                break
+                            }
+                            $grantNotes += "$ident ($identSid) -> SID grant: $sidNote"
+                            Write-Status "SID grant for '$ident' on $_TemplateName failed: $sidNote"
                         }
-                        if ($_back.Count -gt 0) {
-                            $success = $true
-                            break
-                        }
-                        $grantNotes += "$ident -> Set-CertificateTemplateAcl did not throw but read-back found 0 ACEs"
                     }
 
                     if (-not $success) { throw "no identity form in [$($identities -join ' | ')] produced an ACE on $_TemplateName" }
@@ -8431,7 +8548,13 @@ class AddCertificateTemplate {
                     try {
                         Write-Status "PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl"
                         PSPKI\Get-CertificateTemplate -Name $_TemplateName |  PSPKI\Get-CertificateTemplateAcl |  PSPKI\Add-CertificateTemplateAcl -Identity $_Group -AccessType Allow -AccessMask $_Permissions |  PSPKI\Set-CertificateTemplateAcl
-                        $success = $true
+                        # This pipeline swallows a no-op, so the read-back decides. Keep its
+                        # failure out of the catch below, which reboots the machine.
+                        $granted = 0
+                        try { $granted = $this.AceCountFor($_TemplateName, $_Group) }
+                        catch { Write-Status "Retry-pipeline read-back threw: $($_.Exception.Message)" }
+                        $success = ($granted -gt 0)
+                        Write-Status "Retry pipeline for '$_Group' on $_TemplateName granted=$success"
                     }
                     catch {
                         Write-Verbose "$_"
@@ -8447,13 +8570,11 @@ class AddCertificateTemplate {
             }
 
             if (-not $success) {
-                # SkipIfNotExist covers a principal that is not there to grant to. It must NOT
-                # cover a principal that resolved and still ended up with no ACE.
-                if ($_Skip -and -not $anyResolved) {
-                    Write-Status "SKIP $_TemplateName`: no identity in [$($identities -join ' | ')] resolves to a SID on this CA, so no ACL grant was applied. $($grantNotes -join ' ; ')"
-                    return
-                }
-                throw "AddCertificateTemplate: could not grant '$_Permissions' on '$_TemplateName' to any of [$($identities -join ' | ')] after $retries attempt(s). $($grantNotes -join ' ; '). Cross-forest clients cannot autoenroll until this ACE exists (ccmsetup 0x87D00454). DSC will retry."
+                # SkipIfNotExist means 'this CA does not carry the template' -- the outer
+                # catch above already returns for that. It must NOT also absorb 'the
+                # principal could not be granted': that silently ships a lab whose clients
+                # can never enrol, three phases from where the cause is visible.
+                throw "AddCertificateTemplate: could not grant '$_Permissions' on '$_TemplateName' to any of [$($identities -join ' | ')] by name or by SID after $retries attempt(s) (resolved=$anyResolved). $($grantNotes -join ' ; '). Cross-forest clients cannot autoenroll until this ACE exists (ccmsetup 0x87D00454). DSC will retry."
             }
         }
 
