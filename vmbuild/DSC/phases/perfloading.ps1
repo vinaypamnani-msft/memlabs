@@ -3519,16 +3519,32 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         else {
             Write-DscStatus "$Tag All $($accepted.Count) requested products accepted by SUP component"
         }
-        Write-DscStatus "$Tag Products enabled. Waiting for WCM to reconfigure WSUS with new products..."
 
         # Adding products triggers WCM reconfiguration (SUBSCRIPTION_PENDING).
         # We must wait for WCM to reach SUCCESS before triggering a sync,
         # otherwise wsyncmgr sees 'WSUS server not configured' and the sync
         # blocks WCM from setting the subscription (deadlock).
+        #
+        # That sync is the wait's ONLY consumer, and a downstream SUP must never
+        # force one (see the $isTopLevel gate further down), so downstream the
+        # wait is pure cost: measured 2026-08-22, CT3-PS1SITE read
+        # ConfigurationState=FAILED on 20/20 polls -- 714s -- on four consecutive
+        # runs, while every top-level SUP in the same log set exited after 4-8
+        # polls and never saw FAILED.
+        $wcmMaxAttempts = 20
+        $wcmSkipReason = ''
+        if (-not $isTopLevel) {
+            $wcmMaxAttempts = 0
+            $wcmSkipReason = "Downstream SUP (parent=$($ThisVM.parentSiteCode)) - skipping the WCM reconfiguration wait and the early sync trigger; WCM reconfigures on its own schedule and the catalog replicates from the upstream SUP."
+        }
+        else {
+            Write-DscStatus "$Tag Products enabled. Waiting for WCM to reconfigure WSUS with new products..."
+        }
+
         $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
         $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
         $wcmReady = $false
-        for ($wcmWait = 1; $wcmWait -le 20; $wcmWait++) {
+        for ($wcmWait = 1; $wcmWait -le $wcmMaxAttempts; $wcmWait++) {
             Start-Sleep -Seconds 30
             try {
                 $wcmRegVal = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
@@ -3540,12 +3556,12 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 break
             }
             if ($wcmRegVal -eq 3 -and ($wcmWait % 5 -eq 0)) {
-                Write-DscStatus "$Tag WCM state is FAILED. Restarting WsusService to trigger reconfiguration (attempt $wcmWait of 20)"
+                Write-DscStatus "$Tag WCM state is FAILED. Restarting WsusService to trigger reconfiguration (attempt $wcmWait of $wcmMaxAttempts)"
                 Restart-Service -Name WsusService -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 30
             }
             else {
-                Write-DscStatus "$Tag WCM state: $wcmName (attempt $wcmWait of 20)"
+                Write-DscStatus "$Tag WCM state: $wcmName (attempt $wcmWait of $wcmMaxAttempts)"
             }
         }
         if ($wcmReady) {
@@ -3593,7 +3609,11 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             }
         }
         else {
-            Write-DscStatus "$Tag WCM did not reach SUCCESS after 20 attempts. Skipping sync trigger — wsyncmgr will sync on schedule."
+            if ($wcmSkipReason) {
+                Write-DscStatus "$Tag $wcmSkipReason"
+            }
+            else {
+            Write-DscStatus "$Tag WCM did not reach SUCCESS after $wcmMaxAttempts attempts. Skipping sync trigger — wsyncmgr will sync on schedule."
             # Log diagnostics so we can investigate
             $diag = @()
             try {
@@ -3610,6 +3630,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 }
             }
             Write-DscStatus "$Tag WCM timeout diag: $($diag -join ' | ')"
+            }
         }
         } # end accepted-products block
     }
