@@ -10,8 +10,11 @@ _fileList_develop.json
 *.exe
 
 # Ignore vmbuild log(s)
+# logs*/ also covers host logs synced in beside them (logs2, ...); the trailing
+# slash keeps it to directories so a file like logsomething.ps1 still tracks.
 *.log
 /vmbuild/logs
+/vmbuild/logs*/
 /vmbuild/crashlogs
 
 # Ignore winre.wim, created by WindowsImageTools module
