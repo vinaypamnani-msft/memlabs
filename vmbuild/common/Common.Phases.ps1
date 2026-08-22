@@ -2001,6 +2001,52 @@ DROP TABLE #memlabs_idxprobe;
         }
     }
 
+    # Phase 1 preflight: the host's memlabs SSH keypair must be self-consistent
+    # BEFORE any seed ISO is built. Phase 1 stamps the PUBLIC key into every
+    # Linux VM's cloud-init and then authenticates with the PRIVATE key, so a
+    # mismatched pair makes every Linux VM unreachable while looking exactly
+    # like a slow guest boot -- burnin.sandwich.lab 2026-08-21 lost 5 VMs x 27min
+    # to a pair left behind by the pre-mutex keygen race (247eaf3f fixed the
+    # producer; the already-corrupted files in the cache survived it, because
+    # the only check was "do both files exist").
+    #
+    # It has to run here rather than on first use: repairing after the ISOs are
+    # built would leave the guests holding a public key the host cannot sign for.
+    if ($Phase -eq 1) {
+        $linuxVMs = @($deployConfig.virtualMachines | Where-Object { (Test-VmIsLinux -Vm $_) -and -not $_.hidden })
+        if ($linuxVMs.Count -gt 0) {
+            Write-Log "[Phase 1] Verifying the host SSH keypair before creating $($linuxVMs.Count) Linux VM(s)..." -Activity
+            $keyPreflight = Repair-LinuxAdminSshKeyPair -DeployConfig $deployConfig
+
+            if (-not $keyPreflight.Ok) {
+                Write-Log "[Phase 1] Preflight FAILED: the memlabs SSH keypair is unusable and could not be repaired -- $($keyPreflight.Reason)." -Failure
+                Write-Log "[Phase 1] Every Linux VM would be created, boot correctly, and then be unreachable for the full SSH-readiness budget. Aborting before any VM is created." -Failure
+                Write-Log "[Phase 1] Remediation: delete both files in $(Join-Path $Common.CachePath 'ssh') and re-run, and confirm the Windows OpenSSH Client is installed." -Failure
+                return [PSCustomObject]@{
+                    Failed          = $linuxVMs.Count
+                    Success         = 0
+                    Jobs            = 0
+                    Applicable      = $true
+                    AdditionalData  = $null
+                    PreflightFailed = $true
+                }
+            }
+
+            if ($keyPreflight.Repaired) {
+                Write-Log "[Phase 1] SSH keypair was broken and has been regenerated. New Linux VMs are fine." -Warning
+                if ($keyPreflight.OrphanedVMs.Count -gt 0) {
+                    # These hold the OLD public key. No key the host now has can
+                    # reach them, so say so once here instead of letting each one
+                    # discover it separately 27 minutes at a time.
+                    Write-Log "[Phase 1] $($keyPreflight.OrphanedVMs.Count) existing Linux VM(s) were built with the old key and can no longer be reached: $($keyPreflight.OrphanedVMs -join ', '). Delete and re-create them." -Warning
+                }
+            }
+            else {
+                Write-Log "[Phase 1] SSH keypair verified ($($keyPreflight.Reason))." -LogOnly
+            }
+        }
+    }
+
     # Per-run readiness token for the multi-node DSC handshake. Every VM_Config
     # job dispatched below captures this same GUID via $using:phaseRunGuid.
     # Members write it to C:\staging\DSC\RunGuid.txt as the LAST step of

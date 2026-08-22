@@ -115,6 +115,72 @@ function Get-LinuxScript {
     return $body
 }
 
+function Test-LinuxSshKeyPairMatches {
+    <#
+    .SYNOPSIS
+        Return whether a private key file and its .pub actually belong together.
+
+    .DESCRIPTION
+        `ssh-keygen -y` re-derives the public key from the private key. If that
+        does not match the .pub on disk, ssh.exe will happily OFFER the .pub,
+        the server will ACCEPT it, and then authentication dies at signing time
+        with "identity_sign: private key ... contents do not match public".
+
+        Returns { Matches; Reason }. Matches is $false whenever the comparison
+        could not be completed, so an unreadable key is never reported as good.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$PrivateKeyPath,
+        [Parameter(Mandatory = $true)][string]$PublicKeyPath
+    )
+
+    $result = [pscustomobject]@{ Matches = $false; Reason = 'not evaluated' }
+
+    if (-not (Test-Path $PrivateKeyPath)) { $result.Reason = 'private key missing'; return $result }
+    if (-not (Test-Path $PublicKeyPath)) { $result.Reason = 'public key missing'; return $result }
+
+    $sshKeygenPath = Get-OpenSshToolPath -Name 'ssh-keygen.exe'
+    if (-not $sshKeygenPath) { $result.Reason = 'ssh-keygen.exe not available, pair NOT verified'; return $result }
+
+    # < NUL so a passphrase-protected or corrupt key fails fast instead of
+    # blocking on a prompt. 2>&1 inside the cmd line, and $LASTEXITCODE read
+    # immediately: on PS 5.1 a redirected native stderr line can otherwise be
+    # promoted to a terminating error before the exit code is ever inspected.
+    $derived = @(& cmd.exe /c "`"$sshKeygenPath`" -y -f `"$PrivateKeyPath`" < NUL 2>&1")
+    $keygenExit = $LASTEXITCODE
+    if ($keygenExit -ne 0) {
+        $result.Reason = "ssh-keygen -y failed (exit=$keygenExit): $(($derived | Select-Object -Last 2) -join ' | ')"
+        return $result
+    }
+
+    # Compare the base64 blob only. The comment field differs by design
+    # (ssh-keygen -y never emits one) and is not part of the key.
+    $blobOf = {
+        param($text)
+        $line = @($text -split "`r?`n" | Where-Object { $_ -match '^\s*ssh-' }) | Select-Object -First 1
+        if (-not $line) { return $null }
+        $parts = $line.Trim() -split '\s+'
+        if ($parts.Count -lt 2) { return $null }
+        "$($parts[0]) $($parts[1])"
+    }
+
+    $derivedBlob = & $blobOf (($derived | Out-String))
+    $storedBlob = & $blobOf (Get-Content -LiteralPath $PublicKeyPath -Raw)
+
+    if (-not $derivedBlob) { $result.Reason = 'could not parse the key derived from the private key'; return $result }
+    if (-not $storedBlob) { $result.Reason = "could not parse $PublicKeyPath"; return $result }
+
+    if ($derivedBlob -ceq $storedBlob) {
+        $result.Matches = $true
+        $result.Reason = 'private key matches public key'
+    }
+    else {
+        $result.Reason = 'private key does not match the .pub file'
+    }
+    return $result
+}
+
 function Get-LinuxAdminSshKeyPair {
     [CmdletBinding()]
     param (
@@ -140,20 +206,34 @@ function Get-LinuxAdminSshKeyPair {
             throw "Timed out after 2 min waiting for the memlabs SSH key generation lock; another VM job is stuck generating $privateKeyPath."
         }
 
-        if ($ForceNew.IsPresent -or -not (Test-Path $privateKeyPath) -or -not (Test-Path $publicKeyPath)) {
-            Write-Log "Generating ed25519 SSH keypair for memlabs Linux VMs at $privateKeyPath"
+        # Both files existing is not the same as the pair being USABLE. A
+        # mismatched pair is silent and permanent: ssh offers the .pub, the
+        # guest accepts it, then signing fails with "identity_sign: private key
+        # ... contents do not match public" and every Linux VM burns its full
+        # SSH-readiness budget and is reported as a guest boot failure. That
+        # cost 5 VMs x 27 min on burnin.sandwich.lab 2026-08-21 and named the
+        # wrong culprit. Verify, do not assume.
+        $regenReason = $null
+        if ($ForceNew.IsPresent) { $regenReason = '-ForceNew specified' }
+        elseif (-not (Test-Path $privateKeyPath) -or -not (Test-Path $publicKeyPath)) { $regenReason = 'keypair not present' }
+        else {
+            $pairCheck = Test-LinuxSshKeyPairMatches -PrivateKeyPath $privateKeyPath -PublicKeyPath $publicKeyPath
+            if (-not $pairCheck.Matches) { $regenReason = "cached keypair is unusable ($($pairCheck.Reason))" }
+        }
+
+        if ($regenReason) {
+            if (-not $ForceNew.IsPresent -and (Test-Path $privateKeyPath) -and (Test-Path $publicKeyPath)) {
+                # Loud, because it invalidates guests already seeded with the old
+                # public key -- they must be recreated, not just retried.
+                Write-Log "SSH keypair at $privateKeyPath is BROKEN ($regenReason). Regenerating. Any Linux VM already built with the old key must be recreated." -Warning
+            }
+            Write-Log "Generating ed25519 SSH keypair for memlabs Linux VMs at $privateKeyPath ($regenReason)"
             if (Test-Path $privateKeyPath) { Remove-Item $privateKeyPath -Force }
             if (Test-Path $publicKeyPath) { Remove-Item $publicKeyPath -Force }
 
-            $sshKeygen = Get-Command ssh-keygen.exe -ErrorAction SilentlyContinue
-            if (-not $sshKeygen) {
-                $fallback = Join-Path $env:WINDIR "System32\OpenSSH\ssh-keygen.exe"
-                if (Test-Path $fallback) {
-                    $sshKeygen = [pscustomobject]@{ Source = $fallback }
-                }
-            }
-            if (-not $sshKeygen) {
-                throw "ssh-keygen.exe not found. Install the Windows OpenSSH client (Settings > Apps > Optional features > OpenSSH Client)."
+            $sshKeygenPath = Get-OpenSshToolPath -Name 'ssh-keygen.exe'
+            if (-not $sshKeygenPath) {
+                throw "ssh-keygen.exe not found and the Windows OpenSSH Client capability could not be installed. Install it manually (Settings > Apps > Optional features > OpenSSH Client) and re-run."
             }
 
             # PowerShell mangles bare "" args for native exes (varies by version);
@@ -162,7 +242,7 @@ function Get-LinuxAdminSshKeyPair {
             # blocks forever on an inherited console. EOF makes it fail fast and say so.
             # 2>&1 is INSIDE the cmd line because redirecting in PowerShell can promote a
             # native stderr line to a terminating error before $LASTEXITCODE is read.
-            $quotedExe = '"' + $sshKeygen.Source + '"'
+            $quotedExe = '"' + $sshKeygenPath + '"'
             $quotedKey = '"' + $privateKeyPath + '"'
             $cmdLine = "$quotedExe -t ed25519 -f $quotedKey -N `"`" -C memlabs-host@$env:COMPUTERNAME -q < NUL 2>&1"
             $keygenOutput = @(& cmd.exe /c $cmdLine)
@@ -170,7 +250,15 @@ function Get-LinuxAdminSshKeyPair {
                 $exitCode = $LASTEXITCODE
                 $detail = if ($keygenOutput.Count) { ($keygenOutput | Select-Object -Last 5) -join ' | ' }
                 else { 'ssh-keygen printed nothing' }
-                throw "ssh-keygen failed (exit=$exitCode) building $privateKeyPath -- $detail (exe=$($sshKeygen.Source); dir exists=$(Test-Path $sshDir); private key written=$(Test-Path $privateKeyPath))"
+                throw "ssh-keygen failed (exit=$exitCode) building $privateKeyPath -- $detail (exe=$sshKeygenPath; dir exists=$(Test-Path $sshDir); private key written=$(Test-Path $privateKeyPath))"
+            }
+
+            # Verify what we just wrote rather than trusting exit code 0. A pair
+            # that fails here would otherwise be cached and poison every
+            # subsequent run exactly as the broken one did.
+            $postCheck = Test-LinuxSshKeyPairMatches -PrivateKeyPath $privateKeyPath -PublicKeyPath $publicKeyPath
+            if (-not $postCheck.Matches) {
+                throw "ssh-keygen reported success but the keypair at $privateKeyPath is not usable: $($postCheck.Reason)"
             }
         }
     }
@@ -208,6 +296,98 @@ function Get-LinuxAdminSshKeyPair {
         PublicKeyPath  = $publicKeyPath
         PublicKey      = (Get-Content $publicKeyPath -Raw).Trim()
     }
+}
+
+function Repair-LinuxAdminSshKeyPair {
+    <#
+    .SYNOPSIS
+        Verify the host's memlabs SSH keypair is usable, repairing it if not.
+        Intended to run ONCE before Phase 1, not per VM.
+
+    .DESCRIPTION
+        Phase 1 stamps the PUBLIC key into every Linux VM's cloud-init seed and
+        then authenticates with the PRIVATE key. If the two disagree, ssh offers
+        a key the guest accepts and signing then fails with
+        "identity_sign: private key ... contents do not match public" -- every
+        Linux VM burns its whole SSH-readiness budget and is reported as a guest
+        boot failure. On burnin.sandwich.lab 2026-08-21 that was 5 VMs x 27 min
+        with sshd answering in 39s on all of them.
+
+        Repair must happen HERE rather than on first use: regenerating the key
+        after seed ISOs are built would leave the guests holding a public key
+        the host can no longer sign for.
+
+    .OUTPUTS
+        [pscustomobject] Ok / Repaired / Reason / OrphanedVMs
+        OrphanedVMs lists Linux VMs that ALREADY exist and were seeded with the
+        pre-repair public key -- a new key cannot reach them, so they are named
+        explicitly instead of being left to time out one at a time.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [object]$DeployConfig
+    )
+
+    $result = [pscustomobject]@{
+        Ok          = $false
+        Repaired    = $false
+        Reason      = 'not evaluated'
+        OrphanedVMs = @()
+    }
+
+    $sshDir = Join-Path $Common.CachePath "ssh"
+    $privateKeyPath = Join-Path $sshDir "memlabs_ed25519"
+    $publicKeyPath = "$privateKeyPath.pub"
+
+    $hadCachedPair = (Test-Path $privateKeyPath) -and (Test-Path $publicKeyPath)
+    $needsRepair = $false
+
+    if ($hadCachedPair) {
+        $check = Test-LinuxSshKeyPairMatches -PrivateKeyPath $privateKeyPath -PublicKeyPath $publicKeyPath
+        if ($check.Matches) {
+            Write-Log "Linux SSH keypair preflight: cached keypair at $privateKeyPath is valid." -LogOnly
+        }
+        else {
+            $needsRepair = $true
+            Write-Log "Linux SSH keypair preflight: cached keypair at $privateKeyPath is UNUSABLE ($($check.Reason)). Repairing before any VM is created." -Warning
+
+            # Name the casualties BEFORE the key changes -- afterwards there is
+            # no way to tell which VMs were seeded with the old public key.
+            try {
+                $result.OrphanedVMs = @(Get-List -Type VM | Where-Object { Test-VmIsLinux -Vm $_ } | Select-Object -ExpandProperty vmName)
+            }
+            catch {
+                Write-Log "Linux SSH keypair preflight: could not enumerate existing Linux VMs ($($_.Exception.Message)); any that exist will need recreating." -Warning
+            }
+        }
+    }
+
+    try {
+        # Get-LinuxAdminSshKeyPair generates when absent and regenerates when the
+        # pair does not verify, then applies the ACL lockdown.
+        $pair = Get-LinuxAdminSshKeyPair
+    }
+    catch {
+        $result.Reason = "could not obtain a usable keypair: $($_.Exception.Message)"
+        return $result
+    }
+
+    # Re-verify the file as it will actually be used -- i.e. AFTER the ACL
+    # lockdown. A lockdown that made the key unreadable would otherwise only
+    # surface as a per-VM SSH failure much later.
+    $final = Test-LinuxSshKeyPairMatches -PrivateKeyPath $pair.PrivateKeyPath -PublicKeyPath $pair.PublicKeyPath
+    if (-not $final.Matches) {
+        $result.Reason = "keypair still unusable after repair: $($final.Reason)"
+        return $result
+    }
+
+    $result.Ok = $true
+    $result.Repaired = $needsRepair
+    $result.Reason = if ($needsRepair) { 'keypair was broken and has been regenerated' }
+    elseif ($hadCachedPair) { 'cached keypair verified' }
+    else { 'keypair generated' }
+    return $result
 }
 
 function Get-OscdimgPath {
@@ -653,12 +833,15 @@ chpasswd:
         # the host before the reboot, unblocking Wait-LinuxVmReady for DHCP
         # VMs (LinuxServer) that have no ExpectedIPAddress fallback.
         'systemctl restart hv-kvp-daemon.service || true',
-        # Prevent maintenance-mode boot: add fsck.mode=force fsck.repair=yes
-        # to the kernel command line so filesystem inconsistencies are auto-
-        # repaired instead of prompting. The emergency.service override and
-        # no-emergency.conf from write_files above are already picked up by
-        # the daemon-reload earlier in this runcmd list.
-        'grep -q ''fsck.repair=yes'' /etc/default/grub || { sed -i ''/^GRUB_CMDLINE_LINUX_DEFAULT=/s/"$/ fsck.mode=force fsck.repair=yes"/'' /etc/default/grub && update-grub; } || true',
+        # Maintenance-mode prevention on images baked before bake/03b existed.
+        # fsck.repair=yes is the part that matters -- it repairs a dirty fs
+        # unattended instead of prompting for a root password, which no
+        # unattended VM can answer. Deliberately NOT fsck.mode=force: that runs
+        # a full fsck on EVERY boot even when the fs is clean, and these VMs
+        # already lose SSH-readiness races to host I/O contention. A current
+        # image has this baked in, so the grep short-circuits and no update-grub
+        # runs at first boot.
+        'grep -q ''fsck.repair=yes'' /etc/default/grub || { sed -i ''/^GRUB_CMDLINE_LINUX_DEFAULT=/s/"$/ fsck.mode=auto fsck.repair=yes"/'' /etc/default/grub && update-grub; } || true',
         # Delete the temporary bake-time console user. The bake runcmd
         # already runs userdel, but if it failed silently (|| true) the
         # account ships in the VHDX and every deployed VM inherits it.
@@ -1682,11 +1865,9 @@ function New-LinuxVirtualMachine {
 function Get-LinuxSshExePath {
     [CmdletBinding()]
     param ()
-    $ssh = Get-Command ssh.exe -ErrorAction SilentlyContinue
-    if ($ssh) { return $ssh.Source }
-    $fallback = Join-Path $env:WINDIR "System32\OpenSSH\ssh.exe"
-    if (Test-Path $fallback) { return $fallback }
-    throw "ssh.exe not found. Install the Windows OpenSSH client (Settings > Apps > Optional features > OpenSSH Client)."
+    $ssh = Get-OpenSshToolPath -Name 'ssh.exe'
+    if ($ssh) { return $ssh }
+    throw "ssh.exe not found and the Windows OpenSSH Client capability could not be installed. Install it manually (Settings > Apps > Optional features > OpenSSH Client) and re-run."
 }
 
 function Get-LinuxVmExpectedStaticIP {
@@ -2450,6 +2631,20 @@ function Wait-LinuxVmReady {
                 $errText = ($sshErr | Out-String).Trim()
                 if (-not $errText) { $errText = '(no stderr output)' }
                 Write-Log "$VmName`: SSH probe failed (elapsed ${elapsed}s, exit=$LASTEXITCODE, tcp/22=$tcpProbeOk): $errText" -LogOnly
+            }
+
+            # "identity_sign: private key ... contents do not match public" is a
+            # statement about the HOST's key files, not the guest -- the private
+            # key and its .pub disagree, so signing fails after the server has
+            # already accepted the offered key. Waiting cannot change a local
+            # file, so retrying until the budget expires only converts a
+            # 30-second host problem into a 27-minute one reported as a guest
+            # boot failure (burnin.sandwich.lab 2026-08-21: 5 Linux VMs, 51
+            # identical failures each, root cause never named). Stop now and say
+            # what is actually wrong.
+            if (($sshErr | Out-String) -match 'identity_sign.*do(es)? not match public') {
+                $keyDir = Split-Path -Parent $keyPair.PrivateKeyPath
+                throw "$VmName`: the memlabs SSH keypair is broken on THIS HOST -- the private key $($keyPair.PrivateKeyPath) does not match $($keyPair.PublicKeyPath), so authentication can never succeed and waiting will not help. The guest is healthy (sshd answered on tcp/22 at $ip). Delete both files in $keyDir and re-run; every Linux VM seeded with the stale public key must be recreated."
             }
         }
         else {
@@ -5719,7 +5914,12 @@ $bakeWriteFilesYaml
         # and throws with detailed output on failure. Uses a hashtable for
         # the mutable step counter (reference type survives inner function
         # scope).
-        $totalSteps = $(if ($Variant -eq 'Desktop') { 10 } else { 5 })
+        # 7 common steps (updates, base packages, base services, kernel cmdline,
+        # DHCP watchdog, service trim, sshd hardening) + 5 Desktop-only steps +
+        # 2 validation steps, which are themselves Invoke-BakeStep calls.
+        # Validation was previously left out of the total, so every bake ended
+        # by logging "[6/5]".
+        $totalSteps = $(if ($Variant -eq 'Desktop') { 14 } else { 9 })
         $ctx = @{ Step = 0 }
 
         function Invoke-BakeStep {
@@ -5764,8 +5964,8 @@ $bakeWriteFilesYaml
         Invoke-BakeStep -Name "Enable base services" -Timeout 120 `
             -Script (Get-LinuxScript -Name 'bake/03-enable-base-services' -IncludeAptRetry)
 
-        # ── Step 3b: Prevent maintenance-mode boot on fsck failure ───────
-        Invoke-BakeStep -Name "Prevent maintenance-mode boot" -Timeout 60 `
+        # ── Step 3b: Kernel cmdline + no interactive maintenance prompt ──
+        Invoke-BakeStep -Name "Kernel cmdline + maintenance-mode prevention" -Timeout 120 `
             -Script (Get-LinuxScript -Name 'bake/03b-maintenance-prevention')
 
         # ── Step 4: DHCP watchdog service ────────────────────────────────
@@ -5794,7 +5994,26 @@ $bakeWriteFilesYaml
                 -Script (Get-LinuxScript -Name 'bake/09-dash-to-panel' -IncludeAptRetry)
         } # end Desktop-only steps
 
+        # ── Step 10: Remove boot-time work the lab never uses ────────────
+        # Must run AFTER the Desktop block: ubuntu-desktop-minimal installs and
+        # ENABLES ModemManager, wpa_supplicant, avahi and the snapd units, so a
+        # trim placed earlier would be silently undone on the Desktop variant.
+        Invoke-BakeStep -Name "Trim boot services" -Timeout 300 `
+            -Script (Get-LinuxScript -Name 'bake/10-trim-services' -Variables @{ MEMLABS_BAKE_VARIANT = $Variant })
+
+        # ── Step 11: Make sshd unable to stay down ───────────────────────
+        # Also last, so it is the final word on ssh.service regardless of what
+        # any earlier package install dropped into /etc/ssh.
+        Invoke-BakeStep -Name "sshd hardening" -Timeout 120 `
+            -Script (Get-LinuxScript -Name 'bake/11-sshd-hardening')
+
         # ── Validation ───────────────────────────────────────────────────
+        # Boot-time settings first, for both variants: every one of them was
+        # applied by a sed or a systemctl call that leaves no trace when it
+        # silently matches nothing.
+        Invoke-BakeStep -Name "Validate boot optimizations" -Timeout 120 `
+            -Script (Get-LinuxScript -Name 'bake/validate-boot-optimizations')
+
         $validationScript = $(if ($Variant -eq 'Desktop') {
             Get-LinuxScript -Name 'bake/validate-desktop'
         } else {

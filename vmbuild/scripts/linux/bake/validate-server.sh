@@ -27,6 +27,9 @@ if ! systemctl is-enabled memlabs-dhcp-watchdog.service >/dev/null 2>&1; then
     FAIL=1
 fi
 
+# Kernel cmdline, sshd hardening and the service trim are asserted by
+# bake/validate-boot-optimizations.sh, which runs for both variants.
+
 if [ $FAIL -ne 0 ]; then
     echo "=== VALIDATION FAILED ==="
     printf "$ERRORS"

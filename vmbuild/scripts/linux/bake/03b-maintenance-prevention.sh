@@ -3,43 +3,121 @@
 # Configure GRUB to auto-repair and systemd to never drop to emergency mode.
 set -euo pipefail
 
-# Add fsck.mode=force fsck.repair=yes to kernel command line
+# ── Kernel cmdline helpers ───────────────────────────────────────────────
+# One sed per setting had grown a near-duplicate 8-line block per parameter,
+# and gave no way to REMOVE a parameter -- so a setting baked by an older copy
+# of this script could never be taken back off.
 GRUB_FILE="/etc/default/grub"
-if ! grep -q 'fsck.repair=yes' "$GRUB_FILE"; then
-    sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 fsck.mode=force fsck.repair=yes"/' "$GRUB_FILE"
-    # Also add to GRUB_CMDLINE_LINUX if GRUB_CMDLINE_LINUX_DEFAULT doesn't exist
-    if ! grep -q 'GRUB_CMDLINE_LINUX_DEFAULT' "$GRUB_FILE"; then
-        sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 fsck.mode=force fsck.repair=yes"/' "$GRUB_FILE"
-    fi
-    update-grub
-fi
 
-# Full DATA journaling on the root fs (data=journal): an unannounced hard
-# power-off then leaves file DATA crash-consistent (old-or-new complete, never
-# truncated) -- not just metadata. This is the strong fix for the routine
-# nightly hard shutoffs that were truncating /var/lib/dpkg/status.
-#
-# Set via rootflags= on the kernel cmdline (GRUB_CMDLINE_LINUX, always applied)
-# because the root data= mode can ONLY be chosen at the initial mount -- a
-# later fstab remount cannot change it. Safe on a fast_commit-enabled fs: the
-# kernel simply does not use fast_commit under data=journal (no feature-bit
-# clearing / initramfs hook needed, so no unattended-boot brick risk). commit=1
-# flushes the journal every 1s. Tradeoff (per kernel docs): data=journal
-# disables delayed allocation + O_DIRECT and roughly doubles write traffic --
-# acceptable on the few small Linux lab VMs; the win is surviving the nightly
-# plug-pulls. To revert: remove 'rootflags=data=journal,commit=1' from
-# /etc/default/grub and run update-grub.
-if ! grep -q 'rootflags=data=journal' "$GRUB_FILE"; then
-    if grep -q '^GRUB_CMDLINE_LINUX=' "$GRUB_FILE"; then
-        sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 rootflags=data=journal,commit=1"/' "$GRUB_FILE"
+_grub_get() {
+    sed -n "s|^$1=\"\(.*\)\"$|\1|p" "$GRUB_FILE" | tail -1
+}
+
+_grub_rewrite() {
+    local var="$1" newval="$2"
+    # sed delimiter is | because values contain / (root=/dev/...).
+    if grep -q "^${var}=" "$GRUB_FILE"; then
+        sed -i "s|^${var}=.*|${var}=\"${newval}\"|" "$GRUB_FILE"
     else
-        echo 'GRUB_CMDLINE_LINUX="rootflags=data=journal,commit=1"' >> "$GRUB_FILE"
+        echo "${var}=\"${newval}\"" >> "$GRUB_FILE"
     fi
-    update-grub
-    echo "root fs: enabled data=journal,commit=1 via rootflags (full data journaling)"
-fi
+}
 
-# Make a hard hang SAY something. These VMs log
+# _strip_tokens <cmdline> <regex> -- delete every space-delimited word matching
+# <regex>. Loops to fixpoint because sed matches non-overlapping: on
+# "console=tty1 console=ttyS0" a single pass consumes the space BETWEEN them,
+# so the second token is left behind. One pass silently half-worked.
+_strip_tokens() {
+    local cur=" $1 " prev=''
+    while [ "$cur" != "$prev" ]; do
+        prev="$cur"
+        cur="$(echo "$cur" | sed -e "s| $2 | |g")"
+    done
+    echo "$cur" | tr -s ' ' | sed -e 's|^ ||' -e 's| $||'
+}
+
+# grub_set_param VAR token [replaces_regex]
+# Adds `token`, first deleting any word matching `replaces_regex`, so a re-run
+# or a conflicting older value never leaves both. Idempotent.
+grub_set_param() {
+    local var="$1" token="$2" drop="${3:-}"
+    local cur; cur="$(_grub_get "$var")"
+    [ -n "$drop" ] && cur="$(_strip_tokens "$cur" "$drop")"
+    case " $cur " in
+        *" $token "*) ;;
+        *) cur="$cur $token" ;;
+    esac
+    cur="$(echo "$cur" | tr -s ' ' | sed -e 's|^ ||' -e 's| $||')"
+    _grub_rewrite "$var" "$cur"
+}
+
+grub_drop_param() {
+    local var="$1" drop="$2"
+    local cur; cur="$(_grub_get "$var")"
+    _grub_rewrite "$var" "$(_strip_tokens "$cur" "$drop")"
+}
+
+grub_set_kv() {
+    if grep -q "^$1=" "$GRUB_FILE"; then sed -i "s|^$1=.*|$1=$2|" "$GRUB_FILE"; else echo "$1=$2" >> "$GRUB_FILE"; fi
+}
+
+echo "=== cmdline before ==="
+grep -E '^GRUB_CMDLINE_LINUX(_DEFAULT)?=' "$GRUB_FILE" || true
+
+# ── 1. Serial console baud — the biggest single boot-time win ────────────
+# The stock cloud image ships `console=ttyS0` with NO baud rate. The kernel then
+# keeps whatever rate the UART is already at, which on an uninitialised 16550 is
+# 9600 -- and printk to a registered console is SYNCHRONOUS, so the kernel
+# blocks on every byte it prints.
+#
+# Measured on this image, from the guest's own systemd accounting recovered
+# from /var/log/syslog (vmbuild\logs\linux-diag\PL-PITA):
+#     bake VM,     COM1 not wired    1.315s kernel +   9.252s userspace =  10.6s
+#     deployed VM, COM1 -> pipe     55.080s kernel + 106.128s userspace = 161.2s
+# and in 15 of 15 captured boots the kernel goes silent for 13-28s immediately
+# after `printk: legacy console [ttyS0] enabled` while it flushes the ~10KB
+# early backlog. One whole boot pushed 557KB to the console: ~580s at 9600 baud,
+# ~48s at 115200.
+#
+# So: keep the serial console (it is the only view into an early-boot hang) but
+# make it 12x faster, and stop sending debug-level chatter to it.
+#
+# ORDER MATTERS: with several console= arguments the kernel gives /dev/console
+# -- and therefore all init/cloud-init output -- to the LAST one. ttyS0 must
+# stay last or the serial tap goes deaf to userspace. Both entries are dropped
+# and re-appended in order so the result never depends on what was there.
+grub_drop_param GRUB_CMDLINE_LINUX_DEFAULT 'console=[^ ]*'
+grub_set_param GRUB_CMDLINE_LINUX_DEFAULT 'console=tty1'
+grub_set_param GRUB_CMDLINE_LINUX_DEFAULT 'console=ttyS0,115200n8'
+# loglevel=4 = KERN_WARNING and above reaches the console. The ring buffer and
+# journald still record everything, so dmesg / journalctl -k lose nothing --
+# only the synchronous UART writes are cut.
+grub_set_param GRUB_CMDLINE_LINUX_DEFAULT 'loglevel=4' 'loglevel=[0-9]*'
+echo "console: ttyS0 pinned to 115200n8 and kept last, console loglevel 4 (dmesg/journal keep everything)"
+
+# ── 2. fsck: repair without prompting, but do NOT force a full pass ──────
+# fsck.repair=yes is what actually prevents the "Give root password for
+# maintenance" prompt. fsck.mode=force additionally runs a COMPLETE fsck of the
+# root filesystem on EVERY boot even when it is clean -- pure added latency and
+# added I/O for VMs already losing an SSH-readiness race to host contention.
+# fsck.mode=auto (the default) still checks and repairs whenever the fs is
+# dirty, i.e. exactly the hard-power-off case this was added for.
+grub_set_param GRUB_CMDLINE_LINUX_DEFAULT 'fsck.mode=auto' 'fsck.mode=[a-z]*'
+grub_set_param GRUB_CMDLINE_LINUX_DEFAULT 'fsck.repair=yes' 'fsck.repair=[a-z]*'
+echo "fsck: mode=auto repair=yes (repairs a dirty fs unattended; no forced pass on a clean one)"
+
+# ── 3. Root filesystem journaling mode ───────────────────────────────────
+# Explicitly NOT data=journal. It roughly doubles write traffic and disables
+# delayed allocation, and these VMs already lose SSH-readiness races to host
+# I/O contention -- it would buy crash-consistency by worsening the very
+# contention that causes the failures. commit=1 in fstab plus the
+# dirty-writeback sysctls below give most of the resilience for none of the
+# write amplification. Dropped here rather than merely "not added" so an image
+# baked from an older copy of this script gets the setting taken back off.
+grub_drop_param GRUB_CMDLINE_LINUX 'rootflags=data=journal[^ ]*'
+
+# ── 4. Make a hard hang SAY something ────────────────────────────────────
+# These VMs log
 # "NMI watchdog: Perf NMI watchdog permanently disabled" at boot because the
 # synthetic CPU exposes no PMU, so the hardware lockup detector is never armed
 # and a frozen kernel produces total silence -- ZZ-TOFU froze mid-systemd on
@@ -57,22 +135,50 @@ fi
 # cloud-init runcmd could edit grub, and a cmdline change needs a reboot anyway.
 # Cost when nothing is wrong: nothing. Cost when something is: a named function
 # instead of a blank screen.
-if ! grep -q 'softlockup_panic=1' "$GRUB_FILE"; then
-    if grep -q '^GRUB_CMDLINE_LINUX=' "$GRUB_FILE"; then
-        sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 softlockup_panic=1 unknown_nmi_panic=1 panic=0"/' "$GRUB_FILE"
-    else
-        echo 'GRUB_CMDLINE_LINUX="softlockup_panic=1 unknown_nmi_panic=1 panic=0"' >> "$GRUB_FILE"
-    fi
-    update-grub
-    echo "lockup detection: softlockup_panic=1 unknown_nmi_panic=1 panic=0 (no PMU here, so the NMI watchdog cannot arm itself)"
+grub_set_param GRUB_CMDLINE_LINUX 'softlockup_panic=1' 'softlockup_panic=[0-9]*'
+grub_set_param GRUB_CMDLINE_LINUX 'unknown_nmi_panic=1' 'unknown_nmi_panic=[0-9]*'
+grub_set_param GRUB_CMDLINE_LINUX 'panic=0' 'panic=[0-9]*'
+echo "lockup detection: softlockup_panic=1 unknown_nmi_panic=1 panic=0 (no PMU here, so the NMI watchdog cannot arm itself)"
+
+# ── 5. Trust the CPU RNG so early userspace never blocks on entropy ──────
+grub_set_param GRUB_CMDLINE_LINUX 'random.trust_cpu=on' 'random.trust_cpu=[a-z]*'
+
+# ── 6. Boot menu waits ───────────────────────────────────────────────────
+# GRUB_RECORDFAIL_TIMEOUT is the important one: without it an unclean shutdown
+# makes grub wait for a keypress FOREVER on the next boot, and an unattended VM
+# never comes back -- precisely the failure this script exists to prevent.
+grub_set_kv GRUB_TIMEOUT 1
+grub_set_kv GRUB_RECORDFAIL_TIMEOUT 1
+echo "grub: timeout 1s, recordfail timeout 1s (an unclean shutdown must not wait for a keypress)"
+
+echo "=== cmdline after ==="
+grep -E '^GRUB_CMDLINE_LINUX(_DEFAULT)?=|^GRUB_TIMEOUT|^GRUB_RECORDFAIL' "$GRUB_FILE" || true
+update-grub
+
+# Fail the bake rather than ship an image whose console throttles every boot. A
+# silently-unapplied sed is invisible until someone measures a deployed VM
+# months later -- which is exactly how the current image shipped.
+if ! grep -q 'console=ttyS0,115200n8' "$GRUB_FILE"; then
+    echo "ERROR: console baud was not applied to $GRUB_FILE" >&2
+    exit 1
+fi
+if grep -q 'fsck.mode=force' "$GRUB_FILE"; then
+    echo "ERROR: fsck.mode=force is still present in $GRUB_FILE" >&2
+    exit 1
+fi
+if grep -q 'data=journal' "$GRUB_FILE"; then
+    echo "ERROR: rootflags=data=journal is still present in $GRUB_FILE" >&2
+    exit 1
 fi
 
-# Tell systemd to never drop to emergency/rescue on failure — just reboot
+# Tell systemd to never drop to emergency/rescue on failure — just reboot.
+# DefaultTimeoutStopSec 90s -> 30s: shutdown waits are pure dead time, and
+# cloud-init reboots the VM once during first boot, so this is paid twice.
 mkdir -p /etc/systemd/system.conf.d
 cat > /etc/systemd/system.conf.d/no-emergency.conf << 'EOF'
 [Manager]
 DefaultTimeoutStartSec=180s
-DefaultTimeoutStopSec=90s
+DefaultTimeoutStopSec=30s
 EOF
 
 # Override emergency.service to just reboot instead of prompting

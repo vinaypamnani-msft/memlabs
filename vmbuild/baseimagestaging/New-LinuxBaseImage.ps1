@@ -55,7 +55,7 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Hyper-V switch name for the bake VM. Must have outbound internet.")]
     [string]$BakeSwitchName = 'Default Switch',
 
-    [Parameter(Mandatory = $false, HelpMessage = "Wall-clock timeout for the bake VM. Defaults to 20 min (Server) / 90 min (Desktop: GNOME + Edge + Intune + dash-to-panel + system updates).")]
+    [Parameter(Mandatory = $false, HelpMessage = "Wall-clock timeout for the bake VM. Defaults to 30 min (Server) / 90 min (Desktop: GNOME + Edge + Intune + dash-to-panel + system updates).")]
     [ValidateRange(5, 240)]
     [int]$BakeTimeoutMinutes
 )
@@ -72,7 +72,9 @@ if (-not $PSBoundParameters.ContainsKey('DiskSizeGB') -or $DiskSizeGB -eq 0) {
 if (-not $PSBoundParameters.ContainsKey('BakeTimeoutMinutes') -or $BakeTimeoutMinutes -eq 0) {
     # Desktop: SSH-driven bake installs GNOME + Edge + Intune + dash-to-panel +
     # system updates + validation; 90 min accommodates slow mirrors.
-    $BakeTimeoutMinutes = if ($Desktop.IsPresent) { 90 } else { 20 }
+    # Server: 30 min covers the service-trim (snapd purge) and sshd-hardening
+    # steps added alongside the boot-time work.
+    $BakeTimeoutMinutes = if ($Desktop.IsPresent) { 90 } else { 30 }
 }
 
 # Check for admin rights (qemu-img doesn't strictly require it, but Hyper-V mounts later will)
@@ -94,6 +96,31 @@ $RootPath = Split-Path -Path $PSScriptRoot -Parent
 if ($Common.FatalError) {
     Write-Log "Critical Failure! $($Common.FatalError)" -Failure
     return
+}
+
+# ---------------------------------------------------------------------------
+# 0. Host prerequisites (self-installing)
+# ---------------------------------------------------------------------------
+Write-Log "Checking host prerequisites..." -Activity
+
+# Resize-VHD and the bake VM need Hyper-V. New-Lab installs it, but on a brand-new lab host
+# this script can be the first thing ever run.
+Install-HyperV
+
+# The bake drives the temp VM over SSH.
+$sshExeForBake = Get-OpenSshToolPath -Name 'ssh.exe'
+if (-not $sshExeForBake) {
+    Write-Log "The Windows OpenSSH Client is required to bake the image and could not be installed automatically. Install it (Settings > Apps > Optional features > OpenSSH Client) and re-run." -Failure
+    return
+}
+Write-Log "Using ssh: $sshExeForBake" -LogOnly
+
+# Optional: gives the seed ISO builder real YAML parsing instead of the regex heuristic.
+if (-not (Get-Command ConvertFrom-Yaml -ErrorAction SilentlyContinue)) {
+    $yamlResult = Install-MemLabsModule -Name 'powershell-yaml'
+    if ($yamlResult.Failed.Count -gt 0) {
+        Write-Log "powershell-yaml could not be installed; user-data falls back to heuristic validation." -Warning
+    }
 }
 
 # Release -> upstream image map. Only one release for now; extend by adding rows.
