@@ -51,6 +51,22 @@ if (-not $vmName) {
 # Prepare DSC ZIP files
 Set-Location $PSScriptRoot
 
+# Self-installing prerequisite helpers (PSGallery bootstrap). Dot-sourced before Common.ps1
+# because the module install below has to work on a lab host that has never used PSGallery.
+$prereqScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'common\Common.Prereqs.ps1'
+if (-not (Test-Path $prereqScript -PathType Leaf)) {
+    throw "Cannot find $prereqScript. Run this from a full memlabs clone."
+}
+. $prereqScript
+
+# Install-Module -Scope AllUsers and the TemplateHelpDSC copy into Program Files both need it.
+if (-not $DryRun -and -not (Test-MemLabsElevated)) {
+    Write-Host
+    Write-Host "This script must run as Administrator (it installs modules machine-wide)." -ForegroundColor Red
+    Write-Host
+    return
+}
+
 #####################
 ### Install modules
 #####################
@@ -79,28 +95,21 @@ try {
         'CertificateDsc'
     )
 
-    # Single Get-Module call instead of 15 individual lookups
-    $allAvailable = @(Get-Module -ListAvailable).Name | Sort-Object -Unique
-    $missing = @()
-    foreach ($module in $modules) {
-        if ($allAvailable -contains $module) {
-            if ($force -and -not $DryRun) {
-                Write-Host "Module exists: $module. Updating..."
-                Update-Module $module -Force
-            }
-            else {
-                Write-Host "Module exists: $module "
-            }
-        }
-        else {
-            $missing += $module
+    if ($DryRun) {
+        $allAvailable = @(Get-Module -ListAvailable).Name | Sort-Object -Unique
+        foreach ($module in $modules) {
+            if ($allAvailable -contains $module) { Write-Host "Module exists: $module " }
+            else { Write-Host "DRYRUN: would install module: $module" -ForegroundColor Yellow }
         }
     }
-
-    foreach ($module in $missing) {
-        if ($DryRun) { Write-Host "DRYRUN: would install module: $module" -ForegroundColor Yellow; continue }
-        Write-Host "Installing Module: $module "
-        Install-Module $module -Force
+    else {
+        $moduleResult = Install-MemLabsModule -Name $modules -Update:$force
+        foreach ($module in $moduleResult.Present) { Write-Host "Module exists: $module " }
+        if ($moduleResult.Failed.Count -gt 0) {
+            # A missing module surfaces much later as an unreadable Publish-AzVMDscConfiguration
+            # or DSC compile error, so stop here and name the modules.
+            throw "These modules could not be installed from PSGallery: $($moduleResult.Failed -join ', '). Fix connectivity to https://www.powershellgallery.com and re-run."
+        }
     }
 
     # Install TemplateHelpDSC module on this machine (needed before test compilation)
@@ -145,6 +154,11 @@ try {
     # Dump config to file, for debugging
     #$result.DeployConfig | ConvertTo-Json | Set-Clipboard
     $filePath = if ($DryRun) { Join-Path $dryRunRoot 'deployConfig.json' } else { "C:\temp\deployConfig.json" }
+    # Out-File -Force does not create missing directories, and a new lab host has no C:\temp.
+    $filePathDir = Split-Path $filePath -Parent
+    if (-not (Test-Path $filePathDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $filePathDir -Force | Out-Null
+    }
     $deployConfigCopy.parameters.ThisMachineName = $vmName
     $deployConfigCopy | ConvertTo-Json -Depth 5 | Out-File $filePath -Force
 

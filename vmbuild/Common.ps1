@@ -11706,6 +11706,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 if ($removeOnlyProfile) {
     . $PSScriptRoot\common\Common.StorageToken.ps1
     . $PSScriptRoot\common\Common.Colors.ps1
+    . $PSScriptRoot\common\Common.Prereqs.ps1
     . $PSScriptRoot\common\Common.Config.ps1
     . $PSScriptRoot\common\Common.HyperV.ps1
     . $PSScriptRoot\common\Common.Phases.ps1
@@ -11719,6 +11720,7 @@ else {
 . $PSScriptRoot\common\Common.StorageToken.ps1
 
 . $PSScriptRoot\common\Common.Colors.ps1
+. $PSScriptRoot\common\Common.Prereqs.ps1
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
 . $PSScriptRoot\common\Common.Phases.ps1
