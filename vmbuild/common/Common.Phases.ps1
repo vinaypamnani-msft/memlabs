@@ -900,13 +900,22 @@ function Start-Phase {
     # read. Ask the DC once instead of 15 times.
     $dcServesDns = $false
     if ($deployConfig.parameters.ExistingDCName -and $Phase -eq 1) {
+        $dcName = $deployConfig.parameters.ExistingDCName
         $dnsZone = $deployConfig.vmOptions.domainName
-        $zoneProbe = Invoke-VmCommand -VmName $deployConfig.parameters.ExistingDCName -VmDomainName $dnsZone -SuppressLog -ScriptBlock {
-            $null = Get-DnsServerZone -Name $using:dnsZone -ErrorAction Stop
+        # Probe only a DC that is actually here: Invoke-VmCommand on a missing VM makes
+        # Get-VMSession log an ERROR before this code can decide anything, so a brand-new
+        # domain reported a failure it did not have.
+        if (-not (Get-VM2 -Fallback -Name $dcName -ErrorAction SilentlyContinue)) {
+            Write-Log "[Phase $Phase] No DNS/AD cleanup needed: DC '$dcName' does not exist on this host yet (new domain)." -LogOnly
         }
-        $dcServesDns = ($zoneProbe -and -not $zoneProbe.ScriptBlockFailed)
-        if (-not $dcServesDns) {
-            Write-Log "[Phase $Phase] Skipping DNS/AD cleanup: '$($deployConfig.parameters.ExistingDCName)' is not serving zone '$dnsZone' -- new domain, or the DC VM exists but is not promoted yet. Nothing could be removed from it."
+        else {
+            $zoneProbe = Invoke-VmCommand -VmName $dcName -VmDomainName $dnsZone -SuppressLog -ScriptBlock {
+                $null = Get-DnsServerZone -Name $using:dnsZone -ErrorAction Stop
+            }
+            $dcServesDns = ($zoneProbe -and -not $zoneProbe.ScriptBlockFailed)
+            if (-not $dcServesDns) {
+                Write-Log "[Phase $Phase] Skipping DNS/AD cleanup: '$dcName' exists but is not serving zone '$dnsZone' -- not promoted yet. Nothing could be removed from it."
+            }
         }
     }
 
