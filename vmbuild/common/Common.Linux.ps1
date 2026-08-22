@@ -2059,7 +2059,15 @@ function Get-LinuxHeadStartSeconds {
 
     $vms = @($DeployConfig.virtualMachines)
     if ($vms.Count -le $Threshold) { return 0 }
-    if (-not ($vms | Where-Object { Test-VmIsLinux -Vm $_ })) { return 0 }
+    $linux = @($vms | Where-Object { Test-VmIsLinux -Vm $_ })
+    if ($linux.Count -eq 0) { return 0 }
+
+    # A Linux VM that already exists is skipped by the Phase 1 create job, so holding
+    # Windows back for it waits on a boot that never happens. Seen on a rerun after a
+    # failed build: all 6 Linux VMs survived, and 15 Windows VMs still slept 280s.
+    $booting = @($linux | Where-Object { -not (Get-VM2 -Fallback -Name $_.vmName -ErrorAction SilentlyContinue) })
+    if ($booting.Count -eq 0) { return 0 }
+
     return [Math]::Min(($vms.Count - $Threshold) * $SecondsPerVm, $MaxSeconds)
 }
 
