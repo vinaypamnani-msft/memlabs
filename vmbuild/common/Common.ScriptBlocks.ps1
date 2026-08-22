@@ -6284,6 +6284,7 @@ $global:VM_Config = {
         $lastStaleWarningTime = [DateTime]::MinValue
         $deadWorkflowConfirmations = 0     # consecutive stale checks that proved the ScriptWorkflow task is not running
         $deadWorkflowMax = 3               # after this many, the wait is provably unclearable -- fail instead of warning forever
+        $staleNoticeCount = 0              # stale notices emitted for the CURRENT status (reset on every status change)
         $lcmIdleSince = $null              # when the DSC LCM was FIRST seen continuously idle (null = not idle / unknown)
         $lcmRebootPendingSince = $null     # when the DSC LCM was FIRST seen parked reboot-pending (null = not parked / unknown)
         $lcmDetail = ''                    # LCMStateDetail from the last sample -- names the resource the engine is inside
@@ -6891,6 +6892,7 @@ $global:VM_Config = {
                         $lastStatusChangeTime = [DateTime]::UtcNow
                         $lastStaleWarningTime = [DateTime]::MinValue
                         $deadWorkflowConfirmations = 0
+                        $staleNoticeCount = 0
                         if (-not $dscConfigReRan) {
                             $lcmIdleSince = $null   # status advanced -> work is progressing; reset every stuck clock
                             $lcmRebootPendingSince = $null
@@ -7525,6 +7527,7 @@ $global:VM_Config = {
                             # already probes the task; this is the blind spot, so name it here.
                             $workflowNote = ''
                             $workflowDead = $false
+                            $workflowAlive = $false
                             $workflowLastError = ''
                             if (-not $lcmIdleSince -and -not $lcmRebootPendingSince -and -not $lcmPendingNoRebootSince) {
                                 $swStale = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
@@ -7534,10 +7537,17 @@ $global:VM_Config = {
                                     try { $crumb = (Get-Content 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Raw -ErrorAction Stop).Trim() } catch { }
                                     return [pscustomobject]@{ State = "$($t.State)"; LastError = $crumb }
                                 } -SuppressLog
-                                if (-not $swStale.ScriptBlockFailed -and $swStale.ScriptBlockOutput -and $swStale.ScriptBlockOutput.State -and $swStale.ScriptBlockOutput.State -ne 'Running') {
-                                    $workflowDead = $true
-                                    $workflowLastError = "" + $swStale.ScriptBlockOutput.LastError
-                                    $workflowNote = " -- ScriptWorkflow task is '$($swStale.ScriptBlockOutput.State)', NOT Running: the workflow exited without finishing, so this wait cannot clear on its own."
+                                if (-not $swStale.ScriptBlockFailed -and $swStale.ScriptBlockOutput -and $swStale.ScriptBlockOutput.State) {
+                                    if ($swStale.ScriptBlockOutput.State -ne 'Running') {
+                                        $workflowDead = $true
+                                        $workflowLastError = "" + $swStale.ScriptBlockOutput.LastError
+                                        $workflowNote = " -- ScriptWorkflow task is '$($swStale.ScriptBlockOutput.State)', NOT Running: the workflow exited without finishing, so this wait cannot clear on its own."
+                                    }
+                                    else {
+                                        # CONFIRMED alive. Distinct from "the probe told us nothing",
+                                        # which the old -not $workflowDead test silently folded in here.
+                                        $workflowAlive = $true
+                                    }
                                 }
                             }
                             if ($workflowDead) {
@@ -7558,7 +7568,24 @@ $global:VM_Config = {
                                 break
                             }
 
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m${idleNote} ('$($currentStatus.Trim())')${workflowNote}" -Warning
+                            # A cross-node wait legitimately holds one status for hours (the comment
+                            # above the staleness clock already says so): on cstest5 2026-08-22
+                            # CT5-PS1SITE-P emitted 24 identical warnings over 141m sitting in
+                            # "Waiting for CT5-PS1SITE to finish adding passive site server role",
+                            # on a Phase 8 that finished with 8 success / 0 warnings / 0 failures.
+                            # Once the ScriptWorkflow task has been CONFIRMED Running, every repeat
+                            # adds nothing but a bigger number, so repeats drop to log-only. The
+                            # FIRST notice still warns, and a wait we could not confirm alive keeps
+                            # warning every 5 minutes -- unverified is not the same as fine.
+                            $staleNoticeCount++
+                            $staleLine = "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m${idleNote} ('$($currentStatus.Trim())')${workflowNote}"
+                            if ($workflowAlive -and $staleNoticeCount -gt 1) {
+                                Write-Log "$staleLine -- ScriptWorkflow task confirmed Running (notice $staleNoticeCount for this status); still applying." -LogOnly
+                            }
+                            else {
+                                $aliveNote = if ($workflowAlive) { ' ScriptWorkflow task confirmed Running.' } elseif (-not $workflowDead) { ' ScriptWorkflow task state could NOT be confirmed.' } else { '' }
+                                Write-Log "$staleLine$aliveNote" -Warning
+                            }
                             $lastStaleWarningTime = [DateTime]::UtcNow
                         }
                     }
