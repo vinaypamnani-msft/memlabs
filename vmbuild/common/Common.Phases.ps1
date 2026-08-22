@@ -11,6 +11,54 @@ function Get-JobStreamSource {
     return $Job
 }
 
+# Block until the DC's Phase 2 job leaves its prologue and reaches DSC.
+#
+# The head start below is timed from job DISPATCH, but a Phase 2 job spends its
+# first minute-plus on bootstrap, session setup and tool injection before any
+# DSC runs. Measured on cstest5 (10 fresh members -> 100s hold): the DC copied a
+# 207.5 MB tool bundle until t+79s and did not reach DSC until t+103s, so every
+# member was released BEFORE the promotion the hold exists to protect had begun.
+# Reads the marker off the job's Progress stream, which the parent already
+# consumes to render "<vm>: Creating DSC [Invoking DSC_CreateConfig]".
+#
+# Always returns a result object -- a wait that could not observe the DC must say
+# so rather than pass silently as "DC is ready".
+function Wait-Phase2DcDscStart {
+    param(
+        $DcJob,
+        [int]$TimeoutSeconds
+    )
+
+    if (-not $DcJob) { return [pscustomobject]@{ Reached = $false; Seconds = 0; Reason = 'no DC job to observe' } }
+    if ($TimeoutSeconds -le 0) { return [pscustomobject]@{ Reached = $false; Seconds = 0; Reason = 'no time budget to observe the DC' } }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $scanned = 0
+    while ($true) {
+        # Read state BEFORE the scan so a job that ends holding the marker is
+        # still credited with reaching DSC instead of scored as an early death.
+        $state = "$($DcJob.State)"
+        $source = Get-JobStreamSource -Job $DcJob
+        if ($source -and $source.Progress) {
+            $count = $source.Progress.Count
+            for ($pi = $scanned; $pi -lt $count; $pi++) {
+                $status = "$($source.Progress[$pi].StatusDescription)".Trim()
+                if ($status -eq 'Starting DSC' -or $status -eq 'Invoking DSC_CreateConfig') {
+                    return [pscustomobject]@{ Reached = $true; Seconds = [int]$sw.Elapsed.TotalSeconds; Reason = "DC reached '$status'" }
+                }
+            }
+            $scanned = $count
+        }
+        if ($state -ne 'Running' -and $state -ne 'NotStarted') {
+            return [pscustomobject]@{ Reached = $false; Seconds = [int]$sw.Elapsed.TotalSeconds; Reason = "DC job is $state without reaching DSC" }
+        }
+        if ($sw.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            return [pscustomobject]@{ Reached = $false; Seconds = [int]$sw.Elapsed.TotalSeconds; Reason = "DC had not reached DSC within ${TimeoutSeconds}s" }
+        }
+        Start-Sleep -Seconds 1
+    }
+}
+
 # A Start-Job whose scriptblock RAN TO COMPLETION (emitting its terminal
 # "VM Creation completed successfully" / "...Preparation completed successfully"
 # line) can still end up State=Failed when the runspace/transport Close that
@@ -2316,6 +2364,8 @@ DROP TABLE #memlabs_idxprobe;
     $phase2HeadStartElapsedSeconds = 0
     $phase2ClientReleaseSeconds = 0
     $phase2HeadStartCapSeconds = 180
+    $phase2DcJob = $null
+    $phase2DcDscWaitCapSeconds = 180
     $phase2FreshClientMembers = @{}
     $phase2NonDomainJoinedRoles = @('DC', 'OtherDC', 'WorkgroupMember', 'AADClient', 'InternetClient', 'StandaloneRootCA', 'OSDClient')
     if ($Phase -eq 2 -and -not $WhatIf) {
@@ -2858,6 +2908,20 @@ DROP TABLE #memlabs_idxprobe;
                         Start-Sleep -Seconds $phase2RemainingHeadStartSeconds
                         $phase2HeadStartElapsedSeconds = $phase2HeadStartSeconds
                     }
+                    # The timer above is anchored to dispatch, not to promotion. Hold the
+                    # herd until the DC is actually in DSC so the protected window covers
+                    # the work it names. No-op when the DC got there during the sleep.
+                    $dcDscWait = Wait-Phase2DcDscStart -DcJob $phase2DcJob -TimeoutSeconds $phase2DcDscWaitCapSeconds
+                    $phase2HeadStartElapsedSeconds += $dcDscWait.Seconds
+                    if (-not $dcDscWait.Reached) {
+                        Write-Log "[Phase 2] DC head start: releasing the remaining members without confirming the DC started DSC -- $($dcDscWait.Reason) (waited an extra $($dcDscWait.Seconds)s)." -Warning
+                    }
+                    elseif ($dcDscWait.Seconds -gt 0) {
+                        Write-Log "[Phase 2] DC head start: held the remaining members $($dcDscWait.Seconds)s past the ${phase2HeadStartSeconds}s timer -- $($dcDscWait.Reason)." -Activity
+                    }
+                    else {
+                        Write-Log "[Phase 2] DC head start: no extra hold needed -- $($dcDscWait.Reason) before the timer expired." -LogOnly
+                    }
                 }
             }
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
@@ -2873,6 +2937,9 @@ DROP TABLE #memlabs_idxprobe;
         }
         else {
             Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
+            if ($Phase -eq 2 -and $phase2HeadStartSeconds -gt 0 -and $currentItem.role -eq 'DC' -and -not $phase2DcJob) {
+                $phase2DcJob = $job
+            }
             $jobs += $job
             $job_created_yes++
         }
