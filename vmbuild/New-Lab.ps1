@@ -1123,8 +1123,22 @@ try {
 
                     # Create RDCMan file
                     Start-Sleep -Seconds 5
-                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false -NoActivity -WhatIf:$WhatIf
-                    New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -NoActivity -WhatIf:$WhatIf
+                    # The .RDG / mRemoteNG files are convenience artifacts; a failure building
+                    # one must not abort a multi-hour lab build (see crash 2026-08-22 18:37).
+                    try {
+                        New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false -NoActivity -WhatIf:$WhatIf
+                    }
+                    catch {
+                        Write-Exception -ExceptionInfo $_
+                        Write-Log "Could not build the RDCMan file at $($Global:Common.RdcManFilePath); continuing with the deployment. $($_.Exception.Message)" -Warning
+                    }
+                    try {
+                        New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -NoActivity -WhatIf:$WhatIf
+                    }
+                    catch {
+                        Write-Exception -ExceptionInfo $_
+                        Write-Log "Could not build the mRemoteNG file at $($Global:Common.MRemoteNGFilePath); continuing with the deployment. $($_.Exception.Message)" -Warning
+                    }
                     Restore-TerminalFocus
                     #Refresh deployConfig to add any props that may have been added in New-VirtualMachine, eg ClusterIPAddress
                     $deployConfig = ConvertTo-DeployConfigEx -DeployConfig $deployConfig
