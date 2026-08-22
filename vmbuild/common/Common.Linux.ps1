@@ -128,31 +128,55 @@ function Get-LinuxAdminSshKeyPair {
     $privateKeyPath = Join-Path $sshDir "memlabs_ed25519"
     $publicKeyPath = "$privateKeyPath.pub"
 
-    if ($ForceNew.IsPresent -or -not (Test-Path $privateKeyPath) -or -not (Test-Path $publicKeyPath)) {
-        Write-Log "Generating ed25519 SSH keypair for memlabs Linux VMs at $privateKeyPath"
-        if (Test-Path $privateKeyPath) { Remove-Item $privateKeyPath -Force }
-        if (Test-Path $publicKeyPath) { Remove-Item $publicKeyPath -Force }
+    # Phase 1 creates every Linux VM in parallel and each one calls this, so on a fresh
+    # host they all race to write the SAME key path -- same collision class as the
+    # IMAPI2FS lock below. Whoever wins generates; the rest find both files and skip.
+    $keyMutex = [System.Threading.Mutex]::new($false, 'Global\MemlabsSshKeyGenLock')
+    $keyLockHeld = $false
+    try {
+        try { $keyLockHeld = $keyMutex.WaitOne([TimeSpan]::FromMinutes(2)) }
+        catch [System.Threading.AbandonedMutexException] { $keyLockHeld = $true }
+        if (-not $keyLockHeld) {
+            throw "Timed out after 2 min waiting for the memlabs SSH key generation lock; another VM job is stuck generating $privateKeyPath."
+        }
 
-        $sshKeygen = Get-Command ssh-keygen.exe -ErrorAction SilentlyContinue
-        if (-not $sshKeygen) {
-            $fallback = Join-Path $env:WINDIR "System32\OpenSSH\ssh-keygen.exe"
-            if (Test-Path $fallback) {
-                $sshKeygen = [pscustomobject]@{ Source = $fallback }
+        if ($ForceNew.IsPresent -or -not (Test-Path $privateKeyPath) -or -not (Test-Path $publicKeyPath)) {
+            Write-Log "Generating ed25519 SSH keypair for memlabs Linux VMs at $privateKeyPath"
+            if (Test-Path $privateKeyPath) { Remove-Item $privateKeyPath -Force }
+            if (Test-Path $publicKeyPath) { Remove-Item $publicKeyPath -Force }
+
+            $sshKeygen = Get-Command ssh-keygen.exe -ErrorAction SilentlyContinue
+            if (-not $sshKeygen) {
+                $fallback = Join-Path $env:WINDIR "System32\OpenSSH\ssh-keygen.exe"
+                if (Test-Path $fallback) {
+                    $sshKeygen = [pscustomobject]@{ Source = $fallback }
+                }
+            }
+            if (-not $sshKeygen) {
+                throw "ssh-keygen.exe not found. Install the Windows OpenSSH client (Settings > Apps > Optional features > OpenSSH Client)."
+            }
+
+            # PowerShell mangles bare "" args for native exes (varies by version);
+            # invoke through cmd.exe so the empty passphrase is passed literally.
+            # < NUL: if the key somehow exists, ssh-keygen prompts "Overwrite (y/n)?" and
+            # blocks forever on an inherited console. EOF makes it fail fast and say so.
+            # 2>&1 is INSIDE the cmd line because redirecting in PowerShell can promote a
+            # native stderr line to a terminating error before $LASTEXITCODE is read.
+            $quotedExe = '"' + $sshKeygen.Source + '"'
+            $quotedKey = '"' + $privateKeyPath + '"'
+            $cmdLine = "$quotedExe -t ed25519 -f $quotedKey -N `"`" -C memlabs-host@$env:COMPUTERNAME -q < NUL 2>&1"
+            $keygenOutput = @(& cmd.exe /c $cmdLine)
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $publicKeyPath)) {
+                $exitCode = $LASTEXITCODE
+                $detail = if ($keygenOutput.Count) { ($keygenOutput | Select-Object -Last 5) -join ' | ' }
+                else { 'ssh-keygen printed nothing' }
+                throw "ssh-keygen failed (exit=$exitCode) building $privateKeyPath -- $detail (exe=$($sshKeygen.Source); dir exists=$(Test-Path $sshDir); private key written=$(Test-Path $privateKeyPath))"
             }
         }
-        if (-not $sshKeygen) {
-            throw "ssh-keygen.exe not found. Install the Windows OpenSSH client (Settings > Apps > Optional features > OpenSSH Client)."
-        }
-
-        # PowerShell mangles bare "" args for native exes (varies by version);
-        # invoke through cmd.exe so the empty passphrase is passed literally.
-        $quotedExe = '"' + $sshKeygen.Source + '"'
-        $quotedKey = '"' + $privateKeyPath + '"'
-        $cmdLine = "$quotedExe -t ed25519 -f $quotedKey -N `"`" -C memlabs-host@$env:COMPUTERNAME -q"
-        $null = & cmd.exe /c $cmdLine
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $publicKeyPath)) {
-            throw "ssh-keygen failed (exit=$LASTEXITCODE) building $privateKeyPath"
-        }
+    }
+    finally {
+        if ($keyLockHeld) { $keyMutex.ReleaseMutex() }
+        $keyMutex.Dispose()
     }
 
     # Lock private key down so OpenSSH on Windows will actually use it.
