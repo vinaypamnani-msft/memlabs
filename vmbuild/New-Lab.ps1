@@ -620,7 +620,7 @@ try {
             write-log -Verbose "Acquired Mutex $($vm.vmName)"
         }
         else {
-            Write-RedX "Could not acquire mutex for $(vm.vmName).  A deployment for this VM may already be in progress"
+            Write-RedX "Could not acquire mutex for $($vm.vmName).  A deployment for this VM may already be in progress"
             exit 1
         }
         

@@ -1709,7 +1709,7 @@ function Add-VMToAccountLists {
     )
 
     if (($thisVM.vmName).Count -gt 1 -or (($thisVM.vmName).ToCharArray() -contains ' ')) {
-        Write-Log "$(thisVM.vmName) contains invalid data"
+        Write-Log "$($thisVM.vmName) contains invalid data"
         return
     }
 
