@@ -3846,6 +3846,77 @@ function Test-CMSiteFunctionality {
             $lastSignature = @{}
             $linkProgressing = @{}
             $lastLink = @{}
+
+            # A WMI DATETIME at the SQL epoch means this pattern has NEVER synced, which
+            # is not the same as "stale". Label it so nobody reads 1900-01-01 as an age.
+            $isNeverSynced = {
+                param($stamp)
+                if ([string]::IsNullOrWhiteSpace("$stamp")) { return $true }
+                if ("$stamp" -match '^(\d{4})') { return ([int]$Matches[1] -lt 1990) }
+                return $false
+            }
+            $describeSiteSync = {
+                param($stamp)
+                if (& $isNeverSynced $stamp) { "NEVER (first site-pattern sync still pending)" } else { "$stamp" }
+            }
+
+            # Replication ground truth from this site server's OWN site DB. The
+            # SMS_ReplicationLinkSummary rows above come from the monitoring summarizer,
+            # which is recency-derived and lags: Phase 8 measured it reporting Failed for
+            # 45+ min on fabrikam while ServerData had both sites ReplicationActive and
+            # every send result >= 0, and InstallAndUpdateSCCM.ps1 already trusts SQL over
+            # the summary for exactly that reason. Resolve the DB the same way ConfigMgr's
+            # own recovery path does (HKLM\...\SMS\SQL Server + the Port DWORD).
+            $drsActiveStatuses = @(125, 225)   # ReplicationActive: 125 child primary, 225 CAS/top-level
+            $sqlInst = $null; $sqlDb = $null; $sqlResolveError = $null
+            try {
+                $sqlReg = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+                $sqlSrv = $sqlReg.Server
+                $dbRaw = $sqlReg.'Database Name'
+                $sqlPortVal = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server\Site System SQL Account' -Name 'Port' -ErrorAction SilentlyContinue).'Port'
+                if ("$dbRaw" -match '\\') { $sqlInst = "$sqlSrv\$($dbRaw.Split('\')[0])"; $sqlDb = $dbRaw.Split('\')[1] } else { $sqlInst = $sqlSrv; $sqlDb = $dbRaw }
+                if ($sqlPortVal -and "$sqlPortVal" -ne '1433') { $sqlInst = "$sqlInst,$sqlPortVal" }
+            }
+            catch { $sqlResolveError = $_.Exception.Message }
+
+            function Get-DrsSqlGroundTruth {
+                param($Instance, $Database, $ParentSite, $ChildSite, $ActiveStatuses)
+                $g = @{ Measured = $false; ParentStatus = $null; ChildStatus = $null; NegativeSends = $null; Healthy = $false; Error = $null }
+                if (-not $Instance -or -not $Database) { $g.Error = 'site DB not resolved from registry'; return $g }
+                $cn = $null
+                try {
+                    $cs = "Data Source=$Instance;Initial Catalog=$Database;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+                    $cn = New-Object System.Data.SqlClient.SqlConnection $cs
+                    $cn.Open()
+                    $c = $cn.CreateCommand()
+                    $c.CommandText = 'SELECT SiteCode, SiteStatus FROM ServerData WHERE SiteCode IN (@p, @c)'
+                    $c.CommandTimeout = 30
+                    [void]$c.Parameters.AddWithValue('@p', $ParentSite)
+                    [void]$c.Parameters.AddWithValue('@c', $ChildSite)
+                    $rdr = $c.ExecuteReader()
+                    while ($rdr.Read()) {
+                        $sc = [string]$rdr['SiteCode']
+                        $st = [int]$rdr['SiteStatus']
+                        if ($sc -eq $ParentSite) { $g.ParentStatus = $st } elseif ($sc -eq $ChildSite) { $g.ChildStatus = $st }
+                    }
+                    $rdr.Close()
+                    $c2 = $cn.CreateCommand()
+                    $c2.CommandText = 'SELECT COUNT(*) FROM DRS_MessageActivity_Send WHERE SiteCode = @c AND LastSendResult < 0'
+                    $c2.CommandTimeout = 30
+                    [void]$c2.Parameters.AddWithValue('@c', $ChildSite)
+                    $g.NegativeSends = [int]$c2.ExecuteScalar()
+                    # Both status rows must have been READ. A missing row is not a zero.
+                    if ($null -ne $g.ParentStatus -and $null -ne $g.ChildStatus) {
+                        $g.Measured = $true
+                        $g.Healthy = ($g.ParentStatus -in $ActiveStatuses) -and ($g.ChildStatus -in $ActiveStatuses) -and ($g.NegativeSends -eq 0)
+                    }
+                    else { $g.Error = "ServerData has no row for $(if ($null -eq $g.ParentStatus) { $ParentSite } else { $ChildSite })" }
+                }
+                catch { $g.Error = $_.Exception.Message }
+                finally { if ($cn -and $cn.State -eq 'Open') { try { $cn.Close() } catch { } } }
+                return $g
+            }
+
             foreach ($childSC in $childCodes) {
                 $results.LinkActive[$childSC] = $false
                 $linkProgressing[$childSC] = $false
@@ -3868,6 +3939,10 @@ function Test-CMSiteFunctionality {
                         $linkStatus = [int]$link.LinkStatus
                         $parentToChild = [int]$link.Site1ToSite2GlobalState
                         $childToParent = [int]$link.Site2ToSite1GlobalState
+                        # Site-pattern state/sync (child -> parent only; there is no
+                        # parent -> child site pattern). It was never read, so a link whose
+                        # site data has NEVER synced looked identical to one that broke.
+                        $childSiteState = if ($null -ne $link.Site2ToSite1SiteState) { [int]$link.Site2ToSite1SiteState } else { $null }
                         $initPercent = "$($link.GlobalInitPercentage)"
                         $parentSync = "$($link.Site1ToSite2GlobalSyncTime)"
                         $childSync = "$($link.Site2ToSite1GlobalSyncTime)"
@@ -3881,7 +3956,8 @@ function Test-CMSiteFunctionality {
                         $linkName = if ($statusName.ContainsKey($linkStatus)) { $statusName[$linkStatus] } else { "Unknown($linkStatus)" }
                         $parentName = if ($statusName.ContainsKey($parentToChild)) { $statusName[$parentToChild] } else { "Unknown($parentToChild)" }
                         $childName = if ($statusName.ContainsKey($childToParent)) { $statusName[$childToParent] } else { "Unknown($childToParent)" }
-                        $results.Details.Add("INFO: DRS sample $linkAttempt/$maxLinkAttempts $parentSC -> $childSC`: Link=$linkName, S1->S2=$parentName, S2->S1=$childName, Init=$initPercent, LastP2C=$parentSync, LastC2P=$childSync, LastSite=$siteSync")
+                        $siteStateName = if ($null -eq $childSiteState) { 'n/a' } elseif ($statusName.ContainsKey($childSiteState)) { $statusName[$childSiteState] } else { "Unknown($childSiteState)" }
+                        $results.Details.Add("INFO: DRS sample $linkAttempt/$maxLinkAttempts $parentSC -> $childSC`: Link=$linkName, S1->S2=$parentName, S2->S1=$childName, S2->S1(site)=$siteStateName, Init=$initPercent, LastP2C=$parentSync, LastC2P=$childSync, LastSite=$(& $describeSiteSync $siteSync)")
 
                         if ($linkStatus -eq 2 -and $parentToChild -eq 2 -and $childToParent -eq 2) {
                             $results.LinkActive[$childSC] = $true
@@ -3911,17 +3987,42 @@ function Test-CMSiteFunctionality {
                 $linkStatus = [int]$link.LinkStatus
                 $parentToChild = [int]$link.Site1ToSite2GlobalState
                 $childToParent = [int]$link.Site2ToSite1GlobalState
+                $siteSync = "$($link.Site2ToSite1SiteSyncTime)"
                 $linkName = if ($statusName.ContainsKey($linkStatus)) { $statusName[$linkStatus] } else { "Unknown($linkStatus)" }
                 $parentName = if ($statusName.ContainsKey($parentToChild)) { $statusName[$parentToChild] } else { "Unknown($parentToChild)" }
                 $childName = if ($statusName.ContainsKey($childToParent)) { $statusName[$childToParent] } else { "Unknown($childToParent)" }
+                $states = "Link=$linkName, S1->S2=$parentName, S2->S1=$childName, Init=$($link.GlobalInitPercentage), LastSite=$(& $describeSiteSync $siteSync)"
+
                 if ($linkProgressing[$childSC]) {
-                    $results.Details.Add("INFO: DRS link $parentSC -> $childSC is not Active yet but initialization advanced across samples: Link=$linkName, S1->S2=$parentName, S2->S1=$childName, Init=$($link.GlobalInitPercentage)")
+                    $results.Details.Add("INFO: DRS link $parentSC -> $childSC is not Active yet but initialization advanced across samples: $states")
+                    continue
                 }
-                elseif ($linkStatus -in $failedStates -or $parentToChild -in $failedStates -or $childToParent -in $failedStates) {
-                    $results.Details.Add("WARN: DRS link $parentSC -> $childSC has static failures after $maxLinkAttempts samples: Link=$linkName, S1->S2=$parentName, S2->S1=$childName, Init=$($link.GlobalInitPercentage)")
+
+                # Cross-check the summarizer against replication ground truth before
+                # calling anything a failure. Across every memlabs log to 2026-08-22
+                # each "static failures" WARN was a CAS -> child-Primary link whose
+                # site-pattern data had never synced (LastSite at the 1900 epoch) with
+                # global init at 100%, and every one of them read Active on the next run
+                # with no intervention. That is a first-sync convergence window, not a
+                # broken link -- but only SQL can tell the two apart.
+                $gt = Get-DrsSqlGroundTruth -Instance $sqlInst -Database $sqlDb -ParentSite $parentSC -ChildSite $childSC -ActiveStatuses $drsActiveStatuses
+                $gtText = if ($gt.Measured) {
+                    "SQL ground truth: ServerData $parentSC=$($gt.ParentStatus) $childSC=$($gt.ChildStatus) (125/225=ReplicationActive), failed sends for ${childSC}=$($gt.NegativeSends)"
                 }
                 else {
-                    $results.Details.Add("WARN: DRS link $parentSC -> $childSC is not yet Active and showed no progress across $maxLinkAttempts samples: Link=$linkName, S1->S2=$parentName, S2->S1=$childName, Init=$($link.GlobalInitPercentage)")
+                    "SQL ground truth NOT MEASURED ($(if ($sqlResolveError) { "site DB unresolved: $sqlResolveError" } elseif ($gt.Error) { $gt.Error } else { 'unknown reason' }))"
+                }
+                $firstSyncPending = (& $isNeverSynced $siteSync) -and ("$($link.GlobalInitPercentage)" -match '^100') -and ($parentToChild -eq 2)
+
+                if ($gt.Measured -and $gt.Healthy) {
+                    $shape = if ($firstSyncPending) { ' The child site-pattern data has never synced yet (first-sync window), which is what the summarizer is reporting as failed.' } else { '' }
+                    $results.Details.Add("INFO: DRS link $parentSC -> $childSC is not Active in the monitoring summary, but replication is healthy: $states. $gtText.$shape The SMS_ReplicationLinkSummary view is recency-derived and lags; it settles without intervention.")
+                }
+                elseif ($linkStatus -in $failedStates -or $parentToChild -in $failedStates -or $childToParent -in $failedStates) {
+                    $results.Details.Add("WARN: DRS link $parentSC -> $childSC has static failures after $maxLinkAttempts samples: $states. $gtText")
+                }
+                else {
+                    $results.Details.Add("WARN: DRS link $parentSC -> $childSC is not yet Active and showed no progress across $maxLinkAttempts samples: $states. $gtText")
                 }
             }
 
