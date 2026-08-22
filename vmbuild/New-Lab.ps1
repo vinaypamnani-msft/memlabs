@@ -743,6 +743,24 @@ try {
     Write-Log "PowerShell: $($PSVersionTable.PSVersion) (PID $PID)" -LogOnly
     Write-Log "Host PID: $PID | Parent PID: $((Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId)" -LogOnly
     Write-Log "StartPhase: $StartPhase | Phase: $Phase" -LogOnly
+    # The filesystem under the VMs decides whether base-image copies block-clone or are
+    # copied byte-for-byte, and whether dedup could ever have touched the VHDXs.
+    try {
+        $vmBase = $deployConfig.vmOptions.basePath
+        if ([string]::IsNullOrWhiteSpace($vmBase)) { throw 'vmOptions.basePath is empty' }
+        $vmDrive = ([System.IO.Path]::GetPathRoot($vmBase)) -replace '[:\\]', ''
+        $vmVol = Get-Volume -DriveLetter $vmDrive -ErrorAction Stop
+        # Get-Volume returns nothing (no error) for an empty drive letter, and the zeros
+        # that follow would read as a real measurement.
+        if (-not $vmVol -or -not $vmVol.FileSystemType) { throw "no volume matched drive '$vmDrive'" }
+        $copyMode = if ($vmVol.FileSystemType -eq 'ReFS') { 'block-cloned (near-instant, no extra space)' } else { 'full byte copies' }
+        $freeGB = [math]::Round($vmVol.SizeRemaining / 1GB)
+        $sizeGB = [math]::Round($vmVol.Size / 1GB)
+        Write-Log "Host storage: $vmBase on ${vmDrive}: is $($vmVol.FileSystemType), $freeGB GB free of $sizeGB GB. Base-image copies are $copyMode." -LogOnly
+    }
+    catch {
+        Write-Log "Host storage: could not read the volume behind '$($deployConfig.vmOptions.basePath)': $($_.Exception.Message). Filesystem is UNKNOWN -- do not assume NTFS when reading this log." -Warning
+    }
     Write-Log "----------------------------------------" -LogOnly
     try {
         # Pretty-print (no -Compress) to the sidecar so it's readable + diffable.
