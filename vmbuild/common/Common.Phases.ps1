@@ -894,8 +894,24 @@ function Start-Phase {
         return $true
     }
 
-    # Remove DNS records for VM's in this config, if existing DC
+    # ExistingDCName only means a VM with role DC exists on this host -- not that it is
+    # promoted and serving DNS. After a failed first attempt it is a leftover, unpromoted
+    # VM, and every removal below then reports "record not found" for a zone nobody could
+    # read. Ask the DC once instead of 15 times.
+    $dcServesDns = $false
     if ($deployConfig.parameters.ExistingDCName -and $Phase -eq 1) {
+        $dnsZone = $deployConfig.vmOptions.domainName
+        $zoneProbe = Invoke-VmCommand -VmName $deployConfig.parameters.ExistingDCName -VmDomainName $dnsZone -SuppressLog -ScriptBlock {
+            $null = Get-DnsServerZone -Name $using:dnsZone -ErrorAction Stop
+        }
+        $dcServesDns = ($zoneProbe -and -not $zoneProbe.ScriptBlockFailed)
+        if (-not $dcServesDns) {
+            Write-Log "[Phase $Phase] Skipping DNS/AD cleanup: '$($deployConfig.parameters.ExistingDCName)' is not serving zone '$dnsZone' -- new domain, or the DC VM exists but is not promoted yet. Nothing could be removed from it."
+        }
+    }
+
+    # Remove DNS records for VM's in this config, if the DC can actually answer
+    if ($dcServesDns) {
         $existingDC = $deployConfig.parameters.ExistingDCName
         # Which VMs are already on this host decides both which VMs get cleaned
         # and, below, whether a SQLAO cluster still has a surviving node.
