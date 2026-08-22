@@ -360,6 +360,26 @@ WHERE r.ReplicationGroup = @group
         }
         finally { $drsReader.Close() }
         if ($drsRows -eq 0) { Write-DscStatus "Client package pre-stage diag [local DRS]: no Configuration Data send rows in $dataSource/$database" -NoStatus }
+
+        # Own try/catch: this table is only needed by the timeout triage below, and a
+        # failure here must not cost the reads above.
+        try {
+            $dpCommand = $connection.CreateCommand()
+            $dpCommand.CommandText = 'SELECT ServerName, NALPath, SMSSiteCode, DPFlags, Priority, State, Action FROM dbo.DistributionPoints WHERE NALPath LIKE @needle'
+            $dpCommand.CommandTimeout = 30
+            [void]$dpCommand.Parameters.AddWithValue('@needle', "%$DistributionPointFqdn%")
+            $dpReader = $dpCommand.ExecuteReader()
+            $dpRows = 0
+            try {
+                while ($dpReader.Read()) {
+                    $dpRows++
+                    Write-DscStatus "Client package pre-stage diag [local DistributionPoints]: ServerName='$($dpReader['ServerName'])'; NALPath='$($dpReader['NALPath'])'; SMSSiteCode=$($dpReader['SMSSiteCode']); DPFlags=$($dpReader['DPFlags']); Priority=$($dpReader['Priority']); State=$($dpReader['State']); Action=$($dpReader['Action'])" -NoStatus
+                }
+            }
+            finally { $dpReader.Close() }
+            if ($dpRows -eq 0) { Write-DscStatus "Client package pre-stage diag [local DistributionPoints]: NO row for $DistributionPointFqdn in $dataSource/$database -- the DP is not yet a valid content destination" -NoStatus }
+        }
+        catch { Write-DscStatus "Client package pre-stage diag [local DistributionPoints]: query failed, so presence is UNKNOWN (not absent): $($_.Exception.Message)" -NoStatus }
     }
     catch { Write-DscStatus "Client package pre-stage diag query failed: $($_.Exception.Message)" -NoStatus }
     finally { if ($connection) { $connection.Dispose() } }
@@ -396,7 +416,15 @@ $startClientPackagePrestage = {
             return $true
         }
         if (-not $ThisVM.parentSiteCode) { return $true }
-        $targeting = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
+        # -ErrorAction SilentlyContinue here made a failed query and an empty result the
+        # same answer, and the empty answer is what routes us into the distribution call.
+        $targetingQueryError = $null
+        $targetingAll = @()
+        try {
+            $targetingAll = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction Stop)
+        }
+        catch { $targetingQueryError = $_.Exception.Message }
+        $targeting = @($targetingAll |
                 Where-Object {
                     $targetFqdn = if ("$($_.ServerNALPath)" -match '\\([^\\"\]]+)') { $Matches[1] } else { '' }
                     $targetFqdn -ieq $DistributionPointFqdn
@@ -445,6 +473,16 @@ $startClientPackagePrestage = {
                 # Not "confirmed broken", just not ready -- same call the coverage gate makes
                 # on every iteration when a DP has no targeting row, so let it own the retry.
                 Write-DscStatus "Client package pre-stage: $DistributionPointFqdn would not accept the $packageId distribution after $distTries attempt(s) in 30s ($($distErr.Exception.Message)). Continuing; the client-package coverage gate re-establishes a missing targeting row on every pass and Phase 11 re-checks." -Warning
+
+                # 0 of 102 historical retries ever succeeded, and the one line above cannot
+                # say why. The three readings below decide it: SMS_DistributionPoint blind vs
+                # genuinely empty, PkgServers_G row present vs absent, DistributionPoints row
+                # present vs absent.
+                $wmiNote = if ($targetingQueryError) { "QUERY FAILED ('$targetingQueryError') -- rows are UNKNOWN, not zero" } else { "rows=$($targetingAll.Count) matched=$($targeting.Count)" }
+                $nalSample = @($targetingAll | Select-Object -First 3 | ForEach-Object { "'$($_.ServerNALPath)'" }) -join ', '
+                if (-not $nalSample) { $nalSample = '(none)' }
+                Write-DscStatus "Client package pre-stage diag [wmi targeting]: SMS_DistributionPoint PackageID='$packageId' $wmiNote; matching FQDN '$DistributionPointFqdn'; NALPath sample: $nalSample" -NoStatus
+                & $writeClientPackageTargetingDiagnostics $packageId $DistributionPointFqdn $null
                 return $true
             }
             $targeting = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
