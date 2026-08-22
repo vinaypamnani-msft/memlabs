@@ -237,16 +237,40 @@ function Select-ConfigMenu {
             "P" { Select-PasswordMenu }
             "u" { Install-HostToServer2025 }
             "#" {
-                if ($common.DevBranch) {
-                    & git checkout main
-                    Write-Host "Your branch is now main. Please close this window and restart the shortcut."
-                    exit 0
+                # This block is the only thing in memlabs that changes the checked-out
+                # branch, so these log lines are what attributes a MemLabsVersion change
+                # in a later build log back to an operator keypress.
+                $fromBranch = Get-BranchName
+                if ([string]::IsNullOrWhiteSpace($fromBranch)) {
+                    Write-Log "Branch switch via '#' aborted: could not read the current git branch." -Failure
+                    continue
                 }
-                else {
-                    & git checkout develop
-                    Write-Host "Your branch is now develop. Please close this window and restart the shortcut."
-                    exit 0
+                # Same rule Common.ps1 uses to derive $Common.DevBranch, but read live --
+                # the cached value can be up to $GitBranchCacheMinutes stale and would
+                # then toggle the wrong way.
+                $targetBranch = if ($fromBranch -match "main") { "develop" } else { "main" }
+                Write-Log "Branch switch via '#' requested: '$fromBranch' -> '$targetBranch'." -Activity
+
+                # git checkout writes even its SUCCESS line to stderr, which throws under
+                # $ErrorActionPreference='Stop' on PS5.1 before $LASTEXITCODE can be read.
+                $savedEap = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = 'Continue'
+                    $checkoutOutput = @(& git checkout $targetBranch 2>&1 | ForEach-Object { "$_" })
+                    $checkoutExit = $LASTEXITCODE
                 }
+                finally { $ErrorActionPreference = $savedEap }
+
+                # Exit code alone is not enough -- confirm where HEAD actually landed.
+                $nowBranch = Get-BranchName
+                if ($checkoutExit -ne 0 -or $nowBranch -ne $targetBranch) {
+                    Write-Log "Branch switch via '#' FAILED: still on '$nowBranch' (git checkout exit $checkoutExit): $($checkoutOutput -join ' | ')" -Failure
+                    Write-Host "Branch is still '$nowBranch'. Resolve the above and try again." -ForegroundColor Yellow
+                    continue
+                }
+                Write-Log "Branch switch via '#' succeeded: '$fromBranch' -> '$nowBranch'." -Success
+                Write-Host "Your branch is now $nowBranch. Please close this window and restart the shortcut."
+                exit 0
             }
             Default {
                 write-log -verbose "Response $response"
