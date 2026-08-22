@@ -1023,6 +1023,31 @@ try {
         }
     }
 
+    # Same repair for every other role. Phase 1 is skipped entirely when all config VMs
+    # merely EXIST, so a half-built leftover is never re-created -- it is skipped forever
+    # and every later phase fails against a shell. Test-VmPhase1Incomplete only says yes
+    # when the note proves it, so unreadable/legacy/unversioned notes are left alone.
+    $forcePhase1Incomplete = $false
+    foreach ($vm in $deployConfig.virtualMachines) {
+        if ($vm.hidden -or $vm.role -eq 'AADClient') { continue }
+        if ($vm.vmName -in $global:ForcePhase1VmNames) { continue }
+        if (-not (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue)) { continue }
+        $verdict = Test-VmPhase1Incomplete -VmName $vm.vmName
+        if (-not $verdict.Incomplete) { continue }
+        Write-Log "[Phase 0] $($vm.vmName): exists but never completed Phase 1 ($($verdict.Reason)). Deleting so Phase 1 can re-create it." -Warning
+        Remove-VirtualMachine -VmName $vm.vmName -Force
+        if (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue) {
+            Write-Log "[Phase 0] $($vm.vmName): removal reported done but the VM is still present; leaving it for manual cleanup." -Failure
+            continue
+        }
+        $global:ForcePhase1VmNames += $vm.vmName
+        $forcePhase1Incomplete = $true
+    }
+    if ($forcePhase1Incomplete) {
+        $runPhase1 = $true
+        Get-List -FlushCache
+    }
+
     # Define phases
     $start = 1
     $maxPhase = 11
@@ -1051,7 +1076,7 @@ try {
             Write-Phase -Phase $i
 
             if ($i -eq 1 -and -not $runPhase1) {
-                Write-OrangePoint "[Phase $i] Not Applicable. Skipping." -ForegroundColor Yellow -WriteLog
+                Write-OrangePoint "[Phase $i] Not Applicable. Skipping: every VM in the config already exists and none was found incomplete." -ForegroundColor Yellow -WriteLog
                 continue
             }
 

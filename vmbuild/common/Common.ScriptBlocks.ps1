@@ -646,37 +646,15 @@ $global:VM_Create = {
             # Check if VM already exists
             $exists = Get-VM2 -Fallback -Name $currentItem.vmName -ErrorAction SilentlyContinue
             if ($exists) {
-                # A VM that exists but never finished Phase 1 is a half-built leftover from a
-                # failed run. Skipping it leaves every later phase to fail against a shell.
-                # Only redeploy when the note PROVES it is incomplete: an unreadable note, or
-                # one from an older build that never stamped phase 1, is UNKNOWN -- not
-                # incomplete -- and deleting on that would destroy a working VM.
-                $redeploy = $false
-                $donePhase = 0
-                $existingNote = Get-VMNote -VMName $currentItem.vmName
-                if (-not $existingNote) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM exists but its note could not be read; leaving it alone (state UNKNOWN, not incomplete)." -OutputStream -Warning
-                }
-                else {
-                    $noteVer = if ($existingNote.memLabsVersion) { $existingNote.memLabsVersion } else { $existingNote.memLabsDeployVersion }
-                    $donePhase = if ($existingNote.lastPhaseComplete) { [int]$existingNote.lastPhaseComplete } else { 0 }
-                    if (-not $noteVer) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): VM exists but its note carries no MemLabs version -- provenance UNKNOWN, leaving it alone." -OutputStream -Warning
-                    }
-                    elseif ($Common.MemLabsVersion -and ($noteVer -lt $Common.MemLabsVersion)) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): VM exists from an older build ($noteVer < $($Common.MemLabsVersion)), which never stamped phase 1 -- completeness cannot be judged, leaving it alone." -OutputStream -Warning
-                    }
-                    elseif ($donePhase -lt 1) {
-                        $redeploy = $true
-                    }
-                }
-
-                if (-not $redeploy) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM already exists. Exiting." -Failure -OutputStream -HostOnly
+                # Backstop for the launcher's pre-phase sweep in New-Lab.ps1. The rule lives
+                # in Test-VmPhase1Incomplete so the two callers cannot drift apart.
+                $verdict = Test-VmPhase1Incomplete -VmName $currentItem.vmName
+                if (-not $verdict.Incomplete) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM already exists ($($verdict.Reason)). Exiting." -Failure -OutputStream -HostOnly
                     return
                 }
 
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM exists but never completed Phase 1 (lastPhaseComplete=$donePhase); removing it and redeploying." -OutputStream -Warning
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM exists but never completed Phase 1 ($($verdict.Reason)); removing it and redeploying." -OutputStream -Warning
                 Remove-VirtualMachine -VmName $currentItem.vmName -Force
                 if (Get-VM2 -Fallback -Name $currentItem.vmName -ErrorAction SilentlyContinue) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): removal reported done but the VM is still present; not recreating it." -Failure -OutputStream

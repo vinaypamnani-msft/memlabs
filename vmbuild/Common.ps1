@@ -3602,6 +3602,46 @@ function Test-DHCPScope {
     }
 }
 
+function Test-VmPhase1Incomplete {
+    <#
+    .SYNOPSIS
+        Does this VM exist but never finish Phase 1? Only says yes when the note PROVES it.
+
+    .DESCRIPTION
+        The answer decides whether a VM is DELETED and rebuilt, so absence of evidence is
+        never treated as evidence. An unreadable note, a note with no MemLabs version, or
+        a note from a build older than this one (which never stamped phase 1 at all) are
+        all UNKNOWN and return $false with the reason.
+
+        Deliberately shared between the launcher's pre-phase sweep and the Phase 1 create
+        job so the destructive rule exists in exactly one place.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName
+    )
+
+    $note = Get-VMNote -VMName $VmName
+    if (-not $note) {
+        return [pscustomobject]@{ Incomplete = $false; Reason = 'note could not be read; state UNKNOWN, not incomplete' }
+    }
+
+    $noteVer = if ($note.memLabsVersion) { $note.memLabsVersion } else { $note.memLabsDeployVersion }
+    if (-not $noteVer) {
+        return [pscustomobject]@{ Incomplete = $false; Reason = 'note carries no MemLabs version; provenance UNKNOWN' }
+    }
+    if ($Common.MemLabsVersion -and ($noteVer -lt $Common.MemLabsVersion)) {
+        return [pscustomobject]@{ Incomplete = $false; Reason = "built by older build $noteVer (< $($Common.MemLabsVersion)), which never stamped phase 1" }
+    }
+
+    $donePhase = if ($note.lastPhaseComplete) { [int]$note.lastPhaseComplete } else { 0 }
+    if ($donePhase -lt 1) {
+        return [pscustomobject]@{ Incomplete = $true; Reason = "lastPhaseComplete=$donePhase" }
+    }
+    return [pscustomobject]@{ Incomplete = $false; Reason = "lastPhaseComplete=$donePhase" }
+}
+
 function New-VmNote {
     param (
         [Parameter(Mandatory = $true)]
