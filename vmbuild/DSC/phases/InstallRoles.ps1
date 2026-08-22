@@ -353,10 +353,17 @@ if ($configureSUP) {
 
                     # Poll WCM registry state instead of blind sleep. WCM stores its
                     # configuration result at this key (0=NONE,1=PENDING,2=SUCCESS,3=FAILED,4=SUBSCRIPTION_PENDING).
+                    # Budget 30 -> 8. This loop has never given up (39 successes, 0
+                    # give-ups over 181 guest logs) so the cap is preventive, but it
+                    # restarts WsusService on EVERY failed attempt, so a first burn
+                    # would cost ~900s and up to 30 service restarts. 8 is sized from
+                    # the same distribution the sibling wait in perfloading.ps1 uses:
+                    # 71 successes across both waits, attempts 1-6, MAX 6.
                     $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
                     $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+                    $wcmMaxAttempts = 8
                     $wcmReady = $false
-                    for ($wcmWait = 1; $wcmWait -le 30; $wcmWait++) {
+                    for ($wcmWait = 1; $wcmWait -le $wcmMaxAttempts; $wcmWait++) {
                         Start-Sleep -Seconds 30
                         try {
                             $wcmRegVal = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
@@ -373,11 +380,11 @@ if ($configureSUP) {
                             Start-Sleep -Seconds 30
                         }
                         else {
-                            Write-DscStatus "WCM state: $wcmName (attempt $wcmWait of 30)"
+                            Write-DscStatus "WCM state: $wcmName (attempt $wcmWait of $wcmMaxAttempts)"
                         }
                     }
                     if (-not $wcmReady) {
-                        Write-DscStatus "WARNING: WCM did not reach SUCCESS after 30 attempts. Proceeding anyway."
+                        Write-DscStatus "WARNING: WCM did not reach SUCCESS after $wcmMaxAttempts attempts. Proceeding anyway."
                     }
                 }
  

@@ -3531,7 +3531,13 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         # ConfigurationState=FAILED on 20/20 polls -- 714s -- on four consecutive
         # runs, while every top-level SUP in the same log set exited after 4-8
         # polls and never saw FAILED.
-        $wcmMaxAttempts = 20
+        #
+        # Budget 20 -> 8, sized from the outcome distribution over 181 guest logs:
+        # 71 successes across BOTH WCM waits, attempts 1-6, MAX 6. Attempts 7+ have
+        # never once produced a success, while a give-up costs ~570s. CS2-CS1SITE
+        # (a CAS, so top-level and not covered by the gate above) burned the full
+        # budget at SUBSCRIPTION_PENDING three times.
+        $wcmMaxAttempts = 8
         $wcmSkipReason = ''
         if (-not $isTopLevel) {
             $wcmMaxAttempts = 0
