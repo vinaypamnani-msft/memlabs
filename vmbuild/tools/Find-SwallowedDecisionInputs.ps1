@@ -487,8 +487,11 @@ function Test-ReadOutsideScriptBlock {
 else {
     $target = Get-Item -LiteralPath $Path -ErrorAction Stop
     $files = if ($target.PSIsContainer) {
+        # Anchored to the scan root: an unanchored '\temp\' also matches the user's
+        # AppData\Local\Temp, silently excluding a baseline extracted there to test this.
+        $root = $target.FullName.TrimEnd('\')
         @(Get-ChildItem $Path -Recurse -Include *.ps1, *.psm1 -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notmatch '\\(logs|azureFiles|temp)\\' })
+            Where-Object { $_.FullName.Substring($root.Length).TrimStart('\') -notmatch '^(logs|logs2|azureFiles|temp)\\' })
     }
     else {
         @($target)
