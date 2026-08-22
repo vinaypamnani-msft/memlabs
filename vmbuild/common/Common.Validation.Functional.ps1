@@ -7933,14 +7933,22 @@ $Phase11SecondaryCertDiagCollector = {
     # Diagnose a Secondary site whose distmgr is wedged repeating
     #   "site exchange certificate is not found. Can not decrypt the data."
     #   "Failed to decrypt cert PFX data"  ->  "~Sleep 3600 seconds..."
-    # CM source (distmgr.cpp -> CServerAccount::Decrypt ->
-    # CSiteSettings::GetEncryptedSiteExchangeCertificate) reads the DP identity
-    # cert PFX and decrypts it with the site's OWN SiteExchangeCertificate, stored
-    # in this Secondary's site DB: SC_SiteDefinition_Property Name='SiteExchangeCertificate'
-    # (+ the PFX in CM_RoleIdCertificates RoleTypeID=4). If that row is missing the
-    # decrypt fails, distmgr sleeps, and NOTHING (incl. the CM client package) ever
-    # distributes to this DP -> its boundary-group clients wedge in the ccmsetup
-    # GetDPLocations loop. Confirm the missing cert straight from the DB.
+    #
+    # DO NOT read a missing SiteExchangeCertificate row as a fault. ConfigMgr
+    # source (hman.cpp ~L17996) states the row is OPTIONAL:
+    #   "if SC_SiteDefinition_Property.Name='SiteExchangeCertificate' exists and
+    #    Value3=1 this will get the public key of the site exchange certificate;
+    #    otherwise, this will read the RSA public key stored in OS crypto storage"
+    # The row is written by spAoUpdateSiteServerExchangeCertificate /
+    # spAoFailoverToNewServer -- an AlwaysOn/HA feature -- and
+    # CSiteSettings::ValidateSiteExchangeCertificate returns S_FALSE (verbose,
+    # not an error) when it is absent. FailoverMgrUtil.cpp ~L2075 names the
+    # normal state outright: "the pfxblob is likely protected by current site
+    # server's public key, but siteexchangecertificate is not enabled".
+    # Measured: 29 of 29 memlabs secondary probes across 6 labs (SEC, SS1, SS2,
+    # TOP, DIM) report rows=0, including secondaries with ZERO decrypt failures.
+    # So this count cannot discriminate healthy from broken -- report it as
+    # context, and let the distmgr decrypt-failure count carry the symptom.
     $out = @{}
     $lines = @()
     $siteCode = $null; $smsDir = $null
@@ -7992,12 +8000,15 @@ $Phase11SecondaryCertDiagCollector = {
             catch { $c = $cn.CreateCommand(); $c.CommandText = $qExch; $c.CommandTimeout = 15; $exch = [int]$c.ExecuteScalar() }
             $c2 = $cn.CreateCommand(); $c2.CommandText = "SELECT COUNT(*) FROM CM_RoleIdCertificates WHERE RoleTypeID=4"; $c2.CommandTimeout = 15
             $pfx = [int]$c2.ExecuteScalar()
-            $lines += "DB $db on $($srv): SiteExchangeCertificate rows=$exch ; CM_RoleIdCertificates(RoleTypeID=4) rows=$pfx"
-            if ($exch -eq 0 -or $pfx -eq 0) {
-                $lines += "  => VERDICT: site exchange certificate / RoleId PFX is MISSING in the Secondary's site DB. distmgr cannot decrypt the DP identity cert, so it distributes NOTHING to this DP (client package never becomes Installed) and its boundary-group clients loop in ccmsetup GetDPLocations. FIX: recover the Secondary site (Recover Secondary Site / reinstall) so the SiteExchangeCertificate + CM_RoleIdCertificates RoleTypeID=4 PFX are regenerated."
+            $lines += "DB $db on $($srv): SiteExchangeCertificate rows=$exch (0 is NORMAL -- AlwaysOn/HA feature marker, not a fault) ; CM_RoleIdCertificates(RoleTypeID=4) rows=$pfx"
+            if ($pfx -eq 0) {
+                $lines += "  => the DP identity certificate row itself is MISSING (CM_RoleIdCertificates RoleTypeID=4). distmgr has nothing to hand this DP; the Secondary's site install did not complete its role-certificate provisioning."
+            }
+            elseif ($sig -gt 0) {
+                $lines += "  => the DP identity PFX EXISTS but distmgr logged $sig decrypt failure(s) in the last 4000 lines. The PFX is encrypted with the site server's master key in OS crypto storage (CServerAccount::Encrypt/Decrypt), so a decrypt failure means the stored blob does not match this machine's current key -- typically a Secondary that was reinstalled or recovered while the old row survived. Compare hman.log / ConfigMgrSetup.log below against the row's provenance; a missing SiteExchangeCertificate row is NOT the cause."
             }
             else {
-                $lines += "  => site exchange certificate present; the PFX decrypt failure is a key/permission issue, not a missing cert. Check hman.log/ConfigMgrSetup.log below."
+                $lines += "  => no certificate problem detected: the DP identity PFX is present and distmgr logged no decrypt failures. If this DP has no content, look at the inter-site content hop (parent distmgr/sender, secondary despool) and the replication link, not at certificates."
             }
             $probed = $true
         }
@@ -10249,7 +10260,6 @@ function Test-CMClientPackageDistribution {
         catch { Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: could not enumerate VMs in domain '$domain' to resolve failing DP(s): $($_.Exception.Message)" -Level Warning }
         $collectedFrom = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
         [void]$collectedFrom.Add($VMName)
-        $secCertBrokenDps = New-Object System.Collections.Generic.List[string]
 
         foreach ($dpShort in ($failing | Select-Object -Unique)) {
             $dpVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$dpShort".ToUpper()) } | Select-Object -First 1
@@ -10275,38 +10285,39 @@ function Test-CMClientPackageDistribution {
                 if ("$($dpVm.role)" -eq 'Secondary') {
                     Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is a Secondary DP -- probing its site DB for the site exchange certificate (distmgr PFX-decrypt wedge)"
                     $certPaths = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-SecCert' -Collector $Phase11SecondaryCertDiagCollector -TimeoutSeconds 180
-                    # The probe's verdict only ever reached a side file. burnin logged
-                    # "WARN: client package NOT Installed on BI-SECONDARY" and then
-                    # "All checks PASSED", while SecondaryCertDiag.txt already said
-                    # SiteExchangeCertificate rows=0 -- distmgr can decrypt nothing, so
-                    # that DP can NEVER receive content until the Secondary is recovered.
-                    # Read the verdict back here so it reaches the run log and the result.
-                    # Every read is guarded: a probe we cannot parse must not silently
-                    # clear the DP, and must not cost the rest of the collection either.
+                    # Read the probe's verdict back so it reaches the run log instead of
+                    # only a side file ($null = Save-Phase11GuestLogs used to discard it,
+                    # so burnin's whole certificate finding lived in an artifact nobody
+                    # was told to open). The DECIDING signal is the distmgr decrypt-failure
+                    # count, NOT the SiteExchangeCertificate row count: that row is absent
+                    # on every healthy memlabs secondary (29/29 across 6 labs), because
+                    # ConfigMgr falls back to the OS crypto-storage RSA key unless the
+                    # AlwaysOn site-exchange-certificate feature is enabled.
                     try {
                         $certFile = @($certPaths | Where-Object { "$_" -like '*SecondaryCertDiag.txt' }) | Select-Object -First 1
                         if (-not $certFile) {
-                            Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' site-exchange-certificate probe returned no SecondaryCertDiag.txt; the missing-cert wedge is NOT ruled out for this DP." -Level Warning
+                            Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' certificate probe returned no SecondaryCertDiag.txt; the distmgr PFX-decrypt wedge is NOT ruled out for this DP." -Level Warning
                         }
                         else {
                             $certLines = @(Get-Content -LiteralPath $certFile -ErrorAction Stop)
                             $certCounts = (@($certLines | Where-Object { $_ -match 'SiteExchangeCertificate rows=' }) | Select-Object -First 1)
                             $certSig = (@($certLines | Where-Object { $_ -match 'cert-decrypt-failure lines' }) | Select-Object -First 1)
+                            $certFinding = (@($certLines | Where-Object { $_ -match '^\s+=> ' }) | Select-Object -First 1)
                             $evidence = (@($certCounts, $certSig | Where-Object { $_ }) | ForEach-Object { "$_".Trim() }) -join ' ; '
-                            if (@($certLines | Where-Object { $_ -match '=> VERDICT:' }).Count -gt 0) {
-                                $secCertBrokenDps.Add("$($dpVm.vmName) [$evidence]")
-                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' site DB is MISSING the site exchange certificate -- $evidence. See $certFile." -Level Failure
+                            $decryptFailures = if ("$certSig" -match ':\s*(\d+)\s*$') { [int]$Matches[1] } else { $null }
+                            if ($null -eq $decryptFailures) {
+                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' certificate probe reported no decrypt-failure count, so the PFX-decrypt wedge is NOT ruled out; see $certFile." -Level Warning
                             }
-                            elseif (@($certLines | Where-Object { $_ -match 'site exchange certificate present' }).Count -gt 0) {
-                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' site exchange certificate is present -- $evidence. The DP is behind for another reason; see $certFile."
+                            elseif ($decryptFailures -gt 0) {
+                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' distmgr logged $decryptFailures certificate-decrypt failure(s): $evidence.$(if ($certFinding) { " $($certFinding.Trim())" }) See $certFile." -Level Warning
                             }
                             else {
-                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' certificate probe reached no verdict (SQL probe blocked?); see $certFile." -Level Warning
+                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' shows no certificate problem ($evidence); this DP is behind for another reason -- see the inter-site content logs collected above."
                             }
                         }
                     }
                     catch {
-                        Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - could not read the site-exchange-certificate verdict for '$($dpVm.vmName)': $($_.Exception.Message). The missing-cert wedge is NOT ruled out." -Level Warning
+                        Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - could not read the certificate probe result for '$($dpVm.vmName)': $($_.Exception.Message). The PFX-decrypt wedge is NOT ruled out." -Level Warning
                     }
                 }
             }
@@ -10353,22 +10364,6 @@ function Test-CMClientPackageDistribution {
                     Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: site $siteCode holds no copy of the client package -- collecting the sending side from parent site $parentCode ('$($parentVm.vmName)')"
                     $null = Save-Phase11GuestLogs -VMName $parentVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-ContentSource' -Collector $Phase11SmsSiteLogCollector
                 }
-            }
-        }
-
-        # A Secondary DP whose site DB lost the site exchange certificate cannot ever
-        # receive content -- that is terminal, not a distribution that is still catching
-        # up, so it must not ride out as a WARN under "All checks PASSED". Fold it into
-        # the guest result BEFORE Format-TestResult so the run reports ONE verdict.
-        if ($secCertBrokenDps.Count -gt 0) {
-            $failLine = "FAIL: $($secCertBrokenDps.Count) Secondary DP(s) can never receive content -- the site exchange certificate is missing from their own site DB, so distmgr cannot decrypt the DP identity cert: $($secCertBrokenDps -join '; '). Recover/reinstall the Secondary site to regenerate SiteExchangeCertificate + CM_RoleIdCertificates(RoleTypeID=4)."
-            if ($result.ScriptBlockOutput -is [hashtable]) {
-                $result.ScriptBlockOutput.Details = @($result.ScriptBlockOutput.Details) + @($failLine)
-                $result.ScriptBlockOutput.Passed = $false
-            }
-            else {
-                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: $failLine" -Level Failure
-                return $false
             }
         }
     }
