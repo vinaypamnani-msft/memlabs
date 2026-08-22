@@ -416,9 +416,20 @@ $startClientPackagePrestage = {
             # and fail with "No content destination was found" -- observed on CS2-PS1SITE,
             # 4s after "DP Role detected ... after 5.2s". Wait on the real precondition
             # instead, and exit the moment it takes.
-            $distDeadline = (Get-Date).AddMinutes(5)
+            #
+            # The budget was 5 min and NOT ONE retry has ever paid: 102 timeouts and 0
+            # successes across 179 guest logs / 28 distinct runs / 12 VMs (2026-08-22). A
+            # transient readiness gap would not be 0 for 102, and the error text itself names
+            # a permanent cause -- "or if the content has already been distributed to the
+            # specified destination" -- which fits, because the SMS_DistributionPoint query
+            # above is known to under-report targeting rows that direct SQL can see. So the
+            # 303s was spent re-asking a question whose answer cannot change. Keep a short
+            # window for a genuinely transient gap; the coverage gate owns the real retry.
+            $distDeadline = (Get-Date).AddSeconds(30)
             $distErr = $null
+            $distTries = 0
             while ($true) {
+                $distTries++
                 try {
                     Start-CMContentDistribution -PackageId $packageId -DistributionPointName $DistributionPointFqdn -ErrorAction Stop
                     $distErr = $null
@@ -433,7 +444,7 @@ $startClientPackagePrestage = {
             if ($distErr) {
                 # Not "confirmed broken", just not ready -- same call the coverage gate makes
                 # on every iteration when a DP has no targeting row, so let it own the retry.
-                Write-DscStatus "Client package pre-stage: $DistributionPointFqdn would not accept the $packageId distribution within 5 min ($($distErr.Exception.Message)). Continuing; the client-package coverage gate re-establishes a missing targeting row on every pass and Phase 11 re-checks." -Warning
+                Write-DscStatus "Client package pre-stage: $DistributionPointFqdn would not accept the $packageId distribution after $distTries attempt(s) in 30s ($($distErr.Exception.Message)). Continuing; the client-package coverage gate re-establishes a missing targeting row on every pass and Phase 11 re-checks." -Warning
                 return $true
             }
             $targeting = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
@@ -442,7 +453,7 @@ $startClientPackagePrestage = {
                         $targetFqdn -ieq $DistributionPointFqdn
                     })
             if ($targeting.Count -eq 0) { throw "Start-CMContentDistribution returned but no targeting row exists for $DistributionPointFqdn" }
-            Write-DscStatus "Client package pre-stage: targeted $packageId to $DistributionPointFqdn immediately after DP registration so parent replication overlaps remaining role setup."
+            Write-DscStatus "Client package pre-stage: targeted $packageId to $DistributionPointFqdn on attempt $distTries, immediately after DP registration so parent replication overlaps remaining role setup."
         }
 
         foreach ($target in $targeting) {
