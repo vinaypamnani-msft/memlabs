@@ -118,22 +118,82 @@ function Invoke-GitMaintenance {
         Write-LogMessage "git gc threw: $_" -Level 'WARNING'
     }
 
-    # Exclude .git from Windows Defender real-time scanning.
-    # Defender holds file handles during scan, contributing to pack-file
-    # locking when git rewrites packs.
-    $repoGitDir = Join-Path $repoRoot '.git'
-    if (Test-Path $repoGitDir) {
+    # Keep Defender away from the host's high-I/O memlabs paths. In addition to
+    # pack-file locking under .git, scanning VM disks, base images and ISO build
+    # trees adds latency to every guest I/O or large host-side copy.
+    $defenderPaths = New-Object System.Collections.Generic.List[string]
+    function Add-DefenderPathCandidate {
+        param([string]$Path)
+
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
         try {
-            $prefs = Get-MpPreference -ErrorAction Stop
-            if ($prefs.ExclusionPath -notcontains $repoGitDir) {
-                Add-MpPreference -ExclusionPath $repoGitDir -ErrorAction Stop
-                Write-LogMessage "Added Defender exclusion for $repoGitDir"
-            }
+            $fullPath = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Path))
+            $pathRoot = [System.IO.Path]::GetPathRoot($fullPath)
+            if ([string]::IsNullOrWhiteSpace($pathRoot) -or -not [System.IO.Directory]::Exists($pathRoot)) { return }
+            if ($fullPath.Length -gt $pathRoot.Length) { $fullPath = $fullPath.TrimEnd('\') }
+            $defenderPaths.Add($fullPath)
         }
         catch {
-            # Non-fatal: Defender may not be present or we may lack permissions
-            Write-LogMessage "Could not configure Defender exclusion: $_" -Level 'WARNING'
+            Write-LogMessage "Could not resolve Defender exclusion candidate '$Path': $_" -Level 'WARNING'
         }
+    }
+
+    foreach ($path in @(
+            (Join-Path $repoRoot '.git')
+            (Join-Path $scriptPath 'azureFiles')
+            (Join-Path $scriptPath 'baseimagestaging\vhdx-base')
+            (Join-Path $scriptPath 'baseimagestaging\vm')
+            (Join-Path $scriptPath 'baseimagestaging\wim')
+        )) {
+        Add-DefenderPathCandidate -Path $path
+    }
+
+    # Match Get-MemlabsVmStorageRoot's non-interactive resolution order without
+    # loading Common.ps1 (this maintenance script is intentionally standalone).
+    $vmStorageRoot = $env:MEMLABS_VM_STORAGE_ROOT
+    if ([string]::IsNullOrWhiteSpace($vmStorageRoot)) {
+        $dataRoot = $env:MEMLABS_DATA_ROOT
+        if ([string]::IsNullOrWhiteSpace($dataRoot)) {
+            $programData = if ([string]::IsNullOrWhiteSpace($env:ProgramData)) { 'C:\ProgramData' } else { $env:ProgramData }
+            $dataRoot = Join-Path $programData 'memlabs'
+        }
+        $hostSettingsPath = Join-Path $dataRoot 'host-settings.json'
+        if (Test-Path -LiteralPath $hostSettingsPath) {
+            try {
+                $hostSettings = Get-Content -LiteralPath $hostSettingsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                if ($hostSettings.PSObject.Properties['vmStorageRoot']) {
+                    $savedVmStorageRoot = [string]$hostSettings.vmStorageRoot
+                    $savedPathRoot = [System.IO.Path]::GetPathRoot($savedVmStorageRoot)
+                    if ($savedPathRoot -and [System.IO.Directory]::Exists($savedPathRoot)) {
+                        $vmStorageRoot = $savedVmStorageRoot
+                    }
+                }
+            }
+            catch {
+                Write-LogMessage "Could not read VM storage root from $hostSettingsPath`: $_" -Level 'WARNING'
+            }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($vmStorageRoot) -and [System.IO.Directory]::Exists('E:\')) {
+        $vmStorageRoot = 'E:\VirtualMachines'
+    }
+    Add-DefenderPathCandidate -Path $vmStorageRoot
+
+    try {
+        $prefs = Get-MpPreference -ErrorAction Stop
+        $existingPaths = @($prefs.ExclusionPath | Where-Object { $_ })
+        $newPaths = @($defenderPaths | Sort-Object -Unique | Where-Object { $existingPaths -notcontains $_ })
+        if ($newPaths.Count -gt 0) {
+            Add-MpPreference -ExclusionPath $newPaths -ErrorAction Stop
+            Write-LogMessage "Added Defender exclusions: $($newPaths -join '; ')"
+        }
+        else {
+            Write-LogMessage 'Defender exclusions already current.'
+        }
+    }
+    catch {
+        # Non-fatal: Defender may not be present or we may lack permissions
+        Write-LogMessage "Could not configure Defender exclusions: $_" -Level 'WARNING'
     }
 
     Write-LogMessage 'Git maintenance completed.'
@@ -580,6 +640,81 @@ function Invoke-MRemoteNGMaintenance {
     Write-LogMessage 'mRemoteNG maintenance completed.'
 }
 
+function Invoke-RdcManMaintenance {
+    Write-LogMessage 'Starting RDCMan maintenance...'
+
+    # RDCMan 3.21 prompts to trust a certificate for every lab VM, so MemLabs prefers
+    # 3.12.0.0 -- but keeps its OWN copy under ProgramData instead of holding back
+    # C:\tools, which belongs to the chocolatey sysinternals package. Sysinternals stays
+    # free to update; MemLabs just stops using its RDCMan when it has a better option.
+    #
+    # live.sysinternals.com is deliberately NOT used: it only serves the current build.
+    # If 3.12 cannot be obtained, the sysinternals copy is used as-is and the .rdg
+    # cert-trust entries switch themselves on to suppress the prompt.
+    $pinnedVersion = [version]'3.12.0.0'
+    $pinnedDir = Join-Path $env:ProgramData 'memlabs\RDCMan'
+    $pinnedExe = Join-Path $pinnedDir 'RDCMan.exe'
+    $sysinternalsExe = 'C:\tools\RDCMan.exe'
+    # This script is intentionally standalone (no Common.ps1), so derive the cache directly.
+    $cachedExe = Join-Path $PSScriptRoot 'cache\RDCMan-3.12.0.0.exe'
+
+    function Get-RdcManFileVersion {
+        param([string]$Path)
+        if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+        try { return [version](Get-Item -LiteralPath $Path).VersionInfo.ProductVersion } catch { return $null }
+    }
+
+    # Rescue a 3.12 that is still sitting in the sysinternals folder before choco replaces
+    # it -- for most hosts that copy is the only 3.12 they will ever have.
+    if ((Get-RdcManFileVersion -Path $cachedExe) -ne $pinnedVersion) {
+        foreach ($candidate in @($pinnedExe, $sysinternalsExe)) {
+            if ((Get-RdcManFileVersion -Path $candidate) -ne $pinnedVersion) { continue }
+            try {
+                $cacheDir = Split-Path -Parent $cachedExe
+                if (-not (Test-Path -LiteralPath $cacheDir)) { New-Item -Path $cacheDir -ItemType Directory -Force | Out-Null }
+                Copy-Item -LiteralPath $candidate -Destination $cachedExe -Force -ErrorAction Stop
+                Write-LogMessage "Rescued RDCMan $pinnedVersion from $candidate to $cachedExe."
+                break
+            }
+            catch {
+                Write-LogMessage "Could not rescue RDCMan $pinnedVersion from $candidate : $_" -Level 'WARNING'
+            }
+        }
+    }
+
+    if ((Get-RdcManFileVersion -Path $pinnedExe) -eq $pinnedVersion) {
+        Write-LogMessage "RDCMan $pinnedVersion is installed at $pinnedExe."
+        Write-LogMessage 'RDCMan maintenance completed.'
+        return
+    }
+
+    if ((Get-RdcManFileVersion -Path $cachedExe) -eq $pinnedVersion) {
+        try {
+            if (-not (Test-Path -LiteralPath $pinnedDir)) { New-Item -Path $pinnedDir -ItemType Directory -Force | Out-Null }
+            Copy-Item -LiteralPath $cachedExe -Destination $pinnedExe -Force -ErrorAction Stop
+            $now = Get-RdcManFileVersion -Path $pinnedExe
+            if ($now -eq $pinnedVersion) { Write-LogMessage "Installed pinned RDCMan $pinnedVersion at $pinnedExe." }
+            else { Write-LogMessage "RDCMan install did not take effect (found '$now' at $pinnedExe)." -Level 'WARNING' }
+        }
+        catch {
+            Write-LogMessage "Could not install RDCMan $pinnedVersion from $cachedExe : $_" -Level 'WARNING'
+        }
+        Write-LogMessage 'RDCMan maintenance completed.'
+        return
+    }
+
+    $sysVersion = Get-RdcManFileVersion -Path $sysinternalsExe
+    if ($sysVersion) {
+        Write-LogMessage ("RDCMan $pinnedVersion is not cached; using the sysinternals build $sysVersion at $sysinternalsExe. " +
+            "MemLabs will write trusted-certificate entries into the .rdg to suppress its per-VM prompt.")
+    }
+    else {
+        Write-LogMessage "No RDCMan found at $pinnedExe or $sysinternalsExe." -Level 'WARNING'
+    }
+
+    Write-LogMessage 'RDCMan maintenance completed.'
+}
+
 function Invoke-WeeklyUpgrades {
     Write-LogMessage 'Starting weekly upgrades...'
 
@@ -677,6 +812,7 @@ try { Invoke-GitMaintenance } catch { Write-LogMessage "Git maintenance threw: $
 try { Invoke-System32CurlMaintenance } catch { Write-LogMessage "System32 curl maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+try { Invoke-RdcManMaintenance } catch { Write-LogMessage "RDCMan maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-MRemoteNGMaintenance } catch { Write-LogMessage "mRemoteNG maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-WeeklyUpgrades } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 

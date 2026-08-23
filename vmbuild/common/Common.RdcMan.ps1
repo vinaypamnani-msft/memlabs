@@ -3,39 +3,436 @@
 ### RDCMan Functions ###
 ########################
 
+# Additive-grouping parent folder names. These optional folders are rebuilt on
+# every regeneration; the default (Domain Servers / MECM / Servers / Clients)
+# scheme is handled separately by the DefaultGrouping toggle.
+$script:RDCGroupingParents = @("All VMs", "By Role", "By OS", "By Subnet", "By Site")
 
-function Install-RDCman {
-    # ARM template installs sysinternals tools via choco
-    $rdcmanpath = "C:\ProgramData\chocolatey\lib\sysinternals\tools"
-    $Global:newrdcmanpath = "C:\tools"
-    $rdcmanexe = "RDCMan.exe"
+# RDCMan 3.21 added a per-server certificate warning that fires for every lab VM, so MemLabs
+# prefers 3.12.0.0. It keeps its OWN copy under ProgramData rather than pinning C:\tools:
+# that path belongs to the chocolatey sysinternals package, and holding it back would block
+# sysinternals updates for everything else.
+#
+# Sysinternals only ever publishes the current build, so 3.12 cannot be re-downloaded from
+# live.sysinternals.com. It comes from the storage account, or from a cached copy any host
+# rescues while it still has one.
+#
+# If 3.12 cannot be obtained, MemLabs FALLS BACK to whatever the sysinternals package
+# provides. That still works -- the .rdg cert-trust feature simply switches itself on,
+# because Test-RDCManCertTrustSupported keys off the version actually being launched.
+$script:RDCManPinnedVersion = [version]'3.12.0.0'
+$script:RDCManPinnedDir = Join-Path $env:ProgramData 'memlabs\RDCMan'
+$script:RDCManFallbackDir = 'C:\tools'
+$script:RDCManCacheFileName = 'RDCMan-3.12.0.0.exe'
+$script:RDCManStorageFileId = 'RdcMan312Exe'
 
-    # create C:\tools if not present
-    if (-not (Test-Path $Global:newrdcmanpath)) {
-        New-Item -Path $Global:newrdcmanpath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+function Get-RDCManPinnedVersion { return $script:RDCManPinnedVersion }
+
+function Get-RDCManVersion {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    try { return [version](Get-Item -LiteralPath $Path).VersionInfo.ProductVersion }
+    catch {
+        Write-Log "Could not read the RDCMan version at $Path. $_" -LogOnly -Verbose
+        return $null
     }
+}
 
-    # Download rdcman, if not present
-    if (-not (Test-Path "$rdcmanpath\$rdcmanexe")) {
+# The exe MemLabs will actually launch and associate .rdg with: the pinned copy when we have
+# it, otherwise the sysinternals one. Everything else keys off this, so a fallback host stays
+# self-consistent instead of associating one build and version-checking another.
+function Get-RDCManExePath {
+    $pinned = Join-Path $script:RDCManPinnedDir 'RDCMan.exe'
+    if ((Get-RDCManVersion -Path $pinned) -eq $script:RDCManPinnedVersion) { return $pinned }
+    $fallback = Join-Path $script:RDCManFallbackDir 'RDCMan.exe'
+    if (Get-RDCManVersion -Path $fallback) { return $fallback }
+    if (Test-Path -LiteralPath $pinned) { return $pinned }
+    return $null
+}
 
+# <trustedCertificates> is a 3.21+ concept. Dormant on the pinned build (that client never
+# reads it), active on the fallback -- which is exactly when the prompt would otherwise fire.
+function Test-RDCManCertTrustSupported {
+    $installed = Get-RDCManVersion -Path (Get-RDCManExePath)
+    if (-not $installed) { return $false }
+    return ($installed -gt $script:RDCManPinnedVersion)
+}
+
+# Rescue a known-good pinned build into the cache. Sysinternals will not serve it again, so a
+# host that has one and loses it has no local way back. Checks the sysinternals path too --
+# that copy is the only 3.12 most hosts still have, and choco will eventually overwrite it.
+function Save-RDCManPinnedCopy {
+    if (-not $Common -or -not $Common.CachePath) { return $false }
+    $cached = Join-Path $Common.CachePath $script:RDCManCacheFileName
+    if ((Get-RDCManVersion -Path $cached) -eq $script:RDCManPinnedVersion) { return $true }
+
+    foreach ($dir in @($script:RDCManPinnedDir, $script:RDCManFallbackDir)) {
+        $exe = Join-Path $dir 'RDCMan.exe'
+        if ((Get-RDCManVersion -Path $exe) -ne $script:RDCManPinnedVersion) { continue }
         try {
-            $ProgressPreference = 'SilentlyContinue'
-            Start-BitsTransfer -Source "https://live.sysinternals.com/$rdcmanexe" -Destination "$Global:newrdcmanpath\$rdcmanexe" -ErrorAction SilentlyContinue
+            Copy-Item -LiteralPath $exe -Destination $cached -Force -ErrorAction Stop
+            Write-Log "Rescued RDCMan $script:RDCManPinnedVersion from $exe to $cached." -LogOnly -Verbose
+            return $true
         }
         catch {
-            Write-Log "Could not download latest RDCMan.exe. $_" -Warning -LogOnly
-        }
-        finally {
-            $ProgressPreference = 'Continue'
+            Write-Log "Could not rescue RDCMan $script:RDCManPinnedVersion from $exe. $_" -LogOnly -Verbose
         }
     }
-    else {
-        Copy-Item -Path "$rdcmanpath\$rdcmanexe" -Destination "$Global:newrdcmanpath\$rdcmanexe" -Force -ErrorAction SilentlyContinue
-    }
-    # set file associations
-    & cmd /c assoc .rdg=rdcman | Out-Null
-    & cmd /c ftype rdcman=$Global:newrdcmanpath\$rdcmanexe | Out-Null
+    return $false
+}
 
+# Put the pinned build in MemLabs' own directory. Cache first, storage account second. Never
+# touches C:\tools -- that belongs to chocolatey.
+function Restore-RDCManPinnedVersion {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([switch]$Quiet)
+
+    $exe = Join-Path $script:RDCManPinnedDir 'RDCMan.exe'
+    if ((Get-RDCManVersion -Path $exe) -eq $script:RDCManPinnedVersion) { return $true }
+
+    $null = Save-RDCManPinnedCopy
+    $source = $null
+    if ($Common -and $Common.CachePath) {
+        $cached = Join-Path $Common.CachePath $script:RDCManCacheFileName
+        if ((Get-RDCManVersion -Path $cached) -eq $script:RDCManPinnedVersion) { $source = $cached }
+    }
+
+    if (-not $source -and $Common -and $Common.AzureFileList) {
+        $entry = @($Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq $script:RDCManStorageFileId }) | Select-Object -First 1
+        if ($entry) {
+            if (Get-FileFromStorage -File $entry -IgnoreHashFailure:$false) {
+                $downloaded = Join-Path $Common.AzureFilesPath $entry.filename
+                if ((Get-RDCManVersion -Path $downloaded) -eq $script:RDCManPinnedVersion) { $source = $downloaded }
+                else { Write-Log "Storage supplied '$($entry.filename)' but it is not RDCMan $script:RDCManPinnedVersion." -Warning }
+            }
+        }
+    }
+
+    if (-not $source) {
+        if (-not $Quiet) {
+            Write-Log ("RDCMan $script:RDCManPinnedVersion is not cached and not in storage; falling back to the sysinternals copy. " +
+                "Add a SupportFiles entry with id '$script:RDCManStorageFileId' pointing at support\$script:RDCManCacheFileName to pin it.") -LogOnly -Verbose
+        }
+        return $false
+    }
+
+    if (-not $PSCmdlet.ShouldProcess($exe, "Install RDCMan $script:RDCManPinnedVersion")) { return $false }
+
+    try {
+        if (-not (Test-Path -LiteralPath $script:RDCManPinnedDir)) {
+            $null = New-Item -Path $script:RDCManPinnedDir -ItemType Directory -Force
+        }
+        Copy-Item -LiteralPath $source -Destination $exe -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Log "Could not install RDCMan $script:RDCManPinnedVersion from $source. $_" -Warning
+        return $false
+    }
+
+    # Read back: a copy that did not land must not report success.
+    $now = Get-RDCManVersion -Path $exe
+    if ($now -ne $script:RDCManPinnedVersion) {
+        Write-Log "RDCMan install did not take effect (found '$now' at $exe)." -Warning
+        return $false
+    }
+    Write-Log "Installed pinned RDCMan $script:RDCManPinnedVersion at $exe (from $source)." -LogOnly -Verbose
+    $null = Save-RDCManPinnedCopy
+    return $true
+}
+
+# Default RDC / Remote Connection settings. Grouping additions default OFF (the
+# default scheme reproduces today's layout); display-name elements default ON so
+# a fresh install matches the historical output (plus the newly requested SQL
+# version tag). Persisted as rdc-settings.json under $Common.CachePath and read
+# by BOTH the RDCMan and mRemoteNG generators (interactive and automatic).
+function Get-RDCSettingsDefaults {
+    return [ordered]@{
+        DefaultGrouping = $true    # Domain Servers / MECM (per-site) / Servers / Clients / Linux
+        AllVMsGroup     = $false   # single "All VMs" folder containing every VM
+        RoleGroups      = $false   # "By Role" -> Clients/SiteServers/DPs/MPs/Sql Servers/Wsus Servers/Reporting Servers
+        OSGroups        = $false   # "By OS" -> one folder per deployed OS
+        SubnetGroups    = $false   # "By Subnet" -> one folder per network
+        SiteCodeGroups  = $false   # "By Site" -> one folder per ConfigMgr site code
+        ShowRole        = $true    # [DC]/[PRI]/[CAS]/... role tag
+        ShowOS          = $true    # [S22]/[W11]/... OS tag
+        ShowCMVersion   = $true    # [CM22] on site-server roles
+        ShowSiteRoles   = $true    # MP/DP/SUP/RP/CA/Proxy feature tags
+        ShowSiteCode    = $true    # (PS1->CAS) / client-push site
+        ShowUser        = $true    # (domain\user) - only shown when non-default
+        ShowSqlVersion  = $true    # [SQL2019] tag (new)
+    }
+}
+
+function Get-RDCSettingsPath {
+    $cachePath = $Global:Common.CachePath
+    if ([string]::IsNullOrWhiteSpace($cachePath)) { $cachePath = Join-Path $PSScriptRoot "..\cache" }
+    return (Join-Path $cachePath "rdc-settings.json")
+}
+
+function Get-RDCSettings {
+    $defaults = Get-RDCSettingsDefaults
+    $result = [ordered]@{}
+    foreach ($k in $defaults.Keys) { $result[$k] = $defaults[$k] }
+
+    $path = Get-RDCSettingsPath
+    if (Test-Path $path) {
+        try {
+            $loaded = Get-Content $path -Raw -ErrorAction Stop | ConvertFrom-Json
+            foreach ($k in @($defaults.Keys)) {
+                if ($loaded.PSObject.Properties.Name -contains $k -and $null -ne $loaded.$k) {
+                    $result[$k] = [bool]$loaded.$k
+                }
+            }
+        }
+        catch {
+            Write-Log "Get-RDCSettings: failed to read $path : $($_.Exception.Message)" -LogOnly -Warning
+        }
+    }
+    return [PSCustomObject]$result
+}
+
+function Save-RDCSettings {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Settings
+    )
+    $path = Get-RDCSettingsPath
+    try {
+        $Settings | ConvertTo-Json | Set-Content -Path $path -Encoding UTF8 -Force -ErrorAction Stop
+        Write-Log "Save-RDCSettings: wrote $path" -LogOnly -Verbose
+    }
+    catch {
+        Write-Log "Save-RDCSettings: failed to write $path : $($_.Exception.Message)" -Warning
+    }
+}
+
+# Short SQL version tag, e.g. "SQL Server 2019" -> "SQL2019".
+function Get-RDCManSqlShortName {
+    param([string]$SqlVersion)
+    if ([string]::IsNullOrWhiteSpace($SqlVersion)) { return $null }
+    $m = [regex]::Match($SqlVersion, '(20\d\d)')
+    if ($m.Success) { return "SQL$($m.Groups[1].Value)" }
+    return "SQL"
+}
+
+# Which "By Role" category folders a VM belongs to (multi-membership: a single
+# SiteSystem with MP+DP appears under both MPs and DPs).
+function Get-RDCRoleCategories {
+    param(
+        [object]$vm,
+        [object[]]$vmListFull
+    )
+    $cats = @()
+    # Linux VMs don't map to any Windows role bucket (LinuxClient/LinuxServer/
+    # Proxy). Group them under a single "Linux" category so the "By Role" scheme
+    # mirrors the default grouping's dedicated Linux folder instead of dropping
+    # them entirely.
+    if (Test-VmIsLinux -Vm $vm) { return @("Linux") }
+    $isServerOS = $vm.deployedOS -and ($vm.deployedOS -match "Server")
+    if ($vm.Role -in "OSDClient", "AADClient", "InternetClient") { $cats += "Clients" }
+    elseif (($vm.Role -in "DomainMember", "WorkgroupMember") -and -not $isServerOS) { $cats += "Clients" }
+    if ($vm.Role -in "CAS", "Primary", "Secondary", "PassiveSite") { $cats += "SiteServers" }
+    if ($vm.installDP) { $cats += "DPs" }
+    if ($vm.installMP) { $cats += "MPs" }
+    $isRemoteSqlTarget = @($vmListFull | Where-Object { $_.remoteSQLVM -eq $vm.vmName }).Count -gt 0
+    if ($vm.Role -eq "SQLAO" -or $vm.SqlVersion -or $isRemoteSqlTarget) { $cats += "Sql Servers" }
+    if ($vm.Role -eq "WSUS" -or $vm.installSUP -or $vm.InstallSUP) { $cats += "Wsus Servers" }
+    if ($vm.InstallRP) { $cats += "Reporting Servers" }
+    return $cats
+}
+
+# The ConfigMgr site code a VM belongs to (for "By Site" grouping): explicit
+# hierarchy membership first, then client-push affinity, then its own SiteCode.
+function Get-RDCVmSiteCode {
+    param(
+        [object]$vm,
+        [object]$siteHierarchy,
+        [hashtable]$clientPushSiteMap
+    )
+    if ($siteHierarchy -and $siteHierarchy.VmSiteMap[$vm.vmName]) { return $siteHierarchy.VmSiteMap[$vm.vmName] }
+    if ($clientPushSiteMap -and $clientPushSiteMap.ContainsKey($vm.vmName)) { return $clientPushSiteMap[$vm.vmName] }
+    if ($vm.SiteCode) { return $vm.SiteCode }
+    return $null
+}
+
+# Returns the list of OPTIONAL additive folder paths a VM should also appear in,
+# based on the enabled grouping toggles. Each entry is an ordered string[] of
+# nested folder names (e.g. @("By Role","MPs")). The DefaultGrouping scheme is
+# handled by the caller's existing category-group logic, not here.
+function Get-RDCGroupingFolders {
+    param(
+        [object]$vm,
+        [object]$settings,
+        [object[]]$vmListFull,
+        [object]$siteHierarchy,
+        [hashtable]$clientPushSiteMap
+    )
+    $folders = @()
+    if ($settings.AllVMsGroup) { $folders += , @("All VMs") }
+    if ($settings.RoleGroups) {
+        foreach ($cat in (Get-RDCRoleCategories -vm $vm -vmListFull $vmListFull)) {
+            $folders += , @("By Role", $cat)
+        }
+    }
+    if ($settings.OSGroups) {
+        $os = if ($vm.deployedOS) { $vm.deployedOS } elseif ($vm.operatingSystem) { $vm.operatingSystem } else { "Unknown" }
+        $folders += , @("By OS", $os)
+    }
+    if ($settings.SubnetGroups) {
+        $net = if ($vm.network) { $vm.network } else { "Unknown" }
+        $folders += , @("By Subnet", $net)
+    }
+    if ($settings.SiteCodeGroups) {
+        $sc = Get-RDCVmSiteCode -vm $vm -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap
+        if ($sc) { $folders += , @("By Site", $sc) }
+    }
+    return , $folders
+}
+
+# Build the VM display name honoring the ShowXxx toggles. Returns "VmName [tags]
+# (siteCode)"; the caller appends protocol-specific extras (console prefix,
+# missing-IP marker) and the user tag (gated on ShowUser) so ordering matches
+# the historical output exactly.
+function Get-RDCManDisplayName {
+    param(
+        [object]$vm,
+        [object]$settings,
+        [string]$cmVersion,
+        [object]$siteHierarchy,
+        [hashtable]$clientPushSiteMap
+    )
+
+    $roleTag = $null
+    if ($settings.ShowRole) {
+        switch ($vm.Role) {
+            "DC"               { $roleTag = "DC" }
+            "BDC"              { $roleTag = "BDC" }
+            "CAS"              { $roleTag = "CAS" }
+            "Primary"          { $roleTag = "PRI" }
+            "Secondary"        { $roleTag = "SEC" }
+            "PassiveSite"      { $roleTag = "Passive" }
+            "SQLAO"            { $roleTag = "SQLAO" }
+            "WSUS"             { $roleTag = "WSUS" }
+            "FileServer"       { $roleTag = "FS" }
+            "OSDClient"        { $roleTag = "OSD" }
+            "StandaloneRootCA" { $roleTag = "RootCA" }
+            "InternetClient"   { $roleTag = "Internet" }
+            "AADClient"        { $roleTag = "AAD" }
+            "WorkgroupMember"  { $roleTag = "WG" }
+            Default { }
+        }
+        # Dedup: skip role tag if VM name already contains it
+        if ($roleTag -and $vm.VmName -match [regex]::Escape($roleTag)) { $roleTag = $null }
+    }
+
+    $siteRolesTag = $null
+    $caTag = $null
+    $supTag = $null
+    $rpTag = $null
+    $proxyTag = $null
+    if ($settings.ShowSiteRoles) {
+        if ($vm.Role -eq "SiteSystem") {
+            $sr = @()
+            if ($vm.installMP) { $sr += "MP" }
+            if ($vm.installDP) { $sr += "DP" }
+            if ($vm.installSUP -or $vm.InstallSUP) { $sr += "SUP" }
+            if ($vm.InstallRP) { $sr += "RP" }
+            if ($vm.InstallSMSProv) { $sr += "SMSProv" }
+            if ($sr.Count -gt 0) { $siteRolesTag = $sr -join ',' }
+        }
+        if ($vm.InstallCA -and $vm.Role -ne "StandaloneRootCA") { $caTag = "CA" }
+        if (($vm.installSUP -or $vm.InstallSUP) -and $vm.Role -ne "SiteSystem") { $supTag = "WSUS" }
+        if ($vm.InstallRP -and $vm.Role -ne "SiteSystem") { $rpTag = "RP" }
+        if ($vm.useProxy) { $proxyTag = "Proxy" }
+    }
+
+    $tagParts = @()
+    if ($roleTag) { $tagParts += $roleTag }
+    if ($caTag) { $tagParts += $caTag }
+    if ($rpTag) { $tagParts += $rpTag }
+    if ($supTag) { $tagParts += $supTag }
+    if ($proxyTag) { $tagParts += $proxyTag }
+
+    if ($settings.ShowOS) {
+        $osShort = Get-RDCManOSShortName -deployedOS $vm.deployedOS
+        if ($osShort -and -not ($vm.VmName -match [regex]::Escape($osShort))) { $tagParts += $osShort }
+    }
+
+    if ($settings.ShowSqlVersion -and $vm.SqlVersion) {
+        $sqlShort = Get-RDCManSqlShortName -SqlVersion $vm.SqlVersion
+        if ($sqlShort -and -not ($vm.VmName -match [regex]::Escape($sqlShort))) { $tagParts += $sqlShort }
+    }
+
+    if ($settings.ShowCMVersion -and $cmVersion -and $vm.Role -in "CAS", "Primary", "Secondary", "SiteSystem", "PassiveSite") {
+        $tagParts += $cmVersion
+    }
+
+    if ($siteRolesTag) { $tagParts += $siteRolesTag }
+
+    $displayName = $vm.VmName
+    if ($tagParts.Count -gt 0) { $displayName += " [$($tagParts -join ' ')]" }
+
+    if ($settings.ShowSiteCode) {
+        if ($vm.SiteCode) {
+            $displayName += " ($($vm.SiteCode)"
+            if ($vm.ParentSiteCode) { $displayName += "->$($vm.ParentSiteCode)" }
+            $displayName += ")"
+        }
+        elseif ($clientPushSiteMap -and $clientPushSiteMap.ContainsKey($vm.vmName)) {
+            $displayName += " ($($clientPushSiteMap[$vm.vmName]))"
+        }
+    }
+    return $displayName
+}
+
+# Ensure a nested RDG <group> path exists under $parent, creating folders as
+# needed, and return the innermost group element. Used to build the optional
+# additive grouping folders (By Role\MPs, By OS\Server 2022, ...).
+function Get-RDCManNestedGroup {
+    param(
+        [object]$parent,
+        [string[]]$pathNames,
+        [xml]$existing
+    )
+    $cur = $parent
+    foreach ($n in $pathNames) {
+        $child = $cur.SelectNodes('group') | Where-Object { $_.properties.name -eq $n } | Select-Object -First 1
+        if (-not $child) {
+            $escaped = [System.Security.SecurityElement]::Escape($n)
+            [xml]$gx = "<group><properties><expanded>False</expanded><name>$escaped</name></properties></group>"
+            $imported = $existing.ImportNode($gx.group, $true)
+            [void]$cur.AppendChild($imported)
+            $child = $cur.SelectNodes('group') | Where-Object { $_.properties.name -eq $n } | Select-Object -Last 1
+        }
+        $cur = $child
+    }
+    return $cur
+}
+
+
+function Install-RDCman {
+    # C:\tools is the chocolatey sysinternals package's; MemLabs only ever reads from it.
+    # Its own pinned copy lives under ProgramData so sysinternals stays free to update.
+    $null = Restore-RDCManPinnedVersion
+
+    $exe = Get-RDCManExePath
+    if (-not $exe) {
+        Write-Log "No RDCMan.exe found under $script:RDCManPinnedDir or $script:RDCManFallbackDir; install the sysinternals package." -Warning
+        return
+    }
+
+    $Global:newrdcmanpath = Split-Path -Parent $exe
+    $version = Get-RDCManVersion -Path $exe
+    if ($version -gt $script:RDCManPinnedVersion) {
+        Write-Log ("Using RDCMan $version from $exe. It prompts to trust a certificate per VM, so MemLabs writes the " +
+            "trusted-certificate entries into the .rdg to suppress that. Supply $script:RDCManCacheFileName to use the quieter pinned build instead.") -Warning
+    }
+
+    # Point .rdg at whichever build was actually resolved, so the association can never
+    # disagree with the version the rest of this file makes decisions from.
+    & cmd /c assoc .rdg=rdcman | Out-Null
+    & cmd /c ftype rdcman=$exe | Out-Null
 }
 
 
@@ -354,6 +751,27 @@ function New-RDCManFileFromHyperV {
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity:$Activity
 
+    # Load persisted RDC settings (grouping + display-name toggles). Drives both
+    # the interactive [R] regen and every automatic call site.
+    $rdcSettings = Get-RDCSettings
+
+    # Any additive folder grouping (All VMs / By Role / By OS / By Subnet / By
+    # Site) enabled? When grouping is on but the default scheme is off, VMs live
+    # ONLY in the additive folders -- not also flat under the domain group (which
+    # is what made them show up twice).
+    $anyAdditiveGrouping = [bool]($rdcSettings.AllVMsGroup -or $rdcSettings.RoleGroups -or $rdcSettings.OSGroups -or $rdcSettings.SubnetGroups -or $rdcSettings.SiteCodeGroups)
+
+    # Capture the path of the currently-running RDCMan.exe (if any) BEFORE we
+    # stop it, so we can relaunch the exact same binary afterward. Hardcoding
+    # C:\tools\RDCMan.exe fails on hosts where RDCMan was launched from another
+    # location (e.g. a dev repo), leaving it stopped-but-not-restarted.
+    $rdcExePath = $null
+    try {
+        $rdcRunning = @(Get-Process -Name rdcman -ea Ignore)
+        if ($rdcRunning.Count -gt 0) { $rdcExePath = ($rdcRunning | Select-Object -First 1).Path }
+        Write-Log "[RDCMan restart] Pre-kill scan: $($rdcRunning.Count) rdcman process(es) running; captured exe path = '$rdcExePath'" -LogOnly
+    } catch { Write-Log "[RDCMan restart] Pre-kill process scan failed: $($_.Exception.Message)" -LogOnly }
+
     # Bulk-fetch all VM network adapters in one WMI call so per-VM cache
     # lookups during Get-VMFromHyperV are instant instead of ~3s each.
     Invoke-VMNetworkBulkWarmup
@@ -361,10 +779,13 @@ function New-RDCManFileFromHyperV {
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
             Write-Log "Stopping RDCMan.exe, deleting $rdcmanfile, and regenerating a new MEMLabs.RDG."
-            $p = Get-Process -Name rdcman -ea Ignore
-            if ($p) {
+            $p = @(Get-Process -Name rdcman -ea Ignore)
+            Write-Log "[RDCMan restart] OverWrite path: found $($p.Count) rdcman process(es) to stop." -LogOnly
+            if ($p.Count -gt 0) {
+                if (-not $rdcExePath) { $rdcExePath = ($p | Select-Object -First 1).Path }
                 $p | Stop-Process -force
                 $killedAlready = $true
+                Write-Log "[RDCMan restart] Stopped rdcman (killedAlready=true); exe path now '$rdcExePath'." -LogOnly
             }
             Start-Sleep 1
             Remove-Item $rdcmanfile -ProgressAction SilentlyContinue| out-null
@@ -449,6 +870,9 @@ function New-RDCManFileFromHyperV {
         }
     }
     Install-RDCman
+    # Dormant while pinned to 3.12: the node is a 3.21+ concept and that client never reads
+    # it. Capture into VM notes still runs, so the pin can be lifted without a re-collection.
+    $emitCertTrust = Test-RDCManCertTrustSupported
     $domainList = (Get-List -Type UniqueDomain -SmartUpdate)
     foreach ($domain in $domainList) {
         Write-Verbose "Adding all machines from Domain $domain"
@@ -544,6 +968,17 @@ function New-RDCManFileFromHyperV {
         if ($oldAllVMs) {
             [void]$findGroup.RemoveChild($oldAllVMs)
             $shouldSave = $true
+        }
+
+        # Remove the optional additive-grouping parent folders so they are
+        # rebuilt fresh from current settings (handles toggles turning off and
+        # VMs changing category/OS/subnet/site between runs).
+        foreach ($parentName in $script:RDCGroupingParents) {
+            $existingParent = $findGroup.SelectNodes('group') | Where-Object { $_.properties.name -eq $parentName } | Select-Object -First 1
+            if ($existingParent) {
+                [void]$findGroup.RemoveChild($existingParent)
+                $shouldSave = $true
+            }
         }
 
         # On re-runs, clear all servers from category groups so they get
@@ -653,6 +1088,14 @@ function New-RDCManFileFromHyperV {
                 $isLinuxClient = $vm.Role -eq 'LinuxClient'
                 $hasRdp = $rdpOn -or $isLinuxClient
 
+                # RDCMan is an RDP-only client; it cannot connect over SSH. Skip
+                # SSH-only Linux VMs so we don't add a dead [Linux SSH] entry that
+                # can never connect. (These VMs still get an SSH entry in mRemoteNG.)
+                if (-not $hasRdp) {
+                    Write-Log "Skipping SSH-only Linux VM '$($vm.VmName)' in RDCMan (enableRDP not set; RDCMan has no SSH support)." -LogOnly -Verbose
+                    continue
+                }
+
                 # Resolve IP (Ubuntu doesn't respond to LLMNR).
                 # Prefer live IP from Hyper-V over cached LastKnownIP — DHCP
                 # leases can change and LastKnownIP goes stale.
@@ -664,12 +1107,21 @@ function New-RDCManFileFromHyperV {
                 if ([string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp = $vm.LastKnownIP }
                 $linuxName = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
 
-                # Build display name
-                if ($hasRdp) {
-                    $linuxDisplay = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
-                } else {
-                    $linuxDisplay = "$($vm.VmName) [Linux SSH] (vmbuildadmin)"
-                }
+                # Default login mirrors the Windows model. vmbuildadmin is the
+                # deployment account only; the human logon is:
+                #   domain-joined + domainUser -> that AD user (NOPASSWD sudo)
+                #   domain-joined, no domainUser -> the domain admin (adminName)
+                #   workgroup -> the local adminName account (default 'admin')
+                # Domain stays empty: SSSD/xrdp use short names
+                # (use_fully_qualified_names=False), so a domain-qualified login
+                # would fail to authenticate.
+                $linuxJoinOn = ($vm.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$vm.joinDomain
+                $linuxAdmin = if ($vm.adminName) { $vm.adminName } else { 'admin' }
+                $linuxUser = if ($linuxJoinOn -and $vm.domainUser) { $vm.domainUser } else { $linuxAdmin }
+
+                # Build display name (RDP only; username suffix gated on ShowUser)
+                $linuxDisplay = "$($vm.VmName) [Linux RDP]"
+                if ($rdcSettings.ShowUser) { $linuxDisplay += " ($linuxUser)" }
                 if ($vm.SiteCode) { $linuxDisplay += " ($($vm.SiteCode))" }
 
                 $cLinux = [PsCustomObject]@{}
@@ -695,13 +1147,29 @@ function New-RDCManFileFromHyperV {
                 }
 
                 # RDP-capable and SSH-only VMs both go directly under Linux
-                $linuxTarget = $catGroups["Linux"]
+                $linuxTarget = if ($rdcSettings.DefaultGrouping) { $catGroups["Linux"] } else { $findGroup }
 
-                if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
-                        -targetGroup $linuxTarget -groupfromtemplate $groupFromTemplate -existing $existing `
-                        -comment $linuxComment -ForceOverwrite:$true `
-                        -domain '' -username 'vmbuildadmin') -eq $True) {
-                    $shouldSave = $true
+                # Skip the flat/default placement when additive grouping is on but
+                # the default scheme is off -- the VM then lives only in the
+                # additive folders below (avoids the duplicate under the domain).
+                if ($rdcSettings.DefaultGrouping -or -not $anyAdditiveGrouping) {
+                    if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
+                            -targetGroup $linuxTarget -groupfromtemplate $groupFromTemplate -existing $existing `
+                            -comment $linuxComment -ForceOverwrite:$true `
+                            -domain '' -username $linuxUser) -eq $True) {
+                        $shouldSave = $true
+                    }
+                }
+
+                # Optional additive grouping folders (By Role / By OS / By Subnet / By Site / All VMs)
+                foreach ($fp in (Get-RDCGroupingFolders -vm $vm -settings $rdcSettings -vmListFull $vmListFull -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap)) {
+                    $addGroup = Get-RDCManNestedGroup -parent $findGroup -pathNames $fp -existing $existing
+                    if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
+                            -targetGroup $addGroup -groupfromtemplate $groupFromTemplate -existing $existing `
+                            -comment $linuxComment -ForceOverwrite:$true `
+                            -domain '' -username $linuxUser) -eq $True) {
+                        $shouldSave = $true
+                    }
                 }
                 continue
             }
@@ -769,103 +1237,8 @@ function New-RDCManFileFromHyperV {
                 $name = $($vm.VmName)
             }            
             $ForceOverwrite = $false
-            $roleTag = $null
-            switch ($vm.Role) {
-                "DC"              { $roleTag = "DC" }
-                "BDC"             { $roleTag = "BDC" }
-                "CAS"             { $roleTag = "CAS" }
-                "Primary"         { $roleTag = "PRI" }
-                "Secondary"       { $roleTag = "SEC" }
-                "PassiveSite"     { $roleTag = "Passive" }
-                "SQLAO"           { $roleTag = "SQLAO" }
-                "WSUS"            { $roleTag = "WSUS" }
-                "FileServer"      { $roleTag = "FS" }
-                "OSDClient"       { $roleTag = "OSD" }
-                "StandaloneRootCA" { $roleTag = "RootCA" }
-                "InternetClient"  { $roleTag = "Internet"; $ForceOverwrite = $true }
-                "AADClient"       { $roleTag = "AAD"; $ForceOverwrite = $true }
-                "WorkgroupMember" { $roleTag = "WG" }
-                Default {}
-            }
+            $displayName = Get-RDCManDisplayName -vm $vm -settings $rdcSettings -cmVersion $cmVersion -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap
 
-            # SiteSystem: show actual installed roles instead of generic tag
-            $siteRolesTag = $null
-            if ($vm.Role -eq "SiteSystem") {
-                $sr = @()
-                if ($vm.installMP) { $sr += "MP" }
-                if ($vm.installDP) { $sr += "DP" }
-                if ($vm.installSUP -or $vm.InstallSUP) { $sr += "SUP" }
-                if ($vm.InstallRP) { $sr += "RP" }
-                if ($vm.InstallSMSProv) { $sr += "SMSProv" }
-                if ($sr.Count -gt 0) { $siteRolesTag = $sr -join ',' }
-            }
-
-            # Certificate Authority tag (Issuing CA via InstallCA property)
-            $caTag = $null
-            if ($vm.InstallCA -and $vm.Role -ne "StandaloneRootCA") {
-                $caTag = "CA"
-            }
-
-            # SUP/WSUS tag for non-SiteSystem VMs with installSUP
-            $supTag = $null
-            if (($vm.installSUP -or $vm.InstallSUP) -and $vm.Role -ne "SiteSystem") {
-                $supTag = "WSUS"
-            }
-
-            # Reporting Point tag for non-SiteSystem VMs with installRP
-            $rpTag = $null
-            if ($vm.InstallRP -and $vm.Role -ne "SiteSystem") {
-                $rpTag = "RP"
-            }
-
-            # Proxy-client tag: VM is opted in to route HTTP(S) through the
-            # Linux Squid proxy (per-VM useProxy=true, set from genconfig).
-            $proxyTag = $null
-            if ($vm.useProxy) {
-                $proxyTag = "Proxy"
-            }
-
-            # Dedup: skip role tag if VM name already contains it
-            if ($roleTag -and $vm.VmName -match [regex]::Escape($roleTag)) {
-                $roleTag = $null
-            }
-
-            # Build bracket tag: [ROLE OS CMver SiteRoles CA SUP Proxy]
-            $tagParts = @()
-            if ($roleTag) { $tagParts += $roleTag }
-            if ($caTag) { $tagParts += $caTag }
-            if ($rpTag) { $tagParts += $rpTag }
-            if ($supTag) { $tagParts += $supTag }
-            if ($proxyTag) { $tagParts += $proxyTag }
-
-            $osShort = Get-RDCManOSShortName -deployedOS $vm.deployedOS
-            # Dedup: skip OS tag if VM name already contains it
-            if ($osShort -and -not ($vm.VmName -match [regex]::Escape($osShort))) {
-                $tagParts += $osShort
-            }
-
-            # CM version for site server roles
-            if ($cmVersion -and $vm.Role -in "CAS", "Primary", "Secondary", "SiteSystem", "PassiveSite") {
-                $tagParts += $cmVersion
-            }
-
-            # Append site system role flags
-            if ($siteRolesTag) { $tagParts += $siteRolesTag }
-
-            $displayName = $vm.VmName
-            if ($tagParts.Count -gt 0) {
-                $displayName += " [$($tagParts -join ' ')]"
-            }
-            if ($vm.SiteCode) {
-                $displayName += " ($($vm.SiteCode)"
-                if ($vm.ParentSiteCode) {
-                    $displayName += "->$($vm.ParentSiteCode)"
-                }
-                $displayName += ")"
-            }
-            elseif ($clientPushSiteMap.ContainsKey($vm.vmName)) {
-                $displayName += " ($($clientPushSiteMap[$vm.vmName]))"
-            }
             if ($vm.Role -eq "AADClient" -or $vm.Role -eq "InternetClient") {
                 if (-not [string]::IsNullOrWhiteSpace($vm.LastKnownIP)) {
                     $name = $vm.LastKnownIP
@@ -880,7 +1253,7 @@ function New-RDCManFileFromHyperV {
                     }
                 }
             }
-            if ($vm.domainUser) {
+            if ($rdcSettings.ShowUser -and $vm.domainUser) {
                 $displayName = $displayName + " ($($vm.domainUser))"
             }
             $ForceOverwrite = $true
@@ -917,11 +1290,18 @@ function New-RDCManFileFromHyperV {
                 # Fallback: use Servers group
                 $targetGroup = $catGroups["Servers"]
             }
+            # When the default grouping is disabled, place VMs directly under the
+            # domain group (the now-empty category folders are pruned at the end).
+            if (-not $rdcSettings.DefaultGrouping) {
+                $targetGroup = $findGroup
+            }
 
             # Phase 11 captures this. Precedence: the note, then a trust already in the .rdg
             # (either clicked in the dialog or written by a previous run), then a one-off
             # capture from a running guest. Anything recovered from the file is written back
-            # to the note so it stops depending on the file surviving.
+            # to the note so it stops depending on the file surviving -- that rescue runs even
+            # while emission is dormant, which is the only chance to save a hash the pinned
+            # client is about to drop from the file.
             $certSha256 = if ($vm.rdpCertSha256) { "$($vm.rdpCertSha256)" } else { $null }
             if (-not $certSha256 -and [string]::IsNullOrWhiteSpace($vmID)) {
                 $carried = $existingCerts["$($name.ToLowerInvariant())"]
@@ -929,13 +1309,27 @@ function New-RDCManFileFromHyperV {
                     $certSha256 = $carried
                     $null = Save-VmRdpCertNote -VmName $vm.vmName -Sha256 $carried
                 }
-                elseif ($vm.State -eq 'Running') {
+                elseif ($emitCertTrust -and $vm.State -eq 'Running') {
                     $certSha256 = Update-VmRdpCertNote -VmName $vm.vmName -VmDomainName $vm.Domain
                 }
             }
+            if (-not $emitCertTrust) { $certSha256 = $null }
 
-            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $targetGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser -certSha256 $certSha256) -eq $True) {
-                $shouldSave = $true
+            # Skip the flat/default placement when additive grouping is on but the
+            # default scheme is off -- the VM then lives only in the additive
+            # folders below (avoids the duplicate under the domain group).
+            if ($rdcSettings.DefaultGrouping -or -not $anyAdditiveGrouping) {
+                if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $targetGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser -certSha256 $certSha256) -eq $True) {
+                    $shouldSave = $true
+                }
+            }
+
+            # Optional additive grouping folders (By Role / By OS / By Subnet / By Site / All VMs)
+            foreach ($fp in (Get-RDCGroupingFolders -vm $vm -settings $rdcSettings -vmListFull $vmListFull -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap)) {
+                $addGroup = Get-RDCManNestedGroup -parent $findGroup -pathNames $fp -existing $existing
+                if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $addGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser -certSha256 $certSha256) -eq $True) {
+                    $shouldSave = $true
+                }
             }
         }
 
@@ -1050,6 +1444,8 @@ function New-RDCManFileFromHyperV {
             $proc = Get-Process -Name rdcman -ea Ignore | Select-Object -First 1
             if ($proc) {
                 $killed = $true
+                if (-not $rdcExePath) { $rdcExePath = $proc.Path }
+                Write-Log "[RDCMan restart] Save path: rdcman still/again running (PID $($proc.Id)); stopping it (killed=true)." -LogOnly
                 Get-Process -Name rdcman -ea Ignore | Stop-Process
             }
             Start-Sleep 1
@@ -1064,7 +1460,25 @@ function New-RDCManFileFromHyperV {
     }
     if ($killed -or $killedAlready) {
 
-        $rdcProc = Start-Process "C:\tools\RDCMan.exe" -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -PassThru
+        # Prefer the path we captured before stopping RDCMan; fall back to the
+        # default install location. Use the exe's own folder as the working
+        # directory (C:\Temp may not exist on every host).
+        if (-not ($rdcExePath -and (Test-Path $rdcExePath))) { $rdcExePath = Get-RDCManExePath }
+        $rdcWorkDir = Split-Path $rdcExePath -Parent
+        if (-not (Test-Path $rdcWorkDir)) { $rdcWorkDir = $env:TEMP }
+        Write-Log "[RDCMan restart] Gate OPEN (killed=$killed killedAlready=$killedAlready). Launching '$rdcExePath' /reconnect (workdir '$rdcWorkDir', exeExists=$(Test-Path $rdcExePath))." -LogOnly
+        $rdcProc = $null
+        if (Test-Path $rdcExePath) {
+            try {
+                $rdcProc = Start-Process $rdcExePath -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory $rdcWorkDir -ErrorAction Stop -WarningAction SilentlyContinue -PassThru
+            }
+            catch {
+                Write-Log "[RDCMan restart] Start-Process FAILED for '$rdcExePath': $($_.Exception.Message)" -Warning
+            }
+        }
+        else {
+            Write-Log "[RDCMan restart] Cannot restart RDCMan: RDCMan.exe not found at '$rdcExePath'." -Warning
+        }
         $i = 0
         while ($i -lt 3) {
             Set-RdcManMin
@@ -1074,13 +1488,16 @@ function New-RDCManFileFromHyperV {
         Set-RdcManMin
 
         if ($rdcProc) {
+            Write-Log "[RDCMan restart] Restarted RDCMan (PID $($rdcProc.Id)) from '$rdcExePath'." -LogOnly
             Write-GreenCheck "Updated $rdcmanfile. Restarted RDCMan (PID $($rdcProc.Id))" -ForegroundColor ForestGreen
         }
         else {
+            Write-Log "[RDCMan restart] RDCMan was stopped but FAILED to restart (exe '$rdcExePath', workdir '$rdcWorkDir')." -Warning
             Write-GreenCheck "Updated $rdcmanfile. RDCMan was stopped but failed to restart" -ForegroundColor ForestGreen
         }
     }
     else {
+        Write-Log "[RDCMan restart] Gate CLOSED: RDCMan was not detected as running (killed=$killed killedAlready=$killedAlready); nothing to restart." -LogOnly
         Write-GreenCheck "Updated $rdcmanfile. RDCMan was not running" -ForegroundColor ForestGreen
     }
 }
