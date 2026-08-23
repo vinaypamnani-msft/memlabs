@@ -20,6 +20,12 @@
     FQDN, last known IP). Pinning covers BOTH errors, so the name mismatch stops
     mattering as well.
 
+    MEASURED CAVEAT (2026-08-23): on a host where BI-PRIMARY had already been
+    trusted through the RDCMan 3.12 dialog, this key held NO entries at all. So
+    RDCMan 3.12 persists its trust somewhere else and these pins do not suppress
+    its prompt. They still work for mstsc.exe and anything else on the RDP client
+    stack. Use Find-RdcManCertTrust.ps1 to locate RDCMan's actual store.
+
     The hash width is not guessed. Windows 11 / Server 2022+ clients pin SHA-256
     (32 bytes) while older ones pin SHA-1 (20); the script reads the width already
     used by existing entries on this host and matches it, so the value it writes
@@ -97,18 +103,32 @@ if (-not ($bom[0] -eq 0xEF -and $bom[1] -eq 0xBB -and $bom[2] -eq 0xBF)) {
 # Never load with -InJob here: it skips storage init, leaves $Common.LocalAdmin null, and
 # then every Invoke-VmCommand returns a bare $false -- which reads as "the lab is broken"
 # rather than "the tool never authenticated".
-function Test-CredLoaded { return ($Common -and $Common.LocalAdmin -and $Common.LocalAdmin.Password) }
+#
+# $Common is GLOBAL and outlives the script that loaded it, but Common.ps1's functions are
+# dot-sourced into that script's scope and die with it. So a session where any other tool
+# has already run leaves a fully populated $Common with no Get-List -- readiness has to be
+# gated on the functions, not on the credential alone.
+$needed = @('Get-List', 'Invoke-VmCommand', 'Test-VmIsLinux')
+function Test-CommonLoaded {
+    if (-not ($Common -and $Common.LocalAdmin -and $Common.LocalAdmin.Password)) { return $false }
+    foreach ($fn in $needed) { if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) { return $false } }
+    return $true
+}
 
-if (-not (Test-CredLoaded)) { . $commonPath -FastInit }
-if (-not (Test-CredLoaded) -and (Get-Command Get-LocalAdminCredential -ErrorAction SilentlyContinue)) {
+if (-not (Test-CommonLoaded)) { . $commonPath -FastInit }
+if (-not (Test-CommonLoaded) -and (Get-Command Get-LocalAdminCredential -ErrorAction SilentlyContinue)) {
     if ($Common) { $Common.Initialized = $false }
     try { $null = Get-LocalAdminCredential } catch { Write-Host "  Get-LocalAdminCredential failed: $($_.Exception.Message)" -ForegroundColor DarkYellow }
 }
-if (-not (Test-CredLoaded)) {
+if (-not (Test-CommonLoaded)) {
     if ($Common) { $Common.Initialized = $false }
     . $commonPath
 }
-if (-not (Test-CredLoaded)) {
+$missing = @($needed | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+if ($missing.Count -gt 0) {
+    throw "Common.ps1 loaded but these functions are not defined: $($missing -join ', '). Run '. .\Common.ps1' from $vmbuildRoot, then re-run."
+}
+if (-not ($Common -and $Common.LocalAdmin -and $Common.LocalAdmin.Password)) {
     throw ("Local admin (vmbuildadmin) credential not loaded -- every guest call would fail silently. " +
         "cacheExists={0}. Open a new PowerShell window and retry." -f (Test-Path (Join-Path $vmbuildRoot 'cache\vmbuildadmin.txt')))
 }
