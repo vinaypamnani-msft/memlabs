@@ -122,6 +122,12 @@
 .EXAMPLE
     # start during Phase 2 of an add-child-primary run and let it arm itself
     .\Get-DrsLogs.ps1 -WatchSendChain -ArmWaitMinutes 300
+.EXAMPLE
+    # measure only -- reads the three witnesses and writes logs\secondary-content-hop-<stamp>.log
+    .\Get-DrsLogs.ps1 -SecondaryContentHop -Domain burnin.sandwich.lab
+.EXAMPLE
+    # measure, then intervene if the precondition holds
+    .\Get-DrsLogs.ps1 -RepairSecondaryContent -Domain burnin.sandwich.lab -BaselineSeconds 120
 #>
 [CmdletBinding()]
 param(
