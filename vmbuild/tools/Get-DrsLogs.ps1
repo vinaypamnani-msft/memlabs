@@ -52,6 +52,34 @@
     from "8527f678 simply ran at the wrong moment", which is the fork the investigation is stuck on.
 
 .PARAMETER BaselineSeconds  No-intervention baseline before the flush (default 180).
+
+.PARAMETER SecondaryContentHop
+    The OTHER hop. -WatchSendChain follows CAS -> child primary; this follows child primary ->
+    SECONDARY, which is where burnin's client package stalls (HUB00004 = ContentValidating on
+    BI-SECONDARY, site SEC, while the three DPs under the primary are Installed).
+
+    Reads three independent witnesses, because each one alone has already been wrong here:
+      summarizer  SMS_PackageStatusDistPointsSummarizer State per DP -- deliberately the SAME
+                  oracle Phase 11 fails on, so "fixed" here means that check would now pass.
+      database    PkgServers_G / PkgStatus_G for the secondary's site code. Per the send-chain
+                  notes above, distmgr logs NOTHING when it declines to send, so the database is
+                  the only witness and absence of a log line proves nothing.
+      physical    the secondary's own SCCMContentLib\PkgLib, and the depth of despoolr.box\receive.
+                  A DP parked at ContentValidating with the package absent from PkgLib never
+                  received content at all -- that state is a phantom initial row, not progress.
+
+.PARAMETER RepairSecondaryContent
+    INTERVENES on the lab. Sets RefreshNow on the parent primary's SMS_DistributionPoint row for
+    the package + secondary DP, i.e. asks the parent to re-send. Pre-registered like
+    -FlushExperiment so the result cannot be rationalised afterwards:
+      precondition  the secondary DP is readable AND not already Installed. Otherwise abort.
+      baseline      watch -BaselineSeconds with NO intervention; if it clears on its own the
+                    repair was NOT tested and the run says so.
+      intervention  RefreshNow on the parent primary's row.
+      measure       poll the summarizer for up to -PostSeconds for State=0 (Installed).
+    ONE TRIAL. phase8-clientpkg-coverage-secondary-inactive.md already found that RefreshNow acts
+    on the PARENT's targeting rows and does not drive the send-to-child path, so a negative result
+    here is the expected one and is worth recording; a positive one is the rung worth shipping.
 .PARAMETER PostSeconds      How long to watch after the flush (default 900).
 .PARAMETER IntervalSeconds  Poll interval for -WatchSendChain (default 20).
 .PARAMETER MaxMinutes   Give up after this long under -WatchSendChain (default 120). Counts from ARMING, not from launch: arming lands at child site install, and the rest of Phase 8 still has to run before the coverage wait, whose own worst case is 2622s.
@@ -108,6 +136,8 @@ param(
     [int]$ExpectPrimaries = 0,
     [switch]$FlushExperiment,
     [switch]$ResetChildPackageState,
+    [switch]$SecondaryContentHop,
+    [switch]$RepairSecondaryContent,
     [switch]$DrsProbe,
     [switch]$EnableDrsTracing,
     [switch]$DisableDrsTracing,
@@ -173,11 +203,15 @@ if ($priList.Count -eq 0) { Write-Host "FATAL: -PrimaryName '$PrimaryName' did n
 
 $siteCodes = @($cas.siteCode) + @($priList | Select-Object -ExpandProperty siteCode)
 $siteSystems = @($allVms | Where-Object { $_.role -in @('SiteSystem', 'DPMP') -and $_.domain -eq $dom -and ($_.siteCode -in $siteCodes -or $_.parentSiteCode -in $siteCodes) })
+# Secondaries are the second content hop and were never resolved here, so despool.log on the one
+# machine a Primary->Secondary stall is about was the one log this tool did not collect.
+$secList = @($allVms | Where-Object { $_.role -eq 'Secondary' -and $_.domain -eq $dom -and $_.parentSiteCode -in @($priList | Select-Object -ExpandProperty siteCode) })
 
-$logTargets = @($cas) + $priList + $siteSystems | Sort-Object vmName -Unique
+$logTargets = @($cas) + $priList + $secList + $siteSystems | Sort-Object vmName -Unique
 Write-Host "Domain  : $dom" -ForegroundColor Gray
 Write-Host "CAS     : $($cas.vmName) (site $($cas.siteCode))  SQL: $((Resolve-SqlVm $cas $allVms).vmName)" -ForegroundColor Gray
 foreach ($p in $priList) { Write-Host "Primary : $($p.vmName) (site $($p.siteCode))  SQL: $((Resolve-SqlVm $p $allVms).vmName)" -ForegroundColor Gray }
+foreach ($s in $secList) { Write-Host "Secondary: $($s.vmName) (site $($s.siteCode), parent $($s.parentSiteCode))" -ForegroundColor Gray }
 if ($siteSystems.Count) { Write-Host "SiteSys : $($siteSystems.vmName -join ', ')" -ForegroundColor Gray }
 Write-Host ""
 
@@ -569,6 +603,80 @@ $cmPackageBlock = {
         finally { Pop-Location }
     }
     catch { $o.Add("CM ERROR ($Mode): " + $_.Exception.Message) }
+    return $o.ToArray()
+}
+
+# The oracle Phase 11 fails on. Returned verbatim so "WMI did not answer" and "no DP has this
+# package" cannot be confused -- they mean opposite things and both look like an empty list.
+$dpStateBlock = {
+    param($SiteCode, $PkgId)
+    $names = @{ 0 = 'Installed'; 1 = 'InstallPending'; 2 = 'InstallRetrying'; 3 = 'InstallFailed'; 4 = 'RemovalPending'; 5 = 'RemovalRetrying'; 6 = 'RemovalFailed'; 7 = 'ContentValidating'; 8 = 'ContentValidationFailed' }
+    $ns = "root\SMS\site_$SiteCode"
+    $o = New-Object System.Collections.Generic.List[string]
+    $rows = $null
+    try { $rows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PkgId'" -ErrorAction Stop) }
+    catch { $o.Add("DPSTATE ERROR $ns : $($_.Exception.Message)"); return $o.ToArray() }
+    if ($rows.Count -eq 0) { $o.Add("DPSTATE NO ROWS in $ns for $PkgId"); return $o.ToArray() }
+    foreach ($r in $rows) {
+        $nal = "$($r.ServerNALPath)"
+        $dp = if ($nal -match '\\\\([^\\"\]]+)') { $Matches[1] } else { $nal }
+        $sn = $names[[int]$r.State]; if (-not $sn) { $sn = "State$($r.State)" }
+        $o.Add(("DPSTATE[{0}] site={1} state={2}({3}) srcVer={4} dpSrcVer={5}" -f $dp, $r.SiteCode, [int]$r.State, $sn, $r.SourceVersion, $r.DPSourceVersion))
+    }
+    return $o.ToArray()
+}
+
+# Physical ground truth on the secondary. A DP sitting at ContentValidating with the package absent
+# from PkgLib never received anything -- the summarizer row is a phantom, not progress.
+$secContentBlock = {
+    param($PkgId)
+    $o = New-Object System.Collections.Generic.List[string]
+    $sawLib = $false
+    foreach ($d in @('E', 'D', 'F', 'G', 'C')) {
+        $pl = "${d}:\SCCMContentLib\PkgLib"
+        if (-not (Test-Path $pl)) { continue }
+        $sawLib = $true
+        $inis = @(Get-ChildItem -LiteralPath $pl -Filter '*.INI' -ErrorAction SilentlyContinue)
+        $mine = @($inis | Where-Object { $_.BaseName -like "$PkgId*" })
+        $o.Add("PKGLIB $pl count=$($inis.Count) hasPackage=$($mine.Count -gt 0)")
+    }
+    if (-not $sawLib) { $o.Add('PKGLIB NONE on E,D,F,G,C -- no content library on this machine') }
+    $dir = $null
+    foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+        try { $dir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
+        if ($dir) { break }
+    }
+    if (-not $dir) { $o.Add('INBOX UNKNOWN -- SMS install dir not found, inbox depth NOT measured'); return $o.ToArray() }
+    foreach ($box in @('despoolr.box\receive', 'despoolr.box', 'distmgr.box')) {
+        $p = Join-Path $dir "inboxes\$box"
+        if (-not (Test-Path $p)) { $o.Add("INBOX $box ABSENT"); continue }
+        $f = @(Get-ChildItem -LiteralPath $p -File -ErrorAction SilentlyContinue)
+        $oldest = if ($f.Count) { (($f | Sort-Object LastWriteTime | Select-Object -First 1).LastWriteTime).ToString('MM-dd HH:mm:ss') } else { '-' }
+        $o.Add("INBOX $box files=$($f.Count) oldest=$oldest")
+    }
+    return $o.ToArray()
+}
+
+# INTERVENTION: ask the parent to re-send this package to one DP.
+$dpRefreshBlock = {
+    param($SiteCode, $PkgId, $DpMatch)
+    $ns = "root\SMS\site_$SiteCode"
+    $o = New-Object System.Collections.Generic.List[string]
+    $rows = $null
+    try { $rows = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PkgId'" -ErrorAction Stop) }
+    catch { $o.Add("REFRESH ERROR $ns : $($_.Exception.Message)"); return $o.ToArray() }
+    $o.Add("REFRESH rows=$($rows.Count) in $ns for $PkgId")
+    $hit = 0
+    # Anchored on the NAL's \\<name> so a longer DP name cannot be refreshed by mistake.
+    $nalRe = '\\\\' + [regex]::Escape($DpMatch) + '(\.|\\)'
+    foreach ($r in $rows) {
+        $nal = "$($r.ServerNALPath)"
+        if ($nal -notmatch $nalRe) { continue }
+        $hit++
+        try { $r.RefreshNow = $true; $null = $r.Put(); $o.Add("REFRESH SET $nal") }
+        catch { $o.Add("REFRESH FAILED $nal : $($_.Exception.Message)") }
+    }
+    if ($hit -eq 0) { $o.Add("REFRESH NO MATCH for '$DpMatch' -- this site does not target that DP for this package") }
     return $o.ToArray()
 }
 
@@ -998,6 +1106,128 @@ if ($FlushExperiment) {
     else { & $esay "RESULT: row reached the CAS but NO send within 600s -- arrival of the row is therefore NOT sufficient on its own." }
     & $esay "ONE TRIAL. It separates 'a flush cannot move this row' from '8527f678 ran at the wrong moment'. It does not establish a fix."
     Write-Host "Experiment log: $expLog" -ForegroundColor Green
+    return
+}
+
+if ($SecondaryContentHop -or $RepairSecondaryContent) {
+    $hopLog = Join-Path $logsRoot ("secondary-content-hop-{0}.log" -f $stamp)
+    $hsay = {
+        param($t)
+        $l = '{0}  {1}' -f (Get-Date -Format 'HH:mm:ss'), $t
+        Write-Host $l -ForegroundColor Gray
+        try { Add-Content -LiteralPath $hopLog -Value $l -Encoding utf8 -ErrorAction Stop } catch { }
+    }
+    & $hsay "log -> $hopLog"
+    if ($secList.Count -eq 0) { & $hsay 'FATAL: no Secondary site under any child primary in this domain. Nothing to measure.'; return }
+    if ($secList.Count -ne 1 -and $RepairSecondaryContent) { & $hsay "FATAL: -RepairSecondaryContent needs exactly one secondary; got $($secList.vmName -join ', ')."; return }
+
+    if (-not $PackageId) {
+        $cand = @(Get-GuestOutput -VmName $cas.vmName -DomainName $dom -Block $pkgFindBlock -ArgList @($cas.siteCode) -Tag 'find-clientpkg')
+        $ids = @($cand | Where-Object { $_ -match '^[A-Z0-9]{8} ' })
+        if ($ids.Count -ne 1) { & $hsay 'FATAL: could not resolve the client package. Re-run with -PackageId.'; return }
+        $PackageId = $ids[0].Split(' ')[0]
+    }
+    & $hsay "package=$PackageId  cas=$($cas.vmName)/$($cas.siteCode)  secondaries=$($secList.vmName -join ', ')"
+
+    # The summarizer is hierarchy-wide, so the parent primary is the natural place to read it and is
+    # also the site that owns the send to its secondary.
+    $parentOf = @{}
+    foreach ($s in $secList) {
+        $p = @($priList | Where-Object { $_.siteCode -eq $s.parentSiteCode }) | Select-Object -First 1
+        if (-not $p) { & $hsay "WARN: no parent primary resolved for $($s.vmName) (parentSiteCode=$($s.parentSiteCode)) -- skipping"; continue }
+        $parentOf[$s.vmName] = $p
+    }
+
+    # Returns the summarizer line for this secondary, or $null when it could not be READ -- the
+    # caller must never treat those the same.
+    $readSecState = {
+        param($Sec, $Parent)
+        $lines = @(Get-GuestOutput -VmName $Parent.vmName -DomainName $dom -Block $dpStateBlock -ArgList @($Parent.siteCode, $PackageId) -Tag "dpstate-$($Parent.siteCode)")
+        $short = ($Sec.vmName -split '\.')[0]
+        $rows = @($lines | Where-Object { $_ -like 'DPSTATE`[*' })
+        # Anchored to the bracketed name: a bare substring lets 'BI-SECONDARY' match a
+        # 'BI-SECONDARY-DP' row and report a different machine's state as this one's.
+        $nameRe = '^DPSTATE\[' + [regex]::Escape($short) + '(\.|\])'
+        $mine = @($rows | Where-Object { $_ -match $nameRe })
+        return [pscustomobject]@{
+            Readable  = ($rows.Count -gt 0)
+            Row       = (@($mine) | Select-Object -First 1)
+            Installed = (@($mine | Where-Object { $_ -match 'state=0\(' }).Count -gt 0)
+            Lines     = $lines
+        }
+    }
+
+    foreach ($s in $secList) {
+        $parent = $parentOf[$s.vmName]
+        if (-not $parent) { continue }
+        & $hsay ''
+        & $hsay "================ $($s.vmName) (site $($s.siteCode)) under $($parent.vmName) (site $($parent.siteCode)) ================"
+
+        $st = & $readSecState $s $parent
+        foreach ($l in $st.Lines) { & $hsay "    $l" }
+        if (-not $st.Readable) { & $hsay '    SUMMARIZER NOT READ -- that is an instrument failure, not evidence that no DP holds the package.' }
+        elseif (-not $st.Row) { & $hsay "    NO SUMMARIZER ROW names $($s.vmName) -- the secondary is not even targeted for this package." }
+
+        foreach ($l in (Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($parent.siteCode, $PackageId) -Tag 'parent-db')) { & $hsay "    PARENT-DB $l" }
+        foreach ($l in (Get-GuestOutput -VmName $s.vmName -DomainName $dom -Block $secContentBlock -ArgList @($PackageId) -Tag 'sec-content')) { & $hsay "    SEC $l" }
+    }
+
+    if (-not $RepairSecondaryContent) {
+        & $hsay ''
+        & $hsay 'READ: PKGLIB hasPackage=False with a summarizer row means the row is a phantom -- content never arrived, so nothing on the DP side can fix it. distmgr logs NOTHING when it declines to send, so do not read a quiet distmgr.log as "no decision was made".'
+        Write-Host "Hop log: $hopLog" -ForegroundColor Green
+        return
+    }
+
+    # ---- pre-registered repair, same contract as -FlushExperiment ----
+    $sec = $secList[0]
+    $parent = $parentOf[$sec.vmName]
+    if (-not $parent) { & $hsay 'ABORT: no parent primary for the secondary. NOT A RESULT.'; return }
+    $secShort = ($sec.vmName -split '\.')[0]
+    & $hsay ''
+    & $hsay "REPAIR (pre-registered): baseline ${BaselineSeconds}s with NO intervention, then RefreshNow on $($parent.vmName), then watch ${PostSeconds}s."
+
+    $pre = & $readSecState $sec $parent
+    if (-not $pre.Readable) { & $hsay 'ABORT: could not READ the summarizer. Instrument failure, NOT evidence. NOT A RESULT.'; return }
+    if (-not $pre.Row) { & $hsay "ABORT: no summarizer row names $secShort, so there is no DP state to repair. NOT A RESULT."; return }
+    if ($pre.Installed) { & $hsay "ABORT: $secShort already reads Installed -- nothing to repair. NOT A RESULT."; return }
+    & $hsay "precondition met: $($pre.Row)"
+
+    $tBase = Get-Date
+    $clearedInBaseline = $false
+    while (((Get-Date) - $tBase).TotalSeconds -lt $BaselineSeconds) {
+        Start-Sleep -Seconds 20
+        if ((& $readSecState $sec $parent).Installed) { $clearedInBaseline = $true; break }
+    }
+    if ($clearedInBaseline) {
+        & $hsay "CLEARED DURING BASELINE after $([int]((Get-Date) - $tBase).TotalSeconds)s, with no intervention."
+        & $hsay 'THE REPAIR WAS NOT TESTED. This says the content was still moving on its own, nothing more.'
+        return
+    }
+    & $hsay "baseline done: ${BaselineSeconds}s with no change and no intervention."
+
+    $tFix = Get-Date
+    foreach ($l in (Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $dpRefreshBlock -ArgList @($parent.siteCode, $PackageId, $secShort) -Tag 'refresh')) { & $hsay "    $l" }
+    & $hsay "intervened at $($tFix.ToString('HH:mm:ss')); polling every 20s for up to ${PostSeconds}s"
+
+    $tClear = $null
+    while (((Get-Date) - $tFix).TotalSeconds -lt $PostSeconds) {
+        Start-Sleep -Seconds 20
+        if ((& $readSecState $sec $parent).Installed) { $tClear = Get-Date; break }
+    }
+    $post = & $readSecState $sec $parent
+    foreach ($l in $post.Lines) { & $hsay "    $l" }
+    foreach ($l in (Get-GuestOutput -VmName $sec.vmName -DomainName $dom -Block $secContentBlock -ArgList @($PackageId) -Tag 'sec-content-after')) { & $hsay "    SEC $l" }
+
+    if ($tClear) {
+        & $hsay "RESULT: $secShort reached Installed $([int]($tClear - $tFix).TotalSeconds)s after RefreshNow, having not moved during a ${BaselineSeconds}s baseline."
+        & $hsay 'ONE TRIAL. If it reproduces, this is the rung to add to $ensureClientPkgCoverage (InstallBoundaryGroups.ps1).'
+    }
+    else {
+        & $hsay "RESULT: still not Installed ${PostSeconds}s after RefreshNow."
+        & $hsay 'That matches phase8-clientpkg-coverage-secondary-inactive.md: RefreshNow acts on the PARENT targeting rows and does not drive the send-to-child path. Do NOT ship a rung that cannot work -- check PKGLIB/INBOX above and the link state instead.'
+    }
+    Write-Host "Hop log: $hopLog" -ForegroundColor Green
     return
 }
 
