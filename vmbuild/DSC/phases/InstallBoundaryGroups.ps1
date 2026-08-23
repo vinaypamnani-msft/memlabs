@@ -59,17 +59,34 @@ try {
     }
     $dmLog = if ($imDir) { Join-Path $imDir 'Logs\distmgr.log' } else { $null }
     if ($dmLog -and (Test-Path $dmLog)) {
-        $dmTail = @(Get-Content $dmLog -Tail 800 -ErrorAction SilentlyContinue)
-        $dmAborts = @($dmTail | Where-Object { $_ -match '0x800704d3' -and $_ -match 'CopyFileExW|CreatePackageBundle|TakeContentSnapshot|AddContentToBundle|SnapshotPackage|BundleLegacyContentFiles' }).Count
-        $dmSucc = @($dmTail | Where-Object { $_ -match 'Created minijob to send compressed copy|Removing retry key for package' }).Count
+        # Chronological, not windowed. A fixed tail cannot see this: the aborts cluster right
+        # after the thread exit and then one content-cleanup burst emits hundreds of
+        # "permanently deleting <hash>" lines that flush them out, while the wedge persists.
+        # Widening the tail does not help either -- it only makes the success veto easier to
+        # trip. Ask instead "did a real send happen AFTER the last abort?".
+        # 'Removing retry key for package' is BOOKKEEPING, logged next to "will retry 99 more
+        # times", so counting it as success vetoes the gate on a site that is completely dead.
+        # Only 'Created minijob to send compressed copy' is a real send.
+        $dmTail = @(Get-Content $dmLog -Tail 4000 -ErrorAction SilentlyContinue)
+        $dmAborts = 0
+        $dmLastAbort = -1
+        $dmLastSend = -1
+        for ($dmI = 0; $dmI -lt $dmTail.Count; $dmI++) {
+            $dmLn = $dmTail[$dmI]
+            if ($dmLn -match '0x800704d3' -and $dmLn -match 'CopyFileExW|CreatePackageBundle|TakeContentSnapshot|AddContentToBundle|SnapshotPackage|BundleLegacyContentFiles') {
+                $dmLastAbort = $dmI
+                $dmAborts++
+            }
+            if ($dmLn -match 'Created minijob to send compressed copy') { $dmLastSend = $dmI }
+        }
         $exeUpMin = 999
         try {
             $exeSvc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
             if ($exeSvc.ProcessId -gt 0) { $exeProc = Get-Process -Id $exeSvc.ProcessId -ErrorAction SilentlyContinue; if ($exeProc) { $exeUpMin = ((Get-Date) - $exeProc.StartTime).TotalMinutes } }
         }
         catch {}
-        if ($dmAborts -ge 5 -and $dmSucc -eq 0 -and $exeUpMin -gt 20) {
-            Write-DscStatus "distmgr WEDGED: $dmAborts x 0x800704d3 content aborts and 0 successes in the recent log, SMS_EXECUTIVE up $([int]$exeUpMin)m -- a stuck distmgr cancel state is blocking ALL content distribution for this site. Restarting SMS_EXECUTIVE ONCE to clear it (the cancel flag is only reset by a fresh process)." -Warning
+        if ($dmAborts -ge 5 -and $dmLastAbort -gt $dmLastSend -and $exeUpMin -gt 20) {
+            Write-DscStatus "distmgr WEDGED: $dmAborts x 0x800704d3 content aborts and NO send since the last one, SMS_EXECUTIVE up $([int]$exeUpMin)m -- a stuck distmgr cancel state is blocking ALL content distribution for this site. Restarting SMS_EXECUTIVE ONCE to clear it (the cancel flag is only reset by a fresh process)." -Warning
             try {
                 Restart-Service -Name SMS_EXECUTIVE -Force -ErrorAction Stop
                 Write-DscStatus "Restarted SMS_EXECUTIVE to clear the wedged distmgr; waiting 90s for components to resume."
