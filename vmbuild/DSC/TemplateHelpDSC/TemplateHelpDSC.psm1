@@ -7593,7 +7593,39 @@ class InstallPBIRS {
             Start-Sleep -Seconds 5
 
             Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
-            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer
+            # -2147220930 is SetVirtualDirectory failing because the Report Server service
+            # is up but not yet serving; the single restart + 5s above is not always enough
+            # (BI-PRIMARY 2026-08-23: "Failed Setting Virtual Directory for
+            # ReportServerWebService, Errocode: -2147220930"). Retry with a restart between
+            # attempts, then carry on regardless: everything that actually repairs the
+            # portal -- the HTTPS URL rebuild, the SSL binding, the key re-encryption,
+            # SetServiceState, Initialize-Rs -- comes AFTER this call, and letting one throw
+            # skip all of it left the step that exists to configure PBIRS doing nothing.
+            # The post-install SOAP probe below stays the arbiter of success.
+            $urlAttempt = 0
+            $urlDone = $false
+            $urlErr = $null
+            while (-not $urlDone -and $urlAttempt -lt 3) {
+                $urlAttempt++
+                try {
+                    Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer
+                    $urlDone = $true
+                }
+                catch {
+                    $urlErr = $_
+                    Write-Status "Set-PbiRsUrlReservation attempt $urlAttempt/3 failed: $($_.Exception.Message)"
+                    if ($urlAttempt -lt 3) {
+                        Restart-Service -Name "PowerBIReportServer" -Force -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 20
+                    }
+                }
+            }
+            if ($urlDone) {
+                if ($urlAttempt -gt 1) { Write-Status "Set-PbiRsUrlReservation succeeded on attempt $urlAttempt/3." }
+            }
+            else {
+                Write-Status "Set-PbiRsUrlReservation failed all 3 attempts ($($urlErr.Exception.Message)); continuing to the URL/SSL configuration, which is the part that repairs the portal."
+            }
 
 
             if ($this.TemplateName) {
@@ -7609,6 +7641,12 @@ class InstallPBIRS {
                 $wmiName = (Get-WmiObject -namespace root\Microsoft\SqlServer\ReportServer  -class __Namespace -ComputerName $env:COMPUTERNAME).Name
                 $version = (Get-WmiObject -namespace root\Microsoft\SqlServer\ReportServer\$wmiName -class __Namespace).Name
                 $rsConfig = Get-WmiObject -namespace "root\Microsoft\SqlServer\ReportServer\$wmiName\$version\Admin" -class MSReportServer_ConfigurationSetting
+                if (-not $rsConfig) {
+                    # Otherwise every $rsConfig.<method>() below fails as "you cannot call a
+                    # method on a null-valued expression", which names neither the namespace
+                    # nor the fact that WMI was the problem.
+                    throw "PBIRS HTTPS config cannot start: MSReportServer_ConfigurationSetting not found in root\Microsoft\SqlServer\ReportServer\$wmiName\$version\Admin (instance='$wmiName', version='$version')."
+                }
 
                 Write-Status ("Removing HTTP ReportServerWebApp ReportServerWebService URLS")
                 $rsConfig.RemoveURL("ReportServerWebApp", "https://+:$httpsPort", $lcid)
