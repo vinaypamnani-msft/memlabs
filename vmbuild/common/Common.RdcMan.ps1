@@ -750,6 +750,21 @@ function New-RDCManFileFromHyperV {
             Write-Log "Could not load group section from $templatefile" -Failure
             return
         }
+
+        # Every server node is rebuilt from the template below, which is what has been
+        # silently discarding trust the user clicked in RDCMan's dialog. Lift those hashes
+        # out before that happens: a trust already in the file is authoritative evidence of
+        # what the endpoint presents, and reading it needs no running guest -- so this also
+        # back-fills the note for a VM that is powered off.
+        $existingCerts = @{}
+        foreach ($certNode in @($existing.SelectNodes('//server/trustedCertificates/certificate'))) {
+            $ep = "$($certNode.GetAttribute('endpoint'))"
+            $sha = "$($certNode.GetAttribute('sha256'))"
+            if ($ep -and $sha) { $existingCerts[$ep.ToLowerInvariant()] = $sha }
+        }
+        if ($existingCerts.Count -gt 0) {
+            Write-Log "Preserving $($existingCerts.Count) trusted certificate(s) already in $rdcmanfile." -LogOnly -Verbose
+        }
     }
     catch {
         if ($OverWrite -eq $false) {
@@ -1180,12 +1195,20 @@ function New-RDCManFileFromHyperV {
                 $targetGroup = $findGroup
             }
 
-            # Phase 11 captures this. Fall back to a one-off capture here so a VM that has
-            # never reached Phase 11 still stops prompting; a stopped VM just reuses the
-            # stored value, which is the whole point of keeping it on the note.
+            # Phase 11 captures this. Precedence: the note, then a trust already in the .rdg
+            # (either clicked in the dialog or written by a previous run), then a one-off
+            # capture from a running guest. Anything recovered from the file is written back
+            # to the note so it stops depending on the file surviving.
             $certSha256 = if ($vm.rdpCertSha256) { "$($vm.rdpCertSha256)" } else { $null }
-            if (-not $certSha256 -and $vm.State -eq 'Running' -and [string]::IsNullOrWhiteSpace($vmID)) {
-                $certSha256 = Update-VmRdpCertNote -VmName $vm.vmName -VmDomainName $vm.Domain
+            if (-not $certSha256 -and [string]::IsNullOrWhiteSpace($vmID)) {
+                $carried = $existingCerts["$($name.ToLowerInvariant())"]
+                if ($carried) {
+                    $certSha256 = $carried
+                    $null = Save-VmRdpCertNote -VmName $vm.vmName -Sha256 $carried
+                }
+                elseif ($vm.State -eq 'Running') {
+                    $certSha256 = Update-VmRdpCertNote -VmName $vm.vmName -VmDomainName $vm.Domain
+                }
             }
 
             # Skip the flat/default placement when additive grouping is on but the

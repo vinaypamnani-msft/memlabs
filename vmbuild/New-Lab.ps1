@@ -1228,6 +1228,20 @@ try {
                     catch {
                         Write-Log "[Phase 11] Proxy cross-lab reconcile failed (non-fatal): $_" -Warning
                     }
+
+                    # The .rdg written after Phase 1 predates the VMs being renamed and
+                    # domain-joined, so it cannot carry their RDP certificate hashes -- the
+                    # certificate is reissued when the FQDN changes. Phase 11 has just
+                    # captured the final hashes onto the VM notes; rewrite the file so
+                    # RDCMan stops prompting. Reads notes only, no guest calls.
+                    try {
+                        New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false -NoActivity -WhatIf:$WhatIf
+                    }
+                    catch {
+                        Write-Exception -ExceptionInfo $_
+                        Write-Log "[Phase 11] Could not refresh the RDCMan file at $($Global:Common.RdcManFilePath); continuing. $($_.Exception.Message)" -Warning
+                    }
+                    Restore-TerminalFocus
                 }
             }
         }

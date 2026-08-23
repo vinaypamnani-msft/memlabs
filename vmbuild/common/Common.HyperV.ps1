@@ -1251,11 +1251,31 @@ function Update-VmRdpCertNote {
 
     if ($hex -eq $existing) { return $existing }
 
-    if (-not $note) { return $hex }
+    $null = Save-VmRdpCertNote -VmName $VmName -Sha256 $hex
+    return $hex
+}
+
+# Persist a hash that is already known -- e.g. lifted out of an existing .rdg, where the
+# user clicked "Trust this certificate" -- without touching the guest. That is what makes
+# the recovery work for a powered-off VM.
+function Save-VmRdpCertNote {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $true)]
+        [string]$Sha256
+    )
+
+    $note = Get-VMNote -VMName $VmName
+    if (-not $note) { return $false }
+    $hex = $Sha256.ToUpperInvariant()
+    if ($note.PSObject.Properties.Name -contains 'rdpCertSha256' -and "$($note.rdpCertSha256)" -eq $hex) { return $true }
+
     $note | Add-Member -MemberType NoteProperty -Name 'rdpCertSha256' -Value $hex -Force
     Set-VMNote -vmName $VmName -vmNote $note
     Write-Log "$VmName`: stored RDP certificate hash $($hex.Substring(0,16))... on the VM note." -LogOnly -Verbose
-    return $hex
+    return $true
 }
 
 function Test-VmResponsive {
