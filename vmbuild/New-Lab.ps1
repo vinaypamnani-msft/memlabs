@@ -1678,7 +1678,9 @@ finally {
     # resident in this long-lived launcher process. Collect and trim only this
     # process after cleanup, and log managed/private/working-set before/after so
     # persistent private growth can be distinguished from reclaimable residency.
-    Invoke-HostMemoryReclaim -CurrentProcessOnly
+    # $null =: it returns the freed MB, which otherwise prints as a bare number
+    # next to the exit message and reads like a status code.
+    $null = Invoke-HostMemoryReclaim -CurrentProcessOnly
 
     Write-Host
     if ($NewLabsuccess -ne $true) {
