@@ -7386,6 +7386,9 @@ class InstallPBIRS {
     [string]$DNSName
 
     [void] Set() {
+        # Declared outside the try because the catch reads it, and a class method
+        # will not compile against a variable only assigned on the try path.
+        $needsReboot = $false
         try {
             $_Creds = $this.DBcredentials
             write-Status ("Configuring PBIRS for $($this.SqlServer) in $($this.InstallPath) downloading from $($this.DownloadUrl)")
@@ -7397,7 +7400,6 @@ class InstallPBIRS {
             $pbirsAttempt = 0
             $pbirsMaxAttempts = 3
             $pbirsExit = -1
-            $needsReboot = $false
 
             # Skip download + install entirely if already installed
             if (Test-Path -LiteralPath $verifyPbirs) {
@@ -7756,10 +7758,48 @@ class InstallPBIRS {
             try { Write-Status "Failed to Configure PBIRS stack: $($_err.ScriptStackTrace -replace '\r?\n', ' | ')" } catch {}
 
             # The post-install SOAP probe above throws on purpose ("so DSC marks this
-            # resource as failed rather than silently passing") -- honour that. Any
-            # other error stays non-fatal, because PBIRS can still end up functional
-            # after a recoverable hiccup earlier in Set().
+            # resource as failed rather than silently passing") -- honour that.
             if ("$($_err.Exception.Message)" -match 'portal is not functional') { throw $_err }
+
+            # Every OTHER error used to be swallowed outright on the theory that "PBIRS
+            # can still end up functional after a recoverable hiccup earlier in Set()".
+            # That theory was never tested: a Set-PbiRsUrlReservation failure still
+            # reported InDesiredState=True, and the only symptom was an unexplained
+            # Phase 11 reporting failure later. Keep the allowance, but PROVE it --
+            # PBIRS has to answer SOAP before the error counts as recoverable.
+            if ($needsReboot) {
+                Write-Status "PBIRS: error above is not fatal yet -- a reboot is still owed, so the LCM re-runs Set() after restart."
+            }
+            else {
+                $vScheme = if ($this.TemplateName) { 'https' } else { 'http' }
+                $vFqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+                $vUri = "$vScheme`://$vFqdn/ReportServer/ReportService2005.asmx"
+                $vOk = $false
+                $vErr = 'no attempt made'
+                $vCb = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                try {
+                    $vDeadline = (Get-Date).AddSeconds(60)
+                    while ((Get-Date) -lt $vDeadline) {
+                        try {
+                            $vProxy = New-WebServiceProxy -Uri $vUri -UseDefaultCredential -ErrorAction Stop
+                            if ($vProxy.GetItemType("/") -eq 'Folder') { $vOk = $true; break }
+                            $vErr = "unexpected root type"
+                        }
+                        catch { $vErr = $_.Exception.Message }
+                        Start-Sleep -Seconds 10
+                    }
+                }
+                finally { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $vCb }
+
+                if ($vOk) {
+                    Write-Status "PBIRS recovered: despite the error above the portal answers SOAP at $vUri. Treating as non-fatal."
+                }
+                else {
+                    Write-Status "PBIRS is NOT functional after the error above -- SOAP probe at ${vUri} failed within 60s: $vErr. Failing the resource."
+                    throw $_err
+                }
+            }
         }
     }
 
@@ -7769,7 +7809,7 @@ class InstallPBIRS {
             if ($this.RSInstance -eq "PBIRS") {
                 $service = Get-Service PowerBIReportServer -ErrorAction SilentlyContinue
                 if (-not $service -or $service.Status -ne "Running") {
-                    Write-Verbose "InstallPBIRS Test: PowerBIReportServer service not running."
+                    Write-VerboseEx "InstallPBIRS Test: PowerBIReportServer service state is '$(if ($service) { $service.Status } else { 'not installed' })', not Running -- Set() will run."
                     return $false
                 }
             }
@@ -7780,7 +7820,7 @@ class InstallPBIRS {
             # RSReportServer.config must exist (proves install completed fully)
             $configPath = Join-Path $ssrsPath 'ReportServer\RSReportServer.config'
             if (-not (Test-Path -LiteralPath $configPath)) {
-                Write-Verbose "InstallPBIRS Test: RSReportServer.config not found at $configPath"
+                Write-VerboseEx "InstallPBIRS Test: RSReportServer.config not found at $configPath -- Set() will run."
                 return $false
             }
 
@@ -7795,26 +7835,26 @@ class InstallPBIRS {
                 $verName = $wmiVer.Name
                 $wmiNs = "root\Microsoft\SqlServer\ReportServer\$rsName\$verName\Admin"
             } catch {
-                Write-Verbose "InstallPBIRS Test: cannot enumerate PBIRS WMI namespace: $_"
+                Write-VerboseEx "InstallPBIRS Test: cannot enumerate PBIRS WMI namespace ($_) -- Set() will run."
                 return $false
             }
 
             $rsConfig = Get-WmiObject -Namespace $wmiNs -Class MSReportServer_ConfigurationSetting -ErrorAction SilentlyContinue
             if (-not $rsConfig) {
-                Write-Verbose "InstallPBIRS Test: MSReportServer_ConfigurationSetting not found in $wmiNs"
+                Write-VerboseEx "InstallPBIRS Test: MSReportServer_ConfigurationSetting not found in $wmiNs -- Set() will run."
                 return $false
             }
 
             # DatabaseName must be populated (proves Set-RsDatabase ran)
             if ([string]::IsNullOrWhiteSpace($rsConfig.DatabaseName)) {
-                Write-Verbose "InstallPBIRS Test: database not configured (empty DatabaseName in WMI)"
+                Write-VerboseEx "InstallPBIRS Test: database not configured (empty DatabaseName in WMI) -- Set() will run."
                 return $false
             }
 
             # At least one URL must be reserved
             $urls = $rsConfig.ListReservedUrls()
             if (-not $urls -or -not $urls.UrlString -or $urls.UrlString.Count -eq 0) {
-                Write-Verbose "InstallPBIRS Test: no URL reservations in WMI"
+                Write-VerboseEx "InstallPBIRS Test: no URL reservations in WMI -- Set() will run."
                 return $false
             }
 
@@ -7822,7 +7862,7 @@ class InstallPBIRS {
             if ($this.TemplateName) {
                 $httpsUrls = $urls.UrlString | Where-Object { $_ -like 'https:*' }
                 if (-not $httpsUrls -or $httpsUrls.Count -eq 0) {
-                    Write-Verbose "InstallPBIRS Test: TemplateName set but no HTTPS URL reservations found"
+                    Write-VerboseEx "InstallPBIRS Test: TemplateName set but no HTTPS URL reservations found (have: $($urls.UrlString -join ', ')) -- Set() will run."
                     return $false
                 }
             }
@@ -7845,7 +7885,7 @@ class InstallPBIRS {
                         Write-Verbose "InstallPBIRS Test: SOAP API healthy at '$soapUri' (root = Folder)"
                     }
                     else {
-                        Write-Verbose "InstallPBIRS Test: SOAP API returned unexpected root type '$itemType'"
+                        Write-VerboseEx "InstallPBIRS Test: SOAP API returned unexpected root type '$itemType' -- Set() will run."
                         return $false
                     }
                 }
@@ -7854,14 +7894,14 @@ class InstallPBIRS {
                 }
             }
             catch {
-                Write-Verbose "InstallPBIRS Test: SOAP API probe failed: $($_.Exception.Message)"
+                Write-VerboseEx "InstallPBIRS Test: SOAP API probe failed ($($_.Exception.Message)) -- Set() will run."
                 return $false
             }
 
             return $true
         }
         catch {
-            Write-Verbose "InstallPBIRS Test: $_"
+            Write-VerboseEx "InstallPBIRS Test: threw ($_) -- Set() will run."
             return $false
         }
     }
