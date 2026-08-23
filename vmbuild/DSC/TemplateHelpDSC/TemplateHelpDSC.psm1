@@ -3247,6 +3247,46 @@ function Get-RsWmiCallFailure {
     return ("{0} failed: HRESULT {1} (0x{1:X8}){2}" -f $What, $hr, $detail)
 }
 
+function Get-RsMissingCatalogTable {
+    # Set-RsDatabase -IsExistingDatabase does not create the report server catalog -- it
+    # writes the rights script and points the service at whatever database is there. So a
+    # ReportServer database with a partial catalog survives configuration and then answers
+    # every request with HTTP 500 "Invalid object name 'ConfigurationInfo'".
+    # The probed list is deliberately short: only names proven to exist in a real PBIRS
+    # catalog. A wrong name here would report a HEALTHY database as broken and drop it.
+    # Returns $null when the database does not exist, otherwise the (possibly empty) set of
+    # missing table names. Throws if the server cannot be queried, because a check that did
+    # not run must not read as healthy.
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string] $SqlServer,
+        [Parameter(Position = 1)]
+        [string] $DatabaseName = 'ReportServer'
+    )
+
+    $probe = @('ConfigurationInfo', 'Subscriptions')
+    $missing = New-Object System.Collections.ArrayList
+    $conn = New-Object System.Data.SqlClient.SqlConnection
+    $conn.ConnectionString = "Server=$SqlServer;Database=master;Integrated Security=True;TrustServerCertificate=True"
+    try {
+        $conn.Open()
+        $cmd = $conn.CreateCommand()
+        $cmd.CommandText = "SELECT DB_ID('$DatabaseName')"
+        $dbId = $cmd.ExecuteScalar()
+        if ($null -eq $dbId -or $dbId -eq [DBNull]::Value) { return $null }
+        foreach ($t in $probe) {
+            $cmd.CommandText = "SELECT OBJECT_ID('$DatabaseName.dbo.$t')"
+            $oid = $cmd.ExecuteScalar()
+            if ($null -eq $oid -or $oid -eq [DBNull]::Value) { [void]$missing.Add($t) }
+        }
+    }
+    finally { $conn.Close() }
+
+    # The comma keeps an empty result an ARRAY; without it the caller gets $null and
+    # cannot tell "catalog intact" from "database absent".
+    return , $missing.ToArray()
+}
+
 function Write-Status {
     param(
         [String] $Status
@@ -7554,37 +7594,44 @@ class InstallPBIRS {
             }
 
 
-            # Pre-flight: if the ReportServer database already exists but is
-            # corrupt (e.g. missing dbo.Subscriptions), Set-RsDatabase's upgrade
-            # scripts will fail. Drop the corrupt DB so Set-RsDatabase creates a
-            # clean one instead of trying to upgrade.
+            # Pre-flight: a ReportServer database that exists with a PARTIAL catalog cannot be
+            # repaired by Set-RsDatabase -- the -IsExistingDatabase fallback below only points
+            # the service at it. Drop it so a clean catalog gets created.
+            # Probing one table is not enough: BI-PRIMARY 2026-08-23 had dbo.Subscriptions
+            # present and dbo.ConfigurationInfo missing, so the old single-table probe called
+            # the database healthy and three re-runs each died 3 minutes later on HTTP 500.
+            $rsDbMissing = $null
             try {
-                $checkConn = New-Object System.Data.SqlClient.SqlConnection
-                $checkConn.ConnectionString = "Server=$($this.SqlServer);Database=master;Integrated Security=True;TrustServerCertificate=True"
-                $checkConn.Open()
-                $checkCmd = $checkConn.CreateCommand()
-                $checkCmd.CommandText = "SELECT DB_ID('ReportServer')"
-                $dbExists = $checkCmd.ExecuteScalar()
-                if ($null -ne $dbExists -and $dbExists -ne [DBNull]::Value) {
-                    $checkCmd.CommandText = "SELECT OBJECT_ID('ReportServer.dbo.Subscriptions')"
-                    $tblExists = $checkCmd.ExecuteScalar()
-                    if ($null -eq $tblExists -or $tblExists -eq [DBNull]::Value) {
-                        Write-Status "ReportServer database exists but is corrupt (dbo.Subscriptions missing). Dropping and re-creating."
-                        Stop-Service -Name 'PowerBIReportServer' -Force -ErrorAction SilentlyContinue
-                        Start-Sleep -Seconds 3
+                $rsDbMissing = Get-RsMissingCatalogTable -SqlServer $this.SqlServer
+                if ($null -eq $rsDbMissing) {
+                    Write-VerboseEx "ReportServer database does not exist yet; Set-RsDatabase will create it."
+                }
+                elseif ($rsDbMissing.Count -gt 0) {
+                    Write-Status "ReportServer database exists but is missing catalog table(s): $($rsDbMissing -join ', '). Dropping and re-creating."
+                    Stop-Service -Name 'PowerBIReportServer' -Force -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 3
+                    $dropConn = New-Object System.Data.SqlClient.SqlConnection
+                    $dropConn.ConnectionString = "Server=$($this.SqlServer);Database=master;Integrated Security=True;TrustServerCertificate=True"
+                    try {
+                        $dropConn.Open()
+                        $dropCmd = $dropConn.CreateCommand()
                         foreach ($dbName in 'ReportServerTempDB', 'ReportServer') {
-                            $checkCmd.CommandText = "IF DB_ID('$dbName') IS NOT NULL BEGIN ALTER DATABASE [$dbName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$dbName]; END"
-                            $checkCmd.ExecuteNonQuery() | Out-Null
-                            Write-Status "Dropped corrupt database $dbName"
+                            $dropCmd.CommandText = "IF DB_ID('$dbName') IS NOT NULL BEGIN ALTER DATABASE [$dbName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$dbName]; END"
+                            $dropCmd.ExecuteNonQuery() | Out-Null
+                            Write-Status "Dropped incomplete database $dbName"
                         }
                     }
+                    finally { $dropConn.Close() }
                 }
-                $checkConn.Close()
+                else {
+                    Write-VerboseEx "ReportServer catalog probe found ConfigurationInfo and Subscriptions present."
+                }
             }
             catch {
-                Write-Status "Warning: could not check ReportServer database health: $($_.Exception.Message)"
+                Write-Status "Could not verify ReportServer database health -- it was NOT checked: $($_.Exception.Message)"
             }
 
+            $rsDbCreateError = ''
             try {
                 Write-Status "Calling Set-RsDatabase"
                 if ($this.IsRemoteDatabaseServer) {
@@ -7609,7 +7656,11 @@ class InstallPBIRS {
                 }
             }
             catch {
-                Write-Verbose ("InstallPBIRS $_")
+                # The only place the real catalog-creation error appears. It went to
+                # Write-Verbose, which a pushed configuration discards, so the -IsExistingDatabase
+                # retry below read as a normal path rather than a fallback for an unknown fault.
+                $rsDbCreateError = $_.Exception.Message
+                Write-Status "Set-RsDatabase (create) failed; retrying with -IsExistingDatabase: $rsDbCreateError"
                 if ($this.IsRemoteDatabaseServer) {
                     Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
                     Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
@@ -7618,6 +7669,25 @@ class InstallPBIRS {
                     Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
                     Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
+            }
+
+            # -IsExistingDatabase cannot fail the way a create can -- it writes the rights
+            # script and points the service at whatever is there, including a database with no
+            # catalog. Unverified, that turns a failed create into a portal that answers every
+            # request with HTTP 500 "Invalid object name 'ConfigurationInfo'" (BI-PRIMARY
+            # 2026-08-23), three minutes of SOAP probe, and a stack trace for a reason.
+            $rsDbMissingAfter = $null
+            $rsDbVerifyError = ''
+            try { $rsDbMissingAfter = Get-RsMissingCatalogTable -SqlServer $this.SqlServer }
+            catch { $rsDbVerifyError = $_.Exception.Message }
+            if ($rsDbVerifyError) {
+                Write-Status "Could not verify the ReportServer catalog after Set-RsDatabase -- it was NOT checked: $rsDbVerifyError"
+            }
+            elseif ($null -eq $rsDbMissingAfter) {
+                throw "Set-RsDatabase completed but the ReportServer database does not exist on $($this.SqlServer). Create error was: $rsDbCreateError"
+            }
+            elseif ($rsDbMissingAfter.Count -gt 0) {
+                throw "Set-RsDatabase completed but the ReportServer catalog is incomplete (missing dbo.$($rsDbMissingAfter -join ', dbo.')). Every portal request would fail with HTTP 500 'Invalid object name'. Create error was: $rsDbCreateError"
             }
 
 
