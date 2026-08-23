@@ -119,6 +119,14 @@
                     0x800704d3, cured emits a send. -StimulusSeconds bounds the second watch, and
                     the bump must land (SourceVersion must change) or the trial is VOID.
 
+    Runtime: every watch returns the moment an outcome is decisive -- a send, this package's send,
+    or a NEW abort all end it, not just an Installed DP. The first run burned 908s after the
+    restart to reach a conclusion its first minute already contained. -PassiveSeconds (default 180)
+    is deliberately short because that phase only answers "did the restart alone resume queued
+    work", which distmgr does within seconds; with nothing queued, waiting longer cannot help.
+    Typical run is now a few minutes; the ceiling is BaselineSeconds + PassiveSeconds +
+    StimulusSeconds.
+
     Four distinguishable outcomes, and each points at a different script:
       CURED + package moved   -> the gate in InstallBoundaryGroups.ps1 is right and sufficient.
       CURED, package stranded -> the wedge fix works but distmgr.cpp:17252 never re-armed THIS
@@ -194,7 +202,8 @@ param(
     [switch]$SecondaryContentHop,
     [switch]$RepairSecondaryContent,
     [switch]$ProveWedgeFix,
-    [int]$StimulusSeconds = 900,
+    [int]$StimulusSeconds = 600,
+    [int]$PassiveSeconds = 180,
     [switch]$DrsProbe,
     [switch]$EnableDrsTracing,
     [switch]$DisableDrsTracing,
@@ -1523,7 +1532,10 @@ if ($ProveWedgeFix) {
         return
     }
     & $psay "process replaced: pid $($pre.ExecPid) -> $($post0.ExecPid). The flag should now be clear."
-    & $psay "watching up to ${PostSeconds}s for a real send and for $PackageId to reach $($sec.vmName)."
+    # Short on purpose. This phase only answers "did the restart alone resume work already queued",
+    # which distmgr does within seconds of picking up an inbox file. The 900s the first run spent
+    # here bought nothing: with no queued work the signal can never appear, however long you wait.
+    & $psay "watching ${PassiveSeconds}s for work the restart alone resumes."
 
     # Mutable state in a hashtable: a scriptblock that did `$sawSend = $true` would write to its own
     # child scope and the result would be lost, which is the same trap as += inside Where-Object.
@@ -1532,7 +1544,7 @@ if ($ProveWedgeFix) {
         param($Seconds)
         $t0 = Get-Date
         while (((Get-Date) - $t0).TotalSeconds -lt $Seconds) {
-            Start-Sleep -Seconds 30
+            Start-Sleep -Seconds 20
             $w = & $readWedge
             if (-not $w.Readable) { continue }
             # Compare indexes only WITHIN one read: the tail window slides, so an index from an
@@ -1541,10 +1553,13 @@ if ($ProveWedgeFix) {
             if ($w.LastSend -gt $w.LastAbort) { $st.SawSend = $true }
             if ($w.LastPkgSend -gt $w.LastAbort) { $st.SawPkgSend = $true }
             $st.Aborts = $w.Aborts
+            # A new abort is as decisive as a send. Polling on after either one only burns clock --
+            # the first run spent 908s to learn something the first 60s could have told it.
+            if ($st.SawSend -or $st.SawPkgSend -or $st.Aborts -gt $pre.Aborts) { return }
             if ((& $readSecState $sec $parent).Installed) { $st.Installed = $true; return }
         }
     }
-    & $watch $PostSeconds
+    & $watch $PassiveSeconds
 
     # Nothing was exercised, so nothing has been decided. Force an attempt rather than reporting a
     # non-result: the stranded package alone will never trigger one.
