@@ -3642,6 +3642,68 @@ function Test-VmPhase1Incomplete {
     return [pscustomobject]@{ Incomplete = $false; Reason = "lastPhaseComplete=$donePhase" }
 }
 
+function Get-VmMissingDataDisk {
+    <#
+    .SYNOPSIS
+        Which additionalDisks does the config ask for that this VM does not actually have?
+
+    .DESCRIPTION
+        New-VirtualMachine creates <VmName>_DATA_<n>.vhdx, one per additionalDisks entry in
+        psobject.Properties order -- and it only ever runs in Phase 1, on a VM that does not
+        exist yet. So a disk ADDED to the config of a VM that already exists is never
+        created, and nothing notices until Phase 2's InitializeDisks fails on it.
+        CT1-DPMP1 2026-08-23: F=200GB added after an interrupted run had already built the
+        VM with only E; Phase 2 then burned 4h across 3 DSC resumes and 2 VM restarts on a
+        condition no retry could fix, and took the DC's WaitForAll down with it.
+
+        Enumerates in the same order as the creator, so index n here is the same disk the
+        creator would have made. Error is non-empty when the disks could not be read at all,
+        so "could not check" is never indistinguishable from "nothing missing".
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $AdditionalDisks
+    )
+
+    $result = [pscustomobject]@{
+        VMName   = $VmName
+        Error    = ''
+        Expected = @()
+        Missing  = @()
+    }
+
+    if ($null -eq $AdditionalDisks) { return $result }
+    $props = @($AdditionalDisks.psobject.Properties | Where-Object { $_ })
+    if ($props.Count -eq 0) { return $result }
+
+    try { $attached = @(Get-VMHardDiskDrive -VMName $VmName -ErrorAction Stop) }
+    catch {
+        $result.Error = "could not enumerate disks: $($_.Exception.Message)"
+        return $result
+    }
+
+    $paths = @($attached | ForEach-Object { $_.Path } | Where-Object { $_ })
+    $expected = @()
+    $missing = @()
+    $index = 0
+    foreach ($p in $props) {
+        $file = "$VmName`_DATA_$index.vhdx"
+        $present = @($paths | Where-Object { $_ -like "*\$file" }).Count -gt 0
+        $row = [pscustomobject]@{ Letter = $p.Name; Size = $p.Value; File = $file; Present = $present }
+        $expected += $row
+        if (-not $present) { $missing += $row }
+        $index++
+    }
+
+    $result.Expected = $expected
+    $result.Missing = $missing
+    return $result
+}
+
 function New-VmNote {
     param (
         [Parameter(Mandatory = $true)]

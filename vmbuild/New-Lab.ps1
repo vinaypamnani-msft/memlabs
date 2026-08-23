@@ -1048,6 +1048,31 @@ try {
         Get-List -FlushCache
     }
 
+    # Phase 1 is the only thing that creates additionalDisks, and it is skipped for a VM
+    # that already exists -- so a disk added to an existing VM's config never appears, and
+    # Phase 2 InitializeDisks cannot ever succeed. Fail here instead of at the end of the
+    # phase budget. VMs about to be rebuilt are excluded; they get their disks from Phase 1.
+    $diskMismatch = @()
+    foreach ($vm in $deployConfig.virtualMachines) {
+        if ($vm.hidden -or $vm.role -eq 'AADClient') { continue }
+        if ($vm.vmName -in $global:ForcePhase1VmNames) { continue }
+        if (-not (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue)) { continue }
+        $diskState = Get-VmMissingDataDisk -VmName $vm.vmName -AdditionalDisks $vm.additionalDisks
+        if ($diskState.Error) {
+            Write-Log "[Phase 0] $($vm.vmName): $($diskState.Error). Its disks were NOT verified." -Warning
+            continue
+        }
+        if ($diskState.Missing.Count -gt 0) {
+            $detail = (($diskState.Missing | ForEach-Object { "$($_.Letter)=$($_.Size) [$($_.File)]" }) -join ', ')
+            $diskMismatch += "$($vm.vmName) is missing $($diskState.Missing.Count) configured disk(s): $detail"
+        }
+    }
+    if ($diskMismatch.Count -gt 0) {
+        foreach ($m in $diskMismatch) { Write-Log "[Phase 0] $m" -Failure }
+        Write-Log "[Phase 0] These VMs already exist, so Phase 1 will not run for them and the disk(s) above will never be created. Delete the VM(s) so Phase 1 rebuilds them, or remove the added disk(s) from the config." -Failure
+        exit 1
+    }
+
     # Define phases
     $start = 1
     $maxPhase = 11
