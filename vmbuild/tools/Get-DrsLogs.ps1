@@ -905,7 +905,7 @@ $refreshPkgSourceBlock = {
         }
         catch { }
     }
-    $o.Add("REFRESHPKG server has not moved SourceVersion in 60s (still $v0). Expected while distmgr is wedged; the verdict comes from distmgr's own log, not from this column.")
+    $o.Add("REFRESHPKG server has not moved SourceVersion in 60s (still $v0). That is NOT a failure: measured 2026-08-23, the server took ~9 minutes. The watch that follows tracks srcVer from the summarizer, so a late move is still seen.")
     return $o.ToArray()
 }
 
@@ -1349,10 +1349,16 @@ $readSecState = {
     # 'BI-SECONDARY-DP' row and report a different machine's state as this one's.
     $nameRe = '^DPSTATE\[' + [regex]::Escape($short) + '(\.|\])'
     $mine = @($rows | Where-Object { $_ -match $nameRe })
+    $row = (@($mine) | Select-Object -First 1)
+    # The summarizer row already carries srcVer, so the source version can be tracked without a
+    # second round-trip -- and it is how a stimulus is seen to land: on 2026-08-23 RefreshPkgSource
+    # took ~9 minutes to move it, far longer than any short poll after the call.
+    $sv = if ("$row" -match 'srcVer=(\d+)') { [int]$Matches[1] } else { -1 }
     return [pscustomobject]@{
         Readable  = ($rows.Count -gt 0)
-        Row       = (@($mine) | Select-Object -First 1)
+        Row       = $row
         Installed = (@($mine | Where-Object { $_ -match 'state=0\(' }).Count -gt 0)
+        SrcVer    = $sv
         Lines     = $lines
     }
 }
@@ -1541,7 +1547,12 @@ if ($ProveWedgeFix) {
 
     $dpPre = & $readSecState $sec $parent
     foreach ($l in $dpPre.Lines) { & $psay "    $l" }
-    if ($dpPre.Installed) { & $psay "ABORT: $($sec.vmName) already reads Installed for $PackageId. NOT A RESULT."; return }
+    if ($dpPre.Installed) {
+        & $psay "ABORT: $($sec.vmName) already reads Installed for $PackageId at srcVer=$($dpPre.SrcVer). NOT A RESULT as a trial."
+        & $psay 'READ THIS CAREFULLY: if an earlier run bumped the source version, this IS the fix landing, not a no-op. Compare srcVer against the earlier run - a HIGHER srcVer now Installed means the stranded package moved. Confirm physically with -SecondaryContentHop (PkgLib must now hold the package).'
+        Write-Host "Proof log: $pwLog" -ForegroundColor Green
+        return
+    }
 
     & $psay ''
     & $psay "BASELINE: ${BaselineSeconds}s with NO intervention."
@@ -1578,7 +1589,7 @@ if ($ProveWedgeFix) {
 
     # Mutable state in a hashtable: a scriptblock that did `$sawSend = $true` would write to its own
     # child scope and the result would be lost, which is the same trap as += inside Where-Object.
-    $st = @{ SawSend = $false; SawPkgSend = $false; Installed = $false; Aborts = $pre.Aborts }
+    $st = @{ SawSend = $false; SawPkgSend = $false; Installed = $false; Aborts = $pre.Aborts; SrcVer = $dpPre.SrcVer }
     $watch = {
         param($Seconds)
         $t0 = Get-Date
@@ -1595,7 +1606,9 @@ if ($ProveWedgeFix) {
             # A new abort is as decisive as a send. Polling on after either one only burns clock --
             # the first run spent 908s to learn something the first 60s could have told it.
             if ($st.SawSend -or $st.SawPkgSend -or $st.Aborts -gt $pre.Aborts) { return }
-            if ((& $readSecState $sec $parent).Installed) { $st.Installed = $true; return }
+            $d = & $readSecState $sec $parent
+            if ($d.SrcVer -gt $st.SrcVer) { $st.SrcVer = $d.SrcVer }
+            if ($d.Installed) { $st.Installed = $true; return }
         }
     }
     & $watch $PassiveSeconds
@@ -1646,8 +1659,8 @@ if ($ProveWedgeFix) {
         & $psay 'ACTION: the SMS_EXECUTIVE restart is NOT the cure. Do NOT keep 060c30cb as-is -- a wider gate then restarts the service more often for no benefit. Reconsider both the gate and the claim in the InstallBoundaryGroups.ps1 comment.'
     }
     elseif ($stimulated) {
-        & $psay "RESULT: NO CONTENT ACTIVITY AT ALL. SourceVersion was bumped and ${elapsed}s later distmgr has emitted neither a send nor a new abort."
-        & $psay 'ACTION: this is not about the cancel flag -- distmgr is not processing the package at all. Look upstream of the send decision (is the version change replicating to the parent, is the package targeted at the secondary) before touching the wedge gate.'
+        & $psay "RESULT: NO CONTENT ACTIVITY AT ALL. The stimulus was issued and ${elapsed}s later distmgr has emitted neither a send nor a new abort (srcVer $($dpPre.SrcVer) -> $($st.SrcVer))."
+        & $psay 'ACTION: if srcVer did NOT move, the server has not processed the refresh yet -- re-run -SecondaryContentHop in a few minutes before concluding anything; it took ~9 minutes on 2026-08-23. If srcVer DID move and still nothing happened, look at whether the package is targeted at the secondary, not at the cancel flag.'
     }
     else {
         & $psay "RESULT: INCONCLUSIVE after ${elapsed}s -- no send newer than the last abort, no new abort, DP not Installed, and the stimulus did not run."
