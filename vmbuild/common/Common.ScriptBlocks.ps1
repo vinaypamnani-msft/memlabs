@@ -2251,8 +2251,8 @@ function Save-CMSetupSqlFailureEvidence {
         return
     }
     if (-not $tail) {
-        Write-Log "[Phase $Phase]: $VmName`: SQL failure evidence: ConfigMgrSetup.log tail came back EMPTY -- no SQL-side evidence was collected." -Warning -OutputStream
-        return
+        Write-Log "[Phase $Phase]: $VmName`: SQL failure evidence: ConfigMgrSetup.log tail came back EMPTY -- nothing to classify with, so the SQL host is asked for everything." -Warning -OutputStream
+        $tail = ''
     }
 
     $rxSqlError = [regex]'^\s*\*\*\*\s+\[[^\]]+\]\[(?<num>\d+)\](?<msg>.*?)\s*(\$\$<|$)'
@@ -2293,25 +2293,24 @@ function Save-CMSetupSqlFailureEvidence {
         }
     }
 
-    if (-not $sqlErrNum -and -not $sqlErrUnnamed) {
-        Write-Log "[Phase $Phase]: $VmName`: SQL failure evidence: ConfigMgrSetup.log names no SQL error in its last 400 lines -- nothing to classify, so NO SQL-side evidence was collected. Read the pulled ConfigMgrSetup.log directly." -Warning -OutputStream
-        return
-    }
-
     if ($sqlErrUnnamed) {
         Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup database initialization died on an UNNAMED SQL error -- Setup logged 'Unknown SQL Error' and an empty 'SQL Server error: <>', i.e. the provider gave it no number and no text." -OutputStream
     }
-    else {
+    elseif ($sqlErrNum) {
         Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup database initialization was killed by SQL Server error $sqlErrNum -- $sqlErrText" -OutputStream
+    }
+    else {
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup database initialization failed but ConfigMgrSetup.log names no SQL error in its last 400 lines -- nothing narrows the collection, so the SQL host is asked for everything." -Warning -OutputStream
     }
     if ($sqlStmt) {
         if ($sqlStmt.Length -gt 300) { $sqlStmt = $sqlStmt.Substring(0, 300) + ' ...[truncated]' }
         Write-Log "[Phase $Phase]: $VmName`: DIAG: failing statement -- $sqlStmt" -OutputStream
     }
 
-    # Storage/page-integrity errors. Everything else (permissions, timeouts,
-    # bad parameters) is answered by ConfigMgrSetup.log alone.
-    $corruptionErrors = @(605, 823, 824, 825, 829, 5180, 7105, 8646, 8909, 8928, 9100)
+    # Storage/page-integrity errors, plus 3624/5242/5243 where the engine asserts on
+    # its own in-memory structures. This list decides only whether CHECKDB runs --
+    # it is not permission to collect.
+    $corruptionErrors = @(605, 823, 824, 825, 829, 3624, 5180, 5242, 5243, 7105, 8646, 8909, 8928, 9100)
 
     # "the remote host forcibly closed the connection" is a statement ABOUT SQL
     # Server, and ConfigMgrSetup.log cannot adjudicate it: an AG role change, an
@@ -2320,21 +2319,35 @@ function Save-CMSetupSqlFailureEvidence {
     # database is not suspected of damage, only the session.
     $connectionLossErrors = @(64, 121, 232, 233, 258, 10053, 10054, 10060)
 
+    # The ONLY errors that do not get collected: the message names the principal or
+    # the object, and SQL Server writes nothing server-side for them. Everything
+    # else -- including numbers memlabs has never seen -- collects, because an
+    # unrecognised error is precisely the case with no other evidence. Four separate
+    # failures (9100, 10054, an unnamed error, 5243) each landed outside whatever
+    # allowlist existed at the time and threw the SQL side away.
+    $selfExplainedErrors = @(208, 229, 262, 300, 916, 2714, 4060, 15247, 18452, 18456)
+
     # The client-side number never appears in the ERRORLOG, so scan for the
     # server-side events that actually explain a dropped session.
     $connectionLossScanNumbers = @(701, 802, 845, 9001, 17053, 17189, 17830, 17886, 18056)
     $connectionLossScanPattern = 'is changing roles|availability (group|replica).*(offline|resolving|not (healthy|synchron))|SQL Server (is starting|shutdown has been initiated)|non-yielding|Deadlocked Schedulers|insufficient system memory|Failed (to )?allocate|fatal error occurred while (reading|writing)|forcefully terminat|taking longer than \d+ seconds'
 
-    $scanNumbers = $corruptionErrors
-    $scanPattern = $null
-    $runCheckDb = $true
-    # An unnamed error implies no page damage, only a dead session, so it collects on
-    # the connection-loss path: ERRORLOG generations and dumps, no CHECKDB.
-    if ($sqlErrUnnamed -or ($corruptionErrors -notcontains $sqlErrNum)) {
-        if (-not $sqlErrUnnamed -and ($connectionLossErrors -notcontains $sqlErrNum)) { return }
-        $scanNumbers = $connectionLossScanNumbers
+    if ($sqlErrNum -and ($selfExplainedErrors -contains $sqlErrNum)) {
+        Write-Log "[Phase $Phase]: $VmName`: SQL failure evidence: error $sqlErrNum is self-describing (it names the principal or object and SQL Server logs nothing server-side for it), so no SQL-side evidence was collected -- ConfigMgrSetup.log above has the answer." -OutputStream
+        return
+    }
+
+    $runCheckDb = ($corruptionErrors -contains $sqlErrNum)
+    if ($runCheckDb) {
+        $scanNumbers = $corruptionErrors
+        $scanPattern = $null
+    }
+    else {
+        # Unclassified and unnamed failures scan for BOTH sets plus whatever number
+        # Setup did report; the assertion/stack-dump scan inside $collect is
+        # unconditional, so a novel error still surfaces its dump.
+        $scanNumbers = @(@($connectionLossScanNumbers) + @($corruptionErrors) + @($sqlErrNum) | Where-Object { $_ } | Sort-Object -Unique)
         $scanPattern = $connectionLossScanPattern
-        $runCheckDb = $false
     }
 
     $sqlHosts = New-Object System.Collections.Generic.List[string]
@@ -2626,8 +2639,14 @@ WHERE d.name LIKE 'CM[_]%'
         $verdict = if ($sqlErrUnnamed) {
             "DIAG: Setup could not name the error at all, which is what an aborted session looks like from the client -- ConfigMgrSetup.log cannot say why (an AG role change, an engine crash, an OOM kill and a stalled scheduler all look identical). ERRORLOG scan: $logHits server-side event line(s), $assertLines assertion/dump line(s)."
         }
-        else {
+        elseif ($connectionLossErrors -contains $sqlErrNum) {
             "DIAG: SQL error $sqlErrNum means SQL Server closed the connection; ConfigMgrSetup.log cannot say why (an AG role change, an engine crash, an OOM kill and a stalled scheduler all look like this from the client). ERRORLOG scan: $logHits server-side event line(s), $assertLines assertion/dump line(s)."
+        }
+        elseif ($sqlErrNum) {
+            "DIAG: SQL error $sqlErrNum is one memlabs has not classified, so the SQL host was asked for everything rather than assuming the CM log was enough. ERRORLOG scan: $logHits server-side event line(s), $assertLines assertion/dump line(s). If the ERRORLOG turns out to name page damage, add $sqlErrNum to `$corruptionErrors so a DBCC CHECKDB runs next time."
+        }
+        else {
+            "DIAG: ConfigMgrSetup.log named no SQL error, so the SQL host was asked for everything. ERRORLOG scan: $logHits server-side event line(s), $assertLines assertion/dump line(s)."
         }
         if ($logHits -eq 0 -and $assertLines -eq 0) {
             $verdict += " Nothing matched the known causes, which is NOT the same as nothing happening -- read the pulled ERRORLOG copies around the setup window before blaming the network."
@@ -8397,6 +8416,10 @@ $global:Linux_Configure = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux_Configure failed." -OutputStream -Failure
             return
         }
+
+        # Phase 2 skips non-Proxy Linux VMs, so this is the only path that revisits
+        # the reservation after the build -- see Set-LinuxVmDhcpReservation.
+        $null = Set-LinuxVmDhcpReservation -Vm $currentItem -DeployConfig $deployConfig
 
         try {
             $note = Get-VMNote -VMName $currentItem.vmName
