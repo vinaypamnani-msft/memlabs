@@ -81,6 +81,42 @@
     on the PARENT's targeting rows and does not drive the send-to-child path, so a negative result
     here is the expected one and is worth recording; a positive one is the rung worth shipping.
 .PARAMETER PostSeconds      How long to watch after the flush (default 900).
+
+.PARAMETER ProveWedgeFix
+    INTERVENES on the lab. Tests END TO END the one thing the distmgr-wedge work never established:
+    that restarting SMS_EXECUTIVE actually CURES the wedge. InstallBoundaryGroups.ps1 calls that
+    restart "the proven cure"; the historical logs do not show it. The 4.5h after the only real
+    firing (08-21 10:54:57) contains ~77 distmgr lines, all clustered at 15:24-15:26, so that
+    window is absence of evidence, not evidence of a cure.
+
+    The wedge itself IS established: m_bShutdownRequest is a static set at distmgr.cpp:8190 when
+    the process thread exits, passed as the cancel flag to CreatePackageBundle / SnapshotPackage /
+    TakeContentSnapshot, and cleared only by the CDistributionManager constructor -- so only a
+    FRESH PROCESS clears it. The guest log shows the recycle path verbatim:
+      SMS_EXECUTIVE started SMS_DISTRIBUTION_MANAGER as thread ID 6784
+      SMS_EXECUTIVE signalled SMS_DISTRIBUTION_MANAGER to stop.
+    Same PID, new thread, flag survives.
+
+    Pre-registered so the result cannot be rationalised afterwards:
+      precondition  the parent primary reads WEDGED on the SAME predicate InstallBoundaryGroups.ps1
+                    ships (>=5 content aborts and no real send since the last one). Otherwise abort
+                    -- there is nothing to test.
+      baseline      watch -BaselineSeconds with NO intervention. A send or an Installed DP during
+                    this means THE RESTART WAS NOT TESTED, and the run says exactly that.
+      intervention  Restart-Service SMS_EXECUTIVE on the parent.
+      instrument    the PID must CHANGE. The whole mechanism claim is "only a fresh process clears
+                    it", so an unchanged PID makes the trial void rather than negative.
+      measure       new aborts, any real send, the stranded package's own send, the secondary's
+                    PkgLib, and the summarizer state.
+
+    Four distinguishable outcomes, and each points at a different script:
+      CURED + package moved   -> the gate in InstallBoundaryGroups.ps1 is right and sufficient.
+      CURED, package stranded -> the wedge fix works but distmgr.cpp:17252 never re-armed THIS
+                                 send, so the package needs its source version moved. Separate fix.
+      NOT CURED               -> the restart is NOT the cure. Do not widen the gate; 060c30cb makes
+                                 memlabs restart SMS_EXECUTIVE more often for no benefit and should
+                                 be reconsidered.
+      VOID                    -> instrument failure, decides nothing.
 .PARAMETER IntervalSeconds  Poll interval for -WatchSendChain (default 20).
 .PARAMETER MaxMinutes   Give up after this long under -WatchSendChain (default 120). Counts from ARMING, not from launch: arming lands at child site install, and the rest of Phase 8 still has to run before the coverage wait, whose own worst case is 2622s.
 .PARAMETER ArmWaitMinutes
@@ -128,6 +164,9 @@
 .EXAMPLE
     # measure, then intervene if the precondition holds
     .\Get-DrsLogs.ps1 -RepairSecondaryContent -Domain burnin.sandwich.lab -BaselineSeconds 120
+.EXAMPLE
+    # end-to-end proof that the SMS_EXECUTIVE restart cures a wedged distmgr
+    .\Get-DrsLogs.ps1 -ProveWedgeFix -Domain burnin.sandwich.lab
 #>
 [CmdletBinding()]
 param(
@@ -144,6 +183,7 @@ param(
     [switch]$ResetChildPackageState,
     [switch]$SecondaryContentHop,
     [switch]$RepairSecondaryContent,
+    [switch]$ProveWedgeFix,
     [switch]$DrsProbe,
     [switch]$EnableDrsTracing,
     [switch]$DisableDrsTracing,
@@ -731,6 +771,64 @@ $distmgrDecisionBlock = {
     return $o.ToArray()
 }
 
+# KEEP IN SYNC with the wedge gate in DSC/phases/InstallBoundaryGroups.ps1 -- proving a lookalike
+# predicate proves nothing about what ships. temp/test-wedge-gate-sync.ps1 asserts they match.
+$wedgeStateBlock = {
+    param($PkgId, $SecSite)
+    $o = New-Object System.Collections.Generic.List[string]
+    $dir = $null
+    foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+        try { $dir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
+        if ($dir) { break }
+    }
+    if (-not $dir) { $o.Add('WEDGE UNREADABLE -- SMS install dir not found'); return $o.ToArray() }
+    $p = Join-Path $dir 'Logs\distmgr.log'
+    if (-not (Test-Path $p)) { $o.Add("WEDGE UNREADABLE -- no distmgr.log at $p"); return $o.ToArray() }
+    $tail = @(Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue)
+    if ($tail.Count -eq 0) { $o.Add('WEDGE UNREADABLE -- distmgr.log read returned nothing'); return $o.ToArray() }
+    $aborts = 0; $lastAbort = -1; $lastSend = -1; $lastPkgSend = -1
+    for ($i = 0; $i -lt $tail.Count; $i++) {
+        $ln = $tail[$i]
+        if ($ln -match '0x800704d3' -and $ln -match 'CopyFileExW|CreatePackageBundle|TakeContentSnapshot|AddContentToBundle|SnapshotPackage|BundleLegacyContentFiles') { $lastAbort = $i; $aborts++ }
+        if ($ln -match 'Created minijob to send compressed copy') {
+            $lastSend = $i
+            if ($ln -match [regex]::Escape("$PkgId") -and $ln -match ('to site {0}\.' -f [regex]::Escape("$SecSite"))) { $lastPkgSend = $i }
+        }
+    }
+    $wedged = ($aborts -ge 5 -and $lastAbort -gt $lastSend)
+    $o.Add("WEDGE lines=$($tail.Count) aborts=$aborts lastAbort=$lastAbort lastSend=$lastSend lastPkgSend=$lastPkgSend wedged=$wedged")
+    try {
+        $svc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+        $svcPid = [int]$svc.ProcessId
+        $start = '-'
+        if ($svcPid -gt 0) { $pr = Get-Process -Id $svcPid -ErrorAction SilentlyContinue; if ($pr) { $start = $pr.StartTime.ToString('MM-dd HH:mm:ss') } }
+        $o.Add("EXEC state=$($svc.State) pid=$svcPid start=$start")
+    }
+    catch { $o.Add("EXEC UNREADABLE $($_.Exception.Message)") }
+    return $o.ToArray()
+}
+
+# INTERVENTION. The PID must change: the mechanism claim is that only a fresh process clears the
+# static cancel flag, so a restart that reused the process would make the trial void, not negative.
+$execRestartBlock = {
+    $o = New-Object System.Collections.Generic.List[string]
+    $before = 0
+    try { $before = [int](Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop).ProcessId } catch { }
+    $o.Add("EXEC-RESTART before pid=$before")
+    try { Restart-Service -Name SMS_EXECUTIVE -Force -ErrorAction Stop; $o.Add('EXEC-RESTART issued') }
+    catch { $o.Add("EXEC-RESTART FAILED $($_.Exception.Message)"); return $o.ToArray() }
+    Start-Sleep -Seconds 30
+    $after = 0
+    $state = '?'
+    try {
+        $svc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+        $after = [int]$svc.ProcessId; $state = "$($svc.State)"
+    }
+    catch { }
+    $o.Add("EXEC-RESTART after pid=$after state=$state pidChanged=$($after -gt 0 -and $after -ne $before)")
+    return $o.ToArray()
+}
+
 function Get-GuestOutput {
     param($VmName, $DomainName, [scriptblock]$Block, [object[]]$ArgList, $Tag)
     # Invoke-VmCommand -AsJob bootstraps a job AND a session on every call (~1-2 min each), which
@@ -1160,6 +1258,25 @@ if ($FlushExperiment) {
     return
 }
 
+# Returns the summarizer line for a secondary, or Readable=$false when it could not be READ -- the
+# caller must never treat those the same. Module scope: both intervening modes need it.
+$readSecState = {
+    param($Sec, $Parent)
+    $lines = @(Get-GuestOutput -VmName $Parent.vmName -DomainName $dom -Block $dpStateBlock -ArgList @($Parent.siteCode, $PackageId) -Tag "dpstate-$($Parent.siteCode)")
+    $short = ($Sec.vmName -split '\.')[0]
+    $rows = @($lines | Where-Object { $_ -like 'DPSTATE`[*' })
+    # Anchored to the bracketed name: a bare substring lets 'BI-SECONDARY' match a
+    # 'BI-SECONDARY-DP' row and report a different machine's state as this one's.
+    $nameRe = '^DPSTATE\[' + [regex]::Escape($short) + '(\.|\])'
+    $mine = @($rows | Where-Object { $_ -match $nameRe })
+    return [pscustomobject]@{
+        Readable  = ($rows.Count -gt 0)
+        Row       = (@($mine) | Select-Object -First 1)
+        Installed = (@($mine | Where-Object { $_ -match 'state=0\(' }).Count -gt 0)
+        Lines     = $lines
+    }
+}
+
 if ($SecondaryContentHop -or $RepairSecondaryContent) {
     $hopLog = Join-Path $logsRoot ("secondary-content-hop-{0}.log" -f $stamp)
     $hsay = {
@@ -1191,22 +1308,6 @@ if ($SecondaryContentHop -or $RepairSecondaryContent) {
 
     # Returns the summarizer line for this secondary, or $null when it could not be READ -- the
     # caller must never treat those the same.
-    $readSecState = {
-        param($Sec, $Parent)
-        $lines = @(Get-GuestOutput -VmName $Parent.vmName -DomainName $dom -Block $dpStateBlock -ArgList @($Parent.siteCode, $PackageId) -Tag "dpstate-$($Parent.siteCode)")
-        $short = ($Sec.vmName -split '\.')[0]
-        $rows = @($lines | Where-Object { $_ -like 'DPSTATE`[*' })
-        # Anchored to the bracketed name: a bare substring lets 'BI-SECONDARY' match a
-        # 'BI-SECONDARY-DP' row and report a different machine's state as this one's.
-        $nameRe = '^DPSTATE\[' + [regex]::Escape($short) + '(\.|\])'
-        $mine = @($rows | Where-Object { $_ -match $nameRe })
-        return [pscustomobject]@{
-            Readable  = ($rows.Count -gt 0)
-            Row       = (@($mine) | Select-Object -First 1)
-            Installed = (@($mine | Where-Object { $_ -match 'state=0\(' }).Count -gt 0)
-            Lines     = $lines
-        }
-    }
 
     foreach ($s in $secList) {
         $parent = $parentOf[$s.vmName]
@@ -1307,6 +1408,132 @@ if ($SecondaryContentHop -or $RepairSecondaryContent) {
         & $hsay 'That matches phase8-clientpkg-coverage-secondary-inactive.md: RefreshNow acts on the PARENT targeting rows and does not drive the send-to-child path. Do NOT ship a rung that cannot work -- check PKGLIB/INBOX above and the link state instead.'
     }
     Write-Host "Hop log: $hopLog" -ForegroundColor Green
+    return
+}
+
+if ($ProveWedgeFix) {
+    $pwLog = Join-Path $logsRoot ("prove-wedge-fix-{0}.log" -f $stamp)
+    $psay = {
+        param($t)
+        $l = '{0}  {1}' -f (Get-Date -Format 'HH:mm:ss'), $t
+        Write-Host $l -ForegroundColor Gray
+        try { Add-Content -LiteralPath $pwLog -Value $l -Encoding utf8 -ErrorAction Stop } catch { }
+    }
+    & $psay "log -> $pwLog"
+    if ($secList.Count -ne 1) { & $psay "ABORT: need exactly one Secondary; got $($secList.Count). NOT A RESULT."; return }
+    $sec = $secList[0]
+    $parent = @($priList | Where-Object { $_.siteCode -eq $sec.parentSiteCode }) | Select-Object -First 1
+    if (-not $parent) { & $psay "ABORT: no parent primary for $($sec.vmName). NOT A RESULT."; return }
+
+    if (-not $PackageId) {
+        $cand = @(Get-GuestOutput -VmName $cas.vmName -DomainName $dom -Block $pkgFindBlock -ArgList @($cas.siteCode) -Tag 'find-clientpkg')
+        $ids = @($cand | Where-Object { $_ -match '^[A-Z0-9]{8} ' })
+        if ($ids.Count -ne 1) { & $psay 'ABORT: could not resolve the client package. Re-run with -PackageId. NOT A RESULT.'; return }
+        $PackageId = $ids[0].Split(' ')[0]
+    }
+    & $psay "package=$PackageId  parent=$($parent.vmName)/$($parent.siteCode)  secondary=$($sec.vmName)/$($sec.siteCode)"
+
+    $readWedge = {
+        $lines = @(Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $wedgeStateBlock -ArgList @($PackageId, $sec.siteCode) -Tag 'wedge')
+        $row = @($lines | Where-Object { $_ -like 'WEDGE *' }) | Select-Object -First 1
+        $exec = @($lines | Where-Object { $_ -like 'EXEC *' }) | Select-Object -First 1
+        $num = {
+            param($t, $k)
+            if ("$t" -match ($k + '=(-?\d+)')) { [int]$Matches[1] } else { $null }
+        }
+        [pscustomobject]@{
+            Readable    = ($row -and $row -notlike '*UNREADABLE*')
+            Wedged      = ("$row" -match 'wedged=True')
+            Aborts      = (& $num $row 'aborts')
+            LastAbort   = (& $num $row 'lastAbort')
+            LastSend    = (& $num $row 'lastSend')
+            LastPkgSend = (& $num $row 'lastPkgSend')
+            ExecPid     = (& $num $exec 'pid')
+            Lines       = $lines
+        }
+    }
+
+    $pre = & $readWedge
+    foreach ($l in $pre.Lines) { & $psay "    $l" }
+    if (-not $pre.Readable) { & $psay 'ABORT: distmgr.log was NOT read. Instrument failure, NOT evidence. NOT A RESULT.'; return }
+    if (-not $pre.Wedged) { & $psay "ABORT: the parent does not read WEDGED (aborts=$($pre.Aborts), lastAbort=$($pre.LastAbort), lastSend=$($pre.LastSend)). There is nothing to test. NOT A RESULT."; return }
+    & $psay "precondition met: WEDGED on the same predicate InstallBoundaryGroups.ps1 ships."
+
+    $dpPre = & $readSecState $sec $parent
+    foreach ($l in $dpPre.Lines) { & $psay "    $l" }
+    if ($dpPre.Installed) { & $psay "ABORT: $($sec.vmName) already reads Installed for $PackageId. NOT A RESULT."; return }
+
+    & $psay ''
+    & $psay "BASELINE: ${BaselineSeconds}s with NO intervention."
+    $tBase = Get-Date
+    $movedInBaseline = $false
+    while (((Get-Date) - $tBase).TotalSeconds -lt $BaselineSeconds) {
+        Start-Sleep -Seconds 30
+        $b = & $readWedge
+        if ($b.Readable -and ($b.LastSend -gt $pre.LastSend -or -not $b.Wedged)) { $movedInBaseline = $true; break }
+        if ((& $readSecState $sec $parent).Installed) { $movedInBaseline = $true; break }
+    }
+    if ($movedInBaseline) {
+        & $psay "MOVED DURING BASELINE after $([int]((Get-Date) - $tBase).TotalSeconds)s, with no intervention."
+        & $psay 'THE RESTART WAS NOT TESTED. This says the site was recovering on its own, nothing more.'
+        Write-Host "Proof log: $pwLog" -ForegroundColor Green
+        return
+    }
+    & $psay "baseline done: ${BaselineSeconds}s, still wedged, no send, DP not Installed."
+
+    & $psay ''
+    $tFix = Get-Date
+    foreach ($l in (Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $execRestartBlock -ArgList @() -Tag 'exec-restart')) { & $psay "    $l" }
+    $post0 = & $readWedge
+    if (-not $post0.Readable -or -not $post0.ExecPid -or $post0.ExecPid -eq $pre.ExecPid) {
+        & $psay "VOID: SMS_EXECUTIVE pid did not change ($($pre.ExecPid) -> $($post0.ExecPid)). Only a fresh process clears the flag, so this trial decides NOTHING."
+        Write-Host "Proof log: $pwLog" -ForegroundColor Green
+        return
+    }
+    & $psay "process replaced: pid $($pre.ExecPid) -> $($post0.ExecPid). The flag should now be clear."
+    & $psay "watching up to ${PostSeconds}s for a real send and for $PackageId to reach $($sec.vmName)."
+
+    $sawSend = $false; $sawPkgSend = $false; $installed = $false; $newAborts = $pre.Aborts
+    while (((Get-Date) - $tFix).TotalSeconds -lt $PostSeconds) {
+        Start-Sleep -Seconds 30
+        $w = & $readWedge
+        if (-not $w.Readable) { continue }
+        # Compare indexes only WITHIN one read: the tail window slides, so an index from an earlier
+        # read is not comparable. "Newer than the last abort" is the same test the gate itself uses.
+        if ($w.LastSend -gt $w.LastAbort) { $sawSend = $true }
+        if ($w.LastPkgSend -gt $w.LastAbort) { $sawPkgSend = $true }
+        $newAborts = $w.Aborts
+        if ((& $readSecState $sec $parent).Installed) { $installed = $true; break }
+    }
+    $post = & $readWedge
+    foreach ($l in $post.Lines) { & $psay "    $l" }
+    foreach ($l in (Get-GuestOutput -VmName $sec.vmName -DomainName $dom -Block $secContentBlock -ArgList @($PackageId) -Tag 'sec-after')) { & $psay "    SEC $l" }
+    $dpPost = & $readSecState $sec $parent
+    foreach ($l in $dpPost.Lines) { & $psay "    $l" }
+
+    & $psay ''
+    $elapsed = [int]((Get-Date) - $tFix).TotalSeconds
+    if ($dpPost.Installed -or $installed) {
+        & $psay "RESULT: CURED + PACKAGE INSTALLED. $($sec.vmName) reached Installed ${elapsed}s after the restart, having not moved during a ${BaselineSeconds}s baseline."
+        & $psay 'ACTION: the gate in InstallBoundaryGroups.ps1 (060c30cb) is right and sufficient. Nothing further to fix.'
+    }
+    elseif ($sawPkgSend -or $post.LastPkgSend -gt $post.LastAbort) {
+        & $psay "RESULT: CURED + PACKAGE SENT, summarizer not yet Installed after ${elapsed}s. The parent did emit 'Created minijob to send compressed copy of package $PackageId to site $($sec.siteCode)'."
+        & $psay 'ACTION: the wedge fix works and this package is moving. Re-check the summarizer before concluding anything about the DP; content transfer is downstream of the send.'
+    }
+    elseif ($sawSend -or $post.LastSend -gt $post.LastAbort) {
+        & $psay "RESULT: CURED, PACKAGE STILL STRANDED. Real sends resumed after the restart, but $PackageId never went to $($sec.siteCode) in ${elapsed}s."
+        & $psay 'ACTION: the wedge fix works. The stranded package is the SEPARATE defect -- distmgr.cpp:17252 skips its auto-recovery for exactly 0x800704D3, so this send was never re-armed and IsPkgSendingNeeded still declines. The remaining fix must move the package source version; RefreshNow cannot.'
+    }
+    elseif ($post.Wedged -and $newAborts -gt $pre.Aborts) {
+        & $psay "RESULT: NOT CURED. Still wedged ${elapsed}s after a confirmed process replacement, and aborts went $($pre.Aborts) -> $newAborts."
+        & $psay 'ACTION: the SMS_EXECUTIVE restart is NOT the cure. Do NOT keep 060c30cb as-is -- a wider gate then restarts the service more often for no benefit. Reconsider both the gate and the claim in the InstallBoundaryGroups.ps1 comment.'
+    }
+    else {
+        & $psay "RESULT: INCONCLUSIVE after ${elapsed}s -- no send newer than the last abort, no new abort, DP not Installed. The site did no content work in the window, so nothing was exercised."
+        & $psay 'ACTION: re-run with a longer -PostSeconds, or trigger a distribution to force content work. Do NOT record this as either a pass or a failure.'
+    }
+    Write-Host "Proof log: $pwLog" -ForegroundColor Green
     return
 }
 
