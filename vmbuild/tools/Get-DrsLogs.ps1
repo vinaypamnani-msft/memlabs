@@ -371,15 +371,9 @@ WHERE ps.PkgID = @p
 "@ 'PkgServerDistmgrJoin' $keep $PkgId
         Q "SELECT * FROM SMSPackages WHERE PkgID = @p" 'SMSPackages' $keep $PkgId
         # distmgr.cpp:27851 drops a CHILD-SITE package server from the send array unless the site's
-        # Status is SITE_STATUS_ACTIVE(1) -- site.cpp:1448. Every other status removes the DP before
-        # bServerChange/bResendPkg are ever evaluated, so this column outranks the whole chain below.
-        Q @"
-SELECT SiteCode, ReportingSiteCode, Type, Status,
-       CASE Status WHEN 1 THEN 'ACTIVE' WHEN 2 THEN 'PENDING-installing' WHEN 3 THEN 'FAILED-install'
-                   WHEN 4 THEN 'DELETED' WHEN 5 THEN 'UPGRADE' WHEN 6 THEN 'DELETE-FAILED'
-                   WHEN 7 THEN 'UPGRADE-FAILED' ELSE 'UNKNOWN' END AS StatusName
-FROM dbo.Sites ORDER BY SiteCode
-"@ 'Sites' $keep $PkgId
+        # Status is SITE_STATUS_ACTIVE(1) -- site.cpp:1448. SELECT * because the column names here are
+        # not guessable: 'ReportingSiteCode'/'Type' do not exist and cost a run to an Invalid column name.
+        Q "SELECT * FROM dbo.Sites" 'Sites' $keep $PkgId
         # Type: 1 Package, 2 Program, 4 Package Server (DP), 8 Access account (PkgNotification.h).
         Q "SELECT * FROM PkgNotification WHERE PkgID = @p" 'PkgNotification' $keep $PkgId
     # The child can retain the PCK forever while fnIsPkgVersionAvailable is
@@ -716,6 +710,8 @@ $distmgrDecisionBlock = {
     if ($files.Count -eq 0) { $o.Add("DISTMGR NO LOG under $dir\Logs -- NOT read, which is not the same as no decision"); return $o.ToArray() }
     $pats = [ordered]@{
         'not-active-site' = 'is not an active site'
+        'bundle-failed'   = 'Error creating package bundle'
+        'request-aborted' = '0x800704d3'
         'delete-instruct' = 'to delete package'
         'pkg-id'          = [regex]::Escape("$PkgId")
         'dp-name'         = [regex]::Escape("$DpMatch")
@@ -1230,15 +1226,24 @@ if ($SecondaryContentHop -or $RepairSecondaryContent) {
         $dmg = @(Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $distmgrDecisionBlock -ArgList @($PackageId, $secShortName) -Tag 'parent-distmgr')
         foreach ($l in $dmg) { & $hsay "    PARENT-LOG $l" }
         $naHits = -1
-        foreach ($l in $dmg) { if ($l -match "^DISTMGR pattern 'not-active-site' hits=(\d+)") { $naHits = [int]$Matches[1] } }
-        if ($naHits -gt 0) {
+        $abHits = -1
+        foreach ($l in $dmg) {
+            if ($l -match "^DISTMGR pattern 'not-active-site' hits=(\d+)") { $naHits = [int]$Matches[1] }
+            if ($l -match "^DISTMGR pattern 'request-aborted' hits=(\d+)") { $abHits = [int]$Matches[1] }
+        }
+        if ($naHits -lt 0) {
+            & $hsay '    VERDICT: distmgr.log was NOT read, so both gates below are UNTESTED -- do not record this run as ruling anything out.'
+        }
+        elseif ($naHits -gt 0) {
             & $hsay "    VERDICT: the parent printed 'is not an active site, ignore it'. distmgr.cpp:27851 RemoveAt()s the package server there, BEFORE bServerChange/bResendPkg are evaluated -- so no RefreshNow can reach it. Fix Sites.Status for $($s.siteCode) first."
         }
-        elseif ($naHits -eq 0) {
-            & $hsay "    VERDICT: the parent has NOT declined $($s.siteCode) as inactive, so the active-site gate is not the blocker here."
+        elseif ($abHits -gt 0) {
+            # distmgr.cpp:17252 guards the auto-recovery with `if (hr != HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED))`,
+            # and 0x800704D3 IS that HRESULT -- so this one failure is the only one that recovers nothing.
+            & $hsay "    VERDICT: CreatePackageBundle to $($s.siteCode) failed with 0x800704D3 (ERROR_REQUEST_ABORTED). distmgr.cpp:17252 SKIPS its auto-recovery for exactly this HRESULT, so StoredPkgPath is not cleared, Action is not reset to UPDATE, and no backdated PkgStatus row is written to re-arm IsPkgSendingNeeded. The send is abandoned and never retried. RefreshNow cannot fix this; the package's source version has to move."
         }
         else {
-            & $hsay '    VERDICT: distmgr.log was NOT read, so the active-site gate is UNTESTED -- do not record this run as ruling it out.'
+            & $hsay "    VERDICT: the parent has NOT declined $($s.siteCode) as inactive and no aborted bundle was logged."
         }
     }
 
