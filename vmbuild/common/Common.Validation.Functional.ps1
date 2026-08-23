@@ -10005,7 +10005,7 @@ function Test-CMClientPackageDistribution {
 
     $scriptBlock = {
         param($sc, $ownedSitesCsv, $ownedDpCsv)
-        $results = @{ Passed = $true; ContentPendingFromParent = $false; Details = [System.Collections.Generic.List[string]]::new() }
+        $results = @{ Passed = $true; ContentPendingFromParent = $false; ClientPkgSourceSite = ''; Details = [System.Collections.Generic.List[string]]::new() }
         $ns = "root\SMS\site_$sc"
         $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '4' = 'RemovalPending'; '5' = 'RemovalRetrying'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
         $dpNameOf = {
@@ -10143,6 +10143,11 @@ function Test-CMClientPackageDistribution {
                 # parent never sent it down and every DP state above is a consequence, not a
                 # cause. Saying so here stops the next reader triaging the DP: on cstest2 the
                 # DP had been registered for 50 minutes and the site still held no content.
+                # Only the package's SOURCE site runs distmgr's send-to-child loop
+                # (distmgr.cpp gates it on sPkgSrcSite == sThisSite), so this decides
+                # which site owes the send for every DP below.
+                $results.ClientPkgSourceSite = "$($pkg.SourceSite)"
+                $results.Details.Add("INFO: client package '$($pkg.Name)' ($pkgId) SourceSite=$($pkg.SourceSite) SourceVersion=$($pkg.SourceVersion) StoredPkgVersion=$($pkg.StoredPkgVersion) at site $sc -- only site $($pkg.SourceSite) runs the send-to-child loop for it.")
                 if ([int]$pkg.StoredPkgVersion -lt 1) {
                     $results.ContentPendingFromParent = $true
                     $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) has NO content at site $sc at all (StoredPkgVersion=0, SourceVersion=$($pkg.SourceVersion)) -- it is owned by a parent site that never sent it down, so no DP here could have installed it. Triage the PARENT site's distmgr/sender, not the DP.")
@@ -10358,20 +10363,37 @@ function Test-CMClientPackageDistribution {
             }
 
             # Content reaches a DP in another site over THAT site's inter-site hop,
-            # which only the sending parent logs ("Created minijob to send compressed
+            # which only the sending site logs ("Created minijob to send compressed
             # copy ... to site X" / "is NOT an active site, ignore it"). Without this
             # the pulled logs cannot explain the DP they were pulled for.
+            #
+            # The sending side is the package's SOURCE site, NOT the DP's parent.
+            # distmgr.cpp only runs the send-to-child loop under
+            #   if (sPkgSrcSite.CompareNoCase(sThisSite) == 0 && ...)
+            # so a Primary never forwards a CAS-owned package to its own secondary --
+            # it skips the whole block. burnin 2026-08-23: BI-PRIMARY held HUB00004
+            # (StoredVersion:1, processed 18x) and never logged a single
+            # "Needs to send ... to site SEC", while BI-SECONDARY said "hasn't arrived
+            # from site HUB yet". Collecting from the parent Primary gathered logs from
+            # the one site that was correctly doing nothing, and never from the CAS that
+            # owed the send. Collect BOTH: the DP's feeding site and the package source.
             $ownerCode = if ("$($dpVm.role)" -eq 'Secondary') { "$($dpVm.parentSiteCode)" } else { "$($dpVm.siteCode)" }
-            if ($ownerCode -and $ownerCode -ne $siteCode) {
+            $pkgSourceSite = "$($result.ScriptBlockOutput.ClientPkgSourceSite)"
+            foreach ($feed in @(
+                    @{ Code = $ownerCode; Why = "'$($dpVm.vmName)' sits in site $ownerCode"; Label = 'ClientPkg-Parent' }
+                    @{ Code = $pkgSourceSite; Why = "the client package's SOURCE site is $pkgSourceSite and only the source site runs distmgr's send-to-child loop"; Label = 'ClientPkg-PkgSource' }
+                )) {
+                $feedCode = "$($feed.Code)"
+                if (-not $feedCode -or $feedCode -eq $siteCode) { continue }
                 $ownerVm = @(@($DeployConfig.virtualMachines) + @($domainVms) | Where-Object {
-                        $_.vmName -and "$($_.siteCode)" -eq $ownerCode -and "$($_.role)" -in @('CAS', 'Primary', 'Secondary')
+                        $_.vmName -and "$($_.siteCode)" -eq $feedCode -and "$($_.role)" -in @('CAS', 'Primary', 'Secondary')
                     }) | Select-Object -First 1
-                if ($ownerVm -and $collectedFrom.Add($ownerVm.vmName)) {
-                    Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is fed by site $ownerCode -- collecting the sending side from '$($ownerVm.vmName)'"
-                    $null = Save-Phase11GuestLogs -VMName $ownerVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-Parent' -Collector $Phase11SmsSiteLogCollector
+                if (-not $ownerVm) {
+                    Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: $($feed.Why), but no site server for that site exists in domain '$domain' -- sending-side logs NOT collected." -Level Warning
                 }
-                elseif (-not $ownerVm) {
-                    Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' is fed by site $ownerCode but no site server for that site exists in domain '$domain' -- sending-side logs NOT collected." -Level Warning
+                elseif ($collectedFrom.Add($ownerVm.vmName)) {
+                    Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: $($feed.Why) -- collecting the sending side from '$($ownerVm.vmName)'"
+                    $null = Save-Phase11GuestLogs -VMName $ownerVm.vmName -DomainName $domain -RoleLabel $feed.Label -Collector $Phase11SmsSiteLogCollector
                 }
             }
         }
