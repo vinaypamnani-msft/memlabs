@@ -10152,7 +10152,15 @@ function Test-CMClientPackageDistribution {
                     $results.ContentPendingFromParent = $true
                     $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) has NO content at site $sc at all (StoredPkgVersion=0, SourceVersion=$($pkg.SourceVersion)) -- it is owned by a parent site that never sent it down, so no DP here could have installed it. Triage the PARENT site's distmgr/sender, not the DP.")
                 }
-                $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s): $badSummary -- a fallback DP may still serve clients; the boundary-group check below decides whether any client is actually blocked.")
+                # A DP that never received the client package is a broken DP, even when a
+                # fallback DP happens to serve the same boundary group -- the boundary-group
+                # check below reports client impact, it does not make this DP usable. Fail so
+                # the lab is preserved for investigation with the diagnostics collected below.
+                # Discrimination-checked before wiring this to a FAIL: across every VMBuild log
+                # on this host, 10 of 16 labs NEVER emit this line (including cstest1, which has
+                # a secondary site); only burnin/pushlab/wacky/cstest2/fabrikam do.
+                $results.Passed = $false
+                $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s): $badSummary. Only site $($pkg.SourceSite) runs distmgr's send-to-child loop for this package, so that is the site that owes the send. The boundary-group check below reports whether a client is additionally blocked; it does not make these DP(s) usable.")
                 foreach ($b in $bad | Select-Object -First 15) {
                     $sn = $stateName["$([int]$b.State)"]; if (-not $sn) { $sn = "State$($b.State)" }
                     $dpn = & $dpNameOf $b.ServerNALPath
