@@ -370,13 +370,23 @@ LEFT JOIN dbo.DistributionPoints AS dp ON dp.NALPath = ps.NALPath
 WHERE ps.PkgID = @p
 "@ 'PkgServerDistmgrJoin' $keep $PkgId
         Q "SELECT * FROM SMSPackages WHERE PkgID = @p" 'SMSPackages' $keep $PkgId
+        # distmgr.cpp:27851 drops a CHILD-SITE package server from the send array unless the site's
+        # Status is SITE_STATUS_ACTIVE(1) -- site.cpp:1448. Every other status removes the DP before
+        # bServerChange/bResendPkg are ever evaluated, so this column outranks the whole chain below.
+        Q @"
+SELECT SiteCode, ReportingSiteCode, Type, Status,
+       CASE Status WHEN 1 THEN 'ACTIVE' WHEN 2 THEN 'PENDING-installing' WHEN 3 THEN 'FAILED-install'
+                   WHEN 4 THEN 'DELETED' WHEN 5 THEN 'UPGRADE' WHEN 6 THEN 'DELETE-FAILED'
+                   WHEN 7 THEN 'UPGRADE-FAILED' ELSE 'UNKNOWN' END AS StatusName
+FROM dbo.Sites ORDER BY SiteCode
+"@ 'Sites' $keep $PkgId
         # Type: 1 Package, 2 Program, 4 Package Server (DP), 8 Access account (PkgNotification.h).
         Q "SELECT * FROM PkgNotification WHERE PkgID = @p" 'PkgNotification' $keep $PkgId
     # The child can retain the PCK forever while fnIsPkgVersionAvailable is
     # false. Preserve the exact package-status rows offered by the CAS so a
     # missing child row can be attributed to extraction versus apply.
-    Q "SELECT m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@Type','NVARCHAR(64)') AS Operation, CONVERT(NVARCHAR(500), R.Y.query('.')) AS RowXml FROM dbo.DRSSentMessages AS m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) CROSS APPLY T.X.nodes('row') R(Y) WHERE T.X.value('./@TableName','NVARCHAR(256)') = 'PkgStatus_G' AND R.Y.value('./@ID','NVARCHAR(8)') = @p ORDER BY m.ID" 'DRSSentMessages-PkgStatus_G' $keep $PkgId
-    Q "SELECT m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@Type','NVARCHAR(64)') AS Operation, CONVERT(NVARCHAR(500), R.Y.query('.')) AS RowXml FROM dbo.DRSSentMessages AS m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) CROSS APPLY T.X.nodes('row') R(Y) WHERE T.X.value('./@TableName','NVARCHAR(256)') = 'PkgStatusHist' AND R.Y.value('./@PkgID','NVARCHAR(8)') = @p ORDER BY m.ID" 'DRSSentMessages-PkgStatusHist' $keep $PkgId
+    Q "SELECT m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@Type','NVARCHAR(64)') AS Operation, LEFT(CONVERT(NVARCHAR(MAX), R.Y.query('.')), 400) AS RowXml FROM dbo.DRSSentMessages AS m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) CROSS APPLY T.X.nodes('row') R(Y) WHERE T.X.value('./@TableName','NVARCHAR(256)') = 'PkgStatus_G' AND R.Y.value('./@ID','NVARCHAR(8)') = @p ORDER BY m.ID" 'DRSSentMessages-PkgStatus_G' $keep $PkgId
+    Q "SELECT m.ID, m.SendingSite, m.TargetSite, m.ProcessedTime, T.X.value('./@Type','NVARCHAR(64)') AS Operation, LEFT(CONVERT(NVARCHAR(MAX), R.Y.query('.')), 400) AS RowXml FROM dbo.DRSSentMessages AS m WITH (NOLOCK) CROSS APPLY m.MessageData.nodes('/DRS_SyncData/Operation') T(X) CROSS APPLY T.X.nodes('row') R(Y) WHERE T.X.value('./@TableName','NVARCHAR(256)') = 'PkgStatusHist' AND R.Y.value('./@PkgID','NVARCHAR(8)') = @p ORDER BY m.ID" 'DRSSentMessages-PkgStatusHist' $keep $PkgId
         # Second mode of the same proc: all three params non-null jumps to SEARCHFORDATA, which reports
         # this specific row's replication state rather than the site's general state.
         Q "EXEC dbo.spDiagDRS N'PkgServers_G', N'PkgID', @p" 'spDiagDRS-PkgServers_G' $keep $PkgId
@@ -683,6 +693,45 @@ $dpRefreshBlock = {
         catch { $o.Add("REFRESH FAILED $nal : $($_.Exception.Message)") }
     }
     if ($hit -eq 0) { $o.Add("REFRESH NO MATCH for '$DpMatch' -- this site does not target that DP for this package") }
+    return $o.ToArray()
+}
+
+# The ONE decision on the send-to-child path that does log. distmgr.cpp:27851 prints this exact
+# string and RemoveAt()s the package server when the child site is not SITE_STATUS_ACTIVE, which
+# is the documented reason a secondary's DP never receives content (pushlab 2026-07-28).
+$distmgrDecisionBlock = {
+    param($PkgId, $DpMatch)
+    $o = New-Object System.Collections.Generic.List[string]
+    $dir = $null
+    foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+        try { $dir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
+        if ($dir) { break }
+    }
+    if (-not $dir) { $o.Add('DISTMGR UNKNOWN -- SMS install dir not found, distmgr.log NOT read'); return $o.ToArray() }
+    $files = @()
+    foreach ($n in @('distmgr.log', 'distmgr.lo_')) {
+        $p = Join-Path $dir "Logs\$n"
+        if (Test-Path $p) { $files += $p }
+    }
+    if ($files.Count -eq 0) { $o.Add("DISTMGR NO LOG under $dir\Logs -- NOT read, which is not the same as no decision"); return $o.ToArray() }
+    $pats = [ordered]@{
+        'not-active-site' = 'is not an active site'
+        'delete-instruct' = 'to delete package'
+        'pkg-id'          = [regex]::Escape("$PkgId")
+        'dp-name'         = [regex]::Escape("$DpMatch")
+    }
+    foreach ($k in @($pats.Keys)) {
+        $hits = @()
+        foreach ($f in $files) {
+            try { $hits += @(Select-String -LiteralPath $f -Pattern $pats[$k] -ErrorAction Stop) } catch { }
+        }
+        $o.Add("DISTMGR pattern '$k' hits=$($hits.Count)")
+        foreach ($h in @($hits | Select-Object -Last 6)) {
+            $t = ("$($h.Line)" -replace '^<!\[LOG\[', '' -replace '\]LOG\]!>.*', '').Trim()
+            if ($t.Length -gt 220) { $t = $t.Substring(0, 220) + '...' }
+            $o.Add("  $t")
+        }
+    }
     return $o.ToArray()
 }
 
@@ -1176,10 +1225,26 @@ if ($SecondaryContentHop -or $RepairSecondaryContent) {
 
         foreach ($l in (Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($parent.siteCode, $PackageId) -Tag 'parent-db')) { & $hsay "    PARENT-DB $l" }
         foreach ($l in (Get-GuestOutput -VmName $s.vmName -DomainName $dom -Block $secContentBlock -ArgList @($PackageId) -Tag 'sec-content')) { & $hsay "    SEC $l" }
+
+        $secShortName = ($s.vmName -split '\.')[0]
+        $dmg = @(Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $distmgrDecisionBlock -ArgList @($PackageId, $secShortName) -Tag 'parent-distmgr')
+        foreach ($l in $dmg) { & $hsay "    PARENT-LOG $l" }
+        $naHits = -1
+        foreach ($l in $dmg) { if ($l -match "^DISTMGR pattern 'not-active-site' hits=(\d+)") { $naHits = [int]$Matches[1] } }
+        if ($naHits -gt 0) {
+            & $hsay "    VERDICT: the parent printed 'is not an active site, ignore it'. distmgr.cpp:27851 RemoveAt()s the package server there, BEFORE bServerChange/bResendPkg are evaluated -- so no RefreshNow can reach it. Fix Sites.Status for $($s.siteCode) first."
+        }
+        elseif ($naHits -eq 0) {
+            & $hsay "    VERDICT: the parent has NOT declined $($s.siteCode) as inactive, so the active-site gate is not the blocker here."
+        }
+        else {
+            & $hsay '    VERDICT: distmgr.log was NOT read, so the active-site gate is UNTESTED -- do not record this run as ruling it out.'
+        }
     }
 
     if (-not $RepairSecondaryContent) {
         & $hsay ''
+        & $hsay 'LEGEND (distsrc.h / site.h, do not guess these): PkgServers Action 0=NONE 1=UPDATE 2=ADD 3=DELETE 4=VALIDATE 5=CANCEL. Sites.Status 1=ACTIVE 2=PENDING 3=FAILED 4=DELETED 5=UPGRADE. An Action that is still ADD with LastRefresh at the 1970 epoch is an ADD that was never processed, not an ADD in flight.'
         & $hsay 'READ: PKGLIB hasPackage=False with a summarizer row means the row is a phantom -- content never arrived, so nothing on the DP side can fix it. distmgr logs NOTHING when it declines to send, so do not read a quiet distmgr.log as "no decision was made".'
         Write-Host "Hop log: $hopLog" -ForegroundColor Green
         return
@@ -1224,6 +1289,9 @@ if ($SecondaryContentHop -or $RepairSecondaryContent) {
     $post = & $readSecState $sec $parent
     foreach ($l in $post.Lines) { & $hsay "    $l" }
     foreach ($l in (Get-GuestOutput -VmName $sec.vmName -DomainName $dom -Block $secContentBlock -ArgList @($PackageId) -Tag 'sec-content-after')) { & $hsay "    SEC $l" }
+    # Without this the failure path only knows THAT it did not work. The PkgServers row says whether
+    # RefreshNow even reached it: UpdateMask/LastRefresh unchanged means the write never landed here.
+    foreach ($l in (Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($parent.siteCode, $PackageId) -Tag 'parent-db-after')) { & $hsay "    PARENT-DB-AFTER $l" }
 
     if ($tClear) {
         & $hsay "RESULT: $secShort reached Installed $([int]($tClear - $tFix).TotalSeconds)s after RefreshNow, having not moved during a ${BaselineSeconds}s baseline."
