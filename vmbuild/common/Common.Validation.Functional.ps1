@@ -7940,25 +7940,23 @@ $Phase11CmWsusSyncCollector = {
 }
 
 $Phase11SecondaryCertDiagCollector = {
-    # Diagnose a Secondary site whose distmgr is wedged repeating
+    # Diagnose a Secondary site whose distmgr repeats
     #   "site exchange certificate is not found. Can not decrypt the data."
-    #   "Failed to decrypt cert PFX data"  ->  "~Sleep 3600 seconds..."
+    #   "Failed to decrypt cert PFX data"
     #
-    # DO NOT read a missing SiteExchangeCertificate row as a fault. ConfigMgr
-    # source (hman.cpp ~L17996) states the row is OPTIONAL:
-    #   "if SC_SiteDefinition_Property.Name='SiteExchangeCertificate' exists and
-    #    Value3=1 this will get the public key of the site exchange certificate;
-    #    otherwise, this will read the RSA public key stored in OS crypto storage"
-    # The row is written by spAoUpdateSiteServerExchangeCertificate /
+    # DO NOT read a missing SiteExchangeCertificate row as a build-stopping fault.
+    # ConfigMgr source (hman.cpp ~L17996) states the row is OPTIONAL for the site's
+    # own public key: "if SC_SiteDefinition_Property.Name='SiteExchangeCertificate'
+    # exists and Value3=1 this will get the public key of the site exchange
+    # certificate; otherwise, this will read the RSA public key stored in OS crypto
+    # storage". The row is written by spAoUpdateSiteServerExchangeCertificate /
     # spAoFailoverToNewServer -- an AlwaysOn/HA feature -- and
-    # CSiteSettings::ValidateSiteExchangeCertificate returns S_FALSE (verbose,
-    # not an error) when it is absent. FailoverMgrUtil.cpp ~L2075 names the
-    # normal state outright: "the pfxblob is likely protected by current site
-    # server's public key, but siteexchangecertificate is not enabled".
-    # Measured: 29 of 29 memlabs secondary probes across 6 labs (SEC, SS1, SS2,
-    # TOP, DIM) report rows=0, including secondaries with ZERO decrypt failures.
-    # So this count cannot discriminate healthy from broken -- report it as
-    # context, and let the distmgr decrypt-failure count carry the symptom.
+    # CSiteSettings::ValidateSiteExchangeCertificate returns S_FALSE (verbose, not
+    # an error) when it is absent. Measured: 29 of 29 memlabs secondary probes
+    # across 6 labs (SEC, SS1, SS2, TOP, DIM) report rows=0, several of them with
+    # ZERO decrypt failures -- so the row count alone cannot judge a DP.
+    # It IS, however, the direct cause of the decrypt errors below (see the chain
+    # documented at the classification step).
     $out = @{}
     $lines = @()
     $siteCode = $null; $smsDir = $null
@@ -7969,17 +7967,24 @@ $Phase11SecondaryCertDiagCollector = {
     }
     $lines += "SiteCode=$siteCode  SMSInstallDir=$smsDir  Probed=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 
-    # Confirm the distmgr cert-decrypt wedge signature (last 4000 lines), and
-    # classify it. On burnin BI-SECONDARY 2026-08-23 every one of the 17 failures
-    # in the collected tail was preceded by distmgr's own
-    #   "There is no site exchange certificate created."  (17/17)
-    #   "No DMP found.."                                  (15/17)
-    # inside the hourly CleanupMDMContent / "~Sleep 3600 seconds..." housekeeping
-    # pass -- i.e. a Device Management Point cert decrypt on a site that has no DMP
-    # and no site exchange certificate. That pass runs while content distributes
-    # normally (the same DP held 3 packages with all IIS vdirs present), so a
-    # decrypt-failure COUNT on its own says nothing about DP health.
-    $sig = 0; $lastSig = ''; $benign = 0
+    # Classify the distmgr cert-decrypt signature (last 4000 lines). The call
+    # chain is deterministic and fully source-verified in ConfigMgr-Main dev:
+    #  distmgr.cpp CDistributionManager::GetDPSysResUseSettings() reads the DP's
+    #    'CertificatePFXData' property, and ONLY if it is non-empty calls
+    #    CServerAccount::Decrypt -> on FALSE logs "Failed to decrypt cert PFX
+    #    data" and CONTINUES (non-fatal).
+    #  srvacct.cpp CServerAccount::Decrypt -> CSiteSettings::
+    #    GetEncryptedSiteExchangeCertificate; not S_OK -> "site exchange
+    #    certificate is not found. Can not decrypt the data."
+    #  sitesettings.cpp GetEncryptedSiteExchangeCertificate -> Validate
+    #    SiteExchangeCertificate; S_FALSE -> "There is no site exchange
+    #    certificate created." and returns an EMPTY pfx.
+    # So the missing SC_SiteDefinition_Property row IS the direct cause of these
+    # errors -- they are not noise and not a Device Management Point problem.
+    # What they are NOT is a content blocker: burnin BI-SECONDARY logged them
+    # hourly on 2026-08-23 while its DP held 3 packages with every IIS vdir
+    # present. Count how many carry the causal line so the remainder stands out.
+    $sig = 0; $lastSig = ''; $noSiteExch = 0
     if ($smsDir) {
         $dm = Join-Path $smsDir 'Logs\distmgr.log'
         if (Test-Path $dm) {
@@ -7990,13 +7995,13 @@ $Phase11SecondaryCertDiagCollector = {
                     $sig++
                     $lastSig = "$($tail[$i])".Trim()
                     $ctx = ($tail[[Math]::Max(0, $i - 5)..$i] -join ' ')
-                    if ($ctx -match 'There is no site exchange certificate created|No DMP found') { $benign++ }
+                    if ($ctx -match 'There is no site exchange certificate created') { $noSiteExch++ }
                 }
             }
             catch {}
         }
     }
-    $lines += "distmgr cert-decrypt-failure lines (last 4000): $sig (of which $benign are the benign no-DMP/no-site-exchange-cert housekeeping pass)"
+    $lines += "distmgr cert-decrypt-failure lines (last 4000): $sig (of which $noSiteExch carry 'There is no site exchange certificate created', the known cause)"
     if ($lastSig) { $lines += "  last: $lastSig" }
 
     # Enumerate installed SQL instances; probe the CM secondary DB for the cert.
@@ -8023,18 +8028,15 @@ $Phase11SecondaryCertDiagCollector = {
             catch { $c = $cn.CreateCommand(); $c.CommandText = $qExch; $c.CommandTimeout = 15; $exch = [int]$c.ExecuteScalar() }
             $c2 = $cn.CreateCommand(); $c2.CommandText = "SELECT COUNT(*) FROM CM_RoleIdCertificates WHERE RoleTypeID=4"; $c2.CommandTimeout = 15
             $pfx = [int]$c2.ExecuteScalar()
-            $lines += "DB $db on $($srv): SiteExchangeCertificate rows=$exch (0 is NORMAL -- AlwaysOn/HA feature marker, not a fault) ; CM_RoleIdCertificates(RoleTypeID=4) rows=$pfx"
-            if ($pfx -eq 0) {
-                $lines += "  => the DP identity certificate row itself is MISSING (CM_RoleIdCertificates RoleTypeID=4). distmgr has nothing to hand this DP; the Secondary's site install did not complete its role-certificate provisioning."
+            $lines += "DB $db on $($srv): SC_SiteDefinition_Property 'SiteExchangeCertificate' rows=$exch (0 is COMMON -- that row is the AlwaysOn/HA enable marker; 29/29 memlabs secondaries read 0) ; CM_RoleIdCertificates(RoleTypeID=4, which IS the site exchange certificate) rows=$pfx"
+            if ($sig -eq 0) {
+                $lines += "  => no decrypt failures at all. distmgr only attempts this decrypt when the DP carries a non-empty 'CertificatePFXData' property, so a site with no site exchange certificate can still be silent here. Nothing to chase on the certificate side; if this DP has no content, read the inter-site hop and the replication link."
             }
-            elseif ($sig -gt 0 -and $sig -eq $benign) {
-                $lines += "  => NO certificate fault. All $sig decrypt-failure line(s) are distmgr's hourly Device-Management-Point housekeeping on a site with no DMP and no site exchange certificate ('There is no site exchange certificate created.' / 'No DMP found..' / '~Sleep 3600 seconds...'). Benign noise; it does NOT block content. If this DP is missing content, read the inter-site hop instead: the SECONDARY logs ""The contents for the package <ID> hasn't arrived from site <X> yet"" and the SENDING site either logs, or never logs, 'Needs to send the compressed package ... to site <SEC>' + 'Created minijob to send compressed copy ...'."
-            }
-            elseif ($sig -gt 0) {
-                $lines += "  => $($sig - $benign) of $sig decrypt-failure line(s) are NOT the benign no-DMP housekeeping pass and are unexplained. The DP identity PFX is encrypted with the site server's master key in OS crypto storage (CServerAccount::Encrypt/Decrypt); check hman.log / ConfigMgrSetup.log below. A missing SiteExchangeCertificate row is NOT the cause."
+            elseif ($noSiteExch -eq $sig) {
+                $lines += "  => all $sig failure(s) are the site-exchange-certificate chain: GetDPSysResUseSettings -> CServerAccount::Decrypt -> GetEncryptedSiteExchangeCertificate -> ValidateSiteExchangeCertificate returned S_FALSE because SC_SiteDefinition_Property 'SiteExchangeCertificate' has no row for this site. distmgr logs the error and CONTINUES, so this is NOT why a DP is missing content -- burnin BI-SECONDARY hit this hourly while its DP held 3 packages with every IIS vdir present. For missing content read the inter-site hop instead: the SECONDARY logs the contents for the package <ID> hasn't arrived from site <X> yet, and the SENDING site either logs, or never logs, 'Needs to send the compressed package ... to site <SEC>' + 'Created minijob to send compressed copy ...'. What this DOES leave undone is the DP identity certificate push; whether that degrades PXE/HTTPS on this DP is NOT established."
             }
             else {
-                $lines += "  => no certificate problem detected: the DP identity PFX is present and distmgr logged no decrypt failures. If this DP has no content, look at the inter-site content hop (parent distmgr/sender, secondary despool) and the replication link, not at certificates."
+                $lines += "  => $($sig - $noSiteExch) of $sig failure(s) do NOT carry 'There is no site exchange certificate created', so they are a different fault inside CServerAccount::Decrypt. Read hman.log / ConfigMgrSetup.log below."
             }
             $probed = $true
         }
@@ -10331,15 +10333,18 @@ function Test-CMClientPackageDistribution {
                             $certFinding = (@($certLines | Where-Object { $_ -match '^\s+=> ' }) | Select-Object -First 1)
                             $evidence = (@($certCounts, $certSig | Where-Object { $_ }) | ForEach-Object { "$_".Trim() }) -join ' ; '
                             $decryptFailures = if ("$certSig" -match ':\s*(\d+)') { [int]$Matches[1] } else { $null }
-                            $benignFailures = if ("$certSig" -match 'which (\d+) are the benign') { [int]$Matches[1] } else { 0 }
+                            $explained = if ("$certSig" -match 'which (\d+) carry') { [int]$Matches[1] } else { 0 }
                             if ($null -eq $decryptFailures) {
-                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' certificate probe reported no decrypt-failure count, so the PFX-decrypt wedge is NOT ruled out; see $certFile." -Level Warning
+                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' certificate probe reported no decrypt-failure count, so the PFX-decrypt state is NOT ruled out; see $certFile." -Level Warning
                             }
-                            elseif ($decryptFailures -gt 0 -and $decryptFailures -eq $benignFailures) {
-                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' certificate state is fine -- all $decryptFailures distmgr decrypt-failure line(s) are the benign hourly no-DMP housekeeping pass, which does not block content. This DP is behind for another reason; see the inter-site content logs collected above and $certFile."
+                            elseif ($decryptFailures -eq 0) {
+                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' logged no certificate-decrypt failures; this DP is behind for another reason -- see the inter-site content logs collected above and $certFile."
                             }
-                            elseif ($decryptFailures -gt 0) {
-                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' distmgr logged $($decryptFailures - $benignFailures) UNEXPLAINED certificate-decrypt failure(s) (of $decryptFailures total): $evidence.$(if ($certFinding) { " $($certFinding.Trim())" }) See $certFile." -Level Warning
+                            elseif ($decryptFailures -eq $explained) {
+                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' logs $decryptFailures distmgr decrypt failure(s), all of them the known site-exchange-certificate chain (distmgr continues past it, and this DP's content state is decided elsewhere). Not the reason for missing content; see the inter-site content logs above and $certFile."
+                            }
+                            else {
+                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' distmgr logged $($decryptFailures - $explained) certificate-decrypt failure(s) NOT explained by the site-exchange-certificate chain (of $decryptFailures total): $evidence.$(if ($certFinding) { " $($certFinding.Trim())" }) See $certFile." -Level Warning
                             }
                             else {
                                 Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' shows no certificate problem ($evidence); this DP is behind for another reason -- see the inter-site content logs collected above."
