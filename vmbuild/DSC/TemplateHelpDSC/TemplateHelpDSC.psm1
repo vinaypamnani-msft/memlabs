@@ -3210,6 +3210,43 @@ function Write-VerboseEx {
     Add-LcmLogLine -Text $Message -Component $Component
 }
 
+function Get-RsWmiCallFailure {
+    # The MSReportServer_ConfigurationSetting methods do NOT throw. Each returns an object
+    # whose HRESULT is 0 on success and an error code otherwise, with the text in
+    # ExtendedErrors. Every call in the PBIRS HTTPS block discarded that return value, so a
+    # portal that was never configured produced no error at all -- the first and only sign
+    # was a SOAP probe timing out three minutes later on "error downloading", naming a line
+    # number instead of the WMI call that failed.
+    # Returns $null when the call succeeded, else one line naming the method and the code.
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [AllowNull()]
+        $Result,
+        [Parameter(Mandatory = $true, Position = 1)]
+        [string] $What
+    )
+
+    if ($null -eq $Result) { return "$What returned nothing (the call did not run)" }
+
+    $hr = $null
+    try { $hr = $Result.HRESULT } catch {}
+    # Not every method reports an HRESULT. Absence is not a failure, but it is not a
+    # verified success either -- say nothing rather than claim the call was checked.
+    if ($null -eq $hr) { return $null }
+    if ($hr -eq 0) { return $null }
+
+    $detail = ''
+    try {
+        # @($null).Count is 1, so the null filter has to come before the count is used.
+        $ext = @($Result.ExtendedErrors | Where-Object { $_ })
+        if ($ext.Count -gt 0) { $detail = " -- $($ext -join '; ')" }
+        elseif ($Result.Error) { $detail = " -- $($Result.Error)" }
+    }
+    catch {}
+
+    return ("{0} failed: HRESULT {1} (0x{1:X8}){2}" -f $What, $hr, $detail)
+}
+
 function Write-Status {
     param(
         [String] $Status
@@ -7593,14 +7630,17 @@ class InstallPBIRS {
             Start-Sleep -Seconds 5
 
             Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
-            # -2147220930 is SetVirtualDirectory failing because the Report Server service
-            # is up but not yet serving; the single restart + 5s above is not always enough
-            # (BI-PRIMARY 2026-08-23: "Failed Setting Virtual Directory for
-            # ReportServerWebService, Errocode: -2147220930"). Retry with a restart between
-            # attempts, then carry on regardless: everything that actually repairs the
-            # portal -- the HTTPS URL rebuild, the SSL binding, the key re-encryption,
-            # SetServiceState, Initialize-Rs -- comes AFTER this call, and letting one throw
-            # skip all of it left the step that exists to configure PBIRS doing nothing.
+            # -2147220930 (0x8004023E) is SetVirtualDirectory for ReportServerWebService
+            # failing, which aborts Set-PbiRsUrlReservation before it reserves anything.
+            # It was first read as the service being up but not yet serving; BI-PRIMARY on
+            # 2026-08-23 disproved that -- all THREE attempts failed identically across two
+            # extra restarts and 45s, on a re-run whose first (fresh) run had succeeded. So
+            # it is a persistent re-run state, not a warm-up race, and the retry below is
+            # kept only for the genuinely transient just-recreated-database case.
+            # Carry on regardless: everything that actually repairs the portal -- the HTTPS
+            # URL rebuild, the SSL binding, the key re-encryption, SetServiceState,
+            # Initialize-Rs -- comes AFTER this call, and letting one throw skip all of it
+            # left the step that exists to configure PBIRS doing nothing.
             # The post-install SOAP probe below stays the arbiter of success.
             $urlAttempt = 0
             $urlDone = $false
@@ -7628,6 +7668,12 @@ class InstallPBIRS {
             }
 
 
+            # Declared out here, not inside the HTTPS block: a class method requires every
+            # variable it reads to be assigned on all paths, and the SOAP probe below reads
+            # these to say WHICH call broke the portal instead of only that it is broken.
+            $rsFailures = New-Object System.Collections.ArrayList
+            $rsNotes = New-Object System.Collections.ArrayList
+
             if ($this.TemplateName) {
                 Write-Status ("Enabling HTTPS")
                 start-sleep -seconds 20
@@ -7649,13 +7695,20 @@ class InstallPBIRS {
                 }
 
                 Write-Status ("Removing HTTP ReportServerWebApp ReportServerWebService URLS")
-                $rsConfig.RemoveURL("ReportServerWebApp", "https://+:$httpsPort", $lcid)
-                $rsConfig.RemoveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
-                $rsConfig.ReserveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
-
-                $rsConfig.RemoveURL("ReportServerWebService", "https://+:$httpsPort", $lcid)
-                $rsConfig.RemoveURL("ReportServerWebService", "https://$($_dnsName):$httpsPort", $lcid)
-                $rsConfig.ReserveURL("ReportServerWebService", "https://$($_dnsName):$httpsPort", $lcid)
+                # RemoveURL of a URL that is not currently reserved returns a non-zero
+                # HRESULT, and on a re-run that is the normal case -- so its result goes to
+                # $rsNotes (recorded, never treated as failure). ReserveURL is the one here
+                # that has to work, so it goes to $rsFailures. Order per application is
+                # unchanged from before: remove '+', remove FQDN, then reserve FQDN.
+                foreach ($_app in @('ReportServerWebApp', 'ReportServerWebService')) {
+                    foreach ($_url in @("https://+:$httpsPort", "https://$($_dnsName):$httpsPort")) {
+                        $_rsErr = Get-RsWmiCallFailure $rsConfig.RemoveURL($_app, $_url, $lcid) "RemoveURL($_app, $_url)"
+                        if ($_rsErr) { [void]$rsNotes.Add($_rsErr) }
+                    }
+                    $_reserveUrl = "https://$($_dnsName):$httpsPort"
+                    $_rsErr = Get-RsWmiCallFailure $rsConfig.ReserveURL($_app, $_reserveUrl, $lcid) "ReserveURL($_app, $_reserveUrl)"
+                    if ($_rsErr) { [void]$rsFailures.Add($_rsErr) }
+                }
                 $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
                 if (-not $cert) {
                     # The WebServer cert (CertReq PkiWebCert) is enrolled in PHASE 8, but
@@ -7695,13 +7748,30 @@ class InstallPBIRS {
 
                 Write-Status ("Adding HTTPS ReportServerWebApp ReportServerWebService URLS")
                 $thumbprint = $cert.ThumbPrint.ToLower()
-                $rsConfig.CreateSSLCertificateBinding('ReportServerWebApp', $Thumbprint, $ipAddress, $httpsport, $lcid)
-                $rsConfig.CreateSSLCertificateBinding('ReportServerWebService', $Thumbprint, $ipAddress, $httpsport, $lcid)
-                $rsConfig.SetSecureConnectionLevel("1")
-                $rsConfig.DeleteEncryptedInformation()
-                $rsConfig.ReencryptSecureInformation()
-                $rsconfig.SetServiceState($false, $false, $false)
-                $rsconfig.SetServiceState($true, $true, $true)
+                foreach ($_app in @('ReportServerWebApp', 'ReportServerWebService')) {
+                    $_rsErr = Get-RsWmiCallFailure $rsConfig.CreateSSLCertificateBinding($_app, $thumbprint, $ipAddress, $httpsport, $lcid) "CreateSSLCertificateBinding($_app, $($thumbprint.Substring(0, 8)).., ${ipAddress}:$httpsPort)"
+                    if ($_rsErr) { [void]$rsFailures.Add($_rsErr) }
+                }
+                $_rsErr = Get-RsWmiCallFailure $rsConfig.SetSecureConnectionLevel("1") 'SetSecureConnectionLevel(1)'
+                if ($_rsErr) { [void]$rsNotes.Add($_rsErr) }
+                $_rsErr = Get-RsWmiCallFailure $rsConfig.DeleteEncryptedInformation() 'DeleteEncryptedInformation()'
+                if ($_rsErr) { [void]$rsNotes.Add($_rsErr) }
+                $_rsErr = Get-RsWmiCallFailure $rsConfig.ReencryptSecureInformation() 'ReencryptSecureInformation()'
+                if ($_rsErr) { [void]$rsNotes.Add($_rsErr) }
+                $_rsErr = Get-RsWmiCallFailure $rsconfig.SetServiceState($false, $false, $false) 'SetServiceState(false,false,false)'
+                if ($_rsErr) { [void]$rsNotes.Add($_rsErr) }
+                $_rsErr = Get-RsWmiCallFailure $rsconfig.SetServiceState($true, $true, $true) 'SetServiceState(true,true,true)'
+                if ($_rsErr) { [void]$rsNotes.Add($_rsErr) }
+
+                if ($rsNotes.Count -gt 0) {
+                    Write-VerboseEx "PBIRS HTTPS config, non-fatal WMI codes (RemoveURL of an unreserved URL is expected): $($rsNotes -join ' | ')"
+                }
+                if ($rsFailures.Count -gt 0) {
+                    Write-Status "PBIRS HTTPS config: $($rsFailures.Count) required WMI call(s) FAILED: $($rsFailures -join ' | ')"
+                }
+                else {
+                    Write-VerboseEx "PBIRS HTTPS config: every required URL reservation and SSL binding returned success."
+                }
             }
             Write-Status ("Restart PowerBIReportServer Service")
             Start-Sleep -Seconds 3
@@ -7751,7 +7821,31 @@ class InstallPBIRS {
                             $probeErr = "unexpected root type '$itemType'"
                         }
                         catch {
+                            # "There was an error downloading '<uri>'" is the outermost
+                            # message and says nothing about why. The inner WebException is
+                            # the discriminator, and the four cases need opposite fixes:
+                            #   ConnectFailure                  nothing is listening on 443
+                            #   TrustFailure/SecureChannelFailure   SSL binding/cert wrong
+                            #   ProtocolError + HTTP 404        URL reserved, no virtual dir
+                            #   ProtocolError + HTTP 503        reserved, service not serving
+                            # Recording only the outer message cost a whole run to re-learn.
                             $probeErr = $_.Exception.Message
+                            $_inner = $_.Exception.InnerException
+                            $_depth = 0
+                            while ($_inner -and $_depth -lt 4) {
+                                $_depth++
+                                $_bit = "[$($_inner.GetType().Name)] $($_inner.Message)"
+                                if ($_inner -is [System.Net.WebException]) {
+                                    $_bit = "[WebException/$($_inner.Status)] $($_inner.Message)"
+                                    try {
+                                        $_resp = $_inner.Response
+                                        if ($_resp) { $_bit += " (HTTP $([int]$_resp.StatusCode) $($_resp.StatusCode))" }
+                                    }
+                                    catch {}
+                                }
+                                $probeErr = "$probeErr -> $_bit"
+                                $_inner = $_inner.InnerException
+                            }
                         }
                         Start-Sleep -Seconds 10
                     }
@@ -7760,8 +7854,15 @@ class InstallPBIRS {
                         Write-Status "PBIRS SOAP health check passed after install in ${probeElapsedSec}s ($probeAttempts attempt(s))."
                     }
                     else {
-                        Write-Status "PBIRS SOAP health check FAILED after install in ${probeElapsedSec}s ($probeAttempts attempt(s), 180s budget): $probeErr"
-                        throw "PBIRS installed but portal is not functional. SOAP probe at $soapUri failed after ${probeElapsedSec}s/$probeAttempts attempt(s): $probeErr"
+                        # The probe failing is the SYMPTOM. If a required WMI call failed
+                        # earlier in this same Set(), that is the cause, and it has to travel
+                        # with the symptom -- this throw is the only text that reaches the
+                        # host, and a run where the portal was never configured used to be
+                        # indistinguishable from one where it was configured and is warming.
+                        $rsHint = ''
+                        if ($rsFailures.Count -gt 0) { $rsHint = " Required WMI call(s) that failed while configuring: $($rsFailures -join ' | ')." }
+                        Write-Status "PBIRS SOAP health check FAILED after install in ${probeElapsedSec}s ($probeAttempts attempt(s), 180s budget): $probeErr$rsHint"
+                        throw "PBIRS installed but portal is not functional. SOAP probe at $soapUri failed after ${probeElapsedSec}s/$probeAttempts attempt(s): $probeErr$rsHint"
                     }
                 }
                 finally {
