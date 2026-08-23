@@ -7,8 +7,30 @@ param(
     # Exercise the real build -- zip, config compile, parse check -- against a scratch
     # folder instead of the repo. Nothing under vmbuild is written, no module is installed,
     # and MemLabsVersion is not bumped.
-    [switch]$DryRun
+    [switch]$DryRun,
+    # Mark this host as the DSC build server and exit.
+    [switch]$DesignateBuildServer
 )
+
+# Self-installing prerequisite helpers (PSGallery bootstrap) plus the build-server gate.
+# Dot-sourced before Common.ps1 because the module install below has to work on a lab host
+# that has never used PSGallery.
+$prereqScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'common\Common.Prereqs.ps1'
+if (-not (Test-Path $prereqScript -PathType Leaf)) {
+    throw "Cannot find $prereqScript. Run this from a full memlabs clone."
+}
+. $prereqScript
+
+if ($DesignateBuildServer) {
+    Set-MemLabsBuildServer
+    return
+}
+
+# -DryRun writes only to a scratch folder, so it stays allowed everywhere.
+if (-not $DryRun -and -not (Test-MemLabsBuildServer)) {
+    Deny-MemLabsNonBuildServer -ScriptName 'createGuestDscZip.ps1'
+    return
+}
 
 $dryRunRoot = $null
 $dryRunCompleted = $false
@@ -50,14 +72,6 @@ if (-not $vmName) {
 
 # Prepare DSC ZIP files
 Set-Location $PSScriptRoot
-
-# Self-installing prerequisite helpers (PSGallery bootstrap). Dot-sourced before Common.ps1
-# because the module install below has to work on a lab host that has never used PSGallery.
-$prereqScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'common\Common.Prereqs.ps1'
-if (-not (Test-Path $prereqScript -PathType Leaf)) {
-    throw "Cannot find $prereqScript. Run this from a full memlabs clone."
-}
-. $prereqScript
 
 # Install-Module -Scope AllUsers and the TemplateHelpDSC copy into Program Files both need it.
 if (-not $DryRun -and -not (Test-MemLabsElevated)) {
@@ -108,7 +122,7 @@ try {
         if ($moduleResult.Failed.Count -gt 0) {
             # A missing module surfaces much later as an unreadable Publish-AzVMDscConfiguration
             # or DSC compile error, so stop here and name the modules.
-            throw "These modules could not be installed from PSGallery: $($moduleResult.Failed -join ', '). Fix connectivity to https://www.powershellgallery.com and re-run."
+            throw "These modules could not be installed: $($moduleResult.Failed -join ', '). Install-Module, a package-cache purge and a direct PSGallery nupkg download all failed - see the warnings above for which one failed and why."
         }
     }
 

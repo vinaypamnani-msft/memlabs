@@ -1,5 +1,7 @@
 param(
-    [switch]$force
+    [switch]$force,
+    # Mark this host as the DSC build server and exit.
+    [switch]$DesignateBuildServer
 )
 
 # Prepare DSC ZIP files
@@ -12,6 +14,16 @@ if (-not (Test-Path $prereqScript -PathType Leaf)) {
     throw "Cannot find $prereqScript. Run this from a full memlabs clone."
 }
 . $prereqScript
+
+if ($DesignateBuildServer) {
+    Set-MemLabsBuildServer
+    return
+}
+
+if (-not (Test-MemLabsBuildServer)) {
+    Deny-MemLabsNonBuildServer -ScriptName 'createHostDscZip.ps1'
+    return
+}
 
 if (-not (Test-MemLabsElevated)) {
     Write-Host
@@ -38,7 +50,7 @@ $modules = @(
 $moduleResult = Install-MemLabsModule -Name $modules -Update:$force
 foreach ($module in $moduleResult.Present) { Write-Host "Module exists: $module " }
 if ($moduleResult.Failed.Count -gt 0) {
-    throw "These modules could not be installed from PSGallery: $($moduleResult.Failed -join ', '). Fix connectivity to https://www.powershellgallery.com and re-run."
+    throw "These modules could not be installed: $($moduleResult.Failed -join ', '). Install-Module, a package-cache purge and a direct PSGallery nupkg download all failed - see the warnings above for which one failed and why."
 }
 
 # Create local compressed file

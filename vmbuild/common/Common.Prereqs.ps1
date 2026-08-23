@@ -42,6 +42,101 @@ function Write-PrereqLog {
     }
 }
 
+function Get-MemLabsBuildServerMarkerPath {
+    # Mirrors Get-MemlabsDataRoot in Common.StorageToken.ps1, which is not loaded yet when the
+    # DSC build scripts run this gate. Deliberately outside the repo so a git pull or a fresh
+    # clone never carries the designation to another host.
+    $root = $env:MEMLABS_DATA_ROOT
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        $programData = $env:ProgramData
+        if ([string]::IsNullOrWhiteSpace($programData)) { $programData = 'C:\ProgramData' }
+        $root = Join-Path $programData 'memlabs'
+    }
+    return (Join-Path $root 'dsc-build-server.json')
+}
+
+function Test-MemLabsBuildServer {
+    <#
+    .SYNOPSIS
+        Is this host designated to BUILD DSC.zip / Host.zip?
+
+    .DESCRIPTION
+        Building rewrites DSC.zip and version.json in the repo and installs 15 DSC modules
+        machine-wide. Lab hosts consume those artifacts and must never produce them, so the
+        build scripts refuse to run unless this host was explicitly designated.
+    #>
+    [CmdletBinding()]
+    param ()
+
+    $path = Get-MemLabsBuildServerMarkerPath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+
+    $marker = $null
+    try { $marker = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    catch {
+        Write-PrereqLog "Build-server marker $path is unreadable: $_" -Level Warning
+        return $false
+    }
+
+    # Lab hosts come off a shared Azure image; a marker baked into that image would silently
+    # promote every host, so the designation only counts for the machine it names.
+    if ($marker.ComputerName -ne $env:COMPUTERNAME) {
+        Write-PrereqLog "Build-server marker names '$($marker.ComputerName)' but this host is '$env:COMPUTERNAME'; ignoring it." -Level Warning
+        return $false
+    }
+    return $true
+}
+
+function Set-MemLabsBuildServer {
+    <#
+    .SYNOPSIS
+        Designate (or, with -Remove, undesignate) this host as a MemLabs DSC build server.
+    #>
+    [CmdletBinding()]
+    param (
+        [switch]$Remove
+    )
+
+    $path = Get-MemLabsBuildServerMarkerPath
+
+    if ($Remove) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
+        Write-PrereqLog "$env:COMPUTERNAME is no longer a MemLabs DSC build server (removed $path)." -Level Success
+        return
+    }
+
+    $root = Split-Path $path -Parent
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        New-Item -ItemType Directory -Path $root -Force -ErrorAction Stop | Out-Null
+    }
+    [pscustomobject]@{
+        ComputerName  = $env:COMPUTERNAME
+        DesignatedBy  = "$env:USERDOMAIN\$env:USERNAME"
+        DesignatedUtc = (Get-Date).ToUniversalTime().ToString('o')
+    } | ConvertTo-Json | Out-File -LiteralPath $path -Force -Encoding utf8 -ErrorAction Stop
+    Write-PrereqLog "$env:COMPUTERNAME is now a MemLabs DSC build server (wrote $path)." -Level Success
+}
+
+function Deny-MemLabsNonBuildServer {
+    <#
+    .SYNOPSIS
+        Print why the build was refused and how to designate this host. Callers return after.
+    #>
+    param (
+        [Parameter(Mandatory = $true)][string]$ScriptName
+    )
+
+    Write-Host
+    Write-Host "$ScriptName refused to run: $env:COMPUTERNAME is not a designated MemLabs DSC build server." -ForegroundColor Red
+    Write-Host "Building rewrites DSC.zip/version.json in the repo and installs DSC modules machine-wide," -ForegroundColor Yellow
+    Write-Host "which is not something a lab host should ever do." -ForegroundColor Yellow
+    Write-Host
+    Write-Host "If this IS the build server, designate it once (elevated):" -ForegroundColor Cyan
+    Write-Host "    .\$ScriptName -DesignateBuildServer" -ForegroundColor Cyan
+    Write-Host "Marker file: $(Get-MemLabsBuildServerMarkerPath)" -ForegroundColor Cyan
+    Write-Host
+}
+
 function Initialize-PSGallery {
     <#
     .SYNOPSIS
@@ -113,6 +208,161 @@ function Initialize-PSGallery {
     return $true
 }
 
+function Get-MemLabsModuleInstallPath {
+    param (
+        [Parameter(Mandatory = $true)][ValidateSet('AllUsers', 'CurrentUser')][string]$Scope
+    )
+
+    # PS 5.1 and PS 7 have separate module roots; createGuestDscZip.ps1 runs under 5.1 and its
+    # Start-Job child must see the same modules, so this has to follow the current edition.
+    $leaf = 'WindowsPowerShell'
+    if ($PSVersionTable.PSEdition -eq 'Core') { $leaf = 'PowerShell' }
+
+    if ($Scope -eq 'AllUsers') {
+        return (Join-Path (Join-Path $env:ProgramFiles $leaf) 'Modules')
+    }
+    return (Join-Path (Join-Path ([Environment]::GetFolderPath('MyDocuments')) $leaf) 'Modules')
+}
+
+function Clear-PackageManagementCache {
+    <#
+    .SYNOPSIS
+        Drop cached .nupkg files for a module.
+
+    .DESCRIPTION
+        A truncated download is cached and re-used, so Install-Module keeps failing with
+        "End of Central Directory record could not be found" on every retry until the bad
+        zip is deleted.
+    #>
+    param (
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $roots = @(
+        (Join-Path $env:LOCALAPPDATA 'PackageManagement\NuGet\Packages'),
+        (Join-Path $env:ProgramData 'PackageManagement\NuGet\Packages'),
+        $env:TEMP
+    )
+    $removed = 0
+    foreach ($root in $roots) {
+        if (-not $root -or -not (Test-Path $root -PathType Container)) { continue }
+        $stale = @(Get-ChildItem -Path $root -Filter "$Name*" -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSIsContainer -or $_.Extension -eq '.nupkg' })
+        foreach ($item in $stale) {
+            try { Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop; $removed++ }
+            catch { }
+        }
+    }
+    if ($removed -gt 0) { Write-PrereqLog "Cleared $removed cached package item(s) for $Name." }
+    return $removed
+}
+
+function Install-ModuleFromNupkg {
+    <#
+    .SYNOPSIS
+        Install a PSGallery module by downloading and expanding its .nupkg directly.
+
+    .DESCRIPTION
+        Last resort when PackageManagement itself is the problem. The download is validated
+        as a real zip BEFORE expansion, which is the exact check Install-Module fails on, so
+        a truncated transfer is retried instead of being installed as a broken module.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][ValidateSet('AllUsers', 'CurrentUser')][string]$Scope
+    )
+
+    $work = Join-Path $env:TEMP ('memlabs-nupkg-' + [guid]::NewGuid().ToString('N'))
+    $extractDir = Join-Path $work 'x'
+    $nupkg = Join-Path $work "$Name.zip"
+    $oldProgress = $Global:ProgressPreference
+    try {
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $Global:ProgressPreference = 'SilentlyContinue'
+
+        if (-not ('System.IO.Compression.ZipFile' -as [type])) {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        }
+
+        $url = "https://www.powershellgallery.com/api/v2/package/$Name"
+        $valid = $false
+        for ($attempt = 1; $attempt -le 3 -and -not $valid; $attempt++) {
+            if (Test-Path -LiteralPath $nupkg) { Remove-Item -LiteralPath $nupkg -Force -ErrorAction SilentlyContinue }
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $nupkg -UseBasicParsing -ErrorAction Stop
+            }
+            catch {
+                # PS 7 folds the whole HTTP response body into the message; collapse it or
+                # the log fills with blank lines from the gallery's error page.
+                $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
+                if ($msg.Length -gt 200) { $msg = $msg.Substring(0, 200) + '...' }
+                Write-PrereqLog "Download of $Name (attempt $attempt) failed: $msg" -Level Warning
+                if ($msg -match '404') { break }
+                continue
+            }
+
+            try {
+                $zip = [System.IO.Compression.ZipFile]::OpenRead($nupkg)
+                try { $valid = ($zip.Entries.Count -gt 0) } finally { $zip.Dispose() }
+                if (-not $valid) { Write-PrereqLog "Downloaded $Name package is an empty zip (attempt $attempt)." -Level Warning }
+            }
+            catch {
+                $sizeKb = 0
+                if (Test-Path -LiteralPath $nupkg) { $sizeKb = [math]::Round((Get-Item -LiteralPath $nupkg).Length / 1KB, 1) }
+                Write-PrereqLog "Downloaded $Name package is not a valid zip (attempt $attempt, ${sizeKb}KB): $_" -Level Warning
+            }
+        }
+        if (-not $valid) { return $false }
+
+        Expand-Archive -LiteralPath $nupkg -DestinationPath $extractDir -Force -ErrorAction Stop
+
+        $version = $null
+        $psd1 = Join-Path $extractDir "$Name.psd1"
+        if (Test-Path -LiteralPath $psd1) {
+            try { $version = (Import-PowerShellDataFile -LiteralPath $psd1).ModuleVersion } catch { }
+        }
+        if (-not $version) {
+            $nuspec = @(Get-ChildItem -LiteralPath $extractDir -Filter '*.nuspec' -File -ErrorAction SilentlyContinue) | Select-Object -First 1
+            if ($nuspec) {
+                try {
+                    $xml = [xml](Get-Content -LiteralPath $nuspec.FullName -Raw)
+                    $version = ($xml.package.metadata.version -split '-')[0]
+                }
+                catch { }
+            }
+        }
+        if (-not $version) {
+            Write-PrereqLog "Could not determine a version for $Name from the downloaded package." -Level Warning
+            return $false
+        }
+
+        # NuGet packaging artifacts; brackets in the path make -LiteralPath mandatory.
+        foreach ($junk in @('_rels', 'package', '[Content_Types].xml')) {
+            $junkPath = Join-Path $extractDir $junk
+            if (Test-Path -LiteralPath $junkPath) { Remove-Item -LiteralPath $junkPath -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        Get-ChildItem -LiteralPath $extractDir -Filter '*.nuspec' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
+        $target = Join-Path (Join-Path (Get-MemLabsModuleInstallPath -Scope $Scope) $Name) $version
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop }
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        Get-ChildItem -LiteralPath $extractDir -Force | Copy-Item -Destination $target -Recurse -Force -ErrorAction Stop
+        Get-ChildItem -LiteralPath $target -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
+
+        Write-PrereqLog "Installed $Name $version from nupkg to $target" -Level Success
+        return $true
+    }
+    catch {
+        Write-PrereqLog "Direct nupkg install of $Name failed: $_" -Level Warning
+        return $false
+    }
+    finally {
+        $Global:ProgressPreference = $oldProgress
+        if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Install-MemLabsModule {
     <#
     .SYNOPSIS
@@ -153,6 +403,20 @@ function Install-MemLabsModule {
         }
         catch {
             Write-PrereqLog "Install-Module $module failed: $_" -Level Warning
+
+            # A bad .nupkg is CACHED, so a plain retry replays the same corrupt zip
+            # ("End of Central Directory record could not be found") forever.
+            $clearedCount = Clear-PackageManagementCache -Name $module
+            if ($clearedCount -gt 0) {
+                Write-PrereqLog "Retrying Install-Module $module after clearing the package cache..."
+                try { Install-Module -Name $module -Force -Confirm:$false -Scope $scope -AllowClobber -SkipPublisherCheck -ErrorAction Stop -Verbose:$false }
+                catch { Write-PrereqLog "Retry of Install-Module $module failed: $_" -Level Warning }
+            }
+
+            if (-not (Get-Module -ListAvailable -Name $module -Verbose:$false)) {
+                Write-PrereqLog "Falling back to a direct PSGallery nupkg download for $module..." -Level Warning
+                $null = Install-ModuleFromNupkg -Name $module -Scope $scope
+            }
         }
 
         if (Get-Module -ListAvailable -Name $module -Verbose:$false) { $installed += $module }
