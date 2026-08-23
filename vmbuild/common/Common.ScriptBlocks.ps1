@@ -7256,10 +7256,22 @@ $global:VM_Config = {
                                         $since = $f.LastWriteTime.AddMinutes(-5)
                                         & $add "ConfigurationStatus record: $($f.Name) (last resource record written $($f.LastWriteTime), $([Math]::Round($f.Length/1KB))KB)"
                                         $raw = $null
-                                        # No encoding/shape heuristics here: the whole file is copied to the
-                                        # host below, so anything this in-guest pass cannot read is answered by
-                                        # the artifact rather than by guessing at it.
-                                        try { $raw = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop }
+                                        # These records are UTF-16LE with NO BOM. PS5.1's Get-Content -Raw
+                                        # then decodes them as the default codepage, producing a string with
+                                        # a NUL between every character: ConvertFrom-Json fails and every
+                                        # regex fallback below finds nothing, which is exactly what happened
+                                        # on 2026-08-23 (103KB captured, not one line readable). Sniff the
+                                        # first bytes and decode accordingly.
+                                        try {
+                                            $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+                                            if ($bytes.Length -ge 2 -and $bytes[0] -ne 0 -and $bytes[1] -eq 0) {
+                                                $raw = [System.Text.Encoding]::Unicode.GetString($bytes)
+                                                & $add "  (decoded as UTF-16LE; the file carries no BOM)"
+                                            }
+                                            else {
+                                                $raw = [System.Text.Encoding]::UTF8.GetString($bytes)
+                                            }
+                                        }
                                         catch { & $add "  read failed even after stop: $($_.Exception.Message)" }
                                         if ($raw) {
                                             $recs = @()
@@ -7278,24 +7290,51 @@ $global:VM_Config = {
                                                 if ($hexHead) { & $add "  first 16 bytes: $hexHead" }
                                             }
                                             if ($recs.Count -gt 0) {
-                                                $dur = {
-                                                    param($r)
-                                                    $d = 0.0
-                                                    $v = $r.DurationInSeconds
-                                                    if ($null -ne $v -and [double]::TryParse([string]$v, [ref]$d)) { return $d }
-                                                    return 0.0
+                                                # Two shapes live under ConfigurationStatus. *.details.json is the
+                                                # LCM's own {time,type,message} trace -- it carries the resource's
+                                                # real exception in its single type=error record, which is the one
+                                                # thing worth having and which the resource-record reader below
+                                                # cannot see because those keys do not exist in it.
+                                                $traceRecs = @($recs | Where-Object { $_.PSObject.Properties.Name -contains 'message' })
+                                                if ($traceRecs.Count -gt 0) {
+                                                    & $add "  $($traceRecs.Count) LCM trace record(s)."
+                                                    $errRecs = @($traceRecs | Where-Object { "$($_.type)" -eq 'error' })
+                                                    if ($errRecs.Count -gt 0) {
+                                                        & $add "  --- LCM error record(s) ($($errRecs.Count)) ---"
+                                                        foreach ($er in @($errRecs | Select-Object -First 5)) {
+                                                            $t = ("" + $er.message) -replace '\s+', ' '
+                                                            if ($t.Length -gt 700) { $t = $t.Substring(0, 700) + ' ...[truncated]' }
+                                                            & $add "    $t"
+                                                        }
+                                                    }
+                                                    else { & $add "  no type=error record in the trace." }
+                                                    & $add "  --- last 8 trace messages (the stall is after the last) ---"
+                                                    foreach ($tr in @($traceRecs | Select-Object -Last 8)) {
+                                                        $t = ("" + $tr.message) -replace '\s+', ' '
+                                                        if ($t.Length -gt 300) { $t = $t.Substring(0, 300) + ' ...' }
+                                                        & $add "    [$($tr.type)] $t"
+                                                    }
                                                 }
-                                                & $add "  $($recs.Count) resource record(s)."
-                                                # Slowest resources name what the LCM was actually grinding on.
-                                                & $add "  --- slowest ---"
-                                                foreach ($r in @($recs | Sort-Object { & $dur $_ } -Descending | Select-Object -First 5)) {
-                                                    & $add ("    {0,8:N1}s  {1}  InDesiredState={2}" -f (& $dur $r), $r.ResourceId, $r.InDesiredState)
-                                                }
-                                                $bad = @($recs | Where-Object { $_.InDesiredState -eq $false -or $_.Error })
-                                                if ($bad.Count -gt 0) {
-                                                    & $add "  --- not in desired state / errored ($($bad.Count)) ---"
-                                                    foreach ($r in @($bad | Select-Object -First 8)) {
-                                                        & $add ("    {0}  {1}" -f $r.ResourceId, ("" + $r.Error))
+                                                else {
+                                                    $dur = {
+                                                        param($r)
+                                                        $d = 0.0
+                                                        $v = $r.DurationInSeconds
+                                                        if ($null -ne $v -and [double]::TryParse([string]$v, [ref]$d)) { return $d }
+                                                        return 0.0
+                                                    }
+                                                    & $add "  $($recs.Count) resource record(s)."
+                                                    # Slowest resources name what the LCM was actually grinding on.
+                                                    & $add "  --- slowest ---"
+                                                    foreach ($r in @($recs | Sort-Object { & $dur $_ } -Descending | Select-Object -First 5)) {
+                                                        & $add ("    {0,8:N1}s  {1}  InDesiredState={2}" -f (& $dur $r), $r.ResourceId, $r.InDesiredState)
+                                                    }
+                                                    $bad = @($recs | Where-Object { $_.InDesiredState -eq $false -or $_.Error })
+                                                    if ($bad.Count -gt 0) {
+                                                        & $add "  --- not in desired state / errored ($($bad.Count)) ---"
+                                                        foreach ($r in @($bad | Select-Object -First 8)) {
+                                                            & $add ("    {0}  {1}" -f $r.ResourceId, ("" + $r.Error))
+                                                        }
                                                     }
                                                 }
                                             }
@@ -7310,6 +7349,20 @@ $global:VM_Config = {
                                                     foreach ($id in @($ids | Select-Object -Last 12)) { & $add "    $id" }
                                                 }
                                                 else { & $add "  raw scan found no ResourceId tokens." }
+                                                # Ids alone say WHERE, never WHY. On a truncated trace file the
+                                                # message bodies are still the only copy of the exception.
+                                                $msgs = @([regex]::Matches($raw, '"message"\s*:\s*"((?:[^"\\]|\\.)*)"') |
+                                                    ForEach-Object { $_.Groups[1].Value } |
+                                                    Where-Object { $_ })
+                                                if ($msgs.Count -gt 0) {
+                                                    & $add "  --- raw scan: $($msgs.Count) trace message(s), last 8 ---"
+                                                    foreach ($m in @($msgs | Select-Object -Last 8)) {
+                                                        $t = ($m -replace '\\r\\n', ' ' -replace '\\n', ' ' -replace '\\"', '"' -replace '\\\\', '\') -replace '\s+', ' '
+                                                        if ($t.Length -gt 400) { $t = $t.Substring(0, 400) + ' ...[truncated]' }
+                                                        & $add "    $t"
+                                                    }
+                                                }
+                                                else { & $add "  raw scan found no trace messages." }
                                             }
                                         }
                                     }
