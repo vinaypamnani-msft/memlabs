@@ -199,6 +199,18 @@ $global:Phase11Job = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stamp lastPhaseComplete=11: $_" -LogOnly
             }
 
+            # Capture the RDP listener certificate for the .rdg <trustedCertificates> node.
+            # Phase 11 is the first point where the FQDN is final (the cert is reissued on
+            # rename/domain-join in Phase 2) and the guest is known reachable. -Force so a
+            # reissued certificate refreshes instead of leaving a stale hash that silently
+            # stops suppressing RDCMan's prompt.
+            try {
+                $null = Update-VmRdpCertNote -VmName $currentItem.vmName -VmDomainName $domainNameForLogging -Force
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to capture the RDP certificate hash: $_" -LogOnly
+            }
+
             # Remove the Read-DSCLog desktop shortcut now that validation passed
             # and re-enable WU services that Phase 1 disabled for the deploy.
             $domainName = $deployConfig.vmOptions.domainName

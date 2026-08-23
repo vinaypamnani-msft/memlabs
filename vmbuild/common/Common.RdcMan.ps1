@@ -1180,11 +1180,19 @@ function New-RDCManFileFromHyperV {
                 $targetGroup = $findGroup
             }
 
+            # Phase 11 captures this. Fall back to a one-off capture here so a VM that has
+            # never reached Phase 11 still stops prompting; a stopped VM just reuses the
+            # stored value, which is the whole point of keeping it on the note.
+            $certSha256 = if ($vm.rdpCertSha256) { "$($vm.rdpCertSha256)" } else { $null }
+            if (-not $certSha256 -and $vm.State -eq 'Running' -and [string]::IsNullOrWhiteSpace($vmID)) {
+                $certSha256 = Update-VmRdpCertNote -VmName $vm.vmName -VmDomainName $vm.Domain
+            }
+
             # Skip the flat/default placement when additive grouping is on but the
             # default scheme is off -- the VM then lives only in the additive
             # folders below (avoids the duplicate under the domain group).
             if ($rdcSettings.DefaultGrouping -or -not $anyAdditiveGrouping) {
-                if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $targetGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser) -eq $True) {
+                if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $targetGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser -certSha256 $certSha256) -eq $True) {
                     $shouldSave = $true
                 }
             }
@@ -1192,7 +1200,7 @@ function New-RDCManFileFromHyperV {
             # Optional additive grouping folders (By Role / By OS / By Subnet / By Site / All VMs)
             foreach ($fp in (Get-RDCGroupingFolders -vm $vm -settings $rdcSettings -vmListFull $vmListFull -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap)) {
                 $addGroup = Get-RDCManNestedGroup -parent $findGroup -pathNames $fp -existing $existing
-                if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $addGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser) -eq $True) {
+                if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $addGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser -certSha256 $certSha256) -eq $True) {
                     $shouldSave = $true
                 }
             }
@@ -1421,6 +1429,7 @@ function Add-RDCManServerToGroup {
         [string]$vmID = $null,
         [string]$username = $null,
         [string]$domain = $null,
+        [string]$certSha256 = $null,
         [bool]$ForceOverwrite
     )
 
@@ -1501,6 +1510,22 @@ function Add-RDCManServerToGroup {
             }
             $clonedNode.logonCredentials.password = $encryptedPass
         }
+
+        # RDCMan 3.12 keeps "Trust this certificate for this server" here, per server, so
+        # rebuilding the node from the template is what discards a trust clicked in the UI.
+        # Writing it from the VM note makes the trust survive every regeneration.
+        # Skipped for console entries: those connect to the Hyper-V host, not the guest,
+        # so the guest's certificate would never be the one presented.
+        if ($certSha256 -and [string]::IsNullOrWhiteSpace($vmID)) {
+            $certs = $existing.CreateElement("trustedCertificates")
+            $cert = $existing.CreateElement("certificate")
+            $cert.SetAttribute("endpointType", "SessionHost")
+            $cert.SetAttribute("endpoint", $serverName.ToLowerInvariant())
+            $cert.SetAttribute("sha256", $certSha256.ToUpperInvariant())
+            [void]$certs.AppendChild($cert)
+            [void]$clonedNode.AppendChild($certs)
+        }
+
         $targetGroup.AppendChild($clonedNode)
         return $True
     }
