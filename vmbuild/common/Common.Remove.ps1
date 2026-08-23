@@ -739,6 +739,40 @@ function Remove-InProgress {
     Write-Host
 }
 
+function Remove-TrustHalf {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DC VM object the removal runs on")]
+        [object]$DC,
+        [Parameter(Mandatory = $true, HelpMessage = "Domain the DC belongs to")]
+        [string]$ForestDomain,
+        [Parameter(Mandatory = $true, HelpMessage = "Trust partner domain")]
+        [string]$PartnerDomain,
+        [Parameter(Mandatory = $true, HelpMessage = "netdom /Remove scriptblock")]
+        [ScriptBlock]$ScriptBlock,
+        [Parameter(HelpMessage = "Whether the partner DC still exists and can be contacted")]
+        [switch]$PartnerOnline
+    )
+
+    # Always clear the local side. Only fire the partner-contacting direction when the
+    # partner DC still exists -- otherwise it just returns netdom's confusing
+    # "domain does not exist or could not be contacted".
+    $outputs = @()
+    $outputs += (Invoke-VmCommand -VmName $DC.vmName -VmDomainName $ForestDomain -ScriptBlock $ScriptBlock -ArgumentList @($ForestDomain, $PartnerDomain) -SuppressLog).ScriptBlockOutput
+    if ($PartnerOnline) {
+        $outputs += (Invoke-VmCommand -VmName $DC.vmName -VmDomainName $ForestDomain -ScriptBlock $ScriptBlock -ArgumentList @($PartnerDomain, $ForestDomain) -SuppressLog).ScriptBlockOutput
+    }
+
+    $output = ($outputs | Where-Object { $_ }) -join "`r`n"
+    if ($output) { Write-Log $output }
+
+    if ($output -match 'does not exist or could not be contacted') {
+        Write-OrangePoint "Partner domain '$PartnerDomain' could not be contacted from $($DC.vmName); its own DC removes the matching half."
+    }
+    elseif ($output -match 'completed successfully') {
+        Write-GreenCheck "Trust removed on $($DC.vmName)"
+    }
+}
+
 function Remove-ForestTrust {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
@@ -757,77 +791,71 @@ function Remove-ForestTrust {
             $DC1 = get-list -type VM -DomainName $TrustedForest.ForestTrust | Where-Object { $_.Role -eq "DC" }
             $DC2 = get-list -type VM -DomainName $TrustedForest.domain | Where-Object { $_.Role -eq "DC" }
 
+            $scriptBlockRemove = {
+                param(
+                    [String]$forestDomain,
+                    [String]$DomainName
+                )
+                write-host "Running on $env:ComputerName as $env:Username"
+                write-host "Netdom trust $forestDomain /Domain:$DomainName /Remove /Force"
+                Netdom trust $forestDomain /Domain:$DomainName /Remove /Force
+            }
+
             if ($DC1) {
                 $forestDomain = $TrustedForest.ForestTrust
-                $domainName = $TrustedForest.domain
+                $partnerDomain = $TrustedForest.domain
                 start-vm2 -Name $DC1.vmName
                 Wait-ForHeartbeat -VmName $DC1.vmName | Out-Null
 
-                $scriptBlockTest = {
-                    param(
-                        [String]$forestDomain,
-                        [String]$DomainName,
-                        [String]$adminName,
-                        [String]$adminName2,
-                        [String]$pw
-                    )
-                    & netdom trust $($forestDomain) /d:$($DomainName) /userD:$adminName /passwordD:$pw /userO:$adminName2 /PasswordO:$pw /verify /twoway
-                }
-                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlockTest -ArgumentList @($forestDomain, $domainName, $DC1.AdminName, $DC2.AdminName, $($Common.LocalAdmin.GetNetworkCredential().Password)) -SuppressLog  
+                # A two-way trust can only be verified with the partner DC online. When it
+                # is already gone, skip the verify (it dereferences $DC2) and just tear the
+                # local half down.
+                if ($DC2) {
+                    $scriptBlockTest = {
+                        param(
+                            [String]$forestDomain,
+                            [String]$DomainName,
+                            [String]$adminName,
+                            [String]$adminName2,
+                            [String]$pw
+                        )
+                        & netdom trust $($forestDomain) /d:$($DomainName) /userD:$adminName /passwordD:$pw /userO:$adminName2 /PasswordO:$pw /verify /twoway
+                    }
+                    $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlockTest -ArgumentList @($forestDomain, $partnerDomain, $DC1.AdminName, $DC2.AdminName, $($Common.LocalAdmin.GetNetworkCredential().Password)) -SuppressLog
 
-                write-host -verbose "Netdom results: $($result.ScriptBlockOutput)"
-                if ($result.ScriptBlockOutput -and $result.ScriptBlockOutput -like "*has been successfully verified*") {
+                    write-host -verbose "Netdom results: $($result.ScriptBlockOutput)"
+                    if ($result.ScriptBlockOutput -and $result.ScriptBlockOutput -like "*has been successfully verified*") {
 
-                    if ($IfBroken) {
-                        Write-GreenCheck "Trust Verified Successfully"
-                        return
-                    } 
+                        if ($IfBroken) {
+                            Write-GreenCheck "Trust Verified Successfully"
+                            return
+                        }
+                        else {
+                            Write-OrangePoint "Trust Verified Successfully. Deleting Anyway"
+                        }
+                    }
                     else {
-                        Write-OrangePoint "Trust Verified Successfully. Deleting Anyway"
+
+                        Write-RedX "Trust is not working. Removing."
+                        write-log $result.ScriptBlockOutput
                     }
                 }
                 else {
-
-                    Write-RedX "Trust is not working. Removing."
-                    write-log $result.ScriptBlockOutput                
+                    Write-OrangePoint "Partner DC for '$partnerDomain' no longer exists; removing the local trust half on $($DC1.vmName) only."
                 }
 
-                Write-Log "Removing Trust on $DC1 for '$otherDomain'" -Activity
-             
-                
-                $scriptBlock1 = {
-                    param(
-                        [String]$forestDomain,
-                        [String]$DomainName
-                    )
-                    write-host "Running on $env:ComputerName as $env:Username"
-                    write-host "Netdom trust $forestDomain /Domain:$DomainName /Remove /Force"
-                    Netdom trust $forestDomain /Domain:$DomainName /Remove /Force
-                }
-                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($forestDomain, $domainName) -SuppressLog
-                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($domainName, $forestDomain) -SuppressLog
-                write-log $result.ScriptBlockOutput
+                Write-Log "Removing Trust on $($DC1.vmName) for '$partnerDomain'" -Activity
+                Remove-TrustHalf -DC $DC1 -ForestDomain $forestDomain -PartnerDomain $partnerDomain -PartnerOnline:([bool]$DC2) -ScriptBlock $scriptBlockRemove
             }
 
             if ($DC2) {
                 $forestDomain = $TrustedForest.domain
-                $domainName = $TrustedForest.ForestTrust
-                Write-Log "Removing Trust on $DC2 for '$otherDomain'" -Activity
+                $partnerDomain = $TrustedForest.ForestTrust
+                Write-Log "Removing Trust on $($DC2.vmName) for '$partnerDomain'" -Activity
 
                 start-vm2 -Name $DC2.vmName
                 Wait-ForHeartbeat -VmName $DC2.vmName | Out-Null
-                $scriptBlock1 = {
-                    param(
-                        [String]$forestDomain,
-                        [String]$DomainName
-                    )
-                    write-host "Running on $env:ComputerName as $env:Username"
-                    write-host "Netdom trust $forestDomain /Domain:$DomainName /Remove /Force"
-                    Netdom trust $forestDomain /Domain:$DomainName /Remove /Force
-                }
-                $result = Invoke-VmCommand -VmName $DC2.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($forestDomain, $domainName) -SuppressLog
-                $result = Invoke-VmCommand -VmName $DC2.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($domainName, $forestDomain) -SuppressLog
-                write-log $result.ScriptBlockOutput
+                Remove-TrustHalf -DC $DC2 -ForestDomain $forestDomain -PartnerDomain $partnerDomain -PartnerOnline:([bool]$DC1) -ScriptBlock $scriptBlockRemove
             }
 
         }
