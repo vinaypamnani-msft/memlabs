@@ -7791,9 +7791,13 @@ class InstallPBIRS {
                 while ($ix -and $depth -lt 4) { $_chain += " <- $($ix.GetType().Name): $($ix.Message)"; $ix = $ix.InnerException; $depth++ }
             }
             catch {}
-            Write-Status "Failed to Configure PBIRS: [$($_err.Exception.GetType().Name)] $($_err.Exception.Message)$_chain"
-            Write-Status "Failed to Configure PBIRS at $_where"
+            # All three go to DSC_Log.log, but only the LAST survives in DSC_Status.txt --
+            # the host polls slower than these are written, so whichever is written last is
+            # what the operator stares at for the next several minutes. Stack first, reason
+            # last: the reason is the only one that says what to do about it.
             try { Write-Status "Failed to Configure PBIRS stack: $($_err.ScriptStackTrace -replace '\r?\n', ' | ')" } catch {}
+            Write-Status "Failed to Configure PBIRS at $_where"
+            Write-Status "Failed to Configure PBIRS: [$($_err.Exception.GetType().Name)] $($_err.Exception.Message)$_chain"
 
             # The post-install SOAP probe above throws on purpose ("so DSC marks this
             # resource as failed rather than silently passing") -- honour that.
