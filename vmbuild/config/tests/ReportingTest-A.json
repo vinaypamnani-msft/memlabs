@@ -150,8 +150,8 @@
     {
       "vmName": "PS2SQLAO1",
       "role": "SQLAO",
-      "operatingSystem": "Server 2022",
-      "memory": "7GB",
+      "operatingSystem": "Server 2019",
+      "memory": "16GB",
       "virtualProcs": 8,
       "tpmEnabled": false,
       "network": "192.168.2.0",
@@ -175,8 +175,8 @@
     {
       "vmName": "PS2SQLAO2",
       "role": "SQLAO",
-      "operatingSystem": "Server 2022",
-      "memory": "7GB",
+      "operatingSystem": "Server 2019",
+      "memory": "16GB",
       "virtualProcs": 8,
       "tpmEnabled": false,
       "network": "192.168.2.0",
