@@ -8,6 +8,138 @@
 # scheme is handled separately by the DefaultGrouping toggle.
 $script:RDCGroupingParents = @("All VMs", "By Role", "By OS", "By Subnet", "By Site")
 
+# RDCMan 3.21 added a per-server certificate warning that fires for every lab VM, so MemLabs
+# prefers 3.12.0.0. It keeps its OWN copy under ProgramData rather than pinning C:\tools:
+# that path belongs to the chocolatey sysinternals package, and holding it back would block
+# sysinternals updates for everything else.
+#
+# Sysinternals only ever publishes the current build, so 3.12 cannot be re-downloaded from
+# live.sysinternals.com. It comes from the storage account, or from a cached copy any host
+# rescues while it still has one.
+#
+# If 3.12 cannot be obtained, MemLabs FALLS BACK to whatever the sysinternals package
+# provides. That still works -- the .rdg cert-trust feature simply switches itself on,
+# because Test-RDCManCertTrustSupported keys off the version actually being launched.
+$script:RDCManPinnedVersion = [version]'3.12.0.0'
+$script:RDCManPinnedDir = Join-Path $env:ProgramData 'memlabs\RDCMan'
+$script:RDCManFallbackDir = 'C:\tools'
+$script:RDCManCacheFileName = 'RDCMan-3.12.0.0.exe'
+$script:RDCManStorageFileId = 'RdcMan312Exe'
+
+function Get-RDCManPinnedVersion { return $script:RDCManPinnedVersion }
+
+function Get-RDCManVersion {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    try { return [version](Get-Item -LiteralPath $Path).VersionInfo.ProductVersion }
+    catch {
+        Write-Log "Could not read the RDCMan version at $Path. $_" -LogOnly -Verbose
+        return $null
+    }
+}
+
+# The exe MemLabs will actually launch and associate .rdg with: the pinned copy when we have
+# it, otherwise the sysinternals one. Everything else keys off this, so a fallback host stays
+# self-consistent instead of associating one build and version-checking another.
+function Get-RDCManExePath {
+    $pinned = Join-Path $script:RDCManPinnedDir 'RDCMan.exe'
+    if ((Get-RDCManVersion -Path $pinned) -eq $script:RDCManPinnedVersion) { return $pinned }
+    $fallback = Join-Path $script:RDCManFallbackDir 'RDCMan.exe'
+    if (Get-RDCManVersion -Path $fallback) { return $fallback }
+    if (Test-Path -LiteralPath $pinned) { return $pinned }
+    return $null
+}
+
+# <trustedCertificates> is a 3.21+ concept. Dormant on the pinned build (that client never
+# reads it), active on the fallback -- which is exactly when the prompt would otherwise fire.
+function Test-RDCManCertTrustSupported {
+    $installed = Get-RDCManVersion -Path (Get-RDCManExePath)
+    if (-not $installed) { return $false }
+    return ($installed -gt $script:RDCManPinnedVersion)
+}
+
+# Rescue a known-good pinned build into the cache. Sysinternals will not serve it again, so a
+# host that has one and loses it has no local way back. Checks the sysinternals path too --
+# that copy is the only 3.12 most hosts still have, and choco will eventually overwrite it.
+function Save-RDCManPinnedCopy {
+    if (-not $Common -or -not $Common.CachePath) { return $false }
+    $cached = Join-Path $Common.CachePath $script:RDCManCacheFileName
+    if ((Get-RDCManVersion -Path $cached) -eq $script:RDCManPinnedVersion) { return $true }
+
+    foreach ($dir in @($script:RDCManPinnedDir, $script:RDCManFallbackDir)) {
+        $exe = Join-Path $dir 'RDCMan.exe'
+        if ((Get-RDCManVersion -Path $exe) -ne $script:RDCManPinnedVersion) { continue }
+        try {
+            Copy-Item -LiteralPath $exe -Destination $cached -Force -ErrorAction Stop
+            Write-Log "Rescued RDCMan $script:RDCManPinnedVersion from $exe to $cached." -LogOnly -Verbose
+            return $true
+        }
+        catch {
+            Write-Log "Could not rescue RDCMan $script:RDCManPinnedVersion from $exe. $_" -LogOnly -Verbose
+        }
+    }
+    return $false
+}
+
+# Put the pinned build in MemLabs' own directory. Cache first, storage account second. Never
+# touches C:\tools -- that belongs to chocolatey.
+function Restore-RDCManPinnedVersion {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([switch]$Quiet)
+
+    $exe = Join-Path $script:RDCManPinnedDir 'RDCMan.exe'
+    if ((Get-RDCManVersion -Path $exe) -eq $script:RDCManPinnedVersion) { return $true }
+
+    $null = Save-RDCManPinnedCopy
+    $source = $null
+    if ($Common -and $Common.CachePath) {
+        $cached = Join-Path $Common.CachePath $script:RDCManCacheFileName
+        if ((Get-RDCManVersion -Path $cached) -eq $script:RDCManPinnedVersion) { $source = $cached }
+    }
+
+    if (-not $source -and $Common -and $Common.AzureFileList) {
+        $entry = @($Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq $script:RDCManStorageFileId }) | Select-Object -First 1
+        if ($entry) {
+            if (Get-FileFromStorage -File $entry -IgnoreHashFailure:$false) {
+                $downloaded = Join-Path $Common.AzureFilesPath $entry.filename
+                if ((Get-RDCManVersion -Path $downloaded) -eq $script:RDCManPinnedVersion) { $source = $downloaded }
+                else { Write-Log "Storage supplied '$($entry.filename)' but it is not RDCMan $script:RDCManPinnedVersion." -Warning }
+            }
+        }
+    }
+
+    if (-not $source) {
+        if (-not $Quiet) {
+            Write-Log ("RDCMan $script:RDCManPinnedVersion is not cached and not in storage; falling back to the sysinternals copy. " +
+                "Add a SupportFiles entry with id '$script:RDCManStorageFileId' pointing at support\$script:RDCManCacheFileName to pin it.") -LogOnly -Verbose
+        }
+        return $false
+    }
+
+    if (-not $PSCmdlet.ShouldProcess($exe, "Install RDCMan $script:RDCManPinnedVersion")) { return $false }
+
+    try {
+        if (-not (Test-Path -LiteralPath $script:RDCManPinnedDir)) {
+            $null = New-Item -Path $script:RDCManPinnedDir -ItemType Directory -Force
+        }
+        Copy-Item -LiteralPath $source -Destination $exe -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Log "Could not install RDCMan $script:RDCManPinnedVersion from $source. $_" -Warning
+        return $false
+    }
+
+    # Read back: a copy that did not land must not report success.
+    $now = Get-RDCManVersion -Path $exe
+    if ($now -ne $script:RDCManPinnedVersion) {
+        Write-Log "RDCMan install did not take effect (found '$now' at $exe)." -Warning
+        return $false
+    }
+    Write-Log "Installed pinned RDCMan $script:RDCManPinnedVersion at $exe (from $source)." -LogOnly -Verbose
+    $null = Save-RDCManPinnedCopy
+    return $true
+}
+
 # Default RDC / Remote Connection settings. Grouping additions default OFF (the
 # default scheme reproduces today's layout); display-name elements default ON so
 # a fresh install matches the historical output (plus the newly requested SQL
@@ -280,61 +412,27 @@ function Get-RDCManNestedGroup {
 
 
 function Install-RDCman {
-    # ARM template installs sysinternals tools via choco
-    $rdcmanpath = "C:\ProgramData\chocolatey\lib\sysinternals\tools"
-    $Global:newrdcmanpath = "C:\tools"
-    $rdcmanexe = "RDCMan.exe"
-    $minimumVersion = [version]"3.12.0.0"
-    $sourceExe = Join-Path $rdcmanpath $rdcmanexe
-    $destinationExe = Join-Path $Global:newrdcmanpath $rdcmanexe
+    # C:\tools is the chocolatey sysinternals package's; MemLabs only ever reads from it.
+    # Its own pinned copy lives under ProgramData so sysinternals stays free to update.
+    $null = Restore-RDCManPinnedVersion
 
-    # create C:\tools if not present
-    if (-not (Test-Path $Global:newrdcmanpath)) {
-        New-Item -Path $Global:newrdcmanpath -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+    $exe = Get-RDCManExePath
+    if (-not $exe) {
+        Write-Log "No RDCMan.exe found under $script:RDCManPinnedDir or $script:RDCManFallbackDir; install the sysinternals package." -Warning
+        return
     }
 
-    $destinationVersion = $null
-    if (Test-Path $destinationExe) {
-        try {
-            $destinationVersion = [version](Get-Item $destinationExe).VersionInfo.ProductVersion
-        }
-        catch {
-            Write-Log "Could not read the RDCMan version at $destinationExe. $_" -Warning -LogOnly
-        }
+    $Global:newrdcmanpath = Split-Path -Parent $exe
+    $version = Get-RDCManVersion -Path $exe
+    if ($version -gt $script:RDCManPinnedVersion) {
+        Write-Log ("Using RDCMan $version from $exe. It prompts to trust a certificate per VM, so MemLabs writes the " +
+            "trusted-certificate entries into the .rdg to suppress that. Supply $script:RDCManCacheFileName to use the quieter pinned build instead.") -Warning
     }
 
-    if (-not $destinationVersion -or $destinationVersion -lt $minimumVersion) {
-        $sourceVersion = $null
-        if (Test-Path $sourceExe) {
-            try {
-                $sourceVersion = [version](Get-Item $sourceExe).VersionInfo.ProductVersion
-            }
-            catch {
-                Write-Log "Could not read the RDCMan version at $sourceExe. $_" -Warning -LogOnly
-            }
-        }
-
-        if ($sourceVersion -and $sourceVersion -ge $minimumVersion) {
-            Copy-Item -Path $sourceExe -Destination $destinationExe -Force -ErrorAction Stop
-        }
-        else {
-            try {
-                $ProgressPreference = 'SilentlyContinue'
-                Start-BitsTransfer -Source "https://live.sysinternals.com/$rdcmanexe" -Destination $destinationExe -ErrorAction Stop
-            }
-            catch {
-                Write-Log "Could not download RDCMan $minimumVersion or newer. $_" -Warning -LogOnly
-            }
-            finally {
-                $ProgressPreference = 'Continue'
-            }
-        }
-    }
-
-    # set file associations
+    # Point .rdg at whichever build was actually resolved, so the association can never
+    # disagree with the version the rest of this file makes decisions from.
     & cmd /c assoc .rdg=rdcman | Out-Null
-    & cmd /c ftype rdcman=$Global:newrdcmanpath\$rdcmanexe | Out-Null
-
+    & cmd /c ftype rdcman=$exe | Out-Null
 }
 
 
@@ -772,6 +870,9 @@ function New-RDCManFileFromHyperV {
         }
     }
     Install-RDCman
+    # Dormant while pinned to 3.12: the node is a 3.21+ concept and that client never reads
+    # it. Capture into VM notes still runs, so the pin can be lifted without a re-collection.
+    $emitCertTrust = Test-RDCManCertTrustSupported
     $domainList = (Get-List -Type UniqueDomain -SmartUpdate)
     foreach ($domain in $domainList) {
         Write-Verbose "Adding all machines from Domain $domain"
@@ -1198,7 +1299,9 @@ function New-RDCManFileFromHyperV {
             # Phase 11 captures this. Precedence: the note, then a trust already in the .rdg
             # (either clicked in the dialog or written by a previous run), then a one-off
             # capture from a running guest. Anything recovered from the file is written back
-            # to the note so it stops depending on the file surviving.
+            # to the note so it stops depending on the file surviving -- that rescue runs even
+            # while emission is dormant, which is the only chance to save a hash the pinned
+            # client is about to drop from the file.
             $certSha256 = if ($vm.rdpCertSha256) { "$($vm.rdpCertSha256)" } else { $null }
             if (-not $certSha256 -and [string]::IsNullOrWhiteSpace($vmID)) {
                 $carried = $existingCerts["$($name.ToLowerInvariant())"]
@@ -1206,10 +1309,11 @@ function New-RDCManFileFromHyperV {
                     $certSha256 = $carried
                     $null = Save-VmRdpCertNote -VmName $vm.vmName -Sha256 $carried
                 }
-                elseif ($vm.State -eq 'Running') {
+                elseif ($emitCertTrust -and $vm.State -eq 'Running') {
                     $certSha256 = Update-VmRdpCertNote -VmName $vm.vmName -VmDomainName $vm.Domain
                 }
             }
+            if (-not $emitCertTrust) { $certSha256 = $null }
 
             # Skip the flat/default placement when additive grouping is on but the
             # default scheme is off -- the VM then lives only in the additive
@@ -1359,7 +1463,7 @@ function New-RDCManFileFromHyperV {
         # Prefer the path we captured before stopping RDCMan; fall back to the
         # default install location. Use the exe's own folder as the working
         # directory (C:\Temp may not exist on every host).
-        if (-not ($rdcExePath -and (Test-Path $rdcExePath))) { $rdcExePath = "C:\tools\RDCMan.exe" }
+        if (-not ($rdcExePath -and (Test-Path $rdcExePath))) { $rdcExePath = Get-RDCManExePath }
         $rdcWorkDir = Split-Path $rdcExePath -Parent
         if (-not (Test-Path $rdcWorkDir)) { $rdcWorkDir = $env:TEMP }
         Write-Log "[RDCMan restart] Gate OPEN (killed=$killed killedAlready=$killedAlready). Launching '$rdcExePath' /reconnect (workdir '$rdcWorkDir', exeExists=$(Test-Path $rdcExePath))." -LogOnly

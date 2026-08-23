@@ -643,88 +643,73 @@ function Invoke-MRemoteNGMaintenance {
 function Invoke-RdcManMaintenance {
     Write-LogMessage 'Starting RDCMan maintenance...'
 
-    $minimumVersion = [version]'3.12.0.0'
-    $installDirectory = 'C:\tools'
-    $rdcManExe = Join-Path $installDirectory 'RDCMan.exe'
-    $installedVersion = $null
+    # RDCMan 3.21 prompts to trust a certificate for every lab VM, so MemLabs prefers
+    # 3.12.0.0 -- but keeps its OWN copy under ProgramData instead of holding back
+    # C:\tools, which belongs to the chocolatey sysinternals package. Sysinternals stays
+    # free to update; MemLabs just stops using its RDCMan when it has a better option.
+    #
+    # live.sysinternals.com is deliberately NOT used: it only serves the current build.
+    # If 3.12 cannot be obtained, the sysinternals copy is used as-is and the .rdg
+    # cert-trust entries switch themselves on to suppress the prompt.
+    $pinnedVersion = [version]'3.12.0.0'
+    $pinnedDir = Join-Path $env:ProgramData 'memlabs\RDCMan'
+    $pinnedExe = Join-Path $pinnedDir 'RDCMan.exe'
+    $sysinternalsExe = 'C:\tools\RDCMan.exe'
+    # This script is intentionally standalone (no Common.ps1), so derive the cache directly.
+    $cachedExe = Join-Path $PSScriptRoot 'cache\RDCMan-3.12.0.0.exe'
 
-    if (Test-Path $rdcManExe) {
-        try {
-            $installedVersion = [version](Get-Item $rdcManExe).VersionInfo.ProductVersion
-        }
-        catch {
-            Write-LogMessage "Could not read the RDCMan version at '$rdcManExe': $_" -Level 'WARNING'
-        }
+    function Get-RdcManFileVersion {
+        param([string]$Path)
+        if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+        try { return [version](Get-Item -LiteralPath $Path).VersionInfo.ProductVersion } catch { return $null }
     }
 
-    $requiresInstall = -not $installedVersion -or $installedVersion -lt $minimumVersion
-    $runningProcesses = @(Get-Process -Name RDCMan -ErrorAction SilentlyContinue)
-    $hasIncompatibleRunningProcess = $false
-    foreach ($runningProcess in $runningProcesses) {
-        try {
-            $runningVersion = [version](Get-Item $runningProcess.Path).VersionInfo.ProductVersion
-            if ($runningVersion -lt $minimumVersion) {
-                Write-LogMessage "Running RDCMan $runningVersion at '$($runningProcess.Path)' is below $minimumVersion."
-                $hasIncompatibleRunningProcess = $true
+    # Rescue a 3.12 that is still sitting in the sysinternals folder before choco replaces
+    # it -- for most hosts that copy is the only 3.12 they will ever have.
+    if ((Get-RdcManFileVersion -Path $cachedExe) -ne $pinnedVersion) {
+        foreach ($candidate in @($pinnedExe, $sysinternalsExe)) {
+            if ((Get-RdcManFileVersion -Path $candidate) -ne $pinnedVersion) { continue }
+            try {
+                $cacheDir = Split-Path -Parent $cachedExe
+                if (-not (Test-Path -LiteralPath $cacheDir)) { New-Item -Path $cacheDir -ItemType Directory -Force | Out-Null }
+                Copy-Item -LiteralPath $candidate -Destination $cachedExe -Force -ErrorAction Stop
+                Write-LogMessage "Rescued RDCMan $pinnedVersion from $candidate to $cachedExe."
+                break
+            }
+            catch {
+                Write-LogMessage "Could not rescue RDCMan $pinnedVersion from $candidate : $_" -Level 'WARNING'
             }
         }
-        catch {
-            Write-LogMessage "Could not verify running RDCMan process $($runningProcess.Id): $_" -Level 'WARNING'
-            $hasIncompatibleRunningProcess = $true
+    }
+
+    if ((Get-RdcManFileVersion -Path $pinnedExe) -eq $pinnedVersion) {
+        Write-LogMessage "RDCMan $pinnedVersion is installed at $pinnedExe."
+        Write-LogMessage 'RDCMan maintenance completed.'
+        return
+    }
+
+    if ((Get-RdcManFileVersion -Path $cachedExe) -eq $pinnedVersion) {
+        try {
+            if (-not (Test-Path -LiteralPath $pinnedDir)) { New-Item -Path $pinnedDir -ItemType Directory -Force | Out-Null }
+            Copy-Item -LiteralPath $cachedExe -Destination $pinnedExe -Force -ErrorAction Stop
+            $now = Get-RdcManFileVersion -Path $pinnedExe
+            if ($now -eq $pinnedVersion) { Write-LogMessage "Installed pinned RDCMan $pinnedVersion at $pinnedExe." }
+            else { Write-LogMessage "RDCMan install did not take effect (found '$now' at $pinnedExe)." -Level 'WARNING' }
         }
+        catch {
+            Write-LogMessage "Could not install RDCMan $pinnedVersion from $cachedExe : $_" -Level 'WARNING'
+        }
+        Write-LogMessage 'RDCMan maintenance completed.'
+        return
     }
 
-    $restartAfterMaintenance = $false
-    if ($runningProcesses.Count -gt 0 -and ($requiresInstall -or $hasIncompatibleRunningProcess)) {
-        Write-LogMessage 'Stopping RDCMan to install or launch the compatible version...'
-        $runningProcesses | Stop-Process -Force -ErrorAction Stop
-        Start-Sleep -Seconds 1
-        $restartAfterMaintenance = $true
-    }
-
-    if (-not $requiresInstall) {
-        Write-LogMessage "RDCMan $installedVersion found at $rdcManExe. No upgrade needed."
+    $sysVersion = Get-RdcManFileVersion -Path $sysinternalsExe
+    if ($sysVersion) {
+        Write-LogMessage ("RDCMan $pinnedVersion is not cached; using the sysinternals build $sysVersion at $sysinternalsExe. " +
+            "MemLabs will write trusted-certificate entries into the .rdg to suppress its per-VM prompt.")
     }
     else {
-        if ($installedVersion) {
-            Write-LogMessage "RDCMan $installedVersion is below the required version $minimumVersion."
-        }
-        else {
-            Write-LogMessage "RDCMan $minimumVersion or newer was not found at $rdcManExe."
-        }
-
-        if (-not (Test-Path $installDirectory)) {
-            New-Item -Path $installDirectory -ItemType Directory -Force | Out-Null
-        }
-
-        $downloadPath = Join-Path $env:TEMP "RDCMan-$([guid]::NewGuid().ToString('N')).exe"
-        try {
-            Write-LogMessage 'Downloading the latest RDCMan from Sysinternals...'
-            $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest -Uri 'https://live.sysinternals.com/RDCMan.exe' -OutFile $downloadPath -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
-
-            $downloadedVersion = [version](Get-Item $downloadPath).VersionInfo.ProductVersion
-            if ($downloadedVersion -lt $minimumVersion) {
-                throw "Sysinternals supplied RDCMan $downloadedVersion; version $minimumVersion or newer is required."
-            }
-
-            Copy-Item -Path $downloadPath -Destination $rdcManExe -Force -ErrorAction Stop
-            $installedVersion = [version](Get-Item $rdcManExe).VersionInfo.ProductVersion
-            if ($installedVersion -lt $minimumVersion) {
-                throw "RDCMan version verification failed after installation (found $installedVersion)."
-            }
-
-            Write-LogMessage "RDCMan $installedVersion installed successfully at $rdcManExe."
-        }
-        finally {
-            $ProgressPreference = 'Continue'
-            Remove-Item -Path $downloadPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-
-    if ($restartAfterMaintenance) {
-        Start-Process -FilePath $rdcManExe -ArgumentList '/reconnect' -WorkingDirectory $installDirectory
-        Write-LogMessage 'Restarted the compatible RDCMan executable.'
+        Write-LogMessage "No RDCMan found at $pinnedExe or $sysinternalsExe." -Level 'WARNING'
     }
 
     Write-LogMessage 'RDCMan maintenance completed.'

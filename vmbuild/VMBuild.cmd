@@ -165,21 +165,11 @@ IF ERRORLEVEL 1 (
     ECHO WARNING: Maintenance script reported one or more errors.
 )
 
-REM RDCMan.settings uses the v3.12 schema. Do not continue with an older
-REM executable even if maintenance could not download or install the update.
-powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -Command "$p='C:\tools\RDCMan.exe'; if (-not (Test-Path $p)) { exit 1 }; try { $v=[version](Get-Item $p).VersionInfo.ProductVersion } catch { exit 1 }; if ($v -lt [version]'3.12.0.0') { exit 1 }"
-IF ERRORLEVEL 1 (
-    ECHO.
-    ECHO ============================================================
-    ECHO  ERROR: RDCMan 3.12 or newer is required.
-    ECHO  Automatic installation did not produce a compatible
-    ECHO  C:\tools\RDCMan.exe. Check the maintenance log and network,
-    ECHO  then re-run VMBuild.cmd.
-    ECHO ============================================================
-    ECHO.
-    PAUSE
-    GOTO END
-)
+REM RDCMan 3.21 prompts to trust a certificate for every lab VM, so MemLabs prefers
+REM 3.12.0.0 from its own ProgramData copy. C:\tools belongs to the chocolatey
+REM sysinternals package and is left alone so sysinternals can keep updating.
+REM Falling back to that copy is supported, so this only reports -- it never blocks.
+powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -Command "$pin=[version]'3.12.0.0'; $dir=Join-Path $env:ProgramData 'memlabs\RDCMan'; $exe=Join-Path $dir 'RDCMan.exe'; $sys='C:\tools\RDCMan.exe'; $cache=Join-Path (Get-Location).Path 'cache\RDCMan-3.12.0.0.exe'; function V($x){ if(-not (Test-Path -LiteralPath $x)){return $null}; try{ [version](Get-Item -LiteralPath $x).VersionInfo.ProductVersion }catch{ $null } }; if((V $cache) -ne $pin){ foreach($c in @($exe,$sys)){ if((V $c) -eq $pin){ try{ $cd=Split-Path -Parent $cache; if(-not (Test-Path $cd)){ New-Item -Path $cd -ItemType Directory -Force | Out-Null }; Copy-Item -LiteralPath $c -Destination $cache -Force -ErrorAction Stop; Write-Host ('  Rescued RDCMan ' + $pin + ' from ' + $c) }catch{}; break } } }; if((V $exe) -ne $pin -and (V $cache) -eq $pin){ try{ if(-not (Test-Path $dir)){ New-Item -Path $dir -ItemType Directory -Force | Out-Null }; Copy-Item -LiteralPath $cache -Destination $exe -Force -ErrorAction Stop }catch{} }; $use=if((V $exe) -eq $pin){ $exe }else{ $sys }; $uv=V $use; if(-not $uv){ Write-Host '  RDCMan: not found in ProgramData or C:\tools.' }elseif($uv -gt $pin){ Write-Host ('  RDCMan: using ' + $uv + ' from ' + $use + ' - MemLabs will pre-trust VM certificates in the .rdg.') }else{ Write-Host ('  RDCMan: using pinned ' + $uv + ' from ' + $use + '.') }"
 
 REM ============================================================
 REM Prune logs / temp / cache older than 7 days
