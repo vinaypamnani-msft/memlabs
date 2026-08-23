@@ -10359,9 +10359,6 @@ function Test-CMClientPackageDistribution {
                             else {
                                 Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: WARN - '$($dpVm.vmName)' distmgr logged $($decryptFailures - $explained) certificate-decrypt failure(s) NOT explained by the site-exchange-certificate chain (of $decryptFailures total): $evidence.$(if ($certFinding) { " $($certFinding.Trim())" }) See $certFile." -Level Warning
                             }
-                            else {
-                                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: '$($dpVm.vmName)' shows no certificate problem ($evidence); this DP is behind for another reason -- see the inter-site content logs collected above."
-                            }
                         }
                     }
                     catch {
