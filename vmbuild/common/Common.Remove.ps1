@@ -531,6 +531,16 @@ function Remove-DhcpScope {
     if ($ScopeId -eq "cluster") {
         $ScopeId = "10.250.250.0"
     }
+    if ($ScopeId -eq "ClusterV2") {
+        $ScopeId = "10.250.251.0"
+    }
+
+    # -ScopeId is [IPAddress[]]-typed. A non-dotted-quad name is an argument-transformation
+    # error raised by the parameter binder, which -ErrorAction cannot suppress.
+    if ($ScopeId -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        Write-Log "Remove-DhcpScope: '$ScopeId' is not a subnet; no DHCP scope to remove." -LogOnly
+        return
+    }
 
     $dhcpScope = Get-DhcpServerv4Scope -ScopeID $ScopeId -ErrorAction SilentlyContinue
     if ($dhcpScope) {
@@ -601,8 +611,25 @@ function Remove-Orphaned {
 
     param (
         [Parameter()]
-        [switch] $WhatIf
+        [switch] $WhatIf,
+        # Set by the -All teardown: the operator already said "remove everything", so every
+        # orphan is approved without a prompt.
+        [Parameter()]
+        [switch] $NoPrompt
     )
+
+    # Local so the auto-approved path still logs WHAT it decided to delete.
+    # Write-Log is $null-assigned: this function's value is a gate, and a leaked log object
+    # would make @(obj, $false) -- a truthy array -- approve every deletion.
+    function Confirm-Orphan {
+        param([string] $Prompt, [string] $Subject)
+        if ($NoPrompt) {
+            $null = Write-Log "  $Subject -- removing (-NoPrompt)." -SubActivity
+            return $true
+        }
+        $response = Read-YesOrNoWithTimeout -Prompt $Prompt -HideHelp -Default "n"
+        return ($response -and $response.ToLowerInvariant() -eq "y")
+    }
 
     Write-Log "Detecting orphaned Virtual Machines" -Activity
     $virtualMachines = Get-List -Type VM -SmartUpdate
@@ -610,8 +637,7 @@ function Remove-Orphaned {
 
         if (-not $vm.Domain) {
             # Prompt for delete, likely no json object in vm notes
-            $response = Read-YesOrNoWithTimeout -Prompt "  VM $($vm.VmName) may be orphaned. Delete? [y/N]" -HideHelp -Default "n"
-            if ($response -and $response.ToLowerInvariant() -eq "y") {
+            if (Confirm-Orphan -Prompt "  VM $($vm.VmName) may be orphaned. Delete? [y/N]" -Subject "VM '$($vm.VmName)' is orphaned") {
                 Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
             }
         }
@@ -632,7 +658,8 @@ function Remove-Orphaned {
     # NATs first deleted half a network out from under a switch that was then left in place.
     $keptSwitches = @()
     Write-Log "Detecting orphaned Hyper-V Switches" -Activity
-    $switches = Get-VMSwitch -SwitchType Internal
+    # 'Default Switch' and 'intSwitch' are host-owned, not memlabs', and are never orphans.
+    $switches = Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -notmatch '^(Default Switch|intSwitch)$' }
     foreach ($switch in $switches) {
         $inUse = $false
         foreach ($network in $vmNetworksInUse) {
@@ -643,8 +670,7 @@ function Remove-Orphaned {
         }
 
         if (-not $inUse) {
-            $response = Read-YesOrNoWithTimeout -Prompt "  Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]" -HideHelp -Default "n"
-            if ($response -and $response.ToLowerInvariant() -eq "y") {
+            if (Confirm-Orphan -Prompt "  Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]" -Subject "Hyper-V Switch '$($switch.Name)' is orphaned") {
                 Remove-VMSwitch2 -NetworkName $switch.Name
             }
             else {
@@ -666,8 +692,7 @@ function Remove-Orphaned {
                 Write-Log "  Keeping DHCP scope '$scopeId'; its Hyper-V switch was kept." -LogOnly
                 continue
             }
-            $response = Read-YesOrNoWithTimeout -Prompt "  DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]" -HideHelp -Default "n"
-            if ($response -and $response.ToLowerInvariant() -eq "y") {
+            if (Confirm-Orphan -Prompt "  DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]" -Subject "DHCP Scope '$($scope.Name) [$scopeId]' is orphaned") {
                 Remove-DhcpScope -ScopeId $scopeId -WhatIf:$WhatIf
             }
             else {
@@ -690,8 +715,7 @@ function Remove-Orphaned {
                 Write-Log "  Keeping NAT '$($nat.Name)'; its Hyper-V switch was kept." -LogOnly
                 continue
             }
-            $response = Read-YesOrNoWithTimeout -Prompt "  NAT entry '$($nat.Name)' ($($nat.InternalIPInterfaceAddressPrefix)) may be orphaned. Delete? [y/N]" -HideHelp -Default "n"
-            if ($response -and $response.ToLowerInvariant() -eq "y") {
+            if (Confirm-Orphan -Prompt "  NAT entry '$($nat.Name)' ($($nat.InternalIPInterfaceAddressPrefix)) may be orphaned. Delete? [y/N]" -Subject "NAT entry '$($nat.Name)' ($($nat.InternalIPInterfaceAddressPrefix)) is orphaned") {
                 Remove-NetNat -Name $nat.Name -Confirm:$false -ErrorAction SilentlyContinue
                 Write-Log "Removed orphaned NAT entry '$($nat.Name)'" -SubActivity
             }
@@ -703,7 +727,7 @@ function Remove-Orphaned {
     }
 
     # The prompts above default to "no" and time out after 10s, so walking away silently keeps
-    # everything. Name what survived, or the leak is invisible.
+    # everything (-NoPrompt removes everything instead). Name what survived, or the leak is invisible.
     $survived = @()
     if ($keptSwitches.Count) { $survived += "switches: $($keptSwitches -join ', ')" }
     if ($keptScopes.Count) { $survived += "DHCP scopes: $($keptScopes -join ', ')" }
@@ -1101,7 +1125,9 @@ function Remove-All {
         }
     }
 
-    Remove-Orphaned -WhatIf:$WhatIf
+    # -All is already an unconditional "remove everything"; asking again per orphan just
+    # stalls the teardown for 10s each and leaves the network behind on a timeout.
+    Remove-Orphaned -WhatIf:$WhatIf -NoPrompt
     Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
     Remove-Item -Path $Global:Common.MRemoteNGFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
 

@@ -229,27 +229,45 @@ function Remove-VMSwitch2 {
     # Always attempt NAT + DHCP cleanup for this network, even if the
     # switch was already gone.  This closes the leak where a switch is
     # removed but the NAT / DHCP scope survives.
+    #
+    # NATs and DHCP scopes are keyed by SUBNET, so the named infrastructure switches have to
+    # be translated first or their NAT/scope is never found. Get-DhcpServerv4Scope -ScopeId is
+    # [IPAddress[]]-typed: handing it 'ClusterV2' is an argument-transformation error raised by
+    # the parameter binder, which -ErrorAction cannot suppress.
+    $subnetId = switch ($NetworkName) {
+        'Internet' { '172.31.250.0' }
+        'Cluster' { '10.250.250.0' }
+        'ClusterV2' { '10.250.251.0' }
+        default { $NetworkName }
+    }
+
     if (-not $WhatIf) {
-        $nat = Get-NetNat -Name $NetworkName -ErrorAction SilentlyContinue
+        $nat = Get-NetNat -Name $subnetId -ErrorAction SilentlyContinue
         if ($nat) {
-            Write-Log "  Removing NAT '$NetworkName'" -SubActivity
+            Write-Log "  Removing NAT '$subnetId'" -SubActivity
             $natError = ''
-            try { Remove-NetNat -Name $NetworkName -Confirm:$false -ErrorAction Stop }
+            try { Remove-NetNat -Name $subnetId -Confirm:$false -ErrorAction Stop }
             catch { $natError = $_.Exception.Message }
-            if (Get-NetNat -Name $NetworkName -ErrorAction SilentlyContinue) {
-                Write-Log "NAT '$NetworkName' is STILL PRESENT after removal.$(if ($natError) { " $natError" })" -Failure
+            if (Get-NetNat -Name $subnetId -ErrorAction SilentlyContinue) {
+                Write-Log "NAT '$subnetId' is STILL PRESENT after removal.$(if ($natError) { " $natError" })" -Failure
                 $leftBehind += 'NAT'
             }
         }
-        $dhcp = Get-DhcpServerv4Scope -ScopeID $NetworkName -ErrorAction SilentlyContinue
-        if ($dhcp) {
-            Write-Log "  Removing DHCP scope '$NetworkName'" -SubActivity
-            $dhcpError = ''
-            try { $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction Stop }
-            catch { $dhcpError = $_.Exception.Message }
-            if (Get-DhcpServerv4Scope -ScopeID $NetworkName -ErrorAction SilentlyContinue) {
-                Write-Log "DHCP scope '$NetworkName' is STILL PRESENT after removal.$(if ($dhcpError) { " $dhcpError" })" -Failure
-                $leftBehind += 'DHCP scope'
+
+        if ($subnetId -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+            Write-Log "Switch '$NetworkName' has no subnet mapping; skipping DHCP scope lookup." -LogOnly
+        }
+        else {
+            $dhcp = Get-DhcpServerv4Scope -ScopeID $subnetId -ErrorAction SilentlyContinue
+            if ($dhcp) {
+                Write-Log "  Removing DHCP scope '$subnetId'" -SubActivity
+                $dhcpError = ''
+                try { $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction Stop }
+                catch { $dhcpError = $_.Exception.Message }
+                if (Get-DhcpServerv4Scope -ScopeID $subnetId -ErrorAction SilentlyContinue) {
+                    Write-Log "DHCP scope '$subnetId' is STILL PRESENT after removal.$(if ($dhcpError) { " $dhcpError" })" -Failure
+                    $leftBehind += 'DHCP scope'
+                }
             }
         }
     }
