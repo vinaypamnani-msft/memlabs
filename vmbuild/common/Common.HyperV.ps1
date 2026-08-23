@@ -695,6 +695,109 @@ function Test-TcpPort {
     return $false
 }
 
+<#
+.SYNOPSIS
+    Capture a VM's RDP listener certificate hash into its VM Note so RDCMan can be
+    regenerated for a powered-off VM without re-prompting to trust it.
+
+.DESCRIPTION
+    RDCMan 3.12 records "Trust this certificate for this server" INSIDE the .rdg file,
+    as a <trustedCertificates> node on each <server>. MemLabs rebuilds every server node
+    from scratch on each regeneration, so a trust clicked in the UI is destroyed by the
+    next deploy / add-VM / remove-VM / snapshot operation.
+
+    The fix is to own the value: read the guest's live certificate once while it is
+    running, persist the hash on the VM Note (Hyper-V metadata, readable with the VM OFF),
+    and have the generator emit the node from the note every time. Guest reachability is
+    then needed only for the initial capture, not for regeneration.
+
+    Lives here rather than in Common.RdcMan.ps1 because that file is behind the
+    -not $InJob gate and Phase 11 -- the capture point -- runs in a job.
+
+    The certificate is regenerated when the computer's FQDN changes, so this must not be
+    called before the VM has been renamed and domain-joined (Phase 2). Capturing earlier
+    stores a hash the guest no longer presents.
+
+.PARAMETER Force
+    Re-read from the guest and overwrite even when the note already has a value. Without
+    it a note that already carries a hash short-circuits with no guest call at all.
+
+.OUTPUTS
+    The uppercase SHA-256 hex string, or $null when it could not be captured.
+#>
+function Update-VmRdpCertNote {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $false)]
+        [string]$VmDomainName,
+        [Parameter(Mandatory = $false)]
+        [switch]$Force
+    )
+
+    $note = Get-VMNote -VMName $VmName
+    $existing = $null
+    if ($note -and $note.PSObject.Properties.Name -contains 'rdpCertSha256') { $existing = "$($note.rdpCertSha256)" }
+    if ($existing -and -not $Force) { return $existing }
+
+    $vm = Get-VM2 -Name $VmName
+    if (-not $vm) { return $existing }
+    if ($vm.State -ne 'Running') {
+        Write-Log "$VmName`: not running; keeping the stored RDP certificate hash." -LogOnly -Verbose
+        return $existing
+    }
+    if (Test-VmIsLinux -Vm $note) {
+        return $existing
+    }
+
+    if (-not $VmDomainName) {
+        $VmDomainName = if ($note -and $note.domain) { "$($note.domain)" } else { 'WORKGROUP' }
+    }
+
+    # Return the DER so the host does the hashing -- the guest's SSLCertificateSHA1Hash is
+    # SHA-1 and RDCMan pins SHA-256, so the thumbprint alone is not enough.
+    $probe = {
+        try {
+            $ts = Get-CimInstance -Namespace 'root/cimv2/TerminalServices' -ClassName Win32_TSGeneralSetting -Filter "TerminalName='RDP-Tcp'" -ErrorAction Stop
+            $hash = "$($ts.SSLCertificateSHA1Hash)".ToUpperInvariant()
+            if ([string]::IsNullOrWhiteSpace($hash)) { return $null }
+            foreach ($store in 'Cert:\LocalMachine\Remote Desktop', 'Cert:\LocalMachine\My') {
+                $found = @(Get-ChildItem -Path $store -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $hash })
+                if ($found.Count -gt 0) { return [Convert]::ToBase64String($found[0].RawData) }
+            }
+        }
+        catch { }
+        return $null
+    }
+
+    $result = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock $probe `
+        -DisplayName 'Read RDP listener certificate' -SuppressLog -AsJob -TimeoutSeconds 60
+    if (-not $result.CommandResult -or $result.ScriptBlockFailed -or [string]::IsNullOrWhiteSpace($result.ScriptBlockOutput)) {
+        Write-Log "$VmName`: could not read the RDP listener certificate; keeping the stored hash. $($result.ErrorDetails)" -LogOnly -Verbose
+        return $existing
+    }
+
+    try {
+        $der = [Convert]::FromBase64String("$($result.ScriptBlockOutput)")
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { $bytes = $sha.ComputeHash($der) } finally { $sha.Dispose() }
+        $hex = (($bytes | ForEach-Object { $_.ToString('X2') }) -join '')
+    }
+    catch {
+        Write-Log "$VmName`: RDP certificate returned by the guest was not usable. $_" -LogOnly -Verbose
+        return $existing
+    }
+
+    if ($hex -eq $existing) { return $existing }
+
+    if (-not $note) { return $hex }
+    $note | Add-Member -MemberType NoteProperty -Name 'rdpCertSha256' -Value $hex -Force
+    Set-VMNote -vmName $VmName -vmNote $note
+    Write-Log "$VmName`: stored RDP certificate hash $($hex.Substring(0,16))... on the VM note." -LogOnly -Verbose
+    return $hex
+}
+
 function Test-VmResponsive {
     param(
         [string]$VmName,
