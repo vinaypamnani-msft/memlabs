@@ -108,6 +108,16 @@
                     it", so an unchanged PID makes the trial void rather than negative.
       measure       new aborts, any real send, the stranded package's own send, the secondary's
                     PkgLib, and the summarizer state.
+      stimulus      a PASSIVE watch cannot decide this, and the first run proved it. burnin
+                    2026-08-23 returned INCONCLUSIVE with lastSend=-1 BEFORE and AFTER -- the
+                    success signal has never fired on that site (0 'Created minijob' in the whole
+                    3987-line log), so its absence carried no information. The stranding is
+                    self-perpetuating: IsPkgSendingNeeded declines, nothing else needs sending, no
+                    bundle is ever attempted, and the cancel flag is never exercised. So when the
+                    passive window yields nothing, RefreshPkgSource bumps SourceVersion to FORCE a
+                    bundle attempt. That discriminates either way -- still wedged emits a NEW
+                    0x800704d3, cured emits a send. -StimulusSeconds bounds the second watch, and
+                    the bump must land (SourceVersion must change) or the trial is VOID.
 
     Four distinguishable outcomes, and each points at a different script:
       CURED + package moved   -> the gate in InstallBoundaryGroups.ps1 is right and sufficient.
@@ -184,6 +194,7 @@ param(
     [switch]$SecondaryContentHop,
     [switch]$RepairSecondaryContent,
     [switch]$ProveWedgeFix,
+    [int]$StimulusSeconds = 900,
     [switch]$DrsProbe,
     [switch]$EnableDrsTracing,
     [switch]$DisableDrsTracing,
@@ -826,6 +837,27 @@ $execRestartBlock = {
     }
     catch { }
     $o.Add("EXEC-RESTART after pid=$after state=$state pidChanged=$($after -gt 0 -and $after -ne $before)")
+    return $o.ToArray()
+}
+
+# INTERVENTION. The stimulus: RefreshPkgSource increments SourceVersion, which is the only thing
+# that makes IsPkgSendingNeeded stop declining -- RefreshNow does not touch it.
+$refreshPkgSourceBlock = {
+    param($SiteCode, $PkgId)
+    $ns = "root\SMS\site_$SiteCode"
+    $o = New-Object System.Collections.Generic.List[string]
+    try {
+        $pkg = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PkgId'" -ErrorAction Stop) | Select-Object -First 1
+        if (-not $pkg) { $o.Add("REFRESHPKG NO PACKAGE $PkgId in $ns"); return $o.ToArray() }
+        $before = [int]$pkg.SourceVersion
+        $o.Add("REFRESHPKG before SourceVersion=$before")
+        $null = $pkg.RefreshPkgSource()
+        Start-Sleep -Seconds 15
+        $pkg2 = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PkgId'" -ErrorAction Stop) | Select-Object -First 1
+        $after = if ($pkg2) { [int]$pkg2.SourceVersion } else { -1 }
+        $o.Add("REFRESHPKG after SourceVersion=$after changed=$($after -gt $before)")
+    }
+    catch { $o.Add("REFRESHPKG FAILED $($_.Exception.Message)") }
     return $o.ToArray()
 }
 
@@ -1493,18 +1525,46 @@ if ($ProveWedgeFix) {
     & $psay "process replaced: pid $($pre.ExecPid) -> $($post0.ExecPid). The flag should now be clear."
     & $psay "watching up to ${PostSeconds}s for a real send and for $PackageId to reach $($sec.vmName)."
 
-    $sawSend = $false; $sawPkgSend = $false; $installed = $false; $newAborts = $pre.Aborts
-    while (((Get-Date) - $tFix).TotalSeconds -lt $PostSeconds) {
-        Start-Sleep -Seconds 30
-        $w = & $readWedge
-        if (-not $w.Readable) { continue }
-        # Compare indexes only WITHIN one read: the tail window slides, so an index from an earlier
-        # read is not comparable. "Newer than the last abort" is the same test the gate itself uses.
-        if ($w.LastSend -gt $w.LastAbort) { $sawSend = $true }
-        if ($w.LastPkgSend -gt $w.LastAbort) { $sawPkgSend = $true }
-        $newAborts = $w.Aborts
-        if ((& $readSecState $sec $parent).Installed) { $installed = $true; break }
+    # Mutable state in a hashtable: a scriptblock that did `$sawSend = $true` would write to its own
+    # child scope and the result would be lost, which is the same trap as += inside Where-Object.
+    $st = @{ SawSend = $false; SawPkgSend = $false; Installed = $false; Aborts = $pre.Aborts }
+    $watch = {
+        param($Seconds)
+        $t0 = Get-Date
+        while (((Get-Date) - $t0).TotalSeconds -lt $Seconds) {
+            Start-Sleep -Seconds 30
+            $w = & $readWedge
+            if (-not $w.Readable) { continue }
+            # Compare indexes only WITHIN one read: the tail window slides, so an index from an
+            # earlier read is not comparable. Measured: lastAbort moved 3991 -> 3645 with no new
+            # aborts at all, purely from the window sliding.
+            if ($w.LastSend -gt $w.LastAbort) { $st.SawSend = $true }
+            if ($w.LastPkgSend -gt $w.LastAbort) { $st.SawPkgSend = $true }
+            $st.Aborts = $w.Aborts
+            if ((& $readSecState $sec $parent).Installed) { $st.Installed = $true; return }
+        }
     }
+    & $watch $PostSeconds
+
+    # Nothing was exercised, so nothing has been decided. Force an attempt rather than reporting a
+    # non-result: the stranded package alone will never trigger one.
+    $stimulated = $false
+    if (-not ($st.SawSend -or $st.SawPkgSend -or $st.Installed) -and $st.Aborts -le $pre.Aborts) {
+        & $psay ''
+        & $psay "STIMULUS (pre-registered): the passive window exercised nothing. Bumping SourceVersion on $PackageId at $($cas.vmName)/$($cas.siteCode) so a bundle MUST be attempted. Still wedged emits a new 0x800704d3; cured emits a send."
+        $stim = @(Get-GuestOutput -VmName $cas.vmName -DomainName $dom -Block $refreshPkgSourceBlock -ArgList @($cas.siteCode, $PackageId) -Tag 'refresh-pkgsource')
+        foreach ($l in $stim) { & $psay "    $l" }
+        if (@($stim | Where-Object { $_ -match 'changed=True' }).Count -eq 0) {
+            & $psay 'VOID: SourceVersion did not change, so no bundle attempt was forced. This trial decides NOTHING.'
+            Write-Host "Proof log: $pwLog" -ForegroundColor Green
+            return
+        }
+        $stimulated = $true
+        & $psay "stimulus landed; watching a further ${StimulusSeconds}s."
+        & $watch $StimulusSeconds
+    }
+
+    $sawSend = $st.SawSend; $sawPkgSend = $st.SawPkgSend; $installed = $st.Installed; $newAborts = $st.Aborts
     $post = & $readWedge
     foreach ($l in $post.Lines) { & $psay "    $l" }
     foreach ($l in (Get-GuestOutput -VmName $sec.vmName -DomainName $dom -Block $secContentBlock -ArgList @($PackageId) -Tag 'sec-after')) { & $psay "    SEC $l" }
@@ -1526,12 +1586,16 @@ if ($ProveWedgeFix) {
         & $psay 'ACTION: the wedge fix works. The stranded package is the SEPARATE defect -- distmgr.cpp:17252 skips its auto-recovery for exactly 0x800704D3, so this send was never re-armed and IsPkgSendingNeeded still declines. The remaining fix must move the package source version; RefreshNow cannot.'
     }
     elseif ($post.Wedged -and $newAborts -gt $pre.Aborts) {
-        & $psay "RESULT: NOT CURED. Still wedged ${elapsed}s after a confirmed process replacement, and aborts went $($pre.Aborts) -> $newAborts."
+        & $psay "RESULT: NOT CURED. Still wedged ${elapsed}s after a confirmed process replacement, and aborts went $($pre.Aborts) -> $newAborts$(if ($stimulated) { ' under a forced bundle attempt' })."
         & $psay 'ACTION: the SMS_EXECUTIVE restart is NOT the cure. Do NOT keep 060c30cb as-is -- a wider gate then restarts the service more often for no benefit. Reconsider both the gate and the claim in the InstallBoundaryGroups.ps1 comment.'
     }
+    elseif ($stimulated) {
+        & $psay "RESULT: NO CONTENT ACTIVITY AT ALL. SourceVersion was bumped and ${elapsed}s later distmgr has emitted neither a send nor a new abort."
+        & $psay 'ACTION: this is not about the cancel flag -- distmgr is not processing the package at all. Look upstream of the send decision (is the version change replicating to the parent, is the package targeted at the secondary) before touching the wedge gate.'
+    }
     else {
-        & $psay "RESULT: INCONCLUSIVE after ${elapsed}s -- no send newer than the last abort, no new abort, DP not Installed. The site did no content work in the window, so nothing was exercised."
-        & $psay 'ACTION: re-run with a longer -PostSeconds, or trigger a distribution to force content work. Do NOT record this as either a pass or a failure.'
+        & $psay "RESULT: INCONCLUSIVE after ${elapsed}s -- no send newer than the last abort, no new abort, DP not Installed, and the stimulus did not run."
+        & $psay 'ACTION: re-run. Do NOT record this as either a pass or a failure.'
     }
     Write-Host "Proof log: $pwLog" -ForegroundColor Green
     return
