@@ -501,6 +501,58 @@ $ensureClientPkgCoverage = {
         }
     }
 
+    # Neither wake path above can help a SECONDARY-site DP when the package is owned by a
+    # parent/CAS. distmgr.cpp runs the send-to-child loop only under
+    #   if (sPkgSrcSite.CompareNoCase(sThisSite) == 0 && ...)
+    # so this Primary never forwards a CAS-owned package to its own secondary, and
+    # AddChangeNotification on the parent only inserts a PkgNotification -- it does not mark
+    # the TARGET site as owing a resend. spAoRetryPkgDistribution (scope CAS_OR_PRIMARY) is
+    # the supported call that does all three, and it self-guards on
+    #   EXISTS (SELECT * FROM SMSPackages WHERE PkgId=@packageID AND SourceSite=dbo.fnGetSiteCode())
+    # so running it anywhere but the package's source site is a logged no-op, never damage:
+    #   UPDATE PkgStatus SET Status=0        WHERE ID=@pkg AND SiteCode=@target AND Type=1
+    #   UPDATE TOP(1) PkgServers SET UpdateMask=4 (PKGSRV_UPDATE_REFRESHTRIG)
+    #   INSERT PkgNotification (PkgID, Priority, TimeKey, Type) VALUES (@pkg, 2, GETUTCDATE(), 1)
+    # Best-effort like every other wake path here: on any failure the parent's own timer still
+    # owns the outcome, so this can only ever shorten the wait.
+    $retryPkgToSite = {
+        param($TargetSiteCode)
+        if (-not $parentFqdn -or -not $parentSite) {
+            Write-DscStatus "Client pkg coverage: [retry-DIST] skipped for site '$TargetSiteCode' -- parent site unknown (fqdn='$parentFqdn' site='$parentSite')."
+            return $false
+        }
+        $cn = $null
+        try {
+            # The source site's DB, read from ITS registry -- the parent's site DB can be on a
+            # separate SQL host, so the parent FQDN is not usable as a server name.
+            $pReg = Invoke-Command -ComputerName $parentFqdn -ScriptBlock {
+                $p = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+                $port = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server\Site System SQL Account' -Name 'Port' -ErrorAction SilentlyContinue).'Port'
+                [pscustomobject]@{ Server = $p.Server; Db = $p.'Database Name'; Port = $port }
+            } -ErrorAction Stop
+            $inst = $pReg.Server
+            $dbName = $pReg.Db
+            if ("$($pReg.Db)" -match '\\') { $inst = "$($pReg.Server)\$($pReg.Db.Split('\')[0])"; $dbName = $pReg.Db.Split('\')[1] }
+            if ($pReg.Port -and "$($pReg.Port)" -ne '1433') { $inst = "$inst,$($pReg.Port)" }
+
+            $cn = New-Object System.Data.SqlClient.SqlConnection "Server=$inst;Initial Catalog=$dbName;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
+            $cn.Open()
+            $cmd = $cn.CreateCommand()
+            $cmd.CommandText = 'EXEC dbo.spAoRetryPkgDistribution @packageID, @targetSiteCode'
+            $cmd.CommandTimeout = 120
+            [void]$cmd.Parameters.AddWithValue('@packageID', $PackageID)
+            [void]$cmd.Parameters.AddWithValue('@targetSiteCode', $TargetSiteCode)
+            [void]$cmd.ExecuteNonQuery()
+            Write-DscStatus "Client pkg coverage: [retry-DIST] ran spAoRetryPkgDistribution($PackageID -> site $TargetSiteCode) on $dbName at source site $parentSite so its distmgr re-evaluates that site instead of waiting out its own timer."
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [retry-DIST] spAoRetryPkgDistribution($PackageID -> site $TargetSiteCode) against source site $parentSite failed: $($_.Exception.Message). The source site's own timer still owns the send."
+            return $false
+        }
+        finally { if ($cn) { try { $cn.Close() } catch { } } }
+    }
+
     # Second, INDEPENDENT wake path, run on a deliberately DIFFERENT cadence (8 min vs the
     # row's 5) so the next build can attribute which one actually moved the parent: compare
     # these [wake-ROW]/[wake-FILE] stamps against the wake times in the pulled
@@ -638,6 +690,14 @@ $ensureClientPkgCoverage = {
                 # to 31s (PS1, after). The OUTCOME (16m54s -> 8m12s) is n=1 vs n=1 and the CAS half of
                 # the chain was not collected that run, so do not bank it as the cause.
                 if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) }; $lastParentPoke = $null }
+                # A secondary-site DP is fed by the package's SOURCE site, not by this Primary
+                # (distmgr gates the send-to-child loop on sPkgSrcSite == sThisSite), so the
+                # RefreshNow above cannot produce that send. Ask the source site to mark this
+                # target site as owing a resend. Same cadence as the arm, so it stays bounded.
+                $secDpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
+                if ($secDpVm -and "$($secDpVm.role)" -eq 'Secondary' -and "$($secDpVm.siteCode)") {
+                    [void](& $retryPkgToSite "$($secDpVm.siteCode)")
+                }
             }
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
         }
