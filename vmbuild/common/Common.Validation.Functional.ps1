@@ -1178,7 +1178,8 @@ function Test-DhcpReservations {
     .DESCRIPTION
         Runs on the host (DHCP server is local, not on the DC). For each
         non-hidden VM in the domain that gets a reservation in Phase 1
-        (all roles except OSDClient, which is skipped there), it:
+        (all roles except OSDClient and Proxy, neither of which is ever
+        reserved for), it:
           - resolves the VM's domain-NIC MAC (Get-VMMacIsolated -ExcludeCluster)
           - looks up the live reservation for that MAC in the VM's scope
           - confirms the reservation exists and its IP matches AssignedIP
@@ -1229,6 +1230,9 @@ function Test-DhcpReservations {
         if ($vm.domain -and $vm.domain -ne $Domain) { continue }
         # OSDClient never gets a reservation (Phase 1 skips it via -OSDClient).
         if ($vm.role -eq 'OSDClient') { continue }
+        # Proxy is statically addressed at <network>.2 by cloud-init, so it is not a
+        # DHCP client and no code path reserves for it.
+        if ($vm.role -eq 'Proxy') { continue }
         # deployConfig only carries AssignedIP on a run that allocated it, so a rerun
         # against an existing lab skipped every VM and the audit checked nothing --
         # exactly the runs where a lost reservation has had time to matter.

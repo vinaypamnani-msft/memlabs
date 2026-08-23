@@ -3323,6 +3323,91 @@ function Register-LinuxVmDns {
 }
 
 
+function Set-LinuxVmDhcpReservation {
+    <#
+    .SYNOPSIS
+        Ensure a Linux VM's DHCP reservation exists and points at its AssignedIP.
+    .DESCRIPTION
+        The Phase 1 build path reserves at VM-creation time, but only when the MAC
+        already exists -- otherwise it logs "DHCP reservation deferred to post-start"
+        and hands off to the Phase 2 existing-VM prep. Phase 2 skips every non-Proxy
+        Linux VM ("no Windows DSC"), so for LinuxServer/LinuxClient that hand-off
+        goes nowhere and the reservation is never created, on the first build or on
+        any rerun. Phase 11's Test-DhcpReservations then fails the whole run.
+
+        Called from Linux_Configure (Phase 3), which dispatches every Linux VM on
+        every run, so it repairs an existing lab as well as a fresh one.
+
+        Proxy is excluded: it is statically addressed at <network>.2 by cloud-init
+        and is not a DHCP client.
+    .OUTPUTS
+        $true when a reservation for AssignedIP is in place afterwards.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Vm,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $vmName = $Vm.vmName
+    if ($Vm.role -eq 'Proxy') {
+        Write-Log "$vmName`: Proxy is statically addressed by cloud-init; no DHCP reservation needed." -LogOnly
+        return $true
+    }
+
+    # deployConfig only carries AssignedIP on the run that allocated it, so a rerun
+    # has to fall back to the VM note -- the same fallback Test-DhcpReservations uses.
+    $assignedIP = $Vm.AssignedIP
+    if (-not $assignedIP) {
+        try { $assignedIP = (Get-VMNote -VMName $vmName -ErrorAction SilentlyContinue).AssignedIP } catch { }
+    }
+    if (-not $assignedIP) {
+        Write-Log "$vmName`: no AssignedIP in deployConfig or VM note; cannot ensure a DHCP reservation." -Warning
+        return $false
+    }
+    $assignedIP = ([string]$assignedIP) -replace '/.+$', ''
+
+    try {
+        $vmMac = Get-VMMacIsolated -VmName $vmName
+        if (-not $vmMac -or $vmMac -eq '000000000000') {
+            Write-Log "$vmName`: MAC is not assigned yet ($vmMac); cannot ensure a DHCP reservation for $assignedIP." -Warning
+            return $false
+        }
+
+        # Scope is the /24 containing AssignedIP -- a VM on a secondary subnet must
+        # reserve in its own scope, not vmOptions.network.
+        $ipOctets = $assignedIP.Split('.')
+        $scopeId = if ($ipOctets.Count -eq 4) { "$($ipOctets[0]).$($ipOctets[1]).$($ipOctets[2]).0" }
+        elseif ($Vm.network) { $Vm.network }
+        else { $DeployConfig.vmOptions.network }
+
+        $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
+        if ($existing -and $existing -eq $assignedIP) {
+            Write-Log "$vmName`: DHCP reservation already correct: $existing (MAC=$vmMac, Scope=$scopeId)" -LogOnly
+            return $true
+        }
+        if ($existing) {
+            Write-Log "$vmName`: DHCP reservation for MAC=$vmMac points to $existing but AssignedIP is $assignedIP; correcting to avoid an address collision" -LogOnly
+        }
+        Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $vmName (Linux)" -LogContext $vmName -PurgeMacFirst
+
+        # Add-DHCPReservationIsolated throws on total failure, but read back anyway so
+        # "created" is never logged for a reservation that is not actually there.
+        $readBack = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
+        if ($readBack -ne $assignedIP) {
+            Write-Log "$vmName`: DHCP reservation read-back returned '$readBack', expected $assignedIP (MAC=$vmMac, Scope=$scopeId)." -Warning
+            return $false
+        }
+        Write-Log "$vmName`: DHCP reservation created and read back: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
+        return $true
+    }
+    catch {
+        Write-Log "$vmName`: Could not ensure a DHCP reservation for $assignedIP. $_" -Warning
+        return $false
+    }
+}
+
+
 function Test-VmIsLinux {
     <#
     .SYNOPSIS
