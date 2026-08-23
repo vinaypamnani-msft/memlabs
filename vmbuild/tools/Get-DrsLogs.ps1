@@ -116,8 +116,11 @@
                     bundle is ever attempted, and the cancel flag is never exercised. So when the
                     passive window yields nothing, RefreshPkgSource bumps SourceVersion to FORCE a
                     bundle attempt. That discriminates either way -- still wedged emits a NEW
-                    0x800704d3, cured emits a send. -StimulusSeconds bounds the second watch, and
-                    the bump must land (SourceVersion must change) or the trial is VOID.
+                    0x800704d3, cured emits a send. -StimulusSeconds bounds the second watch. The
+                    stimulus is VOID only if the CALL could not be issued: SourceVersion is
+                    READ-ONLY and server-maintained, so gating on it is circular -- distmgr moves
+                    that column and distmgr is what is under test. Gating on it produced a VOID on
+                    2026-08-23 ("changed=False") that decided nothing.
 
     Runtime: every watch returns the moment an outcome is decisive -- a send, this package's send,
     or a NEW abort all end it, not just an Installed DP. The first run burned 908s after the
@@ -849,24 +852,60 @@ $execRestartBlock = {
     return $o.ToArray()
 }
 
-# INTERVENTION. The stimulus: RefreshPkgSource increments SourceVersion, which is the only thing
-# that makes IsPkgSendingNeeded stop declining -- RefreshNow does not touch it.
+# INTERVENTION. The stimulus: force distmgr to attempt a content bundle.
+# SourceVersion is READ-ONLY and server-maintained, so it cannot be the gate for "did the stimulus
+# land" -- distmgr moves it, and distmgr is the component under test. Judging the stimulus by that
+# column is circular and produced a VOID on 2026-08-23. The call's own ReturnValue is the only
+# direct evidence it ran; a WMI method can fail by return value without throwing.
 $refreshPkgSourceBlock = {
     param($SiteCode, $PkgId)
     $ns = "root\SMS\site_$SiteCode"
     $o = New-Object System.Collections.Generic.List[string]
+    $pkg = $null
+    try { $pkg = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PkgId'" -ErrorAction Stop) | Select-Object -First 1 }
+    catch { $o.Add("REFRESHPKG UNREADABLE $($_.Exception.Message)"); return $o.ToArray() }
+    if (-not $pkg) { $o.Add("REFRESHPKG NO PACKAGE $PkgId in $ns"); return $o.ToArray() }
+    $v0 = [int]$pkg.SourceVersion
+    $d0 = "$($pkg.SourceDate)"
+    $o.Add("REFRESHPKG before SourceVersion=$v0 SourceDate=$d0")
+
+    $issued = $false
     try {
-        $pkg = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PkgId'" -ErrorAction Stop) | Select-Object -First 1
-        if (-not $pkg) { $o.Add("REFRESHPKG NO PACKAGE $PkgId in $ns"); return $o.ToArray() }
-        $before = [int]$pkg.SourceVersion
-        $o.Add("REFRESHPKG before SourceVersion=$before")
-        $null = $pkg.RefreshPkgSource()
-        Start-Sleep -Seconds 15
-        $pkg2 = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PkgId'" -ErrorAction Stop) | Select-Object -First 1
-        $after = if ($pkg2) { [int]$pkg2.SourceVersion } else { -1 }
-        $o.Add("REFRESHPKG after SourceVersion=$after changed=$($after -gt $before)")
+        $r = $pkg.RefreshPkgSource()
+        $rv = if ($null -ne $r -and $null -ne $r.ReturnValue) { [int]$r.ReturnValue } else { 0 }
+        $o.Add("REFRESHPKG method ReturnValue=$rv")
+        if ($rv -eq 0) { $issued = $true }
     }
-    catch { $o.Add("REFRESHPKG FAILED $($_.Exception.Message)") }
+    catch { $o.Add("REFRESHPKG method threw: $($_.Exception.Message)") }
+
+    # Documented as having the same effect as the method, and it is a property write so there is no
+    # ContextID argument to get wrong. Tried only if the method did not report success.
+    if (-not $issued) {
+        try {
+            $pkg.RefreshPkgSourceFlag = $true
+            $null = $pkg.Put()
+            $o.Add('REFRESHPKG flag+Put issued')
+            $issued = $true
+        }
+        catch { $o.Add("REFRESHPKG flag+Put threw: $($_.Exception.Message)") }
+    }
+    if (-not $issued) { $o.Add('REFRESHPKG NOT ISSUED -- neither lever succeeded'); return $o.ToArray() }
+    $o.Add('REFRESHPKG ISSUED')
+
+    # Reported for interest only. It is NOT the pass/fail gate: the server may not move it while
+    # distmgr is wedged, which is precisely the state being tested.
+    for ($i = 0; $i -lt 6; $i++) {
+        Start-Sleep -Seconds 10
+        try {
+            $p2 = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PkgId'" -ErrorAction Stop) | Select-Object -First 1
+            if ($p2 -and ([int]$p2.SourceVersion -gt $v0 -or "$($p2.SourceDate)" -ne $d0)) {
+                $o.Add("REFRESHPKG server moved: SourceVersion=$([int]$p2.SourceVersion) SourceDate=$($p2.SourceDate)")
+                return $o.ToArray()
+            }
+        }
+        catch { }
+    }
+    $o.Add("REFRESHPKG server has not moved SourceVersion in 60s (still $v0). Expected while distmgr is wedged; the verdict comes from distmgr's own log, not from this column.")
     return $o.ToArray()
 }
 
@@ -1569,8 +1608,10 @@ if ($ProveWedgeFix) {
         & $psay "STIMULUS (pre-registered): the passive window exercised nothing. Bumping SourceVersion on $PackageId at $($cas.vmName)/$($cas.siteCode) so a bundle MUST be attempted. Still wedged emits a new 0x800704d3; cured emits a send."
         $stim = @(Get-GuestOutput -VmName $cas.vmName -DomainName $dom -Block $refreshPkgSourceBlock -ArgList @($cas.siteCode, $PackageId) -Tag 'refresh-pkgsource')
         foreach ($l in $stim) { & $psay "    $l" }
-        if (@($stim | Where-Object { $_ -match 'changed=True' }).Count -eq 0) {
-            & $psay 'VOID: SourceVersion did not change, so no bundle attempt was forced. This trial decides NOTHING.'
+        # VOID only when the CALL failed. Whether the server moved SourceVersion is not the gate --
+        # distmgr moves that column and distmgr is what is under test.
+        if (@($stim | Where-Object { $_ -match 'REFRESHPKG ISSUED' }).Count -eq 0) {
+            & $psay 'VOID: neither RefreshPkgSource nor RefreshPkgSourceFlag could be issued, so no bundle attempt was forced. This trial decides NOTHING.'
             Write-Host "Proof log: $pwLog" -ForegroundColor Green
             return
         }
