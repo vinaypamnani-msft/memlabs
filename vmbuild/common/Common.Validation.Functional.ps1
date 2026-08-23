@@ -10272,6 +10272,41 @@ function Test-CMClientPackageDistribution {
             $results.Details.Add("WARN: site-wide distribution sweep failed: $($_.Exception.Message)")
         }
 
+        # Reported on EVERY run, including the clean case. A wedged distmgr aborts all content
+        # with 0x800704d3 (m_bShutdownRequest stuck TRUE, cleared only by a fresh process), and
+        # InstallBoundaryGroups.ps1 restarts SMS_EXECUTIVE once to clear it. Without a line here,
+        # a green build cannot be told apart from a build where the wedge simply did not happen --
+        # so "no wedge" has to be stated, not inferred from silence.
+        # KEEP IN SYNC with the predicate in DSC/phases/InstallBoundaryGroups.ps1.
+        $getDistmgrWedgeStatus = {
+            $smsDir = $null
+            foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+                try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+                if ($smsDir) { break }
+            }
+            if (-not $smsDir) { return 'NOT MEASURED (no SMS installation directory)' }
+            $lf = Join-Path $smsDir 'Logs\distmgr.log'
+            if (-not (Test-Path $lf)) { return "NOT MEASURED (no distmgr.log at $lf)" }
+            $dmTail = @(Get-Content -LiteralPath $lf -Tail 4000 -ErrorAction SilentlyContinue)
+            if ($dmTail.Count -eq 0) { return 'NOT MEASURED (distmgr.log read returned nothing)' }
+            $dmAborts = 0
+            $dmLastAbort = -1
+            $dmLastSend = -1
+            for ($dmI = 0; $dmI -lt $dmTail.Count; $dmI++) {
+                $dmLn = $dmTail[$dmI]
+                if ($dmLn -match '0x800704d3' -and $dmLn -match 'CopyFileExW|CreatePackageBundle|TakeContentSnapshot|AddContentToBundle|SnapshotPackage|BundleLegacyContentFiles') {
+                    $dmLastAbort = $dmI
+                    $dmAborts++
+                }
+                if ($dmLn -match 'Created minijob to send compressed copy') { $dmLastSend = $dmI }
+            }
+            $exits = @($dmTail | Where-Object { $_ -match 'Exiting SMS_DISTRIBUTION_MANAGER Process Thread' }).Count
+            if ($dmAborts -eq 0) { return "no wedge this run (0 content aborts, $exits distmgr thread exit(s) in the last $($dmTail.Count) lines)" }
+            if ($dmAborts -ge 5 -and $dmLastAbort -gt $dmLastSend) { return "WEDGE ACTIVE ($dmAborts content abort(s), no send since the last one, $exits thread exit(s))" }
+            return "wedge occurred and CLEARED ($dmAborts content abort(s), a send followed the last one, $exits thread exit(s))"
+        }
+        $results.Details.Add("distmgr cancel-flag (0x800704d3) state: $(& $getDistmgrWedgeStatus)")
+
         $results.FailingDPs = @($failingDps | Select-Object -Unique)
         return $results
     }
