@@ -576,11 +576,12 @@ $ensureClientPkgCoverage = {
     }
 
     # Neither wake path above can help a SECONDARY-site DP when the package is owned by a
-    # parent/CAS. distmgr.cpp runs the send-to-child loop only under
-    #   if (sPkgSrcSite.CompareNoCase(sThisSite) == 0 && ...)
-    # so this Primary never forwards a CAS-owned package to its own secondary, and
-    # AddChangeNotification on the parent only inserts a PkgNotification -- it does not mark
-    # the TARGET site as owing a resend. spAoRetryPkgDistribution (scope CAS_OR_PRIMARY) is
+    # parent/CAS. The source site runs the send-to-child loop; when fan-out hands the transfer to a
+    # closer site it forwards a .FWD instruction to that site (distmgr.cpp:15133-15230), but that
+    # forward is gated on bServerChange while the PKG_STATUS_SENT write at :14900 is not -- so a
+    # pass with no server change locks the target without notifying anyone. AddChangeNotification on
+    # the parent only inserts a PkgNotification; it does not mark the TARGET site as owing a resend.
+    # spAoRetryPkgDistribution (scope CAS_OR_PRIMARY) is
     # the supported call that does all three, and it self-guards on
     #   EXISTS (SELECT * FROM SMSPackages WHERE PkgId=@packageID AND SourceSite=dbo.fnGetSiteCode())
     # so running it anywhere but the package's source site is a logged no-op, never damage:
@@ -589,6 +590,26 @@ $ensureClientPkgCoverage = {
     #   INSERT PkgNotification (PkgID, Priority, TimeKey, Type) VALUES (@pkg, 2, GETUTCDATE(), 1)
     # Best-effort like every other wake path here: on any failure the parent's own timer still
     # owns the outcome, so this can only ever shorten the wait.
+    # The source site's DB, resolved from ITS registry -- the parent's site DB can be on a separate
+    # SQL host, so the parent FQDN is not usable as a server name. Shared by the retry-DIST call and
+    # the PkgStatus read below so the two can never disagree about which DB is authoritative.
+    $sourceSiteDbConn = {
+        if (-not $parentFqdn -or -not $parentSite) { return $null }
+        $pReg = Invoke-Command -ComputerName $parentFqdn -ScriptBlock {
+            $p = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+            $port = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server\Site System SQL Account' -Name 'Port' -ErrorAction SilentlyContinue).'Port'
+            [pscustomobject]@{ Server = $p.Server; Db = $p.'Database Name'; Port = $port }
+        } -ErrorAction Stop
+        $inst = $pReg.Server
+        $dbName = $pReg.Db
+        if ("$($pReg.Db)" -match '\\') { $inst = "$($pReg.Server)\$($pReg.Db.Split('\')[0])"; $dbName = $pReg.Db.Split('\')[1] }
+        if ($pReg.Port -and "$($pReg.Port)" -ne '1433') { $inst = "$inst,$($pReg.Port)" }
+        return [pscustomobject]@{
+            Db  = $dbName
+            Str = "Server=$inst;Initial Catalog=$dbName;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
+        }
+    }
+
     $retryPkgToSite = {
         param($TargetSiteCode)
         if (-not $parentFqdn -or -not $parentSite) {
@@ -597,19 +618,10 @@ $ensureClientPkgCoverage = {
         }
         $cn = $null
         try {
-            # The source site's DB, read from ITS registry -- the parent's site DB can be on a
-            # separate SQL host, so the parent FQDN is not usable as a server name.
-            $pReg = Invoke-Command -ComputerName $parentFqdn -ScriptBlock {
-                $p = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
-                $port = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server\Site System SQL Account' -Name 'Port' -ErrorAction SilentlyContinue).'Port'
-                [pscustomobject]@{ Server = $p.Server; Db = $p.'Database Name'; Port = $port }
-            } -ErrorAction Stop
-            $inst = $pReg.Server
-            $dbName = $pReg.Db
-            if ("$($pReg.Db)" -match '\\') { $inst = "$($pReg.Server)\$($pReg.Db.Split('\')[0])"; $dbName = $pReg.Db.Split('\')[1] }
-            if ($pReg.Port -and "$($pReg.Port)" -ne '1433') { $inst = "$inst,$($pReg.Port)" }
-
-            $cn = New-Object System.Data.SqlClient.SqlConnection "Server=$inst;Initial Catalog=$dbName;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
+            $db = & $sourceSiteDbConn
+            if (-not $db) { throw 'could not resolve the source site DB' }
+            $dbName = $db.Db
+            $cn = New-Object System.Data.SqlClient.SqlConnection $db.Str
             $cn.Open()
             $cmd = $cn.CreateCommand()
             $cmd.CommandText = 'EXEC dbo.spAoRetryPkgDistribution @packageID, @targetSiteCode'
@@ -741,6 +753,52 @@ $ensureClientPkgCoverage = {
         if ((& $dpHasPackageContent $DpFqdn) -ne $false) { return $false }
         $strandedWhy['sig'] = 'unowned'
         $strandedWhy['mins'] = [int]$mins
+        return $true
+    }
+
+    # $null = not measured. The row distmgr itself consults: PkgStatus at the SOURCE site, keyed on
+    # (package, target site, PKG_TYPE_MAIN=1). Read from the source site because that is where
+    # distmgr.cpp:14900 writes it and where :23219 reads it back.
+    $readPkgStatusAtSource = {
+        param($TargetSiteCode)
+        $cn = $null
+        try {
+            $db = & $sourceSiteDbConn
+            if (-not $db) { return $null }
+            $cn = New-Object System.Data.SqlClient.SqlConnection $db.Str
+            $cn.Open()
+            $cmd = $cn.CreateCommand()
+            $cmd.CommandText = 'SELECT Status, UpdateTime FROM PkgStatus WHERE ID = @p AND SiteCode = @s AND Type = 1'
+            $cmd.CommandTimeout = 60
+            [void]$cmd.Parameters.AddWithValue('@p', $PackageID)
+            [void]$cmd.Parameters.AddWithValue('@s', $TargetSiteCode)
+            $r = $cmd.ExecuteReader()
+            try {
+                if (-not $r.Read()) { return [pscustomobject]@{ Status = -1; UpdateTime = $null } }
+                return [pscustomobject]@{ Status = [int]$r['Status']; UpdateTime = $r['UpdateTime'] }
+            }
+            finally { $r.Close() }
+        }
+        catch { return $null }
+        finally { if ($cn) { $cn.Dispose() } }
+    }
+
+    # THIRD trigger, and the only one that needs no waiting: the state is self-contradicting.
+    # distmgr recorded PKG_STATUS_SENT (1) for the target site at distmgr.cpp:14900 -- which sits
+    # OUTSIDE the `if(bClosestSite)` guard that creates the minijob at :14867 -- while the DP's own
+    # content library proves nothing arrived. "I sent it" and "nothing is here" cannot both be true,
+    # so there is nothing to wait for. :23219 then declines the send at BOTH sites until the row is
+    # two days old (`GetDays() <= 1` truncates, so 48h, not the 24 the adjacent comment claims).
+    # This exists so a Phase 8 RE-RUN against a lab already stuck repairs on its first iteration
+    # instead of spending $unownedSendMinutes rediscovering what the row already states.
+    $isSentButAbsent = {
+        param($TargetSiteCode, $DpFqdn)
+        if ((& $dpHasPackageContent $DpFqdn) -ne $false) { return $false }
+        $st = & $readPkgStatusAtSource $TargetSiteCode
+        if ($null -eq $st) { return $false }
+        if ([int]$st.Status -ne 1) { return $false }
+        $strandedWhy['sig'] = 'sent-but-absent'
+        $strandedWhy['sentAt'] = "$($st.UpdateTime)"
         return $true
     }
 
@@ -1042,7 +1100,13 @@ $ensureClientPkgCoverage = {
                         # on its own.
                         $abortStranded = [bool](& $isPkgStrandedToSite "$($secDpVm.siteCode)" $dp)
                         $sendUnowned = $false
-                        if (-not $abortStranded) { $sendUnowned = [bool](& $isSendUnowned $dp $dpUnownedSince[$u]) }
+                        if (-not $abortStranded) {
+                            # DB-confirmed first: it needs no elapsed time, so a re-run against an
+                            # already-stuck lab repairs on iteration 1. The timer below is the
+                            # fallback for when PkgStatus cannot be read at all.
+                            $sendUnowned = [bool](& $isSentButAbsent "$($secDpVm.siteCode)" $dp)
+                            if (-not $sendUnowned) { $sendUnowned = [bool](& $isSendUnowned $dp $dpUnownedSince[$u]) }
+                        }
                         # Only a bump that actually RAN earns the deadline extension; a consumed
                         # one-shot after a failed restart must not buy runway for a send nobody armed.
                         $bumpRan = $false
@@ -1055,7 +1119,11 @@ $ensureClientPkgCoverage = {
                             else { $pkgSourceBumped = $true }
                         }
                         elseif ($sendUnowned) {
-                            Write-DscStatus "Client pkg coverage: [wedge-repair] nobody owes the send of $PackageID to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- site $SiteCode has held the content for $($strandedWhy['mins'])m, the DP's content library still does not have the package, and no error was logged because distmgr logs NOTHING when it declines to send. The source site's fan-out handed the transfer to the closest site holding a valid PCK without creating a minijob, then recorded the target as SENT anyway, and a SENT row under a day old stops every site from sending. Bumping the source version is what breaks that: it sets PKG_UPDATE_SOURCE, which bypasses the SENT check outright, and it invalidates the closest site's stale PCK so the source site sends it itself." -Warning
+                            $unownedWhy = "site $SiteCode has held the content for $($strandedWhy['mins'])m, the DP's content library still does not have the package, and no error was logged because distmgr logs NOTHING when it declines to send"
+                            if ("$($strandedWhy['sig'])" -eq 'sent-but-absent') {
+                                $unownedWhy = "the source site recorded this package as SENT to that site at $($strandedWhy['sentAt']) UTC while the DP's content library still does not have it -- those two cannot both be true, so no waiting is needed to tell them apart"
+                            }
+                            Write-DscStatus "Client pkg coverage: [wedge-repair] nobody owes the send of $PackageID to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- $unownedWhy. The source site's fan-out handed the transfer to the closest site holding a valid PCK without creating a minijob, then recorded the target as SENT anyway, and a SENT row under two days old stops every site from sending. Bumping the source version is what breaks that: it sets PKG_UPDATE_SOURCE, which bypasses the SENT check outright, and it invalidates the closest site's stale PCK so the source site sends it itself." -Warning
                             # No restart here on purpose. $isPkgStrandedToSite just returned false,
                             # which for this DP means there is no abort left un-followed by a send --
                             # the cancel flag is not what is blocking, so a restart would only spend
