@@ -5375,6 +5375,128 @@ function Test-SiteSystemFunctionality {
             }
             catch {}
 
+            # A broken web.config under the content library takes the DP off the air
+            # while every other signal here still reads healthy: the site DB says
+            # Installed, the share is published, PkgLib is full -- and IIS answers
+            # 500.19 to every content request. The usual source is a hand-added Failed
+            # Request Tracing rule, because <tracing><traceFailedRequests> keys on
+            # 'path' and adding the rule twice leaves two <add path="*"> entries.
+            # appcmd is the same configuration reader the request pipeline uses, so it
+            # reproduces the fault and names the file, line and description.
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                $appcmd = Join-Path $env:windir 'system32\inetsrv\appcmd.exe'
+                if (-not (Test-Path -LiteralPath $appcmd)) { throw "appcmd.exe not present at '$appcmd'" }
+
+                $cfgPaths = @('Default Web Site')
+                foreach ($vd in @('SMS_DP_SMSPKG$', 'SMS_DP_SMSSIG$', 'NOCERT_SMS_DP_SMSPKG$', 'NOCERT_SMS_DP_SMSSIG$')) {
+                    if (Test-Path "IIS:\Sites\Default Web Site\$vd") { $cfgPaths += "Default Web Site/$vd" }
+                }
+
+                foreach ($cfgPath in $cfgPaths) {
+                    # 5.1 turns a redirected native stderr line into a terminating error
+                    # under -EA Stop, which would skip the exit-code handling below.
+                    $prevEap = $ErrorActionPreference
+                    $ErrorActionPreference = 'Continue'
+                    try {
+                        $appcmdOut = & $appcmd list config "$cfgPath" 2>&1
+                        $appcmdRc = $LASTEXITCODE
+                    }
+                    finally { $ErrorActionPreference = $prevEap }
+                    $appcmdText = (@($appcmdOut | ForEach-Object { "$_" }) -join "`n")
+
+                    # Only IIS's own 'Configuration error' classification is a verdict;
+                    # any other appcmd complaint is reported without failing the DP.
+                    if ($appcmdText -notmatch 'Configuration error') {
+                        if ($appcmdRc -ne 0) {
+                            $results.Details.Add("DIAG: 'appcmd list config `"$cfgPath`"' exited $appcmdRc without reporting a configuration error: $(($appcmdText -replace '\s+', ' ').Trim())")
+                        }
+                        else {
+                            $results.Details.Add("OK: IIS configuration for '$cfgPath' parses")
+                        }
+                        continue
+                    }
+
+                    $badFile = ''
+                    if ($appcmdText -match '(?m)^\s*Filename:\s*(\S.*?)\s*$') { $badFile = $Matches[1] }
+                    $badLine = ''
+                    if ($appcmdText -match '(?m)^\s*Line Number:\s*(\d+)') { $badLine = $Matches[1] }
+                    $badDesc = ''
+                    if ($appcmdText -match '(?m)^\s*Description:\s*(\S.*?)\s*$') { $badDesc = $Matches[1] }
+                    if (-not $badDesc) { $badDesc = (($appcmdText -replace '\s+', ' ').Trim()) }
+
+                    $where = ''
+                    if ($badFile) {
+                        $where = " in '$badFile'"
+                        if ($badLine) { $where += " line $badLine" }
+                    }
+
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: IIS cannot read the configuration for '$cfgPath'$where -- $badDesc. Every HTTP request to this path returns 500.19, so no client, PXE boot or pull DP can download content from this DP.")
+
+                    # IIS merges a collection down applicationHost.config -> site -> folder,
+                    # so the two colliding entries usually live in DIFFERENT files and the
+                    # web.config IIS names looks innocent when read on its own.
+                    $dupAttr = ''
+                    $dupVal = ''
+                    if ($badDesc -match "unique key attribute '([^']+)' set to '([^']*)'") {
+                        $dupAttr = $Matches[1]
+                        $dupVal = $Matches[2]
+                    }
+                    if ($dupAttr) {
+                        $plainFile = ($badFile -replace '^\\\\\?\\', '')
+                        $isFrt = $false
+                        if ($plainFile -and (Test-Path -LiteralPath $plainFile)) {
+                            $isFrt = @(Select-String -LiteralPath $plainFile -Pattern '<traceFailedRequests' -SimpleMatch -ErrorAction SilentlyContinue).Count -gt 0
+                        }
+
+                        if (-not $isFrt) {
+                            $results.Details.Add("  '$dupAttr' is the unique key of that collection. Only one entry with $dupAttr='$dupVal' may survive the merge across applicationHost.config, the site and every parent folder's web.config -- the second one is inherited, not necessarily in the file named above.")
+                        }
+                        else {
+                            $probeFiles = New-Object System.Collections.Generic.List[string]
+                            $probeFiles.Add((Join-Path $env:windir 'system32\inetsrv\config\applicationHost.config'))
+                            # The site root is a config level too, and a vdir rooted off the
+                            # site's physical folder (E:\SCCMContentLib) never walks into it.
+                            try {
+                                $siteRoot = [Environment]::ExpandEnvironmentVariables("$((Get-Website -Name 'Default Web Site' -ErrorAction Stop).physicalPath)")
+                                if ($siteRoot) {
+                                    $siteCfg = Join-Path $siteRoot 'web.config'
+                                    if (Test-Path -LiteralPath $siteCfg) { $probeFiles.Add($siteCfg) }
+                                }
+                            }
+                            catch {}
+                            $dir = Split-Path -Parent $plainFile
+                            while ($dir) {
+                                $wc = Join-Path $dir 'web.config'
+                                if ((Test-Path -LiteralPath $wc) -and -not $probeFiles.Contains($wc)) { $probeFiles.Add($wc) }
+                                $up = Split-Path -Parent $dir
+                                if ($up -eq $dir) { break }
+                                $dir = $up
+                            }
+
+                            $addRx = "<add\s[^>]*$([regex]::Escape($dupAttr))=`"$([regex]::Escape($dupVal))`""
+                            foreach ($pf in $probeFiles) {
+                                $inSection = $false
+                                $hitLines = New-Object System.Collections.Generic.List[int]
+                                $lineNo = 0
+                                foreach ($text in @(Get-Content -LiteralPath $pf -ErrorAction SilentlyContinue)) {
+                                    $lineNo++
+                                    if ($text -match '<traceFailedRequests[\s>]' -and $text -notmatch '/>') { $inSection = $true }
+                                    elseif ($text -match '</traceFailedRequests>') { $inSection = $false }
+                                    elseif ($inSection -and $text -match $addRx) { $hitLines.Add($lineNo) }
+                                }
+                                if ($hitLines.Count -gt 0) {
+                                    $results.Details.Add("  colliding Failed Request Tracing rule $dupAttr='$dupVal' in '$pf' line(s) $($hitLines -join ', ')")
+                                }
+                            }
+                            $results.Details.Add("  <tracing><traceFailedRequests> is keyed on '$dupAttr' and IIS merges it across applicationHost.config, the site and every parent folder, so ONE rule per level already collides. Delete one of the rules listed above, or precede the lower one with <remove $dupAttr=`"$dupVal`" />.")
+                        }
+                    }
+                }
+            }
+            catch { $results.Details.Add("INFO: IIS configuration read skipped: $($_.Exception.Message)") }
+
             # WDS service for PXE -- optional. memlabs DPs may be created
             # with -EnablePxe or with NoWDS PXE, and PXE config can be
             # toggled per-DP. Absence is informational only.
