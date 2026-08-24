@@ -199,7 +199,13 @@ $ensureClientPkgCoverage = {
     $shortOf = { param($name) ("$name" -split '\.')[0].ToUpper() }
     $configDpHosts = @{}
     foreach ($v in @($deployConfig.virtualMachines)) {
-        if ($v.installDP -eq $true -and $v.vmName) { $configDpHosts[(& $shortOf $v.vmName)] = $true }
+        # KEEP IN SYNC with Phase 11's owned-DP rule (Common.Validation.Functional.ps1, the
+        # $ownedDpNames filter). When the two disagree this gate exits clean on a DP that Phase 11
+        # then fails: burnin 2026-08-24 excluded BI-SECONDARY here as "not declared installDP" --
+        # a Secondary carries an implicit DP and declares no installDP -- while Phase 11 counted it
+        # as 1 of 4 owned DPs and failed on BI-SECONDARY=ContentValidating.
+        $isDp = ($v.installDP -eq $true -or $v.enablePullDP -eq $true -or "$($v.role)" -eq 'Secondary')
+        if ($isDp -and $v.vmName) { $configDpHosts[(& $shortOf $v.vmName)] = $true }
     }
 
     $resolveDeadline = (Get-Date).AddMinutes(10)
