@@ -1012,13 +1012,25 @@ $ensureClientPkgCoverage = {
                 # to 31s (PS1, after). The OUTCOME (16m54s -> 8m12s) is n=1 vs n=1 and the CAS half of
                 # the chain was not collected that run, so do not bank it as the cause.
                 if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) }; $lastParentPoke = $null }
-                # A secondary-site DP is fed by the package's SOURCE site, not by this Primary
-                # (distmgr gates the send-to-child loop on sPkgSrcSite == sThisSite), so the
-                # RefreshNow above cannot produce that send. Ask the source site to mark this
-                # target site as owing a resend. Same cadence as the arm, so it stays bounded.
+                # A secondary-site DP is fed by the package's SOURCE site, not by this Primary:
+                # only the source site runs ReplicatePackage for a package it owns. Ask that site
+                # to mark this target site as owing a resend. Same cadence as the arm.
+                #
+                # But STOP once the bump has been attempted, because past that point the poke is
+                # actively harmful. spAoRetryPkgDistribution sets PkgStatus(target).Status=0, so
+                # IsPkgSendingNeeded returns TRUE and the source site enters ReplicatePackage --
+                # where, with fan-out on, IsClosestSite hands the transfer to the closest site that
+                # already holds a valid PCK and NO minijob is created (distmgr.cpp:14867). The
+                # PKG_STATUS_SENT write at distmgr.cpp:14900 sits OUTSIDE that guard, so the target
+                # is recorded as SENT with a fresh UpdateTime having been sent nothing. The closest
+                # site then declines too: IsPkgSendingNeeded returns FALSE for a SENT row less than
+                # a day old (distmgr.cpp:23219). ConfigMgr recovers on its own once that row ages
+                # past 24h -- and every extra poke resets the clock, turning a 24-hour stall into an
+                # indefinite one. Measured 2026-08-24: PkgStatus_G(SEC) UpdateTime landed 19s after
+                # our poke, nine times.
                 $secDpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
                 if ($secDpVm -and "$($secDpVm.role)" -eq 'Secondary' -and "$($secDpVm.siteCode)") {
-                    [void](& $retryPkgToSite "$($secDpVm.siteCode)")
+                    if (-not $pkgSourceBumped) { [void](& $retryPkgToSite "$($secDpVm.siteCode)") }
                     # Repair, in this order: a fresh process clears the cancel flag, THEN the bump
                     # re-arms the send distmgr abandoned. Bumping first just re-snapshots into the
                     # stuck flag and aborts again, burning the whole re-send for nothing.
@@ -1043,7 +1055,7 @@ $ensureClientPkgCoverage = {
                             else { $pkgSourceBumped = $true }
                         }
                         elseif ($sendUnowned) {
-                            Write-DscStatus "Client pkg coverage: [wedge-repair] nobody owes the send of $PackageID to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- site $SiteCode has held the content for $($strandedWhy['mins'])m, the DP's content library still does not have the package, and no error was logged because distmgr logs NOTHING when it declines to send. The source site defers to the closest site and this site does not own the package, so no version ever changes and no pass ever sends." -Warning
+                            Write-DscStatus "Client pkg coverage: [wedge-repair] nobody owes the send of $PackageID to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- site $SiteCode has held the content for $($strandedWhy['mins'])m, the DP's content library still does not have the package, and no error was logged because distmgr logs NOTHING when it declines to send. The source site's fan-out handed the transfer to the closest site holding a valid PCK without creating a minijob, then recorded the target as SENT anyway, and a SENT row under a day old stops every site from sending. Bumping the source version is what breaks that: it sets PKG_UPDATE_SOURCE, which bypasses the SENT check outright, and it invalidates the closest site's stale PCK so the source site sends it itself." -Warning
                             # No restart here on purpose. $isPkgStrandedToSite just returned false,
                             # which for this DP means there is no abort left un-followed by a send --
                             # the cancel flag is not what is blocking, so a restart would only spend
