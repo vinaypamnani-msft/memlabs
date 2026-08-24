@@ -1507,7 +1507,10 @@ if ($SecondaryContentHop -or $RepairSecondaryContent) {
         elseif (-not $st.Row) { & $hsay "    NO SUMMARIZER ROW names $($s.vmName) -- the secondary is not even targeted for this package." }
 
         foreach ($l in (Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $sqlSnapBlock -ArgList @($parent.siteCode, $PackageId) -Tag 'parent-db')) { & $hsay "    PARENT-DB $l" }
-        foreach ($l in (Get-GuestOutput -VmName $s.vmName -DomainName $dom -Block $secContentBlock -ArgList @($PackageId) -Tag 'sec-content')) { & $hsay "    SEC $l" }
+        $secOut = @(Get-GuestOutput -VmName $s.vmName -DomainName $dom -Block $secContentBlock -ArgList @($PackageId) -Tag 'sec-content')
+        foreach ($l in $secOut) { & $hsay "    SEC $l" }
+        $hasPkg = ''
+        foreach ($l in $secOut) { if ($l -match 'hasPackage=(\w+)') { $hasPkg = $Matches[1] } }
 
         $secShortName = ($s.vmName -split '\.')[0]
         $dmg = @(Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $distmgrDecisionBlock -ArgList @($PackageId, $secShortName) -Tag 'parent-distmgr')
@@ -1520,6 +1523,19 @@ if ($SecondaryContentHop -or $RepairSecondaryContent) {
         }
         if ($naHits -lt 0) {
             & $hsay '    VERDICT: distmgr.log was NOT read, so both gates below are UNTESTED -- do not record this run as ruling anything out.'
+        }
+        elseif ($hasPkg -eq 'True') {
+            # Checked BEFORE the abort verdict: aborts persist in the log tail long after the content
+            # they failed on has arrived by another route. On 2026-08-23 this printed "the send is
+            # abandoned and never retried" two lines under its own PKGLIB hasPackage=True.
+            $histNote = ''
+            if ($abHits -gt 0) { $histNote = " The $abHits logged abort(s) are HISTORICAL -- whatever they stopped, it was not this content, which is here." }
+            if ($st.Installed) {
+                & $hsay "    VERDICT: content is PRESENT in $($s.siteCode)'s content library and the summarizer reads Installed at srcVer=$($st.SrcVer). Nothing is stranded.$histNote"
+            }
+            else {
+                & $hsay "    VERDICT: content is PRESENT in $($s.siteCode)'s content library (PkgLib holds it) but the summarizer does not read Installed yet. The hop HAS happened; what is left is the DP finishing. Re-check in a few minutes before calling this a fault.$histNote"
+            }
         }
         elseif ($naHits -gt 0) {
             & $hsay "    VERDICT: the parent printed 'is not an active site, ignore it'. distmgr.cpp:27851 RemoveAt()s the package server there, BEFORE bServerChange/bResendPkg are evaluated -- so no RefreshNow can reach it. Fix Sites.Status for $($s.siteCode) first."
@@ -1537,7 +1553,7 @@ if ($SecondaryContentHop -or $RepairSecondaryContent) {
     if (-not $RepairSecondaryContent) {
         & $hsay ''
         & $hsay 'LEGEND (distsrc.h / site.h, do not guess these): PkgServers Action 0=NONE 1=UPDATE 2=ADD 3=DELETE 4=VALIDATE 5=CANCEL. Sites.Status 1=ACTIVE 2=PENDING 3=FAILED 4=DELETED 5=UPGRADE. An Action that is still ADD with LastRefresh at the 1970 epoch is an ADD that was never processed, not an ADD in flight.'
-        & $hsay 'READ: PKGLIB hasPackage=False with a summarizer row means the row is a phantom -- content never arrived, so nothing on the DP side can fix it. distmgr logs NOTHING when it declines to send, so do not read a quiet distmgr.log as "no decision was made".'
+        & $hsay 'READ: PKGLIB hasPackage=False with a summarizer row means the row is a phantom -- content never arrived, so nothing on the DP side can fix it. hasPackage=True means the hop HAS happened whatever the log tail still shows: aborts outlive the failure they describe. distmgr logs NOTHING when it declines to send, so do not read a quiet distmgr.log as "no decision was made".'
         Write-Host "Hop log: $hopLog" -ForegroundColor Green
         return
     }
