@@ -1527,6 +1527,12 @@ if ($ProveWedgeFix) {
             param($t, $k)
             if ("$t" -match ($k + '=(-?\d+)')) { [int]$Matches[1] } else { $null }
         }
+        # Computed BEFORE the literal: `(if ...)` in a hashtable value parses as a command named
+        # 'if', throws CommandNotFoundException at runtime and leaves the value silently empty --
+        # on both 7.6.5 and 5.1, with the script still exiting 0.
+        # Anchored on ' pid=' because the state can contain a space ('Stop Pending').
+        $execState = ''
+        if ("$exec" -match 'state=(.+?) pid=') { $execState = $Matches[1].Trim() }
         [pscustomobject]@{
             Readable    = ($row -and $row -notlike '*UNREADABLE*')
             Wedged      = ("$row" -match 'wedged=True')
@@ -1535,6 +1541,7 @@ if ($ProveWedgeFix) {
             LastSend    = (& $num $row 'lastSend')
             LastPkgSend = (& $num $row 'lastPkgSend')
             ExecPid     = (& $num $exec 'pid')
+            ExecState   = $execState
             Lines       = $lines
         }
     }
@@ -1543,7 +1550,16 @@ if ($ProveWedgeFix) {
     foreach ($l in $pre.Lines) { & $psay "    $l" }
     if (-not $pre.Readable) { & $psay 'ABORT: distmgr.log was NOT read. Instrument failure, NOT evidence. NOT A RESULT.'; return }
     if (-not $pre.Wedged) { & $psay "ABORT: the parent does not read WEDGED (aborts=$($pre.Aborts), lastAbort=$($pre.LastAbort), lastSend=$($pre.LastSend)). There is nothing to test. NOT A RESULT."; return }
-    & $psay "precondition met: WEDGED on the same predicate InstallBoundaryGroups.ps1 ships."
+    # A service already stopping or stopped cannot be tested: nothing it fails to do afterwards is
+    # evidence about the cancel flag. Measured 2026-08-23 22:56 -- 'Stop Pending' at precondition,
+    # Stopped by the end, and the run still produced a substantive-looking verdict about targeting.
+    if ($pre.ExecState -ne 'Running') {
+        & $psay "ABORT: SMS_EXECUTIVE is '$($pre.ExecState)', not Running, on $($parent.vmName). A service that is not running cannot be tested -- every later silence would be explained by that, not by the cancel flag. NOT A RESULT."
+        & $psay 'Start SMS_EXECUTIVE, let the site settle, and re-run.'
+        Write-Host "Proof log: $pwLog" -ForegroundColor Green
+        return
+    }
+    & $psay "precondition met: WEDGED on the same predicate InstallBoundaryGroups.ps1 ships, SMS_EXECUTIVE Running (pid $($pre.ExecPid))."
 
     $dpPre = & $readSecState $sec $parent
     foreach ($l in $dpPre.Lines) { & $psay "    $l" }
@@ -1574,14 +1590,28 @@ if ($ProveWedgeFix) {
 
     & $psay ''
     $tFix = Get-Date
-    foreach ($l in (Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $execRestartBlock -ArgList @() -Tag 'exec-restart')) { & $psay "    $l" }
+    $restartOut = @(Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $execRestartBlock -ArgList @() -Tag 'exec-restart')
+    foreach ($l in $restartOut) { & $psay "    $l" }
+    # The restart block's OWN report is the evidence. Reading a changed pid from a later query is
+    # not: on 2026-08-23 the call timed out at 90s and the pid had changed anyway because the
+    # service was already cycling, so the run sailed on and tested a service that then stopped.
+    if (@($restartOut | Where-Object { $_ -match 'pidChanged=True' }).Count -eq 0) {
+        & $psay "VOID: the restart did not report a completed process replacement (see the EXEC-RESTART lines above). A timeout or error is not a restart, so this trial decides NOTHING."
+        Write-Host "Proof log: $pwLog" -ForegroundColor Green
+        return
+    }
     $post0 = & $readWedge
     if (-not $post0.Readable -or -not $post0.ExecPid -or $post0.ExecPid -eq $pre.ExecPid) {
         & $psay "VOID: SMS_EXECUTIVE pid did not change ($($pre.ExecPid) -> $($post0.ExecPid)). Only a fresh process clears the flag, so this trial decides NOTHING."
         Write-Host "Proof log: $pwLog" -ForegroundColor Green
         return
     }
-    & $psay "process replaced: pid $($pre.ExecPid) -> $($post0.ExecPid). The flag should now be clear."
+    if ($post0.ExecState -ne 'Running') {
+        & $psay "VOID: SMS_EXECUTIVE is '$($post0.ExecState)' after the restart. Nothing measured from here on would be about the cancel flag."
+        Write-Host "Proof log: $pwLog" -ForegroundColor Green
+        return
+    }
+    & $psay "process replaced: pid $($pre.ExecPid) -> $($post0.ExecPid), state Running. The flag should now be clear."
     # Short on purpose. This phase only answers "did the restart alone resume work already queued",
     # which distmgr does within seconds of picking up an inbox file. The 900s the first run spent
     # here bought nothing: with no queued work the signal can never appear, however long you wait.
@@ -1642,6 +1672,14 @@ if ($ProveWedgeFix) {
 
     & $psay ''
     $elapsed = [int]((Get-Date) - $tFix).TotalSeconds
+    # Everything below reads distmgr's behaviour, so a service that is no longer Running invalidates
+    # all of it -- silence would be explained by the service, not by the cancel flag.
+    if ($post.ExecState -ne 'Running') {
+        & $psay "VOID: SMS_EXECUTIVE is '$($post.ExecState)' (pid $($post.ExecPid)) after ${elapsed}s. distmgr was not running for part or all of the watch, so neither the absence of sends nor the absence of aborts means anything. This trial decides NOTHING."
+        & $psay "ACTION: start SMS_EXECUTIVE on $($parent.vmName), let the site settle, and re-run. Do NOT record this as a result."
+        Write-Host "Proof log: $pwLog" -ForegroundColor Green
+        return
+    }
     if ($dpPost.Installed -or $installed) {
         & $psay "RESULT: CURED + PACKAGE INSTALLED. $($sec.vmName) reached Installed ${elapsed}s after the restart, having not moved during a ${BaselineSeconds}s baseline."
         & $psay 'ACTION: the gate in InstallBoundaryGroups.ps1 (060c30cb) is right and sufficient. Nothing further to fix.'
@@ -1659,8 +1697,12 @@ if ($ProveWedgeFix) {
         & $psay 'ACTION: the SMS_EXECUTIVE restart is NOT the cure. Do NOT keep 060c30cb as-is -- a wider gate then restarts the service more often for no benefit. Reconsider both the gate and the claim in the InstallBoundaryGroups.ps1 comment.'
     }
     elseif ($stimulated) {
-        & $psay "RESULT: NO CONTENT ACTIVITY AT ALL. The stimulus was issued and ${elapsed}s later distmgr has emitted neither a send nor a new abort (srcVer $($dpPre.SrcVer) -> $($st.SrcVer))."
-        & $psay 'ACTION: if srcVer did NOT move, the server has not processed the refresh yet -- re-run -SecondaryContentHop in a few minutes before concluding anything; it took ~9 minutes on 2026-08-23. If srcVer DID move and still nothing happened, look at whether the package is targeted at the secondary, not at the cancel flag.'
+        # Two DIFFERENT versions: the package's SourceVersion (what the stimulus bumps, reported by
+        # the REFRESHPKG lines) and the summarizer row's srcVer (what the DP has been told about).
+        # Reporting the summarizer one as though it were the package one read as 'srcVer 1 -> 1'
+        # directly beneath 'server moved: SourceVersion=2' on 2026-08-23.
+        & $psay "RESULT: NO CONTENT ACTIVITY AT ALL. The stimulus was issued and ${elapsed}s later distmgr has emitted neither a send nor a new abort. Summarizer srcVer for $($sec.siteCode): $($dpPre.SrcVer) -> $($st.SrcVer) (this is the DP's view, NOT the package SourceVersion -- see the REFRESHPKG lines above for that)."
+        & $psay 'ACTION: if the REFRESHPKG lines show SourceVersion did move but the summarizer srcVer did not, the bump has not reached this DP yet -- re-run -SecondaryContentHop in a few minutes; it took ~9 minutes on 2026-08-23. If both moved and still nothing happened, look at whether the package is targeted at the secondary, not at the cancel flag.'
     }
     else {
         & $psay "RESULT: INCONCLUSIVE after ${elapsed}s -- no send newer than the last abort, no new abort, DP not Installed, and the stimulus did not run."
