@@ -206,6 +206,7 @@ param(
     [switch]$RepairSecondaryContent,
     [switch]$ProveWedgeFix,
     [switch]$StartExec,
+    [switch]$RefreshStaleDps,
     [int]$StimulusSeconds = 600,
     [int]$PassiveSeconds = 180,
     [switch]$DrsProbe,
@@ -705,16 +706,30 @@ $dpStateBlock = {
 $secContentBlock = {
     param($PkgId)
     $o = New-Object System.Collections.Generic.List[string]
+    # The DP's OWN registry, never a guessed drive list. memlabs pull DPs keep the library on Q:/R:,
+    # which an E,D,F,G,C scan reports as "no content library" -- the same false negative that already
+    # shipped once for HA remote libraries. Where the path came from is reported so a zero is readable.
+    $roots = @()
+    $src = ''
+    try {
+        $clp = "$((Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name 'ContentLibraryPath' -ErrorAction Stop).ContentLibraryPath)"
+        if ($clp) { $roots = @($clp); $src = 'registry' }
+    }
+    catch { }
+    if ($roots.Count -eq 0) {
+        $roots = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object { Join-Path "$($_.Root)" 'SCCMContentLib' })
+        $src = 'drive scan'
+    }
     $sawLib = $false
-    foreach ($d in @('E', 'D', 'F', 'G', 'C')) {
-        $pl = "${d}:\SCCMContentLib\PkgLib"
+    foreach ($root in $roots) {
+        $pl = Join-Path "$root" 'PkgLib'
         if (-not (Test-Path $pl)) { continue }
         $sawLib = $true
         $inis = @(Get-ChildItem -LiteralPath $pl -Filter '*.INI' -ErrorAction SilentlyContinue)
         $mine = @($inis | Where-Object { $_.BaseName -like "$PkgId*" })
-        $o.Add("PKGLIB $pl count=$($inis.Count) hasPackage=$($mine.Count -gt 0)")
+        $o.Add("PKGLIB $pl count=$($inis.Count) hasPackage=$($mine.Count -gt 0) via=$src")
     }
-    if (-not $sawLib) { $o.Add('PKGLIB NONE on E,D,F,G,C -- no content library on this machine') }
+    if (-not $sawLib) { $o.Add("PKGLIB NONE -- no content library found via $src (roots tried: $($roots -join ', '))") }
     $dir = $null
     foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
         try { $dir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
@@ -1626,6 +1641,45 @@ if ($StartExec) {
     Write-Host 'static, so the new process begins with it clear. A -ProveWedgeFix run started now can' -ForegroundColor Yellow
     Write-Host 'no longer test whether a RESTART clears it -- there is nothing left to clear. Let the' -ForegroundColor Yellow
     Write-Host 'site run and re-check with -SecondaryContentHop.' -ForegroundColor Yellow
+    return
+}
+
+if ($RefreshStaleDps) {
+    # Phase 8's $ensureClientPkgCoverage only ever iterates boundary-group DPs, so a DP that belongs
+    # to no boundary group can fall behind and Phase 11's per-DP check will fail on it forever with
+    # no repair path. That is exactly BI-PULL1/BI-PULL2 on 2026-08-24, left at v1 by a source-version
+    # bump. This re-arms distribution for whichever DPs are actually behind.
+    $rsTarget = @($priList) | Select-Object -First 1
+    if (-not $rsTarget) { Write-Host 'ABORT: no primary site server resolved.' -ForegroundColor Red; return }
+    if (-not $PackageId) {
+        $cand = @(Get-GuestOutput -VmName $cas.vmName -DomainName $dom -Block $pkgFindBlock -ArgList @($cas.siteCode) -Tag 'find-clientpkg')
+        $ids = @($cand | Where-Object { $_ -match '^[A-Z0-9]{8} ' })
+        if ($ids.Count -ne 1) { Write-Host 'ABORT: could not resolve the client package. Re-run with -PackageId.' -ForegroundColor Red; return }
+        $PackageId = $ids[0].Split(' ')[0]
+    }
+    Write-Host "package=$PackageId  site=$($rsTarget.vmName)/$($rsTarget.siteCode)" -ForegroundColor Cyan
+    $rsRows = @(Get-GuestOutput -VmName $rsTarget.vmName -DomainName $dom -Block $dpStateBlock -ArgList @($rsTarget.siteCode, $PackageId) -Tag 'dpstate')
+    foreach ($l in $rsRows) { Write-Host "    $l" -ForegroundColor Gray }
+    $behind = @()
+    foreach ($l in $rsRows) {
+        if ($l -match '^DPSTATE\[([^\]]+)\].*state=(\d+)\(') {
+            $dpName = $Matches[1]; $dpState = [int]$Matches[2]
+            if ($dpState -ne 0) { $behind += ($dpName -split '\.')[0] }
+        }
+    }
+    if ($rsRows.Count -eq 0 -or @($rsRows | Where-Object { $_ -like 'DPSTATE ERROR*' -or $_ -like 'DPSTATE NO ROWS*' }).Count) {
+        Write-Host 'ABORT: the summarizer was not read, so nothing was measured. NOT A RESULT.' -ForegroundColor Red
+        return
+    }
+    if ($behind.Count -eq 0) { Write-Host 'every DP already reads Installed -- nothing to refresh.' -ForegroundColor Green; return }
+    Write-Host "behind: $($behind -join ', ')" -ForegroundColor Yellow
+    foreach ($d in $behind) {
+        foreach ($l in (Get-GuestOutput -VmName $rsTarget.vmName -DomainName $dom -Block $dpRefreshBlock -ArgList @($rsTarget.siteCode, $PackageId, $d) -Tag "refresh-$d")) { Write-Host "    $l" -ForegroundColor Gray }
+    }
+    Write-Host ''
+    Write-Host 'RefreshNow is a REQUEST, not a result. Re-run -SecondaryContentHop (or Phase 11) to see' -ForegroundColor Yellow
+    Write-Host 'whether the DPs actually reached Installed; a pull DP must fetch from its source DP, so' -ForegroundColor Yellow
+    Write-Host 'the source has to hold the new version first.' -ForegroundColor Yellow
     return
 }
 
