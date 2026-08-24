@@ -7908,6 +7908,30 @@ $Phase11DpContentLogCollector = {
     }
     catch { $lines += "content-library probe threw: $($_.Exception.Message)" }
 
+    # The single fact that separates "content never sent" from "DP never provisioned".
+    # smsdpprov is the DP-side provider that builds the content library AND creates the
+    # IIS content vdirs (src/SiteServer/smsdp/smsdpinstprov.cpp); distmgr only creates the
+    # SMS_DP$ folder/share and writes ContentLibraryPath. So an SMS_DP$\sms\logs that
+    # exists but is EMPTY means smsdpprov has not run even once -- the DP is not yet able
+    # to accept content, and PkgLib/vdirs being absent is a CONSEQUENCE, not an extra
+    # symptom. burnin 2026-08-24 read all three as separate failures and could not rank
+    # them, because this fact lived only in the collector's own side file.
+    try {
+        if (-not $dpLogDir) {
+            $lines += 'DP readiness: no ?:\SMS_DP$\sms\logs at all -- the DP role has not been installed on this server.'
+        }
+        else {
+            $dpLogs = @(Get-ChildItem -LiteralPath $dpLogDir -Filter '*.log' -ErrorAction SilentlyContinue)
+            if ($dpLogs.Count -eq 0) {
+                $lines += "DP readiness: '$dpLogDir' exists but holds NO logs -- smsdpprov has never run, so this DP has never built its content library or created its IIS content vdirs. distmgr made the folder/share; the DP provider did not follow. Any missing PkgLib/vdir below follows from this, and content sent to this DP now cannot land."
+            }
+            else {
+                $lines += "DP readiness: smsdpprov has run ($($dpLogs.Count) log(s) in $dpLogDir, newest $(( @($dpLogs | Sort-Object LastWriteTime -Descending)[0]).LastWriteTime))"
+            }
+        }
+    }
+    catch { $lines += "DP-readiness probe threw: $($_.Exception.Message)" }
+
     # IIS is how a DP serves content and how smsdpprov publishes state; a stopped
     # site/app pool looks identical to "content never arrived" from the site's side.
     try {
