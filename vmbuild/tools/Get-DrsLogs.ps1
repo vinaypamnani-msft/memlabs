@@ -903,21 +903,51 @@ $execStartBlock = {
 
 # INTERVENTION. The PID must change: the mechanism claim is that only a fresh process clears the
 # static cancel flag, so a restart that reused the process would make the trial void, not negative.
+# Stop+start via CIM rather than Restart-Service: Restart-Service BLOCKS, and when the 90s guest
+# budget killed the job mid-call on 2026-08-23 it had already stopped the service but not restarted
+# it, leaving SMS_EXECUTIVE down for 3.5 hours. Non-blocking calls with bounded polls cannot strand
+# it that way, and the block always ends having tried to leave the service Running.
 $execRestartBlock = {
     $o = New-Object System.Collections.Generic.List[string]
-    $before = 0
-    try { $before = [int](Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop).ProcessId } catch { }
-    $o.Add("EXEC-RESTART before pid=$before")
-    try { Restart-Service -Name SMS_EXECUTIVE -Force -ErrorAction Stop; $o.Add('EXEC-RESTART issued') }
-    catch { $o.Add("EXEC-RESTART FAILED $($_.Exception.Message)"); return $o.ToArray() }
-    Start-Sleep -Seconds 30
+    $svc = $null
+    try { $svc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop }
+    catch { $o.Add("EXEC-RESTART UNREADABLE $($_.Exception.Message)"); return $o.ToArray() }
+    $before = [int]$svc.ProcessId
+    $o.Add("EXEC-RESTART before pid=$before state=$($svc.State)")
+    $readSvc = {
+        try { return Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop } catch { return $null }
+    }
+    if ("$($svc.State)" -eq 'Running') {
+        $rcStop = -1
+        try { $rcStop = [int](Invoke-CimMethod -InputObject $svc -MethodName StopService -ErrorAction Stop).ReturnValue }
+        catch { $o.Add("EXEC-RESTART stop threw $($_.Exception.Message)") }
+        $o.Add("EXEC-RESTART StopService ReturnValue=$rcStop")
+        $dl = (Get-Date).AddSeconds(30)
+        while ((Get-Date) -lt $dl) {
+            Start-Sleep -Seconds 3
+            $s = & $readSvc
+            if ($s -and "$($s.State)" -eq 'Stopped') { break }
+        }
+    }
+    $s = & $readSvc
+    $o.Add("EXEC-RESTART afterStop state=$(if ($s) { $s.State } else { '?' })")
+    $rcStart = -1
+    try {
+        $s2 = & $readSvc
+        if ($s2) { $rcStart = [int](Invoke-CimMethod -InputObject $s2 -MethodName StartService -ErrorAction Stop).ReturnValue }
+    }
+    catch { $o.Add("EXEC-RESTART start threw $($_.Exception.Message)") }
+    $o.Add("EXEC-RESTART StartService ReturnValue=$rcStart")
     $after = 0
     $state = '?'
-    try {
-        $svc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
-        $after = [int]$svc.ProcessId; $state = "$($svc.State)"
+    $dl = (Get-Date).AddSeconds(45)
+    while ((Get-Date) -lt $dl) {
+        Start-Sleep -Seconds 5
+        $s = & $readSvc
+        if ($s) { $after = [int]$s.ProcessId; $state = "$($s.State)" }
+        if ($state -eq 'Running' -and $after -gt 0) { break }
     }
-    catch { }
+    if ($state -ne 'Running') { $o.Add('EXEC-RESTART WARNING SMS_EXECUTIVE is NOT Running -- the site is left degraded, start it before anything else.') }
     $o.Add("EXEC-RESTART after pid=$after state=$state pidChanged=$($after -gt 0 -and $after -ne $before)")
     return $o.ToArray()
 }
