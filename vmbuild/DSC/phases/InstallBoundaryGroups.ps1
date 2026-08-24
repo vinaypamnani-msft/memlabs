@@ -398,6 +398,48 @@ $ensureClientPkgCoverage = {
     # (PkgServers) targeting row alive and flip RefreshNow on it so distmgr re-processes
     # the package now instead of waiting out its 3600s sleep / 30-min retry backoff.
     $lastArm = @{}   # DP-upper -> when RefreshNow was last flipped for that DP
+    # A pending Secondary now STAYS in scope (see the $pendingDp split above), so the distribute
+    # must be gated on the DP role actually existing or it fires at a non-existent DP every 30s
+    # for the ~30 min a secondary takes to install. Once a DP registers it stays registered, so
+    # the positive is cached and never re-queried; negatives are re-checked on a slow cadence.
+    $dpRoleKnown = @{}
+    $dpRoleLastCheck = @{}
+    $dpWaitLogged = @{}
+    $dpPendingSince = @{}
+    # Reported alongside the wait so it is never silent: if both numbers sit still while a DP is
+    # pending, the registration is stuck rather than slow, and that is visible without a re-run.
+    $dpRoleSourceCounts = {
+        $parts = @()
+        foreach ($q in @(
+                @{ Name = 'SMS_DistributionPointInfo'; Class = 'SMS_DistributionPointInfo'; Filter = $null },
+                @{ Name = 'SMS_SystemResourceList'; Class = 'SMS_SystemResourceList'; Filter = "RoleName='SMS Distribution Point'" }
+            )) {
+            try { $parts += "$($q.Name)=$(@(Get-WmiObject -Namespace $ns -Class $q.Class -Filter $q.Filter -ErrorAction Stop).Count)" }
+            catch { $parts += "$($q.Name)=UNREADABLE" }
+        }
+        return ($parts -join ' ')
+    }
+    $isDpRoleLive = {
+        param($DpFqdn)
+        $k = ("$DpFqdn" -split '\.')[0].ToUpper()
+        if ($dpRoleKnown.ContainsKey($k)) { return $true }
+        if ($dpRoleLastCheck.ContainsKey($k) -and ((Get-Date) - $dpRoleLastCheck[$k]).TotalSeconds -lt 120) { return $false }
+        $dpRoleLastCheck[$k] = Get-Date
+        foreach ($q in @(
+                @{ Class = 'SMS_DistributionPointInfo'; Filter = $null },
+                @{ Class = 'SMS_SystemResourceList'; Filter = "RoleName='SMS Distribution Point'" }
+            )) {
+            try {
+                foreach ($d in @(Get-WmiObject -Namespace $ns -Class $q.Class -Filter $q.Filter -ErrorAction Stop)) {
+                    $df = & $fqdnOf $d.NALPath
+                    if (-not $df -and $d.ServerName) { $df = "$($d.ServerName)" }
+                    if ($df -and ((("$df" -split '\.')[0]).ToUpper()) -eq $k) { $dpRoleKnown[$k] = $true; return $true }
+                }
+            }
+            catch { }
+        }
+        return $false
+    }
     $extendedCoverageWait = $false
     # A CAS/parent-owned package (e.g. the client package under a child primary) has NO
     # local content yet (StoredPkgVersion=0); its content must first replicate DOWN from
@@ -688,6 +730,37 @@ $ensureClientPkgCoverage = {
         return $true
     }
 
+    # SECOND stranding mode, and the one $isPkgStrandedToSite is blind to by construction.
+    # wacky 2026-08-23: the source site logged "Package server ... is not an active site, ignore
+    # it" x5 for the secondary's DP and sent nothing -- ZERO bundle aborts anywhere, because the
+    # send never started. That evidence lives on the SOURCE site, not here, so a local scan for
+    # 0x800704d3 can never see it. Diagnosis only: the cure is the child reaching
+    # Sites.Status=1 (ACTIVE), after which the per-attempt retryPkgToSite re-enumerates it.
+    $sourceDroppedAsInactive = {
+        param($DpHost)
+        if (-not $parentFqdn) { return 'NOT MEASURED (source site server unknown)' }
+        try {
+            return Invoke-Command -ComputerName $parentFqdn -ArgumentList $DpHost -ScriptBlock {
+                param($H)
+                $d = $null
+                foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+                    try { $d = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
+                    if ($d) { break }
+                }
+                if (-not $d) { return 'NOT MEASURED (no SMS install dir on the source site)' }
+                $p = Join-Path $d 'Logs\distmgr.log'
+                if (-not (Test-Path $p)) { return 'NOT MEASURED (no distmgr.log on the source site)' }
+                $t = @(Get-Content $p -Tail 4000 -ErrorAction SilentlyContinue)
+                if ($t.Count -eq 0) { return 'NOT MEASURED (source distmgr.log read returned nothing)' }
+                $hits = @($t | Where-Object { $_ -match 'is not an active site' -and $_ -match [regex]::Escape("$H") })
+                if ($hits.Count -eq 0) { return "no 'not an active site' drop naming $H in the last $($t.Count) lines" }
+                $last = (("$($hits[-1])" -replace '\s+\$\$<SMS_DISTRIBUTION_MANAGER>.*', '')).Trim()
+                return "$($hits.Count) x 'is not an active site, ignore it' naming $H -- last: $last"
+            } -ErrorAction Stop
+        }
+        catch { return "NOT MEASURED (could not read the source site's distmgr.log: $($_.Exception.Message))" }
+    }
+
     # Second, INDEPENDENT wake path, run on a deliberately DIFFERENT cadence (8 min vs the
     # row's 5) so the next build can attribute which one actually moved the parent: compare
     # these [wake-ROW]/[wake-FILE] stamps against the wake times in the pulled
@@ -782,6 +855,22 @@ $ensureClientPkgCoverage = {
             $hasTgt = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue |
                     Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }).Count -gt 0
             if (-not $hasTgt) {
+                # Distributing to a DP that does not exist yet cannot succeed; hold rather than
+                # throw once per iteration. The DP stays in $notInstalled, so the phase keeps
+                # waiting on it and distributes the moment the role registers.
+                if (-not (& $isDpRoleLive $dp)) {
+                    if (-not $dpPendingSince.ContainsKey($u)) { $dpPendingSince[$u] = Get-Date }
+                    if (-not $dpWaitLogged.ContainsKey($u) -or ((Get-Date) - $dpWaitLogged[$u]).TotalMinutes -ge 5) {
+                        $dpWaitLogged[$u] = Get-Date
+                        $pendMin = [int](((Get-Date) - $dpPendingSince[$u]).TotalMinutes)
+                        Write-DscStatus "Client pkg coverage: DP '$dp' is declared installDP but its DP role has not registered yet (${pendMin}m so far; $(& $dpRoleSourceCounts)). Holding the distribute -- the DP stays in scope, so this phase cannot exit declaring success without it. InstallSecondarySiteServer.ps1 already proved the site install itself finished, so what is outstanding is role registration, not setup."
+                    }
+                    continue
+                }
+                if ($dpPendingSince.ContainsKey($u)) {
+                    Write-DscStatus "Client pkg coverage: DP '$dp' registered its DP role after $([int](((Get-Date) - $dpPendingSince[$u]).TotalMinutes))m of waiting -- distributing now."
+                    $dpPendingSince.Remove($u)
+                }
                 try {
                     Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
                     $lastArm[$u] = Get-Date
@@ -892,6 +981,11 @@ $ensureClientPkgCoverage = {
         foreach ($dp in $stillBad) {
             $dpHost = ("$dp" -split '\.')[0]
             $u = $dp.ToUpper()
+            $diagVm = $vmByHost[$dpHost.ToUpper()]
+            if ($diagVm -and "$($diagVm.role)" -eq 'Secondary') {
+                Write-DscStatus "Client pkg coverage: [source-drop] $dpHost -- $(& $sourceDroppedAsInactive $dpHost)"
+                Write-DscStatus "Client pkg coverage: [source-drop] a drop at the SOURCE is a DIFFERENT failure from the 0x800704D3 bundle wedge -- nothing was ever sent, so there is no local abort to find. It clears once the child site reads Sites.Status=1 (ACTIVE) and the source re-enumerates its package servers."
+            }
             $sInfo = if ($state.ContainsKey($u)) { "State=$($stateName["$($state[$u])"]) DPSourceVersion=$($stateVer[$u]) vs pkg=$pkgSourceVersion" } else { "no summarizer row" }
             if (-not $state.ContainsKey($u)) {
                 # "never targeted, or not yet reported" was a coin toss, and the two halves
