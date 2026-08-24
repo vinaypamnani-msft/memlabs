@@ -205,6 +205,7 @@ param(
     [switch]$SecondaryContentHop,
     [switch]$RepairSecondaryContent,
     [switch]$ProveWedgeFix,
+    [switch]$StartExec,
     [int]$StimulusSeconds = 600,
     [int]$PassiveSeconds = 180,
     [switch]$DrsProbe,
@@ -799,6 +800,19 @@ $distmgrDecisionBlock = {
 $wedgeStateBlock = {
     param($PkgId, $SecSite)
     $o = New-Object System.Collections.Generic.List[string]
+    # Read the service FIRST. The cancel flag is a per-process static, so aborts logged by an
+    # EARLIER process say nothing about this one -- without that split a freshly started service
+    # still reads wedged=True off historical lines and a restart appears to have done nothing.
+    $svcState = '?'; $svcPid = 0; $svcStart = $null
+    try {
+        $svc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+        $svcState = "$($svc.State)"; $svcPid = [int]$svc.ProcessId
+        if ($svcPid -gt 0) {
+            $pr = Get-Process -Id $svcPid -ErrorAction SilentlyContinue
+            if ($pr) { $svcStart = $pr.StartTime }
+        }
+    }
+    catch { }
     $dir = $null
     foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
         try { $dir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
@@ -810,9 +824,25 @@ $wedgeStateBlock = {
     $tail = @(Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue)
     if ($tail.Count -eq 0) { $o.Add('WEDGE UNREADABLE -- distmgr.log read returned nothing'); return $o.ToArray() }
     $aborts = 0; $lastAbort = -1; $lastSend = -1; $lastPkgSend = -1
+    $abortsThisProc = 0; $tsUnparsed = 0
     for ($i = 0; $i -lt $tail.Count; $i++) {
         $ln = $tail[$i]
-        if ($ln -match '0x800704d3' -and $ln -match 'CopyFileExW|CreatePackageBundle|TakeContentSnapshot|AddContentToBundle|SnapshotPackage|BundleLegacyContentFiles') { $lastAbort = $i; $aborts++ }
+        if ($ln -match '0x800704d3' -and $ln -match 'CopyFileExW|CreatePackageBundle|TakeContentSnapshot|AddContentToBundle|SnapshotPackage|BundleLegacyContentFiles') {
+            $lastAbort = $i; $aborts++
+            if ($svcStart) {
+                # distmgr.log is the legacy '$$<comp><MM-DD-YYYY HH:mm:ss.fff+ooo>' shape, NOT the
+                # XML time=/date= shape. Matching only the latter silently scored every line 0.
+                $ts = $null
+                if ($ln -match '<(\d{2})-(\d{2})-(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\.\d+[+-]\d+>') {
+                    $ts = Get-Date -Year ([int]$Matches[3]) -Month ([int]$Matches[1]) -Day ([int]$Matches[2]) -Hour ([int]$Matches[4]) -Minute ([int]$Matches[5]) -Second ([int]$Matches[6]) -Millisecond 0
+                }
+                elseif ($ln -match 'time="(\d{1,2}):(\d{2}):(\d{2})\.\d+[+-]\d+"\s+date="(\d{2})-(\d{2})-(\d{4})"') {
+                    $ts = Get-Date -Year ([int]$Matches[6]) -Month ([int]$Matches[4]) -Day ([int]$Matches[5]) -Hour ([int]$Matches[1]) -Minute ([int]$Matches[2]) -Second ([int]$Matches[3]) -Millisecond 0
+                }
+                if (-not $ts) { $tsUnparsed++ }
+                elseif ($ts -ge $svcStart) { $abortsThisProc++ }
+            }
+        }
         if ($ln -match 'Created minijob to send compressed copy') {
             $lastSend = $i
             if ($ln -match [regex]::Escape("$PkgId") -and $ln -match ('to site {0}\.' -f [regex]::Escape("$SecSite"))) { $lastPkgSend = $i }
@@ -820,14 +850,54 @@ $wedgeStateBlock = {
     }
     $wedged = ($aborts -ge 5 -and $lastAbort -gt $lastSend)
     $o.Add("WEDGE lines=$($tail.Count) aborts=$aborts lastAbort=$lastAbort lastSend=$lastSend lastPkgSend=$lastPkgSend wedged=$wedged")
+    # Separate field on purpose: `wedged` stays byte-identical to the DSC gate's predicate.
+    $o.Add("WEDGEPROC abortsThisProc=$abortsThisProc tsUnparsed=$tsUnparsed procStart=$(if ($svcStart) { $svcStart.ToString('MM-dd HH:mm:ss') } else { '-' })")
+    $start = '-'
+    if ($svcStart) { $start = $svcStart.ToString('MM-dd HH:mm:ss') }
+    if ($svcState -eq '?') { $o.Add('EXEC UNREADABLE') }
+    else { $o.Add("EXEC state=$svcState pid=$svcPid start=$start") }
+    return $o.ToArray()
+}
+
+# Starting a stopped SMS_EXECUTIVE is itself the flag-clearing intervention, so it is a separate
+# mode and never folded into a measurement run. Non-blocking StartService + poll: Start-Service
+# waits for the SCM and would burn the 90s guest-call budget on a slow start.
+$execStartBlock = {
+    $o = New-Object System.Collections.Generic.List[string]
+    $svc = $null
+    try { $svc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop }
+    catch { $o.Add("EXEC-START UNREADABLE $($_.Exception.Message)"); return $o.ToArray() }
+    $o.Add("EXEC-START before state=$($svc.State) pid=$([int]$svc.ProcessId) startMode=$($svc.StartMode)")
+    if ("$($svc.State)" -eq 'Running') { $o.Add('EXEC-START already Running -- nothing done'); return $o.ToArray() }
+    # Read why it went down BEFORE starting it.
     try {
-        $svc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
-        $svcPid = [int]$svc.ProcessId
-        $start = '-'
-        if ($svcPid -gt 0) { $pr = Get-Process -Id $svcPid -ErrorAction SilentlyContinue; if ($pr) { $start = $pr.StartTime.ToString('MM-dd HH:mm:ss') } }
-        $o.Add("EXEC state=$($svc.State) pid=$svcPid start=$start")
+        $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = (Get-Date).AddHours(-12) } -ErrorAction Stop |
+                Where-Object { "$($_.Message)" -match 'SMS_EXECUTIVE|SMS Executive' } | Select-Object -First 6)
+        if ($ev.Count -eq 0) { $o.Add('EXEC-START no SCM events naming SMS_EXECUTIVE in the last 12h') }
+        foreach ($e in $ev) {
+            $m = ("$($e.Message)" -replace '\s+', ' ').Trim()
+            if ($m.Length -gt 160) { $m = $m.Substring(0, 160) + '...' }
+            $o.Add("  SCM $($e.TimeCreated.ToString('MM-dd HH:mm:ss')) id=$($e.Id) $m")
+        }
     }
-    catch { $o.Add("EXEC UNREADABLE $($_.Exception.Message)") }
+    catch { $o.Add("EXEC-START event log unreadable: $($_.Exception.Message)") }
+    $rc = -1
+    try { $rc = [int](Invoke-CimMethod -InputObject $svc -MethodName StartService -ErrorAction Stop).ReturnValue }
+    catch { $o.Add("EXEC-START FAILED $($_.Exception.Message)"); return $o.ToArray() }
+    $o.Add("EXEC-START StartService ReturnValue=$rc")
+    if ($rc -ne 0) { $o.Add('EXEC-START did NOT start (non-zero return).'); return $o.ToArray() }
+    $deadline = (Get-Date).AddSeconds(60)
+    $state = '?'; $newPid = 0
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        try {
+            $s2 = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+            $state = "$($s2.State)"; $newPid = [int]$s2.ProcessId
+        }
+        catch { }
+        if ($state -eq 'Running' -and $newPid -gt 0) { break }
+    }
+    $o.Add("EXEC-START after state=$state pid=$newPid running=$($state -eq 'Running' -and $newPid -gt 0)")
     return $o.ToArray()
 }
 
@@ -1497,6 +1567,22 @@ if ($SecondaryContentHop -or $RepairSecondaryContent) {
     return
 }
 
+if ($StartExec) {
+    $seSec = @($secList) | Select-Object -First 1
+    $seTarget = $null
+    if ($seSec) { $seTarget = @($priList | Where-Object { $_.siteCode -eq $seSec.parentSiteCode }) | Select-Object -First 1 }
+    if (-not $seTarget) { $seTarget = @($priList) | Select-Object -First 1 }
+    if (-not $seTarget) { Write-Host 'ABORT: no primary site server resolved.' -ForegroundColor Red; return }
+    Write-Host "starting SMS_EXECUTIVE on $($seTarget.vmName) ..." -ForegroundColor Cyan
+    foreach ($l in (Get-GuestOutput -VmName $seTarget.vmName -DomainName $dom -Block $execStartBlock -ArgList @() -Tag 'exec-start')) { Write-Host "    $l" -ForegroundColor Gray }
+    Write-Host ''
+    Write-Host 'This START is itself the flag-clearing intervention: the cancel flag is a per-process' -ForegroundColor Yellow
+    Write-Host 'static, so the new process begins with it clear. A -ProveWedgeFix run started now can' -ForegroundColor Yellow
+    Write-Host 'no longer test whether a RESTART clears it -- there is nothing left to clear. Let the' -ForegroundColor Yellow
+    Write-Host 'site run and re-check with -SecondaryContentHop.' -ForegroundColor Yellow
+    return
+}
+
 if ($ProveWedgeFix) {
     $pwLog = Join-Path $logsRoot ("prove-wedge-fix-{0}.log" -f $stamp)
     $psay = {
@@ -1522,6 +1608,7 @@ if ($ProveWedgeFix) {
     $readWedge = {
         $lines = @(Get-GuestOutput -VmName $parent.vmName -DomainName $dom -Block $wedgeStateBlock -ArgList @($PackageId, $sec.siteCode) -Tag 'wedge')
         $row = @($lines | Where-Object { $_ -like 'WEDGE *' }) | Select-Object -First 1
+        $proc = @($lines | Where-Object { $_ -like 'WEDGEPROC *' }) | Select-Object -First 1
         $exec = @($lines | Where-Object { $_ -like 'EXEC *' }) | Select-Object -First 1
         $num = {
             param($t, $k)
@@ -1542,6 +1629,7 @@ if ($ProveWedgeFix) {
             LastPkgSend = (& $num $row 'lastPkgSend')
             ExecPid     = (& $num $exec 'pid')
             ExecState   = $execState
+            AbortsThisProc = (& $num $proc 'abortsThisProc')
             Lines       = $lines
         }
     }
@@ -1560,6 +1648,14 @@ if ($ProveWedgeFix) {
         return
     }
     & $psay "precondition met: WEDGED on the same predicate InstallBoundaryGroups.ps1 ships, SMS_EXECUTIVE Running (pid $($pre.ExecPid))."
+    # abortsThisProc>0 is the only state that PROVES the flag is set in the live process. 0 is
+    # ambiguous, not negative: a stranded package is never retried, so it produces no new aborts.
+    if ($pre.AbortsThisProc -gt 0) {
+        & $psay "the live process has aborted $($pre.AbortsThisProc) time(s) itself, so its cancel flag is set. A restart is a real intervention here."
+    }
+    else {
+        & $psay 'CAVEAT: 0 aborts by the LIVE process -- every abort in the log belongs to an earlier one. That does NOT mean the flag is clear (a stranded package is never retried, so it cannot abort), but it does mean a restart may be clearing something that was already clear. Weigh the verdict accordingly.'
+    }
 
     $dpPre = & $readSecState $sec $parent
     foreach ($l in $dpPre.Lines) { & $psay "    $l" }
