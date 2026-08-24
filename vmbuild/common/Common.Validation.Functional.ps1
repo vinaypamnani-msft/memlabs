@@ -7870,7 +7870,12 @@ $Phase11DpContentLogCollector = {
     $lines = @()
     try {
         $clp = ''
-        try { $clp = "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name ContentLibraryPath -ErrorAction Stop).ContentLibraryPath)" } catch { }
+        # Recorded separately because InstallBoundaryGroups' $dpHasPackageContent keys its
+        # absent-vs-unmeasurable decision on exactly this: the key only exists once the DP role is
+        # configured, so it is what makes "PkgLib missing" mean ABSENT rather than UNKNOWN.
+        $fromRegistry = $false
+        try { $clp = "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name ContentLibraryPath -ErrorAction Stop).ContentLibraryPath)"; if ($clp) { $fromRegistry = $true } } catch { }
+        $lines += "DP role registry (HKLM\SOFTWARE\Microsoft\SMS\DP ContentLibraryPath) = $(if ($fromRegistry) { 'present' } else { 'ABSENT' })"
         if (-not $clp) {
             foreach ($d in @('E:', 'D:', 'F:', 'G:', 'C:')) { if (Test-Path "$d\SCCMContentLib") { $clp = "$d\SCCMContentLib"; break } }
         }
@@ -7879,7 +7884,11 @@ $Phase11DpContentLogCollector = {
         }
         else {
             $isRemote = $clp.StartsWith('\\')
-            $lines += "ContentLibraryPath = $clp$(if ($isRemote) { ' (REMOTE/UNC -- HA relocated content library)' })"
+            $lines += "ContentLibraryPath = $clp$(if ($isRemote) { ' (REMOTE/UNC -- HA relocated content library)' })$(if (-not $fromRegistry) { ' (found by DRIVE SCAN, not the registry)' })"
+            # "root missing" and "root present but empty" look identical once you only report
+            # PkgLib, and they are different states: the first is a DP that was never provisioned,
+            # the second a DP provisioned but never fed.
+            $lines += "content library root exists = $(Test-Path $clp)"
             $pl = Join-Path $clp 'PkgLib'
             if (Test-Path $pl) {
                 $inis = @(Get-ChildItem -LiteralPath $pl -Filter '*.INI' -ErrorAction SilentlyContinue)
@@ -10179,6 +10188,12 @@ function Test-CMClientPackageDistribution {
         }
 
         $failingDps = New-Object System.Collections.Generic.List[string]
+        # A DP-side probe with nothing to compare against cannot tell a defect from the normal
+        # resting state of that DP kind. Burnin 2026-08-24: the failing DP reported all three
+        # content vdirs MISSING and the question "is that abnormal?" was unanswerable, because
+        # DpContent.txt is only ever collected from the DP that failed. Name a known-Installed
+        # DP so the same probe runs on one, and the next failure arrives with its own control.
+        $healthyDps = New-Object System.Collections.Generic.List[string]
 
         # --- ConfigMgr client package(s): the critical client-install content ---
         try {
@@ -10293,6 +10308,9 @@ function Test-CMClientPackageDistribution {
                     $dpn = & $dpNameOf $b.ServerNALPath
                     [void]$failingDps.Add(("$dpn" -split '\.')[0])
                     $results.Details.Add("  DP=$dpn Site=$($b.SiteCode) State=$sn SourceVersion=$($b.SourceVersion) LastCopied=$($b.LastCopied)")
+                }
+                foreach ($g in @($dpRows | Where-Object { [int]$_.State -eq 0 } | Select-Object -First 1)) {
+                    [void]$healthyDps.Add(("$(& $dpNameOf $g.ServerNALPath)" -split '\.')[0])
                 }
             }
         }
@@ -10435,6 +10453,7 @@ function Test-CMClientPackageDistribution {
         $results.Details.Add("distmgr cancel-flag (0x800704d3) state: $(& $getDistmgrWedgeStatus)")
 
         $results.FailingDPs = @($failingDps | Select-Object -Unique)
+        $results.HealthyDPs = @($healthyDps | Select-Object -Unique)
         return $results
     }
 
@@ -10562,6 +10581,28 @@ function Test-CMClientPackageDistribution {
                     Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: $($feed.Why) -- collecting the sending side from '$($ownerVm.vmName)'"
                     $null = Save-Phase11GuestLogs -VMName $ownerVm.vmName -DomainName $domain -RoleLabel $feed.Label -Collector $Phase11SmsSiteLogCollector
                 }
+            }
+        }
+
+        # Run the SAME content probe against a DP that IS Installed, so the failing DP's
+        # readings have a control. burnin 2026-08-24 collected DpContent.txt only from the
+        # broken DP: it reported all three content vdirs MISSING and PkgLib absent, and
+        # neither reading could be called abnormal, because no healthy DP had ever been
+        # measured. One extra probe turns "MISSING" from a hypothesis into a difference.
+        $healthy = @()
+        if (($result.ScriptBlockOutput -is [hashtable]) -and $result.ScriptBlockOutput.ContainsKey('HealthyDPs')) { $healthy = @($result.ScriptBlockOutput.HealthyDPs | Where-Object { $_ }) }
+        $baselineName = @($healthy | Where-Object { "$_" -notin @($failing | ForEach-Object { "$_" }) }) | Select-Object -First 1
+        if (-not $baselineName) {
+            Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: no Installed DP to use as a content-probe baseline -- the failing DP's content/vdir readings have no control to compare against." -Level Warning
+        }
+        else {
+            $baselineVm = @(@($DeployConfig.virtualMachines) + @($domainVms) | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$baselineName".ToUpper()) }) | Select-Object -First 1
+            if (-not $baselineVm) {
+                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: baseline DP '$baselineName' matches no VM in domain '$domain' -- no control content probe collected." -Level Warning
+            }
+            else {
+                Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: collecting a control content probe from HEALTHY DP '$($baselineVm.vmName)' to compare against the failing DP(s)"
+                $null = Save-Phase11GuestLogs -VMName $baselineVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DPBaseline' -Collector $Phase11DpContentLogCollector
             }
         }
 

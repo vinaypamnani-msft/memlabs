@@ -663,9 +663,12 @@ $ensureClientPkgCoverage = {
             return Invoke-Command -ComputerName $DpFqdn -ArgumentList $PackageID -ErrorAction Stop -ScriptBlock {
                 param($PkgId)
                 $roots = @()
+                # The registry key only exists once the DP role is configured, so reading it is
+                # also the proof that this machine IS a DP and has told us where its library goes.
+                $authoritative = $false
                 try {
                     $clp = "$((Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name 'ContentLibraryPath' -ErrorAction Stop).ContentLibraryPath)"
-                    if ($clp) { $roots = @($clp) }
+                    if ($clp) { $roots = @($clp); $authoritative = $true }
                 }
                 catch { }
                 if ($roots.Count -eq 0) {
@@ -676,6 +679,13 @@ $ensureClientPkgCoverage = {
                     if (-not (Test-Path $pl)) { continue }
                     return [bool](@(Get-ChildItem -LiteralPath $pl -Filter '*.INI' -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like "$PkgId*" }).Count -gt 0)
                 }
+                # A brand-new DP has no PkgLib at all -- the tree is created on first arrival. When
+                # the DP itself named the path, its absence is the package being ABSENT, not
+                # unmeasurable, and that is the exact state the repair exists for: burnin
+                # 2026-08-24 returned $null here and every repair rung declined on a DP that had
+                # never received anything. $null stays reserved for the drive-scan fallback, where
+                # a pull DP keeping its library on Q:/R: really can make absence uninformative.
+                if ($authoritative) { return $false }
                 return $null
             }
         }
