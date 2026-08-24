@@ -7613,7 +7613,8 @@ $global:VM_Config = {
                             $workflowDead = $false
                             $workflowAlive = $false
                             $workflowLastError = ''
-                            if (-not $lcmIdleSince -and -not $lcmRebootPendingSince -and -not $lcmPendingNoRebootSince) {
+                            $crossNodeWait = [regex]::IsMatch($currentStatus.Trim(), '^Waiting (?:on [A-Za-z0-9\-,]+ to Complete|for [A-Za-z0-9\-]+ to finish adding passive site server role|for Site Server [A-Za-z0-9\-]+ to finish configuration\.)')
+                            if (-not $crossNodeWait -and -not $lcmIdleSince -and -not $lcmRebootPendingSince -and -not $lcmPendingNoRebootSince) {
                                 $swStale = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
                                     $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
                                     if (-not $t) { return $null }
@@ -7658,12 +7659,18 @@ $global:VM_Config = {
                             # "Waiting for CT5-PS1SITE to finish adding passive site server role",
                             # on a Phase 8 that finished with 8 success / 0 warnings / 0 failures.
                             # Once the ScriptWorkflow task has been CONFIRMED Running, every repeat
-                            # adds nothing but a bigger number, so repeats drop to log-only. The
-                            # FIRST notice still warns, and a wait we could not confirm alive keeps
-                            # warning every 5 minutes -- unverified is not the same as fine.
+                            # adds nothing but a bigger number, so repeats drop to log-only. Explicit
+                            # cross-node waits have no local task; Wait-Phase owns their liveness.
+                            # For local workflows the FIRST notice still warns, and an unconfirmed
+                            # task keeps warning every 5 minutes -- unverified is not the same as fine.
                             $staleNoticeCount++
                             $staleLine = "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m${idleNote} ('$($currentStatus.Trim())')${workflowNote}"
-                            if ($workflowAlive -and $staleNoticeCount -gt 1) {
+                            if ($crossNodeWait) {
+                                if ($staleNoticeCount -eq 1) {
+                                    Write-Log "$staleLine -- explicit cross-node wait; Wait-Phase is tracking the named job and will stop this job if that dependency fails." -LogOnly
+                                }
+                            }
+                            elseif ($workflowAlive -and $staleNoticeCount -gt 1) {
                                 Write-Log "$staleLine -- ScriptWorkflow task confirmed Running (notice $staleNoticeCount for this status); still applying." -LogOnly
                             }
                             else {
