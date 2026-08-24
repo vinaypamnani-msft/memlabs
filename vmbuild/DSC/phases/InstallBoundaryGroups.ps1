@@ -293,11 +293,22 @@ $ensureClientPkgCoverage = {
     # and only ever reports Installed on a DISTRIBUTION POINT, so a site system with
     # no DP role (e.g. an HA Primary whose content library is remote) can never
     # satisfy this check and would run to the coverage deadline and warn.
+    #
+    # But "no DP role right now" and "will never be a DP" are different. A Secondary is
+    # installed by an ASYNC job, so its DP role registers long after this runs: on 2026-08-24
+    # the job started 01:01:58 and BI-SECONDARY was excluded at 01:13:09, which took the one DP
+    # that mattered out of scope for the whole phase and let coverage exit "Installed on all 3".
+    # deployConfig knows the difference, so trust it over a WMI read that is merely early.
     $nonDp = @($bgDpFqdns | Where-Object { -not $dpHostSet.ContainsKey((& $shortOf $_)) })
-    if ($nonDp.Count -gt 0) {
-        Write-DscStatus "Client pkg coverage: excluding $($nonDp.Count) boundary-group site system(s) that hold no DP role (no client-package content lands there): $($nonDp -join ', ')"
+    $pendingDp = @($nonDp | Where-Object { $configDpHosts.ContainsKey((& $shortOf $_)) })
+    $neverDp = @($nonDp | Where-Object { -not $configDpHosts.ContainsKey((& $shortOf $_)) })
+    if ($neverDp.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: excluding $($neverDp.Count) boundary-group site system(s) that hold no DP role and are not declared installDP (no client-package content lands there): $($neverDp -join ', ')"
     }
-    $bgDpFqdns = @($bgDpFqdns | Where-Object { $dpHostSet.ContainsKey((& $shortOf $_)) })
+    if ($pendingDp.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: KEEPING $($pendingDp.Count) boundary-group site system(s) whose DP role has not registered yet but which this deploy declares installDP (a Secondary installs asynchronously and registers late): $($pendingDp -join ', ')"
+    }
+    $bgDpFqdns = @($bgDpFqdns | Where-Object { $dpHostSet.ContainsKey((& $shortOf $_)) -or $configDpHosts.ContainsKey((& $shortOf $_)) })
     if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems in expected boundary groups to cover." -Failure; return }
 
     # A SECONDARY-site DP only receives the client package via slow inter-site
@@ -591,26 +602,19 @@ $ensureClientPkgCoverage = {
         if ($tl.Count -eq 0) { return $false }
         $sitePat = 'to site {0}\.' -f [regex]::Escape("$TargetSiteCode")
         $pkgPat = [regex]::Escape("$PackageID")
-        $lastAb = -1; $lastSd = -1; $lastAbAt = $null
+        $lastAb = -1; $lastSd = -1
         for ($i = 0; $i -lt $tl.Count; $i++) {
             $ln = $tl[$i]
             if ($ln -notmatch $pkgPat) { continue }
-            if ($ln -match '0x800704d3' -and $ln -match 'creating package bundle' -and $ln -match $sitePat) {
-                $lastAb = $i
-                # distmgr.log is the legacy '$$<comp><MM-DD-YYYY HH:mm:ss.fff+ooo>' shape.
-                if ($ln -match '<(\d{2})-(\d{2})-(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\.\d+[+-]\d+>') {
-                    $lastAbAt = Get-Date -Year ([int]$Matches[3]) -Month ([int]$Matches[1]) -Day ([int]$Matches[2]) -Hour ([int]$Matches[4]) -Minute ([int]$Matches[5]) -Second ([int]$Matches[6]) -Millisecond 0
-                }
-            }
+            if ($ln -match '0x800704d3' -and $ln -match 'creating package bundle' -and $ln -match $sitePat) { $lastAb = $i }
             if ($ln -match 'Created minijob to send compressed copy' -and $ln -match $sitePat) { $lastSd = $i }
         }
         if (-not ($lastAb -ge 0 -and $lastAb -gt $lastSd)) { return $false }
-        # A still-wedged distmgr re-aborts every ~30 min, and bumping then just re-snapshots into
-        # the stuck cancel flag and aborts again -- that state needs the fresh process the gate at
-        # the top of this file provides, not a re-send. Only a quiet abort means ABANDONED.
-        # Unparseable stamp => fail safe, do not bump.
-        if (-not $lastAbAt) { return $false }
-        return (((Get-Date) - $lastAbAt).TotalMinutes -ge 35)
+        # No quiet period. The old 35-minute wait was only ever a PROXY for "is the cancel flag
+        # clear?", and it could not fit: on 2026-08-24 the abort landed at 01:46:33 against a
+        # 01:58 deadline, so the rung could never fire in the same phase. The repair below clears
+        # the flag itself with a fresh process, so the answer is known rather than inferred.
+        return $true
     }
 
     # RefreshPkgSource re-snapshots the source and re-sends the package to EVERY DP, so it runs
@@ -654,6 +658,38 @@ $ensureClientPkgCoverage = {
     }
 
 
+    # The cancel flag is a per-process static cleared only by the CDistributionManager
+    # constructor, so nothing short of a fresh process clears it. Same restart the gate at the top
+    # of this file performs; the difference is that the gate runs ONCE before any content moves,
+    # and the wedge can start later -- 2026-08-24 the thread exited 01:39:09, 28 minutes after the
+    # gate had already run and passed.
+    $restartExecOnce = {
+        $before = 0
+        try { $before = [int](Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop).ProcessId } catch { }
+        try { Restart-Service -Name SMS_EXECUTIVE -Force -ErrorAction Stop }
+        catch {
+            Write-DscStatus "Client pkg coverage: [wedge-repair] could not restart SMS_EXECUTIVE: $($_.Exception.Message). The cancel flag is still set, so a bump would abort again -- skipping it."
+            return $false
+        }
+        Start-Sleep -Seconds 90
+        $after = 0
+        $state = '?'
+        try {
+            $svc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+            $after = [int]$svc.ProcessId; $state = "$($svc.State)"
+        }
+        catch { }
+        # Only a CHANGED pid proves a fresh CDistributionManager; a reused pid means the flag survived.
+        if ($after -le 0 -or $after -eq $before -or $state -ne 'Running') {
+            Write-DscStatus "Client pkg coverage: [wedge-repair] SMS_EXECUTIVE did not come back as a NEW process (pid $before -> $after, state=$state). The cancel flag is not proven clear, so the bump is skipped."
+            return $false
+        }
+        Write-DscStatus "Client pkg coverage: [wedge-repair] restarted SMS_EXECUTIVE (pid $before -> $after) to clear the distmgr cancel flag; only a fresh process resets it." -Warning
+        return $true
+    }
+
+    # Second, INDEPENDENT wake path, run on a deliberately DIFFERENT cadence (8 min vs the
+    # row's 5) so the next build can attribute which one actually moved the parent: compare
     # these [wake-ROW]/[wake-FILE] stamps against the wake times in the pulled
     # <CAS>-Phase8-*-ClientPkgPrestage-ParentCAS-distmgr.log. They coincide only every 40 min.
     #
@@ -695,6 +731,8 @@ $ensureClientPkgCoverage = {
     $coverageStart = Get-Date
     $coverageDeadline = $coverageStart.AddMinutes($(if ($extendedCoverageWait) { $contentPendingWaitMinutes } else { $normalWaitMinutes }))
     $pkgSourceBumped = $false
+    $coverageExtendedForRepair = $false
+    $repairExtraMinutes = 25
     $try = 0
     while ((Get-Date) -lt $coverageDeadline) {
         $try++
@@ -797,11 +835,23 @@ $ensureClientPkgCoverage = {
                 $secDpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
                 if ($secDpVm -and "$($secDpVm.role)" -eq 'Secondary' -and "$($secDpVm.siteCode)") {
                     [void](& $retryPkgToSite "$($secDpVm.siteCode)")
-                    # Only after the cheap rungs have had half the budget: an abandoned send looks
-                    # identical to a slow one until the retries have demonstrably failed.
-                    $halfway = $coverageStart.AddSeconds((($coverageDeadline - $coverageStart).TotalSeconds) / 2)
-                    if (-not $pkgSourceBumped -and (Get-Date) -ge $halfway -and (& $isPkgStrandedToSite "$($secDpVm.siteCode)")) {
-                        $pkgSourceBumped = & $bumpPkgSourceVersion "$($secDpVm.siteCode)"
+                    # Repair, in this order: a fresh process clears the cancel flag, THEN the bump
+                    # re-arms the send distmgr abandoned. Bumping first just re-snapshots into the
+                    # stuck flag and aborts again, burning the whole re-send for nothing.
+                    if (-not $pkgSourceBumped -and (& $isPkgStrandedToSite "$($secDpVm.siteCode)")) {
+                        Write-DscStatus "Client pkg coverage: [wedge-repair] $PackageID was ABANDONED to site $($secDpVm.siteCode) -- a 0x800704D3 bundle abort with no send after it. distmgr.cpp:17252 skips its auto-recovery for exactly that HRESULT, so nothing retries this on its own."
+                        if (& $restartExecOnce) {
+                            $pkgSourceBumped = & $bumpPkgSourceVersion "$($secDpVm.siteCode)"
+                            # A repair needs runway the original budget does not have: measured
+                            # 2026-08-23, content reached the secondary ~20 min after a fresh
+                            # process. Once only, so this can never become an unbounded wait.
+                            if ($pkgSourceBumped -and -not $coverageExtendedForRepair) {
+                                $coverageExtendedForRepair = $true
+                                $coverageDeadline = (Get-Date).AddMinutes($repairExtraMinutes)
+                                Write-DscStatus "Client pkg coverage: [wedge-repair] extended the coverage deadline by $repairExtraMinutes min (once) so the re-armed send has time to land."
+                            }
+                        }
+                        else { $pkgSourceBumped = $true }
                     }
                 }
             }
