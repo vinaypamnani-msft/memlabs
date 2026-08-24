@@ -441,14 +441,34 @@ function Resolve-TestConfigNetworks {
     }
 }
 
+function Invoke-TestGitPull {
+    param(
+        [string]$Context
+    )
+
+    # Pull failures are non-fatal: the operator can still retry with the current tree.
+    try {
+        Write-Host "git pull ($Context)..." -ForegroundColor Cyan
+        $pullOutput = & git -C $PSScriptRoot pull --rebase --autostash 2>&1
+        $pullExit = $LASTEXITCODE
+        $pullOutput | ForEach-Object { Write-Host "  $_" }
+        if ($pullExit -ne 0) {
+            Write-Host "  git pull returned $pullExit; continuing with the current tree." -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "  git pull failed: $($_.Exception.Message); continuing with the current tree." -ForegroundColor Yellow
+    }
+}
+
 function Invoke-NewLab {
     # Run one deployment and hand back ONLY its exit code. Two things here are load-bearing:
     #  1. '| Out-Host' -- New-Lab.ps1 leaks objects onto the success stream. Un-piped they
     #     join Run-Test's own output, so the caller's "$result = Run-Test" gets an ARRAY and
     #     "-not $result" evaluates FALSE on failure: a failed build silently rolled on.
     #  2. Zeroing $LASTEXITCODE first -- New-Lab.ps1 only calls exit when it FAILS, so on
-    #     success $LASTEXITCODE is whatever the last native command left (e.g. the git pull
-    #     above, whose non-zero exit we deliberately tolerate).
+    #     success $LASTEXITCODE is whatever the last native command left (e.g. a preceding
+    #     git pull whose non-zero exit we deliberately tolerate).
     #  3. -KeepFailedVMs -- without it New-Lab deletes every Phase 1 VM on failure, which
     #     flatly contradicts the "left intact for investigation" message the harness prints
     #     next and makes the offered Retry-after-repair impossible.
@@ -570,18 +590,7 @@ function Run-Test {
             # newest New-Lab.ps1 / Common.ps1 / DSC / phase scripts without restarting
             # the runner. --rebase --autostash keeps any local edits and never creates a
             # merge commit; a pull failure is non-fatal (continue with the current tree).
-            try {
-                Write-Host "git pull (before $(Split-Path $testjson -Leaf))..." -ForegroundColor Cyan
-                $pullOutput = & git -C $PSScriptRoot pull --rebase --autostash 2>&1
-                $pullExit = $LASTEXITCODE
-                $pullOutput | ForEach-Object { Write-Host "  $_" }
-                if ($pullExit -ne 0) {
-                    Write-Host "  git pull returned $pullExit; continuing with the current tree." -ForegroundColor Yellow
-                }
-            }
-            catch {
-                Write-Host "  git pull failed: $($_.Exception.Message); continuing with the current tree." -ForegroundColor Yellow
-            }
+            Invoke-TestGitPull -Context "before $(Split-Path $testjson -Leaf)"
             $outputFile = Split-Path $testjson -leaf
             $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
             $config = Get-Content $testjson -Force | ConvertFrom-Json
@@ -628,6 +637,7 @@ function Run-Test {
                 $action = Get-TestFailureAction -ConfigFile $ModifiedtestFile -DomainName $domainName -ExitCode $exitCode -ResumeCommand $script:LastNewLabResumeCommand
                 if ($action -ne 'Retry') { break }
                 Write-Host "Retrying $testjson ($passLabel)..." -ForegroundColor Cyan
+                Invoke-TestGitPull -Context "before retrying $(Split-Path $testjson -Leaf)"
                 $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
                 Write-Host "$exitCode was returned from $testjson (retry, $passLabel)"
             }
