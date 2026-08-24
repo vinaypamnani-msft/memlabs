@@ -630,8 +630,52 @@ $ensureClientPkgCoverage = {
     # and an SMS_EXECUTIVE restart all correctly do nothing: they re-arm a send that
     # IsPkgSendingNeeded still declines. Only moving the package's source version re-arms it.
     # KEEP IN SYNC with the wedge gate at the top of this file and with Get-DrsLogs.ps1.
+    # $true = content present, $false = library readable and package absent, $null = NOT MEASURED.
+    # The three cases must stay distinct: "no content library found" is not "no content", and
+    # collapsing them is how a DP whose library sits on Q:/R: gets reported as empty.
+    # Hashtable, not $script: -- assignment inside a scriptblock would otherwise only bind a local.
+    $strandedWhy = @{}
+    $dpHasPackageContent = {
+        param($DpFqdn)
+        try {
+            return Invoke-Command -ComputerName $DpFqdn -ArgumentList $PackageID -ErrorAction Stop -ScriptBlock {
+                param($PkgId)
+                $roots = @()
+                try {
+                    $clp = "$((Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name 'ContentLibraryPath' -ErrorAction Stop).ContentLibraryPath)"
+                    if ($clp) { $roots = @($clp) }
+                }
+                catch { }
+                if ($roots.Count -eq 0) {
+                    $roots = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object { Join-Path "$($_.Root)" 'SCCMContentLib' })
+                }
+                foreach ($root in $roots) {
+                    $pl = Join-Path "$root" 'PkgLib'
+                    if (-not (Test-Path $pl)) { continue }
+                    return [bool](@(Get-ChildItem -LiteralPath $pl -Filter '*.INI' -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like "$PkgId*" }).Count -gt 0)
+                }
+                return $null
+            }
+        }
+        catch { return $null }
+    }
+
     $isPkgStrandedToSite = {
-        param($TargetSiteCode)
+        param($TargetSiteCode, $DpFqdn)
+        # Physical content VETOES the repair before any log is read. 2026-08-23 23:52 showed this DP
+        # at ContentValidating with an abort naming this package AND PkgLib holding it -- it reached
+        # Installed on its own 1h36m later. The old predicate would have bumped there, re-sending to
+        # every DP to fix nothing. An abort outlives the failure it describes; the library does not.
+        $has = & $dpHasPackageContent $DpFqdn
+        if ($has) { return $false }
+        # Unreadable library must not COST capability: fall back to exactly what shipped before this
+        # check existed (abort signature alone). The no-op signature is near-universal -- it fires on
+        # 17 of 23 collected distmgr logs, healthy ones included -- so it is only ever safe when the
+        # absence of content has actually been proven.
+        $contentUnmeasured = ($null -eq $has)
+        if ($contentUnmeasured) {
+            Write-DscStatus "Client pkg coverage: [stranded] NOT MEASURED for '$DpFqdn' -- its content library could not be read, so 'content absent' cannot be told apart from 'no answer'. Falling back to the bundle-abort signature alone."
+        }
         $imd = $null
         foreach ($ik in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
             try { $imd = (Get-ItemProperty -Path $ik -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
@@ -651,7 +695,14 @@ $ensureClientPkgCoverage = {
             if ($ln -match '0x800704d3' -and $ln -match 'creating package bundle' -and $ln -match $sitePat) { $lastAb = $i }
             if ($ln -match 'Created minijob to send compressed copy' -and $ln -match $sitePat) { $lastSd = $i }
         }
+        # NOT extended to "distmgr looked and had nothing to do". That signature fires on 15 of 26
+        # collected logs, healthy ones included, because THIS log belongs to the primary and the
+        # package is owned by site HUB -- a no-op here is the correct behaviour of a site that does
+        # not owe the send, not evidence of stranding. Detecting the 2026-08-24 10:55 case needs the
+        # SOURCE site's distmgr.log (reachable via $parentFqdn, as $sourceDroppedAsInactive does),
+        # and that variant has no discrimination proof yet, so it is deliberately not here.
         if (-not ($lastAb -ge 0 -and $lastAb -gt $lastSd)) { return $false }
+        $strandedWhy['sig'] = 'abort'
         # No quiet period. The old 35-minute wait was only ever a PROXY for "is the cancel flag
         # clear?", and it could not fit: on 2026-08-24 the abort landed at 01:46:33 against a
         # 01:58 deadline, so the rung could never fire in the same phase. The repair below clears
@@ -927,8 +978,8 @@ $ensureClientPkgCoverage = {
                     # Repair, in this order: a fresh process clears the cancel flag, THEN the bump
                     # re-arms the send distmgr abandoned. Bumping first just re-snapshots into the
                     # stuck flag and aborts again, burning the whole re-send for nothing.
-                    if (-not $pkgSourceBumped -and (& $isPkgStrandedToSite "$($secDpVm.siteCode)")) {
-                        Write-DscStatus "Client pkg coverage: [wedge-repair] $PackageID was ABANDONED to site $($secDpVm.siteCode) -- a 0x800704D3 bundle abort with no send after it. distmgr.cpp:17252 skips its auto-recovery for exactly that HRESULT, so nothing retries this on its own."
+                    if (-not $pkgSourceBumped -and (& $isPkgStrandedToSite "$($secDpVm.siteCode)" $dp)) {
+                        Write-DscStatus "Client pkg coverage: [wedge-repair] $PackageID was ABANDONED to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- the content is NOT in that DP's library and the send is not armed. distmgr.cpp:17252 skips its auto-recovery for a 0x800704D3 abort, so StoredPkgPath is never cleared and every later pass exits with nothing to do."
                         if (& $restartExecOnce) {
                             $pkgSourceBumped = & $bumpPkgSourceVersion "$($secDpVm.siteCode)"
                             # A repair needs runway the original budget does not have: measured
