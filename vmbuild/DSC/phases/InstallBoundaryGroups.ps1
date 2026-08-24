@@ -570,8 +570,90 @@ $ensureClientPkgCoverage = {
         finally { if ($cn) { try { $cn.Close() } catch { } } }
     }
 
-    # Second, INDEPENDENT wake path, run on a deliberately DIFFERENT cadence (8 min vs the
-    # row's 5) so the next build can attribute which one actually moved the parent: compare
+    # LAST RESORT. distmgr.cpp:17252 guards its auto-recovery with
+    # `if (hr != HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED))`, and 0x800704D3 IS that HRESULT --
+    # the one failure that clears no StoredPkgPath, resets no Action, and writes no backdated
+    # PkgStatus row. The send is abandoned and never retried, so RefreshNow, spAoRetryPkgDistribution
+    # and an SMS_EXECUTIVE restart all correctly do nothing: they re-arm a send that
+    # IsPkgSendingNeeded still declines. Only moving the package's source version re-arms it.
+    # KEEP IN SYNC with the wedge gate at the top of this file and with Get-DrsLogs.ps1.
+    $isPkgStrandedToSite = {
+        param($TargetSiteCode)
+        $imd = $null
+        foreach ($ik in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+            try { $imd = (Get-ItemProperty -Path $ik -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+            if ($imd) { break }
+        }
+        if (-not $imd) { return $false }
+        $lg = Join-Path $imd 'Logs\distmgr.log'
+        if (-not (Test-Path $lg)) { return $false }
+        $tl = @(Get-Content $lg -Tail 4000 -ErrorAction SilentlyContinue)
+        if ($tl.Count -eq 0) { return $false }
+        $sitePat = 'to site {0}\.' -f [regex]::Escape("$TargetSiteCode")
+        $pkgPat = [regex]::Escape("$PackageID")
+        $lastAb = -1; $lastSd = -1; $lastAbAt = $null
+        for ($i = 0; $i -lt $tl.Count; $i++) {
+            $ln = $tl[$i]
+            if ($ln -notmatch $pkgPat) { continue }
+            if ($ln -match '0x800704d3' -and $ln -match 'creating package bundle' -and $ln -match $sitePat) {
+                $lastAb = $i
+                # distmgr.log is the legacy '$$<comp><MM-DD-YYYY HH:mm:ss.fff+ooo>' shape.
+                if ($ln -match '<(\d{2})-(\d{2})-(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\.\d+[+-]\d+>') {
+                    $lastAbAt = Get-Date -Year ([int]$Matches[3]) -Month ([int]$Matches[1]) -Day ([int]$Matches[2]) -Hour ([int]$Matches[4]) -Minute ([int]$Matches[5]) -Second ([int]$Matches[6]) -Millisecond 0
+                }
+            }
+            if ($ln -match 'Created minijob to send compressed copy' -and $ln -match $sitePat) { $lastSd = $i }
+        }
+        if (-not ($lastAb -ge 0 -and $lastAb -gt $lastSd)) { return $false }
+        # A still-wedged distmgr re-aborts every ~30 min, and bumping then just re-snapshots into
+        # the stuck cancel flag and aborts again -- that state needs the fresh process the gate at
+        # the top of this file provides, not a re-send. Only a quiet abort means ABANDONED.
+        # Unparseable stamp => fail safe, do not bump.
+        if (-not $lastAbAt) { return $false }
+        return (((Get-Date) - $lastAbAt).TotalMinutes -ge 35)
+    }
+
+    # RefreshPkgSource re-snapshots the source and re-sends the package to EVERY DP, so it runs
+    # once per phase and only behind $isPkgStrandedToSite. The package belongs to its SOURCE site,
+    # so a child primary cannot bump a CAS-owned package locally -- reach the source the same way
+    # $retryPkgToSite does.
+    $bumpPkgSourceVersion = {
+        param($TargetSiteCode)
+        $srcSite = ''
+        try { $srcSite = "$((Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction Stop | Select-Object -First 1).SourceSite)" } catch {}
+        if (-not $srcSite) {
+            Write-DscStatus "Client pkg coverage: [bump] could not read the package's SourceSite -- NOT bumping. $PackageID stays stranded to site $TargetSiteCode."
+            return $false
+        }
+        $doBump = {
+            param($Site, $Pkg)
+            $p = @(Get-WmiObject -Namespace "root\SMS\site_$Site" -Class SMS_Package -Filter "PackageID='$Pkg'" -ErrorAction Stop) | Select-Object -First 1
+            if (-not $p) { return 'NO PACKAGE' }
+            $r = $p.RefreshPkgSource()
+            return "ReturnValue=$($r.ReturnValue)"
+        }
+        try {
+            $res = ''
+            if ($srcSite -ieq "$SiteCode") {
+                $res = & $doBump $SiteCode $PackageID
+            }
+            elseif ($parentFqdn -and $srcSite -ieq "$parentSite") {
+                $res = Invoke-Command -ComputerName $parentFqdn -ScriptBlock $doBump -ArgumentList $srcSite, $PackageID -ErrorAction Stop
+            }
+            else {
+                Write-DscStatus "Client pkg coverage: [bump] $PackageID is owned by site '$srcSite', which is neither this site ($SiteCode) nor the known parent ('$parentSite') -- NOT bumping. It stays stranded to site $TargetSiteCode."
+                return $false
+            }
+            Write-DscStatus "Client pkg coverage: [bump] $PackageID was ABANDONED to site $TargetSiteCode (0x800704D3 bundle abort with no send after it); distmgr never retries that error. Called RefreshPkgSource at source site $srcSite -> $res. This re-sends the package to every DP, which is why it is last-resort and once-per-phase." -Warning
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [bump] RefreshPkgSource for $PackageID at source site $srcSite failed: $($_.Exception.Message). $PackageID stays stranded to site $TargetSiteCode."
+            return $false
+        }
+    }
+
+
     # these [wake-ROW]/[wake-FILE] stamps against the wake times in the pulled
     # <CAS>-Phase8-*-ClientPkgPrestage-ParentCAS-distmgr.log. They coincide only every 40 min.
     #
@@ -612,6 +694,7 @@ $ensureClientPkgCoverage = {
     }
     $coverageStart = Get-Date
     $coverageDeadline = $coverageStart.AddMinutes($(if ($extendedCoverageWait) { $contentPendingWaitMinutes } else { $normalWaitMinutes }))
+    $pkgSourceBumped = $false
     $try = 0
     while ((Get-Date) -lt $coverageDeadline) {
         $try++
@@ -714,6 +797,12 @@ $ensureClientPkgCoverage = {
                 $secDpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
                 if ($secDpVm -and "$($secDpVm.role)" -eq 'Secondary' -and "$($secDpVm.siteCode)") {
                     [void](& $retryPkgToSite "$($secDpVm.siteCode)")
+                    # Only after the cheap rungs have had half the budget: an abandoned send looks
+                    # identical to a slow one until the retries have demonstrably failed.
+                    $halfway = $coverageStart.AddSeconds((($coverageDeadline - $coverageStart).TotalSeconds) / 2)
+                    if (-not $pkgSourceBumped -and (Get-Date) -ge $halfway -and (& $isPkgStrandedToSite "$($secDpVm.siteCode)")) {
+                        $pkgSourceBumped = & $bumpPkgSourceVersion "$($secDpVm.siteCode)"
+                    }
                 }
             }
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
