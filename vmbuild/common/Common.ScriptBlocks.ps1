@@ -7658,11 +7658,11 @@ $global:VM_Config = {
                             # CT5-PS1SITE-P emitted 24 identical warnings over 141m sitting in
                             # "Waiting for CT5-PS1SITE to finish adding passive site server role",
                             # on a Phase 8 that finished with 8 success / 0 warnings / 0 failures.
-                            # Once the ScriptWorkflow task has been CONFIRMED Running, every repeat
-                            # adds nothing but a bigger number, so repeats drop to log-only. Explicit
+                            # Once the ScriptWorkflow task has been CONFIRMED Running, the stale status
+                            # is a duration signal rather than a failure signal, so notices are log-only. Explicit
                             # cross-node waits have no local task; Wait-Phase owns their liveness.
-                            # For local workflows the FIRST notice still warns, and an unconfirmed
-                            # task keeps warning every 5 minutes -- unverified is not the same as fine.
+                            # An unconfirmed local task keeps warning every 5 minutes -- unverified is
+                            # not the same as fine.
                             $staleNoticeCount++
                             $staleLine = "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m${idleNote} ('$($currentStatus.Trim())')${workflowNote}"
                             if ($crossNodeWait) {
@@ -7670,7 +7670,7 @@ $global:VM_Config = {
                                     Write-Log "$staleLine -- explicit cross-node wait; Wait-Phase is tracking the named job and will stop this job if that dependency fails." -LogOnly
                                 }
                             }
-                            elseif ($workflowAlive -and $staleNoticeCount -gt 1) {
+                            elseif ($workflowAlive) {
                                 Write-Log "$staleLine -- ScriptWorkflow task confirmed Running (notice $staleNoticeCount for this status); still applying." -LogOnly
                             }
                             else {
