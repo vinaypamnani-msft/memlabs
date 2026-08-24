@@ -1299,7 +1299,9 @@ function Start-Phase {
         return $false
     }
     if (-not $start.Applicable) {
-        Write-OrangePoint "[Phase $Phase] No VMs need this step. Skipping." -ForegroundColor Yellow -WriteLog
+        $phaseSkipMessage = "[Phase $Phase] No VMs need this step. Skipping."
+        Write-OrangePoint $phaseSkipMessage -ForegroundColor Yellow
+        Write-Log $phaseSkipMessage -LogOnly
         $global:PhaseSkipped = $true
         return $true
     }
