@@ -795,8 +795,16 @@ $ensureClientPkgCoverage = {
         param($TargetSiteCode, $DpFqdn)
         if ((& $dpHasPackageContent $DpFqdn) -ne $false) { return $false }
         $st = & $readPkgStatusAtSource $TargetSiteCode
-        if ($null -eq $st) { return $false }
-        if ([int]$st.Status -ne 1) { return $false }
+        # Every decline below is announced. A silent negative here is indistinguishable from "the
+        # check never ran", and that is precisely how the ordering bug above stayed invisible.
+        if ($null -eq $st) {
+            Write-DscStatus "Client pkg coverage: [sent-but-absent] NOT MEASURED for site $TargetSiteCode -- the package is absent from '$DpFqdn' but PkgStatus at the source site could not be read, so the elapsed-time signature has to decide instead."
+            return $false
+        }
+        if ([int]$st.Status -ne 1) {
+            Write-DscStatus "Client pkg coverage: [sent-but-absent] the package is absent from '$DpFqdn' but PkgStatus(site $TargetSiteCode) reads Status=$($st.Status), not 1 (SENT) -- not the false-SENT state, so the elapsed-time signature decides."
+            return $false
+        }
         $strandedWhy['sig'] = 'sent-but-absent'
         $strandedWhy['sentAt'] = "$($st.UpdateTime)"
         return $true
@@ -1088,7 +1096,12 @@ $ensureClientPkgCoverage = {
                 # our poke, nine times.
                 $secDpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
                 if ($secDpVm -and "$($secDpVm.role)" -eq 'Secondary' -and "$($secDpVm.siteCode)") {
-                    if (-not $pkgSourceBumped) { [void](& $retryPkgToSite "$($secDpVm.siteCode)") }
+                    # The repair DECIDES FIRST, before the poke below. spAoRetryPkgDistribution sets
+                    # PkgStatus(target).Status = 0, which erases the very PKG_STATUS_SENT row that
+                    # $isSentButAbsent exists to read. Poking first made that signal unobservable and
+                    # the trigger could never fire: observed 2026-08-24 12:48 on burnin, poke at :22
+                    # and the predicate read Status=0 a moment later, so no repair ran on a lab that
+                    # was in exactly the state it was written for.
                     # Repair, in this order: a fresh process clears the cancel flag, THEN the bump
                     # re-arms the send distmgr abandoned. Bumping first just re-snapshots into the
                     # stuck flag and aborts again, burning the whole re-send for nothing.
@@ -1136,10 +1149,22 @@ $ensureClientPkgCoverage = {
                         # process. Once only, so this can never become an unbounded wait.
                         if ($bumpRan -and -not $coverageExtendedForRepair) {
                             $coverageExtendedForRepair = $true
-                            $coverageDeadline = (Get-Date).AddMinutes($repairExtraMinutes)
-                            Write-DscStatus "Client pkg coverage: [wedge-repair] extended the coverage deadline by $repairExtraMinutes min (once) so the re-armed send has time to land."
+                            # Take the LATER of the two. This assigned now+25m outright, which
+                            # SHORTENS the budget whenever more than that remains -- burnin
+                            # 2026-08-24 went 2103s -> 1499s while logging "extended by 25 min".
+                            $repairDeadline = (Get-Date).AddMinutes($repairExtraMinutes)
+                            if ($repairDeadline -gt $coverageDeadline) {
+                                $coverageDeadline = $repairDeadline
+                                Write-DscStatus "Client pkg coverage: [wedge-repair] extended the coverage deadline to $repairExtraMinutes min from now (once) so the re-armed send has time to land."
+                            }
+                            else {
+                                Write-DscStatus "Client pkg coverage: [wedge-repair] left the coverage deadline alone -- $([int](($coverageDeadline - (Get-Date)).TotalMinutes))m already remains, which is more than the $repairExtraMinutes min a re-armed send needs."
+                            }
                         }
                     }
+                    # Only now, and only if no repair fired: the bump supersedes the poke, and past
+                    # that point the poke is actively harmful (see the note above).
+                    if (-not $pkgSourceBumped) { [void](& $retryPkgToSite "$($secDpVm.siteCode)") }
                 }
             }
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
