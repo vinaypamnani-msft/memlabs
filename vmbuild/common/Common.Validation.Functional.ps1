@@ -13371,7 +13371,7 @@ function Test-LinuxSmbAccess {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: net view output: $netViewString" -LogOnly
     }
 
-    $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: OK - Samba accessible on $vmIp:445"; Level = 'Success' })
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Samba accessible on ${vmIp}:445" -LogOnly
     return $true
 }
 
@@ -13459,7 +13459,6 @@ echo "A=`${A:-none} SRV=`$SRV ROUTE=`$ROUTE"
         if ($aRec -ne 'none' -and $aIsPrivate -and $srv -eq 'ok') {
             $dcNote = if ($aIsDc) { " (DC $dcIp)" } else { " ($aRec, private)" }
             Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - AD DNS resolves to the DC$dcNote and the SRV zone answers (route drop-in $route)" -LogOnly
-            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: OK - AD DNS -> DC$dcNote, SRV zone OK"; Level = 'Success' })
         }
         else {
             $reason = if ($aRec -eq 'none') { "the AD domain does not resolve" }
@@ -13480,7 +13479,6 @@ echo "A=`${A:-none} SRV=`$SRV ROUTE=`$ROUTE"
 
     if ($domainLower -and ($realmOut -match [regex]::Escape($domainLower))) {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - realm-joined to $domain" -LogOnly
-        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: OK - joined to AD domain $domain"; Level = 'Success' })
         return $true
     }
 
