@@ -406,6 +406,10 @@ $ensureClientPkgCoverage = {
     $dpRoleLastCheck = @{}
     $dpWaitLogged = @{}
     $dpPendingSince = @{}
+    # DP-upper -> when this DP was first seen not-Installed while THIS site already held the
+    # content. Feeds $isSendUnowned; cleared whenever content is still coming from the parent,
+    # so the clock only ever measures time in which a send was actually possible.
+    $dpUnownedSince = @{}
     # Reported alongside the wait so it is never silent: if both numbers sit still while a DP is
     # pending, the registration is stuck rather than slow, and that is visible without a re-run.
     $dpRoleSourceCounts = {
@@ -710,6 +714,36 @@ $ensureClientPkgCoverage = {
         return $true
     }
 
+    # SECOND trigger for the SAME repair, and the one the 2026-08-24 burnin needed. There, the
+    # abort signature above was correctly FALSE and broadening it to "any package -> this site"
+    # would ALSO have been false: after the wedge gate restarted SMS_EXECUTIVE at 07:19:50 the
+    # fresh process (PID 4276) sent PRI00001/2/F/10/11/12/13 to SEC, so the last send to SEC came
+    # AFTER the last abort. No cancel flag was set. distmgr simply processed HUB00004 ~29 more
+    # times -- "Processing package HUB00004 (SourceVersion:1;StoredVersion:1)", "No action
+    # specified", exit -- and never once emitted "Needs to send the compressed package ... to site
+    # SEC", while emitting exactly that for PRI00001 in the same process minutes later. The send
+    # was not wedged; it was UNOWNED. The source site logs "Skipped sending ... as the closest
+    # site is PRI" and defers, and this primary never runs the send-to-child loop for a package it
+    # does not own, so neither site sends. 89 RefreshNow + spAoRetryPkgDistribution attempts over
+    # 45 minutes moved nothing, because neither changes a version and the version is the only
+    # input to that decision.
+    #
+    # Deliberately a POSITIVE state predicate, not a log signature: distmgr logs nothing when it
+    # declines to send, so absence of evidence is the normal case here and cannot be waited for.
+    # Physical content still vetoes, reusing the same measurement proven over 26 logs -- and
+    # $null (library unreadable) must NOT fire this, because unlike the abort path there is no
+    # second signature to fall back on.
+    $isSendUnowned = {
+        param($DpFqdn, $UnownedSinceUtc)
+        if (-not $UnownedSinceUtc) { return $false }
+        $mins = ((Get-Date) - $UnownedSinceUtc).TotalMinutes
+        if ($mins -lt $unownedSendMinutes) { return $false }
+        if ((& $dpHasPackageContent $DpFqdn) -ne $false) { return $false }
+        $strandedWhy['sig'] = 'unowned'
+        $strandedWhy['mins'] = [int]$mins
+        return $true
+    }
+
     # RefreshPkgSource re-snapshots the source and re-sends the package to EVERY DP, so it runs
     # once per phase and only behind $isPkgStrandedToSite. The package belongs to its SOURCE site,
     # so a child primary cannot bump a CAS-owned package locally -- reach the source the same way
@@ -857,6 +891,12 @@ $ensureClientPkgCoverage = {
     $pkgSourceBumped = $false
     $coverageExtendedForRepair = $false
     $repairExtraMinutes = 25
+    # Two full arm cycles (the loop flips RefreshNow every 5 min) with no state change at all.
+    # Sized against the budget, not picked: the secondary path runs on the 45-minute deadline and
+    # a re-armed send was measured landing ~20 min after it is armed, so firing at 10 leaves 35 --
+    # enough for the send plus the $repairExtraMinutes extension, and long enough that a
+    # distribution merely in flight (InstallPending is skipped outright) is never cut into.
+    $unownedSendMinutes = 10
     $try = 0
     while ((Get-Date) -lt $coverageDeadline) {
         $try++
@@ -896,6 +936,10 @@ $ensureClientPkgCoverage = {
             $hasRow = $state.ContainsKey($u)
             $st = if ($hasRow) { $state[$u] } else { -1 }
             $stName = if ($stateName.ContainsKey("$st")) { $stateName["$st"] } else { "State$st" }
+            # Clock for $isSendUnowned. It only advances while this site already holds the content,
+            # so a parent that is merely slow to replicate down can never be read as an unowned send.
+            if ($contentPendingFromParent) { $dpUnownedSince.Remove($u) }
+            elseif (-not $dpUnownedSince.ContainsKey($u)) { $dpUnownedSince[$u] = Get-Date }
             # The SMS_DistributionPoint (PkgServers) row is the one thing that matters: it
             # tells distmgr to send the content AND it is what distmgr checks before it will
             # accept the DP's status file back. With no row the copy still runs to completion
@@ -978,20 +1022,43 @@ $ensureClientPkgCoverage = {
                     # Repair, in this order: a fresh process clears the cancel flag, THEN the bump
                     # re-arms the send distmgr abandoned. Bumping first just re-snapshots into the
                     # stuck flag and aborts again, burning the whole re-send for nothing.
-                    if (-not $pkgSourceBumped -and (& $isPkgStrandedToSite "$($secDpVm.siteCode)" $dp)) {
-                        Write-DscStatus "Client pkg coverage: [wedge-repair] $PackageID was ABANDONED to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- the content is NOT in that DP's library and the send is not armed. distmgr.cpp:17252 skips its auto-recovery for a 0x800704D3 abort, so StoredPkgPath is never cleared and every later pass exits with nothing to do."
-                        if (& $restartExecOnce) {
-                            $pkgSourceBumped = & $bumpPkgSourceVersion "$($secDpVm.siteCode)"
-                            # A repair needs runway the original budget does not have: measured
-                            # 2026-08-23, content reached the secondary ~20 min after a fresh
-                            # process. Once only, so this can never become an unbounded wait.
-                            if ($pkgSourceBumped -and -not $coverageExtendedForRepair) {
-                                $coverageExtendedForRepair = $true
-                                $coverageDeadline = (Get-Date).AddMinutes($repairExtraMinutes)
-                                Write-DscStatus "Client pkg coverage: [wedge-repair] extended the coverage deadline by $repairExtraMinutes min (once) so the re-armed send has time to land."
+                    if (-not $pkgSourceBumped) {
+                        # Two independent ways for the send to be dead, sharing one repair. The abort
+                        # signature is checked first because it is the only one whose cancel flag has
+                        # to be cleared before the bump; if it does not hold, the flag is provably not
+                        # blocking (an abort with a later send is not a wedge) and the bump can run
+                        # on its own.
+                        $abortStranded = [bool](& $isPkgStrandedToSite "$($secDpVm.siteCode)" $dp)
+                        $sendUnowned = $false
+                        if (-not $abortStranded) { $sendUnowned = [bool](& $isSendUnowned $dp $dpUnownedSince[$u]) }
+                        # Only a bump that actually RAN earns the deadline extension; a consumed
+                        # one-shot after a failed restart must not buy runway for a send nobody armed.
+                        $bumpRan = $false
+                        if ($abortStranded) {
+                            Write-DscStatus "Client pkg coverage: [wedge-repair] $PackageID was ABANDONED to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- the content is NOT in that DP's library and the send is not armed. distmgr.cpp:17252 skips its auto-recovery for a 0x800704D3 abort, so StoredPkgPath is never cleared and every later pass exits with nothing to do."
+                            if (& $restartExecOnce) {
+                                $pkgSourceBumped = & $bumpPkgSourceVersion "$($secDpVm.siteCode)"
+                                $bumpRan = $pkgSourceBumped
                             }
+                            else { $pkgSourceBumped = $true }
                         }
-                        else { $pkgSourceBumped = $true }
+                        elseif ($sendUnowned) {
+                            Write-DscStatus "Client pkg coverage: [wedge-repair] nobody owes the send of $PackageID to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- site $SiteCode has held the content for $($strandedWhy['mins'])m, the DP's content library still does not have the package, and no error was logged because distmgr logs NOTHING when it declines to send. The source site defers to the closest site and this site does not own the package, so no version ever changes and no pass ever sends." -Warning
+                            # No restart here on purpose. $isPkgStrandedToSite just returned false,
+                            # which for this DP means there is no abort left un-followed by a send --
+                            # the cancel flag is not what is blocking, so a restart would only spend
+                            # minutes of the coverage budget and re-import content for nothing.
+                            $pkgSourceBumped = & $bumpPkgSourceVersion "$($secDpVm.siteCode)"
+                            $bumpRan = $pkgSourceBumped
+                        }
+                        # A repair needs runway the original budget does not have: measured
+                        # 2026-08-23, content reached the secondary ~20 min after a fresh
+                        # process. Once only, so this can never become an unbounded wait.
+                        if ($bumpRan -and -not $coverageExtendedForRepair) {
+                            $coverageExtendedForRepair = $true
+                            $coverageDeadline = (Get-Date).AddMinutes($repairExtraMinutes)
+                            Write-DscStatus "Client pkg coverage: [wedge-repair] extended the coverage deadline by $repairExtraMinutes min (once) so the re-armed send has time to land."
+                        }
                     }
                 }
             }

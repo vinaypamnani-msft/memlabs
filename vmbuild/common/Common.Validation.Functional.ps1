@@ -10144,10 +10144,15 @@ function Test-CMClientPackageDistribution {
                 # cause. Saying so here stops the next reader triaging the DP: on cstest2 the
                 # DP had been registered for 50 minutes and the site still held no content.
                 # Only the package's SOURCE site runs distmgr's send-to-child loop
-                # (distmgr.cpp gates it on sPkgSrcSite == sThisSite), so this decides
-                # which site owes the send for every DP below.
+                # (distmgr.cpp gates it on sPkgSrcSite == sThisSite). That does NOT mean the
+                # source site performs the transfer: it can log "Skipped sending compressed copy
+                # of package X to site Y as the closest site is Z" and hand off to Z. On the
+                # 2026-08-24 burnin, HUB ran the loop and delegated to PRI, so the primary's
+                # distmgr.log was the right one to read all along -- an earlier version of this
+                # message said the source site "owes the send" and cost a session chasing the
+                # wrong machine. Report ownership; do not assert who transfers.
                 $results.ClientPkgSourceSite = "$($pkg.SourceSite)"
-                $results.Details.Add("INFO: client package '$($pkg.Name)' ($pkgId) SourceSite=$($pkg.SourceSite) SourceVersion=$($pkg.SourceVersion) StoredPkgVersion=$($pkg.StoredPkgVersion) at site $sc -- only site $($pkg.SourceSite) runs the send-to-child loop for it.")
+                $results.Details.Add("INFO: client package '$($pkg.Name)' ($pkgId) SourceSite=$($pkg.SourceSite) SourceVersion=$($pkg.SourceVersion) StoredPkgVersion=$($pkg.StoredPkgVersion) at site $sc -- only site $($pkg.SourceSite) runs the send-to-child loop for it, though it may delegate the transfer itself to the site closest to the target.")
                 if ([int]$pkg.StoredPkgVersion -lt 1) {
                     $results.ContentPendingFromParent = $true
                     $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) has NO content at site $sc at all (StoredPkgVersion=0, SourceVersion=$($pkg.SourceVersion)) -- it is owned by a parent site that never sent it down, so no DP here could have installed it. Triage the PARENT site's distmgr/sender, not the DP.")
@@ -10160,7 +10165,7 @@ function Test-CMClientPackageDistribution {
                 # on this host, 10 of 16 labs NEVER emit this line (including cstest1, which has
                 # a secondary site); only burnin/pushlab/wacky/cstest2/fabrikam do.
                 $results.Passed = $false
-                $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s): $badSummary. Only site $($pkg.SourceSite) runs distmgr's send-to-child loop for this package, so that is the site that owes the send. The boundary-group check below reports whether a client is additionally blocked; it does not make these DP(s) usable.")
+                $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s): $badSummary. Site $($pkg.SourceSite) owns the package and runs distmgr's send-to-child loop, but it may delegate the transfer to the site closest to the target -- read BOTH that site's distmgr.log and the closest parent's before deciding which one stopped. The boundary-group check below reports whether a client is additionally blocked; it does not make these DP(s) usable.")
                 foreach ($b in $bad | Select-Object -First 15) {
                     $sn = $stateName["$([int]$b.State)"]; if (-not $sn) { $sn = "State$($b.State)" }
                     $dpn = & $dpNameOf $b.ServerNALPath
