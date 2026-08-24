@@ -426,10 +426,9 @@ $Install_Secondary = {
 
                     $msg = "Installing Secondary site on $secondaryFQDN ($progressTag): $($state.Status)"
                     Write-DscStatus $msg -RetrySeconds $sleepSeconds -MachineName $SecondaryName
-                    # Keep Primary's own row on the simpler "Installing Secondary site on X"
-                    # line -- no need to duplicate per-step detail that's already visible
-                    # on the Secondary's row.
-                    Write-DscStatus "Installing Secondary site on $secondaryFQDN" -RetrySeconds $sleepSeconds -NoLog
+                    # Keep elapsed time out of the Primary's row so host liveness resets only
+                    # when WMI reports real progress, not merely because another minute passed.
+                    Write-DscStatus "Installing Secondary site on $secondaryFQDN (step $stepNumber): $($state.Status)" -RetrySeconds $sleepSeconds -NoLog
 
                     # Stalled: progress was seen before but nothing changed for $stalledTimeoutSec.
                     if ($sinceProgressSec -ge $stalledTimeoutSec) {
