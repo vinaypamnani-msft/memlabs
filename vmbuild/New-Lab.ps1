@@ -1101,7 +1101,9 @@ try {
             Write-Phase -Phase $i
 
             if ($i -eq 1 -and -not $runPhase1) {
-                Write-OrangePoint "[Phase $i] Not Applicable. Skipping: every VM in the config already exists and none was found incomplete." -ForegroundColor Yellow -WriteLog
+                $skipMessage = "[Phase $i] Not Applicable. Skipping: every VM in the config already exists and none was found incomplete."
+                Write-OrangePoint $skipMessage -ForegroundColor Yellow
+                Write-Log $skipMessage -LogOnly
                 continue
             }
 
