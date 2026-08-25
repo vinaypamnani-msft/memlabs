@@ -911,7 +911,12 @@ $global:VM_Create = {
 
                     # First boot of a fresh guest, and the last unmeasured Phase 1 step.
                     $swOobe = [System.Diagnostics.Stopwatch]::StartNew()
-                    $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
+                    $waitForVmOutput = @(Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout)
+                    $connected = (@($waitForVmOutput | Where-Object { $_ -is [bool] }) | Select-Object -Last 1) -eq $true
+                    $nonBooleanOutputCount = @($waitForVmOutput | Where-Object { $_ -isnot [bool] }).Count
+                    if ($nonBooleanOutputCount -gt 0) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Wait-ForVm returned $nonBooleanOutputCount non-Boolean output item(s); ignored them and used only the last explicit Boolean result." -LogOnly
+                    }
                     $swOobe.Stop()
                     Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] OobeWait completed in $([Math]::Round($swOobe.Elapsed.TotalSeconds, 1)) seconds (ok=$connected attempt=$($oobeRetries + 1) timeoutMin=$oobeTimeout)" -LogOnly
                     if (-not $connected) {

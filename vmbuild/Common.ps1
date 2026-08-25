@@ -6565,6 +6565,28 @@ function Wait-ForVm {
         [int]$powerCycles = 0
         [int]$maxPowerCycles = 3
 
+        function Format-OobePowerCycleDiagnostic {
+            param(
+                [int]$FailureBudget,
+                [int]$MaxFailureBudget,
+                [int]$Polls,
+                [int]$RpcCalls,
+                [double]$ElapsedSeconds,
+                [double]$LastProbeSeconds,
+                $ProbeResult,
+                [string]$HostDiag
+            )
+            try {
+                $lastError = @($ProbeResult.ErrorDetails | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }) -join '; '
+                $lastError = $lastError -replace '\s+', ' '
+                if ($lastError.Length -gt 300) { $lastError = $lastError.Substring(0, 300) + '...' }
+                if ([string]::IsNullOrWhiteSpace($lastError)) { $lastError = '<none>' }
+                if ([string]::IsNullOrWhiteSpace($HostDiag)) { $HostDiag = '[host-diag: unavailable]' }
+                return "failureBudget=$FailureBudget/$MaxFailureBudget polls=$Polls rpcCalls=$RpcCalls elapsed=$([Math]::Round($ElapsedSeconds, 1))s lastProbe=$([Math]::Round($LastProbeSeconds, 1))s timedOut=$([bool]$ProbeResult.TimedOut) channelBroken=$([bool]$ProbeResult.ChannelBroken) error='$lastError' $HostDiag"
+            }
+            catch { return "diagnostic-unavailable error='$($_.Exception.Message)'" }
+        }
+
         # Phase 1 reports only SessionCreate/JobBootstrap/StartVm, so this wait -- which
         # dominates Phase 1 once the parallel VHDX copy is not masking it -- has never been
         # attributed. rpc= is what the polling itself costs; a large share of the total means
@@ -6573,6 +6595,8 @@ function Wait-ForVm {
         [int]$oobePolls = 0
         [int]$oobeRpcCalls = 0
         [double]$oobeRpcMs = 0
+        [double]$oobeLastProbeSeconds = 0
+        $oobeLastPowerCycleAtSeconds = $null
         [int]$oobeSettleWaits = 0
         [double]$oobeHbGateMs = 0
         [int]$oobeHbGates = 0
@@ -6657,6 +6681,7 @@ function Wait-ForVm {
             $stopwatch2.Start()
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
+            $oobeLastProbeSeconds = $stopwatch2.Elapsed.TotalSeconds
             $oobeRpcCalls++
             $oobeRpcMs += $stopwatch2.Elapsed.TotalMilliseconds
             $oobeLastProbeFailed = ($null -eq $out.ScriptBlockOutput)
@@ -6693,9 +6718,13 @@ function Wait-ForVm {
                         Write-Log "$VmName`: OOBE not responding after $maxPowerCycles power-cycles ($([int]$stopWatch.Elapsed.TotalMinutes) min elapsed). Giving up." -Warning
                         break
                     }
-                    Write-Log "$VmName`: OOBE not responding after $failures poll failures. Power-cycling VM (attempt $powerCycles/$maxPowerCycles)." -Warning
-                    $vmState = if ($vmCheck) { $vmCheck.State } else { "Unknown" }
-                    Write-Log "$VmName`: VM state before power-cycle: $vmState" -Warning
+                    $hostDiag = '[host-diag: unavailable]'
+                    try { $hostDiag = Get-VmHostSideDiag -VmName $VmName } catch { $hostDiag = "[host-diag: unavailable ($($_.Exception.Message))]" }
+                    $oobeDiag = Format-OobePowerCycleDiagnostic -FailureBudget $failures -MaxFailureBudget $maxFailures `
+                        -Polls $oobePolls -RpcCalls $oobeRpcCalls -ElapsedSeconds $oobeSw.Elapsed.TotalSeconds `
+                        -LastProbeSeconds $oobeLastProbeSeconds -ProbeResult $out -HostDiag $hostDiag
+                    Write-Log "$VmName`: OOBE probe failure budget exhausted ($oobeDiag). Power-cycling VM (attempt $powerCycles/$maxPowerCycles)." -Warning
+                    $oobeLastPowerCycleAtSeconds = $oobeSw.Elapsed.TotalSeconds
                     $stopOk = stop-vm2 -name $VmName -TurnOff -Passthru
                     start-sleep -seconds 8
 
@@ -6793,7 +6822,7 @@ function Wait-ForVm {
                         }
                     }
 
-                    Start-vm2 -name $VmName
+                    $null = Start-vm2 -name $VmName
                     Start-Sleep -Seconds 8
                     [int]$failures = 0
                 }
@@ -6918,6 +6947,10 @@ function Wait-ForVm {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is ready. Waiting $WaitSeconds seconds before continuing"
                 Start-Sleep -Seconds $WaitSeconds
                 $ready = $true
+                if ($powerCycles -gt 0) {
+                    $sincePowerCycle = if ($null -eq $oobeLastPowerCycleAtSeconds) { 'n/a' } else { "$([Math]::Round($oobeSw.Elapsed.TotalSeconds - $oobeLastPowerCycleAtSeconds, 1))s" }
+                    Write-Log "$VmName`: OOBE recovered after power-cycle $powerCycles/$maxPowerCycles (elapsed=$([Math]::Round($oobeSw.Elapsed.TotalSeconds, 1))s sincePowerCycle=$sincePowerCycle polls=$oobePolls rpcCalls=$oobeRpcCalls)." -Success
+                }
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
 
