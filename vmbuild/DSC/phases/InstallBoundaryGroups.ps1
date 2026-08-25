@@ -51,14 +51,23 @@ if (-not $SiteCode) {
 # distmgr without dropping the provider connected below. Fire ONCE, and only on the
 # confirmed wedge signature (many 0x800704d3 aborts, ZERO successes, executive up a
 # while so it isn't a fresh/normal start -- which also prevents a restart loop).
-try {
-    $imDir = $null
-    foreach ($ik in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
-        try { $imDir = (Get-ItemProperty -Path $ik -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
-        if ($imDir) { break }
-    }
-    $dmLog = if ($imDir) { Join-Path $imDir 'Logs\distmgr.log' } else { $null }
-    if ($dmLog -and (Test-Path $dmLog)) {
+#
+# It is a SCRIPTBLOCK because one shot at phase start is not enough: the wedge is created by
+# whatever stops distmgr, which can happen at any time, INCLUDING after this check has already
+# run and found nothing. burnin 2026-08-24: this ran clean at 15:57, distmgr was signalled to
+# stop at 16:23:36, the 16:24:59 restart was thread-only so the flag survived, and the HUB00004
+# bundle for site SEC aborted at 16:29:30 -- 24 minutes after the only check. The coverage wait
+# below re-runs it for exactly that reason.
+$clearStuckDistmgrWedge = {
+    param([string]$When)
+    try {
+        $imDir = $null
+        foreach ($ik in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+            try { $imDir = (Get-ItemProperty -Path $ik -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+            if ($imDir) { break }
+        }
+        $dmLog = if ($imDir) { Join-Path $imDir 'Logs\distmgr.log' } else { $null }
+        if (-not ($dmLog -and (Test-Path $dmLog))) { return $false }
         # Chronological, not windowed. A fixed tail cannot see this: the aborts cluster right
         # after the thread exit and then one content-cleanup burst emits hundreds of
         # "permanently deleting <hash>" lines that flush them out, while the wedge persists.
@@ -86,17 +95,20 @@ try {
         }
         catch {}
         if ($dmAborts -ge 5 -and $dmLastAbort -gt $dmLastSend -and $exeUpMin -gt 20) {
-            Write-DscStatus "distmgr WEDGED: $dmAborts x 0x800704d3 content aborts and NO send since the last one, SMS_EXECUTIVE up $([int]$exeUpMin)m -- a stuck distmgr cancel state is blocking ALL content distribution for this site. Restarting SMS_EXECUTIVE ONCE to clear it (the cancel flag is only reset by a fresh process)." -Warning
+            Write-DscStatus "distmgr WEDGED [$When]: $dmAborts x 0x800704d3 content aborts and NO send since the last one, SMS_EXECUTIVE up $([int]$exeUpMin)m -- a stuck distmgr cancel state is blocking ALL content distribution for this site. Restarting SMS_EXECUTIVE ONCE to clear it (the cancel flag is only reset by a fresh process)." -Warning
             try {
                 Restart-Service -Name SMS_EXECUTIVE -Force -ErrorAction Stop
                 Write-DscStatus "Restarted SMS_EXECUTIVE to clear the wedged distmgr; waiting 90s for components to resume."
                 Start-Sleep -Seconds 90
+                return $true
             }
             catch { Write-DscStatus "Could not restart SMS_EXECUTIVE to clear the wedged distmgr: $($_.Exception.Message)" -Warning }
         }
     }
+    catch {}
+    return $false
 }
-catch {}
+$null = & $clearStuckDistmgrWedge 'phase start'
 
 # Provider
 $smsProvider = Get-SMSProvider -SiteCode $SiteCode
@@ -979,9 +991,18 @@ $ensureClientPkgCoverage = {
     # enough for the send plus the $repairExtraMinutes extension, and long enough that a
     # distribution merely in flight (InstallPending is skipped outright) is never cut into.
     $unownedSendMinutes = 10
+    $lastWedgeCheck = $null
     $try = 0
     while ((Get-Date) -lt $coverageDeadline) {
         $try++
+        # A wedge that appears mid-wait blocks every send for the rest of the phase, and the
+        # check at phase start cannot see one that does not exist yet. Rate-limited because it
+        # tails 4000 lines; the $exeUpMin > 20 guard inside makes a restart loop impossible,
+        # since a restart resets uptime to zero.
+        if (-not $lastWedgeCheck -or ((Get-Date) - $lastWedgeCheck).TotalMinutes -ge 2) {
+            $lastWedgeCheck = Get-Date
+            if (& $clearStuckDistmgrWedge "coverage wait, try $try") { $lastWedgeCheck = Get-Date }
+        }
         # Is the client package content present at THIS site yet? StoredPkgVersion=0
         # means it is still replicating down from a parent/CAS site.
         $storedVer = 0
