@@ -9168,7 +9168,7 @@ function Get-VmSession {
         [switch]$LocalOnly,
         [Parameter(Mandatory = $false, HelpMessage = "Suppress the final 'Could not create session' type=3 failure log. Use for best-effort liveness probes (e.g. Copy-ItemSafe heartbeat) where a miss during OOBE is expected and not an error.")]
         [switch]$Quiet,
-        [Parameter(Mandatory = $false, HelpMessage = "Hashtable populated with channel diagnostics: ChannelBroken = true when PSDirect timed out or returned a VMBus error.")]
+        [Parameter(Mandatory = $false, HelpMessage = "Hashtable populated with channel diagnostics: ChannelBroken, FailureReasons, LastError, VmState, Heartbeat, and ConnectMilliseconds.")]
         [hashtable]$Diagnostics
     )
 
@@ -9315,6 +9315,8 @@ function Get-VmSession {
     # credential that had just failed, clustered at 31-32s = the 30s connect timeout plus a
     # ~2s retry -- so whether those are timeouts or errors decides if the timeout is tunable.
     $failReasons = New-Object System.Collections.ArrayList
+    $lastConnectError = $null
+    $vmState = 'unknown'
     # Bounded deliberately below the 30s connect timeout, so the wait substitutes for a doomed
     # connect instead of adding to one.
     $sessionHeartbeatWaitSec = 12
@@ -9339,6 +9341,7 @@ function Get-VmSession {
         $swStateCheck.Stop()
         $swStateCheckTotalMs += $swStateCheck.Elapsed.TotalMilliseconds
         if ($vmState -ne 'Running') {
+            $null = $failReasons.Add("vm-not-running:$vmState")
             Write-Log "$VmName`: VM state is '$vmState'; skipping session attempt $failCount/$MaxRetries" -Verbose
             continue
         }
@@ -9419,16 +9422,19 @@ function Get-VmSession {
             $channelBroken = $false
             if ($connectResult.TimedOut) {
                 $null = $failReasons.Add('timeout')
+                $lastConnectError = 'New-PSSession timed out'
                 $sawChannelBroken = $true
                 $channelBroken = $true
             }
             elseif ($connectResult.ErrorMessage -match 'socket target process has ended|background process reported an error') {
                 $null = $failReasons.Add('guest-host-crash')
+                $lastConnectError = "$($connectResult.ErrorMessage)"
                 $sawChannelBroken = $true
                 $channelBroken = $true
             }
             else {
                 $null = $failReasons.Add('auth-or-other')
+                $lastConnectError = "$($connectResult.ErrorMessage)"
             }
             Remove-VmSession $ps
 
@@ -9447,20 +9453,36 @@ function Get-VmSession {
         }
 
         $triedList = $triedNames -join ', '
+        $failureDiag = 'diagnostic-unavailable'
+        try {
+            $reasonCounts = @($failReasons | Group-Object | ForEach-Object { "$($_.Name):$($_.Count)" }) -join ','
+            if ([string]::IsNullOrWhiteSpace($reasonCounts)) { $reasonCounts = 'none' }
+            $lastErrorText = "$lastConnectError" -replace '\s+', ' '
+            if ($lastErrorText.Length -gt 300) { $lastErrorText = $lastErrorText.Substring(0, 300) + '...' }
+            if ([string]::IsNullOrWhiteSpace($lastErrorText)) { $lastErrorText = '<none>' }
+            $failureDiag = "reasons=[$reasonCounts] vmState='$vmState' heartbeat='$heartbeatAtConnect' connectMs=$([int]$swConnectTotalMs) lastError='$lastErrorText'"
+        }
+        catch { }
+        $sessionFailureMessage = "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList; $failureDiag"
         if (-not $Quiet -and ($ShowVMSessionError.IsPresent -or ($failCount -eq $MaxRetries))) {
-            Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning
+            Write-Log $sessionFailureMessage -Warning
         }
         elseif ($Quiet) {
             # Quiet probe: keep it in the log for diagnostics but never on screen.
-            Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning -Verbose -LogOnly
+            Write-Log $sessionFailureMessage -Warning -Verbose -LogOnly
         }
         else {
-            Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning -Verbose
+            Write-Log $sessionFailureMessage -Warning -Verbose
         }
     }
     # Populate diagnostics for the caller so it knows WHY we failed
-    if ($Diagnostics -and $sawChannelBroken) {
-        $Diagnostics.ChannelBroken = $true
+    if ($Diagnostics) {
+        $Diagnostics.ChannelBroken = $sawChannelBroken
+        $Diagnostics.FailureReasons = @($failReasons)
+        $Diagnostics.LastError = $lastConnectError
+        $Diagnostics.VmState = "$vmState"
+        $Diagnostics.Heartbeat = "$heartbeatAtConnect"
+        $Diagnostics.ConnectMilliseconds = [int]$swConnectTotalMs
     }
     # Best-effort probes (e.g. Copy-ItemSafe heartbeat, MaxRetries=1) routinely
     # miss while the guest is still in OOBE; that is expected, not a failure.
