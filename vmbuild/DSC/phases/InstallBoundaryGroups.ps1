@@ -352,7 +352,12 @@ $ensureClientPkgCoverage = {
     # replication -- Phase 11 re-checks). Non-secondary DPs are always waited on.
     $vmByHost = @{}
     foreach ($v in @($deployConfig.virtualMachines)) { if ($v.vmName) { $vmByHost["$($v.vmName)".ToUpper()] = $v } }
-    $secSkipped = @()
+    # Grace is charged only AFTER every DP something depends on is Installed, because until
+    # then the loop is polling anyway and these cost nothing. Sized from measurement, not
+    # taste: on wacky 08-17 and 08-25 08:26 the unneeded secondary DP was already Installed
+    # within 95s and 58s of Phase 8 ending while the gate was not even waiting on it.
+    $optionalGraceMinutes = 5
+    $secOptionalDps = @()
     $keptDpFqdns = @()
     $secKeptDps = @()
     foreach ($dp in $bgDpFqdns) {
@@ -367,12 +372,13 @@ $ensureClientPkgCoverage = {
                     (($_.pushClient -eq $true) -and $secNet -and ("$($_.network)" -eq $secNet))
                 )
             })
-        if ($assigned.Count -gt 0) { $keptDpFqdns += $dp; $secKeptDps += "$dp" }             # clients depend on it -> wait
-        else { $secSkipped += "$dp" }                                                       # no clients -> skip
+        if ($assigned.Count -gt 0) { $keptDpFqdns += $dp; $secKeptDps += "$dp" }             # clients depend on it -> wait on the full budget
+        else { $keptDpFqdns += $dp; $secOptionalDps += "$dp" }                              # no clients -> wait, but only for free
     }
     $bgDpFqdns = @($keptDpFqdns)
-    if ($secSkipped.Count -gt 0) {
-        Write-DscStatus "Client pkg coverage: skipping $($secSkipped.Count) secondary-site DP(s) with NO push clients assigned (parent-Primary DPs still serve those boundaries; client package will arrive via normal inter-site replication): $($secSkipped -join ', ')"
+    $optionalDpFqdns = @($secOptionalDps)
+    if ($optionalDpFqdns.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: $($optionalDpFqdns.Count) secondary-site DP(s) have NO push clients assigned, so nothing is blocked if they lag: $($optionalDpFqdns -join ', '). They are still waited on -- for free while any other DP is outstanding -- and only get ${optionalGraceMinutes} extra minute(s) once every other DP is Installed."
     }
     if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems require client-package coverage."; return }
 
@@ -1002,6 +1008,7 @@ $ensureClientPkgCoverage = {
     # distribution merely in flight (InstallPending is skipped outright) is never cut into.
     $unownedSendMinutes = 10
     $lastWedgeCheck = $null
+    $optionalGraceStart = $null
     $try = 0
     while ((Get-Date) -lt $coverageDeadline) {
         $try++
@@ -1043,6 +1050,20 @@ $ensureClientPkgCoverage = {
         if ($notInstalled.Count -eq 0) {
             Write-DscStatus "Client package is Installed on all $($bgDpFqdns.Count) boundary-group DP(s)."
             break
+        }
+        # Waiting on a DP nothing depends on is free while a DP something DOES depend on is
+        # still outstanding -- same poll, same wall clock. Only once the required set is done
+        # does the wait become marginal cost, so that is when the grace clock starts.
+        $requiredOutstanding = @($notInstalled | Where-Object { $_ -notin $optionalDpFqdns })
+        if ($optionalDpFqdns.Count -gt 0 -and $requiredOutstanding.Count -eq 0) {
+            if (-not $optionalGraceStart) {
+                $optionalGraceStart = Get-Date
+                Write-DscStatus "Client pkg coverage: every DP with clients depending on it is Installed; giving $($notInstalled -join ', ') up to $optionalGraceMinutes more minute(s) before moving on (no client is blocked by them)."
+            }
+            elseif (((Get-Date) - $optionalGraceStart).TotalMinutes -ge $optionalGraceMinutes) {
+                Write-DscStatus "Client pkg coverage: moving on after the ${optionalGraceMinutes}-minute grace -- $($notInstalled -join ', ') still not Installed, but no push client is assigned to them and every other boundary-group DP holds the content. Phase 11 re-checks and reports them." -Warning
+                break
+            }
         }
         foreach ($dp in $notInstalled) {
             $u = $dp.ToUpper()
