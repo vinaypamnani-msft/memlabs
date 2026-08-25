@@ -7369,7 +7369,14 @@ function Invoke-VmCommand {
 
         # Get VM Session
         $ps = $null
-        $sessionDiag = @{ ChannelBroken = $false }
+        $sessionDiag = @{
+            ChannelBroken = $false
+            FailureReasons = @()
+            LastError = $null
+            VmState = 'unknown'
+            Heartbeat = 'unknown'
+            ConnectMilliseconds = 0
+        }
         $localOnlySession = $SkipDomainFallback.IsPresent
         # When -SuppressLog is set the caller is polling for VM readiness (OOBE /
         # SMB / path checks in tight do/until loops), so a session that can't be
@@ -7405,6 +7412,15 @@ function Invoke-VmCommand {
         $failed = ($null -eq $ps)
         if ($failed) {
             $return.ChannelBroken = [bool]$sessionDiag.ChannelBroken
+            try {
+                $sessionReasonCounts = @($sessionDiag.FailureReasons | Group-Object | ForEach-Object { "$($_.Name):$($_.Count)" }) -join ','
+                if ([string]::IsNullOrWhiteSpace($sessionReasonCounts)) { $sessionReasonCounts = 'none' }
+                $sessionLastError = "$($sessionDiag.LastError)" -replace '\s+', ' '
+                if ($sessionLastError.Length -gt 300) { $sessionLastError = $sessionLastError.Substring(0, 300) + '...' }
+                if ([string]::IsNullOrWhiteSpace($sessionLastError)) { $sessionLastError = '<none>' }
+                $return.ErrorDetails = @("Session creation failed: reasons=[$sessionReasonCounts] vmState='$($sessionDiag.VmState)' heartbeat='$($sessionDiag.Heartbeat)' connectMs=$($sessionDiag.ConnectMilliseconds) lastError='$sessionLastError'")
+            }
+            catch { $return.ErrorDetails = @('Session creation failed: diagnostic-unavailable') }
             if ($sessionDiag.ChannelBroken) {
                 Write-Log "$VmName`: '$DisplayName' skipped the remaining credential ladders -- the transport is broken, not the credential." -LogOnly -Verbose
             }

@@ -3321,6 +3321,30 @@ $global:VM_Config = {
         # omit it: after a reboot there is nothing left to reap, and a retry runs while the
         # premise ("nothing else is using them") is no longer established.
         $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -ArgumentList @($hostRunStartUtc) -DisplayName "Stop Any Running DSC's"
+        $Format_StopDscFailure = {
+            param($StopResult)
+            try {
+                $failureClass = 'unknown'
+                if ($StopResult.TimedOut) { $failureClass = 'command-timeout' }
+                elseif ($StopResult.ChannelBroken) { $failureClass = 'session-channel-broken' }
+                elseif ($StopResult.ScriptBlockOutput -and $StopResult.ScriptBlockOutput.Stopped -eq $false) { $failureClass = 'lcm-still-busy' }
+                elseif ($StopResult.ScriptBlockFailed) { $failureClass = 'scriptblock-failed' }
+
+                $lcmState = '<not-measured>'
+                if ($StopResult.ScriptBlockOutput -and $StopResult.ScriptBlockOutput.LCMState) {
+                    $lcmState = "$($StopResult.ScriptBlockOutput.LCMState)"
+                }
+                $errorText = @($StopResult.ErrorDetails | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") }) -join '; '
+                if ([string]::IsNullOrWhiteSpace($errorText) -and $StopResult.ScriptBlockFailed -and $StopResult.ScriptBlockOutput -is [string]) {
+                    $errorText = "$($StopResult.ScriptBlockOutput)"
+                }
+                $errorText = $errorText -replace '\s+', ' '
+                if ($errorText.Length -gt 400) { $errorText = $errorText.Substring(0, 400) + '...' }
+                if ([string]::IsNullOrWhiteSpace($errorText)) { $errorText = '<none>' }
+                return "class=$failureClass timedOut=$([bool]$StopResult.TimedOut) channelBroken=$([bool]$StopResult.ChannelBroken) lcm='$lcmState' error='$errorText'"
+            }
+            catch { return "class=diagnostic-unavailable error='$($_.Exception.Message)'" }
+        }
         # An LCM found Busy at PHASE START means the previous phase never finished --
         # we are force-terminating real work, not tidying up. That deserves to be
         # visible; it used to be sledgehammered silently.
@@ -3347,12 +3371,16 @@ $global:VM_Config = {
         if ($stopFailed) {
             $stopDscAttempts++
             Write-Progress2 $Activity -Status "Retry Stopping DSCs" -percentcomplete 5 -force
-            $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+            # This retry is handled here. Keep its low-level warning log-only, then emit one
+            # classified recovery line below with the host state that decides the reboot.
+            $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's" -SuppressLog
             $stopFailed = $result.ScriptBlockFailed -or ($result.ScriptBlockOutput -and ($result.ScriptBlockOutput.Stopped -eq $false))
             if ($stopFailed) {
                 $stopDscAttempts++
-                $lcmInfo = if ($result.ScriptBlockOutput -and $result.ScriptBlockOutput.LCMState) { " (LCM='$($result.ScriptBlockOutput.LCMState)')" } else { "" }
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC did not stop$lcmInfo; rebooting VM to clear the running configuration." -Warning
+                $stopDetail = & $Format_StopDscFailure $result
+                $hostDiag = '[host-diag: unavailable]'
+                try { $hostDiag = Get-VmHostSideDiag -VmName $currentItem.vmName } catch { $hostDiag = "[host-diag: unavailable ($($_.Exception.Message))]" }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC stop recovery required ($stopDetail; $hostDiag); rebooting VM before starting the next configuration." -Warning
                 Write-Progress2 $Activity -Status "Restarting VM then Stopping DSCs" -percentcomplete 5 -force
                 Stop-vm2 -name $currentItem.vmName
                 Start-Sleep -Seconds 10
@@ -3362,7 +3390,11 @@ $global:VM_Config = {
                 $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
                 $stopFailed = $result.ScriptBlockFailed -or ($result.ScriptBlockOutput -and ($result.ScriptBlockOutput.Stopped -eq $false))
                 if ($stopFailed) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
+                    $stopDetail = & $Format_StopDscFailure $result
+                    $hostDiag = '[host-diag: unavailable]'
+                    try { $hostDiag = Get-VmHostSideDiag -VmName $currentItem.vmName } catch { $hostDiag = "[host-diag: unavailable ($($_.Exception.Message))]" }
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC stop recovery FAILED after reboot ($stopDetail; $hostDiag). Aborting before the next DSC configuration." -Failure -OutputStream
+                    return
                 }
             }
         }
