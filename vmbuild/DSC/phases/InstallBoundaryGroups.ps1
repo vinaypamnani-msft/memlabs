@@ -38,19 +38,29 @@ if (-not $SiteCode) {
     return
 }
 
-# --- One-time recovery for a WEDGED distmgr (stuck cancel/shutdown flag) ----------
+# --- Recovery for a WEDGED distmgr (stuck cancel/shutdown flag) -------------------
 # A distmgr whose internal cancel flag (m_bShutdownRequest) is stuck TRUE stays
 # RUNNING but aborts EVERY content operation with 0x800704d3 (CopyFileExW cancelled /
 # TakeContentSnapshot aborted), silently blocking ALL content distribution for the
-# site (nothing snapshots -> nothing replicates to child sites or DPs). CM source
-# (distmgr.cpp): that flag is cleared ONLY by the CDistributionManager constructor --
-# never in Initialize() or at thread (re)start -- so only a FRESH PROCESS clears it; a
-# component/thread-only restart does not. A full SMS_EXECUTIVE restart is the proven
-# cure (confirmed on pushlab HA/remote content library: content flowed within seconds).
+# site (nothing snapshots -> nothing replicates to child sites or DPs).
+# Verified in CM source, not inferred:
+#   * distmgr.cpp declares it STATIC -- `BOOL CDistributionManager::m_bShutdownRequest
+#     = FALSE;` at namespace scope, so it is initialised once per PROCESS LOAD. That is
+#     the ONLY assignment of FALSE in the file; constructing a new CDistributionManager
+#     does not clear it either.
+#   * It is set TRUE in the main process-thread loop immediately after printing
+#     "Exiting SMS_DISTRIBUTION_MANAGER Process Thread..." (on WAIT_EXIT_THREAD).
+#   * All three bundle paths hand it to the copy as the cancel flag
+#     (SetCancelFlag(&m_bShutdownRequest)), and smsdp/Files.cpp FileCopy polls it every
+#     8KB -> "FileCopy cancelled" + ERROR_REQUEST_ABORTED.
+# So a component/thread-only restart leaves it TRUE for the life of the process, and
+# only a FRESH PROCESS clears it. A full SMS_EXECUTIVE restart is the proven cure
+# (confirmed on pushlab HA/remote content library: content flowed within seconds).
 # The SMS Provider is hosted by WMI (smsprov), NOT SMS_EXECUTIVE, so this recycles
-# distmgr without dropping the provider connected below. Fire ONCE, and only on the
-# confirmed wedge signature (many 0x800704d3 aborts, ZERO successes, executive up a
-# while so it isn't a fresh/normal start -- which also prevents a restart loop).
+# distmgr without dropping the provider connected below.
+# Fire only on the confirmed signature (many 0x800704d3 aborts, ZERO sends since the
+# last one, executive up a while so it isn't a fresh/normal start -- which also
+# prevents a restart loop).
 #
 # It is a SCRIPTBLOCK because one shot at phase start is not enough: the wedge is created by
 # whatever stops distmgr, which can happen at any time, INCLUDING after this check has already
