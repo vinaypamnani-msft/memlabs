@@ -7714,7 +7714,13 @@ $Phase11SmsSiteLogCollector = {
         $out['_collector-diag.txt'] = ($diag -join "`r`n")
         return $out
     }
-    foreach ($n in @('distmgr.log', 'PkgXferMgr.log', 'sender.log', 'despool.log', 'rcmctrl.log')) {
+    # sitecomp.log is the only one that says WHY a component was reconfigured. distmgr
+    # logs "SMS_EXECUTIVE signalled SMS_DISTRIBUTION_MANAGER to stop" but never the
+    # trigger, and a component-only stop is what leaves distmgr's static shutdown flag
+    # set and every later content bundle aborting on 0x800704d3 (burnin 2026-08-24:
+    # stop at 13:23:36, threads back at 13:24:59, HUB00004 -> SEC dead at 13:29:30, and
+    # the cause of the stop was unrecoverable from the artifacts collected).
+    foreach ($n in @('distmgr.log', 'PkgXferMgr.log', 'sender.log', 'despool.log', 'rcmctrl.log', 'sitecomp.log')) {
         $p = Join-Path $smsDir "Logs\$n"
         if (Test-Path $p) {
             try { $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$n] = ($c -join "`r`n") } else { $diag += "'$n' present but read returned no content" } } catch { $diag += "'$n' read threw: $($_.Exception.Message)" }
