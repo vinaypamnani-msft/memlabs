@@ -10324,15 +10324,38 @@ function Test-CMClientPackageDistribution {
                     $results.ContentPendingFromParent = $true
                     $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) has NO content at site $sc at all (StoredPkgVersion=0, SourceVersion=$($pkg.SourceVersion)) -- it is owned by a parent site that never sent it down, so no DP here could have installed it. Triage the PARENT site's distmgr/sender, not the DP.")
                 }
-                # A DP that never received the client package is a broken DP, even when a
-                # fallback DP happens to serve the same boundary group -- the boundary-group
-                # check below reports client impact, it does not make this DP usable. Fail so
-                # the lab is preserved for investigation with the diagnostics collected below.
-                # Discrimination-checked before wiring this to a FAIL: across every VMBuild log
-                # on this host, 10 of 16 labs NEVER emit this line (including cstest1, which has
-                # a secondary site); only burnin/pushlab/wacky/cstest2/fabrikam do.
-                $results.Passed = $false
-                $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s): $badSummary. Site $($pkg.SourceSite) owns the package and runs distmgr's send-to-child loop, but it may delegate the transfer to the site closest to the target -- read BOTH that site's distmgr.log and the closest parent's before deciding which one stopped. The boundary-group check below reports whether a client is additionally blocked; it does not make these DP(s) usable.")
+                # Severity follows whether the LAB still works, not the bare fact that a DP is
+                # behind. 3/6/8 are terminal -- that DP will never converge on its own and is
+                # the "permanently broken, go fix it" case. 1/2/7 after the ~90s convergence
+                # wait above is behind-but-not-dead, and a fallback DP can carry the boundary
+                # group meanwhile; the boundary-group check below is what decides real client
+                # impact, and it already FAILs a group with no Installed DP.
+                # wacky 2026-08-25 is why this is not a blanket FAIL: ZZ-DUMPLING sat at
+                # ContentValidating(7) with no push client assigned to it, and the SAME lab had
+                # it Installed on both prior runs (08-17 and 08-25 08:26), so the state was a
+                # lost race and not a broken DP. Failing the build there taught nothing and
+                # cost a rebuild. Note the WARN is NOT a claim that content will arrive -- that
+                # is unproven; it is a claim that nothing is blocked right now. The DP is still
+                # added to $failingDps below, so the full diagnostic set is collected either
+                # way and a WARN that is actually permanent still arrives with its evidence.
+                $terminalBad = @($bad | Where-Object { [int]$_.State -in 3, 6, 8 })
+                $installedOwned = @($dpRows | Where-Object { [int]$_.State -eq 0 })
+                $triage = "Site $($pkg.SourceSite) owns the package and runs distmgr's send-to-child loop, but it may delegate the transfer to the site closest to the target -- read BOTH that site's distmgr.log and the closest parent's before deciding which one stopped."
+                if ($terminalBad.Count -gt 0) {
+                    $termSummary = (@($terminalBad | Select-Object -First 5 | ForEach-Object {
+                                $snT = $stateName["$([int]$_.State)"]; if (-not $snT) { $snT = "State$($_.State)" }
+                                "$((("$(& $dpNameOf $_.ServerNALPath)") -split '\.')[0])=$snT(site $($_.SiteCode))"
+                            })) -join ', '
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) is in a TERMINAL distribution state on $($terminalBad.Count)/$($dpRows.Count) DP(s): $termSummary. A terminal state (InstallFailed/RemovalFailed/ContentValidationFailed) does not retry on its own, so this DP stays broken until it is fixed. $triage")
+                }
+                elseif ($installedOwned.Count -eq 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) is Installed on NONE of the $($dpRows.Count) DP(s) this deployment owns: $badSummary. There is no fallback DP holding the content, so clients assigned here have nowhere to get it. $triage")
+                }
+                else {
+                    $results.Details.Add("WARN: client package '$($pkg.Name)' ($pkgId) NOT Installed on $($bad.Count)/$($dpRows.Count) DP(s): $badSummary -- none of those states is terminal and $($installedOwned.Count) other owned DP(s) hold the content, so no client is blocked by this alone. Whether the content still arrives is NOT established here; the boundary-group check below decides client impact, and DP-side diagnostics are collected regardless so a DP that stays behind can be triaged. $triage")
+                }
                 foreach ($b in $bad | Select-Object -First 15) {
                     $sn = $stateName["$([int]$b.State)"]; if (-not $sn) { $sn = "State$($b.State)" }
                     $dpn = & $dpNameOf $b.ServerNALPath
