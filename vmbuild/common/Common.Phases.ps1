@@ -828,11 +828,38 @@ function Set-CmMediaMountAndShare {
             return "OK(local extadsch fallback): $ShareName -> $localRoot"
         }
     }
-    $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName, $mediaRoot) -DisplayName "Share CM media ($shareName)"
-    if ($res.ScriptBlockFailed) {
-        Write-RedX "[Phase $Phase]: $($vmName): Failed to create CM media share '$shareName' (DC schema extension depends on it). $($res.ScriptBlockOutput)" -WriteLog -ForegroundColor Red
+    # Every branch of $shareScript -- primary AND the local-extadsch fallback -- goes
+    # through the SMB CIM provider, so a guest whose WMI stack has not finished
+    # loading fails all of them at once. cstest3 2026-08-25 lost the share to
+    # "Cannot connect to CIM server. Class not registered" (fqeid
+    # CimJob_BrokenCimSession,Get-SmbShare on MSFT_SMBShare) 69s after the guest
+    # rebooted out of Phase 7, while PSDirect itself was healthy -- the autopsy's
+    # post-failure trivial command answered in 7ms on the same session. The step had
+    # exactly one attempt, so a provider that would have been ready seconds later
+    # produced a hard RedX. Retry across that settling window instead; it is bounded
+    # well inside the DC's 30-minute WaitForExtendSchemaFile tolerance, and the
+    # scriptblock is idempotent (it reconciles an existing share before creating one).
+    $shareStart = Get-Date
+    $shareDeadline = $shareStart.AddMinutes(5)
+    $shareTry = 0
+    while ($true) {
+        $shareTry++
+        $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName, $mediaRoot) -DisplayName "Share CM media ($shareName)"
+        # A null result is "never measured", not "succeeded" -- keep retrying on it.
+        $shareFailed = (-not $res) -or $res.ScriptBlockFailed
+        if (-not $shareFailed) { break }
+        if ((Get-Date) -ge $shareDeadline) { break }
+        $why = if ($res) { "$($res.ScriptBlockOutput)" } else { 'Invoke-VmCommand returned nothing' }
+        Write-Log "[Phase $Phase]: $($vmName): CM media share attempt $shareTry failed, retrying: $why" -LogOnly
+        Start-Sleep -Seconds 15
+    }
+    if ($shareFailed) {
+        $shareWaited = [int]((Get-Date) - $shareStart).TotalSeconds
+        $why = if ($res) { "$($res.ScriptBlockOutput)" } else { 'Invoke-VmCommand returned nothing' }
+        Write-RedX "[Phase $Phase]: $($vmName): Failed to create CM media share '$shareName' after $shareTry attempt(s) over ~$($shareWaited)s (DC schema extension depends on it). $why" -WriteLog -ForegroundColor Red
     }
     else {
+        if ($shareTry -gt 1) { Write-Log "[Phase $Phase]: $($vmName): CM media share succeeded on attempt $shareTry." -LogOnly }
         Write-Log "[Phase $Phase]: $($vmName): CM media share ready ($($res.ScriptBlockOutput))" -LogOnly
     }
 }
