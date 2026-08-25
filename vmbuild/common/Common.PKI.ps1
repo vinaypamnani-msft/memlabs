@@ -539,6 +539,33 @@ function Install-SingleTierPKI {
             return $false
         }
 
+        function Write-SingleTierCdp {
+            param([string]$WebURL)
+
+            $configRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+            $activeCaName = (Get-ItemProperty $configRoot -Name Active -ErrorAction Stop).Active
+            if ([string]::IsNullOrWhiteSpace("$activeCaName")) {
+                throw "The active CA registry name is empty under '$configRoot'."
+            }
+            $caRegPath = Join-Path $configRoot $activeCaName
+            if (-not (Test-Path $caRegPath -ErrorAction Stop)) {
+                throw "The active CA registry key does not exist: '$caRegPath'."
+            }
+
+            $expectedEntries = @(
+                '1:C:\Windows\system32\CertSrv\CertEnroll\%3%8%9.crl'
+                "2:${WebURL}<CaName><CRLNameSuffix><DeltaCRLAllowed>.crl"
+            )
+            Set-ItemProperty $caRegPath -Name CRLPublicationURLs -Value $expectedEntries -ErrorAction Stop
+            $actualEntries = @((Get-ItemProperty $caRegPath -Name CRLPublicationURLs -ErrorAction Stop).CRLPublicationURLs)
+            $missingEntries = @($expectedEntries | Where-Object { $actualEntries -notcontains $_ })
+            if ($missingEntries.Count -ne 0) {
+                throw "CRLPublicationURLs readback at '$caRegPath' is missing: $($missingEntries -join '; ')"
+            }
+
+            return [pscustomobject]@{ Path = $caRegPath; Entries = @($actualEntries) }
+        }
+
         # A CA is only "installed" once it has been CONFIGURED. The ADCS
         # role feature alone registers the certsvc service but leaves it
         # unconfigured; configuration writes Active=<CAName> under
@@ -1066,15 +1093,8 @@ LoadDefaultTemplates=0
             # Configure CDP/AIA
             _Log "Configuring CDP extensions..."
             # Remove default CDP entries and add HTTP-based
-            $cdpBase = "HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$CAName\CRLDistributionPoint"
-            if (Test-Path $cdpBase) {
-                # Keep only ldap:/// and add HTTP CDP
-                $httpCDP = "${WebURL}<CaName><CRLNameSuffix><DeltaCRLAllowed>.crl"
-                & certutil.exe -setreg CA\CRLPublicationURLs "1:C:\Windows\system32\CertSrv\CertEnroll\%3%8%9.crl\n2:$httpCDP" 2>&1 | Out-Null
-                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CDP returned exit code $LASTEXITCODE" }
-            } else {
-                _Log "WARNING: CDP registry path not found: $cdpBase"
-            }
+            $cdpConfig = Write-SingleTierCdp -WebURL $WebURL
+            _Log "Configured CRLPublicationURLs at '$($cdpConfig.Path)' with $(@($cdpConfig.Entries).Count) entries (registry readback passed)."
 
             _Log "Configuring AIA extensions..."
             $httpAIA = "${WebURL}<ServerDNSName>_<CaName><CertificateName>.crt"
