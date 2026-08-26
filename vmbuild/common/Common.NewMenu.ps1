@@ -811,6 +811,9 @@ public struct MOUSE_EVENT_RECORD {
     # session run (before these methods were added), the guard above skips
     # recompilation and the methods are missing. The polling loop falls back to
     # GetNumberOfConsoleInputEvents in that case (original behavior).
+    # Assigned INSIDE this function on purpose: a $script: name written and read on the
+    # same call chain resolves consistently, so it does not need $global: the way a
+    # dot-source-time constant does.
     $script:_hasPeekConsoleInput = $null -ne [MemLabsConsole.MouseInput].GetMethod('PeekConsoleInput')
     $script:_hasFlushConsoleInput = $null -ne [MemLabsConsole.MouseInput].GetMethod('FlushConsoleInputBuffer')
 
