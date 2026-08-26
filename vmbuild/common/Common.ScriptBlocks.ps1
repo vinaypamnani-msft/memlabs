@@ -7677,27 +7677,43 @@ $global:VM_Config = {
                             $workflowNote = ''
                             $workflowDead = $false
                             $workflowAlive = $false
+                            $workflowAbsent = $false
                             $workflowLastError = ''
+                            # Only a CAS/Primary node registers the ScriptWorkflow task
+                            # (RegisterTaskScheduler RunScriptWorkflow lives solely in the
+                            # 'CAS' -or 'Primary' Node block of Phase8.ps1/Phase9.ps1). On any
+                            # other role the probe below CANNOT find a task, so "not found"
+                            # there is a property of the role, not a measurement.
+                            $workflowOwnedHere = ("$($currentItem.role)" -in @('CAS', 'Primary'))
                             $crossNodeWait = [regex]::IsMatch($currentStatus.Trim(), '^Waiting (?:on [A-Za-z0-9\-,]+ to Complete|for [A-Za-z0-9\-]+ to finish adding passive site server role|for Site Server [A-Za-z0-9\-]+ to finish configuration\.)')
                             if (-not $crossNodeWait -and -not $lcmIdleSince -and -not $lcmRebootPendingSince -and -not $lcmPendingNoRebootSince) {
                                 $swStale = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
+                                    # Report REGISTERED separately from STATE. Returning $null for
+                                    # "no such task" made an absent task indistinguishable from a
+                                    # probe that never ran, and the host warned on both.
                                     $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
-                                    if (-not $t) { return $null }
                                     $crumb = ''
                                     try { $crumb = (Get-Content 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Raw -ErrorAction Stop).Trim() } catch { }
-                                    return [pscustomobject]@{ State = "$($t.State)"; LastError = $crumb }
+                                    if (-not $t) { return [pscustomobject]@{ Registered = $false; State = ''; LastError = $crumb } }
+                                    return [pscustomobject]@{ Registered = $true; State = "$($t.State)"; LastError = $crumb }
                                 } -SuppressLog
-                                if (-not $swStale.ScriptBlockFailed -and $swStale.ScriptBlockOutput -and $swStale.ScriptBlockOutput.State) {
-                                    if ($swStale.ScriptBlockOutput.State -ne 'Running') {
+                                $swOut = $null
+                                if (-not $swStale.ScriptBlockFailed) { $swOut = @($swStale.ScriptBlockOutput | Where-Object { $_ -and $_.PSObject.Properties['Registered'] }) | Select-Object -First 1 }
+                                if ($swOut -and $swOut.Registered -and $swOut.State) {
+                                    if ($swOut.State -ne 'Running') {
                                         $workflowDead = $true
-                                        $workflowLastError = "" + $swStale.ScriptBlockOutput.LastError
-                                        $workflowNote = " -- ScriptWorkflow task is '$($swStale.ScriptBlockOutput.State)', NOT Running: the workflow exited without finishing, so this wait cannot clear on its own."
+                                        $workflowLastError = "" + $swOut.LastError
+                                        $workflowNote = " -- ScriptWorkflow task is '$($swOut.State)', NOT Running: the workflow exited without finishing, so this wait cannot clear on its own."
                                     }
                                     else {
                                         # CONFIRMED alive. Distinct from "the probe told us nothing",
                                         # which the old -not $workflowDead test silently folded in here.
                                         $workflowAlive = $true
                                     }
+                                }
+                                elseif ($swOut -and -not $swOut.Registered) {
+                                    # The guest answered: there is no ScriptWorkflow task here.
+                                    $workflowAbsent = $true
                                 }
                             }
                             if ($workflowDead) {
@@ -7738,8 +7754,24 @@ $global:VM_Config = {
                             elseif ($workflowAlive) {
                                 Write-Log "$staleLine -- ScriptWorkflow task confirmed Running (notice $staleNoticeCount for this status); still applying." -LogOnly
                             }
+                            elseif ($workflowAbsent -and -not $workflowOwnedHere) {
+                                # The guest ANSWERED and there is no ScriptWorkflow task on this
+                                # role, so no local task-death can be stranding the status --
+                                # something remote is writing it. A Secondary sits in
+                                # [WaitForEvent]WaitPrimary while the Primary mirrors its own
+                                # install progress into this node's status file (Write-DscStatus
+                                # -MachineName), so the caption freezes the moment the Primary
+                                # moves on, with nothing wrong. That produced 34 identical
+                                # warnings across two labs (wacky ZZ-DUMPLING 14 over 80m,
+                                # pushlab PL-PICKLE 20 over 111m), both on Phase 8 runs that
+                                # finished 0 warnings / 0 failures. Wait-Phase owns this
+                                # dependency's liveness, exactly as for the named cross-node
+                                # waits above. A CAS/Primary with no task is NOT covered here --
+                                # that one is a real defect and still warns.
+                                Write-Log "$staleLine -- no ScriptWorkflow task on this node (role '$($currentItem.role)' never registers one), so the status is written remotely; Wait-Phase owns this dependency." -LogOnly
+                            }
                             else {
-                                $aliveNote = if ($workflowAlive) { ' ScriptWorkflow task confirmed Running.' } elseif (-not $workflowDead) { ' ScriptWorkflow task state could NOT be confirmed.' } else { '' }
+                                $aliveNote = if ($workflowAbsent) { " ScriptWorkflow task is NOT registered on this $($currentItem.role) -- it should be; the workflow never started." } elseif (-not $workflowDead) { ' ScriptWorkflow task state could NOT be confirmed.' } else { '' }
                                 Write-Log "$staleLine$aliveNote" -Warning
                             }
                             $lastStaleWarningTime = [DateTime]::UtcNow
