@@ -1115,23 +1115,29 @@ function Add-MRemoteNGConnectionToContainer {
         [bool]$ForceOverwrite = $false
     )
 
-    # Check for existing connection by display name only.
-    # Do NOT match on Hostname — Hyper-V Console connections all share the same
-    # host ($env:COMPUTERNAME), so hostname matching would treat every VM as a
-    # duplicate of the first one added, causing ForceOverwrite to delete it.
-    $existingNodes = $Container.SelectNodes("Node[@Type='Connection']")
-    $findNode = $existingNodes | Where-Object { $_.Name -eq $DisplayName } | Select-Object -First 1
+    $id = Get-MRemoteNGDeterministicGuid -Seed $GuidSeed
 
-    if ($findNode -and $ForceOverwrite) {
-        [void]$Container.RemoveChild($findNode)
-        $findNode = $null
+    # Display names include mutable labels such as the login user. Match the
+    # deterministic Id too, otherwise a rename leaves the old credential node
+    # beside its replacement and the password audit repairs it on every run.
+    # Do NOT match on Hostname: all Hyper-V Console entries share the host name.
+    $existingNodes = @($Container.SelectNodes("Node[@Type='Connection']"))
+    $matchingNodes = @($existingNodes | Where-Object {
+            $_.Name -eq $DisplayName -or
+            (-not [string]::IsNullOrWhiteSpace($GuidSeed) -and $_.GetAttribute("Id") -eq $id)
+        })
+
+    if ($matchingNodes.Count -gt 0 -and $ForceOverwrite) {
+        foreach ($matchingNode in $matchingNodes) {
+            [void]$Container.RemoveChild($matchingNode)
+        }
+        $matchingNodes = @()
     }
 
-    if ($findNode) {
+    if ($matchingNodes.Count -gt 0) {
         return $false
     }
 
-    $id = Get-MRemoteNGDeterministicGuid -Seed $GuidSeed
     $node = New-MRemoteNGConnectionNode -Doc $Doc -Name $Name -DisplayName $DisplayName -Hostname $Hostname `
         -Protocol $Protocol -Port $Port -Description $Description `
         -Username $Username -Domain $Domain -Password $Password -Id $id `
