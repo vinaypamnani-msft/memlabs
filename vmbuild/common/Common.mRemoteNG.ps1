@@ -246,7 +246,8 @@ function Install-MRemoteNG {
     }
 
     # Enable description tooltips in the connection tree so hovering shows VM info.
-    Set-MRemoteNGSettings -InstallDir (Split-Path $mRemoteNGExe)
+    Set-MRemoteNGSettings -InstallDir (Split-Path $mRemoteNGExe) `
+        -ConnectionFilePath $Global:Common.MRemoteNGFilePath
 
     # Workaround: mRemoteNG 1.78.2 /cons: CLI argument is broken — GetStartupConnectionFileName()
     # reads OptionsConnectionsPage.Default.ConnectionFilePath but /cons: writes to the old
@@ -420,14 +421,26 @@ function Format-MRemoteNGTooltip {
 }
 
 function Set-MRemoteNGSettings {
-    # Enable ShowDescriptionTooltipsInTree in mRemoteNG settings.
+    # Enable description tooltips and pin mRemoteNG to the generated connection file.
     # Handles both portable (mRemoteNG.settings next to exe) and
     # non-portable (user.config in %LocalAppData%) editions.
-    param([string]$InstallDir)
+    param(
+        [string]$InstallDir,
+        [string]$ConnectionFilePath
+    )
 
     if (-not $InstallDir) { return }
 
-    $settingName = 'ShowDescriptionTooltipsInTree'
+    $portableSettings = [ordered]@{
+        ShowDescriptionTooltipsInTree = 'True'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ConnectionFilePath)) {
+        # ConnectionFilePath is used by older 1.78 nightlies. Current builds use
+        # LoadConsFromCustomLocation + CustomConsPath. Write both generations.
+        $portableSettings['ConnectionFilePath'] = $ConnectionFilePath
+        $portableSettings['LoadConsFromCustomLocation'] = 'True'
+        $portableSettings['CustomConsPath'] = $ConnectionFilePath
+    }
 
     # --- Portable edition: mRemoteNG.settings ---
     $portableFile = Join-Path $InstallDir 'mRemoteNG.settings'
@@ -443,19 +456,24 @@ function Set-MRemoteNGSettings {
             $local = $sx.CreateElement('localSettings')
             [void]$sx.DocumentElement.AppendChild($local)
         }
-        $node = $local.SelectSingleNode("setting[@name='$settingName']")
-        if (-not $node) {
-            $node = $sx.CreateElement('setting')
-            $node.SetAttribute('name', $settingName)
-            $node.InnerText = 'True'
-            [void]$local.AppendChild($node)
-            $sx.Save($portableFile)
-            Write-Log "mRemoteNG: enabled $settingName in portable settings" -LogOnly -Verbose
+        $portableChanged = $false
+        foreach ($setting in $portableSettings.GetEnumerator()) {
+            $node = $local.SelectSingleNode("setting[@name='$($setting.Key)']")
+            if (-not $node) {
+                $node = $sx.CreateElement('setting')
+                $node.SetAttribute('name', $setting.Key)
+                $node.InnerText = $setting.Value
+                [void]$local.AppendChild($node)
+                $portableChanged = $true
+            }
+            elseif ($node.InnerText -ne $setting.Value) {
+                $node.InnerText = $setting.Value
+                $portableChanged = $true
+            }
         }
-        elseif ($node.InnerText -ne 'True') {
-            $node.InnerText = 'True'
+        if ($portableChanged) {
             $sx.Save($portableFile)
-            Write-Log "mRemoteNG: enabled $settingName in portable settings" -LogOnly -Verbose
+            Write-Log "mRemoteNG: updated portable settings in $portableFile" -LogOnly -Verbose
         }
     }
     catch {
@@ -464,28 +482,62 @@ function Set-MRemoteNGSettings {
 
     # --- Non-portable edition: user.config in %LocalAppData% ---
     try {
+        $userSettings = @(
+            [pscustomobject]@{
+                Section = '//userSettings/mRemoteNG.Properties.OptionsAppearancePage'
+                Name    = 'ShowDescriptionTooltipsInTree'
+                Value   = 'True'
+            }
+        )
+        if (-not [string]::IsNullOrWhiteSpace($ConnectionFilePath)) {
+            $userSettings += [pscustomobject]@{
+                Section = '//userSettings/mRemoteNG.Properties.OptionsConnectionsPage'
+                Name    = 'ConnectionFilePath'
+                Value   = $ConnectionFilePath
+            }
+            $userSettings += [pscustomobject]@{
+                Section = '//userSettings/mRemoteNG.Properties.OptionsBackupPage'
+                Name    = 'LoadConsFromCustomLocation'
+                Value   = 'True'
+            }
+            $userSettings += [pscustomobject]@{
+                Section = '//userSettings/mRemoteNG.Properties.OptionsBackupPage'
+                Name    = 'CustomConsPath'
+                Value   = $ConnectionFilePath
+            }
+        }
+
         $userConfigs = @(Get-ChildItem -Path "$env:LOCALAPPDATA\mRemoteNG" -Filter 'user.config' -Recurse -ErrorAction SilentlyContinue)
         foreach ($uc in $userConfigs) {
             [xml]$ucx = Get-Content -Path $uc.FullName -Raw
-            $sectionPath = '//userSettings/mRemoteNG.Properties.OptionsAppearancePage'
-            $section = $ucx.SelectSingleNode($sectionPath)
-            if (-not $section) { continue }
-            $existing = $section.SelectSingleNode("setting[@name='$settingName']")
-            if (-not $existing) {
-                $el = $ucx.CreateElement('setting')
-                $el.SetAttribute('name', $settingName)
-                $el.SetAttribute('serializeAs', 'String')
-                $val = $ucx.CreateElement('value')
-                $val.InnerText = 'True'
-                [void]$el.AppendChild($val)
-                [void]$section.AppendChild($el)
-                $ucx.Save($uc.FullName)
-                Write-Log "mRemoteNG: enabled $settingName in $($uc.FullName)" -LogOnly -Verbose
+            $userConfigChanged = $false
+            foreach ($setting in $userSettings) {
+                $section = $ucx.SelectSingleNode($setting.Section)
+                if (-not $section) { continue }
+                $existing = $section.SelectSingleNode("setting[@name='$($setting.Name)']")
+                if (-not $existing) {
+                    $existing = $ucx.CreateElement('setting')
+                    $existing.SetAttribute('name', $setting.Name)
+                    $existing.SetAttribute('serializeAs', 'String')
+                    $valueNode = $ucx.CreateElement('value')
+                    [void]$existing.AppendChild($valueNode)
+                    [void]$section.AppendChild($existing)
+                }
+                else {
+                    $valueNode = $existing.SelectSingleNode('value')
+                    if (-not $valueNode) {
+                        $valueNode = $ucx.CreateElement('value')
+                        [void]$existing.AppendChild($valueNode)
+                    }
+                }
+                if ($valueNode.InnerText -ne $setting.Value) {
+                    $valueNode.InnerText = $setting.Value
+                    $userConfigChanged = $true
+                }
             }
-            elseif ($existing.value -ne 'True') {
-                $existing.value = 'True'
+            if ($userConfigChanged) {
                 $ucx.Save($uc.FullName)
-                Write-Log "mRemoteNG: enabled $settingName in $($uc.FullName)" -LogOnly -Verbose
+                Write-Log "mRemoteNG: updated settings in $($uc.FullName)" -LogOnly -Verbose
             }
         }
     }
@@ -704,7 +756,7 @@ function New-MRemoteNGXmlDocument {
     $root.SetAttribute("FullFileEncryption", "false")
     # Protected hash for default (no custom master password) — required or mRemoteNG crashes with NullReferenceException
     $root.SetAttribute("Protected", "zd4H/+kOmTb3uDN3ehFiYDE5SiS79p+qWRZkMBpQjzaiU4A5rA66CcSULCGAPhxpZRrcfKy7A7NMMG4jgBSD0SPG")
-    $root.SetAttribute("ConfVersion", "2.6")
+    $root.SetAttribute("ConfVersion", "2.8")
 
     return $doc
 }
@@ -1352,6 +1404,7 @@ function New-MRemoteNGFileFromHyperV {
     # Full regen avoids this because New-MRemoteNGXmlDocument sets these attributes fresh.
     $root = $doc.DocumentElement
     $expectedRootAttrs = @{
+        ConfVersion       = "2.8"
         EncryptionEngine   = "AES"
         BlockCipherMode    = "GCM"
         KdfIterations      = "1000"
@@ -1368,8 +1421,6 @@ function New-MRemoteNGFileFromHyperV {
             $shouldSave = $true
         }
     }
-
-    Install-MRemoteNG
 
     # Encrypt password
     $encryptedPass = Get-MRemoteNGPassword
@@ -1945,6 +1996,11 @@ function New-MRemoteNGFileFromHyperV {
     else {
         Write-Log "No Changes. Not updating $MRemoteNGFile" -Success -Verbose
     }
+
+    # Full regeneration deletes the target near the start of this function. Repair
+    # startup settings and links only after the replacement file exists, otherwise
+    # Install-MRemoteNG skips the links and mRemoteNG can reopen a stale confCons.xml.
+    Install-MRemoteNG
 
     # ALWAYS-ON diag: fingerprint what WE just wrote (or the unchanged file) and
     # persist it to logs\mrng-diag-last.json so the NEXT run's entry fingerprint can
