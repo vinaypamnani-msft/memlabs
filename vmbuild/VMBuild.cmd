@@ -57,7 +57,7 @@ REM ------------------------------------------------------------
 git fetch --prune origin 2>NUL
 FOR /F "tokens=*" %%B IN ('git rev-parse --abbrev-ref HEAD 2^>NUL') DO SET CURBRANCH=%%B
 
-SET "RETIRED_BRANCHES=;feature/mouse-menu-support;"
+SET "RETIRED_BRANCHES=;feature/mouse-menu-support;feature/pushclient-sitecode;"
 
 SET "SWITCHREASON="
 IF "%CURBRANCH%"=="" GOTO AfterBranchRedirect
