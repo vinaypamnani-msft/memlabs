@@ -1399,36 +1399,70 @@ function Repair-VmCimServer {
         [switch]$AllowReboot
     )
 
+    # Step 0: MEASURE. Every caller reached here by inferring a wedge from some
+    # other symptom (a disk-init job that timed out, a settings step that failed),
+    # and the old entry line stated "CIM server unresponsive" as fact without ever
+    # asking the guest. On wacky ZZ-CREPE 2026-08-25 that assertion was logged
+    # twice, the restart's own failure reason was thrown away, and the run left no
+    # evidence of what the CIM stack was actually doing. Probe first and report the
+    # measured verdict. The remedy is NOT gated on it: at the disk-init call site
+    # the reboot also serves to kill a lingering abandoned job, which is worth doing
+    # even when CIM answers -- so this changes the log, not the recovery.
+    $cimProbe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -AsJob -DisplayName "Probe guest CIM before repair" -TimeoutSeconds 30 -ScriptBlock {
+        try { return "$((Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).CSName)" }
+        catch { return "ERR: $($_.Exception.Message)" }
+    }
+    $cimAnswered = $cimProbe -and -not $cimProbe.ScriptBlockFailed -and "$($cimProbe.ScriptBlockOutput)" -and "$($cimProbe.ScriptBlockOutput)" -notlike 'ERR: *'
+    if ($cimAnswered) {
+        Write-Log "[Phase $Phase]: ${VmName}: guest CIM ANSWERED the pre-repair probe (Win32_OperatingSystem -> '$($cimProbe.ScriptBlockOutput)'), so the caller's failure is not a wedged CIM server. Running the requested recovery anyway (it also clears a lingering abandoned job)." -Warning
+    }
+    else {
+        $probeErr = ((("$($cimProbe.ScriptBlockOutput) $($cimProbe.ErrorDetails -join ' ')") -replace '\s+', ' ').Trim())
+        if (-not $probeErr) { $probeErr = 'no output, no error text' }
+        Write-Log "[Phase $Phase]: ${VmName}: guest CIM did NOT answer a 30s Win32_OperatingSystem probe (timedOut=$($cimProbe.TimedOut) channelBroken=$($cimProbe.ChannelBroken) -- $probeErr). Restarting winmgmt in-guest..." -Warning
+    }
+
     # Step 1: restart the WMI service inside the guest via PSDirect.
     # MUST run -AsJob: Invoke-VmCommand only honors -TimeoutSeconds on the -AsJob
     # path. A guest whose WMI is truly wedged makes 'Restart-Service Winmgmt -Force'
     # (it stops/starts dependent services too) block indefinitely, and a SYNCHRONOUS
     # Invoke-Command over PSDirect has no timeout -- it would hang this whole repair
     # (and the caller's Phase 11 job) forever. -AsJob lets the 120s Wait-Job reap it.
-    Write-Log "[Phase $Phase]: ${VmName}: Guest WMI/CIM server unresponsive. Restarting winmgmt in-guest..." -Warning
     $restart = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -AsJob -DisplayName "Restart guest WMI (winmgmt)" -TimeoutSeconds 120 -ScriptBlock {
+        # Return the STEP that failed and its error. A bare $false told the host
+        # nothing about whether winmgmt refused to restart or the probe after it
+        # still hung, which is the difference between "service problem" and
+        # "provider problem" -- and it is the only chance to capture it, because
+        # the guest is about to be rebooted.
+        $step = 'Restart-Service Winmgmt'
         try {
             # -Force also restarts winmgmt's dependent services.
             Restart-Service -Name Winmgmt -Force -ErrorAction Stop
             Start-Sleep -Seconds 5
             # The Storage stack also leans on the Virtual Disk Service.
+            $step = 'Restart-Service vds'
             try { Restart-Service -Name vds -Force -ErrorAction SilentlyContinue } catch {}
             Start-Sleep -Seconds 3
             # Probe CIM to confirm the provider is answering again.
+            $step = 'Get-CimInstance Win32_OperatingSystem'
             $null = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-            return $true
+            return [pscustomobject]@{ Ok = $true; Step = 'complete'; Error = '' }
         }
         catch {
-            return $false
+            return [pscustomobject]@{ Ok = $false; Step = $step; Error = "$($_.Exception.Message)" }
         }
     }
 
-    if ($restart -and -not $restart.ScriptBlockFailed -and ($restart.ScriptBlockOutput -eq $true)) {
+    $restartOut = $null
+    if ($restart -and -not $restart.ScriptBlockFailed) { $restartOut = @($restart.ScriptBlockOutput | Where-Object { $_ -and $_.PSObject.Properties['Ok'] }) | Select-Object -First 1 }
+    if ($restartOut -and $restartOut.Ok) {
         Write-Log "[Phase $Phase]: ${VmName}: WMI restart succeeded; CIM probe OK."
         return $true
     }
 
-    Write-Log "[Phase $Phase]: ${VmName}: WMI restart did not recover the CIM server." -Warning
+    $restartWhy = if ($restartOut) { "guest failed at '$($restartOut.Step)': $($restartOut.Error)" }
+    else { "the restart job returned no verdict (failed=$($restart.ScriptBlockFailed) timedOut=$($restart.TimedOut) channelBroken=$($restart.ChannelBroken)) -- $((("$($restart.ErrorDetails -join ' ')") -replace '\s+', ' ').Trim())" }
+    Write-Log "[Phase $Phase]: ${VmName}: WMI restart did not recover the CIM server -- $restartWhy" -Warning
     if (-not $AllowReboot) {
         return $false
     }
@@ -1448,21 +1482,21 @@ function Repair-VmCimServer {
     # Probe CIM again after the reboot. -AsJob so the 120s timeout is enforced
     # (a still-wedged guest must not hang this synchronous probe indefinitely).
     $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -AsJob -DisplayName "Probe guest CIM after reboot" -TimeoutSeconds 120 -ScriptBlock {
-        try {
-            $null = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-            return $true
-        }
-        catch {
-            return $false
-        }
+        try { return "$((Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).CSName)" }
+        catch { return "ERR: $($_.Exception.Message)" }
     }
 
-    if ($probe -and -not $probe.ScriptBlockFailed -and ($probe.ScriptBlockOutput -eq $true)) {
+    if ($probe -and -not $probe.ScriptBlockFailed -and "$($probe.ScriptBlockOutput)" -and "$($probe.ScriptBlockOutput)" -notlike 'ERR: *') {
         Write-Log "[Phase $Phase]: ${VmName}: CIM server healthy after reboot."
         return $true
     }
 
-    Write-Log "[Phase $Phase]: ${VmName}: CIM server still unresponsive after reboot." -Warning
+    # This is the terminal state of the repair: the caller gets $false and usually
+    # halts. Carry the reason out with it -- a reboot that did not fix CIM is the
+    # one occurrence nobody can reproduce on demand.
+    $probeWhy = ((("$($probe.ScriptBlockOutput) $($probe.ErrorDetails -join ' ')") -replace '\s+', ' ').Trim())
+    if (-not $probeWhy) { $probeWhy = 'no output, no error text' }
+    Write-Log "[Phase $Phase]: ${VmName}: CIM server still unresponsive after reboot (timedOut=$($probe.TimedOut) channelBroken=$($probe.ChannelBroken) -- $probeWhy)." -Warning
     return $false
 }
 

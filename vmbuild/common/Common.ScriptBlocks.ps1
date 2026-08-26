@@ -1885,8 +1885,14 @@ $global:VM_Create = {
                             if (-not $badDetail -and $diskVerdict.Count -ne $diskEntries.Count) { $badDetail = "verdict covered $($diskVerdict.Count)/$($diskEntries.Count) disk(s)" }
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init verify FAILED (attempt $diskInitAttempts): $badDetail" -Warning
                         }
-                        $diskErrText = "$($result.ScriptBlockOutput) $($result.ErrorDetails -join ' ')"
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init failed (attempt $diskInitAttempts): $diskErrText" -Warning
+                        # A TIMED-OUT job returns neither output nor ErrorDetails, so the old
+                        # concatenation logged the bare text 'Disk init failed (attempt 1):' with
+                        # nothing after the colon -- the single most useful line in the whole
+                        # ladder carried zero information (wacky ZZ-CREPE 2026-08-25, twice).
+                        # Always emit the job's shape, which is populated in every failure mode.
+                        $diskErrText = (("$($result.ScriptBlockOutput) $($result.ErrorDetails -join ' ')") -replace '\s+', ' ').Trim()
+                        if (-not $diskErrText) { $diskErrText = 'guest returned no output and no error text -- the job never came back' }
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init failed (attempt $diskInitAttempts): timedOut=$($result.TimedOut) channelBroken=$($result.ChannelBroken) timeout=${settingsTimeout}s -- $diskErrText" -Warning
                         # Snapshot the guest's disk/partition/volume state on a failed
                         # attempt so a half-initialized disk (letter present, no NTFS)
                         # is captured in the log instead of inferred after the fact.
@@ -1896,6 +1902,12 @@ $global:VM_Create = {
                             $snap = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Disk init diag snapshot" -AsJob -TimeoutSeconds 120 -ScriptBlock $diskDiagSb
                             if (-not $snap.ScriptBlockFailed -and $snap.ScriptBlockOutput) {
                                 foreach ($line in @($snap.ScriptBlockOutput)) { Write-Log "[Phase $Phase]: $($currentItem.vmName): DISKDIAG $line" -LogOnly }
+                            }
+                            else {
+                                # Silence here reads identically to "the snapshot was never
+                                # attempted". Say which one it was, so a reader who finds no
+                                # DISKDIAG lines knows the guest was asked and did not answer.
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DISKDIAG unavailable (attempt $diskInitAttempts) -- timedOut=$($snap.TimedOut) channelBroken=$($snap.ChannelBroken) err='$((("$($snap.ErrorDetails -join ' ')") -replace '\s+', ' ').Trim())'" -LogOnly
                             }
                         }
                         catch {}
@@ -2982,6 +2994,18 @@ $global:VM_Config = {
         if ($quietWUThisRun) {
             try {
                 $wuResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Quiet Windows Update (stop+disable wuauserv/UsoSvc)" -ScriptBlock {
+                    $servicingPending = @()
+                    foreach ($pendingKey in @(
+                            @{ Name = 'CBS RebootPending'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending' },
+                            @{ Name = 'CBS PackagesPending'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\PackagesPending' },
+                            @{ Name = 'Windows Update RebootRequired'; Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired' }
+                        )) {
+                        if (Test-Path -LiteralPath $pendingKey.Path) { $servicingPending += $pendingKey.Name }
+                    }
+                    if (Test-Path -LiteralPath 'C:\Windows\WinSxS\pending.xml') { $servicingPending += 'WinSxS pending.xml' }
+                    $updateExeVolatile = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Updates' -Name 'UpdateExeVolatile' -ErrorAction SilentlyContinue
+                    if ($null -ne $updateExeVolatile -and [int]$updateExeVolatile -ne 0) { $servicingPending += "UpdateExeVolatile=$updateExeVolatile" }
+
                     $acted = @()
                     foreach ($svc in @('wuauserv', 'UsoSvc')) {
                         $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
@@ -2991,10 +3015,14 @@ $global:VM_Config = {
                             $acted += $svc
                         }
                     }
-                    if ($acted.Count -gt 0) { "stopped+disabled: $($acted -join ', ')" } else { "no WU services present" }
+                    $serviceResult = 'no WU services present'
+                    if ($acted.Count -gt 0) { $serviceResult = "stopped+disabled: $($acted -join ', ')" }
+                    $servicingResult = 'none'
+                    if ($servicingPending.Count -gt 0) { $servicingResult = $servicingPending -join ', ' }
+                    "$serviceResult; pre-existing servicing markers before quiet: $servicingResult"
                 }
                 if ($wuResult.ScriptBlockOutput) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows Update quieted for build ($($wuResult.ScriptBlockOutput))." -LogOnly
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows Update services quieted for build ($($wuResult.ScriptBlockOutput))." -LogOnly
                 }
             }
             catch {
