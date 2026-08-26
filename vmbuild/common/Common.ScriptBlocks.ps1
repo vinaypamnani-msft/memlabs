@@ -1536,9 +1536,21 @@ $global:VM_Create = {
                         $gUtc = [datetime]::Parse($guestTz.UtcNow, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
                         $clockSkewSec = [int][math]::Abs(($gUtc - [datetime]::UtcNow).TotalSeconds)
                         if ($clockSkewSec -gt 120) {
-                            $recheckAfterJoin = (-not $isWorkgroup) -and ($currentItem.role -notin @('DC', 'BDC', 'OtherDC'))
-                            if ($recheckAfterJoin) {
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): pre-domain guest UTC clock differs from the host's by ${clockSkewSec}s. Phase 1 timestamps for this VM are not correlatable; Phase 2 will recheck after domain join before deciding this is actionable." -LogOnly
+                            # One sample, taken minutes after first boot, is not a
+                            # measurement of a PERSISTENT skew -- that is exactly why
+                            # domain members were already deferred to a Phase 2 recheck.
+                            # A workgroup VM converges too, just via the Hyper-V time
+                            # integration service and w32time instead of domain time, so
+                            # it earns the same second look. wacky 2026-08-25 ZZ-CHURRO
+                            # (InternetClient) warned on 162s in Phase 1 and its Phase 10
+                            # guest transcript put the clock 28s from the host, inside
+                            # the slop of a batched run. A DC is excluded on purpose: it
+                            # IS the domain's time source, so skew there is actionable on
+                            # the first sample.
+                            $recheckInPhase2 = ($currentItem.role -notin @('DC', 'BDC', 'OtherDC'))
+                            if ($recheckInPhase2) {
+                                $syncSource = if ($isWorkgroup) { 'Hyper-V time sync' } else { 'domain time after join' }
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): early guest UTC clock differs from the host's by ${clockSkewSec}s. Phase 1 timestamps for this VM are not correlatable; Phase 2 will recheck once $syncSource has had a chance to settle before deciding this is actionable." -LogOnly
                                 try {
                                     # New-VmNote later rebuilds the note from this
                                     # config object, so stamp the source it copies.
@@ -8446,11 +8458,12 @@ $global:VM_Config = {
 
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -Phase $Phase
 
-            # A domain-bound VM can be minutes off during Phase 1 before it has
-            # joined and discovered domain time. Recheck only VMs that actually
+            # A VM can be minutes off during Phase 1, before it has had a chance to
+            # find a time source -- domain time for a member, the Hyper-V time
+            # integration service for a workgroup VM. Recheck only VMs that actually
             # crossed the threshold; do not add a PSDirect call to every Phase 2
-            # job. Persistent post-join skew is actionable, while convergence is
-            # closed explicitly as recovered.
+            # job. Persistent skew is actionable, while convergence is closed
+            # explicitly as recovered.
             if ($complete -and $Phase -eq 2 -and $clockSkewNeedsRecheck) {
                 $clockNote = $null
                 try { $clockNote = Get-VMNote -VMName $currentItem.vmName } catch {}
@@ -8466,18 +8479,18 @@ $global:VM_Config = {
                             $guestUtc = [datetime]::Parse("$($clockCheck.ScriptBlockOutput | Select-Object -First 1)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
                             $postJoinSkewSec = [int][math]::Abs(($guestUtc - [datetime]::UtcNow).TotalSeconds)
                             if ($postJoinSkewSec -le 120) {
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): RECOVERED: post-domain clock skew is ${postJoinSkewSec}s (within 120s); the Phase 1 skew converged after domain join." -Success -OutputStream
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): RECOVERED: guest clock skew is now ${postJoinSkewSec}s (within 120s); the Phase 1 skew converged." -Success -OutputStream
                                 $clockNote.clockSkewNeedsRecheck = $false
                                 Set-VMNote -VMName $currentItem.vmName -vmNote $clockNote
                             }
                             else {
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): post-domain guest UTC clock still differs from the host by ${postJoinSkewSec}s. This persisted after domain join; check Hyper-V time synchronization and w32time." -Warning -OutputStream
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): guest UTC clock still differs from the host by ${postJoinSkewSec}s at the end of Phase 2. This did not converge; check Hyper-V time synchronization and w32time on this VM." -Warning -OutputStream
                             }
                         }
-                        catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): post-domain clock recheck could not parse guest UTC: $($_.Exception.Message)" -Warning -OutputStream }
+                        catch { Write-Log "[Phase $Phase]: $($currentItem.vmName): clock recheck could not parse guest UTC: $($_.Exception.Message)" -Warning -OutputStream }
                     }
                     else {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): post-domain clock recheck could not reach the guest; the Phase 1 skew remains unresolved." -Warning -OutputStream
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): clock recheck could not reach the guest; the Phase 1 skew remains unresolved." -Warning -OutputStream
                     }
                 }
             }
