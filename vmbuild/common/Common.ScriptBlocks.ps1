@@ -1079,24 +1079,38 @@ $global:VM_Create = {
             Wait-ForHeartbeat -VmName $currentItem.vmName | Out-Null
         }
 
-        # Set PS Execution Policy (required on client OS)
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
+        # Set PS Execution Policy (required on client OS). Attempts 1 and 2 run
+        # -SuppressLog because Invoke-VmCommand's generic catch logs -Failure: a
+        # transient PSDirect drop that the very next attempt fixes was landing in
+        # the run log as a build error (wacky ZZ-BISCUIT 2026-08-25, "The Hyper-V
+        # socket target process has ended."; attempt 2 succeeded 25s later and the
+        # VM went on to complete every phase). The error text is still kept.
+        $epMaxAttempts = 3
+        $result = $null
+        foreach ($epTry in 1..$epMaxAttempts) {
+            $epIsLast = ($epTry -eq $epMaxAttempts)
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Set ExecutionPolicy Bypass (attempt $epTry/$epMaxAttempts)" -SuppressLog:(-not $epIsLast) -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
+            if (-not $result.ScriptBlockFailed) { break }
+            if (-not $epIsLast) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Set-ExecutionPolicy attempt $epTry/$epMaxAttempts failed, retrying in 15s: timedOut=$($result.TimedOut) channelBroken=$($result.ChannelBroken) $((("$($result.ScriptBlockOutput) $($result.ErrorDetails -join ' ')") -replace '\s+', ' ').Trim())" -LogOnly
+                Start-Sleep -Seconds 15
+            }
+        }
         if ($result.ScriptBlockFailed) {
-            start-sleep -seconds 15
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
-            if ($result.ScriptBlockFailed) {
-                start-sleep -seconds 15
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
-                if ($result.ScriptBlockFailed) {
-                    if (-not $currentItem.operatingSystem -like "*Server*") {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                        return
-                    }
-                    else {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine. $($result.ScriptBlockOutput)"
-                    }
-                    
-                }
+            # `-not $x -like "*Server*"` binds as `(-not $x) -like "*Server*"`, which
+            # is constant $false for any non-empty string -- so the client-OS branch
+            # below has never once executed and a client whose ExecutionPolicy was
+            # never set carried on through the whole build. Compute the test on its
+            # own line. A missing/blank OS string now reads as client, i.e. it stops,
+            # which is the safe direction for a step the comment calls required.
+            $epIsServerOs = ("$($currentItem.operatingSystem)" -like "*Server*")
+            $epWhy = "timedOut=$($result.TimedOut) channelBroken=$($result.ChannelBroken) $((("$($result.ScriptBlockOutput) $($result.ErrorDetails -join ' ')") -replace '\s+', ' ').Trim())"
+            if (-not $epIsServerOs) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine after $epMaxAttempts attempts on client OS '$($currentItem.operatingSystem)'. $epWhy" -Failure -OutputStream
+                return
+            }
+            else {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set PS ExecutionPolicy to Bypass for LocalMachine after $epMaxAttempts attempts; continuing because this is a Server OS ('$($currentItem.operatingSystem)'), where the default policy already permits the build's scripts. $epWhy" -Warning
             }
         }
 
