@@ -313,16 +313,18 @@ function Convert-RGBtoAnsi {
 }
 
 # OSC 8 hyperlink support — makes URLs and file paths ctrl+clickable in Windows Terminal / VS Code
-$script:_hyperlinkSupport = ($null -ne $env:WT_SESSION) -or ($env:TERM_PROGRAM -eq 'vscode')
-$script:_hyperlinkEsc = [char]0x1B
-$script:_hyperlinkPattern = '(https?://[^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]]|[A-Za-z]:\\[^\s<>"\x1B]{2,}[^\s<>"\x1B.,;:!?\)\]]|\\\\[A-Za-z][^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]])'
+# $global:, not $script:: these are set at dot-source time but read from functions running on
+# other script scopes' call chains (e.g. genconfig.ps1 -InternalUseOnly), where $script: is $null.
+$global:_hyperlinkSupport = ($null -ne $env:WT_SESSION) -or ($env:TERM_PROGRAM -eq 'vscode')
+$global:_hyperlinkEsc = [char]0x1B
+$global:_hyperlinkPattern = '(https?://[^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]]|[A-Za-z]:\\[^\s<>"\x1B]{2,}[^\s<>"\x1B.,;:!?\)\]]|\\\\[A-Za-z][^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]])'
 
 function ConvertTo-Hyperlinks {
     param([string]$Text)
-    if (-not $script:_hyperlinkSupport -or -not $Text) { return $Text }
+    if (-not $global:_hyperlinkSupport -or -not $Text) { return $Text }
     if ($Text -notmatch 'https?://|[A-Za-z]:\\|\\\\[A-Za-z]') { return $Text }
-    $e = $script:_hyperlinkEsc
-    return [regex]::Replace($Text, $script:_hyperlinkPattern, {
+    $e = $global:_hyperlinkEsc
+    return [regex]::Replace($Text, $global:_hyperlinkPattern, {
         param($m)
         $link = $m.Value
         if ($link -match '^https?://') {

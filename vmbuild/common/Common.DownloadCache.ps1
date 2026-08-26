@@ -24,9 +24,11 @@
 # Windows PowerShell 5.1 and PowerShell 7). All ISO/Hyper-V work only runs on the
 # PS7 host.
 
-$script:MemlabsCacheTier1Keys = @('DotNet', 'SSMS', 'ODBC', 'OleDB', 'SQLClient', 'VCredist', 'VCredistX86', 'ReportBuilder', 'PMPC')
-$script:MemlabsCacheVolumeLabel = 'MEMLABSCACHE'
-$script:MemlabsDscVolumeLabel = 'MEMLABSDSC'
+# $global:, not $script:: these are set at dot-source time but read from functions running on
+# other script scopes' call chains (e.g. genconfig.ps1 -InternalUseOnly), where $script: is $null.
+$global:MemlabsCacheTier1Keys = @('DotNet', 'SSMS', 'ODBC', 'OleDB', 'SQLClient', 'VCredist', 'VCredistX86', 'ReportBuilder', 'PMPC')
+$global:MemlabsCacheVolumeLabel = 'MEMLABSCACHE'
+$global:MemlabsDscVolumeLabel = 'MEMLABSDSC'
 
 function Test-MemlabsDownloadCacheEnabled {
     # Kill switch.
@@ -129,7 +131,7 @@ function Get-MemlabsCacheNeededKeys {
     # intentionally not used to narrow the set (that's what produced multiple
     # ISOs); the only thing that scopes inclusion is whether a tool is downloadable.
     param($DeployConfig, [int]$StartPhase = 1)
-    return @($script:MemlabsCacheTier1Keys)
+    return @($global:MemlabsCacheTier1Keys)
 }
 
 function Get-MemlabsCacheIsoForDeploy {
@@ -381,7 +383,7 @@ function Get-MemlabsCacheIsoForDeploy {
                         ($manifest | ConvertTo-Json -Depth 6) | Out-File (Join-Path $stage 'manifest.json') -Encoding utf8 -Force
 
                         if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
-                        New-NoCloudSeedIsoWithImapi -SourceDir $stage -OutputIsoPath $tmpIso -VolumeLabel $script:MemlabsCacheVolumeLabel
+                        New-NoCloudSeedIsoWithImapi -SourceDir $stage -OutputIsoPath $tmpIso -VolumeLabel $global:MemlabsCacheVolumeLabel
                         if (-not (Test-Path $tmpIso)) { throw "ISO build produced no output for $isoPath" }
 
                         if (-not (Test-Path $isoPath)) {
@@ -538,7 +540,7 @@ function Get-MemlabsDscIsoForPayload {
         $tmpIso = "$isoPath.$PID.tmp"
         try {
             if (Test-Path $tmpIso) { Remove-Item $tmpIso -Force -ErrorAction SilentlyContinue }
-            New-NoCloudSeedIsoWithImapi -SourceDir $srcDir -OutputIsoPath $tmpIso -VolumeLabel $script:MemlabsDscVolumeLabel
+            New-NoCloudSeedIsoWithImapi -SourceDir $srcDir -OutputIsoPath $tmpIso -VolumeLabel $global:MemlabsDscVolumeLabel
             if (-not (Test-Path $tmpIso)) { throw "DSC ISO build produced no output for $isoPath" }
             if (-not (Test-Path $isoPath)) { Move-Item -Path $tmpIso -Destination $isoPath -Force }
             Write-Log "DownloadCache: built $([System.IO.Path]::GetFileName($isoPath)) (DSC payload)." -LogOnly

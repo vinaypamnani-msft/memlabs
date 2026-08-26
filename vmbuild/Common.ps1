@@ -363,11 +363,14 @@ Function Write-Progress2Impl {
 #
 # Tunables (chosen to keep menu work in-memory while still surfacing useful
 # data quickly when something goes wrong):
-$Script:LogBufferMaxBytes      = 16KB    # flush after this much pending text
-$Script:LogBufferMaxAgeSeconds = 2       # flush at least this often
-$Script:LogRotateMaxBytes      = 2MB     # rotate when log exceeds this size
-$Script:LogRotateKeep          = 3       # number of historical .1/.2/.3 files
-$Script:LogRotateCheckEverySec = 5       # don't stat the file more than this
+# $global: for the same reason $global:LogBuffers below is: these are set once at
+# dot-source time but read from functions running on other script scopes' call chains
+# (genconfig.ps1 -InternalUseOnly, engine-exit actions), where $script: reads as $null.
+$global:LogBufferMaxBytes      = 16KB    # flush after this much pending text
+$global:LogBufferMaxAgeSeconds = 2       # flush at least this often
+$global:LogRotateMaxBytes      = 2MB     # rotate when log exceeds this size
+$global:LogRotateKeep          = 3       # number of historical .1/.2/.3 files
+$global:LogRotateCheckEverySec = 5       # don't stat the file more than this
 $Script:LogRotateExitRegistered = $false
 # Buffer state lives in $global: so the engine-exit Action scriptblock (which
 # runs in its own scope) can still see and flush it.
@@ -395,12 +398,12 @@ function Invoke-LogRotateIfNeeded {
         $entry = $global:LogBuffers[$Path]
         if ($entry) {
             $age = ([DateTime]::UtcNow - $entry.LastRotateCheckUtc).TotalSeconds
-            if ($age -lt $Script:LogRotateCheckEverySec) { return }
+            if ($age -lt $global:LogRotateCheckEverySec) { return }
             $entry.LastRotateCheckUtc = [DateTime]::UtcNow
         }
         $fi = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
-        if (-not $fi -or $fi.Length -lt $Script:LogRotateMaxBytes) { return }
-        $keep = $Script:LogRotateKeep
+        if (-not $fi -or $fi.Length -lt $global:LogRotateMaxBytes) { return }
+        $keep = $global:LogRotateKeep
         $oldest = "$Path.$keep"
         if (Test-Path -LiteralPath $oldest) {
             Remove-Item -LiteralPath $oldest -Force -ErrorAction SilentlyContinue
@@ -855,9 +858,9 @@ function Write-Log {
                 $forceFlush = $Warning.IsPresent -or $Failure.IsPresent `
                     -or $Activity.IsPresent -or $SubActivity.IsPresent `
                     -or $Highlight.IsPresent
-                $sizeFlush = $entry.Builder.Length -ge $Script:LogBufferMaxBytes
+                $sizeFlush = $entry.Builder.Length -ge $global:LogBufferMaxBytes
                 $ageFlush = ([DateTime]::UtcNow - $entry.LastFlushUtc).TotalSeconds `
-                    -ge $Script:LogBufferMaxAgeSeconds
+                    -ge $global:LogBufferMaxAgeSeconds
 
                 if ($forceFlush -or $sizeFlush -or $ageFlush) {
                     Flush-LogBuffer -Path $logPath
