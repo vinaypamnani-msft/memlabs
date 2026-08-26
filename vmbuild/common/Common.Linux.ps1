@@ -21,7 +21,10 @@
 # vmbuild/scripts/linux/.  Get-LinuxScript reads them, optionally prepends
 # variable assignments, and returns the content ready for
 # Invoke-LinuxVmCommand -BashCommand.
-$script:LinuxScriptDir = Join-Path (Split-Path $PSScriptRoot) 'scripts\linux'
+# $global:, not $script:: set at dot-source time but read from functions running on other
+# script scopes' call chains (e.g. genconfig.ps1 -InternalUseOnly), where $script: is $null
+# and Join-Path then throws "Cannot bind argument to parameter 'Path' because it is null".
+$global:LinuxScriptDir = Join-Path (Split-Path $PSScriptRoot) 'scripts\linux'
 
 function Get-LinuxScript {
     <#
@@ -60,7 +63,7 @@ function Get-LinuxScript {
         [switch]$IncludeSetDcDns
     )
 
-    $scriptPath = Join-Path $script:LinuxScriptDir "$Name.sh"
+    $scriptPath = Join-Path $global:LinuxScriptDir "$Name.sh"
     if (-not (Test-Path $scriptPath)) {
         throw "Get-LinuxScript: script not found: $scriptPath"
     }
@@ -78,7 +81,7 @@ function Get-LinuxScript {
 
     # Optionally prepend the shared apt_retry helper.
     if ($IncludeAptRetry.IsPresent) {
-        $aptRetryPath = Join-Path $script:LinuxScriptDir 'lib\apt-retry.sh'
+        $aptRetryPath = Join-Path $global:LinuxScriptDir 'lib\apt-retry.sh'
         if (Test-Path $aptRetryPath) {
             $aptRetryBody = Get-Content -Path $aptRetryPath -Raw
             # Strip the shebang from the helper since we're inlining it.
@@ -90,7 +93,7 @@ function Get-LinuxScript {
     # Optionally prepend the shared memlabs_set_dc_dns helper (single source of
     # truth for the DC-DNS config, shared with Set-LinuxVmsDcDns).
     if ($IncludeSetDcDns.IsPresent) {
-        $setDcDnsPath = Join-Path $script:LinuxScriptDir 'lib\set-dc-dns.sh'
+        $setDcDnsPath = Join-Path $global:LinuxScriptDir 'lib\set-dc-dns.sh'
         if (Test-Path $setDcDnsPath) {
             $setDcDnsBody = Get-Content -Path $setDcDnsPath -Raw
             # Strip the shebang from the helper since we're inlining it.
@@ -4259,8 +4262,8 @@ echo "APT_CLEANUP_DONE"
     # A lightweight Flask app that manages /etc/squid/blocklist.txt and
     # reloads Squid on changes. Runs as a systemd service on port 8443.
     # The .py and .service files live under scripts/linux/proxy/.
-    $proxyAdminApp = Get-Content -Path (Join-Path $script:LinuxScriptDir 'proxy\proxy-admin.py') -Raw
-    $proxyAdminService = Get-Content -Path (Join-Path $script:LinuxScriptDir 'proxy\proxy-admin.service') -Raw
+    $proxyAdminApp = Get-Content -Path (Join-Path $global:LinuxScriptDir 'proxy\proxy-admin.py') -Raw
+    $proxyAdminService = Get-Content -Path (Join-Path $global:LinuxScriptDir 'proxy\proxy-admin.service') -Raw
 
     $appB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($proxyAdminApp))
     $svcB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($proxyAdminService))
@@ -4284,7 +4287,7 @@ echo "APT_CLEANUP_DONE"
     # Install a colorized squid log viewer and a login banner that
     # advertises it so SSH sessions land with useful instructions.
     $proxyFqdn = "$vmName.$($deployConfig.vmOptions.domainName)"
-    $squidlogContent = Get-Content -Path (Join-Path $script:LinuxScriptDir 'proxy\squidlog') -Raw
+    $squidlogContent = Get-Content -Path (Join-Path $global:LinuxScriptDir 'proxy\squidlog') -Raw
     $squidlogB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($squidlogContent))
 
     $motdBash = Get-LinuxScript -Name 'proxy/install-motd' -Variables @{ SQUIDLOG_B64 = $squidlogB64; PROXY_FQDN = $proxyFqdn }

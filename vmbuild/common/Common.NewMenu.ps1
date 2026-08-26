@@ -965,7 +965,9 @@ function Get-RoomLeftFromCurrentPosition {
 
 # Layout constants used by Show-Menu's line-counting math. Centralized so the
 # same number isn't sprinkled across the file in a half-dozen places.
-$script:MenuLayout = @{
+# $global: for the same reason Get-AnsiCsiPattern below uses a getter: $script: resolves
+# to $null when these are read on another script scope's call chain.
+$global:MenuLayout = @{
     HelpBannerLines = 5    # Update-HelpText placeholder rendered above the menu
     PromptLines     = 2    # Trailing blank + prompt row
     TextWidthSlack  = 9    # Columns reserved for arrow/indent in wrap detection
@@ -1029,7 +1031,7 @@ function Get-MenuMetrics {
         [Parameter(Mandatory)][int]$WindowWidth
     )
     $tiers = @{ Summary = 0; Header = 0; Blank = 0; Help = 0 }
-    $wrapAt = $WindowWidth - $script:MenuLayout.TextWidthSlack
+    $wrapAt = $WindowWidth - $global:MenuLayout.TextWidthSlack
     $totalLineCount = 0
     $longestBreak = 0
     $helpFound = $false
@@ -1048,8 +1050,8 @@ function Get-MenuMetrics {
         $tier = Get-MenuItemTier -MenuItem $mi
         if ($tier) { $tiers[$tier] += $mi.LineCount }
     }
-    if ($helpNeeded) { $totalLineCount += $script:MenuLayout.HelpBannerLines }
-    $totalLineCount += $script:MenuLayout.PromptLines
+    if ($helpNeeded) { $totalLineCount += $global:MenuLayout.HelpBannerLines }
+    $totalLineCount += $global:MenuLayout.PromptLines
 
     return [pscustomobject]@{
         TotalLineCount   = $totalLineCount
@@ -1496,7 +1498,7 @@ function Show-Menu {
         # PgDn is a LAST resort -- if a layout pass still wouldn't fit, we
         # escalate the shrink plan one tier at a time and re-layout before
         # giving up and paginating.
-        $helpBannerCost = if ($HelpNeeded) { $script:MenuLayout.HelpBannerLines } else { 0 }
+        $helpBannerCost = if ($HelpNeeded) { $global:MenuLayout.HelpBannerLines } else { 0 }
         $shrink    = Resolve-ShrinkPlan -Tiers $metrics.Tiers -HelpBannerCost $helpBannerCost -TotalLineCount $TotalLineCount -RoomLeft $RoomLeft
         $Maxshrink = $shrink.Max
 
@@ -1505,7 +1507,7 @@ function Show-Menu {
         # starts, so we model that here instead of sampling cursor position
         # after the banner draws. This keeps shrink and layout consistent so
         # the same numbers drive both decisions.
-        $wrapAt = $liveWidth - $script:MenuLayout.TextWidthSlack
+        $wrapAt = $liveWidth - $global:MenuLayout.TextWidthSlack
         $bannerWillDraw = (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help)
         $availableRows  = [Math]::Max(1, $RoomLeft - $(if ($bannerWillDraw) { $helpBannerCost } else { 0 }))
         $layout = Get-PageLayout -MenuItems $menuItems -Shrink $shrink -MaxShrink $Maxshrink `

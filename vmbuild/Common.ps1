@@ -363,12 +363,15 @@ Function Write-Progress2Impl {
 #
 # Tunables (chosen to keep menu work in-memory while still surfacing useful
 # data quickly when something goes wrong):
-$Script:LogBufferMaxBytes      = 16KB    # flush after this much pending text
-$Script:LogBufferMaxAgeSeconds = 2       # flush at least this often
-$Script:LogRotateMaxBytes      = 2MB     # rotate when log exceeds this size
-$Script:LogRotateKeep          = 3       # number of historical .1/.2/.3 files
-$Script:LogRotateCheckEverySec = 5       # don't stat the file more than this
-$Script:LogBufferHardCapBytes  = 8MB     # give up buffering past this (leaves a marker)
+# $global: for the same reason $global:LogBuffers below is: these are set once at
+# dot-source time but read from functions running on other script scopes' call chains
+# (genconfig.ps1 -InternalUseOnly, engine-exit actions), where $script: reads as $null.
+$global:LogBufferMaxBytes      = 16KB    # flush after this much pending text
+$global:LogBufferMaxAgeSeconds = 2       # flush at least this often
+$global:LogRotateMaxBytes      = 2MB     # rotate when log exceeds this size
+$global:LogRotateKeep          = 3       # number of historical .1/.2/.3 files
+$global:LogRotateCheckEverySec = 5       # don't stat the file more than this
+$global:LogBufferHardCapBytes  = 8MB     # give up buffering past this (leaves a marker)
 $Script:LogRotateExitRegistered = $false
 # Buffer state lives in $global: so the engine-exit Action scriptblock (which
 # runs in its own scope) can still see and flush it.
@@ -382,7 +385,7 @@ if (-not $global:LogBuffers) { $global:LogBuffers = @{} }
 # duplicated component/context/file fields collapse to one 'comp' (+ 'at'
 # file:line on non-INFO lines only). See Write-Log for the exact schema.
 # Enabled by default; set $env:MEMLABS_JSON_LOG=0 (or 'false'/'off') to disable.
-$Script:JsonLogEnabled = -not ($env:MEMLABS_JSON_LOG -in @('0', 'false', 'False', 'off'))
+$global:JsonLogEnabled = -not ($env:MEMLABS_JSON_LOG -in @('0', 'false', 'False', 'off'))
 # One run id per process, tagged onto every line so an agent can group a run.
 # Honors an inherited $env:MEMLABS_RUN_ID so child job processes can share it.
 if (-not $global:MemLabsRunId) {
@@ -467,12 +470,12 @@ function Invoke-LogRotateIfNeeded {
         $entry = $global:LogBuffers[$Path]
         if ($entry) {
             $age = ([DateTime]::UtcNow - $entry.LastRotateCheckUtc).TotalSeconds
-            if ($age -lt $Script:LogRotateCheckEverySec) { return }
+            if ($age -lt $global:LogRotateCheckEverySec) { return }
             $entry.LastRotateCheckUtc = [DateTime]::UtcNow
         }
         $fi = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
-        if (-not $fi -or $fi.Length -lt $Script:LogRotateMaxBytes) { return }
-        $keep = $Script:LogRotateKeep
+        if (-not $fi -or $fi.Length -lt $global:LogRotateMaxBytes) { return }
+        $keep = $global:LogRotateKeep
         $oldest = "$Path.$keep"
         if (Test-Path -LiteralPath $oldest) {
             Remove-Item -LiteralPath $oldest -Force -ErrorAction SilentlyContinue
@@ -534,7 +537,7 @@ function Flush-LogBuffer {
             # Keep the text buffered so the next flush retries it. Only a hard cap
             # discards, and it leaves a marker so the gap is visible in the file
             # itself once writes resume -- a dropped chunk must never be silent.
-            if ($entry.Builder.Length -gt $Script:LogBufferHardCapBytes) {
+            if ($entry.Builder.Length -gt $global:LogBufferHardCapBytes) {
                 $lost = $entry.Builder.Length
                 $entry.Builder.Length = 0
                 [void]$entry.Builder.AppendLine(
@@ -1018,9 +1021,9 @@ function Write-Log {
                 $forceFlush = $Warning.IsPresent -or $Failure.IsPresent `
                     -or $Activity.IsPresent -or $SubActivity.IsPresent `
                     -or $Highlight.IsPresent
-                $sizeFlush = $entry.Builder.Length -ge $Script:LogBufferMaxBytes
+                $sizeFlush = $entry.Builder.Length -ge $global:LogBufferMaxBytes
                 $ageFlush = ([DateTime]::UtcNow - $entry.LastFlushUtc).TotalSeconds `
-                    -ge $Script:LogBufferMaxAgeSeconds
+                    -ge $global:LogBufferMaxAgeSeconds
 
                 if ($forceFlush -or $sizeFlush -or $ageFlush) {
                     Flush-LogBuffer -Path $logPath
@@ -1032,7 +1035,7 @@ function Write-Log {
                 # it for free. Only non-redundant fields are emitted; 'at' is
                 # added just for WARN/ERROR/VERBOSE (the lines you investigate)
                 # so bulk INFO stays compact.
-                if ($Script:JsonLogEnabled) {
+                if ($global:JsonLogEnabled) {
                     $jsonPath = [System.IO.Path]::ChangeExtension($logPath, '.jsonl')
                     $lvlName = switch ($logLevel) { 0 { 'VERBOSE' } 2 { 'WARN' } 3 { 'ERROR' } default { 'INFO' } }
                     $domVal = $null
@@ -1054,7 +1057,7 @@ function Write-Log {
                     $jsonEntry = Get-LogBufferEntry -Path $jsonPath
                     Add-LogBufferText -Entry $jsonEntry -Text ($jb.ToString() + "`n")
                     $jsonAge = ([DateTime]::UtcNow - $jsonEntry.LastFlushUtc).TotalSeconds
-                    if ($forceFlush -or $jsonEntry.Builder.Length -ge $Script:LogBufferMaxBytes -or $jsonAge -ge $Script:LogBufferMaxAgeSeconds) {
+                    if ($forceFlush -or $jsonEntry.Builder.Length -ge $global:LogBufferMaxBytes -or $jsonAge -ge $global:LogBufferMaxAgeSeconds) {
                         Flush-LogBuffer -Path $jsonPath
                     }
                 }
@@ -10808,7 +10811,7 @@ function Copy-ToolToVM {
                         try {
                             $visible = Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $vm.domain -MarkerRelativePath 'Tools.Bundle.md5' -Context 'tools' -TimeoutSeconds 90 -Phase 2
                             if ($visible) {
-                                $isoResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ArgumentList @($bundleHash, $script:MemlabsToolsVolumeLabel) -DisplayName 'Tools: Expand bundles from mounted ISO' -ScriptBlock {
+                                $isoResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ArgumentList @($bundleHash, $global:MemlabsToolsVolumeLabel) -DisplayName 'Tools: Expand bundles from mounted ISO' -ScriptBlock {
                                     param($expectedHash, $volumeLabel)
 
                                     $volume = Get-Volume -FileSystemLabel $volumeLabel -ErrorAction SilentlyContinue |
