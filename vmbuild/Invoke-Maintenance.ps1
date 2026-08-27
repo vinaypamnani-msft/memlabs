@@ -47,6 +47,52 @@ function Test-ChocoAvailable {
     return ($null -ne (Get-Command choco -ErrorAction SilentlyContinue))
 }
 
+function Get-InstalledPwshVersion {
+    # Chocolatey's own package record goes stale when pwsh is upgraded outside of it,
+    # so read the version off pwsh.exe. A chocolatey shim reports the shim's version.
+    $candidates = @(Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe')
+    $resolved = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($resolved -and $resolved.Source -notlike '*\chocolatey\*') {
+        $candidates += $resolved.Source
+    }
+
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+
+        $versionInfo = (Get-Item -LiteralPath $candidate -ErrorAction SilentlyContinue).VersionInfo
+        if (-not $versionInfo -or $versionInfo.FileMajorPart -le 0) { continue }
+
+        return [version]"$($versionInfo.FileMajorPart).$($versionInfo.FileMinorPart).$($versionInfo.FileBuildPart)"
+    }
+
+    return $null
+}
+
+function Get-ChocoAvailablePackageVersion {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId
+    )
+
+    $output = @(& choco search $PackageId --exact --limit-output)
+    $searchRc = $LASTEXITCODE
+
+    if (-not (Test-ChocoSuccessCode -Code $searchRc)) {
+        Write-LogMessage "choco search $PackageId returned exit code $searchRc; cannot determine the available version." -Level 'WARNING'
+        return $null
+    }
+
+    $idPattern = '^{0}\|(\d+(?:\.\d+){{1,3}})' -f [regex]::Escape($PackageId)
+    foreach ($line in $output) {
+        if ($line -match $idPattern) {
+            return [version]$Matches[1]
+        }
+    }
+
+    Write-LogMessage "choco search $PackageId reported no usable version; cannot compare it against the installed build." -Level 'WARNING'
+    return $null
+}
+
 $script:MaintenanceHadFailure = $false
 
 function Set-MemLabsFileAssociation {
@@ -861,17 +907,43 @@ function Invoke-WeeklyUpgrades {
     }
 
     if ($doPs7Upgrade) {
-        Write-LogMessage 'Upgrading PowerShell 7...'
-        & choco upgrade pwsh -y
-        $chocoRc = $LASTEXITCODE
-        Write-LogMessage "choco upgrade pwsh returned exit code: $chocoRc"
+        $installedPwsh = Get-InstalledPwshVersion
+        $availablePwsh = Get-ChocoAvailablePackageVersion -PackageId 'pwsh'
 
-        if (Test-ChocoSuccessCode -Code $chocoRc) {
+        if ($installedPwsh -and $availablePwsh -and $installedPwsh -ge $availablePwsh) {
+            # The package MSI returns 1603 when the installed build is newer than the one it carries.
+            if ($installedPwsh -gt $availablePwsh) {
+                Write-LogMessage "PowerShell $installedPwsh is installed but the Chocolatey pwsh package only offers $availablePwsh (a newer build was installed outside Chocolatey). Skipping the upgrade."
+            }
+            else {
+                Write-LogMessage "PowerShell $installedPwsh is already the latest Chocolatey pwsh version. Skipping the upgrade."
+            }
+
             $now.ToString('o') | Out-File $ps7Flag -Encoding ascii -NoNewline
-            Write-LogMessage 'PowerShell 7 upgrade completed successfully.'
         }
         else {
-            Write-LogMessage "PowerShell 7 upgrade failed (exit code: $chocoRc)." -Level 'WARNING'
+            if ($installedPwsh -and $availablePwsh) {
+                Write-LogMessage "Upgrading PowerShell 7 ($installedPwsh installed, $availablePwsh available)..."
+            }
+            else {
+                Write-LogMessage 'Upgrading PowerShell 7...'
+            }
+
+            & choco upgrade pwsh -y
+            $chocoRc = $LASTEXITCODE
+            Write-LogMessage "choco upgrade pwsh returned exit code: $chocoRc"
+
+            if (Test-ChocoSuccessCode -Code $chocoRc) {
+                $now.ToString('o') | Out-File $ps7Flag -Encoding ascii -NoNewline
+                Write-LogMessage 'PowerShell 7 upgrade completed successfully.'
+            }
+            else {
+                $failureMessage = "PowerShell 7 upgrade failed (exit code: $chocoRc)."
+                if ($chocoRc -eq 1603 -and $installedPwsh) {
+                    $failureMessage += " PowerShell $installedPwsh is already installed; 1603 usually means the package is trying to install an older or equal build."
+                }
+                Write-LogMessage $failureMessage -Level 'WARNING'
+            }
         }
     }
     else {
