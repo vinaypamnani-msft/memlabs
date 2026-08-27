@@ -1,6 +1,27 @@
 @ECHO OFF
 REM VmBuild.cmd
-pushd "%~dp0"
+SETLOCAL EnableExtensions DisableDelayedExpansion
+
+REM Run from an immutable snapshot. The git pull below can replace VMBuild.cmd,
+REM and cmd.exe would otherwise resume reading the new file at the old byte offset.
+IF /I "%~f0"=="%MEMLABS_VMBUILD_SNAPSHOT%" GOTO RunStableLauncher
+
+SET "MEMLABS_VMBUILD_ROOT=%~dp0"
+SET "MEMLABS_VMBUILD_SNAPSHOT=%TEMP%\MemLabs-VMBuild-%RANDOM%-%RANDOM%.cmd"
+FOR %%I IN ("%MEMLABS_VMBUILD_SNAPSHOT%") DO SET "MEMLABS_VMBUILD_SNAPSHOT=%%~fI"
+COPY /Y "%~f0" "%MEMLABS_VMBUILD_SNAPSHOT%" >NUL
+IF ERRORLEVEL 1 (
+    ECHO ERROR: Could not create a stable launcher copy at:
+    ECHO        %MEMLABS_VMBUILD_SNAPSHOT%
+    EXIT /B 1
+)
+
+REM Keep the call, cleanup, and exit on one parsed line. The live file may change
+REM while the snapshot runs, so this process must not read another line from it.
+CALL "%MEMLABS_VMBUILD_SNAPSHOT%" %* & IF ERRORLEVEL 1 (DEL /Q "%MEMLABS_VMBUILD_SNAPSHOT%" >NUL 2>&1 & EXIT /B 1) ELSE (DEL /Q "%MEMLABS_VMBUILD_SNAPSHOT%" >NUL 2>&1 & EXIT /B 0)
+
+:RunStableLauncher
+pushd "%MEMLABS_VMBUILD_ROOT%"
 cls
 
 REM ============================================================
