@@ -1059,6 +1059,41 @@ function Test-ConfigNeedsProxy {
     return $false
 }
 
+function Disable-ProxyOptIn {
+    # Clears every proxy opt-in in the config so a Proxy VM the user just
+    # deleted is not immediately re-added by Add-ProxyVMIfMissing on the next
+    # menu pass. Returns what was flipped so the caller can report it.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [object] $ConfigToModify = $global:config
+    )
+
+    $flipped = New-Object System.Collections.Generic.List[string]
+    if (-not $ConfigToModify) { return $flipped.ToArray() }
+
+    foreach ($vm in @($ConfigToModify.virtualMachines)) {
+        if (-not $vm) { continue }
+        if ($vm.PSObject.Properties.Name -contains 'useProxy' -and [bool]$vm.useProxy) {
+            $vm.useProxy = $false
+            $flipped.Add([string]$vm.vmName)
+        }
+    }
+
+    # Seed-only hints: left true, the next VM added would opt in and pull a
+    # replacement Proxy VM straight back into the config.
+    if ($ConfigToModify.domainDefaults) {
+        foreach ($key in @('UseProxyForClients', 'UseProxyForCM')) {
+            if ($ConfigToModify.domainDefaults.PSObject.Properties.Name -contains $key -and [bool]$ConfigToModify.domainDefaults.$key) {
+                $ConfigToModify.domainDefaults.$key = $false
+                $flipped.Add("domainDefaults.$key")
+            }
+        }
+    }
+
+    return $flipped.ToArray()
+}
+
 function Add-ProxyVMIfMissing {
     # When the in-memory config opts into the proxy (domainDefaults.UseProxyFor*
     # or any per-VM useProxy=$true) but no Proxy VM exists -- neither in the
@@ -1097,6 +1132,12 @@ function Add-ProxyVMIfMissing {
         # VM name. They can only have come from a previous validation pass
         # (different config shape) and would mislead the user.
         Clear-StaleValidationMessagesForVM -VmName $newVM.vmName
+        # write-log above is wiped by the menu's clear-screen; the banner is
+        # the only channel the user actually gets to read.
+        $optedIn = @($ConfigToModify.virtualMachines | Where-Object { -not $_.hidden -and $_.PSObject.Properties.Name -contains 'useProxy' -and [bool]$_.useProxy } | ForEach-Object { $_.vmName })
+        $because = 'the domain proxy defaults'
+        if ($optedIn.Count -gt 0) { $because = "useProxy=true on $($optedIn -join ', ')" }
+        Add-ErrorMessage -Warning -property 'useProxy' -message "Added Proxy VM $($newVM.vmName) to $domainName because of $because. Deleting the Proxy VM turns useProxy off everywhere."
     }
 }
 

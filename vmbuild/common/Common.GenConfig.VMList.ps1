@@ -803,6 +803,9 @@ function Select-VirtualMachines {
                         }
                         else {
                             Remove-VirtualMachine -VmName $virtualMachine.vmName
+                            if ($virtualMachine.role -eq "Proxy") {
+                                Invoke-ProxyOptInCleanup -ProxyVmName $virtualMachine.vmName
+                            }
                             if ($global:Config.existingVirtualMachines) {
                                 $global:Config.existingVirtualMachines = $global:Config.existingVirtualMachines | where-object { $_.vmName -ne $virtualMachine.vmName }
                             }
@@ -1287,6 +1290,9 @@ function Select-VirtualMachines {
                             }
                         }
                         if ($removeVM -eq $true) {
+                            if ($virtualMachine.role -eq "Proxy") {
+                                Invoke-ProxyOptInCleanup -ProxyVmName $virtualMachine.vmName
+                            }
                             Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $global:config
                         }
 
@@ -1301,6 +1307,32 @@ function Select-VirtualMachines {
         return
     }
 
+}
+
+function Invoke-ProxyOptInCleanup {
+    # Deleting the Proxy VM has to clear every useProxy opt-in too, or
+    # Add-ProxyVMIfMissing re-adds a Proxy on the next menu pass and the delete
+    # looks like it silently failed.
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Name of the Proxy VM being removed.")]
+        [string] $ProxyVmName
+    )
+
+    $flipped = @(Disable-ProxyOptIn -ConfigToModify $global:config)
+    $summary = "Proxy VM $ProxyVmName removed."
+    if ($flipped.Count -gt 0) {
+        $summary = "$summary useProxy turned off on: $($flipped -join ', ')."
+    }
+    Write-Log $summary
+    Write-Host
+    Write-OrangePoint $summary
+
+    # The menu clear-screens and resets GenConfigErrorMessages on its next
+    # pass; PendingValidationErrors is the one channel that survives both.
+    $pending = @($global:PendingValidationErrors | Where-Object { $_ })
+    $pending += [PSCustomObject]@{ property = 'useProxy'; Level = 'WARNING'; Message = $summary }
+    $global:PendingValidationErrors = $pending
 }
 
 function Remove-VMFromConfig {

@@ -132,8 +132,19 @@ function Show-GenConfigErrorMessages {
         [switch] $LineCount
     )
 
-    $Errors = $global:GenConfigErrorMessages | Select-Object -Unique
-    $count = ($Errors | Measure-Object).Count
+    # Select-Object -Unique compares these PSCustomObjects by ToString(), which
+    # is empty for all of them, so it collapsed the whole list to one message.
+    # Dedupe on the text instead; first occurrence wins.
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $unique = New-Object System.Collections.Generic.List[object]
+    foreach ($e in @($global:GenConfigErrorMessages)) {
+        if (-not $e) { continue }
+        $key = "$($e.Message)"
+        if (-not $key) { $key = "$e" }
+        if ($seen.Add($key)) { $unique.Add($e) }
+    }
+    $Errors = $unique.ToArray()
+    $count = $Errors.Count
     if ($LineCount) {
         if ($count -eq 0) { return 0 }
         return $count + 4
@@ -141,13 +152,26 @@ function Show-GenConfigErrorMessages {
     if ($count -gt 0) {
         #Write-host2 "┃" -NoNewline -ForegroundColor Crimson
         Write-Verbose "Showing Show-GenConfigErrorMessages"
-        Write-Host2 "┍━━━━━━━━━━━━━━━━━━━  ERROR: Validation Failures were encountered:" -ForegroundColor Crimson
-        Write-host2 "│" -ForegroundColor Crimson
-        foreach ($err in $Errors) {
-            Write-host2 "│" -NoNewline -ForegroundColor Crimson
-            write-redx $err.message -ForegroundColor White
+        # A notice (auto-add/auto-remove) must not be dressed up as a validation failure.
+        $failures = @($Errors | Where-Object { $_.Level -ne "WARNING" })
+        $color = "Crimson"
+        $header = "ERROR: Validation Failures were encountered:"
+        if ($failures.Count -eq 0) {
+            $color = "Orange"
+            $header = "NOTICE: The configuration was changed for you:"
         }
-        Write-host2 "│" -ForegroundColor Crimson
+        Write-Host2 "┍━━━━━━━━━━━━━━━━━━━  $header" -ForegroundColor $color
+        Write-host2 "│" -ForegroundColor $color
+        foreach ($err in $Errors) {
+            Write-host2 "│" -NoNewline -ForegroundColor $color
+            if ($err.Level -eq "WARNING") {
+                Write-OrangePoint $err.message -ForegroundColor White
+            }
+            else {
+                write-redx $err.message -ForegroundColor White
+            }
+        }
+        Write-host2 "│" -ForegroundColor $color
         Write-Host
         $global:GenConfigErrorMessages = $null
     }
