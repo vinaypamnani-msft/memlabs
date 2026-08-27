@@ -4680,8 +4680,14 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
                 }
             }
             else {
+                # v_BgbMP computes DBID live from the stored SQLServerName/DatabaseName and
+                # falls back to the site code when EITHER is the empty string, so those two
+                # values -- not the DBID -- say which half of the repoint is missing.
                 $results.Passed = $false
-                $results.Details.Add("FAIL: MP '$mp' DBID='$dbid' is NOT a replica hash -- MP still on the site DB (Set-CMManagementPoint did not apply)")
+                $prop = @($mpProps | Where-Object { "$($_.ServerName)".ToLower() -eq $mp.ToLower() }) | Select-Object -First 1
+                $storedSql = if ($prop) { "$($prop.SQLServerName)".Trim() } else { '<no SC_SysResUse row>' }
+                $storedDb = if ($prop) { "$($prop.DatabaseName)".Trim() } else { '<no SC_SysResUse row>' }
+                $results.Details.Add("FAIL: MP '$mp' DBID='$dbid' is the site code, not a replica hash -- the MP is still reading the site DB. Stored SQLServerName='$storedSql', DatabaseName='$storedDb'; v_BgbMP falls back to the site code when either is empty, so the empty one names what did not get written.")
             }
         }
         return $results

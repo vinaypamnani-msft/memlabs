@@ -1119,14 +1119,27 @@ if (-not $hardFailed) {
                 Write-DscStatus "$Tag [$rlabel] MP repointed to replica DB $($t.ReplicaFqdn)\$instanceLabel / $($t.ReplicaDbName)."
                 # Verify what CM actually stored (the value the MP connects with). Bare DB name =
                 # connectable; an instance part that is empty or MSSQLSERVER = broken for the MP.
+                # DBID is read too because the site DB name and the replica DB name are both
+                # CM_<SiteCode>, so DatabaseName alone cannot tell a repointed MP from one still
+                # on the site DB -- and the route cleanup below deletes any replica route whose
+                # DBID has no v_BgbMP match, i.e. the one STEP 5 just built.
                 try {
-                    $sd = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "SELECT DatabaseName = MAX(CASE WHEN prop.Name = N'DatabaseName' THEN prop.Value2 END) FROM SC_SysResUse sys_res JOIN SC_SysResUse_Property prop ON prop.SysResUseID = sys_res.ID WHERE sys_res.RoleTypeID = 6 AND dbo.fnGetSiteSystemName(sys_res.NALPath) = N'$($t.MPFqdn)' GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)"
+                    $sd = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "SELECT SqlServerName = MAX(CASE WHEN prop.Name = N'SQLServerName' THEN prop.Value2 END), DatabaseName = MAX(CASE WHEN prop.Name = N'DatabaseName' THEN prop.Value2 END), DBID = MAX(bgb.DBID) FROM SC_SysResUse sys_res JOIN SC_SysResUse_Property prop ON prop.SysResUseID = sys_res.ID LEFT JOIN v_BgbMP bgb ON bgb.ServerName = dbo.fnGetSiteSystemName(sys_res.NALPath) WHERE sys_res.RoleTypeID = 6 AND dbo.fnGetSiteSystemName(sys_res.NALPath) = N'$($t.MPFqdn)' GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)"
+                    $storedSql = if ($sd) { "$($sd.SqlServerName)" } else { '' }
                     $storedDb = if ($sd) { "$($sd.DatabaseName)" } else { '' }
+                    $storedDbid = if ($sd) { "$($sd.DBID)" } else { '' }
                     $instPart = if ($storedDb -match '\\') { $storedDb.Split('\')[0] } else { '' }
                     $verdict = if ($storedDb -match '\\' -and ($instPart -eq '' -or $instPart -ieq 'MSSQLSERVER')) { 'BROKEN - MP cannot connect' } else { 'connectable' }
-                    Write-DscStatus "$Tag [$rlabel] stored DatabaseName = '$storedDb' ($verdict)."
+                    Write-DscStatus "$Tag [$rlabel] stored SQLServerName = '$storedSql', DatabaseName = '$storedDb' ($verdict), v_BgbMP DBID = '$storedDbid'."
+                    if ([string]::IsNullOrWhiteSpace($storedDbid)) {
+                        Write-DscStatus "$Tag [$rlabel] v_BgbMP returned no DBID for this MP -- the flip was NOT measured, which is not the same as 'it worked'."
+                    }
+                    elseif (-not $storedDbid.StartsWith('0x')) {
+                        Write-DscStatus "$Tag [$rlabel] DBID is still '$storedDbid' (the site code), so the MP is NOT on the replica. v_BgbMP derives it live from the two stored values above -- whichever is empty is what Set-CMManagementPoint failed to write." -Failure
+                        $hardFailed = $true
+                    }
                 }
-                catch { Write-DscStatus "$Tag [$rlabel] could not read back stored DatabaseName: $($_.Exception.Message)" }
+                catch { Write-DscStatus "$Tag [$rlabel] could not read back the stored MP database / DBID -- the repoint is UNVERIFIED, not confirmed: $($_.Exception.Message)" }
             }
             catch {
                 Write-DscStatus "$Tag [$rlabel] Set-CMManagementPoint to replica failed: $($_.Exception.Message)" -Failure
