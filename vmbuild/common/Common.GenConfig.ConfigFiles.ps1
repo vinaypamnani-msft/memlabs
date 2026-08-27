@@ -1,4 +1,45 @@
 ﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+function Write-ConfigJsonFile {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
+        [object] $Config,
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $directory = [System.IO.Path]::GetDirectoryName($fullPath)
+    if (-not [System.IO.Directory]::Exists($directory)) {
+        throw "Config directory does not exist: $directory"
+    }
+
+    $tempPath = Join-Path $directory (".$([System.IO.Path]::GetFileName($fullPath)).$([guid]::NewGuid().ToString('N')).tmp")
+    $backupPath = "$tempPath.bak"
+    try {
+        $json = $Config | ConvertTo-Json -Depth 5 -ErrorAction Stop
+        $json | Out-File -LiteralPath $tempPath -ErrorAction Stop
+        $null = Get-Content -LiteralPath $tempPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+
+        if ([System.IO.File]::Exists($fullPath)) {
+            [System.IO.File]::Replace($tempPath, $fullPath, $backupPath)
+        }
+        else {
+            [System.IO.File]::Move($tempPath, $fullPath)
+        }
+    }
+    finally {
+        if ([System.IO.File]::Exists($tempPath)) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        }
+        if ([System.IO.File]::Exists($backupPath)) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Function Get-ConfigFiles {
     param(
         [string] $ConfigPath,
@@ -108,7 +149,8 @@ function Select-Config {
                 $savedConfigJson = Get-Content $file | ConvertFrom-Json
             }
             catch {
-                Write-Log "Failed to parse config file '$($file.FullName)': $_" -Warning
+                Write-Log "Skipping invalid config file '$($file.FullName)'. Repair it or rename it outside '*.json' before loading. JSON error: $_" -Warning
+                continue
             }
 
             $savedNotes = "[" + $file.LastWriteTime.GetDateTimeFormats()[2].PadLeft(8) + "]"

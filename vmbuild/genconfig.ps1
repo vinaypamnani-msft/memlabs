@@ -1170,7 +1170,7 @@ function Save-Config {
 
     if ($fullFileName -and (-not $response)) {
         try {
-            $config | ConvertTo-Json -Depth 5 | Out-File $fullfilename -ErrorAction Stop
+            Write-ConfigJsonFile -Config $config -Path $fullfilename
             Write-Host "Saved to $fullfilename"
         }
         catch {
@@ -1192,7 +1192,7 @@ function Save-Config {
     }
 
     try {
-        $config | ConvertTo-Json -Depth 5 | Out-File $filename -ErrorAction Stop
+        Write-ConfigJsonFile -Config $config -Path $filename
         #$return.ConfigFileName = Split-Path -Path $fileName -Leaf
         Write-Host "Saved to $filename"
     }
