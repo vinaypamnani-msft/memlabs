@@ -906,11 +906,18 @@ function Invoke-WeeklyUpgrades {
         }
     }
 
-    if ($doPs7Upgrade) {
+    # Both paths below install the same MSI, and 'upgrade all' runs on its own schedule, so measure for both.
+    $installedPwsh = $null
+    $availablePwsh = $null
+    $pwshMsiWouldFail = $false
+    if ($doPs7Upgrade -or $doChocoUpgrade) {
         $installedPwsh = Get-InstalledPwshVersion
         $availablePwsh = Get-ChocoAvailablePackageVersion -PackageId 'pwsh'
+        $pwshMsiWouldFail = ($installedPwsh -and $availablePwsh -and $installedPwsh -ge $availablePwsh)
+    }
 
-        if ($installedPwsh -and $availablePwsh -and $installedPwsh -ge $availablePwsh) {
+    if ($doPs7Upgrade) {
+        if ($pwshMsiWouldFail) {
             # The package MSI returns 1603 when the installed build is newer than the one it carries.
             if ($installedPwsh -gt $availablePwsh) {
                 Write-LogMessage "PowerShell $installedPwsh is installed but the Chocolatey pwsh package only offers $availablePwsh (a newer build was installed outside Chocolatey). Skipping the upgrade."
@@ -957,7 +964,15 @@ function Invoke-WeeklyUpgrades {
         $scriptLines = @()
         $scriptLines += '$Host.UI.RawUI.WindowTitle = "MemLabs - Chocolatey Upgrades"'
         $scriptLines += "Write-Host 'Upgrading all Chocolatey packages...' -ForegroundColor Cyan"
-        $scriptLines += '& choco upgrade all -y --ignore-checksums'
+
+        $upgradeAllCommand = '& choco upgrade all -y --ignore-checksums'
+        if ($pwshMsiWouldFail) {
+            # choco wants the value single-quoted inside the double quotes.
+            $upgradeAllCommand += ' --except="''pwsh,powershell-core''"'
+            Write-LogMessage "Excluding pwsh and powershell-core from upgrade all; PowerShell $installedPwsh is installed and the package offers $availablePwsh."
+        }
+
+        $scriptLines += $upgradeAllCommand
         $scriptLines += 'if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {'
         $scriptLines += "    '$timestamp' | Out-File '$chocoAllFlag' -Encoding ascii -NoNewline"
         $scriptLines += "    Write-Host 'Chocolatey package upgrade completed successfully.' -ForegroundColor Green"
@@ -972,7 +987,8 @@ function Invoke-WeeklyUpgrades {
         $chocoScriptPath = Join-Path $env:TEMP 'memlabs_choco_upgrade.ps1'
         $scriptContent | Out-File $chocoScriptPath -Encoding utf8
 
-        Start-Process pwsh -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $chocoScriptPath -WindowStyle Normal
+        # Not pwsh: Chocolatey cannot replace pwsh.exe while it is in the parent process chain.
+        Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $chocoScriptPath -WindowStyle Normal
         Write-LogMessage 'Chocolatey upgrade all launched in a new window (non-blocking).'
     }
     else {
