@@ -212,6 +212,33 @@ function Invoke-ReplSql {
     }
 }
 
+# The site DB and every replica DB are named CM_<SiteCode>, so a DatabaseName read-back
+# cannot tell a repointed MP from one still on the site DB. v_BgbMP.DBID can: it is a
+# view computed live from these same rows that falls back to the site code when either
+# stored name is the empty string. Names are Value2; UseSiteDatabase is Value3 (int).
+function Get-MPRepointState {
+    param([Parameter(Mandatory)][string]$MPFqdn)
+    $r = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "SELECT SqlServerName = MAX(CASE WHEN prop.Name = N'SQLServerName' THEN prop.Value2 END), DatabaseName = MAX(CASE WHEN prop.Name = N'DatabaseName' THEN prop.Value2 END), UseSiteDb = MAX(CASE WHEN prop.Name = N'UseSiteDatabase' THEN prop.Value3 END), DBID = MAX(bgb.DBID) FROM SC_SysResUse sys_res JOIN SC_SysResUse_Property prop ON prop.SysResUseID = sys_res.ID LEFT JOIN v_BgbMP bgb ON bgb.ServerName = dbo.fnGetSiteSystemName(sys_res.NALPath) WHERE sys_res.RoleTypeID = 6 AND dbo.fnGetSiteSystemName(sys_res.NALPath) = N'$MPFqdn' GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)"
+    if (-not $r) {
+        return [pscustomobject]@{ RowFound = $false; SqlServerName = ''; DatabaseName = ''; UseSiteDb = ''; DBID = ''; OnReplica = $false
+            Text = "no MP row in SC_SysResUse for $MPFqdn"
+        }
+    }
+    $sqlName = "$($r.SqlServerName)"
+    $dbName = "$($r.DatabaseName)"
+    $useSite = "$($r.UseSiteDb)"
+    $dbid = "$($r.DBID)"
+    return [pscustomobject]@{
+        RowFound      = $true
+        SqlServerName = $sqlName
+        DatabaseName  = $dbName
+        UseSiteDb     = $useSite
+        DBID          = $dbid
+        OnReplica     = $dbid.StartsWith('0x')
+        Text          = "SQLServerName='$sqlName' DatabaseName='$dbName' UseSiteDatabase=$useSite DBID='$dbid'"
+    }
+}
+
 # Collect an actionable diagnostic snapshot on failure (state that explains WHY the
 # replica isn't working) so it's captured in the DSC log without a manual health run.
 function Write-MPReplicaDiagnostics {
@@ -239,6 +266,13 @@ function Write-MPReplicaDiagnostics {
     catch { Write-DscStatus "$Tag [Diag] agent-history query failed: $($_.Exception.Message)" }
     foreach ($t in @($Targets)) {
         $mpLabel = "$($t.MPName)"
+        # First, because it decides whether the replica-side findings below are causes
+        # or consequences: an MP still on the site DB never reads any of them.
+        try {
+            $mpState = Get-MPRepointState -MPFqdn $t.MPFqdn
+            Write-DscStatus "$Tag [Diag][MP $mpLabel] $($mpState.Text) onReplica=$($mpState.OnReplica)"
+        }
+        catch { Write-DscStatus "$Tag [Diag][MP $mpLabel] repoint-state query failed: $($_.Exception.Message)" }
         try {
             $rb = Invoke-ReplSql -Instance $t.ReplicaConn -Query "SELECT b = ISNULL((SELECT CONVERT(int, is_broker_enabled) FROM sys.databases WHERE name = N'$($t.ReplicaDbName)'), -1)"
             $sub = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL SELECT c = COUNT(*) FROM dbo.MSreplication_subscriptions WHERE publication = 'ConfigMgr_MPReplica' ELSE SELECT c = 0"
@@ -1082,11 +1116,14 @@ END
 #          Done LAST; flips v_BgbMP.DBID to the hash so BGB uses the new route.
 # ===========================================================================
 if (-not $hardFailed) {
+    $repointTries = 3
+    $repointWaitSec = 20
     try {
         . $PSScriptRoot\Connect-CMSite.ps1 -Tag $Tag
         foreach ($t in $targets) {
             $rlabel = "Replica[$($t.MPName)]"
             $isNamedInstance = ($t.ReplicaInstance -and $t.ReplicaInstance -ne 'MSSQLSERVER')
+            $instanceLabel = if ($isNamedInstance) { $t.ReplicaInstance } else { '(default)' }
             $mpParams = @{
                 SiteSystemServerName = $t.MPFqdn
                 SiteCode             = $SiteCode
@@ -1106,43 +1143,66 @@ if (-not $hardFailed) {
                 # strips the instance for its DBID hash (so routing still matches STEP 5's bare
                 # hash), but the MP's live connection uses the RAW stored value, so it must be
                 # bare. OMITTING -SqlServerInstanceName leaves whatever a prior run stored (the
-                # stale 'MSSQLSERVER\...'). Reset to the site DB first to CLEAR the stored
-                # SQLServerName/DatabaseName, then re-point with an EMPTY instance so CM records
-                # the bare DB name.
-                try { Set-CMManagementPoint -SiteSystemServerName $t.MPFqdn -SiteCode $SiteCode -UseSiteDatabase $true -ErrorAction Stop }
-                catch { Write-DscStatus "$Tag [$rlabel] pre-reset to site DB failed (continuing): $($_.Exception.Message)" }
+                # stale 'MSSQLSERVER\...'), so the loop resets to the site DB first to CLEAR the
+                # stored names, then re-points with an EMPTY instance.
                 $mpParams['SqlServerInstanceName'] = ''
             }
-            $instanceLabel = if ($isNamedInstance) { $t.ReplicaInstance } else { '(default)' }
-            try {
-                Set-CMManagementPoint @mpParams
-                Write-DscStatus "$Tag [$rlabel] MP repointed to replica DB $($t.ReplicaFqdn)\$instanceLabel / $($t.ReplicaDbName)."
-                # Verify what CM actually stored (the value the MP connects with). Bare DB name =
-                # connectable; an instance part that is empty or MSSQLSERVER = broken for the MP.
-                # DBID is read too because the site DB name and the replica DB name are both
-                # CM_<SiteCode>, so DatabaseName alone cannot tell a repointed MP from one still
-                # on the site DB -- and the route cleanup below deletes any replica route whose
-                # DBID has no v_BgbMP match, i.e. the one STEP 5 just built.
+
+            # The write is re-issued rather than trusted: PT1 2026-08-26 logged a clean
+            # Set-CMManagementPoint whose DBID never left the site code, four minutes after the
+            # MP role itself was created. Verify-then-retry is the only thing that separates a
+            # transient half-write from a permanent one, and it costs nothing when it works.
+            $state = $null
+            $flipped = $false
+            $lastError = ''
+            for ($attempt = 1; $attempt -le $repointTries; $attempt++) {
                 try {
-                    $sd = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "SELECT SqlServerName = MAX(CASE WHEN prop.Name = N'SQLServerName' THEN prop.Value2 END), DatabaseName = MAX(CASE WHEN prop.Name = N'DatabaseName' THEN prop.Value2 END), DBID = MAX(bgb.DBID) FROM SC_SysResUse sys_res JOIN SC_SysResUse_Property prop ON prop.SysResUseID = sys_res.ID LEFT JOIN v_BgbMP bgb ON bgb.ServerName = dbo.fnGetSiteSystemName(sys_res.NALPath) WHERE sys_res.RoleTypeID = 6 AND dbo.fnGetSiteSystemName(sys_res.NALPath) = N'$($t.MPFqdn)' GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)"
-                    $storedSql = if ($sd) { "$($sd.SqlServerName)" } else { '' }
-                    $storedDb = if ($sd) { "$($sd.DatabaseName)" } else { '' }
-                    $storedDbid = if ($sd) { "$($sd.DBID)" } else { '' }
-                    $instPart = if ($storedDb -match '\\') { $storedDb.Split('\')[0] } else { '' }
-                    $verdict = if ($storedDb -match '\\' -and ($instPart -eq '' -or $instPart -ieq 'MSSQLSERVER')) { 'BROKEN - MP cannot connect' } else { 'connectable' }
-                    Write-DscStatus "$Tag [$rlabel] stored SQLServerName = '$storedSql', DatabaseName = '$storedDb' ($verdict), v_BgbMP DBID = '$storedDbid'."
-                    if ([string]::IsNullOrWhiteSpace($storedDbid)) {
-                        Write-DscStatus "$Tag [$rlabel] v_BgbMP returned no DBID for this MP -- the flip was NOT measured, which is not the same as 'it worked'."
+                    if (-not $isNamedInstance) {
+                        try { Set-CMManagementPoint -SiteSystemServerName $t.MPFqdn -SiteCode $SiteCode -UseSiteDatabase $true -ErrorAction Stop }
+                        catch { Write-DscStatus "$Tag [$rlabel] pre-reset to site DB failed (continuing): $($_.Exception.Message)" }
                     }
-                    elseif (-not $storedDbid.StartsWith('0x')) {
-                        Write-DscStatus "$Tag [$rlabel] DBID is still '$storedDbid' (the site code), so the MP is NOT on the replica. v_BgbMP derives it live from the two stored values above -- whichever is empty is what Set-CMManagementPoint failed to write." -Failure
-                        $hardFailed = $true
-                    }
+                    Set-CMManagementPoint @mpParams
+                    Write-DscStatus "$Tag [$rlabel] MP repointed to replica DB $($t.ReplicaFqdn)\$instanceLabel / $($t.ReplicaDbName) (attempt $attempt/$repointTries)."
                 }
-                catch { Write-DscStatus "$Tag [$rlabel] could not read back the stored MP database / DBID -- the repoint is UNVERIFIED, not confirmed: $($_.Exception.Message)" }
+                catch {
+                    $lastError = "Set-CMManagementPoint threw: $($_.Exception.Message)"
+                    $state = $null
+                    Write-DscStatus "$Tag [$rlabel] $lastError (attempt $attempt/$repointTries)"
+                    if ($attempt -lt $repointTries) { Start-Sleep -Seconds $repointWaitSec; continue }
+                    break
+                }
+
+                try { $state = Get-MPRepointState -MPFqdn $t.MPFqdn; $lastError = '' }
+                catch {
+                    $state = $null
+                    $lastError = "read-back threw: $($_.Exception.Message)"
+                    Write-DscStatus "$Tag [$rlabel] $lastError (attempt $attempt/$repointTries) -- UNVERIFIED, which is not the same as confirmed"
+                }
+
+                if ($state -and $state.OnReplica) {
+                    # A stored DatabaseName whose instance part is empty or MSSQLSERVER makes the
+                    # MP build 'server\' and fail MPLIST with HTTP 500, even though DBID is a hash.
+                    $instPart = if ($state.DatabaseName -match '\\') { $state.DatabaseName.Split('\')[0] } else { '' }
+                    $verdict = if ($state.DatabaseName -match '\\' -and ($instPart -eq '' -or $instPart -ieq 'MSSQLSERVER')) { 'BROKEN - MP cannot connect' } else { 'connectable' }
+                    Write-DscStatus "$Tag [$rlabel] repoint VERIFIED on attempt $attempt/${repointTries}: $($state.Text) ($verdict)."
+                    $flipped = $true
+                    break
+                }
+
+                if ($state) {
+                    Write-DscStatus "$Tag [$rlabel] repoint did NOT take on attempt $attempt/${repointTries}: $($state.Text)"
+                }
+                if ($attempt -lt $repointTries) { Start-Sleep -Seconds $repointWaitSec }
             }
-            catch {
-                Write-DscStatus "$Tag [$rlabel] Set-CMManagementPoint to replica failed: $($_.Exception.Message)" -Failure
+
+            if (-not $flipped) {
+                Write-MPReplicaDiagnosticsOnce
+                if ($state) {
+                    Write-DscStatus "$Tag [$rlabel] MP is still NOT on the replica after $repointTries attempts. Last state: $($state.Text). v_BgbMP derives DBID live from those two names and falls back to the site code when EITHER is empty, so the blank one is what Set-CMManagementPoint did not write." -Failure
+                }
+                else {
+                    Write-DscStatus "$Tag [$rlabel] repoint neither completed nor verified after $repointTries attempts ($lastError). Failing rather than reporting an unmeasured write as success." -Failure
+                }
                 $hardFailed = $true
             }
         }
