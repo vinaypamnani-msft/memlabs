@@ -49,6 +49,114 @@ function Test-ChocoAvailable {
 
 $script:MaintenanceHadFailure = $false
 
+function Set-MemLabsFileAssociation {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Win32.RegistryKey]$ClassesRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$LauncherPath
+    )
+
+    $progId = 'MemLabs.Run'
+    $openCommand = '"{0}" "%1"' -f $LauncherPath
+    $registryValues = @(
+        @{ SubKey = '.memlabs'; Value = $progId },
+        @{ SubKey = $progId; Value = 'MemLabs configuration' },
+        @{ SubKey = "$progId\shell\open\command"; Value = $openCommand }
+    )
+    $changed = $false
+
+    foreach ($registryValue in $registryValues) {
+        $key = $ClassesRoot.CreateSubKey($registryValue.SubKey)
+        if ($null -eq $key) {
+            throw "Could not open the per-user registry key '$($registryValue.SubKey)' for writing."
+        }
+
+        try {
+            if ([string]$key.GetValue('') -ne $registryValue.Value) {
+                $key.SetValue('', $registryValue.Value, [Microsoft.Win32.RegistryValueKind]::String)
+                $changed = $true
+            }
+            if ([string]$key.GetValue('') -ne $registryValue.Value) {
+                throw "Registry read-back failed for '$($registryValue.SubKey)'."
+            }
+        }
+        finally {
+            $key.Dispose()
+        }
+    }
+
+    return $changed
+}
+
+function Invoke-MemLabsFileAssociationMaintenance {
+    Write-LogMessage 'Starting MemLabs file association maintenance...'
+
+    $progId = 'MemLabs.Run'
+    $launcherPath = Join-Path $scriptPath 'VMBuild.cmd'
+    $expectedCommand = '"{0}" "%1"' -f $launcherPath
+    $acceptedCommands = @($expectedCommand, ('"{0}" %1' -f $launcherPath))
+
+    if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
+        throw "MemLabs launcher not found at '$launcherPath'."
+    }
+
+    $effectiveProgId = $null
+    $effectiveCommand = $null
+    $extensionKey = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey('.memlabs')
+    try {
+        if ($null -ne $extensionKey) {
+            $effectiveProgId = [string]$extensionKey.GetValue('')
+        }
+    }
+    finally {
+        if ($null -ne $extensionKey) { $extensionKey.Dispose() }
+    }
+
+    $commandKey = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey("$progId\shell\open\command")
+    try {
+        if ($null -ne $commandKey) {
+            $effectiveCommand = [string]$commandKey.GetValue('')
+        }
+    }
+    finally {
+        if ($null -ne $commandKey) { $commandKey.Dispose() }
+    }
+
+    if ($effectiveProgId -eq $progId -and $acceptedCommands -contains $effectiveCommand) {
+        Write-LogMessage "The .memlabs association already opens '$launcherPath'."
+        return
+    }
+
+    $classesRoot = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\Classes')
+    if ($null -eq $classesRoot) {
+        throw 'Could not open the current user Classes registry key for writing.'
+    }
+
+    try {
+        $changed = Set-MemLabsFileAssociation -ClassesRoot $classesRoot -LauncherPath $launcherPath
+    }
+    finally {
+        $classesRoot.Dispose()
+    }
+
+    if ($changed) {
+        if ($null -eq ('MemLabs.ShellNotification' -as [type])) {
+            $nativeMethods = @'
+[System.Runtime.InteropServices.DllImport("shell32.dll")]
+public static extern void SHChangeNotify(uint eventId, uint flags, System.IntPtr item1, System.IntPtr item2);
+'@
+            Add-Type -Namespace MemLabs -Name ShellNotification -MemberDefinition $nativeMethods -ErrorAction Stop
+        }
+        [MemLabs.ShellNotification]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+        Write-LogMessage "Registered .memlabs files to open with '$launcherPath' for the current user."
+    }
+    else {
+        Write-LogMessage 'The per-user .memlabs association is already current.'
+    }
+}
+
 function Invoke-System32CurlMaintenance {
     Write-LogMessage 'Starting System32 curl maintenance...'
 
@@ -808,6 +916,7 @@ Write-LogMessage "Script path: $scriptPath"
 Write-LogMessage "Log file: $logFile"
 Write-LogMessage '========================================' 
 
+try { Invoke-MemLabsFileAssociationMaintenance } catch { Write-LogMessage "File association maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-GitMaintenance } catch { Write-LogMessage "Git maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-System32CurlMaintenance } catch { Write-LogMessage "System32 curl maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }

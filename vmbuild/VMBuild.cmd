@@ -1,13 +1,6 @@
 @ECHO OFF
 REM VmBuild.cmd
 pushd "%~dp0"
-
-REM ============================================================
-REM Register file association
-REM (use ^" so embedded quotes are not seen as terminators by cmd /c)
-REM ============================================================
-cmd /c ftype MemLabs.Run=^"%~f0^" %%1
-cmd /c assoc .memlabs=MemLabs.Run
 cls
 
 REM ============================================================
