@@ -945,6 +945,15 @@ function New-MRemoteNGConnectionNode {
         [bool]$UseEnhancedMode = $false
     )
 
+    # mRemoteNG sets DisableCredentialsDelegation=true for UseVmId connections.
+    # Host authorization uses the current Windows session; guest credentials are
+    # entered at the console and cannot be supplied through these fields.
+    if (-not [string]::IsNullOrWhiteSpace($VmId)) {
+        $Username = ""
+        $Domain = ""
+        $Password = ""
+    }
+
     $node = $Doc.CreateElement("Node")
     $node.SetAttribute("Name", $DisplayName)
     $node.SetAttribute("Type", "Connection")
@@ -1814,7 +1823,7 @@ function New-MRemoteNGFileFromHyperV {
 
             if (-not [string]::IsNullOrWhiteSpace($vmID)) {
                 $displayName = "[console] " + $displayName
-                $connUsername = $env:username
+                $connUsername = ""
                 $connDomain = ""
                 $connPassword = ""
                 $name = $env:computername
@@ -1894,7 +1903,7 @@ function New-MRemoteNGFileFromHyperV {
         $hvContainer = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "Hyper-V Console" } | Select-Object -First 1
         if (-not $hvContainer) {
             $hvContainer = New-MRemoteNGContainerNode -Doc $doc -Name "Hyper-V Console" `
-                -Username $env:USERNAME -Domain "" -Password "" -Protocol "RDP" -Port "2179" -Expanded $false
+                -Username "" -Domain "" -Password "" -Protocol "RDP" -Port "2179" -Expanded $false
             [void]$container.AppendChild($hvContainer)
             $shouldSave = $true
         }
@@ -1917,7 +1926,7 @@ function New-MRemoteNGFileFromHyperV {
             if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $hvContainer `
                     -Name $vm.VmName -DisplayName $hvDisplayName -Hostname $env:COMPUTERNAME `
                     -Protocol "RDP" -Port "2179" -Description "" `
-                    -Username $env:USERNAME -Domain "" -Password "" `
+                    -Username "" -Domain "" -Password "" `
                     -GuidSeed "hv:${domain}:$($vm.VmName)" `
                     -VmId $hvVmId -UseEnhancedMode $true `
                     -ForceOverwrite $true) {
