@@ -973,7 +973,8 @@ function Invoke-WeeklyUpgrades {
         }
 
         $scriptLines += $upgradeAllCommand
-        $scriptLines += 'if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {'
+        # 2 is 'nothing to upgrade', returned only when the useEnhancedExitCodes feature is on.
+        $scriptLines += 'if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2 -or $LASTEXITCODE -eq 3010) {'
         $scriptLines += "    '$timestamp' | Out-File '$chocoAllFlag' -Encoding ascii -NoNewline"
         $scriptLines += "    Write-Host 'Chocolatey package upgrade completed successfully.' -ForegroundColor Green"
         $scriptLines += '} else {'
