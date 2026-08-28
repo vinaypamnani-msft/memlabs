@@ -168,6 +168,7 @@ function Get-RDCSettingsDefaults {
         ShowUser        = $true    # (domain\user) - only shown when non-default
         ShowSqlVersion  = $true    # [SQL2019] tag (new)
         DarkMode        = $true    # mRemoteNG only: vs2015Dark theme rather than the stock light one
+        SingleClick     = $true    # mRemoteNG only: single click on a connection opens it (product default is OFF)
     }
 }
 

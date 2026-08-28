@@ -248,7 +248,8 @@ function Install-MRemoteNG {
     # Enable description tooltips in the connection tree so hovering shows VM info.
     Set-MRemoteNGSettings -InstallDir (Split-Path $mRemoteNGExe) `
         -ConnectionFilePath $Global:Common.MRemoteNGFilePath `
-        -DarkMode ([bool](Get-RDCSettings).DarkMode)
+        -DarkMode ([bool](Get-RDCSettings).DarkMode) `
+        -SingleClick ([bool](Get-RDCSettings).SingleClick)
 
     # Workaround: mRemoteNG 1.78.2 /cons: CLI argument is broken — GetStartupConnectionFileName()
     # reads OptionsConnectionsPage.Default.ConnectionFilePath but /cons: writes to the old
@@ -428,7 +429,8 @@ function Set-MRemoteNGSettings {
     param(
         [string]$InstallDir,
         [string]$ConnectionFilePath,
-        [bool]$DarkMode = $true
+        [bool]$DarkMode = $true,
+        [bool]$SingleClick = $true
     )
 
     if (-not $InstallDir) { return }
@@ -442,12 +444,15 @@ function Set-MRemoteNGSettings {
         $themeName = 'vs2015Dark'
         $themeActive = 'True'
     }
+    $singleClickValue = 'False'
+    if ($SingleClick) { $singleClickValue = 'True' }
 
     $portableSettings = [ordered]@{
-        ShowDescriptionTooltipsInTree = 'True'
-        ThemingActive                 = $themeActive
-        ThemeName                     = $themeName
-        IsActiveThemeDark             = $themeActive
+        ShowDescriptionTooltipsInTree  = 'True'
+        ThemingActive                  = $themeActive
+        ThemeName                      = $themeName
+        IsActiveThemeDark              = $themeActive
+        SingleClickOnConnectionOpensIt = $singleClickValue
     }
     if (-not [string]::IsNullOrWhiteSpace($ConnectionFilePath)) {
         # ConnectionFilePath is used by older 1.78 nightlies. Current builds use
@@ -517,6 +522,13 @@ function Set-MRemoteNGSettings {
                 Section = '//userSettings/mRemoteNG.Properties.OptionsThemePage'
                 Name    = 'IsActiveThemeDark'
                 Value   = $themeActive
+            }
+            # The checkbox sits on the Connections options PAGE, but source (ConnectionsPage.cs)
+            # saves it to Settings.Default - the page is not the settings class.
+            [pscustomobject]@{
+                Section = '//userSettings/mRemoteNG.Properties.Settings'
+                Name    = 'SingleClickOnConnectionOpensIt'
+                Value   = $singleClickValue
             }
         )
         if (-not [string]::IsNullOrWhiteSpace($ConnectionFilePath)) {

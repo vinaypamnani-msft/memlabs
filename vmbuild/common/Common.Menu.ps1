@@ -284,7 +284,8 @@ function Select-RDCSettingsMenu {
         ShowSqlVersion = "Show SQL version (SQL2019)"
     }
     $appearanceItems = [ordered]@{
-        DarkMode = "Dark mode (mRemoteNG only - applies after it restarts)"
+        DarkMode    = "Dark mode"
+        SingleClick = "Single click on a connection opens it"
     }
 
     while ($true) {
@@ -321,7 +322,7 @@ function Select-RDCSettingsMenu {
         }
 
         $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BGAP2"
-        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BREAKA" -text "Appearance (mRemoteNG only)%$headerColor"
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BREAKA" -text "mRemoteNG options (take effect when mRemoteNG restarts)%$headerColor"
         foreach ($key in $appearanceItems.Keys) {
             $num++
             $label = $appearanceItems[$key]
