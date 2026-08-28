@@ -247,7 +247,8 @@ function Install-MRemoteNG {
 
     # Enable description tooltips in the connection tree so hovering shows VM info.
     Set-MRemoteNGSettings -InstallDir (Split-Path $mRemoteNGExe) `
-        -ConnectionFilePath $Global:Common.MRemoteNGFilePath
+        -ConnectionFilePath $Global:Common.MRemoteNGFilePath `
+        -DarkMode ([bool](Get-RDCSettings).DarkMode)
 
     # Workaround: mRemoteNG 1.78.2 /cons: CLI argument is broken — GetStartupConnectionFileName()
     # reads OptionsConnectionsPage.Default.ConnectionFilePath but /cons: writes to the old
@@ -426,13 +427,27 @@ function Set-MRemoteNGSettings {
     # non-portable (user.config in %LocalAppData%) editions.
     param(
         [string]$InstallDir,
-        [string]$ConnectionFilePath
+        [string]$ConnectionFilePath,
+        [bool]$DarkMode = $true
     )
 
     if (-not $InstallDir) { return }
 
+    # Source (mRemoteNG 1.78.2 ThemeManager.cs): SetActive() looks ThemeName up in a
+    # CASE-SENSITIVE Hashtable and silently reverts to light on a miss, so the casing
+    # below is load-bearing. The theme only takes effect after mRemoteNG restarts.
+    $themeName = 'vs2015Light'
+    $themeActive = 'False'
+    if ($DarkMode) {
+        $themeName = 'vs2015Dark'
+        $themeActive = 'True'
+    }
+
     $portableSettings = [ordered]@{
         ShowDescriptionTooltipsInTree = 'True'
+        ThemingActive                 = $themeActive
+        ThemeName                     = $themeName
+        IsActiveThemeDark             = $themeActive
     }
     if (-not [string]::IsNullOrWhiteSpace($ConnectionFilePath)) {
         # ConnectionFilePath is used by older 1.78 nightlies. Current builds use
@@ -487,6 +502,21 @@ function Set-MRemoteNGSettings {
                 Section = '//userSettings/mRemoteNG.Properties.OptionsAppearancePage'
                 Name    = 'ShowDescriptionTooltipsInTree'
                 Value   = 'True'
+            }
+            [pscustomobject]@{
+                Section = '//userSettings/mRemoteNG.Properties.OptionsThemePage'
+                Name    = 'ThemingActive'
+                Value   = $themeActive
+            }
+            [pscustomobject]@{
+                Section = '//userSettings/mRemoteNG.Properties.OptionsThemePage'
+                Name    = 'ThemeName'
+                Value   = $themeName
+            }
+            [pscustomobject]@{
+                Section = '//userSettings/mRemoteNG.Properties.OptionsThemePage'
+                Name    = 'IsActiveThemeDark'
+                Value   = $themeActive
             }
         )
         if (-not [string]::IsNullOrWhiteSpace($ConnectionFilePath)) {

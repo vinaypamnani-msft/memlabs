@@ -283,6 +283,9 @@ function Select-RDCSettingsMenu {
         ShowUser       = "Show user, only if non-default (domain\user)"
         ShowSqlVersion = "Show SQL version (SQL2019)"
     }
+    $appearanceItems = [ordered]@{
+        DarkMode = "Dark mode (mRemoteNG only - applies after it restarts)"
+    }
 
     while ($true) {
         $settings = Get-RDCSettings
@@ -318,6 +321,16 @@ function Select-RDCSettingsMenu {
         }
 
         $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BGAP2"
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BREAKA" -text "Appearance (mRemoteNG only)%$headerColor"
+        foreach ($key in $appearanceItems.Keys) {
+            $num++
+            $label = $appearanceItems[$key]
+            $textToKey[$label] = $key
+            $mi = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "$num" -text $label -color1 $optColor -color2 $optNum -selectable
+            $mi.MultiSelected = [bool]$settings.$key
+        }
+
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BGAP3"
         $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "*BREAKR" -text "Actions%$headerColor"
         $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "A" -text "All Entries" -color1 $Global:Common.Colors.GenConfigTrue -color2 $Global:Common.Colors.GenConfigTrue -selectable -helptext "Check every setting"
         $null = New-MenuItem -MenuItems ([ref]$menuItems) -itemName "N" -text "No Entries" -color1 $Global:Common.Colors.GenConfigFalse -color2 $Global:Common.Colors.GenConfigFalse -selectable -helptext "Uncheck every setting"

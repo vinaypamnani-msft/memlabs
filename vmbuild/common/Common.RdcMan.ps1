@@ -167,6 +167,7 @@ function Get-RDCSettingsDefaults {
         ShowSiteCode    = $true    # (PS1->CAS) / client-push site
         ShowUser        = $true    # (domain\user) - only shown when non-default
         ShowSqlVersion  = $true    # [SQL2019] tag (new)
+        DarkMode        = $true    # mRemoteNG only: vs2015Dark theme rather than the stock light one
     }
 }
 
