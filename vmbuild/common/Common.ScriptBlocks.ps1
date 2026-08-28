@@ -600,8 +600,18 @@ $global:VM_Create = {
                                 Priority     = $pinPriority
                                 Buffer       = $pinBuffer
                             }
-                            $biasNote = if ($biasResult.Status -eq 'OK') { "applied priority=$pinPriority buffer=$pinBuffer instead" } else { "and the priority/buffer fallback also failed ($($biasResult.Status): $($biasResult.Detail))" }
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): cannot raise the dynamic-memory minimum from $([math]::Round($vm.MemoryMinimum / 1GB, 1))GB to $([math]::Round($pinnedMin / 1GB, 1))GB while the VM is running -- Hyper-V only allows a decrease. $biasNote." -Warning -LogOnly
+                            $floorNow = [math]::Round($vm.MemoryMinimum / 1GB, 1)
+                            $floorWanted = [math]::Round($pinnedMin / 1GB, 1)
+                            $floorMsg = "[Phase $Phase]: $($currentItem.vmName): dynamic-memory floor stays at ${floorNow}GB for this run; the ${floorWanted}GB deploy pin needs a stopped VM (Hyper-V only lets Minimum go DOWN on a live one)."
+                            if ($biasResult.Status -eq 'OK') {
+                                # Restore-DynamicMemory ends every run with this same role->priority/buffer
+                                # map, so on a re-run this call re-asserts values already in effect. Do not
+                                # word it as a remedy: the deploy floor is simply not available here.
+                                Write-Log "$floorMsg Re-asserted priority=$pinPriority buffer=$pinBuffer (the values Restore-DynamicMemory leaves at end of run)." -LogOnly
+                            }
+                            else {
+                                Write-Log "$floorMsg The priority/buffer re-assert also failed ($($biasResult.Status): $($biasResult.Detail)), so the balancer carries no bias toward this VM either." -Warning -LogOnly
+                            }
                         }
                         else {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Pinning dynamic memory min to 99% for deploy" -LogOnly
