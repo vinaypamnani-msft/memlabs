@@ -1311,20 +1311,21 @@ function ConvertTo-DeployConfigEx {
                 if ($thisCSName) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $thisCSName -Force
                 }
-                if ($thisVM.hidden) {
-                    $DC = get-list -type VM -DomainName $deployConfig.vmOptions.DomainName | Where-Object { $_.Role -eq "DC" }
-                    $addr = $dc.Network.Substring(0, $dc.Network.LastIndexOf(".")) + ".1"
-                    $gateway = $dc.Network.Substring(0, $dc.Network.LastIndexOf(".")) + ".200"
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "DCDefaultGateway" -Value $gateway  -Force
+                $dcExists = Get-VM2 -Name $thisVM.vmName -Fallback -ErrorAction SilentlyContinue
+                if ($dcExists) {
+                    $dcNetwork = Get-VmDomainNetworkFromSwitch -VmName $thisVM.vmName
+                    if (-not $dcNetwork) {
+                        throw "Existing DC '$($thisVM.vmName)' is not attached to one IPv4-named domain switch; refusing to derive its address from config or notes."
+                    }
                 }
                 else {
-                    #This is Okay.. since the vmOptions.network for the DC is correct
-                    $addr = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
-                    $gateway = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".200"
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "DCDefaultGateway" -Value $gateway  -Force
+                    $dcNetwork = if ($thisVM.network) { [string]$thisVM.network } else { [string]$deployConfig.vmOptions.network }
                 }
+
+                $addr = $dcNetwork -replace '\.0$', '.1'
+                $gateway = $dcNetwork -replace '\.0$', '.200'
+                $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
+                $thisParams | Add-Member -MemberType NoteProperty -Name "DCDefaultGateway" -Value $gateway  -Force
 
             }
             "SQLAO" {

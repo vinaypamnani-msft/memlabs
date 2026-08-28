@@ -869,14 +869,24 @@ try {
     # whose option 6 still points at a previous lab's DC.
     $DNSServer = $null
     $DC = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" } | Select-Object -First 1
-    if ($DC -and $DC.Network) {
-        $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+    $existingDC = if ($DC) { Get-VM2 -Name $DC.vmName -Fallback -ErrorAction SilentlyContinue } else { $null }
+    if ($existingDC) {
+        $dcNetwork = Get-VmDomainNetworkFromSwitch -VmName $DC.vmName
+        if (-not $dcNetwork) {
+            Write-Log "Existing DC '$($DC.vmName)' is not attached to one IPv4-named domain switch; refusing to derive its DNS address from config or notes." -Failure
+            exit 1
+        }
+        $DNSServer = $dcNetwork -replace '\.0$', '.1'
+    }
+    elseif ($DC) {
+        $dcNetwork = if ($DC.Network) { [string]$DC.Network } else { [string]$deployConfig.vmOptions.network }
+        $DNSServer = $dcNetwork -replace '\.0$', '.1'
     }
 
     # Test if hyper-v switch exists, if not create it
     $AddedScopes = @($deployConfig.vmOptions.network)
     if (-not (Test-NetworkFastPath -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -Cache $_netCache -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer)) {
-        $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
+        $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
         if (-not $worked) {
             exit 1
         }

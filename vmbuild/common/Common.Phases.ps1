@@ -1645,7 +1645,56 @@ function Start-PhaseJobs {
     $ConfigurationData = $null
     $linuxDispatchOnly = $false
     if ($Phase -gt 1 -and $Phase -lt 10) {
-        $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
+        if ($Phase -eq 2) {
+            $dcConfig = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+            $dcExists = if ($dcConfig) { Get-VM2 -Name $dcConfig.vmName -Fallback -ErrorAction SilentlyContinue } else { $null }
+            $switchIp = ''
+            if ($dcExists) {
+                try {
+                    $dcNetwork = Get-VmDomainNetworkFromSwitch -VmName $dcConfig.vmName
+                    if ($dcNetwork) { $switchIp = $dcNetwork -replace '\.0$', '.1' }
+                }
+                catch {
+                    Write-Log "[Phase 2] Preflight FAILED: could not resolve existing DC '$($dcConfig.vmName)' address from its Hyper-V switch. $($_.Exception.Message)" -Failure
+                }
+                if (-not $switchIp) {
+                    return [PSCustomObject]@{
+                        Failed          = 1
+                        Success         = 0
+                        Jobs            = 0
+                        Applicable      = $true
+                        AdditionalData  = $null
+                        PreflightFailed = $true
+                    }
+                }
+            }
+            $configuredIp = if ($dcConfig -and $dcConfig.thisParams -and $dcConfig.thisParams.PSObject.Properties['DCIPAddress']) { [string]$dcConfig.thisParams.DCIPAddress } else { '' }
+            if ($switchIp -and $configuredIp -ne $switchIp) {
+                Write-Log "[Phase 2] Preflight FAILED: refusing to change existing DC '$($dcConfig.vmName)' from switch-derived IP $switchIp to $configuredIp. DC addressing is immutable after creation; the deploy configuration is stale/corrupt." -Failure
+                return [PSCustomObject]@{
+                    Failed          = 1
+                    Success         = 0
+                    Jobs            = 0
+                    Applicable      = $true
+                    AdditionalData  = $null
+                    PreflightFailed = $true
+                }
+            }
+        }
+        try {
+            $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
+        }
+        catch {
+            Write-Log "[Phase $Phase] Configuration preflight FAILED: $($_.Exception.Message). Aborting before any per-VM jobs are dispatched." -Failure
+            return [PSCustomObject]@{
+                Failed          = 1
+                Success         = 0
+                Jobs            = 0
+                Applicable      = $true
+                AdditionalData  = $null
+                PreflightFailed = $true
+            }
+        }
         if (-not $ConfigurationData) {
             # No Windows DSC nodes need this phase. Normally that means the phase
             # is a no-op -- EXCEPT when the only work is a non-DSC Linux dispatch
@@ -4060,8 +4109,7 @@ function Get-ConfigurationData {
                     $restarted = Restart-UnresponsiveVm -VmName $dc.NodeName -WaitTimeSeconds 90
         
                     if (-not $restarted) {
-                        Write-Log "[Phase $Phase]: $($dc.NodeName): VM failed to become responsive after restart" -Failure
-                        # You might want to throw an exception here or handle the failure
+                        throw "$($dc.NodeName): VM failed to become responsive after restart"
                     }
                     else {
                         Write-Log "[Phase $Phase]: $($dc.NodeName): VM successfully restarted and is responsive"
@@ -4081,7 +4129,8 @@ function Get-ConfigurationData {
                 }
             }
             catch {
-                Write-Log "[Phase $Phase]: $($dc.NodeName): Error during VM connectivity test: $_" -Failure
+                Write-Log "[Phase $Phase]: $($dc.NodeName): Error during VM connectivity test: $($_.Exception.Message)" -Failure
+                throw
             }
             finally {
                 Write-Progress2 "Preparing Phase $Phase" -Status "Done Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent -Log

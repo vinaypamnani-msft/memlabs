@@ -186,6 +186,25 @@ function Get-VMSwitch2 {
     return (Get-VMSwitch -SwitchType Internal | Where-Object { $_.Name -like "*$NetworkName*" })
 }
 
+function Get-VmDomainNetworkFromSwitch {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName
+    )
+
+    $networks = @(Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop |
+        ForEach-Object { [string]$_.SwitchName } |
+        Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' -and $_ -match '\.0$' } |
+        Select-Object -Unique)
+
+    if ($networks.Count -gt 1) {
+        throw "VM '$VmName' is attached to multiple IPv4 domain switches: $($networks -join ', ')"
+    }
+    if ($networks.Count -eq 1) { return $networks[0] }
+    return $null
+}
+
 function Remove-VMSwitch2 {
     param (
         [Parameter(Mandatory = $true)]
@@ -1302,24 +1321,35 @@ function Test-VmResponsive {
             }
         }
         
-        # Get the VM's IP from Hyper-V directly (avoids DNS, which may point at
-        # the DC we're testing and can hang Test-Connection indefinitely).
-        $vmIp = ($vm | Get-VMNetworkAdapter | Select-Object -First 1).IPAddresses |
-                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
-        if (-not $vmIp) {
-            Write-Log "VM $VmName has no IPv4 address from Hyper-V" -Warning
+        # Probe live Hyper-V/KVP addresses first. VM-note addresses are historical
+        # fallbacks only and must never override what the running guest reports.
+        $vmIps = @(($vm | Get-VMNetworkAdapter).IPAddresses |
+            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' })
+        try {
+            $vmNote = Get-VMNote -VMName $VmName -ErrorAction SilentlyContinue
+            foreach ($propertyName in 'AssignedIP', 'LastKnownIP') {
+                $property = $vmNote.PSObject.Properties[$propertyName]
+                if ($property -and $property.Value) { $vmIps += [string]$property.Value }
+            }
+        }
+        catch { }
+        $vmIps = @($vmIps | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -Unique)
+        if ($vmIps.Count -eq 0) {
+            Write-Log "VM $VmName has no known IPv4 address from Hyper-V or its VM note" -Warning
             return $false
         }
 
         # Test RDP port with hard timeout + retry (never uses Test-Connection or
         # Test-NetConnection — both can hang on DNS reverse lookups).
         $tcpTimeoutMs = [Math]::Max(1000, $TimeoutSeconds * 1000 / 3)
-        if (-not (Test-TcpPort -ComputerName $vmIp -Port 3389 -TimeoutMs $tcpTimeoutMs -Retries 3 -RetryDelayMs 1000)) {
-            Write-Log "VM $VmName ($vmIp) RDP port test failed after retries" -Warning
-            return $false
+        foreach ($vmIp in $vmIps) {
+            if (Test-TcpPort -ComputerName $vmIp -Port 3389 -TimeoutMs $tcpTimeoutMs -Retries 3 -RetryDelayMs 1000) {
+                return $true
+            }
         }
-        
-        return $true
+
+        Write-Log "VM $VmName RDP port test failed after retries for all candidate addresses: $($vmIps -join ', ')" -Warning
+        return $false
     }
     catch {
         Write-Log "Error testing VM $VmName responsiveness: $_" -Warning

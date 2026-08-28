@@ -3729,10 +3729,32 @@ function New-VmNote {
         $ProgressPreference = 'SilentlyContinue'
 
         $ThisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
+        $existingNote = Get-VMNote -VMName $VmName
+        $existingNetwork = ''
+        if ($existingNote) {
+            $existingNetworkProperty = $existingNote.PSObject.Properties['network']
+            if ($existingNetworkProperty -and $existingNetworkProperty.Value) {
+                $existingNetwork = [string]$existingNetworkProperty.Value
+            }
+        }
+        $deployedDcNetwork = ''
+        if ($ThisVM.role -eq 'DC') {
+            try { $deployedDcNetwork = Get-VmDomainNetworkFromSwitch -VmName $VmName }
+            catch { Write-Log "Could not resolve existing DC '$VmName' network from its Hyper-V switch; retaining persisted network metadata. $($_.Exception.Message)" -Warning -LogOnly }
+        }
 
         $network = $DeployConfig.vmOptions.network
-        if ($ThisVm.network) {
+        if ($deployedDcNetwork) {
+            $network = $deployedDcNetwork
+        }
+        elseif ($ThisVM.role -eq 'DC' -and $existingNetwork) {
+            $network = $existingNetwork
+        }
+        elseif ($ThisVm.network) {
             $network = $ThisVm.network
+        }
+        elseif ($existingNetwork) {
+            $network = $existingNetwork
         }
 
         $vmNote = [PSCustomObject]@{
@@ -3752,7 +3774,6 @@ function New-VmNote {
         # Monotonic: a -StartPhase N re-run must not drop the value from (say) 11
         # down to N, because the Phase 8 auto-snapshot guard reads this as
         # "has this CAS/Primary ever finished Phase 8?" (lastPhaseComplete >= 8).
-        $existingNote = Get-VMNote -VMName $VmName
         $existingMax = if ($existingNote -and $existingNote.lastPhaseComplete) { [int]$existingNote.lastPhaseComplete } else { 0 }
         if ($Successful -and $Phase -gt 0) {
             $newMax = [Math]::Max($existingMax, [int]$Phase)
@@ -3767,7 +3788,7 @@ function New-VmNote {
         }
 
         foreach ($prop in $ThisVM.PSObject.Properties) {
-            if ($prop.Name -eq "thisParams" -or $prop.Name -eq "SQLAO") {
+            if ($prop.Name -in @('thisParams', 'SQLAO', 'network')) {
                 continue
             }
             $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force

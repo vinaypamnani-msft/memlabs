@@ -2065,8 +2065,8 @@ $global:VM_Create = {
                 Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Done" -Completed -force
         }
 
-        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -Phase $Phase
         if ($createVM) {
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true -Phase $Phase
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
         }
         else {
