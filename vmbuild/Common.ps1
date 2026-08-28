@@ -3860,7 +3860,7 @@ function Get-VMNote {
             return $vmNoteObject
         }
         else {
-            Write-Log "$VMName`: VM Properties do not contain values. Assume this was not deployed by vmbuild. $_" -Verbose -LogOnly -Warning
+            Write-Log "$VMName`: VM Properties do not contain values. Assume this was not deployed by vmbuild." -Verbose -LogOnly
             return $null
         }
     }
@@ -7479,7 +7479,7 @@ function Invoke-VmCommand {
             }
             catch { $return.ErrorDetails = @('Session creation failed: diagnostic-unavailable') }
             if ($sessionDiag.ChannelBroken) {
-                Write-Log "$VmName`: '$DisplayName' skipped the remaining credential ladders -- the transport is broken, not the credential." -LogOnly -Verbose
+                Write-Log "$VmName`: '$DisplayName' skipped the remaining credential ladders -- the transport is broken, not the credential." -LogOnly
             }
         }
 
@@ -7847,8 +7847,10 @@ function Invoke-VmCommand {
                             # not to spam the console/log with expected, non-fatal timeouts --
                             # honor that here too instead of always emitting an -Failure (ERROR)
                             # line. Still recorded to the log file for diagnostics.
+                            # -LogOnly alone: adding -Verbose returns before the write unless
+                            # $Common.VerboseEnabled, which dropped this line in 224/224 runs.
                             if ($SuppressLog) {
-                                Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -LogOnly -Verbose
+                                Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -LogOnly
                             }
                             else {
                                 Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
@@ -9542,7 +9544,7 @@ function Get-VmSession {
         }
         elseif ($Quiet) {
             # Quiet probe: keep it in the log for diagnostics but never on screen.
-            Write-Log $sessionFailureMessage -Warning -Verbose -LogOnly
+            Write-Log $sessionFailureMessage -LogOnly
         }
         else {
             Write-Log $sessionFailureMessage -Warning -Verbose
@@ -9560,10 +9562,10 @@ function Get-VmSession {
     # Best-effort probes (e.g. Copy-ItemSafe heartbeat, MaxRetries=1) routinely
     # miss while the guest is still in OOBE; that is expected, not a failure.
     # -Quiet downgrades this from a type=3 error (which makes Phase 1 look
-    # broken) to a log-only verbose entry: it's recorded in the log for
+    # broken) to a log-only entry: it's recorded in the log for
     # diagnostics but never spews the console.
     if ($Quiet) {
-        Write-Log "$VmName`: Could not create session after $MaxRetries retries (quiet probe)." -LogOnly -Verbose
+        Write-Log "$VmName`: Could not create session after $MaxRetries retries (quiet probe)." -LogOnly
     }
     else {
         Write-Log "$VmName`: Could not create session after $MaxRetries retries." -Failure
