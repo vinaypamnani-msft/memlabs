@@ -624,6 +624,44 @@ function Update-MRemoteNGShortcut {
     }
 }
 
+function Set-MRemoteNGDpiCompatibility {
+    param([string]$ExePath)
+
+    # The 1.78 nightly advertises per-monitor DPI awareness but lays out and hit-tests at a different
+    # scale than it renders, so on a scaled display clicks land inches right of the control drawn.
+    # Forcing System awareness makes Windows own the scaling, which keeps the geometry consistent.
+    if (-not $ExePath -or -not (Test-Path $ExePath)) { return }
+
+    $layersKey = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers'
+    $dpiTokens = @('HIGHDPIAWARE', 'DPIUNAWARE', 'GDIDPISCALING', 'PERPROCESSSYSTEMDPIFORCEOFF', 'PERPROCESSSYSTEMDPIFORCEON')
+
+    try {
+        if (-not (Test-Path $layersKey)) { $null = New-Item -Path $layersKey -Force }
+
+        $existing = ''
+        $props = Get-ItemProperty -LiteralPath $layersKey -ErrorAction SilentlyContinue
+        if ($null -ne $props -and $props.PSObject.Properties.Name -contains $ExePath) {
+            $existing = [string]$props.$ExePath
+        }
+
+        # Any DPI token already here was chosen by a human - never overwrite their choice.
+        $tokens = @($existing -split '\s+' | Where-Object { $_ })
+        $already = @($tokens | Where-Object { $dpiTokens -contains $_.ToUpperInvariant() })
+        if ($already.Count -gt 0) {
+            Write-LogMessage "mRemoteNG DPI compatibility is already set ('$existing'). Leaving it as-is."
+            return
+        }
+
+        # '~' is the layer-list marker; the other tokens (RUNASADMIN etc.) must survive.
+        $merged = @('~') + @($tokens | Where-Object { $_ -ne '~' }) + @('HIGHDPIAWARE')
+        Set-ItemProperty -LiteralPath $layersKey -Name $ExePath -Value ($merged -join ' ') -Type String
+        Write-LogMessage "Set mRemoteNG DPI scaling to System for $ExePath (fixes mouse clicks landing off-target on scaled displays)."
+    }
+    catch {
+        Write-LogMessage "Could not set mRemoteNG DPI compatibility: $_" -Level 'WARNING'
+    }
+}
+
 function Invoke-MRemoteNGMaintenance {
     Write-LogMessage 'Starting mRemoteNG maintenance...'
 
@@ -650,6 +688,7 @@ function Invoke-MRemoteNGMaintenance {
                     # Still ensure .NET 9 Desktop Runtime is present (required by 1.78+ WinForms)
                     Install-DotNet9DesktopRuntime
                     Update-MRemoteNGShortcut -ExePath $candidate
+                    Set-MRemoteNGDpiCompatibility -ExePath $candidate
                     return
                 }
                 Write-LogMessage "mRemoteNG $ver at $candidate is below $minVersion (no Hyper-V Console support)."
@@ -790,6 +829,7 @@ function Invoke-MRemoteNGMaintenance {
 
     Install-DotNet9DesktopRuntime
     Update-MRemoteNGShortcut -ExePath $mRNGExe
+    Set-MRemoteNGDpiCompatibility -ExePath $mRNGExe
 
     Write-LogMessage 'mRemoteNG maintenance completed.'
 }
