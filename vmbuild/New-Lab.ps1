@@ -1266,7 +1266,7 @@ try {
         Set-TitleBar "SCRIPT FINISHED WITH FAILURES"
         $NewLabsuccess = $false
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
-        Write-Log "Log file: $($Common.LogPath)" -Warning -NoIndent
+        Write-Log "Log file: $($Common.LogPath)" -NoIndent
         if ($currentPhase -ge 2) {
             $offerRestore = $false
             if ($currentPhase -eq 8 -and $deployConfig) {
@@ -1281,7 +1281,7 @@ try {
             }
             else {
                 Write-Host
-                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
+                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -NoIndent
                 Write-NewLabResumeCommand -Configuration $Configuration -Phase $currentPhase
 
             }
@@ -1467,7 +1467,7 @@ finally {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
         Set-TitleBar "Script Cancelled"
         Write-Log "### $Configuration Terminated $currentPhase" -HostOnly
-        Write-Log "Log file: $($Common.LogPath)" -Warning -NoIndent
+        Write-Log "Log file: $($Common.LogPath)" -NoIndent
         # 55 is a self-restart request (DSC.zip was just rebuilt), not a build failure --
         # don't clobber it, or the caller can't tell the two apart.
         if ($exitcode -ne 55) {
@@ -1486,7 +1486,7 @@ finally {
             }
             else {
                 write-host
-                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
+                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -NoIndent
                 Write-NewLabResumeCommand -Configuration $Configuration -Phase $currentPhase
             }
         }
