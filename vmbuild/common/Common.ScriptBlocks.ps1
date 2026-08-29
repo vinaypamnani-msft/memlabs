@@ -2107,9 +2107,10 @@ $global:VM_Create = {
 function Save-CMSetupLogsFromVm {
     <#
     .SYNOPSIS
-        Pulls C:\ConfigMgrSetup.log, C:\staging\DSC\InstallCMLog.log and
-        C:\staging\DSC\DSC_Log.log out of a VM and writes them next to the
-        host VMBuild log so operators can inspect them without RDP'ing in.
+        Pulls C:\ConfigMgrSetup.log, C:\staging\DSC\InstallCMLog.log,
+        C:\staging\DSC\DSC_Log.log and recent ADK installer diagnostics out
+        of a VM and writes them next to the host VMBuild log so operators can
+        inspect them without RDP'ing in.
     .DESCRIPTION
         InstallCMLog.log (DSC wrapper transcript, normally <1 MB) is ALWAYS
         pulled in full. ConfigMgrSetup.log is pulled FULL on failure AND on
@@ -2123,11 +2124,15 @@ function Save-CMSetupLogsFromVm {
         narrative -- a different file from InstallCMLog.log, and the only
         place a resource can say WHY it gave up. The host only ever samples
         the current status, so without this the reasoning is unrecoverable.
+        On failure, files from C:\staging\DSC\ADKSetupLogs modified in the
+        last eight hours are also pulled. Files over 16MB retain their first
+        and last 5000 lines so one large Burn log cannot swamp PSDirect.
         Files land in (Split-Path $Common.LogPath -Parent) as:
             <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.log          (full)
             <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.head30000-tail5000.log (>64MB only)
             <VmName>-Phase<N>-<timestamp>-InstallCMLog.log            (always: full)
             <VmName>-Phase<N>-<timestamp>-DSC_Log.log                 (always: tail 4000)
+            <VmName>-Phase<N>-<timestamp>-adksetup-*.log/.txt          (failure only)
     #>
     [CmdletBinding()]
     param(
@@ -2150,6 +2155,7 @@ function Save-CMSetupLogsFromVm {
             DscLogExists   = $false
             DscLogBytes    = 0
             DscLogContent  = $null
+            AdkArtifacts   = @()
         }
         if (Test-Path 'C:\ConfigMgrSetup.log') {
             $fi = Get-Item 'C:\ConfigMgrSetup.log' -ErrorAction SilentlyContinue
@@ -2192,6 +2198,34 @@ function Save-CMSetupLogsFromVm {
                 $out.DscLogBytes   = $fi.Length
                 $out.DscLogContent = (Get-Content -LiteralPath $fi.FullName -Tail 4000 -ErrorAction SilentlyContinue) -join "`r`n"
             }
+        }
+        if ($Mode -eq 'Failure' -and (Test-Path 'C:\staging\DSC\ADKSetupLogs' -PathType Container)) {
+            $artifacts = New-Object System.Collections.Generic.List[object]
+            $cutoff = (Get-Date).AddHours(-8)
+            $files = @(Get-ChildItem -LiteralPath 'C:\staging\DSC\ADKSetupLogs' -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -ge $cutoff -and $_.Extension -in @('.log', '.txt') } |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 12)
+            foreach ($artifact in $files) {
+                $tailOnly = $false
+                if ($artifact.Length -le 16MB) {
+                    $content = Get-Content -LiteralPath $artifact.FullName -Raw -ErrorAction SilentlyContinue
+                }
+                else {
+                    $tailOnly = $true
+                    $head = @(Get-Content -LiteralPath $artifact.FullName -TotalCount 5000 -ErrorAction SilentlyContinue)
+                    $tail = @(Get-Content -LiteralPath $artifact.FullName -Tail 5000 -ErrorAction SilentlyContinue)
+                    $marker = "***** MEMLABS: middle omitted -- $($artifact.Length) bytes in-VM, kept first + last 5000 lines *****"
+                    $content = (@($head) + @($marker) + @($tail)) -join "`r`n"
+                }
+                $artifacts.Add([pscustomobject]@{
+                        Name             = $artifact.Name
+                        Bytes            = $artifact.Length
+                        LastWriteTimeUtc = $artifact.LastWriteTimeUtc
+                        TailOnly         = $tailOnly
+                        Content          = $content
+                    })
+            }
+            $out.AdkArtifacts = @($artifacts)
         }
         [pscustomobject]$out
     }
@@ -2264,6 +2298,27 @@ function Save-CMSetupLogsFromVm {
         }
         catch {
             Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write DSC_Log copy: $_" -Warning
+        }
+    }
+
+    if ($r.PSObject.Properties.Name -contains 'AdkArtifacts') {
+        foreach ($artifact in @($r.AdkArtifacts | Where-Object { $null -ne $_ })) {
+            $safeName = [System.IO.Path]::GetFileName("$($artifact.Name)")
+            if (-not $safeName) { continue }
+            if (-not $artifact.Content) {
+                Write-Log "[Phase $Phase]: $VmName`: ADK diagnostic '$safeName' was $($artifact.Bytes) bytes in the VM but Get-Content returned empty" -Warning
+                continue
+            }
+            $dest = Join-Path $logDir "$base-$safeName"
+            try {
+                Set-Content -LiteralPath $dest -Value $artifact.Content -Encoding UTF8 -ErrorAction Stop
+                $kb = [math]::Round($artifact.Bytes / 1KB, 1)
+                $note = if ($artifact.TailOnly) { "first + last 5000 lines of ${kb}KB" } else { "full ${kb}KB" }
+                Write-Log "[Phase $Phase]: $VmName`: Pulled ADK diagnostic $safeName ($note) -> $dest" -OutputStream
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write ADK diagnostic '$safeName': $_" -Warning
+            }
         }
     }
 }

@@ -449,6 +449,311 @@ function Install-MSIPackage {
     Write-Status "$DisplayName installed successfully (exit $exit)"
 }
 
+function Get-AdkProcessTree {
+    param([Parameter(Mandatory)] [int] $RootProcessId)
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    $all = $null
+    try {
+        $all = @(Get-CimInstance -ClassName Win32_Process `
+                -Property ProcessId, ParentProcessId, Name, CommandLine, CreationDate, KernelModeTime, UserModeTime, WorkingSetSize `
+                -ErrorAction Stop)
+    }
+    catch { return $rows.ToArray() }
+
+    $byId = @{}
+    $childrenOf = @{}
+    foreach ($entry in $all) {
+        $processId = [int] $entry.ProcessId
+        $byId[$processId] = $entry
+        $parentId = [int] $entry.ParentProcessId
+        if (-not $childrenOf.ContainsKey($parentId)) { $childrenOf[$parentId] = New-Object System.Collections.Generic.List[int] }
+        $childrenOf[$parentId].Add($processId)
+    }
+
+    $pendingIds = New-Object System.Collections.Generic.Queue[int]
+    $pendingDepths = New-Object System.Collections.Generic.Queue[int]
+    $seen = New-Object System.Collections.Generic.HashSet[int]
+    $pendingIds.Enqueue($RootProcessId)
+    $pendingDepths.Enqueue(0)
+    while ($pendingIds.Count -gt 0) {
+        $processId = $pendingIds.Dequeue()
+        $depth = $pendingDepths.Dequeue()
+        if (-not $seen.Add($processId)) { continue }
+        if ($byId.ContainsKey($processId)) {
+            $entry = $byId[$processId]
+            $cpuSeconds = ([double] $entry.KernelModeTime + [double] $entry.UserModeTime) / 10000000.0
+            $rows.Add([pscustomobject]@{
+                    Depth           = $depth
+                    ProcessId       = $processId
+                    ParentProcessId = [int] $entry.ParentProcessId
+                    Name            = "$($entry.Name)"
+                    CpuSeconds      = [math]::Round($cpuSeconds, 1)
+                    WorkingSetMB    = [math]::Round(([double] $entry.WorkingSetSize / 1MB), 1)
+                    CreationDate    = "$($entry.CreationDate)"
+                    CommandLine     = "$($entry.CommandLine)"
+                })
+        }
+        if ($childrenOf.ContainsKey($processId)) {
+            foreach ($childId in $childrenOf[$processId]) {
+                $pendingIds.Enqueue($childId)
+                $pendingDepths.Enqueue($depth + 1)
+            }
+        }
+    }
+    return $rows.ToArray()
+}
+
+function Stop-AdkProcessTree {
+    param(
+        [Parameter(Mandatory)] [int] $RootProcessId,
+        [object[]] $Snapshot = @()
+    )
+
+    $byId = @{}
+    foreach ($entry in @($Snapshot) + @(Get-AdkProcessTree -RootProcessId $RootProcessId)) {
+        if ($null -ne $entry) { $byId[[int] $entry.ProcessId] = $entry }
+    }
+    if ($byId.Count -eq 0) {
+        $byId[$RootProcessId] = [pscustomobject]@{ ProcessId = $RootProcessId; Depth = 0; Name = 'root' }
+    }
+
+    $stopped = New-Object System.Collections.Generic.List[int]
+    $errors = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @($byId.Values | Sort-Object Depth -Descending)) {
+        $target = Get-Process -Id $entry.ProcessId -ErrorAction SilentlyContinue
+        if ($null -eq $target) { continue }
+        try {
+            $target.Kill()
+            try { [void] $target.WaitForExit(5000) } catch {}
+            $stopped.Add([int] $entry.ProcessId)
+        }
+        catch { $errors.Add("$($entry.ProcessId)/$($entry.Name): $($_.Exception.Message)") }
+    }
+
+    $remaining = @($byId.Keys | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) })
+    return [pscustomobject]@{
+        Stopped   = @($stopped)
+        Remaining = @($remaining)
+        Errors    = @($errors)
+    }
+}
+
+function Invoke-AdkSetupProcess {
+    param(
+        [Parameter(Mandatory)] [string] $FilePath,
+        [Parameter(Mandatory)] [string[]] $ArgumentList,
+        [Parameter(Mandatory)] [string] $Label,
+        [Parameter(Mandatory)] [string] $LogFile,
+        [Parameter(Mandatory)] [string] $DiagnosticDirectory,
+        [ValidateRange(1, 86400)] [int] $TimeoutSeconds = 5400,
+        [ValidateRange(1, 300)] [int] $PollSeconds = 15,
+        [ValidateRange(1, 3600)] [int] $HeartbeatSeconds = 300
+    )
+
+    if (-not (Test-Path -LiteralPath $DiagnosticDirectory -PathType Container)) {
+        $null = New-Item -ItemType Directory -Path $DiagnosticDirectory -Force -ErrorAction Stop
+    }
+
+    $readLogState = {
+        $state = [ordered]@{ Exists = $false; Bytes = -1; AgeSeconds = -1; LastLine = '(not created)' }
+        try {
+            $item = Get-Item -LiteralPath $LogFile -ErrorAction Stop
+            $state.Exists = $true
+            $state.Bytes = [int64] $item.Length
+            $state.AgeSeconds = [int] [math]::Round(((Get-Date) - $item.LastWriteTime).TotalSeconds)
+            $tail = @(Get-Content -LiteralPath $LogFile -Tail 1 -ErrorAction SilentlyContinue)
+            if ($tail.Count -gt 0) {
+                $lastLine = "$($tail[-1])" -replace '\s+', ' '
+                if ($lastLine.Length -gt 180) { $lastLine = $lastLine.Substring(0, 180) + '...' }
+                $state.LastLine = $lastLine
+            }
+        }
+        catch {}
+        return [pscustomobject] $state
+    }
+
+    $startedAt = Get-Date
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    # Windows PowerShell 5.1's Start-Process object loses ExitCode after WaitForExit(timeout),
+    # and [int]$null becomes a false success 0. A directly-owned Process retains the handle.
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $ArgumentList -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw "Failed to start ADK setup process: $FilePath" }
+    $nextHeartbeat = $HeartbeatSeconds
+    $lastCpuSeconds = -1.0
+    $lastLogBytes = -1L
+    $timedOut = $false
+
+    while (-not $process.WaitForExit($PollSeconds * 1000)) {
+        $elapsedSeconds = [int] $stopwatch.Elapsed.TotalSeconds
+        if ($elapsedSeconds -ge $nextHeartbeat) {
+            $tree = @(Get-AdkProcessTree -RootProcessId $process.Id)
+            $cpuSeconds = 0.0
+            foreach ($entry in $tree) { $cpuSeconds += [double] $entry.CpuSeconds }
+            if ($tree.Count -eq 0) { $cpuSeconds = -1.0 }
+            $logState = & $readLogState
+            $cpuDelta = if ($lastCpuSeconds -ge 0 -and $cpuSeconds -ge 0) { [math]::Round($cpuSeconds - $lastCpuSeconds, 1) } else { -1 }
+            $logDelta = if ($lastLogBytes -ge 0 -and $logState.Bytes -ge 0) { $logState.Bytes - $lastLogBytes } else { -1 }
+            Write-Status ("ADK {0}: still running {1}m/{2}m; processes={3}; treeCPU={4:N1}s (delta={5:N1}s); log={6} bytes (delta={7}, age={8}s); last: {9}" -f `
+                    $Label, [int] ($elapsedSeconds / 60), [int] ($TimeoutSeconds / 60), $tree.Count, $cpuSeconds, $cpuDelta, `
+                    $logState.Bytes, $logDelta, $logState.AgeSeconds, $logState.LastLine)
+            $lastCpuSeconds = $cpuSeconds
+            $lastLogBytes = $logState.Bytes
+            while ($nextHeartbeat -le $elapsedSeconds) { $nextHeartbeat += $HeartbeatSeconds }
+        }
+        if ($elapsedSeconds -ge $TimeoutSeconds) {
+            $timedOut = $true
+            break
+        }
+    }
+
+    $stopwatch.Stop()
+    if (-not $timedOut) {
+        $exitCode = -1
+        try {
+            $process.WaitForExit()
+            $process.Refresh()
+            $exitCode = [int] $process.ExitCode
+        }
+        catch {}
+        return [pscustomobject]@{
+            ExitCode       = $exitCode
+            TimedOut       = $false
+            ElapsedSeconds = [int] $stopwatch.Elapsed.TotalSeconds
+            DiagnosticPath = ''
+            ProcessIds     = @()
+        }
+    }
+
+    $tree = @(Get-AdkProcessTree -RootProcessId $process.Id)
+    $logState = & $readLogState
+    $safeLabel = $Label -replace '[^A-Za-z0-9_.-]', '_'
+    $diagnosticPath = Join-Path $DiagnosticDirectory "adksetup-$safeLabel-timeout.txt"
+    Write-Status ("ADK {0}: TIMEOUT after {1}m (hard cap {2}m). Capturing diagnostics before terminating process tree rooted at PID {3}. Burn log: {4} ({5} bytes, last write {6}s ago)." -f `
+            $Label, [math]::Round($stopwatch.Elapsed.TotalMinutes, 1), [int] ($TimeoutSeconds / 60), $process.Id, $LogFile, $logState.Bytes, $logState.AgeSeconds)
+
+    $diagnostic = New-Object System.Collections.Generic.List[string]
+    $diagnostic.Add('MemLabs ADK installer timeout diagnostic')
+    $diagnostic.Add("CapturedUtc=$([datetime]::UtcNow.ToString('o'))")
+    $diagnostic.Add("Label=$Label")
+    $diagnostic.Add("Executable=$FilePath")
+    $diagnostic.Add("Arguments=$($ArgumentList -join ' ')")
+    $diagnostic.Add("Started=$($startedAt.ToString('o'))")
+    $diagnostic.Add("ElapsedSeconds=$([int] $stopwatch.Elapsed.TotalSeconds)")
+    $diagnostic.Add("TimeoutSeconds=$TimeoutSeconds")
+    $diagnostic.Add("BurnLog=$LogFile")
+    $diagnostic.Add("BurnLogBytes=$($logState.Bytes)")
+    $diagnostic.Add("BurnLogAgeSeconds=$($logState.AgeSeconds)")
+    $diagnostic.Add('')
+    $diagnostic.Add('PROCESS TREE (captured before termination)')
+    if ($tree.Count -eq 0) { $diagnostic.Add("  unavailable; root PID=$($process.Id)") }
+    foreach ($entry in $tree) {
+        $commandLine = "$($entry.CommandLine)" -replace '\r?\n', ' '
+        $diagnostic.Add(("  depth={0} pid={1} ppid={2} name={3} cpu={4:N1}s ws={5:N1}MB created={6} command={7}" -f `
+                    $entry.Depth, $entry.ProcessId, $entry.ParentProcessId, $entry.Name, $entry.CpuSeconds, `
+                    $entry.WorkingSetMB, $entry.CreationDate, $commandLine))
+    }
+
+    $treeIds = @($tree | ForEach-Object { [int] $_.ProcessId })
+    $diagnostic.Add('')
+    $diagnostic.Add('TCP CONNECTIONS OWNED BY PROCESS TREE')
+    $connections = @()
+    if ($treeIds.Count -gt 0 -and (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+        try { $connections = @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object { $treeIds -contains [int] $_.OwningProcess }) } catch {}
+    }
+    if ($connections.Count -eq 0) { $diagnostic.Add('  none measured') }
+    foreach ($connection in $connections) {
+        $diagnostic.Add(("  pid={0} {1}:{2} -> {3}:{4} state={5}" -f $connection.OwningProcess, $connection.LocalAddress, `
+                    $connection.LocalPort, $connection.RemoteAddress, $connection.RemotePort, $connection.State))
+    }
+
+    $diagnostic.Add('')
+    $diagnostic.Add('WINHTTP PROXY')
+    $proxyOutput = @()
+    $proxyExit = -1
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $proxyOutput = @(& "$env:SystemRoot\System32\netsh.exe" winhttp show proxy 2>&1 | ForEach-Object { "$_" })
+        $proxyExit = $LASTEXITCODE
+    }
+    catch { $proxyOutput = @($_.Exception.Message) }
+    finally { $ErrorActionPreference = $savedErrorActionPreference }
+    $diagnostic.Add("  netsh exit=$proxyExit")
+    foreach ($line in $proxyOutput) { $diagnostic.Add("  $line") }
+
+    $diagnostic.Add('')
+    $diagnostic.Add('WINDOWS INSTALLER / DISK')
+    try {
+        $msiService = Get-Service -Name msiserver -ErrorAction Stop
+        $diagnostic.Add("  msiserver=$($msiService.Status) startType=$($msiService.StartType)")
+    }
+    catch { $diagnostic.Add("  msiserver probe failed: $($_.Exception.Message)") }
+    try {
+        $systemDisk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
+        $diagnostic.Add(("  C: free={0:N1}GB size={1:N1}GB" -f ($systemDisk.FreeSpace / 1GB), ($systemDisk.Size / 1GB)))
+    }
+    catch { $diagnostic.Add("  disk probe failed: $($_.Exception.Message)") }
+
+    $diagnostic.Add('')
+    $diagnostic.Add('MSIINSTALLER EVENTS SINCE ATTEMPT START')
+    $events = @()
+    try {
+        $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'MsiInstaller'; StartTime = $startedAt } `
+                -MaxEvents 30 -ErrorAction SilentlyContinue)
+    }
+    catch {}
+    if ($events.Count -eq 0) { $diagnostic.Add('  none measured') }
+    foreach ($msiEvent in $events) {
+        $message = "$($msiEvent.Message)" -replace '\s+', ' '
+        if ($message.Length -gt 700) { $message = $message.Substring(0, 700) + '...' }
+        $diagnostic.Add("  $($msiEvent.TimeCreated.ToString('o')) id=$($msiEvent.Id) level=$($msiEvent.LevelDisplayName) $message")
+    }
+
+    $diagnostic.Add('')
+    $diagnostic.Add('BURN LOG TAIL (last 120 lines)')
+    $burnTail = @()
+    if ($logState.Exists) {
+        try { $burnTail = @(Get-Content -LiteralPath $LogFile -Tail 120 -ErrorAction SilentlyContinue) } catch {}
+    }
+    if ($burnTail.Count -eq 0) { $diagnostic.Add('  unavailable') }
+    foreach ($line in $burnTail) { $diagnostic.Add("  $line") }
+
+    try {
+        [System.IO.File]::WriteAllLines($diagnosticPath, [string[]] $diagnostic.ToArray())
+        Write-Status "ADK ${Label}: timeout diagnostic saved to $diagnosticPath"
+    }
+    catch {
+        Write-Status "ADK ${Label}: FAILED to save timeout diagnostic to ${diagnosticPath}: $($_.Exception.Message)"
+        $diagnosticPath = ''
+    }
+
+    if ($tree.Count -gt 0) {
+        $treeSummary = @($tree | ForEach-Object { "$($_.ProcessId):$($_.Name):cpu=$($_.CpuSeconds)s" }) -join ', '
+        Write-Status "ADK ${Label}: timed-out process tree before kill: $treeSummary"
+    }
+    else { Write-Status "ADK ${Label}: timed-out process tree could not be enumerated; killing root PID $($process.Id) only."
+    }
+
+    $killResult = Stop-AdkProcessTree -RootProcessId $process.Id -Snapshot $tree
+    Write-Status ("ADK {0}: termination complete; stopped=[{1}] remaining=[{2}] errors=[{3}]" -f $Label, `
+            ($killResult.Stopped -join ','), ($killResult.Remaining -join ','), ($killResult.Errors -join ' | '))
+
+    return [pscustomobject]@{
+        ExitCode       = 1460
+        TimedOut       = $true
+        ElapsedSeconds = [int] $stopwatch.Elapsed.TotalSeconds
+        DiagnosticPath = $diagnosticPath
+        ProcessIds     = $treeIds
+    }
+}
+
 [DscResource()]
 class InstallADK {
     [DscProperty(Key)]
@@ -496,13 +801,21 @@ class InstallADK {
         # cause -- which package failed, MSI return, missing prereq, etc.
         $invokeAdk = {
             param($exe, [string[]]$argv, $label)
-            $logFile = Join-Path $env:TEMP ("adksetup-" + ($label -replace '\W','_') + ".log")
+            $logDir = 'C:\staging\DSC\ADKSetupLogs'
+            if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
+                $null = New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop
+            }
+            $logFile = Join-Path $logDir ("adksetup-" + ($label -replace '\W','_') + ".log")
             if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
 
             $full = @($argv) + @('/log', $logFile)
             Write-Status ("ADK {0}: running adksetup (downloading + installing, may take several minutes): {1} {2}" -f $label, $exe, ($full -join ' '))
-            $proc = Start-Process -FilePath $exe -ArgumentList $full -Wait -PassThru -NoNewWindow
-            $code = $proc.ExitCode
+            # MEASURED 2026-08-29: one successful leg took 64m, then WinPE ran another 3h53m
+            # without returning before the outer 5h phase timeout. Keep a conservative 90m hard
+            # cap; log/CPU inactivity is reported but is not yet trusted as a kill decision.
+            $run = Invoke-AdkSetupProcess -FilePath $exe -ArgumentList $full -Label $label -LogFile $logFile `
+                -DiagnosticDirectory $logDir -TimeoutSeconds 5400 -PollSeconds 15 -HeartbeatSeconds 300
+            $code = $run.ExitCode
             Write-Status ("ADK {0}: adksetup exit code: {1} (0x{2:x})" -f $label, $code, $code)
             # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED -- install succeeded, reboot needed.
             # Don't enter the diagnostics/dead-link-probe path for 3010.
@@ -693,6 +1006,9 @@ class InstallADK {
                     Write-Status ("adksetup ({0}) link probe threw: {1}" -f $label, $_.Exception.Message)
                 }
             }
+            if ($run.TimedOut) {
+                throw "ADK $label setup exceeded the 90-minute hard cap and its process tree was terminated. Burn log: $logFile. Timeout diagnostic: $($run.DiagnosticPath)"
+            }
             return $code
         }
 
@@ -722,7 +1038,7 @@ class InstallADK {
                 $missing = @($verifyPaths | Where-Object { -not (Test-Path $_) })
                 if ($missing.Count -eq 0) { return $true }
                 Write-Status ("ADK {0} : adksetup reported success but expected install path(s) missing: {1}" -f $label, ($missing -join '; '))
-                $logFile = Join-Path $env:TEMP ("adksetup-" + ($label -replace '\W','_') + ".log")
+                $logFile = Join-Path 'C:\staging\DSC\ADKSetupLogs' ("adksetup-" + ($label -replace '\W','_') + ".log")
                 if (Test-Path $logFile) {
                     try {
                         $tail = Get-Content -LiteralPath $logFile -Tail 15 -ErrorAction SilentlyContinue
@@ -743,8 +1059,8 @@ class InstallADK {
                 }
                 catch {
                     $ErrorMessage = $_.Exception.Message
-                    Write-Status "Failed to launch ADK $label setup: $ErrorMessage"
-                    throw "Failed to launch ADK $label setup: $ErrorMessage"
+                    Write-Status "ADK $label setup attempt failed: $ErrorMessage"
+                    throw
                 }
                 if ($lastExit -eq 0 -or $lastExit -eq 3010) {
                     if (& $verifyInstall) { return $lastExit }
