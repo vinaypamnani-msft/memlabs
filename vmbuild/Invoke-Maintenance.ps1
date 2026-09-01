@@ -1,18 +1,23 @@
 ﻿[CmdletBinding()]
-param ()
+param (
+    # Re-entry point: the removal relaunches this script with this switch so the uninstaller runs in
+    # its own process and can never delay the VMBuild launch that is waiting on maintenance.
+    [switch] $WindowsAdminCenterRemovalOnly
+)
 
 $ErrorActionPreference = 'Continue'
 
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $logsPath = Join-Path $scriptPath 'logs'
-$logFile = Join-Path $logsPath "Maintenance_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+$logPrefix = if ($WindowsAdminCenterRemovalOnly) { 'WacRemoval' } else { 'Maintenance' }
+$logFile = Join-Path $logsPath "${logPrefix}_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 if (-not (Test-Path $logsPath)) {
     New-Item -ItemType Directory -Path $logsPath -Force | Out-Null
 }
 
 # Clean up old maintenance logs (keep only the 3 most recent)
-$maintenanceLogs = Get-ChildItem -Path $logsPath -Filter 'Maintenance_*.log' -ErrorAction SilentlyContinue | Sort-Object -Property CreationTime -Descending
+$maintenanceLogs = Get-ChildItem -Path $logsPath -Filter "${logPrefix}_*.log" -ErrorAction SilentlyContinue | Sort-Object -Property CreationTime -Descending
 if ($maintenanceLogs.Count -gt 3) {
     $logsToDelete = $maintenanceLogs | Select-Object -Skip 3
     foreach ($logToDelete in $logsToDelete) {
@@ -604,21 +609,74 @@ function ConvertTo-QuietUninstallCommand {
     return $command
 }
 
-function Invoke-WindowsAdminCenterRemoval {
+function Stop-ProcessTree {
     param (
+        [Parameter(Mandatory = $true)]
+        [int] $ProcessId
+    )
+
+    # Depth first: the uninstaller shells out one powershell.exe per cleanup step and waits on it, so
+    # the blocked child is the thing actually holding the tree up. Killing only the parent orphans
+    # the unins*.tmp clone that owns the unins*.dat lock, which then fails the next run with Error 32.
+    foreach ($child in @(Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId=$ProcessId" -ErrorAction SilentlyContinue)) {
+        Stop-ProcessTree -ProcessId ([int] $child.ProcessId)
+    }
+
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-WindowsAdminCenterRemoval {
+    Write-LogMessage 'Checking for Windows Admin Center...'
+
+    # The host ARM template (azuredeploysmall) installed WAC via an AdminCenter extension until
+    # 602b3494 dropped it on 2026-08-21, and nothing ever updated it. Hosts deployed before then
+    # still carry 2.0.0.112 against a current 2.7.4.18, which is what the vulnerability scan flags.
+    if (@(Get-InstalledEntry -NameLike 'Windows Admin Center*').Count -eq 0) {
+        Write-LogMessage 'Windows Admin Center is not installed. Nothing to remove.'
+        return
+    }
+
+    # One removal at a time: a wedged uninstaller can outlive the launch that started it, and a
+    # second one would fight the first for the unins*.dat lock.
+    $lockFile = Join-Path $env:TEMP 'memlabs_wac_removal.pid'
+    if (Test-Path -LiteralPath $lockFile) {
+        $existingPid = 0
+        $lockText = @(Get-Content -LiteralPath $lockFile -ErrorAction SilentlyContinue)[0]
+        if ([int]::TryParse($lockText, [ref] $existingPid)) {
+            $running = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
+            if ($running -and $running.ProcessName -eq 'powershell') {
+                Write-LogMessage "A Windows Admin Center removal is already running (PID $existingPid). Skipping this launch."
+                return
+            }
+        }
+    }
+
+    # Its own process, deliberately not waited on: VMBuild.cmd runs this script synchronously, so an
+    # uninstall that stalls for its full timeout would otherwise be added to every build launch.
+    $worker = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList @(
+        '-NoLogo', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$PSCommandPath`"", '-WindowsAdminCenterRemovalOnly'
+    )
+    Set-Content -LiteralPath $lockFile -Value $worker.Id -Encoding ascii
+    Write-LogMessage "Windows Admin Center removal launched in its own process (PID $($worker.Id), non-blocking). It writes WacRemoval_*.log under $logsPath."
+}
+
+function Invoke-WindowsAdminCenterRemovalWorker {
+    param (
+        [int] $UninstallTimeoutSeconds = 600,
         [int] $VerifyTimeoutSeconds = 180
     )
 
     Write-LogMessage 'Starting Windows Admin Center removal...'
 
-    # Nothing in this repo installs WAC, so any copy here was placed by hand and no updater owns it.
-    # MEASURED on a lab host 2026-09-01: 2.0.0.112 against a current 2.7.4.18.
     $entries = @(Get-InstalledEntry -NameLike 'Windows Admin Center*')
     if ($entries.Count -eq 0) {
         Write-LogMessage 'Windows Admin Center is not installed. Nothing to remove.'
         return
     }
 
+    # Do NOT stop or disable the WindowsAdminCenter services first: the uninstaller runs its own
+    # Stop-WACService / Stop-WACLauncher as its first two steps.
     foreach ($entry in $entries) {
         Write-LogMessage "Found '$($entry.DisplayName)' version $($entry.DisplayVersion)."
 
@@ -628,9 +686,31 @@ function Invoke-WindowsAdminCenterRemoval {
             continue
         }
 
+        # Inno logs each step it shells out to, which is the only thing that names a stalled step.
+        $innoLog = $null
+        if ($command -match '(?i)unins\d*\.exe') {
+            $innoLog = Join-Path $env:TEMP ('wac-uninstall-{0:yyyyMMdd-HHmmss}.log' -f (Get-Date))
+            $command += " /LOG=`"$innoLog`""
+        }
+
         Write-LogMessage "Uninstalling with: $command"
-        $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $command -Wait -PassThru -WindowStyle Hidden
-        Write-LogMessage "Uninstall exited with code: $($proc.ExitCode)"
+        $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $command -PassThru -WindowStyle Hidden
+        if ($proc.WaitForExit($UninstallTimeoutSeconds * 1000)) {
+            Write-LogMessage "Uninstall exited with code: $($proc.ExitCode)"
+            continue
+        }
+
+        $step = $null
+        if ($innoLog -and (Test-Path -LiteralPath $innoLog)) {
+            $step = @(Get-Content -LiteralPath $innoLog -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -match 'Running Exec parameters:' } | Select-Object -Last 1)[0]
+        }
+        $where = if ($step) { " It was last running: $($step.Trim())" } elseif ($innoLog) { " No step was logged to ${innoLog}." } else { '' }
+
+        # Killed rather than left running: a stalled tree keeps the unins*.dat lock, so leaving it
+        # would make every later launch start another one that cannot succeed either.
+        Write-LogMessage "Uninstaller for '$($entry.DisplayName)' has not exited after $UninstallTimeoutSeconds seconds.$where Killing the process tree." -Level 'WARNING'
+        Stop-ProcessTree -ProcessId $proc.Id
     }
 
     # The exit code is the uninstaller's opinion; the registry is the fact. Inno's unins*.exe also
@@ -1238,6 +1318,30 @@ function Invoke-WeeklyUpgrades {
     }
 
     Write-LogMessage 'Weekly upgrades maintenance completed.'
+}
+
+if ($WindowsAdminCenterRemovalOnly) {
+    Write-LogMessage '========================================'
+    Write-LogMessage 'Windows Admin Center removal worker started'
+    Write-LogMessage "Log file: $logFile"
+    Write-LogMessage '========================================'
+
+    $workerExitCode = 0
+    try {
+        Invoke-WindowsAdminCenterRemovalWorker
+    }
+    catch {
+        Write-LogMessage "Windows Admin Center removal threw: $_" -Level 'ERROR'
+        $workerExitCode = 1
+    }
+    finally {
+        # Release the lock here rather than trusting liveness alone: a dead PID can be reused, and
+        # a stale lock would make every later launch skip the removal.
+        Remove-Item -LiteralPath (Join-Path $env:TEMP 'memlabs_wac_removal.pid') -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-LogMessage 'Windows Admin Center removal worker completed'
+    exit $workerExitCode
 }
 
 Write-LogMessage '========================================' 
