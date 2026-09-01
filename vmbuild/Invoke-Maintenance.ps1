@@ -115,8 +115,8 @@ function Get-SevenZipVersion {
     $versionInfo = (Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue).VersionInfo
     if (-not $versionInfo -or $versionInfo.FileMajorPart -le 0) { return $null }
 
-    # Two parts on both sides of every comparison: [version]'24.8' is LESS than [version]'24.8.0'.
-    return [version]"$($versionInfo.FileMajorPart).$($versionInfo.FileMinorPart)"
+    # The file's own string, so the log matches what Add/Remove Programs shows: '26.02', not [version] 26.2.
+    return $versionInfo.FileVersion
 }
 
 function Get-SevenZipChocoPackage {
@@ -635,9 +635,15 @@ function Invoke-SevenZipMaintenance {
 
     $stale = Get-StaleSevenZipMsiEntry
     if ($owner -and $null -ne $stale) {
+        # MEASURED 2026-09-01: that product code still owns 11 files in C:\Program Files\7-Zip, 8 of them
+        # holding the CURRENT version, so the uninstall aims at the files Chocolatey now maintains.
+        $installDir = if ($installedPath) { Split-Path $installedPath -Parent } else { 'the 7-Zip install folder' }
         Write-LogMessage ("An orphaned 7-Zip MSI registration remains: '$($stale.DisplayName)' version $($stale.DisplayVersion). " +
             "No files of that version are on disk, but vulnerability scanners read Add/Remove Programs and will keep " +
-            "reporting it. Remove it by hand, then confirm 7z.exe still reads $installed`: $($stale.UninstallString -replace '(?i)/I', '/X') /qn /norestart") -Level 'WARNING'
+            "reporting it. Removing it is a hand operation, not an unattended one: the old package still claims the " +
+            "in-use files under $installDir, so back them up first, run " +
+            "$($stale.UninstallString -replace '(?i)/I', '/X') /qn /norestart, then confirm 7z.exe still reads $installed. " +
+            "If it does not, 'choco install 7zip.install -y --force' restores it.") -Level 'WARNING'
     }
 
     Write-LogMessage '7-Zip maintenance completed.'
