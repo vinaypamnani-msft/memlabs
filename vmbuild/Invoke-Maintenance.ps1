@@ -93,6 +93,58 @@ function Get-ChocoAvailablePackageVersion {
     return $null
 }
 
+function Get-SevenZipPath {
+    # First hit wins, so a Program Files install hides a chocolatey one - which is exactly
+    # the state Invoke-SevenZipMaintenance exists to keep current.
+    foreach ($candidate in @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe", "$env:ProgramData\chocolatey\bin\7z.exe")) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+
+    return ''
+}
+
+function Get-SevenZipVersion {
+    # Off the binary, never off a package record - 7-Zip here is routinely installed
+    # outside any package manager, so no record is authoritative.
+    param (
+        [string]$Path
+    )
+
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+
+    $versionInfo = (Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue).VersionInfo
+    if (-not $versionInfo -or $versionInfo.FileMajorPart -le 0) { return $null }
+
+    # Two parts on both sides of every comparison: [version]'24.8' is LESS than [version]'24.8.0'.
+    return [version]"$($versionInfo.FileMajorPart).$($versionInfo.FileMinorPart)"
+}
+
+function Get-SevenZipChocoPackage {
+    # The lib folder IS the ownership record, and reading it needs no choco process - which also
+    # sidesteps 'choco list' differing between v1 (--local-only) and v2.
+    $libRoot = Join-Path $env:ProgramData 'chocolatey\lib'
+    foreach ($dir in @(Get-ChildItem -LiteralPath $libRoot -Directory -ErrorAction SilentlyContinue)) {
+        if ($dir.Name -match '(?i)^7zip') { return $dir.Name }
+    }
+
+    return ''
+}
+
+function Get-StaleSevenZipMsiEntry {
+    # Chocolatey's 7zip.install runs the vendor EXE, which upgrades C:\Program Files\7-Zip in place
+    # but leaves any earlier MSI's Add/Remove registration behind. Vulnerability scanners read that
+    # registration, so the host keeps reporting the OLD version with no old files on disk.
+    foreach ($entry in @(@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*') |
+            ForEach-Object { Get-ItemProperty -Path $_ -ErrorAction SilentlyContinue })) {
+        if ("$($entry.DisplayName)" -notmatch '(?i)7-?zip') { continue }
+        if ("$($entry.UninstallString)" -notmatch '(?i)msiexec') { continue }
+        return $entry
+    }
+
+    return $null
+}
+
 $script:MaintenanceHadFailure = $false
 
 function Set-MemLabsFileAssociation {
@@ -541,6 +593,56 @@ function Invoke-WindowsTerminalMaintenance {
     Write-LogMessage 'Windows Terminal maintenance completed.'
 }
 
+function Invoke-SevenZipMaintenance {
+    Write-LogMessage 'Starting 7-Zip maintenance...'
+
+    $installedPath = Get-SevenZipPath
+    $installed = Get-SevenZipVersion -Path $installedPath
+    $owner = Get-SevenZipChocoPackage
+
+    if ($installed) { Write-LogMessage "7-Zip $installed is installed at $installedPath." }
+    else { Write-LogMessage '7-Zip is not installed on this host.' }
+
+    if ($owner) {
+        Write-LogMessage "Chocolatey package '$owner' owns it, so the weekly 'choco upgrade all' keeps it current."
+    }
+    elseif (-not (Test-ChocoAvailable)) {
+        Write-LogMessage 'No Chocolatey package owns 7-Zip and the CLI is missing, so nothing on this host can update it. Its currency is UNKNOWN, not current.' -Level 'WARNING'
+    }
+    else {
+        # MEASURED on a lab host 2026-09-01: 7-Zip 24.08 with InstallSource '<repo>\vmbuild\azureFiles\tools\'
+        # and no package owning it, so 'choco upgrade all' could never reach it. Adopting it is what
+        # puts it under the existing weekly upgrade; measured to take 24.08 to 26.02 in place.
+        # 7zip.install, never 7zip.portable: portable only shims chocolatey\bin, which Get-SevenZipPath
+        # reaches last, so a stale Program Files copy would keep winning and the upgrades go unused.
+        Write-LogMessage 'No Chocolatey package owns 7-Zip. Adopting it so the weekly upgrade covers it...'
+        & choco install 7zip.install -y | Out-Null
+        $chocoRc = $LASTEXITCODE
+        Write-LogMessage "choco install 7zip.install returned exit code: $chocoRc"
+
+        if (Test-ChocoSuccessCode -Code $chocoRc) {
+            # A success exit code is choco's opinion; the file version and the lib folder are the facts.
+            $installedPath = Get-SevenZipPath
+            $installed = Get-SevenZipVersion -Path $installedPath
+            $owner = Get-SevenZipChocoPackage
+            if ($owner) { Write-LogMessage "7-Zip $installed at $installedPath is now owned by '$owner'." }
+            else { Write-LogMessage 'choco reported success but no 7zip* folder exists under chocolatey\lib, so nothing owns 7-Zip yet.' -Level 'WARNING' }
+        }
+        else {
+            Write-LogMessage "Could not adopt 7-Zip into Chocolatey (exit code $chocoRc). It stays unmanaged at $installed." -Level 'WARNING'
+        }
+    }
+
+    $stale = Get-StaleSevenZipMsiEntry
+    if ($owner -and $null -ne $stale) {
+        Write-LogMessage ("An orphaned 7-Zip MSI registration remains: '$($stale.DisplayName)' version $($stale.DisplayVersion). " +
+            "No files of that version are on disk, but vulnerability scanners read Add/Remove Programs and will keep " +
+            "reporting it. Remove it by hand, then confirm 7z.exe still reads $installed`: $($stale.UninstallString -replace '(?i)/I', '/X') /qn /norestart") -Level 'WARNING'
+    }
+
+    Write-LogMessage '7-Zip maintenance completed.'
+}
+
 function Install-DotNet9DesktopRuntime {
     # mRemoteNG 1.78+ uses .NET 9 WinForms — ensure the Desktop Runtime is installed
     $desktopRuntimePath = "$env:ProgramFiles\dotnet\shared\Microsoft.WindowsDesktop.App"
@@ -731,16 +833,13 @@ function Invoke-MRemoteNGMaintenance {
     }
 
     # Ensure 7-Zip is available for RAR extraction
-    $7zExe = $null
-    foreach ($p in @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe", "C:\ProgramData\chocolatey\bin\7z.exe")) {
-        if (Test-Path $p) { $7zExe = $p; break }
-    }
+    $7zExe = Get-SevenZipPath
     if (-not $7zExe) {
         if (Test-ChocoAvailable) {
             Write-LogMessage 'Installing 7-Zip for RAR extraction...'
-            & choco install 7zip.portable -y | Out-Null
+            & choco install 7zip.install -y | Out-Null
             if (Test-ChocoSuccessCode -Code $LASTEXITCODE) {
-                $7zExe = "C:\ProgramData\chocolatey\bin\7z.exe"
+                $7zExe = Get-SevenZipPath
             }
         }
         if (-not $7zExe -or -not (Test-Path $7zExe)) {
@@ -1051,6 +1150,8 @@ try { Invoke-System32CurlMaintenance } catch { Write-LogMessage "System32 curl m
 try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-RdcManMaintenance } catch { Write-LogMessage "RDCMan maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+# Before mRemoteNG: that phase needs 7z.exe to unpack the nightly .rar.
+try { Invoke-SevenZipMaintenance } catch { Write-LogMessage "7-Zip maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-MRemoteNGMaintenance } catch { Write-LogMessage "mRemoteNG maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-WeeklyUpgrades } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 
