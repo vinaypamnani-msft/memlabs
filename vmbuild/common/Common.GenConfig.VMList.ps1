@@ -359,6 +359,25 @@ function Select-Options {
                 }
                 continue MainLoop
             }
+            "prefix" {
+                # The prefix is optional. Read-Host2 treats blank/Enter as "keep the
+                # current value", so clearing it needs an explicit token.
+                $current = "$($property.prefix)"
+                $displayValue = if ($current) { $current } else { "(none)" }
+                Write-Log -Activity -NoNewLine "Modify Property prefix - Current Value: $displayValue"
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "  prefix is optional. Enter '-' for no prefix; VM names are then used exactly as entered."
+                $response = Read-Host2 -Prompt "Select new Value for prefix" $current
+                if ($response -ne "ESCAPE" -and -not [String]::IsNullOrWhiteSpace($response)) {
+                    if ($response.Trim() -in @("-", "none", "(none)")) {
+                        $property.prefix = ""
+                    }
+                    else {
+                        $property.prefix = $response.Trim()
+                    }
+                    Get-TestResult -SuccessOnError | out-null
+                }
+                continue MainLoop
+            }
             "domainName" {
                 $domain = select-NewDomainName
                 if (-not [string]::IsNullOrEmpty($domain) -and $domain -ne "ESCAPE") {    

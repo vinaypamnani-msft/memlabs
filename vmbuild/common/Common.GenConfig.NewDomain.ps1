@@ -306,10 +306,19 @@ function get-PrefixForDomain {
 
     $existingDomains = get-list -Type UniqueDomain
     if ($existingDomains -contains $Domain) {
-        $existingPrefix = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" }).Prefix
-
-        if (-not [string]::IsNullOrWhiteSpace($existingPrefix)) {
-            return $existingPrefix
+        $existingDC = Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1
+        if ($existingDC) {
+            $existingPrefix = $existingDC.Prefix
+            if (-not [string]::IsNullOrWhiteSpace($existingPrefix)) {
+                return $existingPrefix
+            }
+            # vmOptions.prefix is optional, so a deployed domain may legitimately have
+            # none. Only fall through to derivation when the VM note never carried the
+            # property -- otherwise adding a VM to a prefix-free lab would start
+            # prefixing its names and break every reference to the existing VMs.
+            if ($existingDC.PSObject.Properties.Name -contains 'Prefix') {
+                return ""
+            }
         }
     }
     $ValidDomainNames = Get-ValidDomainNames

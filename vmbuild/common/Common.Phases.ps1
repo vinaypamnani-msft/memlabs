@@ -1110,7 +1110,7 @@ function Start-Phase {
                 # the partner node survives: unlike the CNO these are inert files that
                 # setup rewrites, and a stale one is exactly what fails the restore.
                 if ($item.ClusterName -and $item.FileServerVM) {
-                    $clusterNoPrefix = $item.ClusterName.Replace($deployConfig.vmOptions.prefix, '')
+                    $clusterNoPrefix = Remove-VmNamePrefix -Name $item.ClusterName -Prefix $deployConfig.vmOptions.prefix
                     Clear-SqlAoBackupShare -FileServerVM $item.FileServerVM -Domain $deployConfig.vmOptions.domainName -BackupLocalPath "F:\$clusterNoPrefix-Backup" -Reason "SQLAO rebuild of $($item.vmName)" | Out-Null
                 }
             }

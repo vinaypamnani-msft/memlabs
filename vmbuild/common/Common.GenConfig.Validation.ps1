@@ -240,7 +240,7 @@ function Get-AdditionalValidations {
             if ($value -eq $true) {
                 if (-not $property.domainUser) {
                     $existingUsers = @(get-list2 -DeployConfig $Global:Config | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique)
-                    $userPrefix = ($Global:Config.vmOptions.prefix).ToLower() + "user"
+                    $userPrefix = "$($Global:Config.vmOptions.prefix)".ToLower() + "user"
                     $userNoPrefix = "user"
                     [int]$i = 1
                     while ($true) {

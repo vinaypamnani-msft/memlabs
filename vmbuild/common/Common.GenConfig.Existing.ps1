@@ -998,10 +998,10 @@ function New-UserConfig {
     if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
     }
-    $prefix = get-PrefixForDomain -Domain $Domain
-    if ([string]::IsNullOrWhiteSpace($prefix)) {
-        $prefix = "NULL-"
-    }
+    # An existing domain may have been deployed with no prefix at all; keep it blank
+    # rather than inventing one, or VMs added to it would be named for a prefix the
+    # lab does not use.
+    $prefix = "$(get-PrefixForDomain -Domain $Domain)"
     $netbiosName = $Domain.Split(".")[0]
     $vmOptions = [PSCustomObject]@{
         prefix            = $prefix

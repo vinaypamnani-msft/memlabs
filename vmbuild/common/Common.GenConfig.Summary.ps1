@@ -22,7 +22,7 @@ function get-VMOptionsSummary {
     $sep = Format-OptionToken -Color "DimGray" -Text "  ·  "
 
     $tokens = @(
-        Format-OptionToken -Color "LightSteelBlue" -Text "[$($options.prefix)]"
+        if ($options.prefix) { Format-OptionToken -Color "LightSteelBlue" -Text "[$($options.prefix)]" }
         Format-OptionToken -Color "Gold" -Text $options.domainName
         Format-OptionToken -Color "LightSteelBlue" -Text $options.network
         Format-OptionToken -Color "Chartreuse" -Text $options.adminName
@@ -358,38 +358,52 @@ function Get-AdditionalInformation {
 
     $origData = $data
 
+    # vmOptions.prefix is optional; with a blank prefix the "(full name)" preview
+    # would just repeat the value, so it is suppressed below.
+    $configPrefix = "$($global:config.vmOptions.Prefix)"
+
     switch ($item) {
 
         "RemoteSQLVM" {
             $remoteSQL = $global:config.virtualMachines | Where-Object { $_.vmName -eq $data }
-            $name = $($global:config.vmOptions.Prefix + $data)
+            $name = $($configPrefix + $data)
             if ($remoteSQL) {
                 if ($remoteSQL.OtherNode) {
                     $data = $data.PadRight(21) + "($name) [SQL Always On Cluster]"
                 }
-                else {
+                elseif ($configPrefix) {
                     $data = $data.PadRight(21) + "($name)"
                 }
             }
         }
         "ClusterName" {
-            $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+            if ($configPrefix) {
+                $data = $data.PadRight(21) + "($($configPrefix + $data))"
+            }
         }
 
         "AlwaysOnListenerName" {
-            $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+            if ($configPrefix) {
+                $data = $data.PadRight(21) + "($($configPrefix + $data))"
+            }
         }
 
         "vmName" {
-            if (-not $data.StartsWith($global:config.vmOptions.Prefix)) {
-                $data = $data.PadRight(21) + "($($global:config.vmOptions.Prefix+$data))"
+            if ($configPrefix -and -not $data.StartsWith($configPrefix)) {
+                $data = $data.PadRight(21) + "($($configPrefix + $data))"
+            }
+        }
+
+        "prefix" {
+            if ([string]::IsNullOrWhiteSpace($data)) {
+                $data = "(none) - VM names are used as-is"
             }
         }
 
         "domainUser" {
-            $prefixLower = $global:config.vmOptions.Prefix.ToLower()
-            if (-not $data.StartsWith($prefixLower)) {
-                $data = $data.PadRight(21) + "($($prefixLower+$data))"
+            $prefixLower = $configPrefix.ToLower()
+            if ($prefixLower -and -not $data.StartsWith($prefixLower)) {
+                $data = $data.PadRight(21) + "($($prefixLower + $data))"
             }
         }
 

@@ -1870,7 +1870,7 @@ function Test-SQLAOFunctionality {
         $otherNode = if ($VMName -eq $primaryAO.vmName) { $primaryAO.OtherNode } else { $primaryAO.vmName }
         # Derive share UNC paths (same logic as Get-SQLAOConfig)
         $prefix = $DeployConfig.vmOptions.prefix
-        $clusterNameNoPrefix = $primaryAO.ClusterName.Replace($prefix, "")
+        $clusterNameNoPrefix = Remove-VmNamePrefix -Name $primaryAO.ClusterName -Prefix $prefix
         $fileServerVM = $primaryAO.FileServerVM
         $witnessShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Witness"
         $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup"
@@ -14740,7 +14740,7 @@ function Test-SQLAOPostPhase5 {
         $listenerPort = '1500'
 
         $prefix = $DeployConfig.vmOptions.prefix
-        $clusterNameNoPrefix = $clusterName.Replace($prefix, "")
+        $clusterNameNoPrefix = Remove-VmNamePrefix -Name $clusterName -Prefix $prefix
         $fileServerVM = $primaryAO.fileServerVM
         $witnessShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Witness"
         $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup"

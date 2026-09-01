@@ -302,6 +302,58 @@ function Resolve-ConfigVmReference {
     return $normalized
 }
 
+function Add-VmNamePrefix {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [string] $Name,
+        [Parameter(Mandatory = $false)]
+        [string] $Prefix,
+        [Parameter(Mandatory = $false)]
+        [object[]] $BaseNames = $null
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $Name }
+    if ([string]::IsNullOrEmpty($Prefix)) { return $Name }
+
+    # A reference to a VM defined in this config is stored UNPREFIXED -- that is what
+    # the unconditional vmName prepend means -- even when the base name happens to
+    # begin with the prefix text (prefix "CS", VM "CSSQL"). Matching the config's own
+    # base names is the only way to tell that apart from an already-prefixed value,
+    # which a bare StartsWith test gets wrong in both directions.
+    $baseMatch = @($BaseNames | Where-Object { $_ -and ($_ -ieq $Name) }) | Select-Object -First 1
+    if ($baseMatch) { return $Prefix + $baseMatch }
+
+    if ($Name.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        # Already prefixed. Re-derive it from the base name so a casing difference in
+        # the config still produces the exact string the VM is named.
+        $stripped = $Name.Substring($Prefix.Length)
+        $strippedMatch = @($BaseNames | Where-Object { $_ -and ($_ -ieq $stripped) }) | Select-Object -First 1
+        if ($strippedMatch) { return $Prefix + $strippedMatch }
+        return $Name
+    }
+
+    return $Prefix + $Name
+}
+
+function Remove-VmNamePrefix {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [string] $Name,
+        [Parameter(Mandatory = $false)]
+        [string] $Prefix
+    )
+
+    # SQLAO witness/backup share names are derived from the de-prefixed cluster
+    # name, so every caller must strip identically or the deploy and the validator
+    # look at different shares. .Replace() throws on an empty oldValue, which is
+    # exactly what an optional (blank) prefix produces.
+    if ([string]::IsNullOrEmpty($Name)) { return $Name }
+    if ([string]::IsNullOrEmpty($Prefix)) { return $Name }
+    return $Name.Replace($Prefix, "")
+}
+
 function Get-UserConfiguration {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Configuration Name/File")]
@@ -341,6 +393,15 @@ function Get-UserConfiguration {
         $config = Get-Content $configPath -Force | ConvertFrom-Json
 
         #Apply Fixes to Config
+
+        # vmOptions.prefix is optional. Normalize a missing/blank prefix to "" (never
+        # $null): call sites do $prefix.ToLower() and .Replace($prefix, ""), and both
+        # throw on $null while the same calls on "" are handled.
+        if ($config.vmOptions) {
+            if ([string]::IsNullOrWhiteSpace($config.vmOptions.prefix)) {
+                $config.vmOptions | Add-Member -MemberType NoteProperty -Name "prefix" -Value "" -Force
+            }
+        }
 
         if ($config.cmOptions) {
             #Version                   = $latestVersion
@@ -1075,46 +1136,55 @@ function New-DeployConfig {
         }
 
         # add prefix to vm names
+        # The prefix is optional. Normalize blank/missing to "" first: at "" every
+        # .StartsWith() below returns true so the prepend no-ops and vmName stays the
+        # base name, and downstream $prefix.ToLower()/.Replace() callers stop throwing.
+        if ($configObject.vmOptions -and [string]::IsNullOrWhiteSpace($configObject.vmOptions.prefix)) {
+            $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "prefix" -Value "" -Force
+        }
         $virtualMachines = $configObject.virtualMachines
+        # Snapshot the base names before the loop mutates them; Add-VmNamePrefix needs
+        # them to tell an unprefixed reference from one that already carries the prefix.
+        $prefix = $configObject.vmOptions.prefix
+        $baseVmNames = @($virtualMachines | Where-Object { -not $_.Hidden -and $_.vmName } | ForEach-Object { "$($_.vmName)" })
         foreach ($item in $virtualMachines | Where-Object { -not $_.Hidden -and $_.vmName } ) {
-            $item.vmName = $configObject.vmOptions.prefix + $item.vmName
-            if ($item.pullDPSourceDP -and -not $item.pullDPSourceDP.StartsWith($configObject.vmOptions.prefix)) {
-                $item.pullDPSourceDP = $configObject.vmOptions.prefix + $item.pullDPSourceDP
+            $item.vmName = $prefix + $item.vmName
+            if ($item.pullDPSourceDP) {
+                $item.pullDPSourceDP = Add-VmNamePrefix -Name $item.pullDPSourceDP -Prefix $prefix -BaseNames $baseVmNames
             }
 
-            if ($item.remoteSQLVM -and -not $item.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
-                $item.remoteSQLVM = $configObject.vmOptions.prefix + $item.remoteSQLVM
+            if ($item.remoteSQLVM) {
+                $item.remoteSQLVM = Add-VmNamePrefix -Name $item.remoteSQLVM -Prefix $prefix -BaseNames $baseVmNames
             }
 
-            if ($item.replicaSqlServerVM -and -not $item.replicaSqlServerVM.StartsWith($configObject.vmOptions.prefix)) {
-                $item.replicaSqlServerVM = $configObject.vmOptions.prefix + $item.replicaSqlServerVM
+            if ($item.replicaSqlServerVM) {
+                $item.replicaSqlServerVM = Add-VmNamePrefix -Name $item.replicaSqlServerVM -Prefix $prefix -BaseNames $baseVmNames
             }
 
-            if ($item.wsusDataBaseServer -and -not $item.wsusDataBaseServer.StartsWith($configObject.vmOptions.prefix)) {
-                if ($item.wsusDataBaseServer -ne "WID") {
-                    $item.wsusDataBaseServer = $configObject.vmOptions.prefix + $item.wsusDataBaseServer
-                }
+            if ($item.wsusDataBaseServer -and $item.wsusDataBaseServer -ne "WID") {
+                $item.wsusDataBaseServer = Add-VmNamePrefix -Name $item.wsusDataBaseServer -Prefix $prefix -BaseNames $baseVmNames
             }
 
             if ($item.domainUser) {
-                $item.domainUser = $configObject.vmOptions.prefix + $item.domainUser
+                $item.domainUser = $prefix + $item.domainUser
             }
         }
 
         $SQLAOPriVMs = $virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not $_.Hidden }
         foreach ($SQLAO in $SQLAOPriVMs) {
             if ($SQLAO) {
-                if ($SQLAO.fileServerVM -and -not $SQLAO.fileServerVM.StartsWith($configObject.vmOptions.prefix)) {
-                    $SQLAO.fileServerVM = $configObject.vmOptions.prefix + $SQLAO.fileServerVM
+                if ($SQLAO.fileServerVM) {
+                    $SQLAO.fileServerVM = Add-VmNamePrefix -Name $SQLAO.fileServerVM -Prefix $prefix -BaseNames $baseVmNames
                 }
-                if ($SQLAO.OtherNode -and -not $SQLAO.OtherNode.StartsWith($configObject.vmOptions.prefix)) {
-                    $SQLAO.OtherNode = $configObject.vmOptions.prefix + $SQLAO.OtherNode
+                if ($SQLAO.OtherNode) {
+                    $SQLAO.OtherNode = Add-VmNamePrefix -Name $SQLAO.OtherNode -Prefix $prefix -BaseNames $baseVmNames
                 }
-                if ($SQLAO.ClusterName -and -not $SQLAO.ClusterName.StartsWith($configObject.vmOptions.prefix)) {
-                    $SQLAO.ClusterName = $configObject.vmOptions.prefix + $SQLAO.ClusterName
+                # CNO / VCO are new AD objects, not references to a VM in this config.
+                if ($SQLAO.ClusterName) {
+                    $SQLAO.ClusterName = Add-VmNamePrefix -Name $SQLAO.ClusterName -Prefix $prefix
                 }
-                if ($SQLAO.AlwaysOnListenerName -and -not $SQLAO.AlwaysOnListenerName.StartsWith($configObject.vmOptions.prefix)) {
-                    $SQLAO.AlwaysOnListenerName = $configObject.vmOptions.prefix + $SQLAO.AlwaysOnListenerName
+                if ($SQLAO.AlwaysOnListenerName) {
+                    $SQLAO.AlwaysOnListenerName = Add-VmNamePrefix -Name $SQLAO.AlwaysOnListenerName -Prefix $prefix
                 }
             }
         }
@@ -1123,8 +1193,8 @@ function New-DeployConfig {
         if ($PassiveVMs) {
             foreach ($PassiveVM in $PassiveVMs) {
                 # Add prefix to FS
-                if ($PassiveVM.remoteContentLibVM -and -not $PassiveVM.remoteContentLibVM.StartsWith($configObject.vmOptions.prefix)) {
-                    $PassiveVM.remoteContentLibVM = $configObject.vmOptions.prefix + $PassiveVM.remoteContentLibVM
+                if ($PassiveVM.remoteContentLibVM) {
+                    $PassiveVM.remoteContentLibVM = Add-VmNamePrefix -Name $PassiveVM.remoteContentLibVM -Prefix $prefix -BaseNames $baseVmNames
                 }
             }
         }
@@ -1132,8 +1202,8 @@ function New-DeployConfig {
         $pmpcVMs = $virtualMachines | Where-Object { $_.InstallPatchMyPC -and -not $_.Hidden } 
         if ($pmpcVMs) {
             foreach ($pmpcVM in $pmpcVMs) {
-                if ($pmpcVM.PatchMyPCFileServer -and -not $pmpcVM.PatchMyPCFileServer.StartsWith($configObject.vmOptions.prefix)) {
-                    $pmpcVM.PatchMyPCFileServer = $configObject.vmOptions.prefix + $pmpcVM.PatchMyPCFileServer
+                if ($pmpcVM.PatchMyPCFileServer) {
+                    $pmpcVM.PatchMyPCFileServer = Add-VmNamePrefix -Name $pmpcVM.PatchMyPCFileServer -Prefix $prefix -BaseNames $baseVmNames
                 }
             }
         }
@@ -1142,16 +1212,12 @@ function New-DeployConfig {
         if ($configObject.pkiOptions) {
             $knownVmNames = @($virtualMachines | ForEach-Object { $_.vmName })
             if ($configObject.pkiOptions.IssuingCAVM) {
-                $configObject.pkiOptions.IssuingCAVM = Resolve-ConfigVmReference -VmReference $configObject.pkiOptions.IssuingCAVM -VmNames $knownVmNames -Prefix $configObject.vmOptions.prefix
+                $configObject.pkiOptions.IssuingCAVM = Resolve-ConfigVmReference -VmReference $configObject.pkiOptions.IssuingCAVM -VmNames $knownVmNames -Prefix $prefix
+                $configObject.pkiOptions.IssuingCAVM = Add-VmNamePrefix -Name $configObject.pkiOptions.IssuingCAVM -Prefix $prefix -BaseNames $baseVmNames
             }
             if ($configObject.pkiOptions.OfflineRootCAVM) {
-                $configObject.pkiOptions.OfflineRootCAVM = Resolve-ConfigVmReference -VmReference $configObject.pkiOptions.OfflineRootCAVM -VmNames $knownVmNames -Prefix $configObject.vmOptions.prefix
-            }
-            if ($configObject.pkiOptions.IssuingCAVM -and -not $configObject.pkiOptions.IssuingCAVM.StartsWith($configObject.vmOptions.prefix)) {
-                $configObject.pkiOptions.IssuingCAVM = $configObject.vmOptions.prefix + $configObject.pkiOptions.IssuingCAVM
-            }
-            if ($configObject.pkiOptions.OfflineRootCAVM -and -not $configObject.pkiOptions.OfflineRootCAVM.StartsWith($configObject.vmOptions.prefix)) {
-                $configObject.pkiOptions.OfflineRootCAVM = $configObject.vmOptions.prefix + $configObject.pkiOptions.OfflineRootCAVM
+                $configObject.pkiOptions.OfflineRootCAVM = Resolve-ConfigVmReference -VmReference $configObject.pkiOptions.OfflineRootCAVM -VmNames $knownVmNames -Prefix $prefix
+                $configObject.pkiOptions.OfflineRootCAVM = Add-VmNamePrefix -Name $configObject.pkiOptions.OfflineRootCAVM -Prefix $prefix -BaseNames $baseVmNames
             }
         }
 
@@ -2096,7 +2162,7 @@ function Get-SQLAOConfig {
     #$DC = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" }
 
     $ClusterName = $PrimaryAO.ClusterName
-    $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix, "")
+    $ClusterNameNoPrefix = Remove-VmNamePrefix -Name $ClusterName -Prefix $deployConfig.vmOptions.prefix
 
     $ServiceAccount = $PrimaryAO.SqlServiceAccount
     $AgentAccount = $PrimaryAO.SqlAgentAccount

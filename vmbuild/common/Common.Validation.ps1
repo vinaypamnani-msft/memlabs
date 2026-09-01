@@ -99,16 +99,11 @@ function Test-ValidVmOptions {
     )
 
     # prefix
-    if (-not $ConfigObject.vmOptions.prefix) {
-        Add-ValidationMessage -Message "VM Options Validation: vmOptions.prefix not present in vmOptions. You must specify the prefix that will be added to name of Virtual Machine(s)." -ReturnObject $ReturnObject -Failure
-    }
-
-    $ExistingPrefixes = Get-list -type Prefix | where-object { $_.Domain -ne $ConfigObject.vmOptions.DomainName } | Select-Object -ExpandProperty Prefix
-
-    if ($ConfigObject.vmOptions.prefix -in $ExistingPrefixes) {
-        Add-ValidationMessage -Message "VM Options Validation: vmOptions.prefix value [$($ConfigObject.vmOptions.prefix)] is already in use by another domain. You must specify a different prefix." -ReturnObject $ReturnObject -Failure
-    }
-
+    # vmOptions.prefix is OPTIONAL. When blank, VM names equal their base names.
+    # The isolation the prefix used to guarantee is now enforced directly on the
+    # names themselves by the always-on cross-domain name-conflict check in
+    # Test-Configuration, so neither a blank prefix nor a prefix shared with
+    # another domain is a failure by itself.
 
     # basePath
     if (-not $ConfigObject.vmOptions.basePath) {
@@ -589,7 +584,8 @@ function Test-ValidMachineName {
         [string] $name,
         [object] $ReturnObject,
         [switch] $LinuxName,
-        [switch] $EnforceNetBios
+        [switch] $EnforceNetBios,
+        [switch] $FailOnLength
     )
 
     if (-not $name) {
@@ -605,9 +601,14 @@ function Test-ValidMachineName {
     # so an over-15 name (e.g. PS1-LINUXCLIENT2) is silently truncated to a
     # possibly-colliding account (PS1-LINUXCLIENT). A non-domain Linux VM is only
     # bound by the 64-char hostname limit below.
+    # -FailOnLength is passed for names that actually BECOME an AD computer object
+    # in this deployment (the VM itself, the cluster CNO, the listener VCO). Those
+    # must block: with an optional prefix the deployment relies on the NetBIOS name
+    # being the whole name, so silent truncation would break the uniqueness rule the
+    # cross-domain conflict check enforces.
     if (($name.Length -gt 15) -and (-not $LinuxName -or $EnforceNetBios)) {
         $nameKind = if ($LinuxName) { "domain-joined Linux VM's AD machine account name (the hostname is truncated to 15 chars)" } else { "Windows computer name" }
-        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name: $name. $nameKind cannot be more than 15 characters long (Currently $($name.Length))." -ReturnObject $ReturnObject -Warning
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name: $name. $nameKind cannot be more than 15 characters long (Currently $($name.Length))." -ReturnObject $ReturnObject -Failure:$FailOnLength -Warning:(-not $FailOnLength)
     }
 
     if ($LinuxName -and $name.Length -gt 64) {
@@ -624,6 +625,45 @@ function Test-ValidMachineName {
     
     if ($name -eq $env:COMPUTERNAME) {
         Add-ValidationMessage -Message "VM Validation: Domain Name [$name] is invalid. Cannot be the same name as the Host VM [$($env:COMPUTERNAME)]." -ReturnObject $ReturnObject -Warning
+    }
+}
+
+function Test-CrossDomainNameConflict {
+    param (
+        [object[]] $NewVMs,
+        [object[]] $ExistingVMs,
+        [string] $ConfigDomain,
+        [object] $ReturnObject
+    )
+
+    # MemLabs reaches every lab machine by NetBIOS name, so a cluster CNO or an AG
+    # listener VCO has to be as globally unique across the host as a VM name.
+    # vmOptions.prefix is optional and therefore no longer guarantees that.
+    # vmName-vs-vmName is checked by the caller (it has the extra same-domain
+    # re-deploy/role rules), so this pass covers only the virtual-name dimension.
+    $otherDomainVMs = @($ExistingVMs | Where-Object { $_.domain -and $ConfigDomain -and ($_.domain -ne $ConfigDomain) })
+    if ($otherDomainVMs.Count -eq 0) { return }
+
+    $otherVirtualNames = @($otherDomainVMs | ForEach-Object { $_.ClusterName; $_.AlwaysOnListenerName } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $otherVmNames = @($otherDomainVMs | ForEach-Object { $_.vmName } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $otherAllNames = @($otherVmNames + $otherVirtualNames)
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    foreach ($newVM in $NewVMs) {
+        $candidates.Add(@{ Label = "Cluster name"; Value = "$($newVM.ClusterName)"; Against = $otherAllNames })
+        $candidates.Add(@{ Label = "AlwaysOn listener name"; Value = "$($newVM.AlwaysOnListenerName)"; Against = $otherAllNames })
+        $candidates.Add(@{ Label = "VM"; Value = "$($newVM.vmName)"; Against = $otherVirtualNames })
+    }
+
+    # Both SQLAO nodes can carry the same ClusterName, so report each name once.
+    $reported = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in $candidates) {
+        $name = $candidate.Value
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        if ($reported -contains $name) { continue }
+        if (@($candidate.Against | Where-Object { $_ -eq $name }).Count -eq 0) { continue }
+        $reported.Add($name)
+        Add-ValidationMessage -Message "Name Conflict: $($candidate.Label) [$name] is already in use by another domain on this host. NetBIOS names must be unique across all deployments; rename it, or set a vmOptions.prefix that keeps it distinct." -ReturnObject $ReturnObject -Failure
     }
 }
 
@@ -673,14 +713,12 @@ function Test-ValidVmSupported {
 
     $vmName = $VM.vmName
 
-    if (-not ($vmName.StartsWith( $($ConfigObject.vmOptions.prefix) ) ) ) {
-        $vmName = $($ConfigObject.vmOptions.prefix) + $vmName
-    }
+    $vmName = Add-VmNamePrefix -Name $vmName -Prefix $ConfigObject.vmOptions.prefix
     $isLinuxVm = Test-VmIsLinux -Vm $VM
     # A domain-joined Linux VM must also honor the 15-char NetBIOS limit (its AD
     # machine account name is the hostname truncated to 15 chars).
     $enforceNetBios = $isLinuxVm -and ($VM.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$VM.joinDomain
-    Test-ValidMachineName $vmName -ReturnObject $ReturnObject -LinuxName:$isLinuxVm -EnforceNetBios:$enforceNetBios
+    Test-ValidMachineName $vmName -ReturnObject $ReturnObject -LinuxName:$isLinuxVm -EnforceNetBios:$enforceNetBios -FailOnLength
 
     if ($VM.remoteSQLVM) {
         Test-ValidMachineName $VM.remoteSQLVM -ReturnObject $ReturnObject
@@ -726,7 +764,7 @@ function Test-ValidVmSupported {
     }
 
     if ($VM.AlwaysOnListenerName) {
-        Test-ValidMachineName $VM.AlwaysOnListenerName -ReturnObject $ReturnObject
+        Test-ValidMachineName $VM.AlwaysOnListenerName -ReturnObject $ReturnObject -FailOnLength
     }
 
     if ($VM.remoteContentLibVM) {
@@ -739,7 +777,7 @@ function Test-ValidVmSupported {
     }
 
     if ($VM.ClusterName) {
-        Test-ValidMachineName $VM.ClusterName -ReturnObject $ReturnObject
+        Test-ValidMachineName $VM.ClusterName -ReturnObject $ReturnObject -FailOnLength
     }
 
     if ($VM.SqlInstanceName) {
@@ -2503,6 +2541,11 @@ function Test-Configuration {
                     }
                 }
             }
+
+            # The cluster CNO and AG listener VCO are AD computer objects the host
+            # reaches by NetBIOS name, exactly like a VM. vmOptions.prefix is optional,
+            # so nothing else keeps them unique across labs.
+            Test-CrossDomainNameConflict -NewVMs $virtualMachinesNoExisting -ExistingVMs $allExisting -ConfigDomain $configDomain -ReturnObject $return
         }
 
         if (-not $fast) {
