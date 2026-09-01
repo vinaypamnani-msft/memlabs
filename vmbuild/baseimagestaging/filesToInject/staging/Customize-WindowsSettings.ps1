@@ -244,6 +244,16 @@ Set-ItemProperty -Path $dwmPath -Name 'AlwaysHibernateThumbnails' -Value 0 -Forc
 # first-login "welcome" experience that installs suggested apps.
 if (-not $server) {
     Update-Log "Disable Windows 11 Widgets, Copilot, Chat, and first-run bloat"
+    if ([int]$os.BuildNumber -ge 22000) {
+        Update-Log "Use the full Windows 11 context menu"
+        $classicMenuCommand = 'reg.exe add "HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" /f /ve'
+        $classicMenuActiveSetup = 'HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{B6D0E53B-7A71-46A9-AF84-F2E596B8C671}'
+        New-Item -Path $classicMenuActiveSetup -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $classicMenuActiveSetup -Name 'Version' -PropertyType String -Value '1,0,0,0' -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $classicMenuActiveSetup -Name 'StubPath' -PropertyType String -Value $classicMenuCommand -Force -ErrorAction Stop | Out-Null
+        & reg.exe add 'HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32' /f /ve | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Failed to enable the full Windows 11 context menu (reg.exe exit $LASTEXITCODE)." }
+    }
     # Widgets
     New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Force -ErrorAction SilentlyContinue | Out-Null
     New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Name 'AllowNewsAndInterests' -PropertyType DWord -Value 0 -Force | Out-Null

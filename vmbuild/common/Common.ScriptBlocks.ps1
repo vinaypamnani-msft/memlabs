@@ -1432,6 +1432,15 @@ $global:VM_Create = {
                 # Win11 client: Widgets, Copilot, Chat
                 $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
                 if ($os -and $os.ProductType -eq 1) {
+                    if ([int]$os.BuildNumber -ge 22000) {
+                        $classicMenuCommand = 'reg.exe add "HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" /f /ve'
+                        $classicMenuActiveSetup = 'HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{B6D0E53B-7A71-46A9-AF84-F2E596B8C671}'
+                        New-Item -Path $classicMenuActiveSetup -Force -ErrorAction Stop | Out-Null
+                        New-ItemProperty -Path $classicMenuActiveSetup -Name 'Version' -PropertyType String -Value '1,0,0,0' -Force -ErrorAction Stop | Out-Null
+                        New-ItemProperty -Path $classicMenuActiveSetup -Name 'StubPath' -PropertyType String -Value $classicMenuCommand -Force -ErrorAction Stop | Out-Null
+                        $null = & reg.exe add 'HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32' /f /ve
+                        if ($LASTEXITCODE -ne 0) { throw "Failed to enable the full Windows 11 context menu (reg.exe exit $LASTEXITCODE)." }
+                    }
                     New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Force -ErrorAction SilentlyContinue | Out-Null
                     New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Name 'AllowNewsAndInterests' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
                     Set-ItemProperty -Path $advPath -Name 'TaskbarDa' -Value 0 -Force -ErrorAction SilentlyContinue
