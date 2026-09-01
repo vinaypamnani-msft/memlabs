@@ -590,6 +590,12 @@ function ConvertTo-QuietUninstallCommand {
         $command = $command -replace '(?i)/i', '/x'
         if ($command -notmatch '(?i)(/qn|/quiet)') { $command += ' /qn' }
     }
+    elseif ($command -match '(?i)unins\d*\.exe') {
+        # Inno Setup. /SUPPRESSMSGBOXES only takes effect alongside /VERYSILENT, and without
+        # /NORESTART a /VERYSILENT uninstall reboots the host without asking.
+        $exe = if ($command -match '^\s*"([^"]+)"') { $Matches[1] } else { ($command -split '\s+')[0] }
+        return '"{0}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -f $exe
+    }
     elseif ($command -notmatch '(?i)(/qn|/quiet|/S\b)') {
         $command += ' /quiet'
     }
@@ -599,6 +605,10 @@ function ConvertTo-QuietUninstallCommand {
 }
 
 function Invoke-WindowsAdminCenterRemoval {
+    param (
+        [int] $VerifyTimeoutSeconds = 180
+    )
+
     Write-LogMessage 'Starting Windows Admin Center removal...'
 
     # Nothing in this repo installs WAC, so any copy here was placed by hand and no updater owns it.
@@ -623,13 +633,21 @@ function Invoke-WindowsAdminCenterRemoval {
         Write-LogMessage "Uninstall exited with code: $($proc.ExitCode)"
     }
 
-    # The exit code is the uninstaller's opinion; the registry is the fact.
+    # The exit code is the uninstaller's opinion; the registry is the fact. Inno's unins*.exe also
+    # relaunches itself from TEMP and the process we waited on can exit first, so poll rather than
+    # read once.
     $remaining = @(Get-InstalledEntry -NameLike 'Windows Admin Center*')
+    $deadline = (Get-Date).AddSeconds($VerifyTimeoutSeconds)
+    while ($remaining.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        $remaining = @(Get-InstalledEntry -NameLike 'Windows Admin Center*')
+    }
+
     if ($remaining.Count -eq 0) {
         Write-LogMessage 'Windows Admin Center removed.'
     }
     else {
-        Write-LogMessage "Windows Admin Center is still registered after uninstall: $(($remaining | ForEach-Object { "$($_.DisplayName) $($_.DisplayVersion)" }) -join ', ')" -Level 'WARNING'
+        Write-LogMessage "Windows Admin Center is still registered after $VerifyTimeoutSeconds seconds: $(($remaining | ForEach-Object { "$($_.DisplayName) $($_.DisplayVersion)" }) -join ', ')" -Level 'WARNING'
     }
 
     Write-LogMessage 'Windows Admin Center removal completed.'
