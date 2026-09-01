@@ -1199,6 +1199,31 @@ function Add-MRemoteNGConnectionToContainer {
     return $true
 }
 
+function Set-MRemoteNGNodeOrder {
+    param($Parent)
+
+    $changed = $false
+    $nodes = @($Parent.SelectNodes("Node"))
+
+    foreach ($container in @($nodes | Where-Object { $_.GetAttribute("Type") -eq "Container" })) {
+        if (Set-MRemoteNGNodeOrder -Parent $container) {
+            $changed = $true
+        }
+    }
+
+    $sortedNodes = @($nodes | Sort-Object { $_.GetAttribute("Name") })
+    for ($i = 0; $i -lt $nodes.Count; $i++) {
+        if (-not [object]::ReferenceEquals($nodes[$i], $sortedNodes[$i])) {
+            foreach ($node in $sortedNodes) {
+                [void]$Parent.AppendChild($node)
+            }
+            return $true
+        }
+    }
+
+    return $changed
+}
+
 function Remove-MissingConnectionsFromMRemoteNG {
     param($Container)
 
@@ -2028,6 +2053,10 @@ function New-MRemoteNGFileFromHyperV {
                 $shouldSave = $true
             }
         }
+    }
+
+    if (Set-MRemoteNGNodeOrder -Parent $doc.DocumentElement) {
+        $shouldSave = $true
     }
 
     # Audit all passwords before saving — decrypt each one and verify it matches
