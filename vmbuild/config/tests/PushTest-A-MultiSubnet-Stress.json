@@ -81,7 +81,8 @@
       "installSSMS": true,
       "cmInstallDir": "E:\\ConfigMgr",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "siteCode": "BUN",
       "siteName": "Top Bun CAS",
@@ -89,7 +90,7 @@
       "installSUP": true,
       "installRP": true,
       "wsusDataBaseServer": "WID",
-      "wsusContentDir": "E:\\WSUS",
+      "wsusContentDir": "F:\\WSUS",
       "InstallPatchMyPC": true,
       "PatchMyPCFileServer": "PANINI"
     },
@@ -165,13 +166,14 @@
       "siteName": "Patty Primary",
       "cmInstallDir": "E:\\ConfigMgr",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "remoteSQLVM": "RYE",
       "installSUP": true,
       "installRP": true,
       "wsusDataBaseServer": "RYE",
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "RYE",
@@ -257,9 +259,10 @@
       "siteName": "Pickle Secondary",
       "cmInstallDir": "E:\\ConfigMgr",
       "installSUP": true,
-      "wsusContentDir": "E:\\WSUS",
+      "wsusContentDir": "F:\\WSUS",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       }
     },
     {

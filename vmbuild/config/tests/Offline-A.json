@@ -29,14 +29,15 @@
         "tpmEnabled": true,
         "installSSMS": true,
         "additionalDisks": {
-          "E": "250GB"
+          "E": "250GB",
+          "F": "250GB"
         },
         "installDP": true,
         "installMP": true,
         "installSUP": true,
         "installRP": false,
         "siteCode": "PS1",
-        "wsusContentDir": "E:\\WSUS"
+        "wsusContentDir": "F:\\WSUS"
       },
       {
         "vmName": "PS1SITE",

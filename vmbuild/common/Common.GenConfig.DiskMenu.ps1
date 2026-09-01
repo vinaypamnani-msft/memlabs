@@ -61,6 +61,66 @@ function Get-NextDiskLetter {
     return $null
 }
 
+# Ensures a fresh WSUS/SUP VM has a dedicated 250GB content disk. Existing
+# VMs are deliberately immutable here because adding a config disk does not
+# attach a VHD to hardware that Phase 1 already created.
+function Set-WsusDedicatedContentDisk {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $VirtualMachine,
+        [string] $Size = '250GB'
+    )
+
+    if ($VirtualMachine.ExistingVM) {
+        return $false
+    }
+
+    $letters = Get-VMDiskLetters -VirtualMachine $VirtualMachine
+    $wsusLetter = $null
+    if ("$($VirtualMachine.wsusContentDir)" -match '^([E-Y]):\\') {
+        $candidate = $Matches[1].ToUpperInvariant()
+        if ($candidate -ne 'S') {
+            $wsusLetter = $candidate
+        }
+    }
+
+    $sharedWithConfiguredRole = $false
+    foreach ($path in @($VirtualMachine.cmInstallDir, $VirtualMachine.sqlInstanceDir)) {
+        if ($wsusLetter -and "$path" -match "^$wsusLetter`:\\") {
+            $sharedWithConfiguredRole = $true
+            break
+        }
+    }
+
+    $configMgrCanSelectDrive = $VirtualMachine.Role -in @('CAS', 'Primary', 'Secondary') -or $VirtualMachine.InstallDP
+    $hasAlternateConfigMgrDisk = @($letters | Where-Object { $_ -ne $wsusLetter }).Count -gt 0
+    $hasDedicatedDisk = $wsusLetter -and
+        ($letters -contains $wsusLetter) -and
+        (-not $sharedWithConfiguredRole) -and
+        ((-not $configMgrCanSelectDrive) -or $hasAlternateConfigMgrDisk)
+
+    if ($hasDedicatedDisk) {
+        return $true
+    }
+
+    $newLetter = Get-NextDiskLetter -VirtualMachine $VirtualMachine
+    if (-not $newLetter) {
+        return $false
+    }
+
+    if ($null -eq $VirtualMachine.additionalDisks) {
+        $disks = [PSCustomObject]@{ $newLetter = $Size }
+        $VirtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disks -Force
+    }
+    else {
+        $VirtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $newLetter -Value $Size -Force
+    }
+    $VirtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "$newLetter`:\WSUS" -Force
+
+    return $true
+}
+
 # Describes how the given disk letter is consumed by the VM's role config.
 # Returns a short human-readable string.
 function Get-VMDiskUsage {

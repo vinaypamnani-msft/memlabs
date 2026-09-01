@@ -11020,6 +11020,86 @@ function Test-CMClientPackageDistribution {
     return (Format-TestResult -VMName $VMName -RoleLabel 'ClientPkg' -Result $result)
 }
 
+function Get-Phase11WsusDiskPolicy {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $VM
+    )
+
+    $policy = [pscustomobject]@{
+        Dedicated            = $false
+        Letter               = ''
+        ContentPath          = "$($VM.wsusContentDir)"
+        RequiresSmsExclusion = $false
+        CheckDpContentLibrary = $false
+        ExpectedLabels       = [ordered]@{}
+    }
+    if (-not $VM.additionalDisks -or "$($VM.wsusContentDir)" -notmatch '^([E-Y]):\\') {
+        return $policy
+    }
+
+    $letter = $Matches[1].ToUpperInvariant()
+    if ($letter -eq 'S') {
+        return $policy
+    }
+    $diskProperties = if ($VM.additionalDisks -is [System.Collections.IDictionary]) {
+        @($VM.additionalDisks.Keys | ForEach-Object { [pscustomobject]@{ Name = "$_"; Value = $VM.additionalDisks[$_] } })
+    }
+    else {
+        @($VM.additionalDisks.PSObject.Properties)
+    }
+    $diskLetters = @($diskProperties | ForEach-Object { "$($_.Name)".ToUpperInvariant() })
+    if ($diskLetters -notcontains $letter) {
+        return $policy
+    }
+
+    foreach ($path in @($VM.cmInstallDir, $VM.sqlInstanceDir)) {
+        if ("$path" -match "^$letter`:\\") {
+            return $policy
+        }
+    }
+
+    $configMgrCanSelectDrive = $VM.Role -in @('CAS', 'Primary', 'Secondary') -or $VM.InstallDP
+    if ($configMgrCanSelectDrive -and @($diskLetters | Where-Object { $_ -ne $letter }).Count -eq 0) {
+        return $policy
+    }
+
+    $dataCount = 0
+    $diskNumber = 1
+    foreach ($disk in $diskProperties) {
+        $diskLetter = "$($disk.Name)".ToUpperInvariant()
+        $prefix = "$diskLetter`:"
+        $label = ''
+        if ($VM.Role -eq 'FileServer') {
+            if ($diskNumber -eq 1) { $label = 'CONTENTLIB' }
+            if ($diskNumber -eq 2) { $label = 'CLUSTER' }
+            $diskNumber++
+        }
+        foreach ($owner in @(
+                @{ Path = "$($VM.cmInstallDir)"; Label = 'CM' },
+                @{ Path = "$($VM.sqlInstanceDir)"; Label = 'SQL' },
+                @{ Path = "$($VM.wsusContentDir)"; Label = 'WSUS' }
+            )) {
+            if ($owner.Path.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                if ($label) { $label += '_' }
+                $label += $owner.Label
+            }
+        }
+        if (-not $label) {
+            $label = "DATA_$dataCount"
+            $dataCount++
+        }
+        $policy.ExpectedLabels[$diskLetter] = $label
+    }
+
+    $policy.Dedicated = $true
+    $policy.Letter = $letter
+    $policy.RequiresSmsExclusion = [bool]$configMgrCanSelectDrive
+    $policy.CheckDpContentLibrary = [bool]$VM.InstallDP
+    return $policy
+}
+
 function Test-AdditionalDisks {
     <#
     .SYNOPSIS
@@ -11055,12 +11135,28 @@ function Test-AdditionalDisks {
 
     Write-Log "[Phase $Phase] $VMName [Disks]: Verifying $($disks.Count) additional disk(s): $($disks -join ', ')" -LogOnly
 
+    $wsusPolicy = Get-Phase11WsusDiskPolicy -VM $CurrentItem
+    $wsusPolicyJson = $wsusPolicy | ConvertTo-Json -Depth 5 -Compress
+
     $scriptBlock = {
         # NOTE: Invoke-VmCommand declares [string[]]$ArgumentList which flattens
         # arrays. We pass the disk list as a comma-joined string and split here.
-        param($expectedCsv)
+        param($expectedCsv, $wsusPolicyJson)
         $expected = $expectedCsv -split ','
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        try {
+            $wsusPolicy = $wsusPolicyJson | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Dedicated WSUS disk policy could not be deserialized: $($_.Exception.Message)")
+            return $results
+        }
+        if ($wsusPolicy.Dedicated -and @($wsusPolicy.ExpectedLabels.PSObject.Properties).Count -eq 0) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Dedicated WSUS disk policy for '$($wsusPolicy.ContentPath)' contains no expected labels; disk metadata was not measured")
+            return $results
+        }
 
         foreach ($letter in $expected) {
             $letter = $letter.TrimEnd(':').ToUpper()
@@ -11244,11 +11340,56 @@ function Test-AdditionalDisks {
             }
         }
 
+        if ($wsusPolicy.Dedicated) {
+            foreach ($expectedLabel in $wsusPolicy.ExpectedLabels.PSObject.Properties) {
+                $labelLetter = "$($expectedLabel.Name)".ToUpperInvariant()
+                $labelVolume = Get-Volume -DriveLetter $labelLetter -ErrorAction SilentlyContinue | Select-Object -First 1
+                $observedLabel = if ($labelVolume) { "$($labelVolume.FileSystemLabel)" } else { '<missing volume>' }
+                if (-not $labelVolume -or $labelVolume.FileSystem -ne 'NTFS' -or $observedLabel -ne "$($expectedLabel.Value)") {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Volume '$labelLetter`:' label is '$observedLabel' (expected '$($expectedLabel.Value)') for dedicated WSUS content '$($wsusPolicy.ContentPath)'")
+                }
+                else {
+                    $results.Details.Add("OK: Volume '$labelLetter`:' label '$observedLabel' matches its configured ownership")
+                }
+            }
+
+            if ($wsusPolicy.RequiresSmsExclusion) {
+                $markerPath = $wsusPolicy.Letter + ':\NO_SMS_ON_DRIVE.SMS'
+                if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Dedicated WSUS volume '$($wsusPolicy.Letter):' lacks '$markerPath'; ConfigMgr can select this volume for its content library")
+                }
+                else {
+                    $results.Details.Add("OK: Dedicated WSUS volume '$($wsusPolicy.Letter):' has ConfigMgr exclusion marker '$markerPath'")
+                }
+            }
+
+            if ($wsusPolicy.CheckDpContentLibrary) {
+                try {
+                    $dpPath = "$((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name 'ContentLibraryPath' -ErrorAction Stop).ContentLibraryPath)"
+                    if ([string]::IsNullOrWhiteSpace($dpPath)) {
+                        $results.Details.Add("INFO: DP ContentLibraryPath not measured: registry value was present but empty")
+                    }
+                    elseif ($dpPath -match "^$($wsusPolicy.Letter):\\") {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: DP ContentLibraryPath '$dpPath' shares dedicated WSUS volume '$($wsusPolicy.Letter):'")
+                    }
+                    else {
+                        $results.Details.Add("OK: DP ContentLibraryPath '$dpPath' is separate from dedicated WSUS volume '$($wsusPolicy.Letter):'")
+                    }
+                }
+                catch {
+                    $results.Details.Add("INFO: DP ContentLibraryPath not measured: $($_.Exception.Message)")
+                }
+            }
+        }
+
         return $results
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList (($disks -join ',')) `
+        -ScriptBlock $scriptBlock -ArgumentList @(($disks -join ','), $wsusPolicyJson) `
         -DisplayName "Phase11-Disks-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 

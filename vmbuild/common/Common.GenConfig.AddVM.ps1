@@ -373,9 +373,10 @@ function Add-NewVMForRole {
             # 8GB so a freshly-added WSUS passes validation out of the box.
             $virtualMachine.Memory = "8GB"
             #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $true
-            $disk = [PSCustomObject]@{"E" = "250GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS" -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
+            if (-not (Set-WsusDedicatedContentDisk -VirtualMachine $virtualMachine)) {
+                Write-RedX "Could not allocate a dedicated WSUS content disk. Cancelling"
+                return
+            }
             #if (-not $SiteCode) {
             #    $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
             #    if ($test) {
@@ -452,7 +453,10 @@ function Add-NewVMForRole {
             $enableSUP = if ($ConfigToModify.domainDefaults.EnableSUPOnSiteServers) { $true } else { $false }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $enableSUP -force
             if ($enableSUP) {
-                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS" -force
+                if (-not (Set-WsusDedicatedContentDisk -VirtualMachine $virtualMachine)) {
+                    Write-RedX "Could not allocate a dedicated WSUS content disk. Cancelling"
+                    return
+                }
             }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr CAS" -force
@@ -488,7 +492,10 @@ function Add-NewVMForRole {
             $enableSUP = if ($ConfigToModify.domainDefaults.EnableSUPOnSiteServers) { $true } else { $false }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $enableSUP -force
             if ($enableSUP) {
-                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS" -force
+                if (-not (Set-WsusDedicatedContentDisk -VirtualMachine $virtualMachine)) {
+                    Write-RedX "Could not allocate a dedicated WSUS content disk. Cancelling"
+                    return
+                }
             }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
             # A Primary can optionally host its own DP/MP in addition to dedicated

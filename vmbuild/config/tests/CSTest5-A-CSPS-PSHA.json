@@ -38,14 +38,15 @@
       "operatingSystem": "Server 2022",
       "cmInstallDir": "E:\\ConfigMgr",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "memory": "4GB",
       "virtualProcs": 4,
       "InstallRP": true,
       "InstallSUP": true,
       "remoteSQLVM": "CS1SQLAO1",
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "CS1SQLAO1",
@@ -126,14 +127,15 @@
       "sqlInstanceName": "MSSQLSERVER",
       "sqlInstanceDir": "E:\\SQL",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "memory": "12GB",
       "virtualProcs": 8,
       "sqlPort": "1433",
       "InstallRP": true,
       "InstallSUP": true,
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "PS1SITE-P",

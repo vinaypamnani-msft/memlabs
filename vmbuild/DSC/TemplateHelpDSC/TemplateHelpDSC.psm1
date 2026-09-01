@@ -4387,6 +4387,154 @@ function Resolve-OpticalMediaDriveLetter {
     return $null
 }
 
+function Get-MemLabsDiskLabelMap {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $VM
+    )
+
+    $labels = @{}
+    if (-not $VM.additionalDisks) {
+        return $labels
+    }
+
+    $dataCount = 0
+    $diskNumber = 1
+    foreach ($disk in $VM.additionalDisks.PSObject.Properties) {
+        $letter = "$($disk.Name)".ToUpperInvariant()
+        $prefix = "$letter`:"
+        $label = ''
+
+        if ($VM.Role -eq 'FileServer') {
+            if ($diskNumber -eq 1) { $label = 'CONTENTLIB' }
+            if ($diskNumber -eq 2) { $label = 'CLUSTER' }
+            $diskNumber++
+        }
+        foreach ($owner in @(
+                @{ Path = "$($VM.cmInstallDir)"; Label = 'CM' },
+                @{ Path = "$($VM.sqlInstanceDir)"; Label = 'SQL' },
+                @{ Path = "$($VM.wsusContentDir)"; Label = 'WSUS' }
+            )) {
+            if ($owner.Path.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                if ($label) { $label += '_' }
+                $label += $owner.Label
+            }
+        }
+        if (-not $label) {
+            $label = "DATA_$dataCount"
+            $dataCount++
+        }
+        $labels[$letter] = $label
+    }
+
+    return $labels
+}
+
+function Get-MemLabsWsusDiskPolicy {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $VM
+    )
+
+    $policy = [pscustomobject]@{
+        Dedicated            = $false
+        Letter               = ''
+        RequiresSmsExclusion = $false
+        ExpectedLabels       = @{}
+    }
+    if (-not $VM.additionalDisks -or "$($VM.wsusContentDir)" -notmatch '^([E-Y]):\\') {
+        return $policy
+    }
+
+    $letter = $Matches[1].ToUpperInvariant()
+    if ($letter -eq 'S') {
+        return $policy
+    }
+    $diskLetters = @($VM.additionalDisks.PSObject.Properties.Name | ForEach-Object { "$($_)".ToUpperInvariant() })
+    if ($diskLetters -notcontains $letter) {
+        return $policy
+    }
+
+    foreach ($path in @($VM.cmInstallDir, $VM.sqlInstanceDir)) {
+        if ("$path" -match "^$letter`:\\") {
+            return $policy
+        }
+    }
+
+    $configMgrCanSelectDrive = $VM.Role -in @('CAS', 'Primary', 'Secondary') -or $VM.InstallDP
+    if ($configMgrCanSelectDrive -and @($diskLetters | Where-Object { $_ -ne $letter }).Count -eq 0) {
+        return $policy
+    }
+
+    $policy.Dedicated = $true
+    $policy.Letter = $letter
+    $policy.RequiresSmsExclusion = [bool]$configMgrCanSelectDrive
+    $policy.ExpectedLabels = Get-MemLabsDiskLabelMap -VM $VM
+    return $policy
+}
+
+function Test-MemLabsWsusDiskMetadata {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Policy
+    )
+
+    if (-not $Policy.Dedicated) {
+        return $true
+    }
+    foreach ($letter in @($Policy.ExpectedLabels.Keys)) {
+        $volume = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $volume -or $volume.FileSystem -ne 'NTFS' -or "$($volume.FileSystemLabel)" -ne "$($Policy.ExpectedLabels[$letter])") {
+            return $false
+        }
+    }
+    if ($Policy.RequiresSmsExclusion) {
+        $markerPath = $Policy.Letter + ':\NO_SMS_ON_DRIVE.SMS'
+        if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Set-MemLabsWsusDiskMetadata {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Policy
+    )
+
+    if (-not $Policy.Dedicated) {
+        return
+    }
+    foreach ($letter in @($Policy.ExpectedLabels.Keys)) {
+        $expectedLabel = "$($Policy.ExpectedLabels[$letter])"
+        $volume = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $volume -or $volume.FileSystem -ne 'NTFS') {
+            throw "Cannot set disk metadata for $letter`: expected an NTFS volume."
+        }
+        if ("$($volume.FileSystemLabel)" -ne $expectedLabel) {
+            Set-Volume -DriveLetter $letter -NewFileSystemLabel $expectedLabel -ErrorAction Stop
+        }
+        $readBack = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $readBack -or "$($readBack.FileSystemLabel)" -ne $expectedLabel) {
+            $observed = if ($readBack) { "$($readBack.FileSystemLabel)" } else { '<missing>' }
+            throw "Disk label read-back failed for $letter`: expected '$expectedLabel', observed '$observed'."
+        }
+    }
+
+    if ($Policy.RequiresSmsExclusion) {
+        $markerPath = $Policy.Letter + ':\NO_SMS_ON_DRIVE.SMS'
+        New-Item -Path $markerPath -ItemType File -Force -ErrorAction Stop | Out-Null
+        if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+            throw "ConfigMgr exclusion marker read-back failed at '$markerPath'."
+        }
+    }
+}
+
 [DscResource()]
 class InitializeDisks {
     [DscProperty(key)]
@@ -4429,6 +4577,7 @@ class InitializeDisks {
 
         $_VM = $this.VM | ConvertFrom-Json
         $_Disks = $_VM.additionalDisks
+        $wsusDiskPolicy = Get-MemLabsWsusDiskPolicy -VM $_VM
 
         # For debugging
         Write-Status  "VM Additional Disks: $_Disks"
@@ -4452,6 +4601,9 @@ class InitializeDisks {
             $letter = $disk.Name
             $size = $disk.Value
             $label = "DATA`_$count"
+            if ($wsusDiskPolicy.Dedicated -and $wsusDiskPolicy.ExpectedLabels.ContainsKey("$letter".ToUpperInvariant())) {
+                $label = $wsusDiskPolicy.ExpectedLabels["$letter".ToUpperInvariant()]
+            }
             Write-Status "Initializing disk '$letter' (size $size, label $label)"
             try {
                 $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
@@ -4516,6 +4668,13 @@ class InitializeDisks {
             throw "InitializeDisks: $($failedDisks.Count) disk(s) not usable NTFS after init: $($failedDisks -join '; '). See the DIAG lines above for the full Get-Disk/Get-Partition/Get-Volume state."
         }
 
+        try {
+            Set-MemLabsWsusDiskMetadata -Policy $wsusDiskPolicy
+        }
+        catch {
+            throw "InitializeDisks: dedicated WSUS disk metadata failed for '$($wsusDiskPolicy.Letter):' ($($_VM.wsusContentDir)): $($_.Exception.Message)"
+        }
+
         # Create NO_SMS_ON_DRIVE.SMS
         New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue
     }
@@ -4540,6 +4699,11 @@ class InitializeDisks {
                 Write-Verbose "Disk '$($disk.Name)' is not a usable NTFS volume yet (present=$([bool]$vol) fs='$(if ($vol) { $vol.FileSystem } else { '' })')"
                 return $false
             }
+        }
+        $wsusDiskPolicy = Get-MemLabsWsusDiskPolicy -VM $_VM
+        if (-not (Test-MemLabsWsusDiskMetadata -Policy $wsusDiskPolicy)) {
+            Write-Verbose "Dedicated WSUS disk metadata is not in desired state for '$($wsusDiskPolicy.Letter):'"
+            return $false
         }
         Write-Verbose "All configured disks are formatted NTFS volumes"
         return $true

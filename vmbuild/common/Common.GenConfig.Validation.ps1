@@ -489,8 +489,41 @@ function Get-AdditionalValidations {
                 }
             }
         }
+        "wsusContentDir" {
+            $invalidReason = $null
+            $wsusLetter = $null
+            if ("$value" -match '^([E-Y]):\\.+') {
+                $wsusLetter = $Matches[1].ToUpperInvariant()
+            }
+            if ($property.ExistingVM) {
+                $invalidReason = "WSUS content cannot be moved on an existing VM. Rebuild the VM to change its WSUS disk."
+            }
+            elseif (-not $wsusLetter -or $wsusLetter -eq 'S') {
+                $invalidReason = "WSUS content on a fresh VM must use a dedicated additional disk (E: through Y:, excluding S:)."
+            }
+            elseif (-not $property.additionalDisks -or -not ($property.additionalDisks.PSObject.Properties.Name -contains $wsusLetter)) {
+                $invalidReason = "WSUS content drive $wsusLetter`: is not present in additionalDisks."
+            }
+            elseif ("$($property.cmInstallDir)" -match "^$wsusLetter`:\\" -or "$($property.sqlInstanceDir)" -match "^$wsusLetter`:\\") {
+                $invalidReason = "WSUS content drive $wsusLetter`: is already used by ConfigMgr or SQL. Select a dedicated disk."
+            }
+            elseif (($property.Role -in @('CAS', 'Primary', 'Secondary') -or $property.InstallDP) -and
+                @($property.additionalDisks.PSObject.Properties.Name | Where-Object { $_ -ne $wsusLetter }).Count -eq 0) {
+                $invalidReason = "WSUS content drive $wsusLetter`: would leave ConfigMgr without a separate data disk."
+            }
+
+            if ($invalidReason) {
+                Add-ErrorMessage -property $name $invalidReason
+                $property.$name = $CurrentValue
+            }
+        }
         "installSUP" {
             if ($value -eq $true) {
+                if ($property.ExistingVM) {
+                    Add-ErrorMessage -property $name "Adding a SUP to an existing VM requires a new VHD and is supported only when creating a fresh VM."
+                    $property.installSUP = $CurrentValue
+                    return
+                }
                 if (-not $property.siteCode) {
                     Get-SiteCodeMenu -property $property -name "siteCode" -ConfigToCheck $Global:Config
                 }
@@ -528,6 +561,14 @@ function Get-AdditionalValidations {
                 }
 
                 if ($property.Role -ne "WSUS") {
+                    if (-not $property.installSUP) {
+                        return
+                    }
+                    if (-not (Set-WsusDedicatedContentDisk -VirtualMachine $property)) {
+                        Add-ErrorMessage -property $name "No free data-drive letter is available for a dedicated 250GB WSUS content disk."
+                        $property.installSUP = $CurrentValue
+                        return
+                    }
                     $DataBase = "WID"
                     if ($property.SqlVersion) {
                         $Database = $property.VMName                        
@@ -543,17 +584,6 @@ function Get-AdditionalValidations {
                         }
                     }
                     $property | Add-Member -MemberType NoteProperty -Name "wsusDataBaseServer" -Value $database -Force
-                    $property | Add-Member -MemberType NoteProperty -Name "wsusContentDir" -Value "E:\WSUS" -Force
-                    if ($null -eq $property.additionalDisks) {
-                        $disk = [PSCustomObject]@{"E" = "600GB" }
-                        $property | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
-                    }
-                    else {
-
-                        if ($null -eq $property.additionalDisks.E) {
-                            $property.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "600GB" -force
-                        }
-                    }
 
                     $value = $property.Memory
                     if (($value / 1) -lt 5GB) {

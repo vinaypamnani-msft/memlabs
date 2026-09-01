@@ -35,7 +35,8 @@
       "operatingSystem": "Server 2022",
       "cmInstallDir": "E:\\ConfigMgr",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "memory": "8GB",
       "dynamicMinRam": "1GB",
@@ -45,7 +46,7 @@
       "InstallSUP": true,
       "InstallPatchMyPC": true,
       "wsusDataBaseServer": "WID",
-      "wsusContentDir": "E:\\WSUS",
+      "wsusContentDir": "F:\\WSUS",
       "PatchMyPCFileServer": "FS1"
     },
     {
@@ -85,7 +86,8 @@
       "operatingSystem": "Server 2022",
       "role": "SiteSystem",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "memory": "5GB",
       "dynamicMinRam": "1GB",
@@ -97,7 +99,7 @@
       "InstallSUP": true,
       "InstallSMSProv": false,
       "wsusDataBaseServer": "PS1SQL",
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "PS1SITE",

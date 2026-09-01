@@ -60,13 +60,14 @@
       "installSSMS": true,
       "cmInstallDir": "E:\\ConfigMgr",
       "additionalDisks": {
-        "E": "600GB"
+        "E": "600GB",
+        "F": "250GB"
       },
       "siteCode": "PS1",
       "installSUP": true,
       "installRP": true,
       "siteName": "ConfigMgr Primary Site",
-      "wsusContentDir": "E:\\WSUS",
+      "wsusContentDir": "F:\\WSUS",
       "remoteSQLVM": "PS1SQLAO1"
     },
     {

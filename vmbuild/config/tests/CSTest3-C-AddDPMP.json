@@ -17,14 +17,15 @@
       "memory": "8GB",
       "virtualProcs": 4,
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "installDP": true,
       "installMP": true,
       "siteCode": "PS1",
       "InstallRP": false,
       "InstallSUP": true,
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     }
   ],
   "cmOptions": {

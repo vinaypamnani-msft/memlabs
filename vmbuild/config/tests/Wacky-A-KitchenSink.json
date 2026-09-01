@@ -90,7 +90,8 @@
       "installSSMS": true,
       "cmInstallDir": "E:\\ConfigMgr",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "siteCode": "YUM",
       "installSUP": true,
@@ -98,7 +99,7 @@
       "siteName": "The Grand Burrito CAS",
       "remoteSQLVM": "FRIES",
       "wsusDataBaseServer": "WID",
-      "wsusContentDir": "E:\\WSUS",
+      "wsusContentDir": "F:\\WSUS",
       "InstallPatchMyPC": true,
       "PatchMyPCFileServer": "PANTRY"
     },
@@ -161,13 +162,14 @@
       "cmInstallDir": "E:\\ConfigMgr",
       "additionalDisks": {
         "E": "600GB",
-        "H": "250GB"
+        "H": "250GB",
+        "F": "250GB"
       },
       "siteCode": "NOM",
       "installSUP": true,
       "installRP": true,
       "siteName": "Falafel Primary",
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "GYRO-P",
@@ -235,10 +237,11 @@
       "installSUP": true,
       "siteName": "Dim Sum Secondary",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "network": "172.19.79.0",
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "RAMEN",

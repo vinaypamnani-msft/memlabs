@@ -75,7 +75,8 @@
       "installSSMS": true,
       "cmInstallDir": "E:\\ConfigMgr",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "siteCode": "HUB",
       "siteName": "Burn-In CAS",
@@ -83,7 +84,7 @@
       "installSUP": true,
       "installRP": true,
       "wsusDataBaseServer": "WID",
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "CONTROLDB1",
@@ -150,11 +151,12 @@
       "cmInstallDir": "E:\\ConfigMgr",
       "additionalDisks": {
         "E": "600GB",
-        "H": "250GB"
+        "H": "250GB",
+        "F": "250GB"
       },
       "installSUP": true,
       "installRP": true,
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "PRIMARY-P",
@@ -248,10 +250,11 @@
       "siteName": "Burn-In Secondary",
       "cmInstallDir": "E:\\ConfigMgr",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "installSUP": true,
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "PROXY",

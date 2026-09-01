@@ -124,14 +124,15 @@
       "sqlInstanceName": "MSSQLSERVER",
       "sqlInstanceDir": "E:\\SQL",
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "memory": "12GB",
       "virtualProcs": 8,
       "sqlPort": "1433",
       "InstallRP": true,
       "InstallSUP": true,
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "W10Client1",

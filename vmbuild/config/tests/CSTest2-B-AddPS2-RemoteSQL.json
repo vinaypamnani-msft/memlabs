@@ -35,14 +35,15 @@
       "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "additionalDisks": {
-        "E": "250GB"
+        "E": "250GB",
+        "F": "250GB"
       },
       "installDP": true,
       "installMP": true,
       "siteCode": "PS2",
       "InstallRP": true,
       "InstallSUP": true,
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\WSUS"
     },
     {
       "vmName": "PS2SQL",
