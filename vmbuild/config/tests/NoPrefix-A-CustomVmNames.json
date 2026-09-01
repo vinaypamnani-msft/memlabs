@@ -1,0 +1,135 @@
+{
+  "vmOptions": {
+    "prefix": "",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "noprefix.com",
+    "adminName": "admin",
+    "network": "192.168.160.0",
+    "timeZone": "Eastern Standard Time",
+    "domainNetBiosName": "noprefix",
+    "locale": "en-US"
+  },
+  "virtualMachines": [
+    {
+      "vmName": "HQ-DC01",
+      "role": "DC",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "InstallCA": true
+    },
+    {
+      "vmName": "HQ-FILES01",
+      "role": "FileServer",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "additionalDisks": {
+        "E": "500GB",
+        "F": "200GB"
+      }
+    },
+    {
+      "vmName": "BRANCH-DPMPSUP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "8GB",
+      "virtualProcs": 4,
+      "additionalDisks": {
+        "E": "250GB",
+        "F": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "siteCode": "NP1",
+      "InstallRP": false,
+      "InstallSUP": true,
+      "wsusContentDir": "F:\\WSUS"
+    },
+    {
+      "vmName": "HQ-CMPRIMARY",
+      "role": "Primary",
+      "operatingSystem": "Server 2022",
+      "memory": "8GB",
+      "virtualProcs": 4,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "NP1",
+      "InstallRP": false,
+      "InstallSUP": false,
+      "remoteSQLVM": "HQ-SQLNODE01"
+    },
+    {
+      "vmName": "HQ-CMPASSIVE",
+      "role": "PassiveSite",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "siteCode": "NP1",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "remoteContentLibVM": "HQ-FILES01"
+    },
+    {
+      "vmName": "HQ-SQLNODE01",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2022",
+      "memory": "12GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "OtherNode": "HQ-SQLNODE02",
+      "fileServerVM": "HQ-FILES01",
+      "ClusterName": "HQ-SQLCLUSTER",
+      "AlwaysOnGroupName": "NP1 Availability Group",
+      "AlwaysOnListenerName": "HQ-SQLLISTEN",
+      "SqlServiceAccount": "HQSqlClusSvc",
+      "SqlAgentAccount": "HQSqlClusAgent",
+      "installRP": false
+    },
+    {
+      "vmName": "HQ-SQLNODE02",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2022",
+      "memory": "12GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "HQSqlClusSvc",
+      "SqlAgentAccount": "HQSqlClusAgent"
+    },
+    {
+      "vmName": "BRANCH-WKS01",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 Latest",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "domainUser": "bob"
+    }
+  ],
+  "cmOptions": {
+    "version": "current-branch",
+    "install": true,
+    "pushClientToDomainMembers": true,
+    "EVALVersion": false,
+    "UsePKI": true
+  }
+}
