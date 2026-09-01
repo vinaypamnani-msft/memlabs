@@ -552,9 +552,12 @@ function Install-SingleTierPKI {
                 throw "The active CA registry key does not exist: '$caRegPath'."
             }
 
+            # %3/%8/%9 are the CA's own registry insertion tokens. The <CaName> spelling is
+            # only expanded by Add-CACrlDistributionPoint, so writing it here would embed the
+            # literal text in the CDP of every issued certificate and no CRL is ever fetchable.
             $expectedEntries = @(
                 '1:C:\Windows\system32\CertSrv\CertEnroll\%3%8%9.crl'
-                "2:${WebURL}<CaName><CRLNameSuffix><DeltaCRLAllowed>.crl"
+                "2:${WebURL}%3%8%9.crl"
             )
             Set-ItemProperty $caRegPath -Name CRLPublicationURLs -Value $expectedEntries -ErrorAction Stop
             $actualEntries = @((Get-ItemProperty $caRegPath -Name CRLPublicationURLs -ErrorAction Stop).CRLPublicationURLs)
@@ -1097,7 +1100,7 @@ LoadDefaultTemplates=0
             _Log "Configured CRLPublicationURLs at '$($cdpConfig.Path)' with $(@($cdpConfig.Entries).Count) entries (registry readback passed)."
 
             _Log "Configuring AIA extensions..."
-            $httpAIA = "${WebURL}<ServerDNSName>_<CaName><CertificateName>.crt"
+            $httpAIA = "${WebURL}%1_%3%4.crt"
             & certutil.exe -setreg CA\CACertPublicationURLs "1:C:\Windows\system32\CertSrv\CertEnroll\%1_%3%4.crt\n2:$httpAIA" 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg AIA returned exit code $LASTEXITCODE" }
 

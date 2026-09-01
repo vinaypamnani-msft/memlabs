@@ -6506,27 +6506,45 @@ function Test-PKICertificatesOnVM {
         $webCert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
             Where-Object { $_.FriendlyName -eq 'ConfigMgr WebServer Certificate' } | Select-Object -First 1
         if ($webCert) {
+            $cdpUrls = @()
+            try {
+                $cdpExt = $webCert.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.31' } | Select-Object -First 1
+                if ($cdpExt) {
+                    $cdpUrls = @([regex]::Matches($cdpExt.Format($true), '(?i)(https?|ldap|file)://\S+') | ForEach-Object { $_.Value })
+                }
+            }
+            catch {}
+
             # Export cert to temp file for certutil -verify
             $tmpCer = "$env:TEMP\phase11_crl_check.cer"
             try {
                 Export-Certificate -Cert $webCert -FilePath $tmpCer -Force -ErrorAction Stop | Out-Null
                 $verifyOutput = & certutil.exe -verify -urlfetch $tmpCer 2>&1
+                $verifyExit = $LASTEXITCODE
                 $verifyText = $verifyOutput -join "`n"
                 Remove-Item $tmpCer -Force -ErrorAction SilentlyContinue
 
-                if ($LASTEXITCODE -eq 0 -and $verifyText -match 'revocation check passed') {
+                if ($verifyExit -eq 0 -and $verifyText -match 'revocation check passed') {
                     $results.Details.Add("OK: Certificate chain + CRL verification passed")
                 }
-                elseif ($LASTEXITCODE -eq 0) {
-                    $results.Details.Add("OK: certutil -verify succeeded (exit 0)")
-                }
                 else {
+                    # certutil still exits 0 when the chain builds but every CDP fetch failed, so
+                    # the 'revocation check passed' line is the only proof revocation actually worked.
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: certutil -verify -urlfetch failed (exit $LASTEXITCODE)")
-                    # Extract failed URLs
-                    $failedUrls = $verifyOutput | Where-Object { $_ -match 'FAILED' }
-                    foreach ($f in $failedUrls | Select-Object -First 5) {
-                        $results.Details.Add("  $f")
+                    $why = if ($verifyExit -eq 0) {
+                        "certutil exited 0 but never reported a passing revocation check -- no CRL could be retrieved"
+                    }
+                    else {
+                        "certutil -verify -urlfetch failed (exit $verifyExit)"
+                    }
+                    $results.Details.Add("FAIL: Revocation checking is broken for '$($webCert.Subject)': $why. The site is configured to check the CRL for site systems, so an unreachable CDP breaks HTTPS MP/DP traffic and PXE.")
+                    if ($cdpUrls.Count -eq 0) {
+                        $results.Details.Add("  CDP in cert: (none - the certificate carries no CRL Distribution Point)")
+                    }
+                    foreach ($u in $cdpUrls) { $results.Details.Add("  CDP in cert: $u") }
+                    $evidence = @($verifyOutput | Where-Object { "$_" -match 'Error retrieving URL|Failed "|FAILED|revocation' })
+                    foreach ($e in $evidence | Select-Object -First 8) {
+                        $results.Details.Add("  $("$e".Trim())")
                     }
                 }
             }
