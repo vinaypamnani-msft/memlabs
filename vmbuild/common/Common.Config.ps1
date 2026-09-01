@@ -2822,6 +2822,93 @@ function Get-VmBgInfoProperties {
     return @($values.GetEnumerator() | ForEach-Object { [PSCustomObject]@{ Name = $_.Key; Value = [string]$_.Value } })
 }
 
+function Get-VmBgInfoBackgroundColor {
+    <#
+    .SYNOPSIS
+    Desktop background colour for a VM's BgInfo wallpaper, keyed off its MemLabs role.
+
+    .DESCRIPTION
+    SERVER.bgi and CLIENT.bgi already ship different colours (slate vs blue), so a
+    per-role colour is just widening something BgInfo already honours -- it makes a
+    wall of RDP thumbnails readable without reading any text. Every colour is dark
+    because the .bgi renders its text in white and pale yellow.
+
+    Returns a COLORREF (0x00BBGGRR, NOT RGB) or $null for roles that should keep
+    whichever colour the template itself carries.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "VM object from the deploy config")]
+        [object] $CurrentItem
+    )
+
+    $palette = @{
+        DC          = @(0, 100, 60)     # green   - directory
+        BDC         = @(0, 100, 60)
+        CAS         = @(96, 48, 128)    # purple  - top of hierarchy
+        Primary     = @(0, 82, 140)     # blue    - primary site
+        Secondary   = @(0, 110, 120)    # teal    - secondary site
+        PassiveSite = @(70, 70, 120)    # indigo  - HA partner
+        SiteSystem  = @(60, 90, 110)    # steel   - DP/MP/SUP/RP
+        SQLAO       = @(140, 50, 45)    # maroon  - database
+        WSUS        = @(105, 95, 30)    # olive
+        FileServer  = @(110, 80, 40)    # brown
+        Proxy       = @(120, 45, 100)   # magenta
+    }
+
+    $rgb = $null
+    if ($CurrentItem.role -and $palette.ContainsKey($CurrentItem.role)) {
+        $rgb = $palette[$CurrentItem.role]
+    }
+    elseif ($CurrentItem.sqlVersion) {
+        $rgb = $palette['SQLAO']
+    }
+
+    if (-not $rgb) { return $null }
+    return ([int]$rgb[0]) -bor ([int]$rgb[1] -shl 8) -bor ([int]$rgb[2] -shl 16)
+}
+
+function Set-BgiBackgroundColor {
+    <#
+    .SYNOPSIS
+    Overwrite the Background COLORREF inside a .bgi file's bytes, in place.
+
+    .DESCRIPTION
+    .bgi records are [UInt32 nameLen][name ASCII + NUL][UInt32 type][UInt32 dataLen][data];
+    Background is a type-4 DWORD. Only those 4 data bytes are touched.
+
+    .OUTPUTS
+    [bool] $true when the Background record was found and patched.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = ".bgi file bytes, modified in place")]
+        [byte[]] $Bytes,
+        [Parameter(Mandatory = $true, HelpMessage = "COLORREF (0x00BBGGRR)")]
+        [int] $ColorRef
+    )
+
+    $offset = 0
+    while ($offset + 12 -le $Bytes.Length) {
+        $nameLen = [BitConverter]::ToUInt32($Bytes, $offset)
+        $offset += 4
+        if ($nameLen -lt 1 -or $offset + $nameLen + 8 -gt $Bytes.Length) { return $false }
+        $name = [Text.Encoding]::ASCII.GetString($Bytes, $offset, $nameLen - 1)
+        $offset += $nameLen
+        $type = [BitConverter]::ToUInt32($Bytes, $offset)
+        $offset += 4
+        $dataLen = [BitConverter]::ToUInt32($Bytes, $offset)
+        $offset += 4
+        if ($offset + $dataLen -gt $Bytes.Length) { return $false }
+        if ($name -eq "Background" -and $type -eq 4 -and $dataLen -eq 4) {
+            [BitConverter]::GetBytes([uint32]$ColorRef).CopyTo($Bytes, $offset)
+            return $true
+        }
+        $offset += $dataLen
+    }
+    return $false
+}
+
 function Set-VmBgInfoConfig {
     <#
     .SYNOPSIS
@@ -2852,11 +2939,16 @@ function Set-VmBgInfoConfig {
 
     # The two templates are ~4KB each, so they ride along as base64 in the same
     # PSDirect call instead of paying for a separate Copy-ItemSafe job.
+    $backgroundColor = Get-VmBgInfoBackgroundColor -CurrentItem $CurrentItem
     $bgiFiles = @()
     foreach ($bgi in @("SERVER.bgi", "CLIENT.bgi")) {
         $source = Join-Path $Common.StagingInjectPath "staging\bginfo\$bgi"
         if (Test-Path -LiteralPath $source) {
-            $bgiFiles += [PSCustomObject]@{ Name = $bgi; Base64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($source)) }
+            $bytes = [IO.File]::ReadAllBytes($source)
+            if ($null -ne $backgroundColor -and -not (Set-BgiBackgroundColor -Bytes $bytes -ColorRef $backgroundColor)) {
+                Write-Log "[BgInfo] $vmName`: $bgi has no Background record; the role colour was not applied." -Warning -LogOnly
+            }
+            $bgiFiles += [PSCustomObject]@{ Name = $bgi; Base64 = [Convert]::ToBase64String($bytes) }
         }
     }
     if ($bgiFiles.Count -ne 2) {
