@@ -300,7 +300,7 @@ $global:Phase11Job = {
             # revert: that block deletes HKLM:\SOFTWARE\MemLabs once its own markers
             # are gone, which would take the BgInfo subkey with it.
             try {
-                $null = Set-VmBgInfoConfig -DeployConfig $deployConfig -CurrentItem $currentItem
+                $null = Set-VmBgInfoConfig -DeployConfig $deployConfig -CurrentItem $currentItem -Status Validated
             }
             catch {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to publish the BgInfo lab configuration: $_" -LogOnly
@@ -8319,6 +8319,16 @@ $global:VM_Config = {
             }
             catch {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Proxy client config failed: $_" -Warning
+            }
+
+            # Publish the lab configuration now as well as in Phase 11, so a VM whose
+            # deploy dies at Phase 8 still shows what it was meant to be -- and says
+            # "deploy in progress", which is the tell that it never finished.
+            try {
+                $null = Set-VmBgInfoConfig -DeployConfig $deployConfig -CurrentItem $currentItem -Status Deploying
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to publish the BgInfo lab configuration: $_" -LogOnly
             }
         }
 

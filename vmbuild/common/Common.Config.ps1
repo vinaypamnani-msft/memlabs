@@ -2923,6 +2923,14 @@ function Set-VmBgInfoConfig {
 
     Purely cosmetic, so failures are logged and never thrown.
 
+    .PARAMETER Status
+    Where the deploy is when this runs. 'Deploying' (Phase 2) leaves the wallpaper
+    saying so, which is what a VM whose deploy died later still shows -- that is the
+    whole point of writing this twice. Defaults to 'Deploying' rather than being
+    Mandatory: Test-MandatoryParamCalls only flags calls that bind NO mandatory
+    parameter, so a future call site dropping this one would not be caught and would
+    hang the job on a prompt. Understating progress is the safe way to be wrong.
+
     .OUTPUTS
     [bool] $true when the guest was updated.
     #>
@@ -2931,11 +2939,16 @@ function Set-VmBgInfoConfig {
         [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
         [object] $DeployConfig,
         [Parameter(Mandatory = $true, HelpMessage = "VM object from the deploy config")]
-        [object] $CurrentItem
+        [object] $CurrentItem,
+        [Parameter(Mandatory = $false, HelpMessage = "Deployment state to stamp on the wallpaper")]
+        [ValidateSet("Deploying", "Validated")]
+        [string] $Status = "Deploying"
     )
 
     $vmName = $CurrentItem.vmName
-    $items = @(Get-VmBgInfoProperties -DeployConfig $DeployConfig -CurrentItem $CurrentItem)
+    $statusText = if ($Status -eq "Validated") { "(validated)" } else { "-- deploy in progress" }
+    $items = @(Get-VmBgInfoProperties -DeployConfig $DeployConfig -CurrentItem $CurrentItem) +
+        [PSCustomObject]@{ Name = "Status"; Value = $statusText }
 
     # The two templates are ~4KB each, so they ride along as base64 in the same
     # PSDirect call instead of paying for a separate Copy-ItemSafe job.
