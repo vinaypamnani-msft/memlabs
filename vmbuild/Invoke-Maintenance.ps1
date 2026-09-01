@@ -557,6 +557,84 @@ function Invoke-DotNet6Maintenance {
     Write-LogMessage '.NET 6 maintenance completed.'
 }
 
+function Get-InstalledEntry {
+    param (
+        [Parameter(Mandatory = $true)][string] $NameLike
+    )
+
+    $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+
+    $found = @()
+    foreach ($path in $paths) {
+        foreach ($item in @(Get-ItemProperty -Path $path -ErrorAction SilentlyContinue)) {
+            if ($item.DisplayName -like $NameLike) { $found += $item }
+        }
+    }
+
+    return $found
+}
+
+function ConvertTo-QuietUninstallCommand {
+    param (
+        [Parameter(Mandatory = $true)] $Entry
+    )
+
+    $command = $Entry.QuietUninstallString
+    if (-not $command) { $command = $Entry.UninstallString }
+    if ([string]::IsNullOrWhiteSpace($command)) { return '' }
+
+    if ($command -match 'msiexec') {
+        $command = $command -replace '(?i)/i', '/x'
+        if ($command -notmatch '(?i)(/qn|/quiet)') { $command += ' /qn' }
+    }
+    elseif ($command -notmatch '(?i)(/qn|/quiet|/S\b)') {
+        $command += ' /quiet'
+    }
+
+    if ($command -notmatch '(?i)/norestart') { $command += ' /norestart' }
+    return $command
+}
+
+function Invoke-WindowsAdminCenterRemoval {
+    Write-LogMessage 'Starting Windows Admin Center removal...'
+
+    # Nothing in this repo installs WAC, so any copy here was placed by hand and no updater owns it.
+    # MEASURED on a lab host 2026-09-01: 2.0.0.112 against a current 2.7.4.18.
+    $entries = @(Get-InstalledEntry -NameLike 'Windows Admin Center*')
+    if ($entries.Count -eq 0) {
+        Write-LogMessage 'Windows Admin Center is not installed. Nothing to remove.'
+        return
+    }
+
+    foreach ($entry in $entries) {
+        Write-LogMessage "Found '$($entry.DisplayName)' version $($entry.DisplayVersion)."
+
+        $command = ConvertTo-QuietUninstallCommand -Entry $entry
+        if (-not $command) {
+            Write-LogMessage "No uninstall string for '$($entry.DisplayName)', so it cannot be removed automatically." -Level 'WARNING'
+            continue
+        }
+
+        Write-LogMessage "Uninstalling with: $command"
+        $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $command -Wait -PassThru -WindowStyle Hidden
+        Write-LogMessage "Uninstall exited with code: $($proc.ExitCode)"
+    }
+
+    # The exit code is the uninstaller's opinion; the registry is the fact.
+    $remaining = @(Get-InstalledEntry -NameLike 'Windows Admin Center*')
+    if ($remaining.Count -eq 0) {
+        Write-LogMessage 'Windows Admin Center removed.'
+    }
+    else {
+        Write-LogMessage "Windows Admin Center is still registered after uninstall: $(($remaining | ForEach-Object { "$($_.DisplayName) $($_.DisplayVersion)" }) -join ', ')" -Level 'WARNING'
+    }
+
+    Write-LogMessage 'Windows Admin Center removal completed.'
+}
+
 function Invoke-WindowsTerminalMaintenance {
     Write-LogMessage 'Starting Windows Terminal maintenance...'
 
@@ -1154,6 +1232,7 @@ try { Invoke-MemLabsFileAssociationMaintenance } catch { Write-LogMessage "File 
 try { Invoke-GitMaintenance } catch { Write-LogMessage "Git maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-System32CurlMaintenance } catch { Write-LogMessage "System32 curl maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+try { Invoke-WindowsAdminCenterRemoval } catch { Write-LogMessage "Windows Admin Center removal threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-RdcManMaintenance } catch { Write-LogMessage "RDCMan maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 # Before mRemoteNG: that phase needs 7z.exe to unpack the nightly .rar.
