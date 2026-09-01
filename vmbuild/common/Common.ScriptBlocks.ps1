@@ -295,6 +295,16 @@ $global:Phase11Job = {
             if ($revertResult.ScriptBlockOutput) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): WU lockdown revert: $($revertResult.ScriptBlockOutput)" -LogOnly
             }
+
+            # Publish this VM's lab configuration for BgInfo. Must run AFTER the WU
+            # revert: that block deletes HKLM:\SOFTWARE\MemLabs once its own markers
+            # are gone, which would take the BgInfo subkey with it.
+            try {
+                $null = Set-VmBgInfoConfig -DeployConfig $deployConfig -CurrentItem $currentItem
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to publish the BgInfo lab configuration: $_" -LogOnly
+            }
             } # end Windows-only post-pass cleanup guard (skipped for Linux / no-PSDirect roles)
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Functional validation PASSED for $($currentItem.role)." -OutputStream -Success

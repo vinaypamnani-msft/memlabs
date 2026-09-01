@@ -2691,6 +2691,218 @@ function Get-LabWsusUrl {
     return [PSCustomObject]@{ WsusUrl = "http://localhost"; IsRealWsus = $false }
 }
 
+function Get-VmBgInfoProperties {
+    <#
+    .SYNOPSIS
+    Build the values BgInfo renders in the "MemLabs Configuration" block of the wallpaper.
+
+    .DESCRIPTION
+    Every value is derived from the deployment config, not from the guest, so the
+    wallpaper describes the lab MemLabs was asked to build. Each field is always
+    returned (blank ones as "-") so a re-deploy that drops a role overwrites the
+    old text instead of leaving it stale.
+
+    Returns an array of [PSCustomObject]@{ Name; Value }, where Name is the value
+    name under HKLM:\SOFTWARE\MemLabs\BgInfo that SERVER.bgi / CLIENT.bgi read.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $DeployConfig,
+        [Parameter(Mandatory = $true, HelpMessage = "VM object from the deploy config")]
+        [object] $CurrentItem
+    )
+
+    $none = "-"
+    $sep = "  |  "
+    $vmOptions = $DeployConfig.vmOptions
+    $cmOptions = $DeployConfig.cmOptions
+
+    # --- Lab: domain, this VM's subnet, and the VM-name prefix
+    $labParts = @()
+    if ($vmOptions.domainName) { $labParts += $vmOptions.domainName }
+    $network = if ($CurrentItem.network) { $CurrentItem.network } else { $vmOptions.network }
+    if ($network) { $labParts += "subnet $network" }
+    if ($vmOptions.prefix) { $labParts += "prefix $($vmOptions.prefix)" }
+
+    # --- Role: the MemLabs role plus its place in the ConfigMgr hierarchy
+    $roleParts = @()
+    if ($CurrentItem.role) { $roleParts += $CurrentItem.role }
+    if ($CurrentItem.siteCode) {
+        $site = "site $($CurrentItem.siteCode)"
+        if ($CurrentItem.siteName) { $site += " ($($CurrentItem.siteName))" }
+        $roleParts += $site
+    }
+    if ($CurrentItem.parentSiteCode) { $roleParts += "parent site $($CurrentItem.parentSiteCode)" }
+    if ($CurrentItem.OtherNode) { $roleParts += "cluster partner $($CurrentItem.OtherNode)" }
+
+    # --- Installed roles: what this VM actually gets stood up on it
+    $installed = @()
+    switch ($CurrentItem.role) {
+        "CAS" { $installed += "Central Administration Site" }
+        "Primary" { $installed += "Primary Site Server" }
+        "Secondary" { $installed += "Secondary Site Server" }
+        "PassiveSite" { $installed += "Passive Site Server" }
+        "SQLAO" { $installed += "SQL Always On node" }
+        "WSUS" { $installed += "WSUS" }
+        "FileServer" { $installed += "File Server" }
+        "Proxy" { $installed += "Squid proxy" }
+        "StandaloneRootCA" { $installed += "Standalone Root CA" }
+    }
+    if ($CurrentItem.InstallCA) { $installed += "Certificate Authority" }
+    if ($CurrentItem.installMP) { $installed += "Management Point" }
+    if ($CurrentItem.enablePullDP) { $installed += "Pull Distribution Point" }
+    elseif ($CurrentItem.installDP) { $installed += "Distribution Point" }
+    if ($CurrentItem.installSUP) { $installed += "Software Update Point" }
+    if ($CurrentItem.installRP) { $installed += "Reporting Services Point" }
+    if ($CurrentItem.useDatabaseReplica) { $installed += "MP Database Replica" }
+    if ($CurrentItem.remoteContentLibVM) { $installed += "Remote Content Library on $($CurrentItem.remoteContentLibVM)" }
+    if ($CurrentItem.installSSMS) { $installed += "SSMS" }
+    if ($CurrentItem.installOffice) { $installed += "Office" }
+
+    # --- SQL: local instance, or the remote SQL this site server was pointed at
+    $sqlParts = @()
+    if ($CurrentItem.sqlVersion) {
+        $sqlParts += $CurrentItem.sqlVersion
+        $instance = if ($CurrentItem.sqlInstanceName) { $CurrentItem.sqlInstanceName } else { "MSSQLSERVER" }
+        $port = if ($CurrentItem.sqlPort) { $CurrentItem.sqlPort } else { "1433" }
+        $sqlParts += "$instance on port $port"
+    }
+    if ($CurrentItem.remoteSQLVM) { $sqlParts += "remote SQL on $($CurrentItem.remoteSQLVM)" }
+    if ($CurrentItem.AlwaysOnListenerName) { $sqlParts += "AG listener $($CurrentItem.AlwaysOnListenerName)" }
+
+    # --- ConfigMgr: hierarchy-wide options, so it reads the same on every VM in the lab
+    $cmParts = @()
+    if ($cmOptions -and $cmOptions.install) {
+        if ($cmOptions.version) { $cmParts += $cmOptions.version }
+        if ($cmOptions.EVALVersion) { $cmParts += "EVAL media" }
+        if ($cmOptions.UsePKI) { $cmParts += "PKI / HTTPS" } else { $cmParts += "Enhanced HTTP" }
+        if ($cmOptions.pushClientToDomainMembers) { $cmParts += "client push enabled" }
+    }
+    else {
+        $cmParts += "not installed"
+    }
+
+    # --- Proxy: which Squid VM this one is routed through, if any
+    $proxy = "not used"
+    if ($CurrentItem.role -eq "Proxy") {
+        $proxy = "this VM is the lab proxy (Squid on 3128)"
+    }
+    else {
+        # Common.Linux.ps1 only loads under PowerShell 7; VMBuild.cmd still has a 5.1
+        # fallback launch path, where per-VM useProxy is the same source of truth.
+        if (Get-Command Test-VmUsesProxy -ErrorAction SilentlyContinue) {
+            $usesProxy = Test-VmUsesProxy -Vm $CurrentItem -DeployConfig $DeployConfig
+        }
+        else {
+            $usesProxy = [bool]$CurrentItem.useProxy -and $CurrentItem.role -notin @("DC", "BDC", "StandaloneRootCA")
+        }
+
+        if ($usesProxy) {
+            $proxyVm = $DeployConfig.virtualMachines | Where-Object { $_.role -eq "Proxy" } | Select-Object -First 1
+            $proxyName = if ($proxyVm) { $proxyVm.vmName } else { Get-ExistingForDomain -DomainName $vmOptions.domainName -Role "Proxy" | Select-Object -First 1 }
+            $proxy = if ($proxyName) { "$proxyName.$($vmOptions.domainName):3128" } else { "enabled (proxy VM not found)" }
+        }
+    }
+
+    $lab = if ($labParts.Count) { $labParts -join $sep } else { $none }
+    $role = if ($roleParts.Count) { $roleParts -join $sep } else { $none }
+    $installedRoles = if ($installed.Count) { $installed -join ", " } else { $none }
+    $sql = if ($sqlParts.Count) { $sqlParts -join $sep } else { $none }
+
+    $values = [ordered]@{
+        Lab            = $lab
+        Role           = $role
+        InstalledRoles = $installedRoles
+        SQL            = $sql
+        ConfigMgr      = $cmParts -join $sep
+        Proxy          = $proxy
+    }
+
+    return @($values.GetEnumerator() | ForEach-Object { [PSCustomObject]@{ Name = $_.Key; Value = [string]$_.Value } })
+}
+
+function Set-VmBgInfoConfig {
+    <#
+    .SYNOPSIS
+    Publish a VM's MemLabs lab configuration to the guest so BgInfo can render it.
+
+    .DESCRIPTION
+    Writes the HKLM:\SOFTWARE\MemLabs\BgInfo values consumed by the "MemLabs
+    Configuration" block in SERVER.bgi / CLIENT.bgi, and refreshes those two .bgi
+    files under C:\staging\bginfo so a VM built from a base image that predates the
+    block still renders it. BgInfo runs from a Startup shortcut, so the refreshed
+    text appears at the next logon.
+
+    Purely cosmetic, so failures are logged and never thrown.
+
+    .OUTPUTS
+    [bool] $true when the guest was updated.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $DeployConfig,
+        [Parameter(Mandatory = $true, HelpMessage = "VM object from the deploy config")]
+        [object] $CurrentItem
+    )
+
+    $vmName = $CurrentItem.vmName
+    $items = @(Get-VmBgInfoProperties -DeployConfig $DeployConfig -CurrentItem $CurrentItem)
+
+    # The two templates are ~4KB each, so they ride along as base64 in the same
+    # PSDirect call instead of paying for a separate Copy-ItemSafe job.
+    $bgiFiles = @()
+    foreach ($bgi in @("SERVER.bgi", "CLIENT.bgi")) {
+        $source = Join-Path $Common.StagingInjectPath "staging\bginfo\$bgi"
+        if (Test-Path -LiteralPath $source) {
+            $bgiFiles += [PSCustomObject]@{ Name = $bgi; Base64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($source)) }
+        }
+    }
+    if ($bgiFiles.Count -ne 2) {
+        Write-Log "[BgInfo] $vmName`: Found $($bgiFiles.Count) of 2 .bgi templates under $($Common.StagingInjectPath)\staging\bginfo; the guest may keep rendering an older layout." -Warning -LogOnly
+    }
+
+    $write_BgInfoConfig = {
+        param($Items, $BgiFiles)
+        $regPath = "HKLM:\SOFTWARE\MemLabs\BgInfo"
+        if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+        foreach ($item in $Items) {
+            New-ItemProperty -Path $regPath -Name $item.Name -PropertyType String -Value $item.Value -Force | Out-Null
+        }
+        # Stamped in the guest's own time zone -- the host may not share it.
+        New-ItemProperty -Path $regPath -Name "Deployed" -PropertyType String -Value (Get-Date -Format "yyyy-MM-dd HH:mm") -Force | Out-Null
+
+        $refreshed = 0
+        $bgiDir = "C:\staging\bginfo"
+        if (Test-Path -LiteralPath $bgiDir) {
+            foreach ($file in $BgiFiles) {
+                $target = Join-Path $bgiDir $file.Name
+                $current = ""
+                if (Test-Path -LiteralPath $target) {
+                    $current = [Convert]::ToBase64String([IO.File]::ReadAllBytes($target))
+                }
+                if ($current -ne $file.Base64) {
+                    [IO.File]::WriteAllBytes($target, [Convert]::FromBase64String($file.Base64))
+                    $refreshed++
+                }
+            }
+        }
+        return "$(@($Items).Count + 1) values written, $refreshed .bgi template(s) refreshed"
+    }
+
+    $result = Invoke-VmCommand -VmName $vmName -VmDomainName $DeployConfig.vmOptions.domainName -ScriptBlock $write_BgInfoConfig `
+        -ArgumentList @($items, $bgiFiles) -DisplayName "Update BgInfo lab configuration" -SuppressLog
+
+    if ($result.ScriptBlockFailed) {
+        Write-Log "[BgInfo] $vmName`: Failed to publish the lab configuration to the guest. $($result.ScriptBlockOutput)" -Warning -LogOnly
+        return $false
+    }
+
+    Write-Log "[BgInfo] $vmName`: $($result.ScriptBlockOutput)" -LogOnly
+    return $true
+}
+
 function get-RoleForSitecode {
     [CmdletBinding()]
     param (
