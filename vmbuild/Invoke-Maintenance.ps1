@@ -635,15 +635,15 @@ function Invoke-SevenZipMaintenance {
 
     $stale = Get-StaleSevenZipMsiEntry
     if ($owner -and $null -ne $stale) {
-        # MEASURED 2026-09-01: that product code still owns 11 files in C:\Program Files\7-Zip, 8 of them
-        # holding the CURRENT version, so the uninstall aims at the files Chocolatey now maintains.
+        # MEASURED 2026-09-01: /X on that product code took C:\Program Files\7-Zip from 107 files to 1.
+        # Windows Installer removes the files it owns even though a later EXE installer overwrote them.
         $installDir = if ($installedPath) { Split-Path $installedPath -Parent } else { 'the 7-Zip install folder' }
         Write-LogMessage ("An orphaned 7-Zip MSI registration remains: '$($stale.DisplayName)' version $($stale.DisplayVersion). " +
             "No files of that version are on disk, but vulnerability scanners read Add/Remove Programs and will keep " +
-            "reporting it. Removing it is a hand operation, not an unattended one: the old package still claims the " +
-            "in-use files under $installDir, so back them up first, run " +
-            "$($stale.UninstallString -replace '(?i)/I', '/X') /qn /norestart, then confirm 7z.exe still reads $installed. " +
-            "If it does not, 'choco install 7zip.install -y --force' restores it.") -Level 'WARNING'
+            "reporting it. Clearing it takes TWO commands run by hand, in this order, because the uninstall WILL " +
+            "delete the current files out of ${installDir}: " +
+            "$($stale.UninstallString -replace '(?i)/I', '/X') /qn /norestart " +
+            "followed by 'choco install 7zip.install -y --force' to put 7-Zip back.") -Level 'WARNING'
     }
 
     Write-LogMessage '7-Zip maintenance completed.'
