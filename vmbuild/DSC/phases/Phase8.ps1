@@ -1169,6 +1169,103 @@
 
         $nextDepend = "[WaitForEvent]WorkflowComplete"
 
+        Script ConfigMgrConsoleShortcut {
+            GetScript  = {
+                $shortcutPath = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'ConfigMgr Console.lnk'
+                @{ Result = [string](Test-Path -LiteralPath $shortcutPath) }
+            }
+            TestScript = {
+                $uiInstallCandidates = @()
+                $registryBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                    [Microsoft.Win32.RegistryHive]::LocalMachine,
+                    [Microsoft.Win32.RegistryView]::Registry32)
+                try {
+                    $consoleSetup = $registryBase.OpenSubKey('SOFTWARE\Microsoft\ConfigMgr10\Setup')
+                    if ($consoleSetup) {
+                        $uiInstallCandidates += [string]$consoleSetup.GetValue('UI Installation Directory')
+                    }
+                }
+                finally {
+                    if ($consoleSetup) { $consoleSetup.Dispose() }
+                    $registryBase.Dispose()
+                }
+                $smsUIInstallDir = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty 'UI Installation Directory' -ErrorAction SilentlyContinue
+                if ($smsUIInstallDir) { $uiInstallCandidates += [string]$smsUIInstallDir }
+
+                $consoleExe = $null
+                foreach ($candidate in @($uiInstallCandidates | Where-Object { $_ } | Select-Object -Unique)) {
+                    $candidateExe = Join-Path $candidate 'bin\Microsoft.ConfigurationManagement.exe'
+                    if (Test-Path -LiteralPath $candidateExe) {
+                        $consoleExe = $candidateExe
+                        break
+                    }
+                }
+
+                $shortcutPath = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'ConfigMgr Console.lnk'
+                if (-not $consoleExe -or -not (Test-Path -LiteralPath $consoleExe) -or -not (Test-Path -LiteralPath $shortcutPath)) {
+                    return $false
+                }
+
+                try {
+                    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
+                    return $shortcut.TargetPath -eq $consoleExe -and $shortcut.Arguments -eq 'sms:debugview'
+                }
+                catch {
+                    return $false
+                }
+            }
+            SetScript  = {
+                $uiInstallCandidates = @()
+                $registryBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                    [Microsoft.Win32.RegistryHive]::LocalMachine,
+                    [Microsoft.Win32.RegistryView]::Registry32)
+                try {
+                    $consoleSetup = $registryBase.OpenSubKey('SOFTWARE\Microsoft\ConfigMgr10\Setup')
+                    if ($consoleSetup) {
+                        $uiInstallCandidates += [string]$consoleSetup.GetValue('UI Installation Directory')
+                    }
+                }
+                finally {
+                    if ($consoleSetup) { $consoleSetup.Dispose() }
+                    $registryBase.Dispose()
+                }
+                $smsUIInstallDir = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty 'UI Installation Directory' -ErrorAction SilentlyContinue
+                if ($smsUIInstallDir) { $uiInstallCandidates += [string]$smsUIInstallDir }
+
+                $consoleExe = $null
+                foreach ($candidate in @($uiInstallCandidates | Where-Object { $_ } | Select-Object -Unique)) {
+                    $candidateExe = Join-Path $candidate 'bin\Microsoft.ConfigurationManagement.exe'
+                    if (Test-Path -LiteralPath $candidateExe) {
+                        $consoleExe = $candidateExe
+                        break
+                    }
+                }
+
+                if (-not $consoleExe) {
+                    throw "ConfigMgr console executable was not found under any registered UI installation directory: $($uiInstallCandidates -join ', ')"
+                }
+
+                $desktopPath = [Environment]::GetFolderPath('CommonDesktopDirectory')
+                if (-not $desktopPath -or -not (Test-Path -LiteralPath $desktopPath)) {
+                    throw "Public desktop path '$desktopPath' is unavailable."
+                }
+
+                $shortcutPath = Join-Path $desktopPath 'ConfigMgr Console.lnk'
+                $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
+                $shortcut.TargetPath = $consoleExe
+                $shortcut.Arguments = 'sms:debugview'
+                $shortcut.Save()
+
+                if (-not (Test-Path -LiteralPath $shortcutPath)) {
+                    throw "ConfigMgr console shortcut was not created at '$shortcutPath'."
+                }
+            }
+            DependsOn  = $nextDepend
+        }
+        $nextDepend = '[Script]ConfigMgrConsoleShortcut'
+
         if ($thisVM.InstallPatchMyPC) {
 
             if ($ThisVM.RemoteSQLVM) {

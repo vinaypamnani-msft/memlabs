@@ -343,13 +343,33 @@ public static void Refresh() { SHChangeNotify(0x8000000, 0, IntPtr.Zero, IntPtr.
 # --- Gather paths (single registry read for SMS\Setup) ---
 $smsSetup = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue
 $CMInstallDir = $smsSetup | Select-Object -ExpandProperty "Installation Directory" -ErrorAction SilentlyContinue
-$UIInstallDir = $smsSetup | Select-Object -ExpandProperty "UI Installation Directory" -ErrorAction SilentlyContinue
-if (-not $UIInstallDir) {
-    $UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty "UI Installation Directory" -ErrorAction SilentlyContinue
+$uiInstallCandidates = @()
+try {
+    $consoleRegistry = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry32)
+    $consoleSetup = $consoleRegistry.OpenSubKey('SOFTWARE\Microsoft\ConfigMgr10\Setup')
+    if ($consoleSetup) {
+        $uiInstallCandidates += [string]$consoleSetup.GetValue('UI Installation Directory')
+    }
+}
+catch {}
+finally {
+    if ($consoleSetup) { $consoleSetup.Dispose() }
+    if ($consoleRegistry) { $consoleRegistry.Dispose() }
+}
+$smsUIInstallDir = $smsSetup | Select-Object -ExpandProperty "UI Installation Directory" -ErrorAction SilentlyContinue
+if ($smsUIInstallDir) { $uiInstallCandidates += [string]$smsUIInstallDir }
+
+$CMexe = $null
+foreach ($candidate in @($uiInstallCandidates | Where-Object { $_ } | Select-Object -Unique)) {
+    $candidateExe = Join-Path $candidate "bin\Microsoft.ConfigurationManagement.exe"
+    if (Test-Path $candidateExe) {
+        $CMexe = $candidateExe
+        break
+    }
 }
 if ($CMInstallDir) { $CMlogs = Join-Path $CMInstallDir "Logs" }
-if ($UIInstallDir) { $CMexe = Join-Path $UIInstallDir "bin\Microsoft.ConfigurationManagement.exe" }
 
 $ControlPanel = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls" -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty "SMSCFGRC" -ErrorAction SilentlyContinue
