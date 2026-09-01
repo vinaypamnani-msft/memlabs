@@ -2971,12 +2971,23 @@ function Set-VmBgInfoConfig {
     $write_BgInfoConfig = {
         param($Items, $BgiFiles)
         $regPath = "HKLM:\SOFTWARE\MemLabs\BgInfo"
-        if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-        foreach ($item in $Items) {
-            New-ItemProperty -Path $regPath -Name $item.Name -PropertyType String -Value $item.Value -Force | Out-Null
+        $expected = @($Items | ForEach-Object { $_.Name }) + "Deployed"
+        try {
+            if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force -ErrorAction Stop | Out-Null }
+            foreach ($item in $Items) {
+                New-ItemProperty -Path $regPath -Name $item.Name -PropertyType String -Value $item.Value -Force -ErrorAction Stop | Out-Null
+            }
+            # Stamped in the guest's own time zone -- the host may not share it.
+            New-ItemProperty -Path $regPath -Name "Deployed" -PropertyType String -Value (Get-Date -Format "yyyy-MM-dd HH:mm") -Force -ErrorAction Stop | Out-Null
         }
-        # Stamped in the guest's own time zone -- the host may not share it.
-        New-ItemProperty -Path $regPath -Name "Deployed" -PropertyType String -Value (Get-Date -Format "yyyy-MM-dd HH:mm") -Force | Out-Null
+        catch {
+            throw "BgInfo registry write failed at $regPath`: $($_.Exception.Message)"
+        }
+
+        # Report what is actually READABLE, not what we tried to write -- a wallpaper
+        # full of "(none)" with a log line claiming success is the failure this catches.
+        $landed = @(@(Get-Item -LiteralPath $regPath -ErrorAction SilentlyContinue).Property | Where-Object { $_ -in $expected })
+        $missing = @($expected | Where-Object { $_ -notin $landed })
 
         $refreshed = 0
         $bgiDir = "C:\staging\bginfo"
@@ -2993,7 +3004,9 @@ function Set-VmBgInfoConfig {
                 }
             }
         }
-        return "$(@($Items).Count + 1) values written, $refreshed .bgi template(s) refreshed"
+        $note = "$($landed.Count) of $($expected.Count) values readable, $refreshed .bgi template(s) refreshed"
+        if ($missing.Count) { $note += "; MISSING: $($missing -join ', ')" }
+        return $note
     }
 
     $result = Invoke-VmCommand -VmName $vmName -VmDomainName $DeployConfig.vmOptions.domainName -ScriptBlock $write_BgInfoConfig `
@@ -3001,6 +3014,13 @@ function Set-VmBgInfoConfig {
 
     if ($result.ScriptBlockFailed) {
         Write-Log "[BgInfo] $vmName`: Failed to publish the lab configuration to the guest. $($result.ScriptBlockOutput)" -Warning -LogOnly
+        return $false
+    }
+
+    # The guest counts what it can read back, so MISSING means the wallpaper will
+    # render "(none)" -- say so here rather than leaving it to be discovered visually.
+    if ("$($result.ScriptBlockOutput)" -match 'MISSING') {
+        Write-Log "[BgInfo] $vmName`: $($result.ScriptBlockOutput)" -Warning -LogOnly
         return $false
     }
 
