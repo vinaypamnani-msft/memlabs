@@ -11596,7 +11596,7 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText)
+        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner)
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
@@ -11759,6 +11759,65 @@ function Test-CMSiteWideFunctionality {
         }
         catch {
             $results.Details.Add("WARN: SMS_Site mode query failed: $($_.Exception.Message)")
+        }
+
+        # 3a. The site actually REACHED cmOptions.version. Nothing else in the build compares
+        # the running site against what was asked for: when the update workflow dies mid-script
+        # Invoke-DotSource logs the throw as a WARNING without -Failure, so Phase 8 still reports
+        # success -- WGB 2026-09-02 shipped the baseline twice while the config said 2503.
+        #
+        # The name match must be EXACT. On a healthy 2503 site the same prefix also matches
+        # 'Configuration Manager 2503 Hotfix Rollup (KB32851084)' and two more hotfix rows, all
+        # parked at AVAILABLE forever because hotfixes are optional -- a LIKE match reads those
+        # as "2503 not installed". Newer offers (2509 / 2603 at 262146) are ignored for the same
+        # reason: only the row for the configured version is evidence about it.
+        if ($cmVersionInner) {
+            $updName = "Configuration Manager $cmVersionInner"
+            $results.Details.Add("CMD: Get-WmiObject SMS_CM_UpdatePackages where Name = '$updName'")
+            $siteBuild = 0
+            try {
+                $siteRow = Get-WmiObject -Namespace $ns -Class SMS_Site -Filter "SiteCode='$sc'" -ErrorAction Stop | Select-Object -First 1
+                if ($siteRow) { [void][int]::TryParse("$($siteRow.BuildNumber)", [ref]$siteBuild) }
+            }
+            catch { }
+            try {
+                $updRows = @(Get-WmiObject -Namespace $ns -Class SMS_CM_UpdatePackages -Filter "Name='$updName'" -ErrorAction Stop)
+                $installedRows = @($updRows | Where-Object { [int]$_.State -eq 196612 })
+                if ($updRows.Count -eq 0) {
+                    # No update record exists to judge, so this was NOT measured -- never report
+                    # the absence of evidence as a pass.
+                    $results.Details.Add("INFO: no in-console update named '$updName' exists, so whether cmOptions.version was applied was NOT measured (expected when the baseline media is already $cmVersionInner, or the SCP is offline/absent). Site build is $siteBuild.")
+                }
+                elseif ($installedRows.Count -gt 0) {
+                    $results.Details.Add("OK: site is at cmOptions.version $cmVersionInner -- '$updName' is INSTALL_SUCCESS, site build $siteBuild")
+                }
+                else {
+                    # The row carries the build it delivers, so no version->build table is needed
+                    # and none can go stale. A site already at or past that build is the
+                    # same-version no-op InstallAndUpdateSCCM.ps1 deliberately skips, which leaves
+                    # the row un-installed on a perfectly correct site.
+                    $fullVer = ''
+                    foreach ($row in $updRows) {
+                        if (-not $fullVer) { $fullVer = "$($row.FullVersion)" }
+                    }
+                    $targetBuild = 0
+                    if ($fullVer -match '^\d+\.\d+\.(\d+)\.') { [void][int]::TryParse($Matches[1], [ref]$targetBuild) }
+                    $states = (@($updRows | ForEach-Object { "$($_.State)" }) -join ', ')
+                    if ($targetBuild -gt 0 -and $siteBuild -ge $targetBuild) {
+                        $results.Details.Add("OK: site build $siteBuild is at or past $targetBuild, the build '$updName' delivers -- the un-installed row (State $states) is the same-version no-op the upgrade deliberately skips")
+                    }
+                    elseif ($targetBuild -le 0 -or $siteBuild -le 0) {
+                        $results.Details.Add("INFO: '$updName' is not installed (State $states) but the build comparison could NOT be made (site build '$siteBuild', update FullVersion '$fullVer') -- cmOptions.version was NOT verified")
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: cmOptions.version is $cmVersionInner but this site is still on build $siteBuild -- '$updName' delivers build $targetBuild and is NOT installed (SMS_CM_UpdatePackages.State = $states; 196612 = INSTALL_SUCCESS). Phase 8 does not fail on this: a throw inside InstallAndUpdateSCCM.ps1 is logged by Invoke-DotSource as a WARNING only, so the build reports success with the site left on the baseline. Re-run Phase 8 (UpgradeSCCM.Status is left at 'Running', so the upgrade is retried) and read InstallCMLog.log on this server for why it stopped.")
+                    }
+                }
+            }
+            catch {
+                $results.Details.Add("INFO: SMS_CM_UpdatePackages query failed, so cmOptions.version ($cmVersionInner) was NOT verified: $($_.Exception.Message)")
+            }
         }
 
         # 3b. IISSSLState -- the definitive HTTPS flag on the site component.
@@ -13317,7 +13376,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     # braced form -- $function:Invoke-TftpReadProbe is a parse error.
     $tftpProbeText = "function Invoke-TftpReadProbe { $(${function:Invoke-TftpReadProbe}) }"
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, ([string]$effectiveCmOptions.version) `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
