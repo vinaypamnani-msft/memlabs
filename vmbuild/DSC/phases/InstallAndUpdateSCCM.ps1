@@ -1613,9 +1613,31 @@ if ($UpdateRequired) {
             # Package not downloaded
             if ($updatepack.State -eq 327682) {
 
-                # Invoke download
+                # Invoke download.
+                # Invoke-CMSiteUpdateDownload throws a TERMINATING ArgumentNullException
+                # ("Value cannot be null. Parameter name: key") when the package was only
+                # just discovered by the forced Invoke-CMSiteUpdateCheck above -- seen on
+                # two consecutive WGB full builds (2026-09-02, 'Configuration Manager 2503'
+                # invoked ~30s after discovery). Un-caught it escaped this whole script, so
+                # the update was never installed, yet Invoke-DotSource logs script-level
+                # throws as a WARNING only: both builds reported success with the site still
+                # on the baseline build. A later attempt on the same package succeeds, so
+                # retry here; every sibling CM cmdlet in this loop is already guarded.
                 Write-DscStatus "Invoking download for '$($updatepack.Name)', waiting for download to begin."
-                Invoke-CMSiteUpdateDownload -Name $updatepack.Name -Force -WarningAction SilentlyContinue
+                $downloadInvoked = $false
+                for ($invokeTry = 1; $invokeTry -le 5 -and -not $downloadInvoked; $invokeTry++) {
+                    try {
+                        Invoke-CMSiteUpdateDownload -Name $updatepack.Name -Force -WarningAction SilentlyContinue
+                        $downloadInvoked = $true
+                    }
+                    catch {
+                        Write-DscStatus "WARNING: Invoke-CMSiteUpdateDownload for '$($updatepack.Name)' threw (attempt $invokeTry/5): $_"
+                        Start-Sleep 60
+                    }
+                }
+                if (-not $downloadInvoked) {
+                    Write-DscStatus "Could not invoke the download for '$($updatepack.Name)' after 5 attempts. The state machine stays at AVAILABLE until something starts the download, so the wait below will time out and fail the update rather than silently leaving the site on the baseline build."
+                }
                 Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
                 Start-Sleep 120                               
 
