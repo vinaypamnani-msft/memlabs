@@ -411,6 +411,10 @@ function Invoke-GitMaintenance {
 }
 
 function Invoke-DotNet6Maintenance {
+    param (
+        [int] $UninstallTimeoutSeconds = 600
+    )
+
     Write-LogMessage 'Starting .NET 6 maintenance...'
 
     $dotnetCommand = Get-Command dotnet -ErrorAction SilentlyContinue
@@ -531,8 +535,22 @@ function Invoke-DotNet6Maintenance {
 
         Write-LogMessage "Final uninstall command: $uninstall"
 
-        $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $uninstall -Wait -PassThru -WindowStyle Hidden
+        # Direct launch, never cmd /c: cmd preserves quoting only when the line holds exactly two
+        # quote characters, so any quoted argument corrupts a quoted executable path.
+        $invocation = Split-UninstallCommand -CommandLine $uninstall
+        $startArgs = @{ FilePath = $invocation.FilePath; PassThru = $true; WindowStyle = 'Hidden' }
+        if ($invocation.Arguments) { $startArgs['ArgumentList'] = $invocation.Arguments }
+        $proc = Start-Process @startArgs
         $uninstallCount++
+
+        if (-not $proc.WaitForExit($UninstallTimeoutSeconds * 1000)) {
+            # Bounded because this runs unattended at every VMBuild launch, and killed rather than
+            # left behind so a stalled uninstaller cannot accumulate across runs.
+            Write-LogMessage "Uninstaller for '$($target.DisplayName)' has not exited after $UninstallTimeoutSeconds seconds. Killing the process tree." -Level 'WARNING'
+            Stop-ProcessTree -ProcessId $proc.Id
+            $hadFailure = $true
+            continue
+        }
 
         Write-LogMessage "Uninstall process exited with code: $($proc.ExitCode)"
 
