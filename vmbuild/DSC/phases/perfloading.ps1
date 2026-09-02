@@ -1051,6 +1051,7 @@ Write-DscStatus "$Tag Starting perfloading"
     $commandSupportChanged = $false
     $commandSupportPreviousSourceVersion = $null
     $bootTemplateRestored = $false
+    $pxeBootFlagSet = $false
 
     # This staged WIM is the package's PERMANENT source. sspBootImagePackage.cpp:
     # "the ImagePath and ImageIndex store the information of the source image file. the
@@ -1239,6 +1240,39 @@ Write-DscStatus "$Tag Starting perfloading"
             }
         }
 
+        # AP_PACKAGE_PXE_BOOT (0x400) is what makes a DP extract the PXE payload at all.
+        # dpprovutils.cpp ExpandPXEImage tests it, and when it is clear with SccmPxe=1 the
+        # else branch does NOTHING -- no extraction, no removal, no log line -- so the
+        # package reports Installed on every DP and SMSBoot\<PackageID> is never created.
+        # New-CMBootImage does not set it; only Set-CMBootImage -DeployFromPxeDistributionPoint
+        # does (SetBootImage.cs: PkgFlags |= PackageFlags.PxeBootImage). Nothing here ever
+        # set it, so no memlabs lab has ever been able to PXE boot (fourthcoffee 2026-09-02:
+        # zero 'Extracting boot files' lines in 681 lines of smsdpprov.log).
+        $pxeBootFlag = 0x400
+        try {
+            $biFlags = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+            if (-not $biFlags) { throw "SMS_BootImagePackage has no row for $packageId" }
+            $currentFlags = [int]$biFlags.PkgFlags
+            if (($currentFlags -band $pxeBootFlag) -eq $pxeBootFlag) {
+                Write-DscStatus "$Tag Boot image '$biName' ($packageId) is already flagged for PXE deployment (PkgFlags=0x$('{0:X}' -f $currentFlags))"
+            }
+            else {
+                Set-CMBootImage -Id $packageId -DeployFromPxeDistributionPoint $true -ErrorAction Stop
+                $verifyFlags = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+                $newFlags = if ($verifyFlags) { [int]$verifyFlags.PkgFlags } else { 0 }
+                if (($newFlags -band $pxeBootFlag) -eq $pxeBootFlag) {
+                    $pxeBootFlagSet = $true
+                    Write-DscStatus "$Tag Flagged boot image '$biName' ($packageId) for PXE deployment (PkgFlags 0x$('{0:X}' -f $currentFlags) -> 0x$('{0:X}' -f $newFlags)). Without this the DP silently never extracts SMSBoot\$packageId and nothing can PXE boot."
+                }
+                else {
+                    Write-DscStatus "$Tag WARNING: Set-CMBootImage -DeployFromPxeDistributionPoint reported success for '$biName' ($packageId) but PkgFlags is still 0x$('{0:X}' -f $newFlags) (needs 0x400). The DP will not extract a PXE payload and Phase 11 validation FAILS on this." -Warning
+                }
+            }
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: could not flag boot image '$biName' ($packageId) for PXE deployment: $($_.Exception.Message). Without AP_PACKAGE_PXE_BOOT the DP never extracts SMSBoot\$packageId, so PXE boot fails while every content check still reports Installed. Phase 11 validation FAILS on this." -Warning
+        }
+
         # Distribute to the OSD DP group (the DP(s) that share an OSDClient's subnet).
         # Only SKIP when the content is already on EVERY OSD DP -- verified per-DP, not
         # "any row exists", because a single stale row for a removed DP used to read as
@@ -1308,7 +1342,7 @@ Write-DscStatus "$Tag Starting perfloading"
                 # Publish only after the assignment above exists. A newly targeted DP also
                 # needs this update when command support was enabled on an earlier run that
                 # had no OSD targets yet.
-                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $missingOsdDps.Count -gt 0
+                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $missingOsdDps.Count -gt 0
                 if ($bootImagePublicationNeeded) {
                     $bootImagePublicationStarted = $false
                     $bootImagePublicationError = $null

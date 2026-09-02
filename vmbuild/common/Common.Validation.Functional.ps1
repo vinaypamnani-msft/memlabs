@@ -11998,6 +11998,32 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         # Ownership is the whole point of building the image locally: a package
                         # this site does not own cannot be distributed from here.
                         $results.Details.Add("DIAG: Boot image '$biName' ($($bi.PackageID)) SourceSite=$($bi.SourceSite) SourceVersion=$($bi.SourceVersion) StoredPkgVersion=$($bi.StoredPkgVersion) (site-owned=$("$($bi.SourceSite)" -eq $sc))")
+
+                        # AP_PACKAGE_PXE_BOOT (0x400) is the single bit that decides whether a
+                        # DP extracts a PXE payload at all. dpprovutils.cpp ExpandPXEImage tests
+                        # it; with SccmPxe=1 and the bit clear the else branch does NOTHING --
+                        # no extraction, no removal, no log line -- so the package reports
+                        # Installed on every DP and SMSBoot\<PackageID> is never created.
+                        # New-CMBootImage does not set it; Set-CMBootImage
+                        # -DeployFromPxeDistributionPoint does (SetBootImage.cs:
+                        # PkgFlags |= PackageFlags.PxeBootImage). Nothing measured it before,
+                        # which is why fourthcoffee passed every other OSD check and could not
+                        # PXE boot.
+                        $biPkgFlags = $null
+                        try { $biPkgFlags = [int]$bi.PkgFlags } catch { }
+                        if ($null -eq $biPkgFlags) {
+                            $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) PkgFlags could not be read, so PXE deployment was NOT measured")
+                        }
+                        elseif (($biPkgFlags -band 0x400) -eq 0x400) {
+                            $results.Details.Add("OK: Boot image '$biName' ($($bi.PackageID)) is flagged for PXE deployment (PkgFlags=0x$('{0:X}' -f $biPkgFlags))")
+                        }
+                        elseif ($expectOsd) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Boot image '$biName' ($($bi.PackageID)) is NOT flagged for PXE deployment -- PkgFlags=0x$('{0:X}' -f $biPkgFlags) is missing AP_PACKAGE_PXE_BOOT (0x400). Every DP that receives it silently skips the payload extraction, so SMSBoot\$($bi.PackageID) never appears and no client can PXE boot, while content distribution still reports Installed everywhere. Fix: Set-CMBootImage -Id $($bi.PackageID) -DeployFromPxeDistributionPoint `$true, then Update-CMDistributionPoint -BootImageId $($bi.PackageID).")
+                        }
+                        else {
+                            $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) is not flagged for PXE deployment (PkgFlags=0x$('{0:X}' -f $biPkgFlags)); no OSDClient in this lab, so nothing would PXE boot from it anyway")
+                        }
                         # PkgSourcePath is only "the path of the SMS copy" (boot.<PackageID>.wim);
                         # ImagePath is the template ConfigMgr re-copies on EVERY RefreshPkgSource.
                         # With it missing, command support, optional components, drivers and
