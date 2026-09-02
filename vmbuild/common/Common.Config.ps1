@@ -2970,28 +2970,50 @@ function Set-VmBgInfoConfig {
 
     $write_BgInfoConfig = {
         param($Items, $BgiFiles)
-        $regPath = "HKLM:\SOFTWARE\MemLabs\BgInfo"
-        $expected = @($Items | ForEach-Object { $_.Name }) + "Deployed"
-        try {
-            if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force -ErrorAction Stop | Out-Null }
-            foreach ($item in $Items) {
-                New-ItemProperty -Path $regPath -Name $item.Name -PropertyType String -Value $item.Value -Force -ErrorAction Stop | Out-Null
-            }
-            # Stamped in the guest's own time zone -- the host may not share it.
-            New-ItemProperty -Path $regPath -Name "Deployed" -PropertyType String -Value (Get-Date -Format "yyyy-MM-dd HH:mm") -Force -ErrorAction Stop | Out-Null
+        # BgInfo ships 32-bit (live.sysinternals.com/bginfo.exe, PE machine 0x014C) and the
+        # shortcut launches it, so WOW64 redirects its HKLM\SOFTWARE reads into WOW6432Node.
+        # Writing only the native view renders "(none)" for every field while a 64-bit
+        # readback truthfully reports them all present -- it is reading the other view.
+        $regPaths = @("HKLM:\SOFTWARE\MemLabs\BgInfo")
+        if (Test-Path -LiteralPath "HKLM:\SOFTWARE\WOW6432Node") {
+            $regPaths += "HKLM:\SOFTWARE\WOW6432Node\MemLabs\BgInfo"
         }
-        catch {
-            throw "BgInfo registry write failed at $regPath`: $($_.Exception.Message)"
+        $expected = @($Items | ForEach-Object { $_.Name }) + "Deployed"
+        # Stamped in the guest's own time zone -- the host may not share it.
+        $stamp = Get-Date -Format "yyyy-MM-dd HH:mm"
+
+        foreach ($regPath in $regPaths) {
+            try {
+                if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force -ErrorAction Stop | Out-Null }
+                foreach ($item in $Items) {
+                    New-ItemProperty -Path $regPath -Name $item.Name -PropertyType String -Value $item.Value -Force -ErrorAction Stop | Out-Null
+                }
+                New-ItemProperty -Path $regPath -Name "Deployed" -PropertyType String -Value $stamp -Force -ErrorAction Stop | Out-Null
+            }
+            catch {
+                throw "BgInfo registry write failed at $regPath`: $($_.Exception.Message)"
+            }
         }
 
-        # Report what is actually READABLE, not what we tried to write -- a wallpaper
+        # Report what is actually READABLE in every view BgInfo might use -- a wallpaper
         # full of "(none)" with a log line claiming success is the failure this catches.
-        $landed = @(@(Get-Item -LiteralPath $regPath -ErrorAction SilentlyContinue).Property | Where-Object { $_ -in $expected })
-        $missing = @($expected | Where-Object { $_ -notin $landed })
+        $missing = @()
+        foreach ($regPath in $regPaths) {
+            $props = @(@(Get-Item -LiteralPath $regPath -ErrorAction SilentlyContinue).Property)
+            foreach ($name in $expected) {
+                if ($name -notin $props) { $missing += "$regPath\$name" }
+            }
+        }
+        $total = $expected.Count * $regPaths.Count
+        $readable = $total - $missing.Count
 
         $refreshed = 0
         $bgiDir = "C:\staging\bginfo"
-        if (Test-Path -LiteralPath $bgiDir) {
+        # "0 refreshed" must not mean both "already current" and "BgInfo isn't staged here".
+        if (-not (Test-Path -LiteralPath $bgiDir)) {
+            $bgiNote = "; $bgiDir NOT PRESENT - BgInfo is not staged on this VM"
+        }
+        else {
             foreach ($file in $BgiFiles) {
                 $target = Join-Path $bgiDir $file.Name
                 $current = ""
@@ -3003,8 +3025,9 @@ function Set-VmBgInfoConfig {
                     $refreshed++
                 }
             }
+            $bgiNote = ", $refreshed of $(@($BgiFiles).Count) .bgi template(s) refreshed"
         }
-        $note = "$($landed.Count) of $($expected.Count) values readable, $refreshed .bgi template(s) refreshed"
+        $note = "$readable/$total values readable in $($regPaths.Count) registry view(s)$bgiNote"
         if ($missing.Count) { $note += "; MISSING: $($missing -join ', ')" }
         return $note
     }
@@ -3019,7 +3042,7 @@ function Set-VmBgInfoConfig {
 
     # The guest counts what it can read back, so MISSING means the wallpaper will
     # render "(none)" -- say so here rather than leaving it to be discovered visually.
-    if ("$($result.ScriptBlockOutput)" -match 'MISSING') {
+    if ("$($result.ScriptBlockOutput)" -match 'MISSING|NOT PRESENT') {
         Write-Log "[BgInfo] $vmName`: $($result.ScriptBlockOutput)" -Warning -LogOnly
         return $false
     }
