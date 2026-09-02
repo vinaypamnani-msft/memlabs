@@ -135,15 +135,37 @@ function Get-SevenZipChocoPackage {
     return ''
 }
 
+function ConvertTo-SevenZipMajorMinor {
+    # '24.09.00.0' and '26.02' are the two shapes in play; compare only what both carry.
+    param (
+        [string] $Version
+    )
+
+    if ("$Version" -match '^\s*(\d+)\D+(\d+)') { return '{0}.{1}' -f [int] $Matches[1], [int] $Matches[2] }
+    return ''
+}
+
 function Get-StaleSevenZipMsiEntry {
     # Chocolatey's 7zip.install runs the vendor EXE, which upgrades C:\Program Files\7-Zip in place
     # but leaves any earlier MSI's Add/Remove registration behind. Vulnerability scanners read that
     # registration, so the host keeps reporting the OLD version with no old files on disk.
+    param (
+        [string] $InstalledVersion
+    )
+
     foreach ($entry in @(@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
                 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*') |
             ForEach-Object { Get-ItemProperty -Path $_ -ErrorAction SilentlyContinue })) {
         if ("$($entry.DisplayName)" -notmatch '(?i)7-?zip') { continue }
         if ("$($entry.UninstallString)" -notmatch '(?i)msiexec') { continue }
+
+        # Orphaned means it does NOT describe the binary on disk. Without this the caller would
+        # uninstall a legitimately registered 7-Zip and delete the files it is meant to preserve.
+        $entryVersion = ConvertTo-SevenZipMajorMinor -Version "$($entry.DisplayVersion)"
+        $diskVersion = ConvertTo-SevenZipMajorMinor -Version $InstalledVersion
+        if (-not $diskVersion) { continue }
+        if ($entryVersion -and $entryVersion -eq $diskVersion) { continue }
+
         return $entry
     }
 
@@ -822,6 +844,51 @@ function Invoke-WindowsTerminalMaintenance {
     Write-LogMessage 'Windows Terminal maintenance completed.'
 }
 
+function Repair-StaleSevenZipMsiRegistration {
+    param (
+        [Parameter(Mandatory = $true)] $Entry,
+        [int] $TimeoutSeconds = 600
+    )
+
+    if ("$($Entry.UninstallString)" -notmatch '(?i)(\{[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\})') {
+        Write-LogMessage "No product code could be read out of '$($Entry.UninstallString)', so the stale registration was left alone." -Level 'WARNING'
+        return $false
+    }
+
+    $productCode = $Matches[1]
+
+    # Separate arguments, never one string: a bare {GUID} is parsed as a script block and serialised
+    # into -encodedCommand, so msiexec would receive /X with no product code and show its help dialog.
+    Write-LogMessage "Removing the stale registration: msiexec /x $productCode /qn /norestart"
+    $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/x', $productCode, '/qn', '/norestart') -PassThru -WindowStyle Hidden
+    if ($proc.WaitForExit($TimeoutSeconds * 1000)) {
+        # 1605 is 'not installed', which is the state this is trying to reach anyway.
+        if (@(0, 1605, 1641, 3010) -contains $proc.ExitCode) { Write-LogMessage "msiexec returned $($proc.ExitCode)." }
+        else { Write-LogMessage "msiexec returned $($proc.ExitCode), so the registration may still be present." -Level 'WARNING' }
+    }
+    else {
+        Write-LogMessage "msiexec has not exited after $TimeoutSeconds seconds; killing it." -Level 'WARNING'
+        Stop-ProcessTree -ProcessId $proc.Id
+    }
+
+    # Unconditional: MEASURED 2026-09-01 that this uninstall takes C:\Program Files\7-Zip from 107
+    # files to 1, and it does that whether or not it reports success.
+    Write-LogMessage 'Reinstalling 7-Zip to put the files back...'
+    & choco install 7zip.install -y --force | Out-Null
+    $chocoRc = $LASTEXITCODE
+
+    $path = Get-SevenZipPath
+    $version = Get-SevenZipVersion -Path $path
+    if (-not $path -or -not $version) {
+        Write-LogMessage ("7-Zip is MISSING after clearing the stale registration; choco install returned $chocoRc. " +
+            'Restore it with:  choco install 7zip.install -y --force') -Level 'ERROR'
+        return $false
+    }
+
+    Write-LogMessage "7-Zip $version is present at $path."
+    return $true
+}
+
 function Invoke-SevenZipMaintenance {
     Write-LogMessage 'Starting 7-Zip maintenance...'
 
@@ -862,17 +929,23 @@ function Invoke-SevenZipMaintenance {
         }
     }
 
-    $stale = Get-StaleSevenZipMsiEntry
+    $stale = Get-StaleSevenZipMsiEntry -InstalledVersion $installed
     if ($owner -and $null -ne $stale) {
-        # MEASURED 2026-09-01: /X on that product code took C:\Program Files\7-Zip from 107 files to 1.
-        # Windows Installer removes the files it owns even though a later EXE installer overwrote them.
-        $installDir = if ($installedPath) { Split-Path $installedPath -Parent } else { 'the 7-Zip install folder' }
         Write-LogMessage ("An orphaned 7-Zip MSI registration remains: '$($stale.DisplayName)' version $($stale.DisplayVersion). " +
-            "No files of that version are on disk, but vulnerability scanners read Add/Remove Programs and will keep " +
-            "reporting it. Clearing it takes TWO commands run by hand, in this order, because the uninstall WILL " +
-            "delete the current files out of ${installDir}: " +
-            "$($stale.UninstallString -replace '(?i)/I', '/X') /qn /norestart " +
-            "followed by 'choco install 7zip.install -y --force' to put 7-Zip back.") -Level 'WARNING'
+            'No files of that version are on disk, but vulnerability scanners read Add/Remove Programs, so it keeps being reported.')
+
+        if (-not (Test-ChocoAvailable)) {
+            # Never remove it without a way to put the files back: the uninstall deletes the live install.
+            Write-LogMessage 'Leaving it alone: the Chocolatey CLI is missing, and the uninstall would delete the current 7-Zip with no way to reinstall it.' -Level 'WARNING'
+        }
+        elseif (Repair-StaleSevenZipMsiRegistration -Entry $stale) {
+            $remaining = Get-StaleSevenZipMsiEntry -InstalledVersion (Get-SevenZipVersion -Path (Get-SevenZipPath))
+            if ($null -eq $remaining) { Write-LogMessage 'The orphaned registration is gone.' }
+            else { Write-LogMessage "The orphaned registration is still present: '$($remaining.DisplayName)' version $($remaining.DisplayVersion)." -Level 'WARNING' }
+        }
+        else {
+            $script:MaintenanceHadFailure = $true
+        }
     }
 
     Write-LogMessage '7-Zip maintenance completed.'
