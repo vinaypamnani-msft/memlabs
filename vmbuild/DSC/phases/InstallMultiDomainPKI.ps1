@@ -59,11 +59,11 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 }
 
 if (-not $Externaldomainsitecode) {
-    Write-DscStatus "ExternalDomainSiteCode is not set. Skipping PKI configuration" -Log
+    Write-DscStatus "ExternalDomainSiteCode is not set. Skipping PKI configuration"
     return
 }
 else {
-    Write-DscStatus "ExternalDomainSiteCode is $Externaldomainsitecode." -Log
+    Write-DscStatus "ExternalDomainSiteCode is $Externaldomainsitecode."
 }
 
 if ($SiteCode -ne $Externaldomainsitecode) {
@@ -83,7 +83,7 @@ $cm_svc_file = "C:\Windows\Temp\ProvisionScript\certauth.txt"
 if (Test-Path $cm_svc_file) {
     # Add cm_svc user as a CM Account
     $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
-    Write-DscStatus "Adding $cm_svc domain account as CM account for sitecode $Externaldomainsitecode" -Log
+    Write-DscStatus "Adding $cm_svc domain account as CM account for sitecode $Externaldomainsitecode"
     Start-Sleep -Seconds 5
     New-CMAccount -Name $cm_svc -Password $secure -SiteCode $Externaldomainsitecode *>&1 | Write-StatusLogEntry
     #Remove-Item -Path $cm_svc_file -Force -Confirm:$false
@@ -95,26 +95,26 @@ if (Test-Path $cm_svc_file) {
 
     $ForestDiscoveryAccount = "$DomainFullName\$($deployConfig.vmOptions.adminName)"
 
-    Write-DscStatus "Adding $ForestDiscoveryAccount domain account as CM account for sitecode $SiteCode" -Log
+    Write-DscStatus "Adding $ForestDiscoveryAccount domain account as CM account for sitecode $SiteCode"
     Start-Sleep -Seconds 5
     New-CMAccount -Name $ForestDiscoveryAccount -Password $secure -SiteCode $Externaldomainsitecode *>&1 | Write-StatusLogEntry
 
-    Write-DscStatus "Creating New-CMActiveDirectoryForest for domain $DomainFullName" -Log
+    Write-DscStatus "Creating New-CMActiveDirectoryForest for domain $DomainFullName"
     try {
         New-CMActiveDirectoryForest -Description "Multi Forest $DomainFullName" -EnableDiscovery $true -UserName $ForestDiscoveryAccount -Password $secure -ForestFqdn $DomainFullName *>&1 | Write-StatusLogEntry
     }
     catch {
-        Write-DscStatus "Failed to create New-CMActiveDirectoryForest for domain $DomainFullName $_" -Log     
+        Write-DscStatus "Failed to create New-CMActiveDirectoryForest for domain $DomainFullName $_"
     }
-    Write-DscStatus "Get-CMSiteDefinition -SiteCode $Externaldomainsitecode" -Log   
+    Write-DscStatus "Get-CMSiteDefinition -SiteCode $Externaldomainsitecode"
     $sitedef = Get-CMSiteDefinition -SiteCode $Externaldomainsitecode
 
     if (-not $sitedef) {
-        Write-DscStatus "Failed to get CMSiteDefinition for sitecode $Externaldomainsitecode" -Log
+        Write-DscStatus "Failed to get CMSiteDefinition for sitecode $Externaldomainsitecode"
         return
     }   
     
-    Write-DscStatus "Enable Discovery Set-CMActiveDirectoryForest" -Log
+    Write-DscStatus "Enable Discovery Set-CMActiveDirectoryForest"
     "Set-CMActiveDirectoryForest -EnableDiscovery $true -ForestFQDN $DomainFullName -AddPublishingSite $sitedef" | Write-StatusLogEntry
     Set-CMActiveDirectoryForest -EnableDiscovery $true -ForestFQDN $DomainFullName -AddPublishingSite $sitedef *>&1 | Write-StatusLogEntry
 
@@ -186,7 +186,7 @@ if (Test-Path $cm_svc_file) {
                 New-CMBoundary -Type IPRange -Name $boundaryName -Value $rangeValue *>&1 | Write-StatusLogEntry
             }
             catch {
-                Write-DscStatus "Failed to create New-CMBoundary for $boundaryName - $sitecode $_" -Log
+                Write-DscStatus "Failed to create New-CMBoundary for $boundaryName - $sitecode $_"
             }
         }
         else {
@@ -199,7 +199,7 @@ if (Test-Path $cm_svc_file) {
             New-CMBoundaryGroup -Name $boundaryName -DefaultSiteCode $Externaldomainsitecode -AddSiteSystemServerName $sitesystems *>&1 | Write-StatusLogEntry
         }
         catch {
-            Write-DscStatus "Failed to create New-CMBoundaryGroup for $boundaryName - $Externaldomainsitecode $_" -Log
+            Write-DscStatus "Failed to create New-CMBoundaryGroup for $boundaryName - $Externaldomainsitecode $_"
         }
 
         Add-CMBoundaryToGroup -BoundaryName $boundaryName -BoundaryGroupName $boundaryName *>&1 | Write-StatusLogEntry

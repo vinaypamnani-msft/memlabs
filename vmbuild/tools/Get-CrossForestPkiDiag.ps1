@@ -152,7 +152,7 @@ $clientScript = {
               Where-Object { $_.ProviderName -like '*AutoEnrollment*' } | Select-Object -First 12
         foreach ($e in $ev) {
             W ("[{0}] Id={1} {2}" -f $e.TimeCreated, $e.Id, $e.LevelDisplayName)
-            W (($e.Message -split "`r?`n") | Select-Object -First 4) -join ' / '
+            W ((($e.Message -split "`r?`n") | Select-Object -First 4) -join ' / ')
             W "---"
         }
         if (-not $ev) { W "(no AutoEnrollment events found)" }

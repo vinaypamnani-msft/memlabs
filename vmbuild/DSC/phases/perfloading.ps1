@@ -1035,6 +1035,22 @@ Write-DscStatus "$Tag Starting perfloading"
     $packageId = ''
     $commandSupportChanged = $false
     $commandSupportPreviousSourceVersion = $null
+    $bootTemplateRestored = $false
+
+    # This staged WIM is the package's PERMANENT source. sspBootImagePackage.cpp:
+    # "the ImagePath and ImageIndex store the information of the source image file. the
+    # PkgSourcePath stores the path of the SMS copy." boot.<PackageID>.wim is only that
+    # copy; every RefreshPkgSource -- command support, optional components, drivers, and
+    # Update Distribution Points, which is what republishes the PXE payload -- re-copies
+    # ImagePath over it before injecting. Delete boot.wim and every rebuild from then on
+    # dies with "Failed to make a copy of source WIM file due to error 2" while
+    # distribution keeps reporting Installed from the stale copy.
+    # InstallADK runs in Phase 3/8/9 so the ADK FEATURE is guaranteed, but TemplateHelpDSC
+    # tests the 'Windows Preinstallation Environment' FOLDER, not this file. Directory
+    # existence is not file existence, so a miss here is a real site-install gap.
+    $adkWinPeWim = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment\amd64\en-us\winpe.wim'
+    $bootStageDir = Join-Path $folderPath 'boot\x64'
+    $stagedBootWim = Join-Path $bootStageDir 'boot.wim'
 
     $existingMemlabsTaskSequences = @(Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" -and "$($_.PackageID)" -like "$SiteCode*" })
     $BootImage = @(Get-CMBootImage | Where-Object { $_.Name -eq $memlabsBootImageName }) | Select-Object -First 1
@@ -1051,14 +1067,38 @@ Write-DscStatus "$Tag Starting perfloading"
     elseif ($BootImage) {
         $packageId = "$($BootImage.PackageID)"
         Write-DscStatus "$Tag Boot image '$biName' ($packageId) already exists at this site -- skipping creation"
+        # Labs built before this was understood deleted the template, so every rebuild since
+        # has failed with error 2 and their OSD DP was never given a PXE payload. Restore it
+        # from the same pristine ADK source; the publication below then repairs the DP.
+        $existingImagePath = ''
+        try {
+            $existingBootWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+            if ($existingBootWmi) {
+                try { $existingBootWmi.Get() } catch { }
+                $existingImagePath = "$($existingBootWmi.ImagePath)"
+            }
+        }
+        catch { Write-DscStatus "$Tag Could not read ImagePath for boot image '$biName' ($packageId): $($_.Exception.Message)" }
+        if (-not $existingImagePath) {
+            Write-DscStatus "$Tag WARNING: boot image '$biName' ($packageId) has no readable ImagePath, so its source WIM could not be checked. If it is missing, every rebuild fails with error 2 and PXE has no payload." -Warning
+        }
+        elseif (Test-Path -LiteralPath $existingImagePath) {
+            Write-DscStatus "$Tag Boot image source WIM is present: '$existingImagePath'"
+        }
+        elseif (-not (Test-Path -LiteralPath $adkWinPeWim)) {
+            Write-DscStatus "$Tag WARNING: boot image '$biName' ($packageId) points at ImagePath '$existingImagePath', which does not exist, and the ADK WinPE source '$adkWinPeWim' is absent too. Every boot-image rebuild fails with error 2 and PXE has no payload until it is restored. Phase 11 validation FAILS on this." -Warning
+        }
+        else {
+            try {
+                if (-not (Test-Path -LiteralPath $bootStageDir)) { [void](New-Item -ItemType Directory -Path $bootStageDir -Force -ErrorAction Stop) }
+                Copy-Item -LiteralPath $adkWinPeWim -Destination $existingImagePath -Force -ErrorAction Stop
+                $bootTemplateRestored = $true
+                Write-DscStatus "$Tag Restored the missing boot-image source WIM at '$existingImagePath' from the ADK WinPE. Without it every rebuild -- command support, optional components, Update Distribution Points -- failed with error 2, so the DP had no PXE payload."
+            }
+            catch { Write-DscStatus "$Tag WARNING: could not restore the missing boot-image source WIM '$existingImagePath' from '$adkWinPeWim': $($_.Exception.Message). Boot-image rebuilds keep failing with error 2 and PXE has no payload. Phase 11 validation FAILS on this." -Warning }
+        }
     }
     else {
-        # InstallADK runs in Phase 3/8/9 so the ADK FEATURE is guaranteed, but TemplateHelpDSC
-        # tests the 'Windows Preinstallation Environment' FOLDER, not this file. Directory
-        # existence is not file existence, so a miss here is a real site-install gap.
-        $adkWinPeWim = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment\amd64\en-us\winpe.wim'
-        $bootStageDir = Join-Path $folderPath 'boot\x64'
-        $stagedBootWim = Join-Path $bootStageDir 'boot.wim'
         $bootStageError = $null
         if (-not (Test-Path -LiteralPath $adkWinPeWim)) {
             $bootStageError = "the ADK WinPE image is absent at '$adkWinPeWim' -- the ADK feature installed without its WinPE payload"
@@ -1100,11 +1140,12 @@ Write-DscStatus "$Tag Starting perfloading"
                     }
                 }
                 if ($packageId) {
-                    Write-DscStatus "$Tag Created boot image '$biName' ($packageId) from the local ADK WinPE: SourceSite=$SiteCode SourceVersion=$($createdBootImage.SourceVersion) PkgSourcePath='$($createdBootImage.PkgSourcePath)'"
-                    # ConfigMgr copies the template to boot.<PackageID>.wim beside it, so the
-                    # staged file is now a duplicate ~336MB the package does not read.
-                    try { Remove-Item -LiteralPath $stagedBootWim -Force -ErrorAction Stop; Write-DscStatus "$Tag Removed the staged template '$stagedBootWim'; the package keeps its own copy at '$($createdBootImage.PkgSourcePath)'" }
-                    catch { Write-DscStatus "$Tag Could not remove the staged template '$stagedBootWim': $($_.Exception.Message). Harmless apart from ~336MB of disk." }
+                    try { $createdBootImage.Get() } catch { }
+                    Write-DscStatus "$Tag Created boot image '$biName' ($packageId) from the local ADK WinPE: SourceSite=$SiteCode SourceVersion=$($createdBootImage.SourceVersion) ImagePath='$($createdBootImage.ImagePath)' PkgSourcePath='$($createdBootImage.PkgSourcePath)'"
+                    # The staged template is kept on purpose -- see the ImagePath note above.
+                    if (-not (Test-Path -LiteralPath $stagedBootWim)) {
+                        Write-DscStatus "$Tag WARNING: the staged source WIM '$stagedBootWim' is gone after creation, but it is this package's permanent ImagePath. Every later rebuild will fail with error 2 and the DP will have no PXE payload. Phase 11 validation FAILS on this." -Warning
+                    }
                     $BootImage = Get-CMBootImage -Id $packageId
                 }
             }
@@ -1222,10 +1263,17 @@ Write-DscStatus "$Tag Starting perfloading"
                 # Publish only after the assignment above exists. A newly targeted DP also
                 # needs this update when command support was enabled on an earlier run that
                 # had no OSD targets yet.
-                $bootImagePublicationNeeded = $commandSupportChanged -or $missingOsdDps.Count -gt 0
+                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $missingOsdDps.Count -gt 0
                 if ($bootImagePublicationNeeded) {
                     $bootImagePublicationStarted = $false
                     $bootImagePublicationError = $null
+                    # Keep EVERY attempt's error, not just the last. Register() returns FALSE
+                    # only when the ContextID is already in the map (sspbootimagepackage.cpp
+                    # L747), and the failure paths above it never Delete the entry -- so a
+                    # first attempt that dies further in (e.g. the WIM copy) leaks the context
+                    # and every retry after it reports the registration failure instead. Only
+                    # keeping attempt 6 hid the first, real error in every build so far.
+                    $bootPublishErrors = New-Object System.Collections.Generic.List[string]
                     for ($bootPublishTry = 1; $bootPublishTry -le 6 -and -not $bootImagePublicationStarted; $bootPublishTry++) {
                         try {
                             Update-CMDistributionPoint -BootImageId $packageId -Confirm:$false -ErrorAction Stop
@@ -1233,13 +1281,19 @@ Write-DscStatus "$Tag Starting perfloading"
                         }
                         catch {
                             $bootImagePublicationError = $_
+                            $attemptText = "$($_.Exception.Message)"
+                            $attemptDesc = if ($attemptText -match 'Description\s*=\s*"([^"]+)"') { $matches[1] } else { (($attemptText -replace '\s+', ' ').Trim()) }
+                            $attemptSite = if ($attemptText -match 'ObjectInfo\s*=\s*"([^"]+)"') { " at $($matches[1])" } else { '' }
+                            $bootPublishErrors.Add("attempt ${bootPublishTry}: $attemptDesc$attemptSite")
                             if ($bootPublishTry -lt 6) { Start-Sleep -Seconds 10 }
                         }
                     }
                     if (-not $bootImagePublicationStarted) {
-                        # Same reasoning as the coverage wait below: a boot image problem must not
-                        # cost the site its OSD content. Phase 11 fails on the resulting DP state.
-                        Write-DscStatus "$Tag Could not rebuild and publish boot image '$biName' ($packageId) after its OSD DP assignment was created: $bootImagePublicationError. Continuing; Phase 11 validation FAILS on the resulting DP coverage." -Warning
+                        # A boot image problem must not cost the site its OSD content. Phase 11's
+                        # DP coverage check does NOT catch this -- coverage reads PkgSourcePath,
+                        # which still resolves to the last successfully built WIM. Phase 11's DP
+                        # PXE-payload check is what fails on the result.
+                        Write-DscStatus "$Tag Could not rebuild and publish boot image '$biName' ($packageId) after its OSD DP assignment was created. Per-attempt errors: $($bootPublishErrors -join ' | '). The DP keeps serving the previously built WIM and its PXE payload is NOT republished, so PXE may boot a stale image or nothing at all. Full last error: $bootImagePublicationError" -Warning
                     }
                     else {
                         Write-DscStatus "$Tag Started boot image publication after OSD DP targeting: $biName ($packageId)"

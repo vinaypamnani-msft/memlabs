@@ -2322,7 +2322,7 @@ function Test-Configuration {
             Write-Log -SubActivity "Testing URLS"
 
             if (-not $Common.AzureFileList.Urls) {
-                Add-ValidationMessage -Message "Deployment Validation: No URLs found to test." -ReturnObject $return -Error
+                Add-ValidationMessage -Message "Deployment Validation: No URLs found to test." -ReturnObject $return -Failure
             }
             else {
                 # Build the set of URL keys actually needed by this deployment,
@@ -2404,7 +2404,7 @@ function Test-Configuration {
                             }
                         }
                         catch {
-                            Add-ValidationMessage -Message "Error occurred while testing URL $($_.value) for $($_.name): $($_.Exception.Message)" -ReturnObject $return -Error
+                            Add-ValidationMessage -Message "Error occurred while testing URL $($_.value) for $($_.name): $($_.Exception.Message)" -ReturnObject $return -Failure
                         }
                     }
                 }
@@ -2423,7 +2423,7 @@ function Test-Configuration {
                             }
                         }
                         catch {
-                            Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
+                            Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Failure
                         }
                     }
                 }
@@ -2440,7 +2440,7 @@ function Test-Configuration {
                         }
                     }
                     catch {
-                        Add-ValidationMessage -Message "Error occurred while testing CU URL $($sql.cuUrl) for SQL Version $($sql.id): $($_.Exception.Message)" -ReturnObject $return -Error
+                        Add-ValidationMessage -Message "Error occurred while testing CU URL $($sql.cuUrl) for SQL Version $($sql.id): $($_.Exception.Message)" -ReturnObject $return -Failure
                     }
                 }
             }

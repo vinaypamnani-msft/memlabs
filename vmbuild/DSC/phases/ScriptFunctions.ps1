@@ -461,7 +461,10 @@ function Write-DscStatusSetup {
 }
 
 function Write-DscStatus {
-    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds, [switch]$Failure, [string]$MachineName)
+    # -Warning must stay DECLARED: this is a simple function, so an undeclared switch is
+    # silently collected into $args instead of erroring, and every caller that passed it
+    # had its warning written as Informational.
+    param($status, [switch]$NoLog, [switch]$NoStatus, [int]$RetrySeconds, [switch]$Failure, [switch]$Warning, [string]$MachineName)
 
     $RemoteStatusFile = $null
     if ($MachineName -and ($MachineName -ne $Env:ComputerName)) {
@@ -506,7 +509,7 @@ function Write-DscStatus {
     }
 
     if (-not $NoLog.IsPresent) {
-        $logType = if ($Failure.IsPresent) { 3 } else { 1 }
+        $logType = if ($Failure.IsPresent) { 3 } elseif ($Warning.IsPresent) { 2 } else { 1 }
         $status | Write-StatusLogEntry -Component 'Write-DscStatus' -Type $logType
     }
 

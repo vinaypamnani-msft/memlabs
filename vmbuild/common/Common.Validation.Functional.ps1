@@ -5518,6 +5518,69 @@ function Test-SiteSystemFunctionality {
                 $results.Details.Add("OK: WDSServer is Running (PXE active)")
             }
 
+            # PXE PAYLOAD ON DISK. "Installed on the DP" is not "can PXE boot": content
+            # distribution lands the package, but the boot files are published by a
+            # separate step (Update Distribution Points -> RefreshPkgSource). When that
+            # step fails the responder still answers DHCP and the client then dies on
+            # "cannot open smsboot\<PackageID>\x64\wdsmgfw.efi". InstallPxeBoot.cpp
+            # creates <tftproot>\SMSBoot with boot.sdi and per-arch wdsmgfw.efi /
+            # pxeboot.n12, so an absent tree means the publish never ran even once.
+            $sccmPxe = Get-Service -Name 'SccmPxe' -ErrorAction SilentlyContinue
+            $pxeEvidence = New-Object System.Collections.Generic.List[string]
+            if ($sccmPxe) { $pxeEvidence.Add("SccmPxe service is $($sccmPxe.Status)") }
+            if ($wds) { $pxeEvidence.Add("WDSServer service is $($wds.Status)") }
+            try {
+                $dpReg = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -ErrorAction Stop
+                foreach ($pxeProp in @($dpReg.PSObject.Properties | Where-Object { $_.Name -like '*PXE*' })) {
+                    $pxeEvidence.Add("HKLM:\SOFTWARE\Microsoft\SMS\DP\$($pxeProp.Name)=$($pxeProp.Value)")
+                }
+            }
+            catch { }
+
+            if ($pxeEvidence.Count -eq 0) {
+                $results.Details.Add("INFO: no PXE responder on this DP (no SccmPxe/WDSServer service, no PXE registry values) -- PXE payload not checked")
+            }
+            else {
+                $results.Details.Add("CMD: PXE payload check ($($pxeEvidence -join '; '))")
+                $tftpRoots = New-Object System.Collections.Generic.List[string]
+                foreach ($drv in @('E:', 'F:', 'D:', 'G:', 'C:')) {
+                    $cand = "$drv\SMS_DP`$\sms\bin"
+                    if (Test-Path -LiteralPath $cand) { $tftpRoots.Add($cand) }
+                }
+                try {
+                    $wdsRoot = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name 'RootFolder' -ErrorAction Stop).RootFolder
+                    if ($wdsRoot -and (Test-Path -LiteralPath $wdsRoot)) { $tftpRoots.Add($wdsRoot) }
+                }
+                catch { }
+
+                if ($tftpRoots.Count -eq 0) {
+                    $results.Details.Add("WARN: PXE is enabled but no TFTP root was found (no ?:\SMS_DP`$\sms\bin, no WDS RootFolder) -- the PXE payload could NOT be measured")
+                }
+                else {
+                    $bootFiles = @()
+                    $smsBootDirs = @()
+                    foreach ($root in $tftpRoots) {
+                        $smsBoot = Join-Path $root 'SMSBoot'
+                        if (-not (Test-Path -LiteralPath $smsBoot)) { continue }
+                        $smsBootDirs += $smsBoot
+                        $bootFiles += @(Get-ChildItem -LiteralPath $smsBoot -Recurse -File -Include 'wdsmgfw.efi', 'pxeboot.n12' -ErrorAction SilentlyContinue)
+                    }
+                    if ($bootFiles.Count -eq 0) {
+                        $results.Passed = $false
+                        $missingWhere = if ($smsBootDirs.Count) { "'$($smsBootDirs -join "', '")' contains no boot files" } else { "no SMSBoot folder exists under $($tftpRoots -join ', ')" }
+                        $results.Details.Add("FAIL: PXE is enabled on this DP but it has NO PXE boot payload -- $missingWhere. The responder will answer DHCP and then fail the TFTP read ('cannot open smsboot\<PackageID>\x64\wdsmgfw.efi'), so nothing can PXE boot. Content distribution reporting 'Installed' does not publish these files: Update Distribution Points on the boot image is what does, and it fails silently if the boot image's ImagePath source WIM is missing. Check SMSProv.log on the site server for 'sspbootimagepackage.cpp'.")
+                    }
+                    else {
+                        # Name the per-package folders: the responder hands out
+                        # smsboot\<PackageID>\<arch>\..., so this is what a client asks for.
+                        $pkgFolders = @(Get-ChildItem -LiteralPath $smsBootDirs -Directory -ErrorAction SilentlyContinue |
+                                Where-Object { $_.Name -match '^[A-Z0-9]{3}[0-9A-F]{5}$' } | ForEach-Object { $_.Name } | Select-Object -Unique)
+                        $pkgNote = if ($pkgFolders.Count) { " for package(s) $($pkgFolders -join ', ')" } else { " (shared arch folders only; no per-package folder present)" }
+                        $results.Details.Add("OK: PXE boot payload present -- $($bootFiles.Count) boot file(s) under '$($smsBootDirs -join "', '")'$pkgNote")
+                    }
+                }
+            }
+
             return $results
         }
         $localDpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
@@ -11717,6 +11780,26 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         # Ownership is the whole point of building the image locally: a package
                         # this site does not own cannot be distributed from here.
                         $results.Details.Add("DIAG: Boot image '$biName' ($($bi.PackageID)) SourceSite=$($bi.SourceSite) SourceVersion=$($bi.SourceVersion) StoredPkgVersion=$($bi.StoredPkgVersion) (site-owned=$("$($bi.SourceSite)" -eq $sc))")
+                        # PkgSourcePath is only "the path of the SMS copy" (boot.<PackageID>.wim);
+                        # ImagePath is the template ConfigMgr re-copies on EVERY RefreshPkgSource.
+                        # With it missing, command support, optional components, drivers and
+                        # Update Distribution Points -- which is what republishes the PXE payload
+                        # into SMS_DP`$\sms\bin\SMSBoot\<PackageID> -- all fail with error 2, while
+                        # distribution keeps reporting Installed from the stale existing copy.
+                        $biImagePath = "$($bi.ImagePath)"
+                        if (-not $biImagePath) {
+                            $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) has no readable ImagePath, so its source WIM was NOT checked")
+                        }
+                        elseif (Test-Path -LiteralPath $biImagePath) {
+                            $results.Details.Add("OK: Boot image '$biName' source WIM exists: $biImagePath")
+                        }
+                        elseif ($expectOsd) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Boot image '$biName' ($($bi.PackageID)) source WIM '$biImagePath' does not exist. ConfigMgr re-copies ImagePath on every rebuild, so enabling command support, adding optional components and Update Distribution Points all fail with 'Failed to make a copy of source WIM file due to error 2' (SMSProv.log) -- the DP is never given a PXE payload (no SMS_DP`$\sms\bin\SMSBoot\$($bi.PackageID)) and PXE clients get 'cannot open smsboot\$($bi.PackageID)\x64\wdsmgfw.efi', even though distribution reports Installed. Re-run Phase 8: perfloading restores it from the ADK WinPE and republishes.")
+                        }
+                        else {
+                            $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) source WIM '$biImagePath' does not exist, so the image can no longer be rebuilt (error 2 on every refresh). No OSDClient in this lab, so nothing PXE boots from it. Re-run Phase 8 to restore it from the ADK WinPE.")
+                        }
                         if (-not $cmdSupport) {
                             $results.Details.Add("WARN: Boot image '$biName' does not have command support enabled")
                         }
