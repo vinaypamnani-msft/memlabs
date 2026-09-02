@@ -5578,6 +5578,78 @@ function Test-SiteSystemFunctionality {
                                 Where-Object { $_.Name -match '^[A-Z0-9]{3}[0-9A-F]{5}$' } | ForEach-Object { $_.Name } | Select-Object -Unique)
                         $pkgNote = if ($pkgFolders.Count) { " for package(s) $($pkgFolders -join ', ')" } else { " (shared arch folders only; no per-package folder present)" }
                         $results.Details.Add("OK: PXE boot payload present -- $($bootFiles.Count) boot file(s) under '$($smsBootDirs -join "', '")'$pkgNote")
+
+                        # WHICH packages should be there, and is the payload CURRENT? Derived
+                        # from this DP's own content library using the product's own gate
+                        # (ExpandPXEImage: exactly one file / zero folders whose name contains
+                        # '<PackageID>.WIM'), so no cross-VM call is needed and the answer
+                        # cannot disagree with what smsdpprov itself would decide.
+                        $eligible = @()
+                        try {
+                            $pxeClp = ''
+                            if ($dpReg -and $dpReg.PSObject.Properties['ContentLibraryPath']) { $pxeClp = "$($dpReg.ContentLibraryPath)" }
+                            if (-not $pxeClp) {
+                                foreach ($cd in @('E:', 'F:', 'D:', 'G:', 'C:')) { if (Test-Path -LiteralPath "$cd\SCCMContentLib") { $pxeClp = "$cd\SCCMContentLib"; break } }
+                            }
+                            if ($pxeClp -and (Test-Path -LiteralPath $pxeClp)) {
+                                $pxeDataLib = Join-Path $pxeClp 'DataLib'
+                                foreach ($def in @(Get-ChildItem -LiteralPath $pxeDataLib -Directory -ErrorAction SilentlyContinue)) {
+                                    if ($def.Name -notmatch '^([A-Z0-9]{3}[0-9A-F]{5})\.(\d+)$') { continue }
+                                    $defPkg = $Matches[1]
+                                    $defVer = $Matches[2]
+                                    $entries = @(Get-ChildItem -LiteralPath $def.FullName -ErrorAction SilentlyContinue)
+                                    $entFiles = @($entries | Where-Object { -not $_.PSIsContainer })
+                                    $entDirs = @($entries | Where-Object { $_.PSIsContainer })
+                                    if ($entFiles.Count -ne 1 -or $entDirs.Count -ne 0) { continue }
+                                    # DataLib holds one <filename>.INI per real file, so drop that suffix first.
+                                    if (($entFiles[0].BaseName).ToUpperInvariant() -notlike "*$defPkg.WIM") { continue }
+                                    $eligible += [pscustomobject]@{ PackageID = $defPkg; Version = $defVer; ContentWritten = $def.LastWriteTime; File = $entFiles[0].BaseName }
+                                }
+                            }
+                        }
+                        catch { }
+
+                        if ($eligible.Count -eq 0) {
+                            $results.Details.Add("INFO: no boot-image-shaped package found in this DP's content library, so the payload could not be matched against an expected package list")
+                        }
+                        else {
+                            $missingPkgPayload = @()
+                            $stalePkgPayload = @()
+                            foreach ($el in $eligible) {
+                                $elDir = @($smsBootDirs | ForEach-Object { Join-Path $_ $el.PackageID } | Where-Object { Test-Path -LiteralPath $_ }) | Select-Object -First 1
+                                if (-not $elDir) {
+                                    $missingPkgPayload += "$($el.PackageID) (content v$($el.Version), '$($el.File)')"
+                                    continue
+                                }
+                                $elFiles = @(Get-ChildItem -LiteralPath $elDir -Recurse -File -ErrorAction SilentlyContinue)
+                                if ($elFiles.Count -eq 0) {
+                                    $missingPkgPayload += "$($el.PackageID) (folder exists but is EMPTY)"
+                                    continue
+                                }
+                                # CopyWIMBootFiles rewrites these on every extract, so a payload
+                                # older than the content it came from was produced by an earlier
+                                # version of the image and is what a client would boot.
+                                $newestPayload = @($elFiles | Sort-Object LastWriteTime -Descending)[0]
+                                if ($newestPayload.LastWriteTime -lt $el.ContentWritten.AddMinutes(-5)) {
+                                    $stalePkgPayload += "$($el.PackageID): payload written $($newestPayload.LastWriteTime.ToString('yyyy-MM-dd HH:mm')) but content v$($el.Version) landed $($el.ContentWritten.ToString('yyyy-MM-dd HH:mm'))"
+                                }
+                                else {
+                                    $results.Details.Add("OK: PXE payload for $($el.PackageID) is current ($($elFiles.Count) file(s), newest $($newestPayload.LastWriteTime.ToString('yyyy-MM-dd HH:mm')), content v$($el.Version))")
+                                }
+                            }
+                            if ($missingPkgPayload.Count -gt 0) {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: $($missingPkgPayload.Count) boot image(s) are in this DP's content library but have NO payload under SMSBoot: $($missingPkgPayload -join '; '). A client that is offered one of these gets 'cannot open smsboot\<PackageID>\x64\wdsmgfw.efi' even though every other check passes. Read smsdpprov.log on this DP for 'Extracting boot files'.")
+                            }
+                            if ($stalePkgPayload.Count -gt 0) {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: $($stalePkgPayload.Count) PXE payload(s) are OLDER than the boot image content on this DP, so clients boot a superseded image: $($stalePkgPayload -join '; '). Force a re-extract with Update-CMDistributionPoint -BootImageId <PackageID>.")
+                            }
+                            $orphanPkg = @($pkgFolders | Where-Object { $pid2 = $_; -not (@($eligible | Where-Object { $_.PackageID -eq $pid2 }).Count) })
+                            if ($orphanPkg.Count -gt 0) {
+                                $results.Details.Add("INFO: SMSBoot holds payload for $($orphanPkg.Count) package(s) with no matching boot image in this DP's content library (left by a removed image): $($orphanPkg -join ', ')")
+                            }
+                        }
                     }
                 }
 
@@ -7817,6 +7889,88 @@ function Save-Phase11GuestLogs {
 # Collector scriptblocks used by the DP / pull-DP diagnostics below. Each is
 # self-contained (runs IN the guest), resolves its log directory from the
 # authoritative registry key, and tails the named logs into a hashtable.
+function Invoke-TftpReadProbe {
+    <#
+    .SYNOPSIS
+        Perform the TFTP read a PXE client would perform, without booting one.
+
+    .DESCRIPTION
+        RFC 1350 read request against the PXE responder. Everything else we check is
+        state on the site or files on the DP; this is the only check that puts a packet
+        on the wire and makes the responder answer, so it covers DNS, the route, the
+        host firewall, the listener and the file in one shot.
+
+        The reply separates three failures that are indistinguishable from outside:
+          NoResponse    UDP/69 blocked, or nothing is listening
+          FileNotFound  responder IS answering, but that file is not there (error 1)
+          Served        the file is actually served
+
+        Only the first data block is read -- enough to prove the transfer starts,
+        without pulling a whole boot file across the lab network.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Server,
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [int]$Port = 69,
+        [int]$TimeoutMs = 5000
+    )
+
+    $out = [pscustomobject]@{ Server = $Server; FileName = $FileName; Result = 'Error'; Bytes = 0; Detail = '' }
+    $udp = $null
+    try {
+        $udp = New-Object System.Net.Sockets.UdpClient
+        $udp.Client.ReceiveTimeout = $TimeoutMs
+        $req = New-Object System.Collections.Generic.List[byte]
+        $req.Add(0); $req.Add(1)
+        $req.AddRange([System.Text.Encoding]::ASCII.GetBytes($FileName)); $req.Add(0)
+        $req.AddRange([System.Text.Encoding]::ASCII.GetBytes('octet')); $req.Add(0)
+        $payload = $req.ToArray()
+        [void]$udp.Send($payload, $payload.Length, $Server, $Port)
+        $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+        $resp = $udp.Receive([ref]$ep)
+        if ($null -eq $resp -or $resp.Length -lt 4) {
+            $out.Result = 'NoResponse'
+            $out.Detail = 'reply was empty or truncated'
+            return $out
+        }
+        $opcode = ([int]$resp[0] * 256) + [int]$resp[1]
+        if ($opcode -eq 3) {
+            $out.Result = 'Served'
+            $out.Bytes = $resp.Length - 4
+            $out.Detail = "DATA block $((([int]$resp[2] * 256) + [int]$resp[3])), $($out.Bytes) byte(s)"
+            # Abort instead of leaving the server retransmitting block 1 until it gives up.
+            try {
+                $abort = [byte[]]@(0, 5, 0, 0, 0)
+                [void]$udp.Send($abort, $abort.Length, $ep)
+            }
+            catch { }
+        }
+        elseif ($opcode -eq 5) {
+            $code = ([int]$resp[2] * 256) + [int]$resp[3]
+            $msg = ''
+            if ($resp.Length -gt 4) { $msg = ([System.Text.Encoding]::ASCII.GetString($resp, 4, $resp.Length - 4)).Trim([char]0) }
+            $out.Result = if ($code -eq 1) { 'FileNotFound' } else { 'Error' }
+            $out.Detail = "TFTP error $code`: $msg"
+        }
+        else {
+            $out.Result = 'Error'
+            $out.Detail = "unexpected TFTP opcode $opcode"
+        }
+    }
+    catch [System.Net.Sockets.SocketException] {
+        $out.Result = 'NoResponse'
+        $out.Detail = $_.Exception.Message
+    }
+    catch {
+        $out.Result = 'Error'
+        $out.Detail = $_.Exception.Message
+    }
+    finally {
+        if ($udp) { try { $udp.Close() } catch { } }
+    }
+    return $out
+}
+
 $Phase11CcmClientLogCollector = {
     # PullDP.log + DataTransferService.log (BITS) live in the CCM client log dir.
     $out = @{}
@@ -11416,7 +11570,7 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv)
+        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText)
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
@@ -12241,6 +12395,55 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             }
         }
 
+        # 7c. The only check that puts a packet on the wire. Everything above is state:
+        # WMI on the site, files on the DP. A client still cannot boot if UDP/69 is
+        # firewalled, the responder is not listening, or the file it would ask for is not
+        # the file that is there -- and none of those show up in any of it. Do the exact
+        # TFTP read a PXE client does, from a DIFFERENT machine, so DNS, the route, the
+        # firewall, the listener and the file are all exercised at once.
+        if ($isPrimary -and $expectOsd -and $tftpProbeText) {
+            try {
+                . ([scriptblock]::Create($tftpProbeText))
+                $tftpTargets = @($expectedOsdDpNames | Where-Object { $_ })
+                $tftpPkgs = @($bootImgs | ForEach-Object { "$($_.PackageID)" } | Where-Object { $_ } | Select-Object -Unique)
+                if ($tftpTargets.Count -eq 0 -or $tftpPkgs.Count -eq 0) {
+                    $results.Details.Add("WARN: TFTP read was NOT attempted (OSD DPs=$($tftpTargets.Count), boot images=$($tftpPkgs.Count)) -- reported above")
+                }
+                else {
+                    foreach ($tftpDp in $tftpTargets) {
+                        foreach ($tftpPkg in $tftpPkgs) {
+                            # Backslashes are what a PXE client sends and what the responder's
+                            # own error text quotes. Retry with forward slashes before calling
+                            # a file missing, so a wrong assumption here cannot read as a fault.
+                            $probe = $null
+                            foreach ($sep in @('\', '/')) {
+                                $tftpFile = "smsboot$sep$tftpPkg${sep}x64${sep}wdsmgfw.efi"
+                                $probe = Invoke-TftpReadProbe -Server $tftpDp -FileName $tftpFile -TimeoutMs 6000
+                                if ($probe.Result -ne 'FileNotFound') { break }
+                            }
+                            if ($probe.Result -eq 'Served') {
+                                $results.Details.Add("OK: TFTP read of '$($probe.FileName)' from $tftpDp succeeded ($($probe.Detail)) -- a PXE client can pull its boot file")
+                            }
+                            elseif ($probe.Result -eq 'FileNotFound') {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: $tftpDp answers TFTP but does NOT have '$($probe.FileName)' [$($probe.Detail)]. The responder is listening and the network path is fine, so this is the PXE payload itself: smsdpprov never extracted SMSBoot\$tftpPkg on that DP. Force it with Update-CMDistributionPoint -BootImageId $tftpPkg, and read smsdpprov.log there for 'Extracting boot files'.")
+                            }
+                            elseif ($probe.Result -eq 'NoResponse') {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: no TFTP response from $tftpDp on UDP/69 for '$($probe.FileName)' [$($probe.Detail)]. Every PXE boot stops here. The responder service is down, or UDP/69 is blocked between this site server and that DP -- content state and DP settings all look fine and cannot see this.")
+                            }
+                            else {
+                                $results.Details.Add("WARN: TFTP read of '$($probe.FileName)' from $tftpDp was inconclusive [$($probe.Detail)] -- treat as NOT measured")
+                            }
+                        }
+                    }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: TFTP read probe could not run, so PXE file delivery was NOT measured: $($_.Exception.Message)")
+            }
+        }
+
         # 8. Collections — MEMLABS-* device collections should exist.
         # Primary-only (like the task-sequence / package checks above): perfloading
         # authors the MEMLABS device collections under 'if (CurrentRole -ne CAS)'
@@ -13015,8 +13218,11 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     }
 
     $appsCsv = ($expectedAppNames -join '|')
+    # The probe has to exist inside the guest session, and a hyphenated name needs the
+    # braced form -- $function:Invoke-TftpReadProbe is a parse error.
+    $tftpProbeText = "function Invoke-TftpReadProbe { $(${function:Invoke-TftpReadProbe}) }"
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
