@@ -1079,23 +1079,49 @@ Write-DscStatus "$Tag Starting perfloading"
             }
         }
         catch { Write-DscStatus "$Tag Could not read ImagePath for boot image '$biName' ($packageId): $($_.Exception.Message)" }
+
+        # ImagePath is a UNC to this site's OWN share and perfloading runs as SYSTEM under
+        # DSC, so this is a loopback SMB read that can fail while the file is plainly there:
+        # fourthcoffee 2026-09-02 called it missing at 09:42 and Phase 11 read the same path
+        # as present at 09:45. Probe the local staging path too and only believe "missing"
+        # when both agree -- a one-sided negative here deletes nothing but does restore over
+        # a healthy image and republish the whole boot image for no reason.
+        $stagedTail = 'boot\x64\boot.wim'
+        $localEquivalent = ''
+        if ($existingImagePath -and (($existingImagePath -replace '/', '\').ToLowerInvariant()).EndsWith($stagedTail)) {
+            $localEquivalent = $stagedBootWim
+        }
+        $foundImagePath = ''
+        foreach ($probe in @($existingImagePath, $localEquivalent)) {
+            if (-not $probe) { continue }
+            try { if (Test-Path -LiteralPath $probe) { $foundImagePath = $probe; break } } catch { }
+        }
+
         if (-not $existingImagePath) {
             Write-DscStatus "$Tag WARNING: boot image '$biName' ($packageId) has no readable ImagePath, so its source WIM could not be checked. If it is missing, every rebuild fails with error 2 and PXE has no payload." -Warning
         }
-        elseif (Test-Path -LiteralPath $existingImagePath) {
-            Write-DscStatus "$Tag Boot image source WIM is present: '$existingImagePath'"
+        elseif ($foundImagePath -and $foundImagePath -ne $existingImagePath) {
+            Write-DscStatus "$Tag Boot image source WIM is present at '$foundImagePath'. Its ImagePath '$existingImagePath' could not be read from here -- DSC runs as SYSTEM, so a loopback read of this site's own share can be refused. The file exists, so nothing was restored."
+        }
+        elseif ($foundImagePath) {
+            Write-DscStatus "$Tag Boot image source WIM is present: '$foundImagePath'"
         }
         elseif (-not (Test-Path -LiteralPath $adkWinPeWim)) {
             Write-DscStatus "$Tag WARNING: boot image '$biName' ($packageId) points at ImagePath '$existingImagePath', which does not exist, and the ADK WinPE source '$adkWinPeWim' is absent too. Every boot-image rebuild fails with error 2 and PXE has no payload until it is restored. Phase 11 validation FAILS on this." -Warning
         }
         else {
+            # Restore through the local path when we have one: the UNC destination is what
+            # failed with "did not resolve to the same provider" once SYSTEM could not
+            # resolve the share.
+            $restoreTarget = if ($localEquivalent) { $localEquivalent } else { $existingImagePath }
             try {
-                if (-not (Test-Path -LiteralPath $bootStageDir)) { [void](New-Item -ItemType Directory -Path $bootStageDir -Force -ErrorAction Stop) }
-                Copy-Item -LiteralPath $adkWinPeWim -Destination $existingImagePath -Force -ErrorAction Stop
+                $restoreParent = Split-Path -Path $restoreTarget -Parent
+                if ($restoreParent -and -not (Test-Path -LiteralPath $restoreParent)) { [void](New-Item -ItemType Directory -Path $restoreParent -Force -ErrorAction Stop) }
+                Copy-Item -LiteralPath $adkWinPeWim -Destination $restoreTarget -Force -ErrorAction Stop
                 $bootTemplateRestored = $true
-                Write-DscStatus "$Tag Restored the missing boot-image source WIM at '$existingImagePath' from the ADK WinPE. Without it every rebuild -- command support, optional components, Update Distribution Points -- failed with error 2, so the DP had no PXE payload."
+                Write-DscStatus "$Tag Restored the missing boot-image source WIM at '$restoreTarget' from the ADK WinPE. Without it every rebuild -- command support, optional components, Update Distribution Points -- failed with error 2, so the DP had no PXE payload."
             }
-            catch { Write-DscStatus "$Tag WARNING: could not restore the missing boot-image source WIM '$existingImagePath' from '$adkWinPeWim': $($_.Exception.Message). Boot-image rebuilds keep failing with error 2 and PXE has no payload. Phase 11 validation FAILS on this." -Warning }
+            catch { Write-DscStatus "$Tag WARNING: could not restore the missing boot-image source WIM '$restoreTarget' from '$adkWinPeWim': $($_.Exception.Message). Boot-image rebuilds keep failing with error 2 and PXE has no payload. Phase 11 validation FAILS on this." -Warning }
         }
     }
     else {
