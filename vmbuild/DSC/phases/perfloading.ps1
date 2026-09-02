@@ -1080,12 +1080,14 @@ Write-DscStatus "$Tag Starting perfloading"
         }
         catch { Write-DscStatus "$Tag Could not read ImagePath for boot image '$biName' ($packageId): $($_.Exception.Message)" }
 
-        # ImagePath is a UNC to this site's OWN share and perfloading runs as SYSTEM under
-        # DSC, so this is a loopback SMB read that can fail while the file is plainly there:
-        # fourthcoffee 2026-09-02 called it missing at 09:42 and Phase 11 read the same path
-        # as present at 09:45. Probe the local staging path too and only believe "missing"
-        # when both agree -- a one-sided negative here deletes nothing but does restore over
-        # a healthy image and republish the whole boot image for no reason.
+        # This script runs with the current location on the CMSite provider drive
+        # (Set-Location "<site>:\" above), and a BARE UNC is resolved through whatever
+        # provider that is -- so Test-Path returns $false for a file that exists and
+        # Copy-Item fails with "Source and destination path did not resolve to the same
+        # provider". Drive-qualified paths like E:\OSD\... are immune because the drive
+        # names a FileSystem PSDrive. ImagePath comes back from WMI as a UNC, so it has
+        # to name the provider. fourthcoffee 2026-09-02: called missing at 09:42 by this
+        # code, read as present at 09:45 by Phase 11, which is not on a provider drive.
         $stagedTail = 'boot\x64\boot.wim'
         $localEquivalent = ''
         if ($existingImagePath -and (($existingImagePath -replace '/', '\').ToLowerInvariant()).EndsWith($stagedTail)) {
@@ -1094,14 +1096,15 @@ Write-DscStatus "$Tag Starting perfloading"
         $foundImagePath = ''
         foreach ($probe in @($existingImagePath, $localEquivalent)) {
             if (-not $probe) { continue }
-            try { if (Test-Path -LiteralPath $probe) { $foundImagePath = $probe; break } } catch { }
+            $resolvable = if ($probe -like '\\*') { "FileSystem::$probe" } else { $probe }
+            try { if (Test-Path -LiteralPath $resolvable) { $foundImagePath = $probe; break } } catch { }
         }
 
         if (-not $existingImagePath) {
             Write-DscStatus "$Tag WARNING: boot image '$biName' ($packageId) has no readable ImagePath, so its source WIM could not be checked. If it is missing, every rebuild fails with error 2 and PXE has no payload." -Warning
         }
         elseif ($foundImagePath -and $foundImagePath -ne $existingImagePath) {
-            Write-DscStatus "$Tag Boot image source WIM is present at '$foundImagePath'. Its ImagePath '$existingImagePath' could not be read from here -- DSC runs as SYSTEM, so a loopback read of this site's own share can be refused. The file exists, so nothing was restored."
+            Write-DscStatus "$Tag Boot image source WIM is present at '$foundImagePath', but its ImagePath '$existingImagePath' did not resolve from here. The file exists, so nothing was restored."
         }
         elseif ($foundImagePath) {
             Write-DscStatus "$Tag Boot image source WIM is present: '$foundImagePath'"
@@ -1110,14 +1113,15 @@ Write-DscStatus "$Tag Starting perfloading"
             Write-DscStatus "$Tag WARNING: boot image '$biName' ($packageId) points at ImagePath '$existingImagePath', which does not exist, and the ADK WinPE source '$adkWinPeWim' is absent too. Every boot-image rebuild fails with error 2 and PXE has no payload until it is restored. Phase 11 validation FAILS on this." -Warning
         }
         else {
-            # Restore through the local path when we have one: the UNC destination is what
-            # failed with "did not resolve to the same provider" once SYSTEM could not
-            # resolve the share.
+            # Restore through the local path when we have one; otherwise name the provider,
+            # or Copy-Item resolves the UNC destination through the CMSite drive and fails.
             $restoreTarget = if ($localEquivalent) { $localEquivalent } else { $existingImagePath }
+            $restoreParent = Split-Path -Path $restoreTarget -Parent
+            $restoreDest = if ($restoreTarget -like '\\*') { "FileSystem::$restoreTarget" } else { $restoreTarget }
+            $restoreParentPath = if ($restoreParent -and $restoreParent -like '\\*') { "FileSystem::$restoreParent" } else { $restoreParent }
             try {
-                $restoreParent = Split-Path -Path $restoreTarget -Parent
-                if ($restoreParent -and -not (Test-Path -LiteralPath $restoreParent)) { [void](New-Item -ItemType Directory -Path $restoreParent -Force -ErrorAction Stop) }
-                Copy-Item -LiteralPath $adkWinPeWim -Destination $restoreTarget -Force -ErrorAction Stop
+                if ($restoreParentPath -and -not (Test-Path -LiteralPath $restoreParentPath)) { [void](New-Item -ItemType Directory -Path $restoreParentPath -Force -ErrorAction Stop) }
+                Copy-Item -LiteralPath $adkWinPeWim -Destination $restoreDest -Force -ErrorAction Stop
                 $bootTemplateRestored = $true
                 Write-DscStatus "$Tag Restored the missing boot-image source WIM at '$restoreTarget' from the ADK WinPE. Without it every rebuild -- command support, optional components, Update Distribution Points -- failed with error 2, so the DP had no PXE payload."
             }
