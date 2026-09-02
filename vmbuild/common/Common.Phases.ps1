@@ -2729,9 +2729,16 @@ DROP TABLE #memlabs_idxprobe;
             continue
         }
 
-        # Don't touch hidden VM's in Phase 1, 10, or 11
+        # Don't touch hidden VM's in Phase 1, 10, or 11 -- except a VM pulled in ONLY so OSD
+        # could be configured (the DP that serves PXE, the Primary that owns the boot image
+        # and the task-sequence deployments). Those arrive hidden, so the run that INTRODUCES
+        # an OSDClient used to validate none of the chain it just built. Phase 11 is read-only;
+        # 1 and 10 would rebuild them, so they stay excluded there.
         if ($currentItem.hidden -and $Phase -in @(1, 10, 11)) {
-            continue
+            if (-not ($Phase -eq 11 -and $currentItem.osdValidate)) {
+                continue
+            }
+            Write-Log "[Phase $Phase] $($currentItem.vmName): hidden, but pulled in for OSD -- validating it so the PXE chain this run configured is actually checked" -LogOnly
         }
 
         #Special Case for Cross Domain workflows

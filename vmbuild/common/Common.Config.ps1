@@ -1270,6 +1270,7 @@ function Add-ExistingVMsToDeployConfig {
         $phase8PrimaryNames += @(Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role "Primary" | Select-Object -First 1)
     }
     $existingOsdDps = @()
+    $osdPrimaryNames = @()
     if ($newOsdVMs.Count -gt 0) {
         $osdDefaultNetwork = "$($config.vmOptions.network)"
         $newOsdNetworks = @($newOsdVMs | ForEach-Object {
@@ -1300,9 +1301,10 @@ function Add-ExistingVMsToDeployConfig {
             $osdOwnerPrimaryCodes += $ownerSiteCode
         }
         $osdOwnerPrimaryCodes = @($osdOwnerPrimaryCodes | Where-Object { $_ } | Select-Object -Unique)
-        $phase8PrimaryNames += @($existingDomainVMsForOsd | Where-Object {
+        $osdPrimaryNames = @($existingDomainVMsForOsd | Where-Object {
                 $_.role -eq 'Primary' -and $_.siteCode -in $osdOwnerPrimaryCodes
             } | ForEach-Object { $_.vmName })
+        $phase8PrimaryNames += $osdPrimaryNames
     }
 
     foreach ($primaryName in @($phase8PrimaryNames | Where-Object { $_ } | Select-Object -Unique)) {
@@ -1319,6 +1321,15 @@ function Add-ExistingVMsToDeployConfig {
             if ($metadataDp) {
                 $metadataDp | Add-Member -MemberType NoteProperty -Name 'osdMetadataOnly' -Value $true -Force
             }
+        }
+
+        # These come in hidden, and Phase 11 skips hidden VMs -- so the run that INTRODUCES
+        # OSD validated none of it: not the DP that serves PXE, not the Primary that owns the
+        # boot image and the task-sequence deployments. Mark them so Phase 11 alone can opt
+        # them back in; they still stay out of Phase 1 and 10, which would rebuild them.
+        foreach ($osdVmName in @(@($existingOsdDps | ForEach-Object { $_.vmName }) + @($osdPrimaryNames) | Where-Object { $_ } | Select-Object -Unique)) {
+            $osdVm = $config.virtualMachines | Where-Object { $_.vmName -eq $osdVmName } | Select-Object -First 1
+            if ($osdVm) { $osdVm | Add-Member -MemberType NoteProperty -Name 'osdValidate' -Value $true -Force }
         }
     }
 
