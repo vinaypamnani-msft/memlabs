@@ -2302,6 +2302,41 @@ function Save-CMSetupLogsFromVm {
             catch {
                 Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write InstallCMLog copy: $_" -Warning
             }
+
+            # Write-DscStatus -Warning writes CMTrace type="2" and -Failure type="3", and
+            # nothing on the host read either: the boot-image warning on fourthcoffee
+            # 2026-09-02 sat in this file for hours and only surfaced when the log bundle
+            # was opened by hand. Only -Failure escalates (JOBFAILURE), so a warning had no
+            # route to the build summary at all. Scope to the last ScriptWorkflow banner so
+            # a re-run does not re-report the previous run's lines.
+            try {
+                $wrapLines = @("$($r.WrapperContent)" -split "`r?`n")
+                $lastStart = -1
+                for ($wi = $wrapLines.Count - 1; $wi -ge 0; $wi--) {
+                    if ($wrapLines[$wi] -match 'ScriptWorkflow\.ps1 - START') { $lastStart = $wi; break }
+                }
+                if ($lastStart -ge 0 -and $lastStart -lt ($wrapLines.Count - 1)) {
+                    $wrapLines = @($wrapLines[$lastStart..($wrapLines.Count - 1)])
+                }
+                $flagged = @($wrapLines | Where-Object { $_ -match 'type="[23]"' })
+                if ($flagged.Count -gt 0) {
+                    $shown = 0
+                    foreach ($fl in $flagged) {
+                        if ($shown -ge 25) { break }
+                        $msg = if ($fl -match '<!\[LOG\[(.*?)\]LOG\]!>') { $Matches[1] } else { $fl }
+                        $sev = if ($fl -match 'type="3"') { 'ERROR' } else { 'WARN' }
+                        $when = if ($fl -match 'time="([0-9:]{8})') { " at $($Matches[1])" } else { '' }
+                        Write-Log "[Phase $Phase]: $VmName`: guest $sev$when`: $($msg.Trim())" -Warning -OutputStream
+                        $shown++
+                    }
+                    if ($flagged.Count -gt $shown) {
+                        Write-Log "[Phase $Phase]: $VmName`: $($flagged.Count - $shown) further guest warning/error line(s) not shown -- see $dest" -Warning -OutputStream
+                    }
+                }
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $VmName`: could not scan InstallCMLog for guest warnings: $($_.Exception.Message)" -Warning
+            }
         }
         else {
             Write-Log "[Phase $Phase]: $VmName`: InstallCMLog.log present in VM ($($r.WrapperBytes) bytes) but Get-Content returned empty" -Warning

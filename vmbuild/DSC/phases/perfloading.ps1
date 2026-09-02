@@ -1021,6 +1021,21 @@ Write-DscStatus "$Tag Starting perfloading"
 
     Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
 
+    # Canary. This script runs on the CMSite provider drive, where a BARE UNC resolves
+    # through that provider and Test-Path returns false for a file that exists -- silently,
+    # since Test-Path throws nothing. The share was just created, so a bare probe that
+    # disagrees with the FileSystem::-qualified one is that bug and nothing else. Costs two
+    # Test-Path calls and turns an invisible false negative into a log line.
+    $uncCanary = "\\$ThisMachineName\$shareName"
+    $bareCanary = Test-Path -LiteralPath $uncCanary -ErrorAction SilentlyContinue
+    $qualifiedCanary = Test-Path -LiteralPath "FileSystem::$uncCanary" -ErrorAction SilentlyContinue
+    if ($bareCanary -ne $qualifiedCanary) {
+        Write-DscStatus "$Tag UNC path resolution: bare '$uncCanary' reads $bareCanary but 'FileSystem::' reads $qualifiedCanary -- current location is '$((Get-Location).Path)' on the $((Get-Location).Provider.Name) provider, so every BARE UNC in this script resolves through that provider and reads as absent. Any path from WMI (ImagePath, PkgSourcePath) must be FileSystem::-qualified." -Warning
+    }
+    else {
+        Write-DscStatus "$Tag UNC path resolution OK: bare and FileSystem:: probes of '$uncCanary' agree ($bareCanary); provider is $((Get-Location).Provider.Name)"
+    }
+
     # --- Boot image: created here, owned by THIS site ---------------------------
     # A CAS-owned boot image cannot be distributed from a child. Start-CMContentDistribution
     # run at the child writes the destination row only to PkgServers_L, which is not a
