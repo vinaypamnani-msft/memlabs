@@ -7320,9 +7320,15 @@ function Test-DscIdle {
         # so we can both (a) reconstruct what is running and (b) decide whether
         # this is the benign "Phase 8 site-server MOF still unwinding" case on a
         # CAS/Primary before we emit a scary WARN.
+        # The window has to outlast the apply itself. Phase 8's WaitForEvent blocks
+        # for as long as ScriptWorkflow runs -- ~50 min on fourthcoffee 2026-09-02 --
+        # while every Get-Dsc* probe this check makes writes two more events. At 60 the
+        # probes evicted the Start-DscConfiguration event they were looking for, so the
+        # benign branch could not prove its precondition and a healthy site server was
+        # reported as "still running after deployment and wasting resources".
         $events = $null
         try {
-            $events = Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 60 -ErrorAction Stop |
+            $events = Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 500 -ErrorAction Stop |
                 Sort-Object TimeCreated
         }
         catch {
@@ -7412,7 +7418,8 @@ function Test-DscIdle {
             $results.Details.Add("WARN: $applyStartedStr")
         }
         else {
-            $results.Details.Add("WARN: No in-flight Start-DscConfiguration found; LCM may be mid consistency-check or pending a queued config/reboot")
+            $oldestStr = if ($events.Count -gt 0) { " (oldest of $($events.Count) event(s) is $((@($events)[0]).TimeCreated.ToString('HH:mm:ss')))" } else { '' }
+            $results.Details.Add("WARN: No Start-DscConfiguration event in the operational-log window$oldestStr, so the apply could not be attributed. The LCM may be mid consistency-check, pending a queued config/reboot, or applying a config that started before this window.")
         }
 
         if ($resList.Count -gt 0) {
