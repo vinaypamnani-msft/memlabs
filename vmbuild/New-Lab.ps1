@@ -1073,8 +1073,9 @@ try {
             continue
         }
         if ($diskState.Missing.Count -gt 0) {
-            $detail = (($diskState.Missing | ForEach-Object { "$($_.Letter)=$($_.Size) [$($_.File)]" }) -join ', ')
-            $diskMismatch += "$($vm.vmName) is missing $($diskState.Missing.Count) configured disk(s): $detail"
+            $detail = (($diskState.Missing | ForEach-Object { "$($_.Letter)=$($_.Size)" }) -join ', ')
+            $found = if ($diskState.Attached.Count -gt 0) { $diskState.Attached -join ', ' } else { 'none' }
+            $diskMismatch += "$($vm.vmName) is missing $($diskState.Missing.Count) configured disk(s): $detail. Data disks actually attached: $found"
         }
     }
     if ($diskMismatch.Count -gt 0) {

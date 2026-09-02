@@ -3651,17 +3651,23 @@ function Get-VmMissingDataDisk {
         Which additionalDisks does the config ask for that this VM does not actually have?
 
     .DESCRIPTION
-        New-VirtualMachine creates <VmName>_DATA_<n>.vhdx, one per additionalDisks entry in
-        psobject.Properties order -- and it only ever runs in Phase 1, on a VM that does not
-        exist yet. So a disk ADDED to the config of a VM that already exists is never
+        Additional disks are only ever created in Phase 1, which is skipped for a VM that
+        already exists. So a disk ADDED to the config of a VM that already exists is never
         created, and nothing notices until Phase 2's InitializeDisks fails on it.
         CT1-DPMP1 2026-08-23: F=200GB added after an interrupted run had already built the
         VM with only E; Phase 2 then burned 4h across 3 DSC resumes and 2 VM restarts on a
         condition no retry could fix, and took the DC's WaitForAll down with it.
 
-        Enumerates in the same order as the creator, so index n here is the same disk the
-        creator would have made. Error is non-empty when the disks could not be read at all,
-        so "could not check" is never indistinguishable from "nothing missing".
+        Matched BY VIRTUAL SIZE, because that is the only thing the guest looks at:
+        InitializeDisks picks `Get-Disk | Where PartitionStyle -eq 'RAW' -and Size -eq $size`
+        (TemplateHelpDSC), so a correctly sized disk satisfies the build whatever its file is
+        called. Matching on the <VmName>_DATA_<n>.vhdx name instead reported every disk of a
+        working lab as missing (fourthcoffee 2026-09-02) -- the name is a Phase 1 convention,
+        not a requirement, and disks attached by the genconfig Manage Disks menu are named
+        <VmName>_NewDisk_<n>.vhdx.
+
+        Error is non-empty when the disks could not be read at all, so "could not check" is
+        never indistinguishable from either "nothing missing" or "everything missing".
     #>
     [CmdletBinding()]
     param (
@@ -3677,6 +3683,7 @@ function Get-VmMissingDataDisk {
         Error    = ''
         Expected = @()
         Missing  = @()
+        Attached = @()
     }
 
     if ($null -eq $AdditionalDisks) { return $result }
@@ -3689,17 +3696,51 @@ function Get-VmMissingDataDisk {
         return $result
     }
 
-    $paths = @($attached | ForEach-Object { $_.Path } | Where-Object { $_ })
+    # The OS disk is attached before any data disk, so it sorts first: Gen1 boots IDE 0:0,
+    # Gen2 SCSI 0:0, and 'IDE' precedes 'SCSI'. Everything after it is a data disk.
+    $ordered = @($attached | Where-Object { $_.Path } |
+            Sort-Object -Property @{Expression = { "$($_.ControllerType)" } }, ControllerNumber, ControllerLocation)
+    $pool = @()
+    $unreadable = 0
+    $firstReadError = ''
+    foreach ($d in @($ordered | Select-Object -Skip 1)) {
+        $bytes = $null
+        try { $bytes = [int64](Get-VHD -Path $d.Path -ErrorAction Stop).Size }
+        catch {
+            $unreadable++
+            if (-not $firstReadError) { $firstReadError = "$(Split-Path $d.Path -Leaf): $($_.Exception.Message)" }
+        }
+        $pool += [pscustomobject]@{ Path = $d.Path; Bytes = $bytes; Claimed = $false }
+    }
+
+    # Sizes unreadable across the board is a broken measurement, not an empty VM.
+    if ($pool.Count -gt 0 -and $unreadable -eq $pool.Count) {
+        $result.Error = "could not read the size of any of its $($pool.Count) data disk(s) ($firstReadError)"
+        return $result
+    }
+
+    $result.Attached = @($pool | ForEach-Object {
+            $size = if ($null -eq $_.Bytes) { 'size-unreadable' } else { "$([math]::Round($_.Bytes / 1GB))GB" }
+            "$(Split-Path $_.Path -Leaf)=$size"
+        })
+
     $expected = @()
     $missing = @()
-    $index = 0
     foreach ($p in $props) {
-        $file = "$VmName`_DATA_$index.vhdx"
-        $present = @($paths | Where-Object { $_ -like "*\$file" }).Count -gt 0
-        $row = [pscustomobject]@{ Letter = $p.Name; Size = $p.Value; File = $file; Present = $present }
+        $wantBytes = $null
+        try { $wantBytes = [int64]($p.Value / 1) } catch { }
+        $match = $null
+        if ($null -ne $wantBytes) {
+            $match = @($pool | Where-Object { -not $_.Claimed -and $_.Bytes -eq $wantBytes }) | Select-Object -First 1
+        }
+        $matchedName = ''
+        if ($match) {
+            $match.Claimed = $true
+            $matchedName = Split-Path $match.Path -Leaf
+        }
+        $row = [pscustomobject]@{ Letter = $p.Name; Size = $p.Value; Present = [bool]$match; Matched = $matchedName }
         $expected += $row
-        if (-not $present) { $missing += $row }
-        $index++
+        if (-not $row.Present) { $missing += $row }
     }
 
     $result.Expected = $expected
