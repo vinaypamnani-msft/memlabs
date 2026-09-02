@@ -12184,7 +12184,14 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         $results.Details.Add("WARN: no OSD DP was resolved, so $($pkgClass.Label) distribution was NOT measured (this is reported above as an 'OSD DPS' membership problem)")
                         continue
                     }
+                    # Same state vocabulary as the boot-image check above: 0=Installed,
+                    # 1=InstallPending, 2=InstallRetrying, 3=InstallFailed, 4=RemovalPending,
+                    # 5=RemovalRetrying, 6=RemovalFailed, 7=ContentValidating,
+                    # 8=ContentValidationFailed. Phase 11 runs minutes after these multi-GB WIMs
+                    # start distributing, so 1/2/7 are the NORMAL in-flight states and must not
+                    # fail the phase -- only a genuine failure or a missing targeting row does.
                     $osPkgProblems = @()
+                    $osPkgPending = @()
                     foreach ($osPkg in $osPkgs) {
                         $rows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($osPkg.PackageID)'" -ErrorAction SilentlyContinue)
                         foreach ($wantDp in $expectedOsdDpNames) {
@@ -12193,16 +12200,25 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                     $rowName = & $dpNameOf $_.ServerNALPath
                                     $rowName -ieq $wantDp -or ($rowName -split '\.')[0] -ieq $wantShort
                                 } | Select-Object -First 1)
-                            if ($row.Count -eq 0) { $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' not targeted to $wantDp" }
-                            elseif ([int]$row[0].State -ne 0) { $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is State=$($row[0].State)" }
+                            if ($row.Count -eq 0) {
+                                $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' not targeted to $wantDp"
+                                continue
+                            }
+                            $osState = [int]$row[0].State
+                            if ($osState -eq 0) { continue }
+                            if ($osState -in 1, 2, 7) { $osPkgPending += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is State=$osState" }
+                            else { $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is State=$osState" }
                         }
                     }
-                    if ($osPkgProblems.Count -eq 0) {
-                        $results.Details.Add("OK: all $($osPkgs.Count) $($pkgClass.Label)(s) are Installed on every required OSD DP ($($expectedOsdDpNames -join ', '))")
+                    if ($osPkgProblems.Count -gt 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: $($pkgClass.Label) content cannot reach every required OSD DP: $($osPkgProblems -join '; '). PXE will boot into WinPE and the task sequence will then fail to find its content.")
+                    }
+                    elseif ($osPkgPending.Count -gt 0) {
+                        $results.Details.Add("INFO: $($pkgClass.Label) content is still distributing to the OSD DP(s): $($osPkgPending -join '; '). These are in-flight states, not failures; OSD cannot run until they reach Installed.")
                     }
                     else {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: $($pkgClass.Label) content is not on every required OSD DP: $($osPkgProblems -join '; '). PXE will boot into WinPE and the task sequence will then fail to find its content.")
+                        $results.Details.Add("OK: all $($osPkgs.Count) $($pkgClass.Label)(s) are Installed on every required OSD DP ($($expectedOsdDpNames -join ', '))")
                     }
                 }
                 catch {
