@@ -5270,8 +5270,29 @@ function Test-SiteSystemFunctionality {
     if ($CurrentItem.installDP) {
         Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying Distribution Point"
         Write-Log "[Phase $Phase] $VMName [DP]: Local content + PXE checks" -LogOnly
+        # memlabs turns PXE on for EVERY DP (Add-CMDistributionPoint -EnablePxe), so "PXE is
+        # enabled" is not evidence that anything is meant to PXE boot. Only a DP sharing a
+        # subnet with an OSDClient can ever serve one -- the same rule perfloading uses to
+        # build the 'OSD DPS' group. In a lab with no such client a missing payload is worth
+        # reporting but must not fail the build: woodgrovebank 2026-09-02 had 4 VMs and no
+        # OSDClient, and failed on a PXE chain nothing would ever use.
+        $osdDefaultNet = "$($DeployConfig.vmOptions.network)"
+        $netOfVm = {
+            param($v)
+            if ($v.network) { return "$($v.network)" }
+            if ($v.thisParams -and $v.thisParams.vmNetwork) { return "$($v.thisParams.vmNetwork)" }
+            return $osdDefaultNet
+        }
+        $osdClientNets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
+                ForEach-Object { & $netOfVm $_ } | Where-Object { $_ } | Select-Object -Unique)
+        $dpServesOsd = [bool]($osdClientNets.Count -gt 0 -and $osdClientNets -contains (& $netOfVm $CurrentItem))
         $localDpScript = {
+            param($dpServesOsdInner)
+            $dpServesOsd = ("$dpServesOsdInner" -eq 'True')
+            # Reported on both paths so the log always says which one was taken.
+            $pxeScope = if ($dpServesOsd) { 'an OSDClient shares this subnet, so PXE must work' } else { 'no OSDClient shares this subnet, so nothing here PXE boots -- PXE problems are reported, not failed' }
             $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+            $results.Details.Add("CMD: PXE scope -- $pxeScope")
 
             $results.Details.Add("CMD: Get-SmbShare -Name 'SMS_DP`$'")
             $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
@@ -5567,9 +5588,15 @@ function Test-SiteSystemFunctionality {
                         $bootFiles += @(Get-ChildItem -LiteralPath $smsBoot -Recurse -File -Include 'wdsmgfw.efi', 'pxeboot.n12' -ErrorAction SilentlyContinue)
                     }
                     if ($bootFiles.Count -eq 0) {
-                        $results.Passed = $false
                         $missingWhere = if ($smsBootDirs.Count) { "'$($smsBootDirs -join "', '")' contains no boot files" } else { "no SMSBoot folder exists under $($tftpRoots -join ', ')" }
-                        $results.Details.Add("FAIL: PXE is enabled on this DP but it has NO PXE boot payload -- $missingWhere. The responder answers DHCP and the client then dies on the TFTP read ('cannot open smsboot\<PackageID>\x64\wdsmgfw.efi'). These files are extracted locally by smsdpprov (dpprovutils.cpp ExpandPXEImage -> CopyWIMBootFiles), which mounts the boot WIM and copies \Windows\Boot\PXE\* into SMSBoot\<PackageID>\<arch>. It skips silently (ENDOK) when SccmPxe=0 and PxeInstalled=0, when the package content is not exactly one file whose name contains '<PackageID>.WIM', or when the package's PXE-boot flag is not set -- and the package still reports Installed in every one of those cases. Read smsdpprov.log ON THIS DP for 'Extracting boot files' / 'Expanding'; the site's SMSProv.log will not show this. To force a re-extract: Update-CMDistributionPoint -BootImageId <PackageID>.")
+                        $payloadWhy = "PXE is enabled on this DP but it has NO PXE boot payload -- $missingWhere. These files are extracted locally by smsdpprov (dpprovutils.cpp ExpandPXEImage -> CopyWIMBootFiles), which mounts the boot WIM and copies \Windows\Boot\PXE\* into SMSBoot\<PackageID>\<arch>. It skips silently (ENDOK) when SccmPxe=0 and PxeInstalled=0, when the package content is not exactly one file whose name contains '<PackageID>.WIM', or when the package's PXE-boot flag is not set -- and the package still reports Installed in every one of those cases. Read smsdpprov.log ON THIS DP for 'Extracting boot files' / 'Expanding'; the site's SMSProv.log will not show this. To force a re-extract: Update-CMDistributionPoint -BootImageId <PackageID>."
+                        if ($dpServesOsd) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: $payloadWhy The responder answers DHCP and the client then dies on the TFTP read ('cannot open smsboot\<PackageID>\x64\wdsmgfw.efi').")
+                        }
+                        else {
+                            $results.Details.Add("WARN: $payloadWhy No OSDClient shares this DP's subnet, so nothing in this lab would PXE boot from it -- not failing the build.")
+                        }
                     }
                     else {
                         # Name the per-package folders: the responder hands out
@@ -5636,8 +5663,14 @@ function Test-SiteSystemFunctionality {
                                 $results.Details.Add("OK: PXE payload present for $($el.PackageID) ($($elFiles.Count) file(s), content v$($el.Version); newest file stamp $($newestPayload.LastWriteTime.ToString('yyyy-MM-dd HH:mm')) is the WIM's own, not the extract time)")
                             }
                             if ($missingPkgPayload.Count -gt 0) {
-                                $results.Passed = $false
-                                $results.Details.Add("FAIL: $($missingPkgPayload.Count) boot image(s) are in this DP's content library but have NO payload under SMSBoot: $($missingPkgPayload -join '; '). A client that is offered one of these gets 'cannot open smsboot\<PackageID>\x64\wdsmgfw.efi' even though every other check passes. Read smsdpprov.log on this DP for 'Extracting boot files'.")
+                                $pkgWhy = "$($missingPkgPayload.Count) boot image(s) are in this DP's content library but have NO payload under SMSBoot: $($missingPkgPayload -join '; '). Read smsdpprov.log on this DP for 'Extracting boot files'."
+                                if ($dpServesOsd) {
+                                    $results.Passed = $false
+                                    $results.Details.Add("FAIL: $pkgWhy A client that is offered one of these gets 'cannot open smsboot\<PackageID>\x64\wdsmgfw.efi' even though every other check passes.")
+                                }
+                                else {
+                                    $results.Details.Add("WARN: $pkgWhy No OSDClient shares this DP's subnet, so nothing in this lab would boot them -- not failing the build.")
+                                }
                             }
                             $orphanPkg = @($pkgFolders | Where-Object { $pid2 = $_; -not (@($eligible | Where-Object { $_.PackageID -eq $pid2 }).Count) })
                             if ($orphanPkg.Count -gt 0) {
@@ -5656,8 +5689,8 @@ function Test-SiteSystemFunctionality {
                 $dpPxeSettings = $null
                 try { $dpPxeSettings = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -ErrorAction Stop } catch { }
                 if (-not $dpPxeSettings) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: PXE is enabled but 'HKLM:\SOFTWARE\Microsoft\SMS\DP' could not be read, so the responder has no settings to load and cannot serve.")
+                    if ($dpServesOsd) { $results.Passed = $false }
+                    $results.Details.Add("$(if ($dpServesOsd) { 'FAIL' } else { 'WARN' }): PXE is enabled but 'HKLM:\SOFTWARE\Microsoft\SMS\DP' could not be read, so the responder has no settings to load and cannot serve.")
                 }
                 else {
                     # Both are CHECKHR'd reads: an ABSENT value fails the responder's settings
@@ -5669,12 +5702,12 @@ function Test-SiteSystemFunctionality {
                         $present = ($dpPxeSettings.PSObject.Properties.Name -contains $req.Name)
                         $value = if ($present) { [int]$dpPxeSettings.($req.Name) } else { $null }
                         if (-not $present) {
-                            $results.Passed = $false
-                            $results.Details.Add("FAIL: PXE registry value '$($req.Name)' is absent under HKLM:\SOFTWARE\Microsoft\SMS\DP. smspxe reads it unconditionally, so its settings load fails -- $($req.Why)")
+                            if ($dpServesOsd) { $results.Passed = $false }
+                            $results.Details.Add("$(if ($dpServesOsd) { 'FAIL' } else { 'WARN' }): PXE registry value '$($req.Name)' is absent under HKLM:\SOFTWARE\Microsoft\SMS\DP. smspxe reads it unconditionally, so its settings load fails -- $($req.Why)")
                         }
                         elseif ($value -ne 1) {
-                            $results.Passed = $false
-                            $results.Details.Add("FAIL: PXE registry value '$($req.Name)' is $value, expected 1 -- $($req.Why)")
+                            if ($dpServesOsd) { $results.Passed = $false }
+                            $results.Details.Add("$(if ($dpServesOsd) { 'FAIL' } else { 'WARN' }): PXE registry value '$($req.Name)' is $value, expected 1 -- $($req.Why)")
                         }
                         else {
                             $results.Details.Add("OK: PXE responder setting $($req.Name)=1")
@@ -5701,7 +5734,7 @@ function Test-SiteSystemFunctionality {
             return $results
         }
         $localDpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $localDpScript -DisplayName "Phase11-DPLocal-Test" -SuppressLog `
+            -ScriptBlock $localDpScript -ArgumentList ([string]$dpServesOsd) -DisplayName "Phase11-DPLocal-Test" -SuppressLog `
             -AsJob -TimeoutSeconds 300
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DP' -Result $localDpResult)) {
             $allPassed = $false
