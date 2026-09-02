@@ -12,9 +12,10 @@
     ConvertFrom-Json to prove it parses, then File.Replace's it into place.
 
     The claim that matters is the negative one: when the replace CANNOT happen, the
-    original must still be there afterwards. That is not inferred here. The test takes
-    an exclusive lock on the destination so File.Replace is forced to fail, then asserts
-    the call threw, the original file is byte-identical, and no .tmp/.bak was orphaned.
+    original must still be there afterwards. That is not inferred here. The test holds the
+    destination open with FileShare.ReadWrite so File.Replace fails while a plain truncating
+    write would still get in, then asserts the call threw, the original file is byte-identical,
+    and no .tmp/.bak was orphaned.
 
     The function is lifted out of the shipped file with the AST, so this always exercises
     the code that actually ships rather than a copy that can drift.
@@ -125,7 +126,9 @@ try {
     # The reason the function exists: a write that cannot complete must not consume the original.
     $contentBefore = Get-Content -LiteralPath $target -Raw
     $threw = $false
-    $lock = [System.IO.File]::Open($target, 'Open', 'ReadWrite', 'None')
+    # Share must permit writes. FileShare.None blocks the open itself, so a naive truncating
+    # implementation fails identically to this one and the assertions below prove nothing.
+    $lock = [System.IO.File]::Open($target, 'Open', 'Read', 'ReadWrite')
     try {
         & $FunctionName -Config (New-SampleConfig -DomainName 'third.example' -Serial 3) -Path $target
     }
