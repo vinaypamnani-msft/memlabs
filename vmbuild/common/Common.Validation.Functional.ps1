@@ -12024,6 +12024,49 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         else {
                             $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) is not flagged for PXE deployment (PkgFlags=0x$('{0:X}' -f $biPkgFlags)); no OSDClient in this lab, so nothing would PXE boot from it anyway")
                         }
+
+                        # PARITY WITH THE LAB'S OWN DEFAULT BOOT IMAGES. ConfigMgr setup creates
+                        # those (sutils.cpp) and they are known-good for PXE, so they are a better
+                        # oracle than any list of bits I decide matters: anything New-CMBootImage
+                        # does not carry over shows up as a difference without having to predict
+                        # it. Missing AP_PACKAGE_PXE_BOOT was found this way after the fact.
+                        if ($null -ne $biPkgFlags) {
+                            try {
+                                $defaultBootImgs = @()
+                                foreach ($cand in $allBootImgs) {
+                                    if ("$($cand.PackageID)" -eq "$($bi.PackageID)") { continue }
+                                    try { $cand.Get() } catch { }
+                                    if ([bool]$cand.DefaultImage) { $defaultBootImgs += $cand }
+                                }
+                                if ($defaultBootImgs.Count -eq 0) {
+                                    $results.Details.Add("INFO: no default boot image is visible at this site, so '$biName' PkgFlags could not be compared against one")
+                                }
+                                else {
+                                    # Union of the defaults: a bit any known-good image sets is one
+                                    # a custom image built for the same job should have too.
+                                    $defaultUnion = 0
+                                    foreach ($dbi in $defaultBootImgs) {
+                                        try { $defaultUnion = $defaultUnion -bor [int]$dbi.PkgFlags } catch { }
+                                    }
+                                    $missingBits = $defaultUnion -band (-bnot $biPkgFlags)
+                                    if ($missingBits -eq 0) {
+                                        $results.Details.Add("OK: Boot image '$biName' PkgFlags=0x$('{0:X}' -f $biPkgFlags) carries every flag the $($defaultBootImgs.Count) default boot image(s) set (0x$('{0:X}' -f $defaultUnion))")
+                                    }
+                                    else {
+                                        # Name the ones whose absence has a known consequence; the
+                                        # rest are reported as a hex delta rather than guessed at.
+                                        $known = @{ 0x400 = 'AP_PACKAGE_PXE_BOOT -- DPs never extract the PXE payload'; 0x100 = 'AP_PACKAGE_PXE_BOOT_EX -- no Windows UEFI CA 2023 bootloader'; 0x80 = 'AP_PACKAGE_DP_STORAGE_FORMAT_EXPANDED'; 0x2000000 = 'AP_PERSIST_IN_CACHE' }
+                                        $named = @()
+                                        foreach ($k in $known.Keys) { if (($missingBits -band $k) -eq $k) { $named += "0x$('{0:X}' -f $k) $($known[$k])" } }
+                                        $namedText = if ($named.Count) { " Known: $($named -join '; ')." } else { '' }
+                                        $results.Details.Add("WARN: Boot image '$biName' PkgFlags=0x$('{0:X}' -f $biPkgFlags) is missing flag(s) 0x$('{0:X}' -f $missingBits) that this site's default boot image(s) set (0x$('{0:X}' -f $defaultUnion)).$namedText New-CMBootImage does not copy the defaults' flags, so a custom image only has what perfloading sets explicitly.")
+                                    }
+                                }
+                            }
+                            catch {
+                                $results.Details.Add("INFO: could not compare '$biName' PkgFlags against the default boot image(s): $($_.Exception.Message)")
+                            }
+                        }
                         # PkgSourcePath is only "the path of the SMS copy" (boot.<PackageID>.wim);
                         # ImagePath is the template ConfigMgr re-copies on EVERY RefreshPkgSource.
                         # With it missing, command support, optional components, drivers and
