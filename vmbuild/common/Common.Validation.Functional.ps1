@@ -5579,6 +5579,56 @@ function Test-SiteSystemFunctionality {
                         $results.Details.Add("OK: PXE boot payload present -- $($bootFiles.Count) boot file(s) under '$($smsBootDirs -join "', '")'$pkgNote")
                     }
                 }
+
+                # The responder's own settings. smspxe reads these from THIS registry key --
+                # provsettings.cpp: RegReadDWord(HKLM, "Software\Microsoft\SMS\DP", ...) -- so
+                # the local registry is the runtime truth, not the site's intent.
+                # SupportUnknownMachines=0 is the quiet one: PXE answers, the boot image
+                # downloads, and the bare-metal client is then refused because it is not a
+                # known resource. Nothing upstream of here reports it.
+                $dpPxeSettings = $null
+                try { $dpPxeSettings = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -ErrorAction Stop } catch { }
+                if (-not $dpPxeSettings) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: PXE is enabled but 'HKLM:\SOFTWARE\Microsoft\SMS\DP' could not be read, so the responder has no settings to load and cannot serve.")
+                }
+                else {
+                    # Both are CHECKHR'd reads: an ABSENT value fails the responder's settings
+                    # load exactly like a disabled one, so absent and 0 are both failures.
+                    foreach ($req in @(
+                            @{ Name = 'IsActive'; Why = 'the PXE responder is present but marked inactive, so it will not answer.' },
+                            @{ Name = 'SupportUnknownMachines'; Why = "bare-metal machines are not known resources, so the responder refuses them. memlabs deploys its task sequences to 'All Unknown Computers', so OSD cannot work with this off. Add-CMDistributionPoint -EnableUnknownComputerSupport sets it." }
+                        )) {
+                        $present = ($dpPxeSettings.PSObject.Properties.Name -contains $req.Name)
+                        $value = if ($present) { [int]$dpPxeSettings.($req.Name) } else { $null }
+                        if (-not $present) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: PXE registry value '$($req.Name)' is absent under HKLM:\SOFTWARE\Microsoft\SMS\DP. smspxe reads it unconditionally, so its settings load fails -- $($req.Why)")
+                        }
+                        elseif ($value -ne 1) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: PXE registry value '$($req.Name)' is $value, expected 1 -- $($req.Why)")
+                        }
+                        else {
+                            $results.Details.Add("OK: PXE responder setting $($req.Name)=1")
+                        }
+                    }
+
+                    # Report only whether a password is SET, never its value -- it is obfuscated
+                    # on disk and smspxe itself logs just <empty>/<hidden>. WARN not FAIL: the
+                    # stored form of "no password" is obfuscated too, so a non-empty string here
+                    # is not proof a password is actually required.
+                    $pxePwdSet = $false
+                    if ($dpPxeSettings.PSObject.Properties.Name -contains 'PXEPassword') {
+                        $pxePwdSet = -not [string]::IsNullOrEmpty("$($dpPxeSettings.PXEPassword)")
+                    }
+                    if ($pxePwdSet) {
+                        $results.Details.Add("WARN: a PXE password appears to be set on this DP. If it is real, every PXE boot stops at a password prompt and unattended OSD cannot complete. memlabs never sets one; value not shown.")
+                    }
+                    else {
+                        $results.Details.Add("OK: no PXE password is set, so PXE boot is unattended")
+                    }
+                }
             }
 
             return $results
@@ -12068,6 +12118,96 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             }
             catch {
                 $results.Details.Add("WARN: SMS_TaskSequencePackage query failed: $($_.Exception.Message)")
+            }
+        }
+
+        # 7b. The OSD OFFER chain. Existing task sequences are not enough: the PXE responder
+        # only offers one that is DEPLOYED to All Unknown Computers AND flagged PXE-visible.
+        # Without both, the responder answers DHCP and then tells the client there is nothing
+        # to run -- which looks like a network fault, not a deployment gap. Phase 8 sets these
+        # with New-CMTaskSequenceDeployment -MakeAvailableTo ClientsMediaAndPxe and nothing has
+        # ever read them back. ENABLE_TS_FROM_CD_AND_PXE is bit 18 of AdvertFlags (_smsprov.mof).
+        if ($isPrimary -and $expectOsd) {
+            $pxeAdvertFlag = 0x40000
+            try {
+                $unknownColl = @(Get-WmiObject -Namespace $ns -Class SMS_Collection -Filter "Name='All Unknown Computers'" -ErrorAction Stop | Select-Object -First 1)
+                if ($unknownColl.Count -eq 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: collection 'All Unknown Computers' not found, so no bare-metal client can ever be offered a task sequence.")
+                }
+                else {
+                    $collId = "$($unknownColl[0].CollectionID)"
+                    # A task sequence deployment IS an SMS_Advertisement -- there is no
+                    # SMS_TaskSequenceDeployment class (0 hits in ConfigMgr-Main, against a
+                    # working control). Scope to this site's TS packages so ordinary software
+                    # advertisements to the same collection cannot masquerade as OSD offers.
+                    $results.Details.Add("CMD: Get-WmiObject SMS_Advertisement -Filter `"CollectionID='$collId'`"")
+                    $siteTsPackageIds = @(Get-WmiObject -Namespace $ns -Class SMS_TaskSequencePackage -Filter "PackageID LIKE '$sc%'" -ErrorAction Stop |
+                            ForEach-Object { "$($_.PackageID)" } | Where-Object { $_ })
+                    $tsDeps = @(Get-WmiObject -Namespace $ns -Class SMS_Advertisement -Filter "CollectionID='$collId'" -ErrorAction Stop |
+                            Where-Object { $siteTsPackageIds -contains "$($_.PackageID)" })
+                    if ($tsDeps.Count -eq 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: no task sequence from site $sc is deployed to 'All Unknown Computers' ($collId). The boot image can be perfectly distributed and PXE will still dead-end -- SMSPXE reports 'no advertisements found'. Re-run Phase 8; perfloading creates these deployments.")
+                    }
+                    else {
+                        $pxeVisible = @($tsDeps | Where-Object { ([int]$_.AdvertFlags -band $pxeAdvertFlag) -eq $pxeAdvertFlag })
+                        $notPxe = @($tsDeps | Where-Object { ([int]$_.AdvertFlags -band $pxeAdvertFlag) -ne $pxeAdvertFlag })
+                        if ($pxeVisible.Count -eq 0) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: all $($tsDeps.Count) task sequence deployment(s) to 'All Unknown Computers' are hidden from PXE (AdvertFlags is missing ENABLE_TS_FROM_CD_AND_PXE, bit 18): $(($tsDeps | ForEach-Object { "$($_.AdvertisementID)/$($_.PackageID) AdvertFlags=0x$('{0:X}' -f [int]$_.AdvertFlags)" }) -join ', '). A PXE client will boot and then be told there is nothing to run.")
+                        }
+                        else {
+                            $results.Details.Add("OK: $($pxeVisible.Count) of $($tsDeps.Count) task sequence deployment(s) to 'All Unknown Computers' are PXE-visible$(if ($notPxe.Count) { " (not PXE-visible: $(($notPxe | ForEach-Object { "$($_.PackageID)" }) -join ', '))" })")
+                        }
+                    }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: could not read the task sequence deployments for 'All Unknown Computers', so PXE offer readiness was NOT measured: $($_.Exception.Message)")
+            }
+
+            # The OS image and OS upgrade packages a task sequence references have to be on the
+            # same OSD DP as the boot image. The boot image alone gets WinPE onto the machine;
+            # the client then fails inside the task sequence looking for content that never
+            # shipped. Only the boot image was ever checked.
+            foreach ($pkgClass in @(@{ Class = 'SMS_ImagePackage'; Label = 'OS image' }, @{ Class = 'SMS_OperatingSystemInstallPackage'; Label = 'OS upgrade package' })) {
+                try {
+                    $osPkgs = @(Get-WmiObject -Namespace $ns -Class $pkgClass.Class -Filter "PackageID LIKE '$sc%'" -ErrorAction Stop)
+                    if ($osPkgs.Count -eq 0) {
+                        $results.Details.Add("WARN: no $($pkgClass.Label) owned by site $sc, so an OSD task sequence has nothing to install")
+                        continue
+                    }
+                    # An empty DP list would make the loop below iterate zero times and then
+                    # report OK having compared nothing.
+                    if ($expectedOsdDpNames.Count -eq 0) {
+                        $results.Details.Add("WARN: no OSD DP was resolved, so $($pkgClass.Label) distribution was NOT measured (this is reported above as an 'OSD DPS' membership problem)")
+                        continue
+                    }
+                    $osPkgProblems = @()
+                    foreach ($osPkg in $osPkgs) {
+                        $rows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($osPkg.PackageID)'" -ErrorAction SilentlyContinue)
+                        foreach ($wantDp in $expectedOsdDpNames) {
+                            $wantShort = ($wantDp -split '\.')[0]
+                            $row = @($rows | Where-Object {
+                                    $rowName = & $dpNameOf $_.ServerNALPath
+                                    $rowName -ieq $wantDp -or ($rowName -split '\.')[0] -ieq $wantShort
+                                } | Select-Object -First 1)
+                            if ($row.Count -eq 0) { $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' not targeted to $wantDp" }
+                            elseif ([int]$row[0].State -ne 0) { $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is State=$($row[0].State)" }
+                        }
+                    }
+                    if ($osPkgProblems.Count -eq 0) {
+                        $results.Details.Add("OK: all $($osPkgs.Count) $($pkgClass.Label)(s) are Installed on every required OSD DP ($($expectedOsdDpNames -join ', '))")
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: $($pkgClass.Label) content is not on every required OSD DP: $($osPkgProblems -join '; '). PXE will boot into WinPE and the task sequence will then fail to find its content.")
+                    }
+                }
+                catch {
+                    $results.Details.Add("WARN: $($pkgClass.Class) query failed, so $($pkgClass.Label) distribution was NOT measured: $($_.Exception.Message)")
+                }
             }
         }
 

@@ -1710,6 +1710,11 @@ Write-DscStatus "$Tag Starting perfloading"
 
         # Get the "All Unknown Computers" collection
         $unknownCollection = Get-CMDeviceCollection -Name "All Unknown Computers"
+        if (-not $unknownCollection -or -not "$($unknownCollection.CollectionID)") {
+            # -CollectionId $null does not error; it just deploys to nothing.
+            Write-DscStatus "$Tag WARNING: 'All Unknown Computers' did not resolve to a collection, so no task sequence can be deployed to it and PXE clients will boot with nothing to run. Phase 11 validation FAILS on this." -Warning
+            $taskSequences = @()
+        }
 
         foreach ($ts in $taskSequences) {
             # Check if a deployment already exists for this task sequence to this collection
@@ -1726,7 +1731,8 @@ Write-DscStatus "$Tag Starting perfloading"
                         -TaskSequencePackageId $ts.PackageID `
                         -CollectionId $unknownCollection.CollectionID `
                         -DeployPurpose Available `
-                        -MakeAvailableTo ClientsMediaAndPxe
+                        -MakeAvailableTo ClientsMediaAndPxe `
+                        -ErrorAction Stop
                 }
                 catch {
                     Write-DscStatus "$Tag WARNING: Failed to deploy TS '$($ts.Name)': $_"
