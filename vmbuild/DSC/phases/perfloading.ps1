@@ -1244,10 +1244,12 @@ Write-DscStatus "$Tag Starting perfloading"
         # dpprovutils.cpp ExpandPXEImage tests it, and when it is clear with SccmPxe=1 the
         # else branch does NOTHING -- no extraction, no removal, no log line -- so the
         # package reports Installed on every DP and SMSBoot\<PackageID> is never created.
-        # New-CMBootImage does not set it; only Set-CMBootImage -DeployFromPxeDistributionPoint
-        # does (SetBootImage.cs: PkgFlags |= PackageFlags.PxeBootImage). Nothing here ever
-        # set it, so no memlabs lab has ever been able to PXE boot (fourthcoffee 2026-09-02:
-        # zero 'Extracting boot files' lines in 681 lines of smsdpprov.log).
+        # ConfigMgr setup sets this bit on the DEFAULT boot images it creates
+        # (sutils.cpp: "Enable flag for PXE" -> PkgFlags = AP_PACKAGE_PXE_BOOT), which is why
+        # PXE worked while perfloading used Get-CMBootImage. a8d784a2 (2026-08-20) switched to
+        # building the image here, and New-CMBootImage does NOT set it -- only Set-CMBootImage
+        # -DeployFromPxeDistributionPoint does (SetBootImage.cs: PkgFlags |=
+        # PackageFlags.PxeBootImage). PXE has been broken since that commit, not forever.
         $pxeBootFlag = 0x400
         try {
             $biFlags = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
