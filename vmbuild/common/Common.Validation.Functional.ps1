@@ -5603,7 +5603,7 @@ function Test-SiteSystemFunctionality {
                                     if ($entFiles.Count -ne 1 -or $entDirs.Count -ne 0) { continue }
                                     # DataLib holds one <filename>.INI per real file, so drop that suffix first.
                                     if (($entFiles[0].BaseName).ToUpperInvariant() -notlike "*$defPkg.WIM") { continue }
-                                    $eligible += [pscustomobject]@{ PackageID = $defPkg; Version = $defVer; ContentWritten = $def.LastWriteTime; File = $entFiles[0].BaseName }
+                                    $eligible += [pscustomobject]@{ PackageID = $defPkg; Version = $defVer; File = $entFiles[0].BaseName }
                                 }
                             }
                         }
@@ -5614,7 +5614,6 @@ function Test-SiteSystemFunctionality {
                         }
                         else {
                             $missingPkgPayload = @()
-                            $stalePkgPayload = @()
                             foreach ($el in $eligible) {
                                 $elDir = @($smsBootDirs | ForEach-Object { Join-Path $_ $el.PackageID } | Where-Object { Test-Path -LiteralPath $_ }) | Select-Object -First 1
                                 if (-not $elDir) {
@@ -5626,24 +5625,19 @@ function Test-SiteSystemFunctionality {
                                     $missingPkgPayload += "$($el.PackageID) (folder exists but is EMPTY)"
                                     continue
                                 }
-                                # CopyWIMBootFiles rewrites these on every extract, so a payload
-                                # older than the content it came from was produced by an earlier
-                                # version of the image and is what a client would boot.
+                                # These timestamps do NOT date the extraction. CopyWIMBootFiles
+                                # uses CopyFileW, which preserves the source mtime, so they are
+                                # the ADK/WinPE binaries' own build dates: fourthcoffee read
+                                # 2025-11-04 on files smsdpprov copied at 2026-09-02 11:43:41.
+                                # Comparing them against the content version reports a healthy
+                                # DP as stale, so it is reported and not judged. There is no
+                                # local signal for "when was this last extracted".
                                 $newestPayload = @($elFiles | Sort-Object LastWriteTime -Descending)[0]
-                                if ($newestPayload.LastWriteTime -lt $el.ContentWritten.AddMinutes(-5)) {
-                                    $stalePkgPayload += "$($el.PackageID): payload written $($newestPayload.LastWriteTime.ToString('yyyy-MM-dd HH:mm')) but content v$($el.Version) landed $($el.ContentWritten.ToString('yyyy-MM-dd HH:mm'))"
-                                }
-                                else {
-                                    $results.Details.Add("OK: PXE payload for $($el.PackageID) is current ($($elFiles.Count) file(s), newest $($newestPayload.LastWriteTime.ToString('yyyy-MM-dd HH:mm')), content v$($el.Version))")
-                                }
+                                $results.Details.Add("OK: PXE payload present for $($el.PackageID) ($($elFiles.Count) file(s), content v$($el.Version); newest file stamp $($newestPayload.LastWriteTime.ToString('yyyy-MM-dd HH:mm')) is the WIM's own, not the extract time)")
                             }
                             if ($missingPkgPayload.Count -gt 0) {
                                 $results.Passed = $false
                                 $results.Details.Add("FAIL: $($missingPkgPayload.Count) boot image(s) are in this DP's content library but have NO payload under SMSBoot: $($missingPkgPayload -join '; '). A client that is offered one of these gets 'cannot open smsboot\<PackageID>\x64\wdsmgfw.efi' even though every other check passes. Read smsdpprov.log on this DP for 'Extracting boot files'.")
-                            }
-                            if ($stalePkgPayload.Count -gt 0) {
-                                $results.Passed = $false
-                                $results.Details.Add("FAIL: $($stalePkgPayload.Count) PXE payload(s) are OLDER than the boot image content on this DP, so clients boot a superseded image: $($stalePkgPayload -join '; '). Force a re-extract with Update-CMDistributionPoint -BootImageId <PackageID>.")
                             }
                             $orphanPkg = @($pkgFolders | Where-Object { $pid2 = $_; -not (@($eligible | Where-Object { $_.PackageID -eq $pid2 }).Count) })
                             if ($orphanPkg.Count -gt 0) {
