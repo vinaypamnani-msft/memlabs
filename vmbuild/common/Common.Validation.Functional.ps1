@@ -5518,13 +5518,14 @@ function Test-SiteSystemFunctionality {
                 $results.Details.Add("OK: WDSServer is Running (PXE active)")
             }
 
-            # PXE PAYLOAD ON DISK. "Installed on the DP" is not "can PXE boot": content
-            # distribution lands the package, but the boot files are published by a
-            # separate step (Update Distribution Points -> RefreshPkgSource). When that
-            # step fails the responder still answers DHCP and the client then dies on
-            # "cannot open smsboot\<PackageID>\x64\wdsmgfw.efi". InstallPxeBoot.cpp
-            # creates <tftproot>\SMSBoot with boot.sdi and per-arch wdsmgfw.efi /
-            # pxeboot.n12, so an absent tree means the publish never ran even once.
+            # PXE PAYLOAD ON DISK. "Installed on the DP" is not "can PXE boot". The boot
+            # files are extracted ON THIS DP by smsdpprov, not sent by the site:
+            # dpprovutils.cpp ExpandPXEImage -> InstallPxeBoot.cpp CopyWIMBootFiles mounts
+            # the boot WIM (wimgapi) and copies \Windows\Boot\PXE\* plus \sms\boot\boot.sdi
+            # into <smsdp.dll dir>\SMSBoot\<PackageID>\<arch>. Every gate in ExpandPXEImage
+            # bails with ENDOK() -- a SILENT SUCCESS -- so the package still reports
+            # Installed with no payload on disk. That is why this has to be measured on the
+            # filesystem and can never be inferred from content state.
             $sccmPxe = Get-Service -Name 'SccmPxe' -ErrorAction SilentlyContinue
             $pxeEvidence = New-Object System.Collections.Generic.List[string]
             if ($sccmPxe) { $pxeEvidence.Add("SccmPxe service is $($sccmPxe.Status)") }
@@ -5568,7 +5569,7 @@ function Test-SiteSystemFunctionality {
                     if ($bootFiles.Count -eq 0) {
                         $results.Passed = $false
                         $missingWhere = if ($smsBootDirs.Count) { "'$($smsBootDirs -join "', '")' contains no boot files" } else { "no SMSBoot folder exists under $($tftpRoots -join ', ')" }
-                        $results.Details.Add("FAIL: PXE is enabled on this DP but it has NO PXE boot payload -- $missingWhere. The responder will answer DHCP and then fail the TFTP read ('cannot open smsboot\<PackageID>\x64\wdsmgfw.efi'), so nothing can PXE boot. Content distribution reporting 'Installed' does not publish these files: Update Distribution Points on the boot image is what does, and it fails silently if the boot image's ImagePath source WIM is missing. Check SMSProv.log on the site server for 'sspbootimagepackage.cpp'.")
+                        $results.Details.Add("FAIL: PXE is enabled on this DP but it has NO PXE boot payload -- $missingWhere. The responder answers DHCP and the client then dies on the TFTP read ('cannot open smsboot\<PackageID>\x64\wdsmgfw.efi'). These files are extracted locally by smsdpprov (dpprovutils.cpp ExpandPXEImage -> CopyWIMBootFiles), which mounts the boot WIM and copies \Windows\Boot\PXE\* into SMSBoot\<PackageID>\<arch>. It skips silently (ENDOK) when SccmPxe=0 and PxeInstalled=0, when the package content is not exactly one file whose name contains '<PackageID>.WIM', or when the package's PXE-boot flag is not set -- and the package still reports Installed in every one of those cases. Read smsdpprov.log ON THIS DP for 'Extracting boot files' / 'Expanding'; the site's SMSProv.log will not show this. To force a re-extract: Update-CMDistributionPoint -BootImageId <PackageID>.")
                     }
                     else {
                         # Name the per-package folders: the responder hands out
