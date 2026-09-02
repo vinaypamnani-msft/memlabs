@@ -609,6 +609,30 @@ function ConvertTo-QuietUninstallCommand {
     return $command
 }
 
+function Split-UninstallCommand {
+    param (
+        [Parameter(Mandatory = $true)] [string] $CommandLine
+    )
+
+    $filePath = ''
+    $arguments = ''
+
+    if ($CommandLine -match '^\s*"([^"]+)"\s*(.*)$') {
+        $filePath = $Matches[1]
+        $arguments = $Matches[2]
+    }
+    else {
+        $parts = $CommandLine.Trim() -split '\s+', 2
+        $filePath = $parts[0]
+        if ($parts.Count -gt 1) { $arguments = $parts[1] }
+    }
+
+    return [pscustomobject]@{
+        FilePath  = $filePath
+        Arguments = $arguments.Trim()
+    }
+}
+
 function Stop-ProcessTree {
     param (
         [Parameter(Mandatory = $true)]
@@ -694,9 +718,20 @@ function Invoke-WindowsAdminCenterRemovalWorker {
         }
 
         Write-LogMessage "Uninstalling with: $command"
-        $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $command -PassThru -WindowStyle Hidden
+        # Launched directly, never through cmd.exe: cmd /c preserves quoting only when the line holds
+        # exactly two quote characters, so adding /LOG="..." makes it mangle the quoted exe path and
+        # the uninstaller is never started (exit 1, no log).
+        $invocation = Split-UninstallCommand -CommandLine $command
+        $startArgs = @{ FilePath = $invocation.FilePath; PassThru = $true; WindowStyle = 'Hidden' }
+        if ($invocation.Arguments) { $startArgs['ArgumentList'] = $invocation.Arguments }
+        $proc = Start-Process @startArgs
         if ($proc.WaitForExit($UninstallTimeoutSeconds * 1000)) {
             Write-LogMessage "Uninstall exited with code: $($proc.ExitCode)"
+            if ($proc.ExitCode -ne 0 -and $innoLog -and -not (Test-Path -LiteralPath $innoLog)) {
+                # Inno writes the log before it does anything else, so its absence means the
+                # uninstaller never started: a launch fault, not an uninstall failure.
+                Write-LogMessage "Nothing was written to $innoLog, so the uninstaller never started and the command above failed to launch." -Level 'WARNING'
+            }
             continue
         }
 
