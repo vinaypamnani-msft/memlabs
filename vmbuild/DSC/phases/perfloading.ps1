@@ -1339,12 +1339,34 @@ Write-DscStatus "$Tag Starting perfloading"
                 Write-DscStatus "$Tag Boot image '$biName' ($packageId) has NO content destination on $($unTargetedOsdDps -join ', ') after 3 confirmations$(if ($bootDistError) { " (distribution error: $bootDistError)" }). Content is never installed to an untargeted DP, so the coverage wait cannot clear -- skipping it rather than spending the full budget. PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
             }
             else {
+                # A PXE flag that was ALREADY correct -- set by hand in the console, or by an
+                # earlier run -- arms nothing here, so a DP that never extracted would stay
+                # broken through every re-run. Probe the payload itself and republish when it
+                # is POSITIVELY absent. An unreachable DP is skipped rather than counted as
+                # missing, so no permission problem can trigger a pointless 350MB republish.
+                # FileSystem:: because this script runs on the CMSite provider drive, where a
+                # bare UNC reads as absent regardless of what is actually there.
+                $pxePayloadMissingOn = @()
+                if (-not $pxeBootFlagSet -and $osdDpFqdns.Count -gt 0) {
+                    foreach ($odp in $osdDpFqdns) {
+                        try {
+                            $dpBin = "FileSystem::\\$odp\SMS_DP`$\sms\bin"
+                            if (-not (Test-Path -LiteralPath $dpBin)) { continue }
+                            if (-not (Test-Path -LiteralPath "$dpBin\SMSBoot\$packageId")) { $pxePayloadMissingOn += $odp }
+                        }
+                        catch { }
+                    }
+                    if ($pxePayloadMissingOn.Count -gt 0) {
+                        Write-DscStatus "$Tag Boot image '$biName' ($packageId) is already flagged for PXE, but $($pxePayloadMissingOn -join ', ') has no SMSBoot\$packageId -- republishing so the DP extracts it."
+                    }
+                }
+
                 # Set-CMBootImage changes the provider property, but clients keep using
                 # the old WIM until Update Distribution Points rebuilds and republishes it.
                 # Publish only after the assignment above exists. A newly targeted DP also
                 # needs this update when command support was enabled on an earlier run that
                 # had no OSD targets yet.
-                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $missingOsdDps.Count -gt 0
+                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $pxePayloadMissingOn.Count -gt 0 -or $missingOsdDps.Count -gt 0
                 if ($bootImagePublicationNeeded) {
                     $bootImagePublicationStarted = $false
                     $bootImagePublicationError = $null
