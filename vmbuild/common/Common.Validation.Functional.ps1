@@ -5639,6 +5639,12 @@ function Test-SiteSystemFunctionality {
             -AsJob -TimeoutSeconds 300
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DP' -Result $localDpResult)) {
             $allPassed = $false
+            # Everything this check can fail on -- missing PXE payload, responder settings,
+            # share/vdir state -- is decided by smsdpprov on the DP itself, and it records
+            # its refusals as INFO rather than errors. Without this the answer needs a
+            # hand-run on the guest after the build has already ended.
+            Add-Phase11Output "[Phase $Phase] $VMName [DP]: local DP validation failed -- collecting smsdpprov/SMSPXE/SMSDPMon logs and content-library state into the logs folder"
+            $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'DPLocal' -Collector $Phase11DpContentLogCollector
         }
     }
 
@@ -7994,7 +8000,7 @@ $Phase11DpContentLogCollector = {
     }
     if ($dpLogDir) {
         $diag += "DP log dir = '$dpLogDir'"
-        foreach ($n in @('smsdpprov.log', 'SMSDPMon.log', 'PrestageContent.log')) {
+        foreach ($n in @('smsdpprov.log', 'SMSDPMon.log', 'PrestageContent.log', 'SMSPXE.log')) {
             $p = Join-Path $dpLogDir $n
             if (-not (Test-Path $p)) { $diag += "'$n' not present at $p"; continue }
             try {
