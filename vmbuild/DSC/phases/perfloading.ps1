@@ -76,6 +76,28 @@ Write-DscStatus "$Tag Starting perfloading"
     # Set the current location to be the site code.
     Set-Location "$($SiteCode):\" @initParams
 
+    function Test-PerfloadingOsdShareAccess {
+        param (
+            [string] $ComputerName,
+            [string] $ShareName,
+            [string] $StatusTag
+        )
+
+        # perfloading remains on the CMSite drive because the ConfigMgr cmdlets
+        # require that context. Explicitly name the FileSystem provider for the
+        # UNC probe instead of deliberately issuing a bare UNC probe that is
+        # guaranteed to read false and turn a healthy build into a warning.
+        $uncPath = "\\$ComputerName\$ShareName"
+        $providerPath = "FileSystem::$uncPath"
+        if (Test-Path -LiteralPath $providerPath -ErrorAction SilentlyContinue) {
+            Write-DscStatus "$StatusTag OSD share filesystem probe succeeded: '$uncPath' (FileSystem provider; current provider is $((Get-Location).Provider.Name))"
+            return $true
+        }
+
+        Write-DscStatus "$StatusTag OSD share '$uncPath' could not be read through the FileSystem provider immediately after it was created. Filesystem paths from WMI cannot be validated safely until share access works." -Warning
+        return $false
+    }
+
     function Sync-MemLabsScriptLibrary {
         param([string]$ScriptPath = 'C:\tools\Scripts')
 
@@ -1021,20 +1043,7 @@ Write-DscStatus "$Tag Starting perfloading"
 
     Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
 
-    # Canary. This script runs on the CMSite provider drive, where a BARE UNC resolves
-    # through that provider and Test-Path returns false for a file that exists -- silently,
-    # since Test-Path throws nothing. The share was just created, so a bare probe that
-    # disagrees with the FileSystem::-qualified one is that bug and nothing else. Costs two
-    # Test-Path calls and turns an invisible false negative into a log line.
-    $uncCanary = "\\$ThisMachineName\$shareName"
-    $bareCanary = Test-Path -LiteralPath $uncCanary -ErrorAction SilentlyContinue
-    $qualifiedCanary = Test-Path -LiteralPath "FileSystem::$uncCanary" -ErrorAction SilentlyContinue
-    if ($bareCanary -ne $qualifiedCanary) {
-        Write-DscStatus "$Tag UNC path resolution: bare '$uncCanary' reads $bareCanary but 'FileSystem::' reads $qualifiedCanary -- current location is '$((Get-Location).Path)' on the $((Get-Location).Provider.Name) provider, so every BARE UNC in this script resolves through that provider and reads as absent. Any path from WMI (ImagePath, PkgSourcePath) must be FileSystem::-qualified." -Warning
-    }
-    else {
-        Write-DscStatus "$Tag UNC path resolution OK: bare and FileSystem:: probes of '$uncCanary' agree ($bareCanary); provider is $((Get-Location).Provider.Name)"
-    }
+    [void](Test-PerfloadingOsdShareAccess -ComputerName $ThisMachineName -ShareName $shareName -StatusTag $Tag)
 
     # --- Boot image: created here, owned by THIS site ---------------------------
     # A CAS-owned boot image cannot be distributed from a child. Start-CMContentDistribution
