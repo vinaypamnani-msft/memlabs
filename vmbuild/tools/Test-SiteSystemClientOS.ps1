@@ -147,7 +147,12 @@ $siteSystemOperatingSystems = @(Get-SupportedOperatingSystemsForRole -Role 'Site
 Assert-Equal 'Server 2025,Server 2022,Windows 11 25H2' ($siteSystemOperatingSystems -join ',') 'SiteSystem picker offers Server and Windows 11'
 
 $serverRoleProperties = @('installMP', 'installSUP', 'installRP', 'installSMSProv')
-$dependentProperties = @('useDatabaseReplica', 'replicaSqlServerVM', 'replicaDbName', 'wsusContentDir', 'wsusDataBaseServer', 'InstallPatchMyPC', 'PatchMyPCFileServer')
+$dependentProperties = @(
+    'useDatabaseReplica', 'replicaSqlServerVM', 'replicaDbName',
+    'wsusContentDir', 'wsusDataBaseServer', 'InstallPatchMyPC', 'PatchMyPCFileServer',
+    'sqlVersion', 'sqlInstanceName', 'sqlInstanceDir', 'sqlPort',
+    'SqlServiceAccount', 'SqlAgentAccount', 'remoteSQLVM', 'installSSMS'
+)
 $script:ReplicaCleanupCalled = 0
 $roundTrip = [pscustomobject]@{
     Role                = 'SiteSystem'
@@ -167,6 +172,13 @@ $roundTrip = [pscustomobject]@{
     wsusDataBaseServer  = 'WID'
     InstallPatchMyPC    = $true
     PatchMyPCFileServer = 'FS1'
+    sqlVersion          = 'SQL Server 2022'
+    sqlInstanceName     = 'MSSQLSERVER'
+    sqlInstanceDir      = 'F:\SQL'
+    sqlPort             = '1433'
+    SqlServiceAccount   = 'LocalSystem'
+    SqlAgentAccount     = 'LocalSystem'
+    installSSMS         = $true
 }
 Set-SiteSystemPropertiesForOperatingSystem -VirtualMachine $roundTrip
 Assert-PropertiesAbsent $roundTrip ($serverRoleProperties + $dependentProperties) 'Windows 11 removes server-only role properties and dependents'
@@ -179,11 +191,13 @@ $script:SelectedOperatingSystem = 'Windows 11 25H2'
 $script:MenuVm = [pscustomobject]@{
     Role = 'SiteSystem'; operatingSystem = 'Server 2022'; installDP = $true
     installMP = $true; installSUP = $true; installRP = $true; installSMSProv = $true
+    sqlVersion = 'SQL Server 2022'; sqlInstanceName = 'MSSQLSERVER'; sqlInstanceDir = 'F:\SQL'; sqlPort = '1433'
 }
 $script:PropertiesSeenByValidation = @()
 Get-OperatingSystemMenu -Property $script:MenuVm -Name 'operatingSystem' -CurrentValue 'Server 2022'
 Assert-Equal 'Windows 11 25H2' $script:MenuVm.operatingSystem 'OS picker accepts Windows 11 for a SiteSystem'
 Assert-PropertiesAbsent $script:MenuVm $serverRoleProperties 'OS picker removes server-only roles before returning'
+Assert-PropertiesAbsent $script:MenuVm @('sqlVersion', 'sqlInstanceName', 'sqlInstanceDir', 'sqlPort') 'OS picker removes local SQL from a Windows 11 SiteSystem'
 $rolesSeenAtValidation = @($serverRoleProperties | Where-Object { $script:PropertiesSeenByValidation -contains $_ })
 Assert-Equal '' ($rolesSeenAtValidation -join ',') 'OS picker validates only after SiteSystem role normalization'
 
@@ -235,6 +249,15 @@ $goodResult = [pscustomobject]@{ Failures = 0; Messages = New-Object System.Coll
 Test-ValidRoleSiteSystem -VM $goodClient -ReturnObject $goodResult
 Assert-Equal 0 $goodResult.Failures 'validator accepts a DP-only Windows 11 SiteSystem'
 
+$sqlClient = [pscustomobject]@{
+    role = 'SiteSystem'; vmName = 'SQLBAD'; siteCode = 'ABC'; operatingSystem = 'Windows 11 25H2'
+    installDP = $true; sqlVersion = 'SQL Server 2022'
+}
+$sqlResult = [pscustomobject]@{ Failures = 0; Messages = New-Object System.Collections.Generic.List[string] }
+Test-ValidRoleSiteSystem -VM $sqlClient -ReturnObject $sqlResult
+Assert-Equal 1 $sqlResult.Failures 'validator rejects SQL on a Windows 11 SiteSystem'
+Assert-Equal $true ($sqlResult.Messages[0] -like '*SQL installation requires Windows Server*') 'SQL validation explains the Server OS requirement'
+
 $configLines = @(Get-Content -LiteralPath $configPath)
 foreach ($guard in @(
         '$isClientOsSiteSystem = Test-SiteSystemClientOperatingSystem -VirtualMachine $vm',
@@ -244,6 +267,9 @@ foreach ($guard in @(
 }
 $vmListText = Get-Content -LiteralPath $vmListPath -Raw
 Assert-Equal 1 ([regex]::Matches($vmListText, 'Set-SiteSystemPropertiesForOperatingSystem -VirtualMachine \$property').Count) 'OS editor invokes the SiteSystem shaper once'
+Assert-Equal 1 ([regex]::Matches($vmListText, 'return "REBUILD"').Count) 'OS editor requests context-sensitive action rebuild'
+Assert-Equal 1 ([regex]::Matches($vmListText, '\$newValue -eq "REBUILD"').Count) 'VM editor handles the action rebuild request'
+Assert-Equal 1 ([regex]::Matches($vmListText, 'SQL cannot be added to a Windows 11 SiteSystem').Count) 'Add SQL action independently blocks Windows 11 SiteSystems'
 
 $clientDpConfig = [pscustomobject]@{
     virtualMachines = @(

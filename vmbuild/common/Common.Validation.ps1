@@ -1404,11 +1404,18 @@ function Test-ValidRoleSiteSystem {
     $serverOnlyRoleSelected = @('installMP', 'installSUP', 'installRP', 'installSMSProv') | Where-Object {
         $VM.PSObject.Properties.Name -contains $_ -and $VM.$_ -eq $true
     }
-    if ((Test-SiteSystemClientOperatingSystem -VirtualMachine $VM) -and $serverOnlyRoleSelected) {
+    $isClientOsSiteSystem = Test-SiteSystemClientOperatingSystem -VirtualMachine $VM
+    if ($isClientOsSiteSystem -and $serverOnlyRoleSelected) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] uses client OS [$($VM.operatingSystem)]. A client-OS SiteSystem can host only the Distribution Point role; disable installMP, installSUP, installRP, and installSMSProv." -ReturnObject $ReturnObject -Failure
     }
     elseif ($serverOnlyRoleSelected) {
         Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
+    }
+    $sqlSelected = @('sqlVersion', 'remoteSQLVM') | Where-Object {
+        $VM.PSObject.Properties.Name -contains $_ -and -not [string]::IsNullOrWhiteSpace("$($VM.$_)")
+    }
+    if ($isClientOsSiteSystem -and $sqlSelected) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] uses client OS [$($VM.operatingSystem)] and contains SQL configuration. MemLabs SQL installation requires Windows Server, and a client-OS SiteSystem supports only the Distribution Point role. Remove sqlVersion/remoteSQLVM or switch the VM back to a Server OS." -ReturnObject $ReturnObject -Failure
     }
 
     # Role allowed on CAS?

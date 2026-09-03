@@ -322,6 +322,13 @@ function Select-Options {
                 if ($property.role -eq "SiteSystem") {
                     Set-SiteSystemPropertiesForOperatingSystem -VirtualMachine $property
                     $newName = Rename-VirtualMachine -vm $property
+                    if (-not [string]::IsNullOrWhiteSpace($newName)) {
+                        return "NEWNAME:$newName"
+                    }
+                    # additionalOptions was built from the OLD OS before entering
+                    # Select-Options. Rebuild it so switching to Windows 11 removes
+                    # the stale Add SQL action, and switching to Server adds it back.
+                    return "REBUILD"
                 }
                 elseif ($property.role -eq "DomainMember") {
                     #if (-not $property.SqlVersion) {
@@ -1137,6 +1144,9 @@ function Select-VirtualMachines {
                             }
                             continue VMLoop
                         }
+                        if ($newValue -eq "REBUILD") {
+                            continue VMLoop
+                        }
                         if ($null -ne $newValue -and $newValue -is [string]) {
                             $newValue = [string]$newValue.Trim()
                             #Write-Host "NewValue = '$newValue'"
@@ -1177,6 +1187,10 @@ function Select-VirtualMachines {
                             }
                         }
                         if ($newValue -eq "S") {
+                            if (Test-SiteSystemClientOperatingSystem -VirtualMachine $virtualMachine) {
+                                Add-ErrorMessage -Property 'sqlVersion' -Warning 'SQL cannot be added to a Windows 11 SiteSystem. Client-OS SiteSystems support only the Distribution Point role.'
+                                continue VMLoop
+                            }
                             if ($virtualMachine.Role -in ("Primary", "CAS", "WSUS")) {
                                 Get-remoteSQLVM -property $virtualMachine
                                 continue VMLoop

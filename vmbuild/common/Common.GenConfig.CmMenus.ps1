@@ -146,7 +146,9 @@ Function Set-SiteSystemPropertiesForOperatingSystem {
         foreach ($propertyName in @(
                 'installMP', 'useDatabaseReplica', 'replicaSqlServerVM', 'replicaDbName',
                 'installSUP', 'wsusContentDir', 'wsusDataBaseServer', 'InstallPatchMyPC', 'PatchMyPCFileServer',
-                'installRP', 'installSMSProv')) {
+                'installRP', 'installSMSProv',
+                'sqlVersion', 'sqlInstanceName', 'sqlInstanceDir', 'sqlPort',
+                'SqlServiceAccount', 'SqlAgentAccount', 'remoteSQLVM', 'installSSMS')) {
             if ($VirtualMachine.PSObject.Properties.Name -contains $propertyName) {
                 $VirtualMachine.PSObject.Members.Remove($propertyName)
             }
