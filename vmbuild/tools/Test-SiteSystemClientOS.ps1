@@ -86,6 +86,9 @@ $installDpPath = Join-Path $RootPath 'DSC\phases\InstallDPMPClient.ps1'
 . (Import-TestFunction -Path $menusPath -Name 'Set-SiteSystemPropertiesForOperatingSystem')
 . (Import-TestFunction -Path $menusPath -Name 'Get-OperatingSystemMenu')
 . (Import-TestFunction -Path $addVmPath -Name 'Add-NewVMForRole')
+. (Import-TestFunction -Path $validationPath -Name 'Test-ValidVmServerOS')
+. (Import-TestFunction -Path $validationPath -Name 'Test-ValidVmPath')
+. (Import-TestFunction -Path $validationPath -Name 'Test-ValidRoleSiteServer')
 . (Import-TestFunction -Path $validationPath -Name 'Test-ValidRoleSiteSystem')
 . (Import-TestFunction -Path $scriptFunctionsPath -Name 'Test-ClientDpProvisioningTarget')
 . (Import-TestFunction -Path $scriptFunctionsPath -Name 'Confirm-DpInstallationAdminAccess')
@@ -248,6 +251,9 @@ $goodClient = [pscustomobject]@{
 $goodResult = [pscustomobject]@{ Failures = 0; Messages = New-Object System.Collections.Generic.List[string] }
 Test-ValidRoleSiteSystem -VM $goodClient -ReturnObject $goodResult
 Assert-Equal 0 $goodResult.Failures 'validator accepts a DP-only Windows 11 SiteSystem'
+$siteCodeResult = [pscustomobject]@{ Failures = 0; Messages = New-Object System.Collections.Generic.List[string] }
+Test-ValidRoleSiteServer -VM $goodClient -ConfigObject $global:ConfigObject -ReturnObject $siteCodeResult
+Assert-Equal 0 $siteCodeResult.Messages.Count 'shared SiteCode validation accepts a DP-only Windows 11 SiteSystem'
 
 $sqlClient = [pscustomobject]@{
     role = 'SiteSystem'; vmName = 'SQLBAD'; siteCode = 'ABC'; operatingSystem = 'Windows 11 25H2'

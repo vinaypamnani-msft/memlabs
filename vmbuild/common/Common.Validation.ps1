@@ -1283,8 +1283,12 @@ function Test-ValidRoleSiteServer {
         }
     }
 
-    # Server OS
-    Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
+    # SiteSystem VMs carry their owning SiteCode too, so they pass through this
+    # shared validation even though they are not site servers. Windows client
+    # SiteSystems are validated as DP-only by Test-ValidRoleSiteSystem.
+    if (-not (Test-SiteSystemClientOperatingSystem -VirtualMachine $VM)) {
+        Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
+    }
 
     # install dir
     Test-ValidVmPath -VM $VM -PathProperty "cmInstallDir" -ValidPathExample "E:\ConfigMgr" -ReturnObject $ReturnObject
