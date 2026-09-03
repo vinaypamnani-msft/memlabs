@@ -956,6 +956,405 @@ function Wait-CMRoleRegistered {
     return $result
 }
 
+function Test-ClientDpProvisioningTarget {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ServerFQDN,
+        [object]$DeployConfig
+    )
+
+    if (-not $DeployConfig -or $DeployConfig.PSObject.Properties.Name -notcontains 'virtualMachines') {
+        return $false
+    }
+    $serverName = $ServerFQDN.Split('.')[0]
+    $target = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $serverName } | Select-Object -First 1
+    if (-not $target -or $target.PSObject.Properties.Name -notcontains 'operatingSystem') {
+        return $false
+    }
+    return ($target.role -eq 'SiteSystem' -and "$($target.operatingSystem)" -like 'Windows 11*')
+}
+
+function Confirm-DpInstallationAdminAccess {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ServerFQDN,
+        [Parameter(Mandatory = $true)]
+        [string]$ServerSiteCode,
+        [object]$DeployConfig
+    )
+
+    if (-not $DeployConfig -or $DeployConfig.PSObject.Properties.Name -notcontains 'virtualMachines') {
+        Write-DscStatus "DP install-account preflight for $ServerFQDN could not inspect deployConfig; site-server local Administrator membership is UNKNOWN." -Warning
+        return $false
+    }
+
+    $targetName = $ServerFQDN.Split('.')[0]
+    if ($targetName -eq $env:COMPUTERNAME) { return $true }
+
+    $requiredServerNames = New-Object System.Collections.Generic.List[string]
+    $target = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $targetName } | Select-Object -First 1
+    if ($target -and $target.PSObject.Properties.Name -contains 'thisParams') {
+        foreach ($propertyName in @('SiteServer', 'SiteServerPassive', 'PrimarySiteServer', 'PrimarySiteServerPassive')) {
+            if ($target.thisParams -and $target.thisParams.PSObject.Properties.Name -contains $propertyName) {
+                $candidate = "$($target.thisParams.$propertyName)"
+                if (-not [string]::IsNullOrWhiteSpace($candidate) -and -not $requiredServerNames.Contains($candidate)) {
+                    [void]$requiredServerNames.Add($candidate)
+                }
+            }
+        }
+    }
+
+    # Derive the same principals directly from topology as an independent fallback.
+    # Bug 29726666 / incident 5046770 requires the primary site-server computer
+    # account even when an alternate site-system installation account is configured.
+    $directSiteServer = $DeployConfig.virtualMachines | Where-Object {
+        $_.siteCode -eq $ServerSiteCode -and $_.role -in 'Primary', 'Secondary'
+    } | Select-Object -First 1
+    if ($directSiteServer -and -not $requiredServerNames.Contains("$($directSiteServer.vmName)")) {
+        [void]$requiredServerNames.Add("$($directSiteServer.vmName)")
+    }
+    if ($directSiteServer -and $directSiteServer.role -eq 'Secondary' -and $directSiteServer.parentSiteCode) {
+        $parentPrimary = $DeployConfig.virtualMachines | Where-Object {
+            $_.siteCode -eq $directSiteServer.parentSiteCode -and $_.role -eq 'Primary'
+        } | Select-Object -First 1
+        if ($parentPrimary -and -not $requiredServerNames.Contains("$($parentPrimary.vmName)")) {
+            [void]$requiredServerNames.Add("$($parentPrimary.vmName)")
+        }
+    }
+
+    if ($requiredServerNames.Count -eq 0) {
+        Write-DscStatus "DP install-account preflight for $ServerFQDN found no owning site-server computer account for site $ServerSiteCode. Refusing to rely on an alternate installation account alone (ConfigMgr 2403 known issue 29726666/5046770)." -Failure
+        return $false
+    }
+
+    $domainNetBiosName = "$($DeployConfig.vmOptions.domainNetBiosName)"
+    if ([string]::IsNullOrWhiteSpace($domainNetBiosName)) {
+        $domainNetBiosName = "$($DeployConfig.parameters.domainName)"
+    }
+    $requiredAccounts = @($requiredServerNames | ForEach-Object { "$domainNetBiosName\$_`$" })
+
+    try {
+        $preflightResults = @(Invoke-Command -ComputerName $ServerFQDN -ArgumentList (, $requiredAccounts) -ErrorAction Stop -ScriptBlock {
+            param([string[]]$RequiredAccounts)
+
+            $administratorsSid = 'S-1-5-32-544'
+            $details = New-Object System.Collections.Generic.List[string]
+            $prerequisiteFailures = New-Object System.Collections.Generic.List[string]
+            try {
+                Set-Service -Name 'RemoteRegistry' -StartupType Automatic -ErrorAction Stop
+                Start-Service -Name 'RemoteRegistry' -ErrorAction Stop
+                $remoteRegistry = Get-Service -Name 'RemoteRegistry' -ErrorAction Stop
+                if ($remoteRegistry.Status -ne 'Running') { throw "state=$($remoteRegistry.Status)" }
+                [void]$details.Add('RemoteRegistry=Running/Automatic')
+            }
+            catch {
+                [void]$prerequisiteFailures.Add("RemoteRegistry: $($_.Exception.Message)")
+            }
+            try {
+                $policyPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+                New-ItemProperty -Path $policyPath -Name 'LocalAccountTokenFilterPolicy' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+                $tokenPolicy = (Get-ItemProperty -Path $policyPath -Name 'LocalAccountTokenFilterPolicy' -ErrorAction Stop).LocalAccountTokenFilterPolicy
+                if ([int]$tokenPolicy -ne 1) { throw "value=$tokenPolicy" }
+                [void]$details.Add('LocalAccountTokenFilterPolicy=1')
+            }
+            catch {
+                [void]$prerequisiteFailures.Add("LocalAccountTokenFilterPolicy: $($_.Exception.Message)")
+            }
+
+            $beforeMembers = @(Get-LocalGroupMember -SID $administratorsSid -ErrorAction Stop)
+            foreach ($account in $RequiredAccounts) {
+                try {
+                    $accountSid = ([System.Security.Principal.NTAccount]$account).Translate([System.Security.Principal.SecurityIdentifier]).Value
+                    $present = @($beforeMembers | Where-Object { $_.SID.Value -eq $accountSid }).Count -gt 0
+                    if (-not $present) {
+                        Add-LocalGroupMember -SID $administratorsSid -Member $account -ErrorAction Stop
+                        [void]$details.Add("added $account ($accountSid)")
+                    }
+                    else {
+                        [void]$details.Add("present $account ($accountSid)")
+                    }
+                }
+                catch {
+                    [void]$details.Add("ERROR ${account}: $($_.Exception.Message)")
+                }
+            }
+
+            $afterMembers = @(Get-LocalGroupMember -SID $administratorsSid -ErrorAction Stop)
+            $missing = New-Object System.Collections.Generic.List[string]
+            foreach ($account in $RequiredAccounts) {
+                try {
+                    $accountSid = ([System.Security.Principal.NTAccount]$account).Translate([System.Security.Principal.SecurityIdentifier]).Value
+                    if (@($afterMembers | Where-Object { $_.SID.Value -eq $accountSid }).Count -eq 0) {
+                        [void]$missing.Add($account)
+                    }
+                }
+                catch { [void]$missing.Add($account) }
+            }
+            [pscustomobject]@{
+                Success  = ($missing.Count -eq 0 -and $prerequisiteFailures.Count -eq 0)
+                Detail   = $details -join '; '
+                Missing  = $missing -join ', '
+                Failures = $prerequisiteFailures -join '; '
+            }
+        })
+        $preflight = $preflightResults | Select-Object -Last 1
+        if ($preflight -and $preflight.Success) {
+            Write-DscStatus "DP install-account preflight passed on ${ServerFQDN}: $($preflight.Detail)"
+            return $true
+        }
+        $detail = 'remote preflight returned no result'
+        if ($preflight) { $detail = "$($preflight.Detail); missing=$($preflight.Missing); failures=$($preflight.Failures)" }
+        Write-DscStatus "DP install-account preflight FAILED on ${ServerFQDN} for required account(s) $($requiredAccounts -join ', '): $detail. ConfigMgr 2403 alternate-account installs can fail with 0x800706be/0x80070005 unless the primary site-server computer account is a local Administrator." -Failure
+        return $false
+    }
+    catch {
+        Write-DscStatus "DP install-account preflight FAILED on $ServerFQDN for required account(s) $($requiredAccounts -join ', '): $($_.Exception.Message). ConfigMgr 2403 alternate-account installs can fail with 0x800706be/0x80070005 unless the primary site-server computer account is a local Administrator." -Failure
+        return $false
+    }
+}
+
+function Get-ClientDpProvisioningState {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ServerFQDN
+    )
+
+    try {
+        $states = @(Invoke-Command -ComputerName $ServerFQDN -ErrorAction Stop -ScriptBlock {
+            $providerReady = $false
+            try {
+                Get-CimClass -Namespace 'root\SCCMDP' -ClassName 'SMS_DistributionPoint' -ErrorAction Stop | Out-Null
+                $providerReady = $true
+            }
+            catch {}
+
+            $shareReady = [bool](Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue)
+            $iisAppReady = $false
+            $applicationHostPath = Join-Path $env:windir 'system32\inetsrv\config\applicationHost.config'
+            try {
+                $applicationHost = [xml](Get-Content -LiteralPath $applicationHostPath -Raw -ErrorAction Stop)
+                $defaultSite = $applicationHost.configuration.'system.applicationHost'.sites.site |
+                    Where-Object { $_.name -eq 'Default Web Site' } | Select-Object -First 1
+                $iisAppReady = [bool]($defaultSite.application | Where-Object { $_.path -eq '/SMS_DP_SMSPKG$' } | Select-Object -First 1)
+            }
+            catch {}
+
+            $w3svc = Get-Service -Name 'W3SVC' -ErrorAction SilentlyContinue
+            $w3svcReady = [bool]($w3svc -and $w3svc.Status -eq 'Running')
+            [pscustomobject]@{
+                Ready   = [bool]($providerReady -and $shareReady -and $iisAppReady -and $w3svcReady)
+                Summary = "provider=$providerReady share=$shareReady iisApp=$iisAppReady W3SVC=$w3svcReady"
+            }
+        })
+        if ($states.Count -gt 0) { return $states[-1] }
+        return [pscustomobject]@{ Ready = $false; Summary = 'remote probe returned no state' }
+    }
+    catch {
+        return [pscustomobject]@{ Ready = $false; Summary = "remote probe failed: $($_.Exception.Message)" }
+    }
+}
+
+function Write-ClientDpProvisioningDiagnostics {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ServerFQDN
+    )
+
+    $serverName = $ServerFQDN.Split('.')[0]
+    $diagnostics = New-Object System.Collections.Generic.List[string]
+    [void]$diagnostics.Add("Client DP provisioning diagnostics for $ServerFQDN at $([datetime]::UtcNow.ToString('o'))")
+
+    try {
+        $remoteLines = @(Invoke-Command -ComputerName $ServerFQDN -ErrorAction Stop -ScriptBlock {
+            $lines = New-Object System.Collections.Generic.List[string]
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+            [void]$lines.Add("OS: $($os.Caption) $($os.Version) build=$($os.BuildNumber) productType=$($os.ProductType)")
+
+            $isAdministrator = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+                [Security.Principal.WindowsBuiltInRole]::Administrator)
+            $tokenPolicy = $null
+            try { $tokenPolicy = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name LocalAccountTokenFilterPolicy -ErrorAction Stop).LocalAccountTokenFilterPolicy } catch {}
+            [void]$lines.Add("Remote admin: identity=$([Security.Principal.WindowsIdentity]::GetCurrent().Name) elevated=$isAdministrator LocalAccountTokenFilterPolicy=$(if ($null -eq $tokenPolicy) { 'ABSENT' } else { $tokenPolicy })")
+            try {
+                $localAdministrators = @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop | ForEach-Object { "$($_.Name)" })
+                [void]$lines.Add("Local Administrators: $($localAdministrators -join ', ')")
+            }
+            catch { [void]$lines.Add("Local Administrators: ERROR $($_.Exception.Message)") }
+
+            foreach ($serviceName in @('RemoteRegistry', 'RpcSs', 'Winmgmt', 'WAS', 'W3SVC')) {
+                $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
+                if ($service) {
+                    [void]$lines.Add("Service ${serviceName}: state=$($service.State) startMode=$($service.StartMode) exitCode=$($service.ExitCode)")
+                }
+                else {
+                    [void]$lines.Add("Service ${serviceName}: ABSENT")
+                }
+            }
+
+            $requiredFeatures = @(
+                'IIS-WebServerRole', 'IIS-WebServer', 'IIS-CommonHttpFeatures', 'IIS-StaticContent',
+                'IIS-DefaultDocument', 'IIS-DirectoryBrowsing', 'IIS-HttpErrors', 'IIS-HttpRedirect',
+                'IIS-WebServerManagementTools', 'IIS-IIS6ManagementCompatibility', 'IIS-Metabase',
+                'IIS-WindowsAuthentication', 'IIS-WMICompatibility', 'IIS-ISAPIExtensions',
+                'IIS-ManagementScriptingTools', 'MSRDC-Infrastructure', 'IIS-ManagementService'
+            )
+            $featureStates = New-Object System.Collections.Generic.List[string]
+            foreach ($featureName in $requiredFeatures) {
+                try {
+                    $feature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction Stop
+                    [void]$featureStates.Add("$featureName=$($feature.State)")
+                }
+                catch { [void]$featureStates.Add("$featureName=ERROR:$($_.Exception.Message)") }
+            }
+            [void]$lines.Add("Optional features: $($featureStates -join '; ')")
+
+            $profiles = Get-NetFirewallProfile -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)=$($_.Enabled)" }
+            [void]$lines.Add("Firewall profiles: $($profiles -join ', ')")
+            foreach ($ruleName in @(
+                    'MemLabs ConfigMgr DP RPC Endpoint Mapper TCP',
+                    'MemLabs ConfigMgr DP RPC Endpoint Mapper UDP',
+                    'MemLabs ConfigMgr DP Dynamic RPC',
+                    'MemLabs ConfigMgr DP WMI',
+                    'MemLabs ConfigMgr DP SMB')) {
+                $rule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($rule) {
+                    $ports = @($rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Protocol)/$($_.LocalPort)" })
+                    [void]$lines.Add("Firewall ${ruleName}: enabled=$($rule.Enabled) action=$($rule.Action) direction=$($rule.Direction) ports=$($ports -join ',')")
+                }
+                else { [void]$lines.Add("Firewall ${ruleName}: ABSENT") }
+            }
+            $wmiRules = @(Get-NetFirewallRule -DisplayGroup 'Windows Management Instrumentation (WMI)' -ErrorAction SilentlyContinue)
+            [void]$lines.Add("Built-in WMI firewall rules: total=$($wmiRules.Count) enabled=$(@($wmiRules | Where-Object Enabled -eq 'True').Count)")
+
+            try {
+                $providerClass = Get-CimClass -Namespace 'root\SCCMDP' -ClassName 'SMS_DistributionPoint' -ErrorAction Stop
+                [void]$lines.Add("root\SCCMDP SMS_DistributionPoint: present methods=$($providerClass.CimClassMethods.Name -join ',')")
+            }
+            catch { [void]$lines.Add("root\SCCMDP SMS_DistributionPoint: ERROR $($_.Exception.Message)") }
+            try {
+                $provider = Get-CimInstance -Namespace 'root\SCCMDP' -ClassName '__Win32Provider' -Filter "Name='SMSDPProvider'" -ErrorAction Stop
+                [void]$lines.Add("SMSDPProvider registration: CLSID=$($provider.CLSID) hostingModel=$($provider.HostingModel)")
+            }
+            catch { [void]$lines.Add("SMSDPProvider registration: ERROR $($_.Exception.Message)") }
+            try {
+                $providerKey = Get-Item 'Registry::HKEY_CLASSES_ROOT\CLSID\{1798F365-5C8D-47e7-80E3-EAF234320077}\InprocServer32' -ErrorAction Stop
+                $providerPath = [Environment]::ExpandEnvironmentVariables("$($providerKey.GetValue(''))")
+                $providerFile = Get-Item -LiteralPath $providerPath -ErrorAction SilentlyContinue
+                [void]$lines.Add("SMSDPProvider DLL: path=$providerPath exists=$([bool]$providerFile) version=$($providerFile.VersionInfo.FileVersion)")
+            }
+            catch { [void]$lines.Add("SMSDPProvider DLL: ERROR $($_.Exception.Message)") }
+
+            $appcmd = Join-Path $env:windir 'system32\inetsrv\appcmd.exe'
+            if (Test-Path -LiteralPath $appcmd) {
+                $previousPreference = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
+                try {
+                    $appcmdOutput = @(& $appcmd list app 'Default Web Site/SMS_DP_SMSPKG$' 2>&1)
+                    $appcmdExitCode = $LASTEXITCODE
+                }
+                finally { $ErrorActionPreference = $previousPreference }
+                [void]$lines.Add("appcmd SMS_DP_SMSPKG`$: exit=$appcmdExitCode output=$((($appcmdOutput -join ' ') -replace '\s+', ' ').Trim())")
+            }
+            else { [void]$lines.Add("appcmd: ABSENT at $appcmd") }
+            $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
+            $shareDetail = 'ABSENT'
+            if ($share) { $shareDetail = "path=$($share.Path)" }
+            [void]$lines.Add("SMS_DP`$ share: $shareDetail")
+
+            $dpLog = $null
+            foreach ($drive in @('E:', 'F:', 'D:', 'G:', 'C:')) {
+                $candidate = "$drive\SMS_DP`$\sms\logs\smsdpprov.log"
+                if (Test-Path -LiteralPath $candidate) { $dpLog = $candidate; break }
+            }
+            if ($dpLog) {
+                [void]$lines.Add("smsdpprov.log: $dpLog")
+                foreach ($line in @(Get-Content -LiteralPath $dpLog -Tail 30 -ErrorAction SilentlyContinue)) {
+                    [void]$lines.Add("smsdpprov: $(("$line" -replace '\s+', ' ').Trim())")
+                }
+            }
+            else { [void]$lines.Add('smsdpprov.log: NOT FOUND') }
+
+            $since = (Get-Date).AddHours(-2)
+            try {
+                $applicationEvents = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $since; Id = @(1000, 1001, 1026) } -ErrorAction Stop |
+                    Where-Object { $_.Message -match 'WmiPrvSE|SMSDP|smsdpprov|appcmd|IIS' } | Select-Object -First 10
+                foreach ($eventRecord in $applicationEvents) {
+                    $message = (("$($eventRecord.Message)" -replace '\s+', ' ').Trim())
+                    [void]$lines.Add("Application event $($eventRecord.Id) $($eventRecord.TimeCreated.ToString('o')): $message")
+                }
+                if (-not $applicationEvents) { [void]$lines.Add('Application crash events: none matched in last 2h') }
+            }
+            catch { [void]$lines.Add("Application crash events: ERROR $($_.Exception.Message)") }
+            try {
+                $wmiEvents = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-WMI-Activity/Operational'; StartTime = $since; Level = 2 } -ErrorAction Stop |
+                    Select-Object -First 10
+                foreach ($eventRecord in $wmiEvents) {
+                    $message = (("$($eventRecord.Message)" -replace '\s+', ' ').Trim())
+                    [void]$lines.Add("WMI event $($eventRecord.Id) $($eventRecord.TimeCreated.ToString('o')): $message")
+                }
+                if (-not $wmiEvents) { [void]$lines.Add('WMI error events: none in last 2h') }
+            }
+            catch { [void]$lines.Add("WMI error events: ERROR $($_.Exception.Message)") }
+
+            return @($lines)
+        })
+        foreach ($line in $remoteLines) { [void]$diagnostics.Add("[$serverName] $line") }
+    }
+    catch {
+        [void]$diagnostics.Add("[$serverName] remote diagnostic collection failed: $($_.Exception.Message)")
+    }
+
+    try {
+        $smsInstallDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory'
+        $distmgrLog = Join-Path $smsInstallDir 'Logs\distmgr.log'
+        $distmgrLines = Get-Content -LiteralPath $distmgrLog -Tail 1000 -ErrorAction Stop |
+            Where-Object { $_ -match [regex]::Escape($serverName) -or $_ -match 'CreateVirtualDirectory' } | Select-Object -Last 40
+        [void]$diagnostics.Add("[site] distmgr.log: $distmgrLog")
+        foreach ($line in $distmgrLines) { [void]$diagnostics.Add("[site] distmgr: $(("$line" -replace '\s+', ' ').Trim())") }
+    }
+    catch { [void]$diagnostics.Add("[site] distmgr collection failed: $($_.Exception.Message)") }
+
+    $diagnosticFolder = $LogPath
+    if ([string]::IsNullOrWhiteSpace($diagnosticFolder)) { $diagnosticFolder = 'C:\staging\DSC' }
+    $diagnosticPath = Join-Path $diagnosticFolder "ClientDP-$serverName-Provisioning.txt"
+    try { $diagnostics | Out-File -LiteralPath $diagnosticPath -Force -Encoding utf8 } catch {}
+    foreach ($line in $diagnostics) { Write-DscStatus "Client DP diag: $line" -Warning }
+    Write-DscStatus "Client DP diagnostic report: $diagnosticPath" -Warning
+}
+
+function Wait-ClientDpProvisioningReady {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ServerFQDN,
+        [int]$TimeoutSeconds = 600,
+        [int]$PollSeconds = 15
+    )
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $nextReportSeconds = 60
+    $lastState = $null
+    while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $lastState = Get-ClientDpProvisioningState -ServerFQDN $ServerFQDN
+        if ($lastState.Ready) {
+            $elapsedSeconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
+            Write-DscStatus "Client DP provisioning ready on $ServerFQDN after ${elapsedSeconds}s ($($lastState.Summary))"
+            return $true
+        }
+        if ($stopwatch.Elapsed.TotalSeconds -ge $nextReportSeconds) {
+            Write-DscStatus "Client DP provisioning still pending on $ServerFQDN after $([int]$stopwatch.Elapsed.TotalSeconds)s ($($lastState.Summary))" -Warning
+            $nextReportSeconds += 60
+        }
+        Start-Sleep -Seconds $PollSeconds
+    }
+
+    $stopwatch.Stop()
+    $lastSummary = 'no probe completed'
+    if ($lastState) { $lastSummary = $lastState.Summary }
+    Write-DscStatus "Client DP provisioning did not become usable on $ServerFQDN within ${TimeoutSeconds}s ($lastSummary)." -Warning
+    Write-ClientDpProvisioningDiagnostics -ServerFQDN $ServerFQDN
+    return $false
+}
+
 function Install-DP {
     param (
         [Parameter()]
@@ -964,12 +1363,19 @@ function Install-DP {
         [string]
         $ServerSiteCode,
         [bool]
-        $usePKI = $false
+        $usePKI = $false,
+        [object]
+        $DeployConfig
     )
 
     $i = 0
     $installFailure = $false
     $DPFQDN = $ServerFQDN
+
+    if (-not (Confirm-DpInstallationAdminAccess -ServerFQDN $DPFQDN -ServerSiteCode $ServerSiteCode -DeployConfig $DeployConfig)) {
+        Write-ClientDpProvisioningDiagnostics -ServerFQDN $DPFQDN
+        return $false
+    }
 
     do {
 
@@ -1035,6 +1441,15 @@ function Install-DP {
 
     } until ($dpinstalled -or $installFailure)
 
+    if (Test-ClientDpProvisioningTarget -ServerFQDN $DPFQDN -DeployConfig $DeployConfig) {
+        if ($dpinstalled) {
+            $dpinstalled = Wait-ClientDpProvisioningReady -ServerFQDN $DPFQDN
+        }
+        else {
+            Write-ClientDpProvisioningDiagnostics -ServerFQDN $DPFQDN
+        }
+    }
+
     if ($dpinstalled -and $usePKI) {        
         Invoke-Command -ComputerName $DPFQDN -ScriptBlock {
             Set-ItemProperty -Path "HKLM:\Software\Microsoft\SMS\DP" -Name "SSLState" -Value 63 -Force
@@ -1054,12 +1469,19 @@ function Install-PullDP {
         [string]
         $SourceDPFQDN,
         [bool]
-        $usePKI = $false
+        $usePKI = $false,
+        [object]
+        $DeployConfig
     )
 
     $i = 0
     $installFailure = $false
     $DPFQDN = $ServerFQDN
+
+    if (-not (Confirm-DpInstallationAdminAccess -ServerFQDN $DPFQDN -ServerSiteCode $ServerSiteCode -DeployConfig $DeployConfig)) {
+        Write-ClientDpProvisioningDiagnostics -ServerFQDN $DPFQDN
+        return $false
+    }
 
     do {
 
@@ -1135,6 +1557,15 @@ function Install-PullDP {
         }
 
     } until ($dpinstalled -or $installFailure)
+
+    if (Test-ClientDpProvisioningTarget -ServerFQDN $DPFQDN -DeployConfig $DeployConfig) {
+        if ($dpinstalled) {
+            $dpinstalled = Wait-ClientDpProvisioningReady -ServerFQDN $DPFQDN
+        }
+        else {
+            Write-ClientDpProvisioningDiagnostics -ServerFQDN $DPFQDN
+        }
+    }
 
     return [bool]$dpinstalled
 }

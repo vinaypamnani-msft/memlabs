@@ -1399,9 +1399,16 @@ function Test-ValidRoleSiteSystem {
     $vmName = $VM.vmName
     $vmRole = $VM.role
 
-    # Server OS
-    if ($VM.installMP -or $VM.installSUP) {
-        Test-ValidVmServerOS -VM $VM -ReturnObject $return
+    # A Windows client OS can host only the Distribution Point role. ConfigMgr's
+    # DP prerequisite path accepts a workstation SKU; component-server roles do not.
+    $serverOnlyRoleSelected = @('installMP', 'installSUP', 'installRP', 'installSMSProv') | Where-Object {
+        $VM.PSObject.Properties.Name -contains $_ -and $VM.$_ -eq $true
+    }
+    if ((Test-SiteSystemClientOperatingSystem -VirtualMachine $VM) -and $serverOnlyRoleSelected) {
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] uses client OS [$($VM.operatingSystem)]. A client-OS SiteSystem can host only the Distribution Point role; disable installMP, installSUP, installRP, and installSMSProv." -ReturnObject $ReturnObject -Failure
+    }
+    elseif ($serverOnlyRoleSelected) {
+        Test-ValidVmServerOS -VM $VM -ReturnObject $ReturnObject
     }
 
     # Role allowed on CAS?

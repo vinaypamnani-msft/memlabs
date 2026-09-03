@@ -775,7 +775,7 @@ foreach ($DP in $DPs) {
     }
 
     $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
-    $dpInstallResult = @(Install-DP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode -usePKI:$usePKI)
+    $dpInstallResult = @(Install-DP -ServerFQDN $DPFQDN -ServerSiteCode $DP.ServerSiteCode -usePKI:$usePKI -DeployConfig $deployConfig)
     if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
         $dpInstallFailed = $true
     }
@@ -814,7 +814,7 @@ foreach ($PDP in $PullDPs) {
     $EnsuredSourceDPs[$SourceDPFQDN] = $true
     if (-not (Get-CMDistributionPoint -SiteSystemServerName $SourceDPFQDN -SiteCode $PDP.ServerSiteCode)) {
         Write-DscStatus "Pull DP source '$SourceDPFQDN' is not a Distribution Point yet. Installing standard DP on the source first (required before adding pull DPs)."
-        $dpInstallResult = @(Install-DP -ServerFQDN $SourceDPFQDN -ServerSiteCode $PDP.ServerSiteCode -usePKI:$usePKI)
+        $dpInstallResult = @(Install-DP -ServerFQDN $SourceDPFQDN -ServerSiteCode $PDP.ServerSiteCode -usePKI:$usePKI -DeployConfig $deployConfig)
         if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
             $dpInstallFailed = $true
         }
@@ -839,7 +839,7 @@ foreach ($PDP in $PullDPs) {
 
     $DPFQDN = $PDP.ServerName.Trim() + "." + $DomainFullName
     $SourceDPFQDN = $PDP.SourceDP.Trim() + "." + $DomainFullName
-    $dpInstallResult = @(Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN -usePKI:$usePKI)
+    $dpInstallResult = @(Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN -usePKI:$usePKI -DeployConfig $deployConfig)
     if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
         $dpInstallFailed = $true
     }
@@ -866,7 +866,7 @@ $configuredMPsThisSite = @($MPs | Where-Object { $_.ServerSiteCode -eq $SiteCode
 if ($dpCount -eq 0) {
     if ($configuredDPsThisSite -eq 0) {
         Write-DscStatus "No DP's found or configured in site $SiteCode. Forcing DP install on Site Server $ThisMachineName"
-        $dpInstallResult = @(Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI)
+        $dpInstallResult = @(Install-DP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI -DeployConfig $deployConfig)
         if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
             $dpInstallFailed = $true
         }

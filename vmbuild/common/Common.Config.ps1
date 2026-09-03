@@ -3,6 +3,25 @@
 ### Config Functions ###
 ########################
 
+function Test-SiteSystemClientOperatingSystem {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $VirtualMachine
+    )
+
+    $role = ''
+    $operatingSystem = ''
+    if ($VirtualMachine.PSObject.Properties.Name -contains 'Role') {
+        $role = "$($VirtualMachine.Role)"
+    }
+    if ($VirtualMachine.PSObject.Properties.Name -contains 'operatingSystem') {
+        $operatingSystem = "$($VirtualMachine.operatingSystem)"
+    }
+
+    return ($role -eq 'SiteSystem' -and $operatingSystem -like 'Windows 11*')
+}
+
 # Returns the top-level site server VM from a config (CAS preferred, else standalone
 # Primary, i.e. a Primary with no parentSiteCode). Returns $null when no top-level
 # site server is present. Used by genconfig, summary, deploy rehydration, and
@@ -605,11 +624,12 @@ function Get-UserConfiguration {
                 }
             }
             #add missing Properties
+            $isClientOsSiteSystem = Test-SiteSystemClientOperatingSystem -VirtualMachine $vm
             if ($vm.Role -in "SiteSystem", "CAS", "Primary") {
-                if ($null -eq $vm.InstallRP) {
+                if (-not $isClientOsSiteSystem -and $null -eq $vm.InstallRP) {
                     $vm | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
                 }
-                if ($null -eq $vm.InstallSUP) {
+                if (-not $isClientOsSiteSystem -and $null -eq $vm.InstallSUP) {
                     $vm | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $false -Force
                 }
                 # InstallDP / InstallMP are valid on a SiteSystem AND on a Primary: a
@@ -617,14 +637,14 @@ function Get-UserConfiguration {
                 # (e.g. so it can serve as a Pull DP's source). Default both to false so
                 # the properties exist and are editable / readable everywhere.
                 if ($vm.Role -in "SiteSystem", "Primary") {
-                    if ($null -eq $vm.InstallMP) {
+                    if (-not $isClientOsSiteSystem -and $null -eq $vm.InstallMP) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $false -Force
                     }
                     if ($null -eq $vm.InstallDP) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
                     }
                 }
-                if ($vm.Role -eq "SiteSystem") {
+                if ($vm.Role -eq "SiteSystem" -and -not $isClientOsSiteSystem) {
                     if ($null -eq $vm.InstallSMSProv) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
                     }
@@ -649,7 +669,7 @@ function Get-UserConfiguration {
                 }
             }
 
-            if ($vm.SqlVersion) {
+            if ($vm.SqlVersion -and -not $isClientOsSiteSystem) {
                 foreach ($listVM in $config.VirtualMachines) {
                     if ($listVM.RemoteSQLVM -eq $vm.VmName) {
                         if ($null -eq $vm.InstallRP) {
@@ -785,7 +805,9 @@ function Get-UserConfiguration {
             foreach ($vm in $config.virtualMachines) {
                 if ($vm.Role -eq "SiteSystem") {
                     $vm | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
-                    $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
+                    if (-not (Test-SiteSystemClientOperatingSystem -VirtualMachine $vm)) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
+                    }
                 }
             }
         }
@@ -3942,27 +3964,28 @@ function Update-VMFromHyperV {
         $vmObject | Add-Member -MemberType NoteProperty -Name "DynamicMinRam" -Value $vmObject.Memory -Force
     }
     #add missing Properties
+    $isClientOsSiteSystem = Test-SiteSystemClientOperatingSystem -VirtualMachine $vmObject
     if ($vmObject.Role -in "SiteSystem", "CAS", "Primary") {
-        if ($null -eq $vmObject.InstallRP) {
+        if (-not $isClientOsSiteSystem -and $null -eq $vmObject.InstallRP) {
             $vmObject | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
         }
-        if ($null -eq $vmObject.InstallSUP) {
+        if (-not $isClientOsSiteSystem -and $null -eq $vmObject.InstallSUP) {
             $vmObject | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $false -Force
         }
         if ($vmObject.Role -eq "SiteSystem") {
-            if ($null -eq $vmObject.InstallMP) {
+            if (-not $isClientOsSiteSystem -and $null -eq $vmObject.InstallMP) {
                 $vmObject | Add-Member -MemberType NoteProperty -Name "InstallMP" -Value $false -Force
             }
             if ($null -eq $vmObject.InstallDP) {
                 $vmObject | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
             }
-            if ($null -eq $vmObject.InstallSMSProv) {
+            if (-not $isClientOsSiteSystem -and $null -eq $vmObject.InstallSMSProv) {
                 $vmObject | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
             }
         }
     }
 
-    if ($vmObject.SqlVersion) {
+    if ($vmObject.SqlVersion -and -not $isClientOsSiteSystem) {
         foreach ($listVM in $global:vm_List) {
             if ($listVM.RemoteSQLVM -eq $vmObject.VmName) {
                 if ($null -eq $vmObject.InstallRP) {

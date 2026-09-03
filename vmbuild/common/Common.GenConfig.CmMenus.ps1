@@ -99,7 +99,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "Secondary" { return $ServerList }
         "FileServer" { return $ServerList }
         "Sqlserver" { return $ServerList }
-        "SiteSystem" { return $ServerList }
+        "SiteSystem" { return @($AllList | Where-Object { $_ -like 'Server*' -or $_ -like 'Windows 11*' }) }
         "WSUS" { return $ServerList }
         "SQLAO" { return $ServerList }
         "PassiveSite" { return $ServerList }
@@ -125,6 +125,42 @@ Function Get-SupportedOperatingSystemsForRole {
         }
     }
     return $AllList
+}
+
+Function Set-SiteSystemPropertiesForOperatingSystem {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "SiteSystem VM Object")]
+        [object] $VirtualMachine
+    )
+
+    if ($VirtualMachine.Role -ne 'SiteSystem') {
+        return
+    }
+
+    if (Test-SiteSystemClientOperatingSystem -VirtualMachine $VirtualMachine) {
+        if (($VirtualMachine.PSObject.Properties.Name -contains 'replicaSqlAutoAdded') -and $VirtualMachine.replicaSqlAutoAdded) {
+            Remove-MPReplicaLocalSql -virtualMachine $VirtualMachine
+        }
+
+        foreach ($propertyName in @(
+                'installMP', 'useDatabaseReplica', 'replicaSqlServerVM', 'replicaDbName',
+                'installSUP', 'wsusContentDir', 'wsusDataBaseServer', 'InstallPatchMyPC', 'PatchMyPCFileServer',
+                'installRP', 'installSMSProv')) {
+            if ($VirtualMachine.PSObject.Properties.Name -contains $propertyName) {
+                $VirtualMachine.PSObject.Members.Remove($propertyName)
+            }
+        }
+        return
+    }
+
+    if ("$($VirtualMachine.operatingSystem)" -like '*Server*') {
+        foreach ($roleProperty in @('installMP', 'installSUP', 'installRP', 'installSMSProv')) {
+            if ($VirtualMachine.PSObject.Properties.Name -notcontains $roleProperty) {
+                $VirtualMachine | Add-Member -MemberType NoteProperty -Name $roleProperty -Value $false -Force
+            }
+        }
+    }
 }
 
 

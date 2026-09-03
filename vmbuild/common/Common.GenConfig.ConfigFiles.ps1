@@ -245,11 +245,13 @@ function Select-Config {
         foreach ($vm in $configSelected.virtualMachines) {
             if ($vm.Role -eq "SiteSystem") {
                 $vm | Add-Member -MemberType NoteProperty -Name "installDP" -Value $true -Force
-                $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
+                if (-not (Test-SiteSystemClientOperatingSystem -VirtualMachine $vm)) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "installMP" -Value $true -Force
+                }
             }
         }
     }
-    if ($vm.Role -eq "SiteSystem") {
+    if ($vm.Role -eq "SiteSystem" -and -not (Test-SiteSystemClientOperatingSystem -VirtualMachine $vm)) {
         if (-not $vm.InstallSMSProv) {
             $vm | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
         }

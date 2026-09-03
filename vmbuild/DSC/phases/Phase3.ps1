@@ -154,8 +154,76 @@
             DependsOn = "[WriteStatus]InstallFeature"
         }
 
+        $featureDependency = '[InstallFeatureForSCCM]InstallFeature'
+        $isWindows11DP = $ThisVM.role -eq 'SiteSystem' -and $ThisVM.installDP -eq $true -and "$($ThisVM.operatingSystem)" -like 'Windows 11*'
+        if ($isWindows11DP) {
+            Script ClientDpWindowsFeatures {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = {
+                    $requiredFeatures = @(
+                        'IIS-WebServerRole', 'IIS-WebServer', 'IIS-CommonHttpFeatures', 'IIS-StaticContent',
+                        'IIS-DefaultDocument', 'IIS-DirectoryBrowsing', 'IIS-HttpErrors', 'IIS-HttpRedirect',
+                        'IIS-WebServerManagementTools', 'IIS-IIS6ManagementCompatibility', 'IIS-Metabase',
+                        'IIS-WindowsAuthentication', 'IIS-WMICompatibility', 'IIS-ISAPIExtensions',
+                        'IIS-ManagementScriptingTools', 'MSRDC-Infrastructure', 'IIS-ManagementService'
+                    )
+                    foreach ($featureName in $requiredFeatures) {
+                        $feature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction SilentlyContinue
+                        if (-not $feature -or $feature.State -ne 'Enabled') { return $false }
+                    }
+                    return $true
+                }
+                SetScript  = {
+                    $requiredFeatures = @(
+                        'IIS-WebServerRole', 'IIS-WebServer', 'IIS-CommonHttpFeatures', 'IIS-StaticContent',
+                        'IIS-DefaultDocument', 'IIS-DirectoryBrowsing', 'IIS-HttpErrors', 'IIS-HttpRedirect',
+                        'IIS-WebServerManagementTools', 'IIS-IIS6ManagementCompatibility', 'IIS-Metabase',
+                        'IIS-WindowsAuthentication', 'IIS-WMICompatibility', 'IIS-ISAPIExtensions',
+                        'IIS-ManagementScriptingTools', 'MSRDC-Infrastructure', 'IIS-ManagementService'
+                    )
+                    $restartRequired = $false
+                    foreach ($featureName in $requiredFeatures) {
+                        $feature = Get-WindowsOptionalFeature -Online -FeatureName $featureName -ErrorAction Stop
+                        if (-not $feature) { throw "Windows optional feature '$featureName' was not found." }
+                        if ($feature.State -eq 'Enabled') { continue }
+                        if ("$($feature.State)" -like '*Pending') {
+                            $restartRequired = $true
+                            continue
+                        }
+
+                        try {
+                            $result = Enable-WindowsOptionalFeature -Online -FeatureName $featureName -All -NoRestart -ErrorAction Stop
+                        }
+                        catch {
+                            throw "Failed to enable Windows 11 DP prerequisite '$featureName': $($_.Exception.Message)"
+                        }
+                        if ($result.RestartNeeded) { $restartRequired = $true }
+                    }
+                    if ($restartRequired) {
+                        $global:DSCMachineStatus = 1
+                    }
+                }
+                DependsOn  = '[InstallFeatureForSCCM]InstallFeature'
+            }
+
+            Service ClientDpWAS {
+                Name        = 'WAS'
+                StartupType = 'Automatic'
+                State       = 'Running'
+                DependsOn   = '[Script]ClientDpWindowsFeatures'
+            }
+
+            Service ClientDpW3SVC {
+                Name        = 'W3SVC'
+                StartupType = 'Automatic'
+                State       = 'Running'
+                DependsOn   = '[Service]ClientDpWAS'
+            }
+            $featureDependency = '[Service]ClientDpW3SVC'
+        }
+
         WriteStatus InstallDotNet {
-            DependsOn = '[InstallFeatureForSCCM]InstallFeature'
+            DependsOn = $featureDependency
             Status    = "Installing .NET 4.8"
         }
 

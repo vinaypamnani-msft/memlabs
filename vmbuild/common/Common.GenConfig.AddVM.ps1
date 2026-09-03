@@ -663,6 +663,7 @@ function Add-NewVMForRole {
             if ((get-RoleForSitecode -ConfigToCheck $ConfigToModify -siteCode $siteCode) -eq "Secondary") {
                 $virtualMachine.installMP = $false
             }
+            Set-SiteSystemPropertiesForOperatingSystem -VirtualMachine $virtualMachine
             if (-not $network) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig -ReturnIfNotNeeded:$true
                 if ($network) {

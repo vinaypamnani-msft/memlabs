@@ -319,7 +319,11 @@ function Select-Options {
             }
             "operatingSystem" {
                 Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
-                if ($property.role -eq "DomainMember") {
+                if ($property.role -eq "SiteSystem") {
+                    Set-SiteSystemPropertiesForOperatingSystem -VirtualMachine $property
+                    $newName = Rename-VirtualMachine -vm $property
+                }
+                elseif ($property.role -eq "DomainMember") {
                     #if (-not $property.SqlVersion) {
                     $newName = Rename-VirtualMachine -vm $property
                     #}

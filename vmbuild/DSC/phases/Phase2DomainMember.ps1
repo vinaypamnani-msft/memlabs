@@ -40,6 +40,7 @@
     if ($ThisVM.sqlVersion -and ("SQL Server" -notin $firewallRoles)) {
         $firewallRoles += "SQL Server"
     }
+    $isWindows11DP = $ThisVM.role -eq 'SiteSystem' -and $ThisVM.installDP -eq $true -and "$($ThisVM.operatingSystem)" -like 'Windows 11*'
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -154,13 +155,75 @@
             Role      = $firewallRoles
         }
 
+        $remoteAdminDependency = "[OpenFirewallPortForSCCM]OpenFirewall"
+        if ($isWindows11DP) {
+            Script ClientDpRemoteManagementFirewall {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = {
+                    $requiredRules = @(
+                        'MemLabs ConfigMgr DP RPC Endpoint Mapper TCP',
+                        'MemLabs ConfigMgr DP RPC Endpoint Mapper UDP',
+                        'MemLabs ConfigMgr DP Dynamic RPC',
+                        'MemLabs ConfigMgr DP WMI',
+                        'MemLabs ConfigMgr DP SMB'
+                    )
+                    foreach ($ruleName in $requiredRules) {
+                        $rule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+                        if (-not $rule -or $rule.Enabled -ne 'True' -or $rule.Direction -ne 'Inbound' -or $rule.Action -ne 'Allow') {
+                            return $false
+                        }
+                    }
+                    return $true
+                }
+                SetScript  = {
+                    foreach ($groupName in @('Windows Management Instrumentation (WMI)', 'Remote Service Management', 'File and Printer Sharing')) {
+                        Enable-NetFirewallRule -DisplayGroup $groupName -ErrorAction SilentlyContinue
+                    }
+
+                    $ruleDefinitions = @(
+                        @{ Name = 'MemLabs ConfigMgr DP RPC Endpoint Mapper TCP'; Protocol = 'TCP'; LocalPort = '135' },
+                        @{ Name = 'MemLabs ConfigMgr DP RPC Endpoint Mapper UDP'; Protocol = 'UDP'; LocalPort = '135' },
+                        @{ Name = 'MemLabs ConfigMgr DP Dynamic RPC'; Protocol = 'TCP'; LocalPort = '49152-65535' },
+                        @{ Name = 'MemLabs ConfigMgr DP WMI'; Protocol = 'TCP'; LocalPort = 'RPC'; Program = "$env:SystemRoot\system32\svchost.exe"; Service = 'winmgmt' },
+                        @{ Name = 'MemLabs ConfigMgr DP SMB'; Protocol = 'TCP'; LocalPort = '445' }
+                    )
+                    foreach ($definition in $ruleDefinitions) {
+                        Get-NetFirewallRule -DisplayName $definition.Name -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+                        $parameters = @{
+                            DisplayName = $definition.Name
+                            Group       = 'For ConfigMgr Client DP Provisioning'
+                            Profile     = 'Any'
+                            Direction   = 'Inbound'
+                            Action      = 'Allow'
+                            Enabled     = 'True'
+                            Protocol    = $definition.Protocol
+                            LocalPort   = $definition.LocalPort
+                            ErrorAction = 'Stop'
+                        }
+                        if ($definition.Program) { $parameters.Program = $definition.Program }
+                        if ($definition.Service) { $parameters.Service = $definition.Service }
+                        New-NetFirewallRule @parameters | Out-Null
+                    }
+                }
+                DependsOn  = "[OpenFirewallPortForSCCM]OpenFirewall"
+            }
+
+            Service ClientDpRemoteRegistry {
+                Name        = 'RemoteRegistry'
+                StartupType = 'Automatic'
+                State       = 'Running'
+                DependsOn   = '[Script]ClientDpRemoteManagementFirewall'
+            }
+            $remoteAdminDependency = '[Service]ClientDpRemoteRegistry'
+        }
+
         # Disable UAC remote restrictions so PSDirect sessions from the host
         # get a full (elevated) admin token. Without this, post-DSC host-to-VM
         # commands (Set-WindowsClientProxy, etc.) fail with "Requested registry
         # access is not allowed" on Windows client SKUs (Win10/Win11) because
         # UAC filters remote admin tokens.
         Registry DisableUACRemoteRestrictions {
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            DependsOn = $remoteAdminDependency
             Ensure    = "Present"
             Key       = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
             ValueName = "LocalAccountTokenFilterPolicy"
