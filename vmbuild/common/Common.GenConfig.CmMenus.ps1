@@ -259,6 +259,14 @@ Function Get-OperatingSystemMenu {
             return
         }
         $property."$name" = $OSName
+        # Validation runs inside this function, before the outer VM editor gets
+        # control back. Shape the role NOW so selecting Windows 11 does not validate
+        # the old Server SiteSystem's installMP/SUP/RP/Provider properties and loop
+        # straight back to this menu. The outer call is retained as an idempotent
+        # guard for callers that bypass this picker.
+        if ($property.Role -eq 'SiteSystem') {
+            Set-SiteSystemPropertiesForOperatingSystem -VirtualMachine $property
+        }
         if (Get-TestResult -SuccessOnWarning) {
             return
         }

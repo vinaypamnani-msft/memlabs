@@ -84,6 +84,7 @@ $installDpPath = Join-Path $RootPath 'DSC\phases\InstallDPMPClient.ps1'
 . (Import-TestFunction -Path $configPath -Name 'Test-SiteSystemClientOperatingSystem')
 . (Import-TestFunction -Path $menusPath -Name 'Get-SupportedOperatingSystemsForRole')
 . (Import-TestFunction -Path $menusPath -Name 'Set-SiteSystemPropertiesForOperatingSystem')
+. (Import-TestFunction -Path $menusPath -Name 'Get-OperatingSystemMenu')
 . (Import-TestFunction -Path $addVmPath -Name 'Add-NewVMForRole')
 . (Import-TestFunction -Path $validationPath -Name 'Test-ValidRoleSiteSystem')
 . (Import-TestFunction -Path $scriptFunctionsPath -Name 'Test-ClientDpProvisioningTarget')
@@ -94,6 +95,12 @@ $installDpPath = Join-Path $RootPath 'DSC\phases\InstallDPMPClient.ps1'
 function Write-Log { param() }
 function Write-Host2 { param() }
 function Test-VmIsLinux { return $false }
+function Get-Menu2 { return $script:SelectedOperatingSystem }
+function Get-TestResult {
+    param ([switch] $SuccessOnWarning)
+    $script:PropertiesSeenByValidation = @($script:MenuVm.PSObject.Properties.Name)
+    return $true
+}
 function get-RoleForSitecode { return 'Primary' }
 function Get-List2 { param([object] $DeployConfig); return @($DeployConfig.virtualMachines) }
 function Get-ExistingSiteServer { return $null }
@@ -167,6 +174,18 @@ Assert-Equal $true $roundTrip.installDP 'Windows 11 retains the DP role'
 Assert-Equal $true $roundTrip.enablePullDP 'Windows 11 retains pull-DP configuration'
 Assert-Equal 'SOURCE' $roundTrip.pullDPSourceDP 'Windows 11 retains the pull-DP source'
 Assert-Equal 1 $script:ReplicaCleanupCalled 'Windows 11 invokes local replica cleanup before removing MP properties'
+
+$script:SelectedOperatingSystem = 'Windows 11 25H2'
+$script:MenuVm = [pscustomobject]@{
+    Role = 'SiteSystem'; operatingSystem = 'Server 2022'; installDP = $true
+    installMP = $true; installSUP = $true; installRP = $true; installSMSProv = $true
+}
+$script:PropertiesSeenByValidation = @()
+Get-OperatingSystemMenu -Property $script:MenuVm -Name 'operatingSystem' -CurrentValue 'Server 2022'
+Assert-Equal 'Windows 11 25H2' $script:MenuVm.operatingSystem 'OS picker accepts Windows 11 for a SiteSystem'
+Assert-PropertiesAbsent $script:MenuVm $serverRoleProperties 'OS picker removes server-only roles before returning'
+$rolesSeenAtValidation = @($serverRoleProperties | Where-Object { $script:PropertiesSeenByValidation -contains $_ })
+Assert-Equal '' ($rolesSeenAtValidation -join ',') 'OS picker validates only after SiteSystem role normalization'
 
 $roundTrip.operatingSystem = 'Server 2022'
 Set-SiteSystemPropertiesForOperatingSystem -VirtualMachine $roundTrip
