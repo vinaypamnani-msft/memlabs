@@ -257,6 +257,8 @@ $sqlResult = [pscustomobject]@{ Failures = 0; Messages = New-Object System.Colle
 Test-ValidRoleSiteSystem -VM $sqlClient -ReturnObject $sqlResult
 Assert-Equal 1 $sqlResult.Failures 'validator rejects SQL on a Windows 11 SiteSystem'
 Assert-Equal $true ($sqlResult.Messages[0] -like '*SQL installation requires Windows Server*') 'SQL validation explains the Server OS requirement'
+$validationText = Get-Content -LiteralPath $validationPath -Raw
+Assert-Equal $true $validationText.Contains('if (-not (Test-SiteSystemClientOperatingSystem -VirtualMachine $vm))') 'global SQL validation suppresses the duplicate generic client-OS warning'
 
 $configLines = @(Get-Content -LiteralPath $configPath)
 foreach ($guard in @(

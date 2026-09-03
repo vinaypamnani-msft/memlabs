@@ -1936,8 +1936,14 @@ function Test-Configuration {
                     Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] does not contain a supported sqlVersion [$($vm.sqlVersion)]." -ReturnObject $return -Failure
                 }
 
-                # Server OS
-                Test-ValidVmServerOS -VM $vm -ReturnObject $return
+                # Client-OS SiteSystems have a dedicated SQL failure in
+                # Test-ValidRoleSiteSystem. Do not add the older generic Server-OS
+                # warning as a second error; it obscures the actionable reason and
+                # was the only message surfaced by GenConfig after a stale Add SQL
+                # action. Every other SQL host still requires a Server OS here.
+                if (-not (Test-SiteSystemClientOperatingSystem -VirtualMachine $vm)) {
+                    Test-ValidVmServerOS -VM $vm -ReturnObject $return
+                }
 
                 # sqlInstance dir
                 Test-ValidVmPath -VM $vm -PathProperty "sqlInstanceDir" -ValidPathExample "F:\SQL" -ReturnObject $return
