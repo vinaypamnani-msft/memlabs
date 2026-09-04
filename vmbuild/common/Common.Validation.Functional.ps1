@@ -11613,6 +11613,11 @@ function Test-CMSiteWideFunctionality {
     # and another with false.
     $expectedAppNames = @()
     $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    # Resolve this independently of Get-UserConfiguration. If a symbolic alias
+    # ever survives config loading again, querying SMS_CM_UpdatePackages for the
+    # literal name "Configuration Manager current-branch" returns zero rows and
+    # the deliberately conservative zero-row path can only report NOT measured.
+    $effectiveCmVersion = Resolve-CmVersionAlias -Version ([string]$effectiveCmOptions.version)
     $prePopulate = [bool]$effectiveCmOptions.PrePopulateObjects
 
     # OfflineSUP deployments deliberately skip subscribing any products /
@@ -13517,7 +13522,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     # braced form -- $function:Invoke-TftpReadProbe is a parse error.
     $tftpProbeText = "function Invoke-TftpReadProbe { $(${function:Invoke-TftpReadProbe}) }"
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, ([string]$effectiveCmOptions.version) `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
