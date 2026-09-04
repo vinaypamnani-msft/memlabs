@@ -146,6 +146,53 @@ function Get-ConfigCmOptions {
     return $null
 }
 
+# Resolves a symbolic ConfigMgr media choice to the concrete version used by
+# deployment and validation. Explicit numeric targets pass through unchanged.
+function Resolve-CmVersionAlias {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Version
+    )
+
+    if ($Version -eq 'current-branch') {
+        return Get-CMLatestBaselineVersion
+    }
+    return $Version
+}
+
+# Resolves symbolic ConfigMgr media choices before cmOptions is copied or
+# rehydrated for deployment.  Historically current-branch lived only at the
+# config root, but modern GenConfig files may also carry an authoritative copy
+# on the top-level site server (and resolved copies on other site-role VMs).
+# Every copy must be normalized or Resolve-VmCmOptions can return the symbolic
+# value and select the stale web baseline instead of the latest shipped media.
+function Resolve-ConfigCmVersionAliases {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+
+    $cmOptionsBlocks = @()
+    if ($Config.cmOptions) {
+        $cmOptionsBlocks += $Config.cmOptions
+    }
+    foreach ($vm in @($Config.virtualMachines)) {
+        if ($vm.cmOptions) {
+            $cmOptionsBlocks += $vm.cmOptions
+        }
+    }
+
+    $aliases = @($cmOptionsBlocks | Where-Object { $_.Version -eq 'current-branch' })
+    if ($aliases.Count -eq 0) { return }
+
+    $latestBaseline = Resolve-CmVersionAlias -Version 'current-branch'
+    foreach ($cmOptions in $aliases) {
+        $cmOptions.Version = $latestBaseline
+    }
+}
+
 # Resolves the cmOptions block that should apply to a given VM, by walking up
 # its hierarchy to the top-level site server (CAS or standalone Primary) that
 # owns the canonical block. Returns $null when the VM has no hierarchy
@@ -701,11 +748,7 @@ function Get-UserConfiguration {
             }
         }
 
-        if ($null -ne $config.cmOptions.Version) {
-            if ($config.cmOptions.Version -eq "current-branch") {
-                $config.cmOptions.Version = Get-CMLatestBaselineVersion
-            }
-        }
+        Resolve-ConfigCmVersionAliases -Config $config
 
         if ($null -ne $config.cmOptions.updateToLatest ) {
             if ($config.cmOptions.updateToLatest -eq $true) {
