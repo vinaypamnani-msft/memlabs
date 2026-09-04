@@ -1368,7 +1368,9 @@ function Add-NewVMForRole {
                 $newCmOptions = $existingTopLevel.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
             }
             else {
-                $latestVersion = Get-CMLatestBaselineVersion
+                # domainDefaults is a hint only. This is the one valid time to
+                # consume it: the new top-level VM has no actual cmOptions yet.
+                $latestVersion = Get-CmVersionWithHintFallback -DomainDefaults $ConfigToModify.domainDefaults -FallbackVersion (Get-CMLatestBaselineVersion)
                 $newCmOptions = [PSCustomObject]@{
                     Version                   = $latestVersion
                     Install                   = $true

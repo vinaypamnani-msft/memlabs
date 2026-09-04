@@ -59,7 +59,9 @@ function Invoke-CMOptionsMenuForVM {
         [object] $VM
     )
     if ($null -eq $VM.cmOptions) {
-        $latestVersion = Get-CMLatestBaselineVersion
+        # A domain default may seed a missing actual block, but never replaces
+        # an existing per-VM selection.
+        $latestVersion = Get-CmVersionWithHintFallback -DomainDefaults $Global:Config.domainDefaults -FallbackVersion (Get-CMLatestBaselineVersion)
         $defaults = [PSCustomObject]@{
             Version                   = $latestVersion
             Install                   = $true
