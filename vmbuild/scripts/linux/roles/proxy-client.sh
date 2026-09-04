@@ -26,7 +26,8 @@ END_MARK="# <<< memlabs-proxy <<<"
 # Replace any prior memlabs-managed block, then append the current one.
 # systemd services and PAM sessions read /etc/environment at startup/login.
 touch /etc/environment
-sed -i "\#${BEGIN_MARK}#,\#${END_MARK}#d" /etc/environment
+# Use | as sed's alternate address delimiter because each marker starts with #.
+sed -i "\|^${BEGIN_MARK}$|,\|^${END_MARK}$|d" /etc/environment
 {
     echo "${BEGIN_MARK}"
     echo "http_proxy=\"${PROXY_URL}\""
