@@ -128,21 +128,40 @@ done
 systemctl daemon-reload
 
 # ── Essential services must still be enabled ─────────────────────────────
-# A trim that silently disables sshd bricks the lab: there is no other way in,
-# and it would not be noticed until a deployment fails hours later. Fail the
-# bake here instead.
+# A trim that silently disables sshd bricks the lab: there is no other way in.
+# At this point, however, current Ubuntu images may legitimately have
+# ssh.service disabled while ssh.socket owns the live TCP/22 listener. Step 11
+# immediately converts that transitional state to the always-enabled service
+# and masks the socket. Requiring ssh.service to be enabled here rejects a
+# reachable image before the step designed to normalize it can run. Prove the
+# listener is live here; Step 11 and validate-boot-optimizations prove the
+# persistent ssh.service end state.
 #
 # Only units that exist at THIS point in the bake are asserted. This step runs
 # after the Desktop block, so gdm3/NetworkManager/xrdp are present on Desktop --
 # but memlabs-dhcp-watchdog is created by step 04 which also already ran.
 echo "=== Verifying essentials survived the trim ==="
-ESSENTIAL="ssh.service hv-kvp-daemon.service qemu-guest-agent.service smbd.service memlabs-dhcp-watchdog.service"
+ssh_service_state="$(systemctl is-enabled ssh.service 2>/dev/null || true)"
+ssh_socket_state="$(systemctl is-enabled ssh.socket 2>/dev/null || true)"
+[ -n "$ssh_service_state" ] || ssh_service_state="not-found"
+[ -n "$ssh_socket_state" ] || ssh_socket_state="not-found"
+printf '  %-42s %s\n' "ssh.service" "$ssh_service_state"
+printf '  %-42s %s\n' "ssh.socket" "$ssh_socket_state"
+BROKEN=""
+if ss -H -ltn 'sport = :22' 2>/dev/null | grep -q .; then
+    printf '  %-42s %s\n' "TCP/22 listener" "LISTENING (Step 11 will pin ssh.service)"
+else
+    printf '  %-42s %s\n' "TCP/22 listener" "MISSING"
+    BROKEN=" ssh transport (no TCP/22 listener)"
+fi
+
+ESSENTIAL="hv-kvp-daemon.service qemu-guest-agent.service smbd.service memlabs-dhcp-watchdog.service"
 if [ "$VARIANT" = "Desktop" ]; then
     ESSENTIAL="$ESSENTIAL gdm3.service NetworkManager.service xrdp.service"
 fi
-BROKEN=""
 for u in $ESSENTIAL; do
-    state="$(systemctl is-enabled "$u" 2>/dev/null || echo 'not-found')"
+    state="$(systemctl is-enabled "$u" 2>/dev/null || true)"
+    [ -n "$state" ] || state="not-found"
     printf '  %-42s %s\n' "$u" "$state"
     case "$state" in
         enabled|enabled-runtime|static|indirect|alias|generated) ;;
