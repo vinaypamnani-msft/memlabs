@@ -153,6 +153,63 @@ function Write-DownloadFileHashSidecar {
     }
 }
 
+function Initialize-AdkBundleWorkspace {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string[]] $BootstrapperPaths,
+        [Parameter(Mandatory)]
+        [string] $FingerprintPath,
+        [Parameter(Mandatory)]
+        [string[]] $CachePaths
+    )
+
+    $hashes = New-Object System.Collections.Generic.List[string]
+    foreach ($path in $BootstrapperPaths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "ADK bundle fingerprint cannot read missing bootstrapper: $path"
+        }
+        $file = Get-Item -LiteralPath $path -ErrorAction Stop
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        $hashes.Add("$($file.Name)|$($file.Length)|$hash")
+    }
+    $fingerprint = $hashes -join ';'
+
+    $previousFingerprint = ''
+    if (Test-Path -LiteralPath $FingerprintPath -PathType Leaf) {
+        try { $previousFingerprint = (Get-Content -LiteralPath $FingerprintPath -Raw -ErrorAction Stop).Trim() } catch {}
+    }
+    if ($previousFingerprint -eq $fingerprint) {
+        return [pscustomobject]@{ Changed = $false; Removed = @(); Fingerprint = $fingerprint }
+    }
+
+    # Burn checks its local source paths before downloading. Files from a previous
+    # ADK release can have the same names and lengths but different hashes, causing
+    # CRYPT_E_HASH_VALUE forever after a catalog upgrade. A missing marker is also
+    # treated as an upgrade so machines carrying pre-marker recovery files self-heal.
+    $removed = New-Object System.Collections.Generic.List[string]
+    foreach ($cachePath in $CachePaths) {
+        if (-not (Test-Path -LiteralPath $cachePath)) { continue }
+        Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction Stop
+        $removed.Add($cachePath)
+    }
+
+    $fingerprintDirectory = Split-Path -Path $FingerprintPath -Parent
+    if ($fingerprintDirectory -and -not (Test-Path -LiteralPath $fingerprintDirectory -PathType Container)) {
+        $null = New-Item -ItemType Directory -Path $fingerprintDirectory -Force -ErrorAction Stop
+    }
+    $temporaryFingerprint = "$FingerprintPath.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [System.IO.File]::WriteAllText($temporaryFingerprint, $fingerprint)
+        Move-Item -LiteralPath $temporaryFingerprint -Destination $FingerprintPath -Force -ErrorAction Stop
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryFingerprint -Force -ErrorAction SilentlyContinue
+    }
+
+    return [pscustomobject]@{ Changed = $true; Removed = @($removed); Fingerprint = $fingerprint }
+}
+
 
 function Invoke-DownloadFile {
     param(
@@ -788,6 +845,21 @@ class InstallADK {
         # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
         Invoke-DownloadFile $_ADKWinPEDownloadPath $_adkWinPEpath        
 
+        $deptoolsLayout = 'C:\temp\adk-layout-deptools'
+        $winpeLayout = 'C:\temp\adk-layout-winpe'
+        $bundleState = Initialize-AdkBundleWorkspace `
+            -BootstrapperPaths @($_adkpath, $_adkWinPEpath) `
+            -FingerprintPath 'C:\temp\.memlabs-adk-bundle-fingerprint' `
+            -CachePaths @('C:\temp\Installers', $deptoolsLayout, $winpeLayout)
+        if ($bundleState.Changed) {
+            if ($bundleState.Removed.Count -gt 0) {
+                Write-Status ("ADK bootstrapper pair changed (or predates bundle tracking); removed incompatible payload/layout cache(s): {0}" -f ($bundleState.Removed -join '; '))
+            }
+            else {
+                Write-Status 'ADK bootstrapper pair fingerprint initialized; no old payload/layout caches were present.'
+            }
+        }
+
         # Local helper: invoke adksetup with a dedicated log file, check
         # exit code, and surface the real failure on error.
         #
@@ -801,6 +873,7 @@ class InstallADK {
         # cause -- which package failed, MSI return, missing prereq, etc.
         $invokeAdk = {
             param($exe, [string[]]$argv, $label)
+            $stagedCount = 0
             $logDir = 'C:\staging\DSC\ADKSetupLogs'
             if (-not (Test-Path -LiteralPath $logDir -PathType Container)) {
                 $null = New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop
@@ -979,6 +1052,7 @@ class InstallADK {
                                                             if ((Test-Path -LiteralPath $localPath) -and (Get-Item -LiteralPath $localPath).Length -gt 0) {
                                                                 $sz = (Get-Item -LiteralPath $localPath).Length
                                                                 Write-Status ("  pre-stage: OK ({0:N0} bytes) -> $localPath" -f $sz)
+                                                                $stagedCount++
                                                                 $staged = $true
                                                                 break baseLoop
                                                             }
@@ -1009,7 +1083,10 @@ class InstallADK {
             if ($run.TimedOut) {
                 throw "ADK $label setup exceeded the 90-minute hard cap and its process tree was terminated. Burn log: $logFile. Timeout diagnostic: $($run.DiagnosticPath)"
             }
-            return $code
+            return [pscustomobject]@{
+                ExitCode    = $code
+                StagedCount = $stagedCount
+            }
         }
 
         # Install routine: prefer direct /quiet /features (only fetches
@@ -1025,7 +1102,8 @@ class InstallADK {
         # Documentation MSI was a known casualty -- retired by MS without
         # a corresponding bundle refresh). That's why direct goes first.
         $runAdkInstall = {
-            param($exe, [string[]]$features, $label, $layoutDir, $maxAttempts, [string[]]$verifyPaths)
+            param($exe, [string[]]$features, $label, $layoutDir, $maxAttempts, [string[]]$verifyPaths,
+                  $retryDelaySeconds = 5, $maxRecoveryPasses = 64)
 
             # Helper: adksetup sometimes exits 0 in a few seconds without
             # actually installing anything (e.g. another bundle instance
@@ -1049,13 +1127,18 @@ class InstallADK {
             }
 
             $attempt = 0
+            $noProgressAttempts = 0
             $lastExit = -1
-            while ($attempt -lt $maxAttempts) {
+            while ($noProgressAttempts -lt $maxAttempts) {
                 $attempt++
-                Write-Status "ADK $label install... (attempt $attempt/$maxAttempts, mode=direct)"
+                if ($attempt -gt $maxRecoveryPasses) {
+                    throw "ADK $label setup exceeded the $maxRecoveryPasses-pass dead-link recovery safety cap while payload staging was still making progress."
+                }
+                Write-Status "ADK $label install... (direct pass $attempt, no-progress failures $noProgressAttempts/$maxAttempts)"
                 try {
                     $directArgs = @('/quiet','/features') + $features
-                    $lastExit = & $invokeAdk $exe $directArgs $label
+                    $invokeResult = & $invokeAdk $exe $directArgs $label
+                    $lastExit = [int] $invokeResult.ExitCode
                 }
                 catch {
                     $ErrorMessage = $_.Exception.Message
@@ -1072,25 +1155,35 @@ class InstallADK {
                     # uninstall to clear the stale provider key, then retry.
                     Write-Status "ADK $label : running /uninstall /quiet to clear stale Burn registration before retry."
                     try {
-                        $uninstallExit = & $invokeAdk $exe @('/uninstall','/quiet') ("$label-uninstall")
+                        $uninstallResult = & $invokeAdk $exe @('/uninstall','/quiet') ("$label-uninstall")
+                        $uninstallExit = [int] $uninstallResult.ExitCode
                         Write-Status "ADK $label : /uninstall returned $uninstallExit."
                     } catch {
                         Write-Status "ADK $label : /uninstall threw: $($_.Exception.Message) (continuing to retry install)"
                     }
                     $lastExit = -2
                 }
-                Write-Status "ADK $label : adksetup exited $lastExit; will retry after backoff."
-                Start-Sleep -Seconds 5
+                if ($invokeResult.StagedCount -gt 0) {
+                    $noProgressAttempts = 0
+                    Write-Status "ADK $label : adksetup exited $lastExit after pre-staging $($invokeResult.StagedCount) missing payload(s); continuing without consuming the no-progress retry budget."
+                }
+                else {
+                    $noProgressAttempts++
+                    Write-Status "ADK $label : adksetup exited $lastExit without staging a new payload (no-progress failure $noProgressAttempts/$maxAttempts)."
+                }
+                if ($retryDelaySeconds -gt 0) { Start-Sleep -Seconds $retryDelaySeconds }
             }
 
-            # Direct path exhausted. Last-resort: try /layout + offline install.
-            Write-Status "ADK $label : all $maxAttempts direct attempts failed (last exit $lastExit). Falling back to /layout + offline install."
+            # Direct path exhausted after consecutive failures that made no recovery
+            # progress. Last-resort: try /layout + offline install.
+            Write-Status "ADK $label : $maxAttempts consecutive direct attempts made no recovery progress (last exit $lastExit). Falling back to /layout + offline install."
             try {
                 if (!(Test-Path $layoutDir)) {
                     New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
                 }
                 $layoutArgs = @('/quiet','/layout',$layoutDir)
-                $layoutExit = & $invokeAdk $exe $layoutArgs ("$label-layout")
+                $layoutResult = & $invokeAdk $exe $layoutArgs ("$label-layout")
+                $layoutExit = [int] $layoutResult.ExitCode
                 if ($layoutExit -ne 0 -and $layoutExit -ne 3010) {
                     Write-Status "ADK $label : /layout fallback failed with exit $layoutExit. Giving up."
                     return $layoutExit
@@ -1104,7 +1197,8 @@ class InstallADK {
                     return 1
                 }
                 $offlineArgs = @('/quiet','/features') + $features
-                $offlineExit = & $invokeAdk $localExe $offlineArgs ("$label-offline")
+                $offlineResult = & $invokeAdk $localExe $offlineArgs ("$label-offline")
+                $offlineExit = [int] $offlineResult.ExitCode
                 if (($offlineExit -eq 0 -or $offlineExit -eq 3010) -and -not (& $verifyInstall)) {
                     Write-Status "ADK $label : offline install reported success but expected paths still missing. Giving up."
                     return -2
@@ -1124,10 +1218,9 @@ class InstallADK {
         $adkinstallpath2 = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool"
         Write-Status "ADK [1/2]: installing DeploymentTools + UserStateMigrationTool (first of two adksetup runs)"
         $deptoolsFeatures = @('OptionId.DeploymentTools','OptionId.UserStateMigrationTool')
-        $deptoolsLayout = 'C:\temp\adk-layout-deptools'
         $lastExit = & $runAdkInstall $_adkpath $deptoolsFeatures "deptools" $deptoolsLayout $maxAttempts @($adkinstallpath, $adkinstallpath2)
         if (!(Test-Path $adkinstallpath) -or !(Test-Path $adkinstallpath2)) {
-            throw ("ADK DeploymentTools/UserStateMigrationTool install failed (last exit code $lastExit, $maxAttempts direct attempts + layout fallback exhausted). Paths missing: " +
+            throw ("ADK DeploymentTools/UserStateMigrationTool install failed (last exit code $lastExit, direct recovery + layout fallback exhausted). Paths missing: " +
                    (@($adkinstallpath, $adkinstallpath2) | Where-Object { -not (Test-Path $_) }) -join '; ')
         }
         Write-Status "ADK [1/2] DeploymentTools + UserStateMigrationTool installed successfully. Starting [2/2] WinPE addon..."
@@ -1136,7 +1229,6 @@ class InstallADK {
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment"
         Write-Status "ADK [2/2]: installing WinPE addon to $adkinstallpath (separate ~1.5GB download, typically 3-5 min on a healthy link)"
         $winpeFeatures = @('OptionId.WindowsPreinstallationEnvironment')
-        $winpeLayout = 'C:\temp\adk-layout-winpe'
         $lastExit = & $runAdkInstall $_adkWinPEpath $winpeFeatures "winpe" $winpeLayout $maxAttempts @($adkinstallpath)
         if (!(Test-Path $adkinstallpath)) {
             throw "ADK WinPE addon install failed (last exit code $lastExit, $maxAttempts direct attempts + layout fallback exhausted). Path missing: $adkinstallpath"

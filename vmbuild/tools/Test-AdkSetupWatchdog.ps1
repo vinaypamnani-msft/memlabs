@@ -75,7 +75,7 @@ if ($realParseErrors.Count -gt 0) {
     exit 2
 }
 
-$wanted = @('Get-AdkProcessTree', 'Stop-AdkProcessTree', 'Invoke-AdkSetupProcess')
+$wanted = @('Initialize-AdkBundleWorkspace', 'Get-AdkProcessTree', 'Stop-AdkProcessTree', 'Invoke-AdkSetupProcess')
 $loaded = New-Object System.Collections.Generic.List[string]
 foreach ($node in $ast.FindAll({ param($candidate) $candidate -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
     if ($wanted -notcontains $node.Name) { continue }
@@ -92,6 +92,7 @@ $moduleText = [System.IO.File]::ReadAllText($sourcePath)
 $collectorText = [System.IO.File]::ReadAllText($collectorSourcePath)
 Assert-Match $moduleText 'Invoke-AdkSetupProcess[\s\S]+-TimeoutSeconds 5400' 'InstallADK invokes the watchdog with a 90-minute hard cap'
 Assert-Match $moduleText 'C:\\staging\\DSC\\ADKSetupLogs' 'Burn logs are written to the durable DSC staging tree'
+Assert-Match $moduleText 'StagedCount\s*=\s*\$stagedCount' 'ADK invocation reports successful dead-link payload staging'
 Assert-Match $collectorText "Mode -eq 'Failure'[\s\S]+ADKSetupLogs" 'failure collector reads staged ADK artifacts'
 Assert-Match $collectorText 'Pulled ADK diagnostic' 'collector reports each ADK artifact copied to the host'
 
@@ -114,6 +115,88 @@ Write-Host "engine    : $($PSVersionTable.PSVersion)"
 Write-Host "module    : $sourcePath"
 Write-Host "collector : $collectorSourcePath"
 Write-Host ''
+
+$fingerprintTestDir = Join-Path ([System.IO.Path]::GetTempPath()) ('adk-fingerprint-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $fingerprintTestDir
+try {
+    $adk = Join-Path $fingerprintTestDir 'adksetup.exe'
+    $winpe = Join-Path $fingerprintTestDir 'adkwinpesetup.exe'
+    $marker = Join-Path $fingerprintTestDir '.memlabs-adk-bundle-fingerprint'
+    $payloads = Join-Path $fingerprintTestDir 'Installers'
+    $layout = Join-Path $fingerprintTestDir 'adk-layout-deptools'
+    [System.IO.File]::WriteAllText($adk, 'bundle-v1')
+    [System.IO.File]::WriteAllText($winpe, 'winpe-v1')
+    $null = New-Item -ItemType Directory -Path $payloads, $layout
+    [System.IO.File]::WriteAllText((Join-Path $payloads 'same-name.msi'), 'old-release-content')
+
+    $first = Initialize-AdkBundleWorkspace -BootstrapperPaths @($adk, $winpe) -FingerprintPath $marker -CachePaths @($payloads, $layout)
+    Assert-Equal $true $first.Changed 'first fingerprint adoption treats untracked payloads as stale'
+    Assert-Equal $false (Test-Path -LiteralPath $payloads) 'first fingerprint adoption removes pre-marker payloads'
+    Assert-Equal $false (Test-Path -LiteralPath $layout) 'first fingerprint adoption removes pre-marker layout'
+
+    $null = New-Item -ItemType Directory -Path $payloads, $layout
+    $retryPayload = Join-Path $payloads 'recovery-progress.cab'
+    [System.IO.File]::WriteAllText($retryPayload, 'keep-for-same-bundle-retry')
+    $same = Initialize-AdkBundleWorkspace -BootstrapperPaths @($adk, $winpe) -FingerprintPath $marker -CachePaths @($payloads, $layout)
+    Assert-Equal $false $same.Changed 'same bootstrapper pair retains its recovery workspace'
+    Assert-Equal $true (Test-Path -LiteralPath $retryPayload) 'same-bundle retry preserves staged recovery payloads'
+
+    [System.IO.File]::WriteAllText($adk, 'bundle-v2')
+    $upgrade = Initialize-AdkBundleWorkspace -BootstrapperPaths @($adk, $winpe) -FingerprintPath $marker -CachePaths @($payloads, $layout)
+    Assert-Equal $true $upgrade.Changed 'changed bootstrapper content is detected as an upgrade'
+    Assert-Equal $false (Test-Path -LiteralPath $payloads) 'upgrade removes same-name payloads from the previous release'
+    Assert-Equal $false (Test-Path -LiteralPath $layout) 'upgrade removes the previous release layout'
+}
+finally {
+    Remove-Item -LiteralPath $fingerprintTestDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$runAdkAssignments = @($ast.FindAll({
+            param($candidate)
+            $candidate -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $candidate.Left.Extent.Text -eq '$runAdkInstall'
+        }, $true))
+if ($runAdkAssignments.Count -ne 1) {
+    Write-Host "SETUP FAIL: expected one runAdkInstall assignment, found $($runAdkAssignments.Count)" -ForegroundColor Red
+    exit 2
+}
+$runAdkFactory = [scriptblock]::Create($runAdkAssignments[0].Right.Extent.Text)
+$runAdkInstall = & $runAdkFactory
+$script:RecoveryCalls = 0
+$invokeAdk = {
+    param($exe, [string[]]$argv, $label)
+    $script:RecoveryCalls++
+    if ($script:RecoveryCalls -le 6) {
+        return [pscustomobject]@{ ExitCode = 15605; StagedCount = 1 }
+    }
+    return [pscustomobject]@{ ExitCode = 0; StagedCount = 0 }
+}
+$null = $invokeAdk # consumed dynamically by the extracted runAdkInstall script block
+$script:Statuses.Clear()
+$recoveryExit = & $runAdkInstall 'synthetic-adksetup.exe' @('SyntheticFeature') 'recovery-test' `
+    (Join-Path ([System.IO.Path]::GetTempPath()) 'unused-adk-layout') 4 @() 0 12
+Assert-Equal 0 $recoveryExit 'progress-aware recovery reaches success after more than four staged payloads'
+Assert-Equal 7 $script:RecoveryCalls 'successful staging does not consume the four-attempt no-progress budget'
+Assert-Match (@($script:Statuses) -join "`n") 'continuing without consuming the no-progress retry budget' 'recovery progress is explicit in status output'
+
+$script:RecoveryCalls = 0
+$invokeAdk = {
+    param($exe, [string[]]$argv, $label)
+    $script:RecoveryCalls++
+    if ($label -like '*-layout') { return [pscustomobject]@{ ExitCode = 99; StagedCount = 0 } }
+    return [pscustomobject]@{ ExitCode = 15605; StagedCount = 0 }
+}
+$null = $invokeAdk # consumed dynamically by the extracted runAdkInstall script block
+$noProgressLayout = Join-Path ([System.IO.Path]::GetTempPath()) ('unused-adk-layout-' + [guid]::NewGuid().ToString('N'))
+try {
+    $noProgressExit = & $runAdkInstall 'synthetic-adksetup.exe' @('SyntheticFeature') 'no-progress-test' `
+        $noProgressLayout 4 @() 0 12
+    Assert-Equal 99 $noProgressExit 'four genuine no-progress failures still enter the layout fallback'
+    Assert-Equal 5 $script:RecoveryCalls 'no-progress budget stops after four direct attempts plus one layout attempt'
+}
+finally {
+    Remove-Item -LiteralPath $noProgressLayout -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ('adk-watchdog-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $workDir
