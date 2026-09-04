@@ -54,6 +54,7 @@ $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
 $genConfigPath = Join-Path $RootPath 'common\Common.GenConfig.ps1'
 $existingPath = Join-Path $RootPath 'common\Common.GenConfig.Existing.ps1'
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdEffectiveNetwork')
+. (Import-TestFunction -Path $configPath -Name 'Get-OsdFixedRoleIPv4')
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdPxePaths')
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdBoundaryMappings')
 . (Import-TestFunction -Path $configPath -Name 'Add-ModifiedExistingVMToDeployConfig')
@@ -305,11 +306,26 @@ Assert-Equal $relayFastMenuCalls $script:MenuCalls 'valid stored relay avoids re
 
 $noRelayOptionConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }
-    virtualMachines = @([pscustomobject]@{ vmName = 'PS1'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $true })
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'PS1'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $false }
+        [pscustomobject]@{ vmName = 'DYNAMICDP'; role = 'SiteSystem'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $true }
+    )
 }
 $script:MenuResponses.Enqueue('B')
 $null = Resolve-OsdPxePathForNetwork -Network '10.0.10.0' -Config $noRelayOptionConfig
 Assert-Equal $false ($script:LastAdditionalOptions.Keys -contains 'R') 'relay option is hidden when no remote DP has a stable IPv4 address'
+
+$fixedPrimaryConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }
+    virtualMachines = @([pscustomobject]@{
+            vmName = 'PS1'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $true
+        })
+}
+$fixedPrimaryCandidates = @(Get-OsdRelayDistributionPointCandidates -Network '192.168.3.0' -Config $fixedPrimaryConfig)
+Assert-Equal 'PS1:192.168.2.10' (($fixedPrimaryCandidates | ForEach-Object { "$($_.VM.vmName):$($_.IPv4)" }) -join ',') 'new Primary is a relay target before AssignedIP is stamped'
+$script:MenuResponses.Enqueue('B')
+$null = Resolve-OsdPxePathForNetwork -Network '192.168.3.0' -Config $fixedPrimaryConfig
+Assert-Equal $true ($script:LastAdditionalOptions.Keys -contains 'R') 'missing-path menu offers relay for a deterministic new Primary target'
 
 $relayCreateConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }

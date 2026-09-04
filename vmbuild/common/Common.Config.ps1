@@ -1992,6 +1992,43 @@ function Get-OsdEffectiveNetwork {
     return "$($Config.vmOptions.network)"
 }
 
+function Get-OsdFixedRoleIPv4 {
+    <#
+    .SYNOPSIS
+    Returns the deterministic pre-deploy IPv4 for a fixed-address ConfigMgr
+    site-server role, or null for dynamically addressed roles.
+
+    .DESCRIPTION
+    GenConfig runs before Set-DeployConfigIPAddresses, so a newly authored
+    Primary that will be x.x.x.10 has no AssignedIP yet. Without this shared
+    derivation the relay option disappears even though the target address is
+    deterministic. The resolver also adds this value beside live sources so a
+    disagreement fails closed rather than silently preferring either value.
+    #>
+    param (
+        [Parameter(Mandatory = $true)] [object] $VM,
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    $octet = $null
+    switch ("$($VM.role)") {
+        'CAS'       { $octet = 5 }
+        'Primary'   { $octet = 10 }
+        'Secondary' { $octet = 15 }
+        default     { return $null }
+    }
+
+    $network = Get-OsdEffectiveNetwork -VM $VM -Config $Config
+    $parsedNetwork = $null
+    if (-not [System.Net.IPAddress]::TryParse("$network", [ref]$parsedNetwork) -or
+        $parsedNetwork.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return $null
+    }
+    $bytes = $parsedNetwork.GetAddressBytes()
+    if ($bytes[3] -ne 0) { return $null }
+    return "$($bytes[0]).$($bytes[1]).$($bytes[2]).$octet"
+}
+
 function Get-OsdPxePaths {
     <#
     .SYNOPSIS
@@ -2174,6 +2211,7 @@ function Get-OsdPxePaths {
             if ($targetDp.thisParams) {
                 $targetIpValues += @($targetDp.thisParams.AssignedIP, $targetDp.thisParams.IPv4Address)
             }
+            $targetIpValues += Get-OsdFixedRoleIPv4 -VM $targetDp -Config $Config
             if (-not $inventoryWasSupplied -and $targetNetwork) {
                 try {
                     $targetHostVm = Get-VM2 -Name $targetDp.vmName -ErrorAction Stop

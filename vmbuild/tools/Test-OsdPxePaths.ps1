@@ -108,6 +108,7 @@ function New-Relay {
 
 $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdEffectiveNetwork')
+. (Import-TestFunction -Path $configPath -Name 'Get-OsdFixedRoleIPv4')
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdPxePaths')
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdBoundaryMappings')
 
@@ -138,6 +139,12 @@ $relay = New-Relay
 $config = New-TestConfig -VMs @((New-OsdClient), $remoteDp, $relay)
 $paths = @(Get-OsdPxePaths -Config $config -Inventory $config.virtualMachines)
 Assert-Equal 'Relay:RELAY1:192.168.3.4:DP1:192.168.1.25' "$($paths[0].mode):$($paths[0].relayVM):$($paths[0].relayIPv4):$($paths[0].distributionPointVM):$($paths[0].distributionPointIPv4)" 'valid mapping resolves relay and target metadata'
+
+$newPrimary = [pscustomobject]@{ vmName = 'NEWPRI'; role = 'Primary'; siteCode = 'N01'; network = '192.168.9.0'; installDP = $true }
+$newPrimaryRelay = New-Relay -Target 'NEWPRI'
+$config = New-TestConfig -VMs @((New-OsdClient), $newPrimary, $newPrimaryRelay)
+$paths = @(Get-OsdPxePaths -Config $config -Inventory $config.virtualMachines)
+Assert-Equal 'Relay:192.168.9.10' "$($paths[0].mode):$($paths[0].distributionPointIPv4)" 'new fixed-address Primary resolves before AssignedIP exists'
 
 $localDp = New-Dp -Name 'LOCALDP' -Network '192.168.3.0'
 $config = New-TestConfig -VMs @((New-OsdClient), $remoteDp, $localDp, $relay)

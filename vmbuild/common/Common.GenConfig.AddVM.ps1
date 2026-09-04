@@ -129,7 +129,6 @@ function Get-OsdRelayDistributionPointCandidates {
         if (-not $candidate -or -not $candidate.vmName) { continue }
         $key = "$($candidate.vmName)".ToLowerInvariant()
         if ($seen.ContainsKey($key)) { continue }
-        $seen[$key] = $true
         if (-not ($candidate.installDP -eq $true -or $candidate.enablePullDP -eq $true)) { continue }
         if ([string]::IsNullOrWhiteSpace("$($candidate.siteCode)")) { continue }
         $candidateNetwork = Get-OsdEffectiveNetwork -VM $candidate -Config $Config
@@ -139,6 +138,7 @@ function Get-OsdRelayDistributionPointCandidates {
         if ($candidate.thisParams) {
             $ipValues += @($candidate.thisParams.AssignedIP, $candidate.thisParams.IPv4Address)
         }
+        $ipValues += Get-OsdFixedRoleIPv4 -VM $candidate -Config $Config
         $ipValues = @($ipValues | ForEach-Object {
                 $candidateIp = "$_" -replace '/\d+$', ''
                 $parsedCandidateIp = $null
@@ -149,6 +149,10 @@ function Get-OsdRelayDistributionPointCandidates {
             } | Select-Object -Unique)
         if ($ipValues.Count -ne 1) { continue }
 
+        # Mark a name seen only after one representation is complete. A stale
+        # cache object lacking IP/site metadata must not hide a richer config
+        # or VM-note representation of the same DP later in the source list.
+        $seen[$key] = $true
         [pscustomobject]@{
             VM = $candidate
             Network = "$candidateNetwork"
@@ -262,7 +266,7 @@ function Resolve-OsdPxePathForNetwork {
             'HD' = 'Uses the existing DP promotion and DP-only VM workflow'
         }
         if ($relayCandidates.Count -gt 0) {
-            $additionalOptions['R'] = 'Relay PXE to an existing remote Distribution Point'
+            $additionalOptions['R'] = 'Install or update a DHCP relay VM and relay PXE to a remote Distribution Point'
             $additionalOptions['HR'] = 'Uses one dedicated Ubuntu relay VM; Windows DHCP remains on the host'
         }
         $additionalOptions['B'] = 'Choose a different subnet'
