@@ -2267,7 +2267,12 @@ function Test-Configuration {
                     Add-ValidationMessage -Message "OSDClient Validation: subnet [$($path.clientNetwork)] has an invalid PXE topology: $($path.reason)." -ReturnObject $return -Failure
                 }
                 elseif ($path.mode -eq 'Relay' -and -not $path.distributionPointIPv4) {
-                    Add-ValidationMessage -Message "OSDClient Validation: relay path [$($path.clientNetwork)] -> [$($path.relayVM)] -> [$($path.distributionPointVM)] has no agreed stable target IPv4 address. Assign/preallocate the target DP address before deployment." -ReturnObject $return -Failure
+                    $pendingTarget = $deployConfig.virtualMachines | Where-Object {
+                        $_.vmName -eq $path.distributionPointVM -and -not $_.hidden
+                    } | Select-Object -First 1
+                    if (-not $pendingTarget) {
+                        Add-ValidationMessage -Message "OSDClient Validation: relay path [$($path.clientNetwork)] -> [$($path.relayVM)] -> [$($path.distributionPointVM)] has no agreed stable target IPv4 address." -ReturnObject $return -Failure
+                    }
                 }
                 elseif ($path.mode -eq 'Relay') {
                     try {

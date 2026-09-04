@@ -147,17 +147,25 @@ function Get-OsdRelayDistributionPointCandidates {
                     $parsedCandidateIp.IPAddressToString
                 }
             } | Select-Object -Unique)
-        if ($ipValues.Count -ne 1) { continue }
+        $configuredNewDp = $Config.virtualMachines | Where-Object {
+            $_.vmName -eq $candidate.vmName -and -not $_.hidden
+        } | Select-Object -First 1
+        if ($ipValues.Count -gt 1) { continue }
+        if ($ipValues.Count -eq 0 -and -not $configuredNewDp) { continue }
 
         # Mark a name seen only after one representation is complete. A stale
         # cache object lacking IP/site metadata must not hide a richer config
         # or VM-note representation of the same DP later in the source list.
         $seen[$key] = $true
+        $candidateForSelection = if ($configuredNewDp) { $configuredNewDp } else { $candidate }
+        $candidateIp = $null
+        if ($ipValues.Count -eq 1) { $candidateIp = "$($ipValues[0])" }
         [pscustomobject]@{
-            VM = $candidate
+            VM = $candidateForSelection
             Network = "$candidateNetwork"
             SiteCode = "$($candidate.siteCode)"
-            IPv4 = "$($ipValues[0])"
+            IPv4 = $candidateIp
+            IPv4Pending = ($ipValues.Count -eq 0)
         }
     }
 }
@@ -175,7 +183,8 @@ function Add-DhcpRelayForOsdNetwork {
         return $false
     }
     $candidateOptions = @($candidates | ForEach-Object {
-            "$($_.VM.vmName) [site $($_.SiteCode), subnet $($_.Network), $($_.IPv4)]"
+            $addressText = if ($_.IPv4Pending) { 'IP assigned during Phase 1' } else { $_.IPv4 }
+            "$($_.VM.vmName) [site $($_.SiteCode), subnet $($_.Network), $addressText]"
         })
     $selection = Get-Menu2 -MenuName "Relay PXE requests from $Network" `
         -Prompt 'Select the remote Distribution Point that will answer PXE' `
@@ -242,7 +251,8 @@ function Add-DhcpRelayForOsdNetwork {
         # hidden snapshot and resolver both succeeded.
         $sourceRelay = $global:existingMachines | Where-Object { $_.vmName -eq $relay.vmName } | Select-Object -First 1
         if ($sourceRelay) { $sourceRelay | Add-Member -MemberType NoteProperty -Name relayMappings -Value @($newMappings) -Force }
-        Write-Log "Configured OSD PXE relay: $Network -> $($relay.vmName) -> $($target.VM.vmName) ($($target.SiteCode), $($target.IPv4))." -Success
+        $targetAddressText = if ($target.IPv4Pending) { 'IPv4 pending Phase 1 allocation' } else { $target.IPv4 }
+        Write-Log "Configured OSD PXE relay: $Network -> $($relay.vmName) -> $($target.VM.vmName) ($($target.SiteCode), $targetAddressText)." -Success
         return $true
     }
     catch {

@@ -174,7 +174,13 @@ Assert-Equal 'Invalid' @(Get-OsdPxePaths -Config $config -Inventory $config.virt
 
 $addresslessDp = New-Dp -Name 'DP1' -Network '192.168.1.0'
 $config = New-TestConfig -VMs @((New-OsdClient), $addresslessDp, $relay)
-Assert-Equal 'Invalid' @(Get-OsdPxePaths -Config $config -Inventory $config.virtualMachines)[0].mode 'relay target without stable IPv4 metadata is Invalid'
+$pendingPath = @(Get-OsdPxePaths -Config $config -Inventory $config.virtualMachines)[0]
+Assert-Equal 'Relay' $pendingPath.mode 'new DPMP target may await Phase 1 stable IPv4 allocation'
+Assert-Equal $true ($pendingPath.reason -like '*pending Phase 1*') 'pending new DPMP path reports why target IPv4 is not serialized yet'
+
+$addresslessDp | Add-Member -MemberType NoteProperty -Name hidden -Value $true -Force
+$config = New-TestConfig -VMs @((New-OsdClient), $addresslessDp, $relay)
+Assert-Equal 'Invalid' @(Get-OsdPxePaths -Config $config -Inventory $config.virtualMachines)[0].mode 'existing hidden target without stable IPv4 metadata is Invalid'
 
 $invalidAddressDp = New-Dp -Name 'DP1' -Network '192.168.1.0' -AssignedIP '999.999.999.999'
 $config = New-TestConfig -VMs @((New-OsdClient), $invalidAddressDp, $relay)

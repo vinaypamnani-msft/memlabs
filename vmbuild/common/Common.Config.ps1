@@ -2234,6 +2234,12 @@ function Get-OsdPxePaths {
                 }
             }
         }
+        $invalidTargetIpv4Values = @($targetIpValues | Where-Object {
+                $rawIp = "$_" -replace '/\d+$', ''
+                if (-not ($_ -and $rawIp -match '^(\d{1,3}\.){3}\d{1,3}$')) { return $false }
+                $parsedRawIp = $null
+                return -not [System.Net.IPAddress]::TryParse($rawIp, [ref]$parsedRawIp)
+            } | ForEach-Object { "$_" } | Select-Object -Unique)
         $targetIpValues = @($targetIpValues | ForEach-Object {
                 $candidateIp = "$_" -replace '/\d+$', ''
                 $parsedCandidateIp = $null
@@ -2244,6 +2250,8 @@ function Get-OsdPxePaths {
             } | Select-Object -Unique)
         $targetKnownIp = $null
         if ($targetIpValues.Count -eq 1) { $targetKnownIp = "$($targetIpValues[0])" }
+        $targetIsPendingAllocation = [bool]($targetDp -and -not $targetDp.hidden -and
+            ($Config.virtualMachines | Where-Object { $_.vmName -eq $targetName -and -not $_.hidden } | Select-Object -First 1))
         $relayIp = $null
         if ("$clientNetwork" -match '^(\d{1,3}\.){3}0$') {
             $relayIp = "$clientNetwork" -replace '\.0$', '.4'
@@ -2255,8 +2263,9 @@ function Get-OsdPxePaths {
         elseif (-not $targetDp) { $invalidReason = "target DP '$targetName' is missing" }
         elseif (-not ($targetDp.installDP -eq $true -or $targetDp.enablePullDP -eq $true)) { $invalidReason = "target '$targetName' is not a Distribution Point" }
         elseif ([string]::IsNullOrWhiteSpace("$($targetDp.siteCode)")) { $invalidReason = "target DP '$targetName' lacks site ownership" }
+        elseif ($invalidTargetIpv4Values.Count -gt 0) { $invalidReason = "target DP '$targetName' has malformed IPv4 metadata: $($invalidTargetIpv4Values -join ', ')" }
         elseif ($targetIpValues.Count -gt 1) { $invalidReason = "target DP '$targetName' has conflicting IPv4 metadata: $($targetIpValues -join ', ')" }
-        elseif ($targetIpValues.Count -eq 0) { $invalidReason = "target DP '$targetName' has no stable IPv4 metadata" }
+        elseif ($targetIpValues.Count -eq 0 -and -not $targetIsPendingAllocation) { $invalidReason = "existing target DP '$targetName' has no stable IPv4 metadata" }
         elseif ($targetNetwork -eq $clientNetwork) { $invalidReason = "target DP '$targetName' is on the client subnet and must be used directly" }
         elseif (-not $relayIp) { $invalidReason = "client network '$clientNetwork' is not a supported /24 network ID" }
 
@@ -2285,6 +2294,8 @@ function Get-OsdPxePaths {
 
         $relayTargetIp = $null
         if ($targetKnownIp) { $relayTargetIp = $targetKnownIp }
+        $relayReason = $null
+        if ($targetIsPendingAllocation -and -not $relayTargetIp) { $relayReason = 'target IPv4 pending Phase 1 pre-allocation' }
         [pscustomobject]@{
             clientNetwork                 = "$clientNetwork"
             mode                          = 'Relay'
@@ -2294,7 +2305,7 @@ function Get-OsdPxePaths {
             distributionPointNetwork      = "$targetNetwork"
             distributionPointSiteCode     = "$($targetDp.siteCode)"
             distributionPointIPv4         = $relayTargetIp
-            reason                        = $null
+            reason                        = $relayReason
         }
     }
 }

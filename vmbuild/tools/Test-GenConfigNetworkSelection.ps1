@@ -306,10 +306,7 @@ Assert-Equal $relayFastMenuCalls $script:MenuCalls 'valid stored relay avoids re
 
 $noRelayOptionConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }
-    virtualMachines = @(
-        [pscustomobject]@{ vmName = 'PS1'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $false }
-        [pscustomobject]@{ vmName = 'DYNAMICDP'; role = 'SiteSystem'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $true }
-    )
+    virtualMachines = @([pscustomobject]@{ vmName = 'PS1'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $false })
 }
 $script:MenuResponses.Enqueue('B')
 $null = Resolve-OsdPxePathForNetwork -Network '10.0.10.0' -Config $noRelayOptionConfig
@@ -326,6 +323,19 @@ Assert-Equal 'PS1:192.168.2.10' (($fixedPrimaryCandidates | ForEach-Object { "$(
 $script:MenuResponses.Enqueue('B')
 $null = Resolve-OsdPxePathForNetwork -Network '192.168.3.0' -Config $fixedPrimaryConfig
 Assert-Equal $true ($script:LastAdditionalOptions.Keys -contains 'R') 'missing-path menu offers relay for a deterministic new Primary target'
+
+$newDpmpConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'PS1'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $false }
+        [pscustomobject]@{ vmName = 'DPMP1'; role = 'SiteSystem'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $true }
+    )
+}
+$newDpmpCandidates = @(Get-OsdRelayDistributionPointCandidates -Network '192.168.3.0' -Config $newDpmpConfig)
+Assert-Equal 'DPMP1:True' (($newDpmpCandidates | ForEach-Object { "$($_.VM.vmName):$($_.IPv4Pending)" }) -join ',') 'configured DPMP is offered with IPv4 pending Phase 1 allocation'
+$script:MenuResponses.Enqueue('B')
+$null = Resolve-OsdPxePathForNetwork -Network '192.168.3.0' -Config $newDpmpConfig
+Assert-Equal $true ($script:LastAdditionalOptions.Keys -contains 'R') 'missing-path menu offers relay when a DPMP machine is in config'
 
 $relayCreateConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }

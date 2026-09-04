@@ -1207,6 +1207,22 @@ function Start-Phase {
         }
 
         Set-DeployConfigIPAddresses -DeployConfig $deployConfig
+        # GenConfig can author a relay to a new dynamically addressed DPMP
+        # before that VM has an AssignedIP. Re-resolve immediately after the
+        # serial allocator stamps every VM so Phase 1 notes and all later
+        # phases carry the concrete, conflict-checked target address.
+        $resolvedOsdPaths = @(Get-OsdPxePaths -Config $deployConfig)
+        $deployConfig | Add-Member -MemberType NoteProperty -Name 'osdPxePaths' -Value $resolvedOsdPaths -Force
+        $unresolvedRelayPaths = @($resolvedOsdPaths | Where-Object {
+                $_.mode -eq 'Relay' -and -not $_.distributionPointIPv4
+            })
+        if ($unresolvedRelayPaths.Count -gt 0) {
+            $details = @($unresolvedRelayPaths | ForEach-Object {
+                    "$($_.clientNetwork) -> $($_.relayVM) -> $($_.distributionPointVM)"
+                }) -join '; '
+            Write-Log "[Phase 1] OSD relay target IP remained unresolved after pre-allocation: $details" -Failure
+            return $false
+        }
     }
 
     # Linux Proxy Squid install is dispatched as a per-VM job through
