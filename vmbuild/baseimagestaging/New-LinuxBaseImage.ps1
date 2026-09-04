@@ -440,5 +440,32 @@ Move-Item -Path $tempVhdx -Destination $outputVhdx -Force
 $finalSizeGB = [math]::Round((Get-Item $outputVhdx).Length / 1GB, 2)
 Write-Log "Linux base VHDX ready: $outputVhdx ($finalSizeGB GB on disk, ${DiskSizeGB}G virtual)" -Success
 
+# The MemLabs filelist validates downloadable artifacts with MD5 (not the
+# upstream image's SHA256 checked above). Compute it only after the final move
+# so the value names and covers the exact VHDX that will be uploaded. This used
+# to be a manual, easy-to-forget extra step after a successful multi-minute
+# bake. Emit both the bare value and a ready-to-paste OS entry.
+Write-Log "Computing final VHDX MD5 for the filelist (reads the full $finalSizeGB GB artifact)..." -Activity
+try {
+    $finalMd5 = (Get-FileHash -LiteralPath $outputVhdx -Algorithm MD5 -ErrorAction Stop).Hash.ToUpperInvariant()
+}
+catch {
+    Write-Log "The image was published, but its filelist MD5 could not be computed: $($_.Exception.Message)" -Failure
+    return
+}
+
+$catalogId = if ($Desktop.IsPresent) { 'Ubuntu Desktop 24.04 LTS' } else { 'Ubuntu Server 24.04 LTS' }
+$filelistEntry = [ordered]@{
+    id       = $catalogId
+    filename = "os\$VhdxFileName"
+    md5      = $finalMd5
+}
+$filelistJson = $filelistEntry | ConvertTo-Json
+Write-Log "Final VHDX MD5: $finalMd5" -Success
+Write-Log "Update the matching OS entry in vmbuild\azureFiles\_fileList_develop.json (or the release filelist):"
+foreach ($line in $filelistJson -split "`r?`n") {
+    Write-Log "    $line"
+}
+
 $timer.Stop()
 Write-Log "### DONE in $([math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds." -Success
