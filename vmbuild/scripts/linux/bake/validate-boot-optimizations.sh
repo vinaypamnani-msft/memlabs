@@ -94,7 +94,13 @@ for u in motd-news.service motd-news.timer ModemManager.service wpa_supplicant.s
          kerneloops.service apport.service avahi-daemon.service nmbd.service; do
     if systemctl list-unit-files "$u" --no-legend --no-pager 2>/dev/null | grep -q .; then
         CHECKS=$((CHECKS + 1))
-        state="$(systemctl is-enabled "$u" 2>/dev/null || echo unknown)"
+        # is-enabled prints useful non-success states such as "masked" and
+        # exits non-zero. `|| echo unknown` appended a second line, producing
+        # the impossible value "masked\nunknown" and rejecting every unit the
+        # trim correctly masked. Preserve stdout and synthesize unknown only
+        # when the command returned no state at all.
+        state="$(systemctl is-enabled "$u" 2>/dev/null || true)"
+        [ -n "$state" ] || state="unknown"
         [ "$state" = "masked" ] || fail "${u} is '${state}', expected masked"
     fi
 done
