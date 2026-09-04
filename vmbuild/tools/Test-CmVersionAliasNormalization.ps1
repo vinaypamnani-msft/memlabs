@@ -63,6 +63,8 @@ if (-not (Test-Path -LiteralPath $sourcePath)) {
     exit 2
 }
 . (Import-TestFunction -Path $sourcePath -Name 'Resolve-CmVersionAlias')
+. (Import-TestFunction -Path $sourcePath -Name 'Get-CmVersionWithHintFallback')
+. (Import-TestFunction -Path $sourcePath -Name 'Resolve-VmCmOptions')
 . (Import-TestFunction -Path $sourcePath -Name 'Resolve-ConfigCmVersionAliases')
 
 Write-Host "engine : $($PSVersionTable.PSVersion)"
@@ -73,6 +75,12 @@ Assert-Equal '2509' (Resolve-CmVersionAlias -Version 'current-branch') 'current-
 Assert-Equal '2603' (Resolve-CmVersionAlias -Version '2603') 'explicit version passes through unchanged'
 Assert-Equal 1 $script:LatestBaselineCalls 'direct alias resolution reads latest baseline once'
 $script:LatestBaselineCalls = 0
+
+$actualOptions = [pscustomobject]@{ Version = '2509' }
+$versionHint = [pscustomobject]@{ CMVersion = '2603' }
+Assert-Equal '2509' (Get-CmVersionWithHintFallback -CmOptions $actualOptions -DomainDefaults $versionHint -FallbackVersion 'current-branch') 'actual cmOptions wins over domain-default hint'
+Assert-Equal '2603' (Get-CmVersionWithHintFallback -DomainDefaults $versionHint -FallbackVersion 'current-branch') 'domain-default hint seeds a missing actual version'
+Assert-Equal 'current-branch' (Get-CmVersionWithHintFallback -FallbackVersion 'current-branch') 'fallback is used only when actual and hint are missing'
 
 $config = [pscustomobject]@{
     cmOptions       = [pscustomobject]@{ Version = 'current-branch' }
@@ -121,6 +129,25 @@ $resolveCall = 'Resolve-CmVersionAlias -Version ([string]$effectiveCmOptions.ver
 $argumentValue = '$tftpProbeText, $effectiveCmVersion `'
 Assert-Equal 1 ([regex]::Matches($validationText, [regex]::Escape($resolveCall))).Count 'Phase 11 independently resolves the configured version'
 Assert-Equal 1 ([regex]::Matches($validationText, [regex]::Escape($argumentValue))).Count 'Phase 11 passes the concrete version to the guest probe'
+
+$rdcPath = Join-Path $RootPath 'common\Common.RdcMan.ps1'
+. (Import-TestFunction -Path $rdcPath -Name 'Get-RDCManCmVersionForVM')
+$primaryOptions = [pscustomobject]@{ Version = '2503' }
+$displayPrimary = [pscustomobject]@{ vmName = 'PS1SITE'; role = 'Primary'; siteCode = 'PS1'; cmOptions = $primaryOptions }
+$displaySiteSystem = [pscustomobject]@{ vmName = 'PS1DPMP1'; role = 'SiteSystem'; siteCode = 'PS1' }
+$displayConfig = [pscustomobject]@{ virtualMachines = @($displayPrimary, $displaySiteSystem) }
+Assert-Equal 'CM2503' (Get-RDCManCmVersionForVM -VM $displayPrimary -Config $displayConfig -DomainDefaults $versionHint) 'connection label uses actual top-level cmOptions over hint'
+Assert-Equal 'CM2503' (Get-RDCManCmVersionForVM -VM $displaySiteSystem -Config $displayConfig -DomainDefaults $versionHint) 'connection label inherits actual hierarchy version over hint'
+$missingPrimary = [pscustomobject]@{ vmName = 'PS2SITE'; role = 'Primary'; siteCode = 'PS2' }
+$missingConfig = [pscustomobject]@{ virtualMachines = @($missingPrimary) }
+Assert-Equal 'CM2603' (Get-RDCManCmVersionForVM -VM $missingPrimary -Config $missingConfig -DomainDefaults $versionHint) 'connection label uses hint only when actual cmOptions is missing'
+
+$addVmText = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.GenConfig.AddVM.ps1') -Raw
+$cmMenuText = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.GenConfig.CmMenus.ps1') -Raw
+$newDomainText = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.GenConfig.NewDomain.ps1') -Raw
+Assert-Equal 1 ([regex]::Matches($addVmText, [regex]::Escape('Get-CmVersionWithHintFallback -DomainDefaults $ConfigToModify.domainDefaults'))).Count 'new top-level VM consumes version hint only while creating missing cmOptions'
+Assert-Equal 1 ([regex]::Matches($cmMenuText, [regex]::Escape('Get-CmVersionWithHintFallback -DomainDefaults $Global:Config.domainDefaults'))).Count 'lazy CM menu initialization consumes hint only when cmOptions is missing'
+Assert-Equal 0 ([regex]::Matches($newDomainText, [regex]::Escape('$newConfig.cmOptions.version = $newconfig.domainDefaults.CMVersion'))).Count 'new-domain wizard never overwrites actual cmOptions from a hint'
 
 Write-Host ''
 if ($script:Failures -gt 0) {

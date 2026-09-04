@@ -395,6 +395,25 @@ function Get-RDCManDisplayName {
     return $displayName
 }
 
+# Resolve the CM version displayed for one VM from its actual hierarchy-owned
+# cmOptions. The domain default is only a fallback for legacy/incomplete VM
+# notes where no actual selection can be recovered.
+function Get-RDCManCmVersionForVM {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [object]$VM,
+        [Parameter(Mandatory = $true)] [object]$Config,
+        [object]$DomainDefaults
+    )
+
+    $resolvedOptions = Resolve-VmCmOptions -Config $Config -vm $VM
+    $version = Get-CmVersionWithHintFallback -CmOptions $resolvedOptions -DomainDefaults $DomainDefaults
+    if ([string]::IsNullOrWhiteSpace($version)) { return '' }
+    $version = Resolve-CmVersionAlias -Version $version
+    if ([string]::IsNullOrWhiteSpace($version)) { return '' }
+    return "CM$version"
+}
+
 # Ensure a nested RDG <group> path exists under $parent, creating folders as
 # needed, and return the innermost group element. Used to build the optional
 # additive grouping folders (By Role\MPs, By OS\Server 2022, ...).
@@ -928,11 +947,9 @@ function New-RDCManFileFromHyperV {
         # $vmList = (Get-List -Type VM -domain $domain).VmName
         $vmListFull = (Get-List -Type VM -domain $domain)
 
-        $cmVersion = $null
         $dcVM = $vmListFull | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1
-        if ($dcVM.domainDefaults.CMVersion) {
-            $cmVersion = "CM" + $dcVM.domainDefaults.CMVersion
-        }
+        $cmDomainDefaults = if ($dcVM) { $dcVM.domainDefaults } else { $null }
+        $cmDisplayConfig = [PSCustomObject]@{ virtualMachines = @($vmListFull) }
 
         # Compute MECM site hierarchy for per-site group generation
         $siteHierarchy = Get-MECMSiteHierarchy -VmListFull $vmListFull
@@ -1246,6 +1263,7 @@ function New-RDCManFileFromHyperV {
                 $name = $($vm.VmName)
             }            
             $ForceOverwrite = $false
+            $cmVersion = Get-RDCManCmVersionForVM -VM $vm -Config $cmDisplayConfig -DomainDefaults $cmDomainDefaults
             $displayName = Get-RDCManDisplayName -vm $vm -settings $rdcSettings -cmVersion $cmVersion -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap
 
             if ($vm.Role -eq "AADClient" -or $vm.Role -eq "InternetClient") {

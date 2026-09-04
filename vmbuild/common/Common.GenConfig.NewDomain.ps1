@@ -729,9 +729,6 @@ function Select-NewDomainConfig {
                 $newConfig.vmOptions.prefix = $prefix
                 $netbiosName = $newconfig.domainDefaults.DomainName.Split(".")[0]
                 $newConfig.vmOptions.DomainNetBiosName = $netbiosName
-                if ($newconfig.domainDefaults.CMVersion -and $newConfig.cmOptions.version) {
-                    $newConfig.cmOptions.version = $newconfig.domainDefaults.CMVersion
-                }
                 if ($domain -in ((Get-ValidDomainNames).Keys)) {
                     $valid = $true
                 }

@@ -1561,12 +1561,11 @@ function New-MRemoteNGFileFromHyperV {
 
         $vmListFull = Get-List -Type VM -domain $domain
 
-        # Determine CM version for display names
-        $cmVersion = $null
+        # Determine CM version per VM from actual hierarchy-owned cmOptions.
+        # domainDefaults is retained only as a legacy missing-data fallback.
         $dcVM = $vmListFull | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1
-        if ($dcVM.domainDefaults.CMVersion) {
-            $cmVersion = "CM" + $dcVM.domainDefaults.CMVersion
-        }
+        $cmDomainDefaults = if ($dcVM) { $dcVM.domainDefaults } else { $null }
+        $cmDisplayConfig = [PSCustomObject]@{ virtualMachines = @($vmListFull) }
 
         # --- Role-based group containers ---
         # Compute which groups are needed, create/find sub-containers.
@@ -1858,6 +1857,7 @@ function New-MRemoteNGFileFromHyperV {
             # domain container (empty role-group containers are pruned at the end).
             if (-not $rdcSettings.DefaultGrouping) { $targetContainer = $container }
 
+            $cmVersion = Get-RDCManCmVersionForVM -VM $vm -Config $cmDisplayConfig -DomainDefaults $cmDomainDefaults
             $comment = Format-MRemoteNGTooltip -Vm $vm -CmVersion $cmVersion -VmListFull $vmListFull
             $name = $vm.VmName
             $ForceOverwrite = $true

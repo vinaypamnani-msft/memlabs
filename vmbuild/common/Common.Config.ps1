@@ -161,6 +161,25 @@ function Resolve-CmVersionAlias {
     return $Version
 }
 
+# Returns the authoritative cmOptions version when present. domainDefaults is
+# only a creation/recovery hint and must never override an actual selection.
+function Get-CmVersionWithHintFallback {
+    [CmdletBinding()]
+    param (
+        [object] $CmOptions,
+        [object] $DomainDefaults,
+        [string] $FallbackVersion = ''
+    )
+
+    if ($CmOptions -and -not [string]::IsNullOrWhiteSpace("$($CmOptions.Version)")) {
+        return [string]$CmOptions.Version
+    }
+    if ($DomainDefaults -and -not [string]::IsNullOrWhiteSpace("$($DomainDefaults.CMVersion)")) {
+        return [string]$DomainDefaults.CMVersion
+    }
+    return $FallbackVersion
+}
+
 # Resolves symbolic ConfigMgr media choices before cmOptions is copied or
 # rehydrated for deployment.  Historically current-branch lived only at the
 # config root, but modern GenConfig files may also carry an authoritative copy
@@ -436,7 +455,8 @@ function Get-UserConfiguration {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EnableBLM" -Value $false -Force
             }
             if ($null -eq ($config.cmOptions.Version)) {
-                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value "current-branch" -Force
+                $versionDefault = Get-CmVersionWithHintFallback -DomainDefaults $config.domainDefaults -FallbackVersion 'current-branch'
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value $versionDefault -Force
             }
             if ($null -eq ($config.cmOptions.Install)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value $true -Force
