@@ -1218,6 +1218,26 @@ function New-DeployConfig {
                 $item.pullDPSourceDP = Add-VmNamePrefix -Name $item.pullDPSourceDP -Prefix $prefix -BaseNames $baseVmNames
             }
 
+            # DHCP relay mappings are authored intent. Keep only the two
+            # portable fields and prefix references to VMs created by this
+            # config. Existing VM notes already carry the deployed VM name and
+            # therefore must not be prefixed a second time.
+            if ($item.role -eq 'DHCPRelay' -and $item.relayMappings) {
+                $normalizedRelayMappings = @()
+                foreach ($mapping in @($item.relayMappings)) {
+                    if ($null -eq $mapping) { continue }
+                    $targetVm = "$($mapping.distributionPointVM)".Trim()
+                    if ($targetVm -and $baseVmNames -contains $targetVm) {
+                        $targetVm = Add-VmNamePrefix -Name $targetVm -Prefix $prefix -BaseNames $baseVmNames
+                    }
+                    $normalizedRelayMappings += [pscustomobject]@{
+                        clientNetwork      = "$($mapping.clientNetwork)".Trim()
+                        distributionPointVM = $targetVm
+                    }
+                }
+                $item.relayMappings = @($normalizedRelayMappings)
+            }
+
             if ($item.remoteSQLVM) {
                 $item.remoteSQLVM = Add-VmNamePrefix -Name $item.remoteSQLVM -Prefix $prefix -BaseNames $baseVmNames
             }
@@ -1401,6 +1421,7 @@ function Add-ExistingVMsToDeployConfig {
         $phase8PrimaryNames += @(Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role "Primary" | Select-Object -First 1)
     }
     $existingOsdDps = @()
+    $existingOsdRelays = @()
     $osdPrimaryNames = @()
     if ($newOsdVMs.Count -gt 0) {
         $osdDefaultNetwork = "$($config.vmOptions.network)"
@@ -1413,6 +1434,22 @@ function Add-ExistingVMsToDeployConfig {
                 $dpNetwork = if ($_.network) { "$($_.network)" } else { $osdDefaultNetwork }
                 return $newOsdNetworks -contains $dpNetwork
             })
+            # A stored relay can target a DP on another subnet. Resolve against the
+            # complete existing-domain inventory before hidden entries are added,
+            # then pull both the relay and target into this deployment.
+            $osdPathsBeforeHiddenMerge = @(Get-OsdPxePaths -Config $config -Inventory (@($config.virtualMachines) + @($existingDomainVMsForOsd)))
+            $relayPathRows = @($osdPathsBeforeHiddenMerge | Where-Object { $_.mode -eq 'Relay' })
+            $relayTargetNames = @($relayPathRows | ForEach-Object { $_.distributionPointVM } | Where-Object { $_ } | Select-Object -Unique)
+            $relayVmNames = @($relayPathRows | ForEach-Object { $_.relayVM } | Where-Object { $_ } | Select-Object -Unique)
+            $relayVmNames += @($existingDomainVMsForOsd | Where-Object {
+                $_.role -eq 'DHCPRelay' -and @($_.relayMappings | Where-Object {
+                    "$($_.clientNetwork)" -in $newOsdNetworks
+                    }).Count -gt 0
+                } | ForEach-Object { $_.vmName })
+            $relayVmNames = @($relayVmNames | Where-Object { $_ } | Select-Object -Unique)
+            $existingOsdDps += @($existingDomainVMsForOsd | Where-Object { $_.vmName -in $relayTargetNames })
+            $existingOsdDps = @($existingOsdDps | Group-Object -Property vmName | ForEach-Object { $_.Group | Select-Object -First 1 })
+            $existingOsdRelays = @($existingDomainVMsForOsd | Where-Object { $_.vmName -in $relayVmNames })
         $configuredOsdDps = @($config.virtualMachines | Where-Object {
                 if (-not ($_.installDP -or $_.enablePullDP)) { return $false }
                 $dpNetwork = Get-OsdEffectiveNetwork -VM $_ -Config $config
@@ -1453,12 +1490,15 @@ function Add-ExistingVMsToDeployConfig {
                 $metadataDp | Add-Member -MemberType NoteProperty -Name 'osdMetadataOnly' -Value $true -Force
             }
         }
+        foreach ($existingOsdRelay in $existingOsdRelays) {
+            Add-ExistingVMToDeployConfig -vmName $existingOsdRelay.vmName -configToModify $config
+        }
 
         # These come in hidden, and Phase 11 skips hidden VMs -- so the run that INTRODUCES
         # OSD validated none of it: not the DP that serves PXE, not the Primary that owns the
         # boot image and the task-sequence deployments. Mark them so Phase 11 alone can opt
         # them back in; they still stay out of Phase 1 and 10, which would rebuild them.
-        foreach ($osdVmName in @(@($existingOsdDps | ForEach-Object { $_.vmName }) + @($osdPrimaryNames) + @($configuredOsdDps | ForEach-Object { $_.vmName }) | Where-Object { $_ } | Select-Object -Unique)) {
+        foreach ($osdVmName in @(@($existingOsdDps | ForEach-Object { $_.vmName }) + @($existingOsdRelays | ForEach-Object { $_.vmName }) + @($osdPrimaryNames) + @($configuredOsdDps | ForEach-Object { $_.vmName }) | Where-Object { $_ } | Select-Object -Unique)) {
             $osdVm = $config.virtualMachines | Where-Object { $_.vmName -eq $osdVmName } | Select-Object -First 1
             if ($osdVm) { $osdVm | Add-Member -MemberType NoteProperty -Name 'osdValidate' -Value $true -Force }
         }
@@ -1932,6 +1972,275 @@ function Get-OsdEffectiveNetwork {
     return "$($Config.vmOptions.network)"
 }
 
+function Get-OsdPxePaths {
+    <#
+    .SYNOPSIS
+    Resolves the ConfigMgr PXE path for every distinct OSDClient subnet.
+
+    .DESCRIPTION
+    This is the shared, read-only topology model used by configuration,
+    boundary generation, Phase 8 and validation. A same-subnet Distribution
+    Point always wins over one well-formed stored relay mapping. Conflicting
+    mappings and incomplete DP metadata fail closed as Invalid rows.
+
+    Inventory is injectable so focused tests can run without Hyper-V. When it
+    is omitted, Get-List2 supplies deployed VM notes and the config supplies
+    hidden metadata-only entries.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config,
+        [Parameter(Mandatory = $false)] [AllowNull()] [object[]] $Inventory
+    )
+
+    $inventoryWasSupplied = $PSBoundParameters.ContainsKey('Inventory')
+    if (-not $inventoryWasSupplied) {
+        $Inventory = @(Get-List2 -DeployConfig $Config)
+    }
+
+    # Config entries are authoritative for in-flight edits. Add deployed
+    # inventory only for names not represented by the config.
+    $allVMs = @()
+    $seenVmNames = @{}
+    foreach ($candidate in @($Config.virtualMachines) + @($Inventory)) {
+        if ($null -eq $candidate) { continue }
+        $vmName = "$($candidate.vmName)".Trim()
+        if (-not $vmName) { continue }
+        $key = $vmName.ToLowerInvariant()
+        if ($seenVmNames.ContainsKey($key)) {
+            # Hidden config entries intentionally omit live-only facts such as
+            # LastKnownIP and network. Fill only absent/blank properties from
+            # deployed inventory; never overwrite an authored in-flight edit.
+            $existingCandidate = $seenVmNames[$key]
+            foreach ($property in $candidate.PSObject.Properties) {
+                $existingProperty = $existingCandidate.PSObject.Properties[$property.Name]
+                if (-not $existingProperty -or $null -eq $existingProperty.Value -or
+                    ($existingProperty.Value -is [string] -and [string]::IsNullOrWhiteSpace($existingProperty.Value))) {
+                    $existingCandidate | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value -Force
+                }
+            }
+            continue
+        }
+        $mergedCandidate = [pscustomobject]@{}
+        foreach ($property in $candidate.PSObject.Properties) {
+            $mergedCandidate | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value -Force
+        }
+        $seenVmNames[$key] = $mergedCandidate
+        $allVMs += $mergedCandidate
+    }
+
+    $osdClients = @($allVMs | Where-Object { $_.role -eq 'OSDClient' })
+    if ($osdClients.Count -eq 0) { return @() }
+
+    # An OSDClient in a lab without ConfigMgr remains a bare VM; there is no
+    # ConfigMgr PXE topology to resolve or validate.
+    $hasCmSite = @($allVMs | Where-Object { $_.role -in @('CAS', 'Primary', 'Secondary') }).Count -gt 0
+    if (-not $hasCmSite) { return @() }
+
+    $osdNetworks = @($osdClients | ForEach-Object {
+            Get-OsdEffectiveNetwork -VM $_ -Config $Config
+        } | Where-Object { $_ } | Select-Object -Unique)
+    $distributionPoints = @($allVMs | Where-Object {
+            $_.installDP -eq $true -or $_.enablePullDP -eq $true
+        })
+    $relayVMs = @($allVMs | Where-Object { $_.role -eq 'DHCPRelay' })
+    $relayMappingRecords = @()
+    foreach ($relayVM in $relayVMs) {
+        foreach ($mapping in @($relayVM.relayMappings | Where-Object { $null -ne $_ })) {
+            $relayMappingRecords += [pscustomobject]@{ RelayVM = $relayVM; Mapping = $mapping }
+        }
+    }
+    # Defensive transient shape used by import/validation callers: authored
+    # configs store mappings on the relay VM, but a detached mapping must be
+    # reported as Invalid rather than disappearing into a confident Missing.
+    foreach ($mapping in @($Config.relayMappings | Where-Object { $null -ne $_ })) {
+        $relayOwner = $null
+        if ($mapping.relayVM) {
+            $relayOwner = $relayVMs | Where-Object { $_.vmName -eq "$($mapping.relayVM)" } | Select-Object -First 1
+        }
+        $relayMappingRecords += [pscustomobject]@{ RelayVM = $relayOwner; Mapping = $mapping }
+    }
+
+    foreach ($clientNetwork in $osdNetworks) {
+        $matchingMappings = @($relayMappingRecords | Where-Object {
+                "$($_.Mapping.clientNetwork)" -eq "$clientNetwork"
+            })
+
+        $directDps = @($distributionPoints | Where-Object {
+                (Get-OsdEffectiveNetwork -VM $_ -Config $Config) -eq $clientNetwork
+            })
+        $directWithoutSite = @($directDps | Where-Object { [string]::IsNullOrWhiteSpace("$($_.siteCode)") })
+        $directSiteCodes = @($directDps | ForEach-Object { "$($_.siteCode)" } | Where-Object { $_ } | Select-Object -Unique)
+
+        $invalidReason = $null
+        if ($matchingMappings.Count -gt 1) {
+            $owners = @($matchingMappings | ForEach-Object {
+                    if ($_.RelayVM) { "$($_.RelayVM.vmName)" } else { '<missing>' }
+                } | Select-Object -Unique)
+            $invalidReason = "conflicting relay mappings on $($owners -join ', ')"
+        }
+        elseif ($matchingMappings.Count -eq 1 -and -not $matchingMappings[0].RelayVM) {
+            $missingRelayName = "$($matchingMappings[0].Mapping.relayVM)"
+            if (-not $missingRelayName) { $missingRelayName = '<unspecified>' }
+            $invalidReason = "relay VM '$missingRelayName' is missing"
+        }
+        elseif ($directWithoutSite.Count -gt 0) {
+            $invalidReason = "same-subnet DP(s) lack site ownership: $(@($directWithoutSite.vmName) -join ', ')"
+        }
+        elseif ($directSiteCodes.Count -gt 1) {
+            $invalidReason = "same-subnet DPs belong to conflicting sites: $($directSiteCodes -join ', ')"
+        }
+
+        if ($invalidReason) {
+            [pscustomobject]@{
+                clientNetwork                 = "$clientNetwork"
+                mode                          = 'Invalid'
+                relayVM                       = $null
+                relayIPv4                     = $null
+                distributionPointVM           = $null
+                distributionPointNetwork      = $null
+                distributionPointSiteCode     = $null
+                distributionPointIPv4         = $null
+                reason                        = $invalidReason
+            }
+            continue
+        }
+
+        # One stale mapping is harmless when a usable local DP exists. Emit
+        # every local DP so all eligible direct targets retain current behavior.
+        if ($directDps.Count -gt 0) {
+            foreach ($directDp in $directDps) {
+                $directDpIp = $null
+                if ($directDp.AssignedIP) { $directDpIp = "$($directDp.AssignedIP)" }
+                [pscustomobject]@{
+                    clientNetwork                 = "$clientNetwork"
+                    mode                          = 'Direct'
+                    relayVM                       = $null
+                    relayIPv4                     = $null
+                    distributionPointVM           = "$($directDp.vmName)"
+                    distributionPointNetwork      = "$(Get-OsdEffectiveNetwork -VM $directDp -Config $Config)"
+                    distributionPointSiteCode     = "$($directDp.siteCode)"
+                    distributionPointIPv4         = $directDpIp
+                    reason                        = $null
+                }
+            }
+            continue
+        }
+
+        if ($matchingMappings.Count -eq 0) {
+            [pscustomobject]@{
+                clientNetwork                 = "$clientNetwork"
+                mode                          = 'Missing'
+                relayVM                       = $null
+                relayIPv4                     = $null
+                distributionPointVM           = $null
+                distributionPointNetwork      = $null
+                distributionPointSiteCode     = $null
+                distributionPointIPv4         = $null
+                reason                        = 'no same-subnet DP or relay mapping'
+            }
+            continue
+        }
+
+        $relayVM = $matchingMappings[0].RelayVM
+        $mapping = $matchingMappings[0].Mapping
+        $targetName = "$($mapping.distributionPointVM)".Trim()
+        $targetDp = $allVMs | Where-Object { $_.vmName -eq $targetName } | Select-Object -First 1
+        $targetNetwork = $null
+        if ($targetDp) { $targetNetwork = Get-OsdEffectiveNetwork -VM $targetDp -Config $Config }
+        $targetIpValues = @()
+        if ($targetDp) {
+            $targetIpValues += @($targetDp.AssignedIP, $targetDp.LastKnownIP)
+            if ($targetDp.thisParams) {
+                $targetIpValues += @($targetDp.thisParams.AssignedIP, $targetDp.thisParams.IPv4Address)
+            }
+            if (-not $inventoryWasSupplied -and $targetNetwork) {
+                try {
+                    $targetHostVm = Get-VM2 -Name $targetDp.vmName -ErrorAction Stop
+                    $targetAdapter = @($targetHostVm | Get-VMNetworkAdapter -ErrorAction Stop |
+                        Where-Object { $_.SwitchName -eq $targetNetwork }) | Select-Object -First 1
+                    if ($targetAdapter) {
+                        $targetIpValues += @($targetAdapter.IPAddresses)
+                        $targetMac = ("$($targetAdapter.MacAddress)" -replace '[-:]', '').ToUpperInvariant()
+                        if ($targetMac) {
+                            $targetReservation = Get-DhcpServerv4Reservation -ScopeId $targetNetwork -ErrorAction Stop |
+                                Where-Object { ("$($_.ClientId)" -replace '[-:]', '').ToUpperInvariant() -eq $targetMac } |
+                                Select-Object -First 1
+                            if ($targetReservation) { $targetIpValues += "$($targetReservation.IPAddress.IPAddressToString)" }
+                        }
+                    }
+                }
+                catch {
+                    # Existing metadata may still be complete. The caller fails
+                    # closed below when no source yields a stable IPv4 value.
+                }
+            }
+        }
+        $targetIpValues = @($targetIpValues | ForEach-Object {
+                $candidateIp = "$_" -replace '/\d+$', ''
+                $parsedCandidateIp = $null
+                if ($_ -and [System.Net.IPAddress]::TryParse($candidateIp, [ref]$parsedCandidateIp) -and
+                    $parsedCandidateIp.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+                    $parsedCandidateIp.IPAddressToString
+                }
+            } | Select-Object -Unique)
+        $targetKnownIp = $null
+        if ($targetIpValues.Count -eq 1) { $targetKnownIp = "$($targetIpValues[0])" }
+        $relayIp = $null
+        if ("$clientNetwork" -match '^(\d{1,3}\.){3}0$') {
+            $relayIp = "$clientNetwork" -replace '\.0$', '.4'
+        }
+
+        $relayIsLinux = $relayVM.osFamily -eq 'Linux' -or "$($relayVM.operatingSystem)" -like 'Ubuntu*'
+        if (-not $relayIsLinux) { $invalidReason = "relay VM '$($relayVM.vmName)' is not Linux" }
+        elseif (-not $targetName) { $invalidReason = "relay VM '$($relayVM.vmName)' has a mapping with no target DP" }
+        elseif (-not $targetDp) { $invalidReason = "target DP '$targetName' is missing" }
+        elseif (-not ($targetDp.installDP -eq $true -or $targetDp.enablePullDP -eq $true)) { $invalidReason = "target '$targetName' is not a Distribution Point" }
+        elseif ([string]::IsNullOrWhiteSpace("$($targetDp.siteCode)")) { $invalidReason = "target DP '$targetName' lacks site ownership" }
+        elseif ($targetIpValues.Count -gt 1) { $invalidReason = "target DP '$targetName' has conflicting IPv4 metadata: $($targetIpValues -join ', ')" }
+        elseif ($targetIpValues.Count -eq 0) { $invalidReason = "target DP '$targetName' has no stable IPv4 metadata" }
+        elseif ($targetNetwork -eq $clientNetwork) { $invalidReason = "target DP '$targetName' is on the client subnet and must be used directly" }
+        elseif (-not $relayIp) { $invalidReason = "client network '$clientNetwork' is not a supported /24 network ID" }
+
+        if ($invalidReason) {
+            $invalidTargetNetwork = $null
+            $invalidTargetSiteCode = $null
+            $invalidTargetIp = $null
+            if ($targetNetwork) { $invalidTargetNetwork = "$targetNetwork" }
+            if ($targetDp) {
+                $invalidTargetSiteCode = "$($targetDp.siteCode)"
+                if ($targetKnownIp) { $invalidTargetIp = $targetKnownIp }
+            }
+            [pscustomobject]@{
+                clientNetwork                 = "$clientNetwork"
+                mode                          = 'Invalid'
+                relayVM                       = "$($relayVM.vmName)"
+                relayIPv4                     = $relayIp
+                distributionPointVM           = $targetName
+                distributionPointNetwork      = $invalidTargetNetwork
+                distributionPointSiteCode     = $invalidTargetSiteCode
+                distributionPointIPv4         = $invalidTargetIp
+                reason                        = $invalidReason
+            }
+            continue
+        }
+
+        $relayTargetIp = $null
+        if ($targetKnownIp) { $relayTargetIp = $targetKnownIp }
+        [pscustomobject]@{
+            clientNetwork                 = "$clientNetwork"
+            mode                          = 'Relay'
+            relayVM                       = "$($relayVM.vmName)"
+            relayIPv4                     = "$relayIp"
+            distributionPointVM           = "$($targetDp.vmName)"
+            distributionPointNetwork      = "$targetNetwork"
+            distributionPointSiteCode     = "$($targetDp.siteCode)"
+            distributionPointIPv4         = $relayTargetIp
+            reason                        = $null
+        }
+    }
+}
+
 function Get-OsdBoundaryMappings {
     <#
     .SYNOPSIS
@@ -1939,33 +2248,23 @@ function Get-OsdBoundaryMappings {
 
     .DESCRIPTION
     OSD clients do not receive client push, and a DP-only SiteSystem normally
-    does not either. Derive the subnet's site from its same-subnet DP so an
-    otherwise empty OSD subnet still receives a ConfigMgr boundary group.
+    does not either. Derive each subnet's owning site from the shared PXE path
+    model. Missing and invalid paths never fabricate a boundary owner.
     #>
     param (
         [Parameter(Mandatory = $true)] [object] $Config
     )
 
-    $allVMs = @(Get-List2 -DeployConfig $Config)
-    $allVMs += @($Config.virtualMachines | Where-Object { $_.hidden })
-    $osdClients = @($allVMs | Where-Object { $_.role -eq 'OSDClient' })
-    $distributionPoints = @($allVMs | Where-Object {
-            ($_.installDP -eq $true -or $_.enablePullDP -eq $true) -and $_.siteCode
-        })
     $mappedSubnets = @{}
-
-    foreach ($osdClient in $osdClients) {
-        $subnet = Get-OsdEffectiveNetwork -VM $osdClient -Config $Config
+    foreach ($path in @(Get-OsdPxePaths -Config $Config)) {
+        if ($path.mode -notin @('Direct', 'Relay')) { continue }
+        $subnet = "$($path.clientNetwork)"
         if (-not $subnet -or $mappedSubnets.ContainsKey($subnet)) { continue }
-
-        $distributionPoint = $distributionPoints | Where-Object {
-            (Get-OsdEffectiveNetwork -VM $_ -Config $Config) -eq $subnet
-        } | Select-Object -First 1
-        if (-not $distributionPoint) { continue }
+        if ([string]::IsNullOrWhiteSpace("$($path.distributionPointSiteCode)")) { continue }
 
         $mappedSubnets[$subnet] = $true
         [pscustomobject]@{
-            SiteCode = "$($distributionPoint.siteCode)"
+            SiteCode = "$($path.distributionPointSiteCode)"
             Subnet   = "$subnet"
         }
     }

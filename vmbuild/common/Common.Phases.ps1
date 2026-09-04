@@ -1376,6 +1376,20 @@ function Start-Phase {
         return $false
     }
 
+    # Normal deployments reconcile immediately after Linux Phase 3. Phase 8
+    # repeats this idempotently so -StartPhase 8 repairs expansions and drift.
+    if ($Phase -eq 3 -and @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'DHCPRelay' }).Count -gt 0) {
+        try {
+            Write-Log "[Phase 3] Reconciling DHCP relay networking and service state after Linux role setup." -Activity
+            $relayReady = Sync-LinuxDhcpRelay -DeployConfig $deployConfig
+            if (-not $relayReady) { throw 'relay reconciler returned false' }
+        }
+        catch {
+            Write-Log "[Phase 3] DHCP relay reconciliation failed: $($_.Exception.Message)" -Failure
+            return $false
+        }
+    }
+
     # After Phase 2 (domain-join + initial member config) succeeds, push proxy
     # client settings to any VM with useProxy=true. Done from the host over
     # PSDirect so we don't have to thread proxy config through DSC. No-op if
@@ -1798,6 +1812,27 @@ function Start-PhaseJobs {
     # waiting on Primary) would block on the same wall-clock, turning a
     # 30-second misconfig into a 9-hour stuck deploy.
     if ($Phase -eq 8) {
+        $relayPathsForPhase = @($deployConfig.osdPxePaths | Where-Object { $_.mode -eq 'Relay' })
+        $relayVmsForPhase = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'DHCPRelay' })
+        if ($relayPathsForPhase.Count -gt 0 -or $relayVmsForPhase.Count -gt 0) {
+            try {
+            Write-Log "[Phase 8] Reconciling $($relayPathsForPhase.Count) active DHCP relay PXE path(s) across $($relayVmsForPhase.Count) relay VM(s) before ConfigMgr work." -Activity
+                $relayReady = Sync-LinuxDhcpRelay -DeployConfig $deployConfig
+                if (-not $relayReady) { throw 'relay reconciler returned false' }
+            }
+            catch {
+                Write-Log "[Phase 8] DHCP relay precondition failed: $($_.Exception.Message)" -Failure
+                return [PSCustomObject]@{
+                    Failed         = 1
+                    Success        = 0
+                    Jobs           = 0
+                    Applicable     = $true
+                    AdditionalData = $null
+                    PreflightFailed = $true
+                }
+            }
+        }
+
         $netbios = $deployConfig.vmOptions.domainNetBiosName
         $domain = $deployConfig.vmOptions.domainName
         $siteServers = @($deployConfig.virtualMachines | Where-Object {
@@ -3238,7 +3273,7 @@ function Wait-Phase {
         $dscDiagLastCheck = @{}   # VMName -> [datetime] last check
         $dscDiagInitialMinutes = 30
         $dscDiagIntervalMinutes = 15
-        $dscDiagSkipRoles = @('Proxy', 'LinuxServer', 'LinuxClient', 'OSDClient', 'AADClient', 'InternetClient')
+        $dscDiagSkipRoles = @('Proxy', 'DHCPRelay', 'LinuxServer', 'LinuxClient', 'OSDClient', 'AADClient', 'InternetClient')
 
         # Nothing else in this loop logs on a schedule -- every other line is
         # event-driven -- so a worker wedged inside an unbounded call leaves the
@@ -4202,7 +4237,7 @@ function Get-Phase3ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
-        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "OtherDC", "AADClient", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
+        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "OtherDC", "AADClient", "StandaloneRootCA", "Proxy", "DHCPRelay", "LinuxServer", "LinuxClient") {
             continue
         }
 
@@ -4252,7 +4287,7 @@ function Get-Phase4ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "DHCPRelay", "LinuxServer", "LinuxClient") {
             continue
         }
 
@@ -4380,7 +4415,7 @@ function Get-Phase6ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "DHCPRelay", "LinuxServer", "LinuxClient") {
             continue
         }
         if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
@@ -4440,7 +4475,7 @@ function Get-Phase7ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "DHCPRelay", "LinuxServer", "LinuxClient") {
             continue
         }
 

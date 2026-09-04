@@ -34,6 +34,9 @@ function Get-NewMachineName {
     if ($Role -eq "BDC") {
         $RoleName = "DC"
     }
+    if ($Role -eq 'DHCPRelay') {
+        $RoleName = 'Relay'
+    }
     if ($Role -eq "DomainMember" -or [string]::IsNullOrWhiteSpace($Role) -or $Role -eq "WorkgroupMember" -or $Role -eq "AADClient" -or $role -eq "InternetClient") {
         if (($ConfigToCheck.vmOptions.prefix.length) -gt 4) {
             $RoleName = "Mem"

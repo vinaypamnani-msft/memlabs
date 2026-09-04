@@ -2254,31 +2254,31 @@ function Test-Configuration {
 
         # OSDClient Validations
         # =====================
-        # An OSDClient PXE-boots to run an OS-deployment task sequence. PXE is a
-        # subnet-local DHCP broadcast, so an OSDClient can only boot from a DP on
-        # its OWN subnet (memlabs does not configure cross-subnet DHCP relay / ip-
-        # helper). With no DP on the subnet, perfloading distributes no OSD content
-        # there and PXE can't work -- but perfloading only WARNs at BUILD time, by
-        # which point the mis-configured lab is already deploying. Catch it up front
-        # so the user adds a DP (or moves the OSDClient) before deploying.
+        # Resolve from one shared model so preflight, boundary generation, Phase 8
+        # and Phase 11 cannot disagree about whether the path is direct or relayed.
         $osdClientVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "OSDClient" })
         if ($osdClientVMs.Count -gt 0) {
-            # Include EXISTING VMs so an already-deployed DP on the subnet counts
-            # (avoids a false block when adding an OSDClient to an existing lab).
-            $allVmsForOsd = @(Get-List2 -deployConfig $deployConfig)
-            $allVmsForOsd += @($deployConfig.virtualMachines | Where-Object { $_.hidden })
-            # OSD is a ConfigMgr feature: only meaningful when the topology has a CM
-            # site (a site server). In a No-ConfigMgr lab an OSDClient is just an
-            # empty Gen2 VM with no OSD/PXE to do, so don't require a DP for it.
-            $hasCmSite = @($allVmsForOsd | Where-Object { $_.role -in 'CAS', 'Primary', 'Secondary' }).Count -gt 0
-            if ($hasCmSite) {
-                # A DP is any VM that installs one -- a real DP or a pull DP (both can
-                # host OSD content + have PXE enabled). Matches perfloading's DP search.
-                $osdDpSubnets = @($allVmsForOsd | Where-Object { $_.installDP -eq $true -or $_.enablePullDP -eq $true } | ForEach-Object { Get-OsdEffectiveNetwork -VM $_ -Config $deployConfig } | Where-Object { $_ } | Select-Object -Unique)
-                foreach ($osd in $osdClientVMs) {
-                    $osdNet = Get-OsdEffectiveNetwork -VM $osd -Config $deployConfig
-                    if ($osdDpSubnets -notcontains $osdNet) {
-                        Add-ValidationMessage -Message "OSDClient Validation: VM [$($osd.vmName)] is on subnet [$osdNet], which has no Distribution Point. An OSDClient PXE-boots from a subnet-local DP (cross-subnet PXE is not supported), so OSD content can't be distributed there and PXE can't work. Add a DP (a Primary/SiteSystem with installDP, or a pull DP) on subnet [$osdNet], or place the OSDClient on a subnet that already has one." -ReturnObject $return -Warning
+            $osdPaths = @(Get-OsdPxePaths -Config $deployConfig)
+            foreach ($path in $osdPaths) {
+                if ($path.mode -eq 'Missing') {
+                    Add-ValidationMessage -Message "OSDClient Validation: subnet [$($path.clientNetwork)] has no PXE path. Add or enable a Distribution Point on that subnet, configure a DHCPRelay mapping to a remote DP, or move the OSDClient." -ReturnObject $return -Warning
+                }
+                elseif ($path.mode -eq 'Invalid') {
+                    Add-ValidationMessage -Message "OSDClient Validation: subnet [$($path.clientNetwork)] has an invalid PXE topology: $($path.reason)." -ReturnObject $return -Failure
+                }
+                elseif ($path.mode -eq 'Relay' -and -not $path.distributionPointIPv4) {
+                    Add-ValidationMessage -Message "OSDClient Validation: relay path [$($path.clientNetwork)] -> [$($path.relayVM)] -> [$($path.distributionPointVM)] has no agreed stable target IPv4 address. Assign/preallocate the target DP address before deployment." -ReturnObject $return -Failure
+                }
+                elseif ($path.mode -eq 'Relay') {
+                    try {
+                        $relayAddressState = Test-LinuxDhcpRelayAddressAvailable -IPAddress $path.relayIPv4 `
+                            -Network $path.clientNetwork -RelayVmName $path.relayVM -DeployConfig $deployConfig
+                        if (-not $relayAddressState.Available) {
+                            Add-ValidationMessage -Message "OSDClient Validation: relay address [$($path.relayIPv4)] on [$($path.clientNetwork)] is not available: $($relayAddressState.Reason)." -ReturnObject $return -Failure
+                        }
+                    }
+                    catch {
+                        Add-ValidationMessage -Message "OSDClient Validation: relay address ownership could not be measured for [$($path.clientNetwork)]: $($_.Exception.Message)." -ReturnObject $return -Failure
                     }
                 }
             }

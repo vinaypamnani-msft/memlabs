@@ -104,6 +104,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "SQLAO" { return $ServerList }
         "PassiveSite" { return $ServerList }
         "Proxy" { return @("Ubuntu Server 24.04 LTS") }
+        "DHCPRelay" { return @("Ubuntu Server 24.04 LTS") }
         "LinuxServer" { return @("Ubuntu Server 24.04 LTS") }
         "LinuxClient" { return @("Ubuntu Desktop 24.04 LTS") }
         "DomainMember" {

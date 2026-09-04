@@ -54,11 +54,16 @@ $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
 $genConfigPath = Join-Path $RootPath 'common\Common.GenConfig.ps1'
 $existingPath = Join-Path $RootPath 'common\Common.GenConfig.Existing.ps1'
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdEffectiveNetwork')
+. (Import-TestFunction -Path $configPath -Name 'Get-OsdPxePaths')
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdBoundaryMappings')
 . (Import-TestFunction -Path $configPath -Name 'Add-ModifiedExistingVMToDeployConfig')
 . (Import-TestFunction -Path $genConfigPath -Name 'Get-ValidSubnets')
 foreach ($functionName in @(
         'Test-OsdNetworkHasDistributionPoint',
+        'Get-OsdPxePathsForNetwork',
+        'Get-OsdRelayDistributionPointCandidates',
+        'Add-DhcpRelayForOsdNetwork',
+        'Resolve-OsdPxePathForNetwork',
         'Get-OsdDistributionPointPromotionCandidates',
         'Select-OsdDistributionPointSiteCode',
         'Set-OsdDistributionPointPromotionProperty',
@@ -75,6 +80,7 @@ $script:SelectorCalls = 0
 $script:SiteServerNetwork = '192.168.2.0'
 $script:MenuCalls = 0
 $script:MenuResponses = New-Object System.Collections.Queue
+$script:LastAdditionalOptions = $null
 $script:EligibleSites = @([pscustomobject]@{ SiteCode = 'PS1'; Network = '192.168.2.0'; Role = 'Primary' })
 $script:NewDpCalls = 0
 $script:DistributionPointOnly = $false
@@ -107,7 +113,9 @@ function Get-VMDeployedNetwork {
 function Get-List { return @($global:existingMachines) }
 function Start-VM2 { return $true }
 function Get-Menu2 {
+    param ([string] $MenuName, [string] $Prompt, [object[]] $OptionArray, [object] $AdditionalOptions, [bool] $Test, [switch] $Split, [string] $CurrentValue)
     $script:MenuCalls++
+    $script:LastAdditionalOptions = $AdditionalOptions
     if ($script:MenuResponses.Count -eq 0) { return $null }
     return $script:MenuResponses.Dequeue()
 }
@@ -124,6 +132,18 @@ function Add-NewVMForRole {
 
     $script:NewDpCalls++
     $script:DistributionPointOnly = $DistributionPointOnly
+    if ($Role -eq 'DHCPRelay') {
+        $newRelay = [pscustomobject]@{
+            vmName = "AUTORELAY$($script:NewDpCalls)"
+            role = 'DHCPRelay'
+            operatingSystem = 'Ubuntu Server 24.04 LTS'
+            osFamily = 'Linux'
+            network = $Network
+            relayMappings = @()
+        }
+        $ConfigToModify.virtualMachines += $newRelay
+        return $newRelay.vmName
+    }
     $newDP = [pscustomobject]@{
         vmName = "AUTODP$($script:NewDpCalls)"
         role = $Role
@@ -231,6 +251,7 @@ Assert-Equal $menuCallsBeforeNoCm $script:MenuCalls 'No-ConfigMgr OSDClient does
 
 $script:SelectedNetwork = '10.0.1.0'
 $script:MenuCalls = 0
+$script:MenuResponses.Enqueue('D')
 $script:MenuResponses.Enqueue('W11CLIENT3')
 $promotedNetwork = Select-OsdClientNetwork -VM $osdClient -Config $config
 $promotedVM = $config.virtualMachines | Where-Object { $_.vmName -eq 'W11CLIENT3' } | Select-Object -First 1
@@ -255,6 +276,7 @@ $newDpConfig = [pscustomobject]@{
     virtualMachines = @([pscustomobject]@{ vmName = 'PS1'; role = 'Primary'; siteCode = 'PS1'; installDP = $true })
 }
 $script:SelectedNetwork = '10.0.2.0'
+$script:MenuResponses.Enqueue('D')
 $script:MenuResponses.Enqueue('N')
 $newDpNetwork = Select-OsdClientNetwork -VM $osdClient -Config $newDpConfig
 $newDP = $newDpConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' } | Select-Object -First 1
@@ -263,6 +285,72 @@ Assert-Equal '10.0.2.0' $newDP.network 'new DP VM is placed on the selected OSD 
 Assert-Equal $true $newDP.installDP 'new DP VM has installDP enabled'
 Assert-Equal $false $newDP.installMP 'new DP VM is DP-only'
 Assert-Equal $true $script:DistributionPointOnly 'new DP remediation requests DP-only defaults during VM creation'
+
+$relayFastConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'PS1'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $true; AssignedIP = '192.168.2.10' }
+        [pscustomobject]@{
+            vmName = 'RELAY1'; role = 'DHCPRelay'; operatingSystem = 'Ubuntu Server 24.04 LTS'; osFamily = 'Linux'; network = '192.168.2.0'
+            relayMappings = @([pscustomobject]@{ clientNetwork = '10.0.9.0'; distributionPointVM = 'PS1' })
+        }
+    )
+}
+$global:existingMachines = @()
+$script:SelectedNetwork = '10.0.9.0'
+$relayFastMenuCalls = $script:MenuCalls
+$relayFastNetwork = Select-OsdClientNetwork -VM $osdClient -Config $relayFastConfig
+Assert-Equal '10.0.9.0' $relayFastNetwork 'OSDClient accepts a valid stored relay path'
+Assert-Equal $relayFastMenuCalls $script:MenuCalls 'valid stored relay avoids remediation menus'
+
+$noRelayOptionConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }
+    virtualMachines = @([pscustomobject]@{ vmName = 'PS1'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $true })
+}
+$script:MenuResponses.Enqueue('B')
+$null = Resolve-OsdPxePathForNetwork -Network '10.0.10.0' -Config $noRelayOptionConfig
+Assert-Equal $false ($script:LastAdditionalOptions.Keys -contains 'R') 'relay option is hidden when no remote DP has a stable IPv4 address'
+
+$relayCreateConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }
+    virtualMachines = @([pscustomobject]@{
+            vmName = 'REMOTEDP'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $true; AssignedIP = '192.168.2.10'
+        })
+}
+$beforeRelayCreateCalls = $script:NewDpCalls
+$script:SelectedNetwork = '10.0.11.0'
+$script:MenuResponses.Enqueue('R')
+$script:MenuResponses.Enqueue('REMOTEDP')
+$relayCreatedNetwork = Select-OsdClientNetwork -VM $osdClient -Config $relayCreateConfig
+$createdRelay = $relayCreateConfig.virtualMachines | Where-Object { $_.role -eq 'DHCPRelay' } | Select-Object -First 1
+Assert-Equal '10.0.11.0' $relayCreatedNetwork 'selecting relay accepts the OSD subnet after re-resolution'
+Assert-Equal ($beforeRelayCreateCalls + 1) $script:NewDpCalls 'selecting relay creates one relay VM when absent'
+Assert-Equal '10.0.11.0:REMOTEDP' "$($createdRelay.relayMappings[0].clientNetwork):$($createdRelay.relayMappings[0].distributionPointVM)" 'new relay stores only client network and target DP intent'
+
+$existingRelayConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }
+    virtualMachines = @([pscustomobject]@{
+            vmName = 'REMOTEDP'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $true; AssignedIP = '192.168.2.10'
+        })
+}
+$existingRelay = [pscustomobject]@{
+    vmName = 'EXISTINGRELAY'; role = 'DHCPRelay'; operatingSystem = 'Ubuntu Server 24.04 LTS'; osFamily = 'Linux'
+    network = '192.168.2.0'; state = 'Running'
+    relayMappings = @([pscustomobject]@{ clientNetwork = '10.0.12.0'; distributionPointVM = 'REMOTEDP' })
+}
+$global:existingMachines = @($existingRelay)
+$script:MenuResponses.Enqueue('REMOTEDP')
+$existingRelayUpdated = Add-DhcpRelayForOsdNetwork -Network '10.0.13.0' -Config $existingRelayConfig
+$persistedRelays = @($existingRelayConfig.virtualMachines | Where-Object { $_.vmName -eq 'EXISTINGRELAY' -and $_.hidden })
+Assert-Equal $true $existingRelayUpdated 'existing relay mapping update succeeds after re-resolution'
+Assert-Equal 1 $persistedRelays.Count 'existing relay update persists one hidden snapshot'
+Assert-Equal '10.0.12.0,10.0.13.0' (@($persistedRelays[0].relayMappings.clientNetwork | Sort-Object) -join ',') 'existing relay update preserves prior mapping and adds the new mapping'
+
+$mappingBeforeCancel = ($existingRelay.relayMappings | ConvertTo-Json -Compress)
+$script:MenuResponses.Enqueue('ESCAPE')
+$cancelledRelayUpdate = Add-DhcpRelayForOsdNetwork -Network '10.0.14.0' -Config $existingRelayConfig
+Assert-Equal $false $cancelledRelayUpdate 'cancelling remote DP selection declines relay update'
+Assert-Equal $mappingBeforeCancel ($existingRelay.relayMappings | ConvertTo-Json -Compress) 'cancel leaves existing relay mappings unchanged'
 
 $existingConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }
@@ -279,6 +367,7 @@ $existingClient = [pscustomobject]@{
 }
 $global:existingMachines = @($existingClient)
 $script:SelectedNetwork = '10.0.3.0'
+$script:MenuResponses.Enqueue('D')
 $script:MenuResponses.Enqueue('EXISTINGCLIENT')
 $existingDpNetwork = Select-OsdClientNetwork -VM $osdClient -Config $existingConfig
 Assert-Equal '10.0.3.0' $existingDpNetwork 'OSDClient accepts a subnet after promoting a deployed VM'
@@ -304,6 +393,7 @@ Assert-Equal '10.0.6.0' (Get-OsdEffectiveNetwork -VM $metadataDP -Config $existi
 $boundaryConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ DomainName = 'example.test'; Network = '192.168.2.0' }
     virtualMachines = @(
+        [pscustomobject]@{ vmName = 'PS1'; role = 'Primary'; siteCode = 'PS1'; network = '192.168.2.0'; installDP = $true }
         [pscustomobject]@{ vmName = 'OSD3'; role = 'OSDClient'; network = '10.0.6.0' }
         [pscustomobject]@{ vmName = 'DP3'; role = 'SiteSystem'; siteCode = 'PS1'; network = '10.0.6.0'; installDP = $true }
         [pscustomobject]@{ vmName = 'OSD4'; role = 'OSDClient'; network = '10.0.8.0' }

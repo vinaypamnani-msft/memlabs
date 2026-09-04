@@ -81,6 +81,202 @@ function Test-OsdNetworkHasDistributionPoint {
     return $false
 }
 
+function Get-OsdPxePathsForNetwork {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string] $Network,
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    # The VM being edited is not guaranteed to have been appended to the
+    # config yet. Add a transient client so the shared resolver can judge the
+    # proposed network without mutating authored state.
+    $probeConfig = $Config | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    if (-not ($probeConfig.virtualMachines | Where-Object {
+                $_.role -eq 'OSDClient' -and (Get-OsdEffectiveNetwork -VM $_ -Config $probeConfig) -eq $Network
+            })) {
+        $probeConfig.virtualMachines += [pscustomobject]@{
+            vmName = '__OSD_NETWORK_PROBE__'
+            role = 'OSDClient'
+            network = $Network
+        }
+    }
+    $inventory = @(Get-List2 -DeployConfig $Config)
+    $inventory += @($Config.virtualMachines | Where-Object { $_.hidden })
+    if ($global:existingMachines) { $inventory += @($global:existingMachines) }
+    $inventory += @($probeConfig.virtualMachines)
+    return @(Get-OsdPxePaths -Config $probeConfig -Inventory $inventory | Where-Object {
+            $_.clientNetwork -eq $Network
+        })
+}
+
+function Get-OsdRelayDistributionPointCandidates {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string] $Network,
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    # Existing VM notes carry LastKnownIP while hidden config entries omit it.
+    # Prefer live inventory for candidate facts; config remains the fallback
+    # for newly authored DPs (which normally lack a stable address until deploy).
+    $allVMs = @(Get-List -Type VM -DomainName $Config.vmOptions.domainName -ErrorAction SilentlyContinue)
+    if ($global:existingMachines) { $allVMs += @($global:existingMachines) }
+    $allVMs += @(Get-List2 -DeployConfig $Config)
+    $allVMs += @($Config.virtualMachines)
+    $seen = @{}
+    foreach ($candidate in $allVMs) {
+        if (-not $candidate -or -not $candidate.vmName) { continue }
+        $key = "$($candidate.vmName)".ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        if (-not ($candidate.installDP -eq $true -or $candidate.enablePullDP -eq $true)) { continue }
+        if ([string]::IsNullOrWhiteSpace("$($candidate.siteCode)")) { continue }
+        $candidateNetwork = Get-OsdEffectiveNetwork -VM $candidate -Config $Config
+        if ($candidateNetwork -eq $Network) { continue }
+
+        $ipValues = @($candidate.AssignedIP, $candidate.LastKnownIP)
+        if ($candidate.thisParams) {
+            $ipValues += @($candidate.thisParams.AssignedIP, $candidate.thisParams.IPv4Address)
+        }
+        $ipValues = @($ipValues | ForEach-Object {
+                $candidateIp = "$_" -replace '/\d+$', ''
+                $parsedCandidateIp = $null
+                if ($_ -and [System.Net.IPAddress]::TryParse($candidateIp, [ref]$parsedCandidateIp) -and
+                    $parsedCandidateIp.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+                    $parsedCandidateIp.IPAddressToString
+                }
+            } | Select-Object -Unique)
+        if ($ipValues.Count -ne 1) { continue }
+
+        [pscustomobject]@{
+            VM = $candidate
+            Network = "$candidateNetwork"
+            SiteCode = "$($candidate.siteCode)"
+            IPv4 = "$($ipValues[0])"
+        }
+    }
+}
+
+function Add-DhcpRelayForOsdNetwork {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string] $Network,
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    $candidates = @(Get-OsdRelayDistributionPointCandidates -Network $Network -Config $Config)
+    if ($candidates.Count -eq 0) {
+        Write-RedX "No remote Distribution Point with one agreed stable IPv4 address is available."
+        return $false
+    }
+    $candidateOptions = @($candidates | ForEach-Object {
+            "$($_.VM.vmName) [site $($_.SiteCode), subnet $($_.Network), $($_.IPv4)]"
+        })
+    $selection = Get-Menu2 -MenuName "Relay PXE requests from $Network" `
+        -Prompt 'Select the remote Distribution Point that will answer PXE' `
+        -OptionArray $candidateOptions -Test:$false -Split
+    if ([string]::IsNullOrWhiteSpace($selection) -or $selection -eq 'ESCAPE') { return $false }
+    $target = $candidates | Where-Object { $_.VM.vmName -eq $selection } | Select-Object -First 1
+    if (-not $target) { return $false }
+
+    $originalVirtualMachines = $Config.virtualMachines | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $existingRelaySources = @($Config.virtualMachines)
+    $existingRelaySources += @($global:existingMachines)
+    $existingRelaySources += @(Get-List -Type VM -DomainName $Config.vmOptions.domainName -ErrorAction SilentlyContinue)
+    $relays = @($existingRelaySources | Where-Object { $_.role -eq 'DHCPRelay' } |
+        Group-Object -Property vmName | ForEach-Object { $_.Group | Select-Object -First 1 })
+    if ($relays.Count -gt 1) {
+        Write-RedX "Domain '$($Config.vmOptions.domainName)' has multiple DHCPRelay VMs: $(@($relays.vmName) -join ', ')."
+        return $false
+    }
+
+    try {
+        $relay = $null
+        $relayIsExisting = $false
+        if ($relays.Count -eq 1) {
+            $relay = $relays[0] | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+            $relayIsExisting = [bool]($relay.hidden -or $relay.ExistingVM -or
+                ($global:existingMachines | Where-Object { $_.vmName -eq $relay.vmName }))
+        }
+        else {
+            $beforeNames = @($Config.virtualMachines | ForEach-Object { $_.vmName })
+            $null = Add-NewVMForRole -Role 'DHCPRelay' -Domain $Config.vmOptions.domainName `
+                -ConfigToModify $Config -Network $Config.vmOptions.network -Quiet:$true
+            $relay = $Config.virtualMachines | Where-Object {
+                $_.role -eq 'DHCPRelay' -and $beforeNames -notcontains $_.vmName
+            } | Select-Object -First 1
+            if (-not $relay) { throw 'the DHCPRelay VM was not created' }
+        }
+
+        $newMappings = @($relay.relayMappings | Where-Object {
+                $null -ne $_ -and "$($_.clientNetwork)" -ne $Network
+            })
+        $newMappings += [pscustomobject]@{
+            clientNetwork = $Network
+            distributionPointVM = "$($target.VM.vmName)"
+        }
+        $relay | Add-Member -MemberType NoteProperty -Name relayMappings -Value @($newMappings) -Force
+
+        if ($relayIsExisting) {
+            $relay | Add-Member -MemberType NoteProperty -Name ExistingVM -Value $true -Force
+            Add-ModifiedExistingVMToDeployConfig -VM $relay -ConfigToModify $Config -Hidden:$true
+        }
+        else {
+            $configuredRelay = $Config.virtualMachines | Where-Object { $_.vmName -eq $relay.vmName } | Select-Object -First 1
+            $configuredRelay.relayMappings = @($newMappings)
+        }
+
+        $resolved = @(Get-OsdPxePathsForNetwork -Network $Network -Config $Config)
+        if ($resolved.Count -ne 1 -or $resolved[0].mode -ne 'Relay' -or
+            $resolved[0].distributionPointVM -ne $target.VM.vmName) {
+            $why = @($resolved | ForEach-Object { "$($_.mode): $($_.reason)" }) -join '; '
+            throw "the saved mapping did not resolve to Relay ($why)"
+        }
+
+        # Keep the interactive existing-machine cache in sync only after the
+        # hidden snapshot and resolver both succeeded.
+        $sourceRelay = $global:existingMachines | Where-Object { $_.vmName -eq $relay.vmName } | Select-Object -First 1
+        if ($sourceRelay) { $sourceRelay | Add-Member -MemberType NoteProperty -Name relayMappings -Value @($newMappings) -Force }
+        Write-Log "Configured OSD PXE relay: $Network -> $($relay.vmName) -> $($target.VM.vmName) ($($target.SiteCode), $($target.IPv4))." -Success
+        return $true
+    }
+    catch {
+        $Config.virtualMachines = @($originalVirtualMachines)
+        Write-RedX "Could not configure the DHCP relay for ${Network}: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Resolve-OsdPxePathForNetwork {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string] $Network,
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    while ($true) {
+        $relayCandidates = @(Get-OsdRelayDistributionPointCandidates -Network $Network -Config $Config)
+        $additionalOptions = [ordered]@{
+            'D'  = "Install or enable a Distribution Point on $Network"
+            'HD' = 'Uses the existing DP promotion and DP-only VM workflow'
+        }
+        if ($relayCandidates.Count -gt 0) {
+            $additionalOptions['R'] = 'Relay PXE to an existing remote Distribution Point'
+            $additionalOptions['HR'] = 'Uses one dedicated Ubuntu relay VM; Windows DHCP remains on the host'
+        }
+        $additionalOptions['B'] = 'Choose a different subnet'
+        $additionalOptions['HB'] = 'Returns without changing the current PXE topology'
+
+        $selection = Get-Menu2 -MenuName "OSD requires a PXE path on $Network" `
+            -Prompt 'Choose a local Distribution Point, a remote relay target, or go back' `
+            -OptionArray @() -AdditionalOptions $additionalOptions -Test:$false -Split
+        if ([string]::IsNullOrWhiteSpace($selection) -or $selection -in @('B', 'ESCAPE')) { return $false }
+        if ($selection -eq 'D' -and (Add-DistributionPointForOsdNetwork -Network $Network -Config $Config)) { return $true }
+        if ($selection -eq 'R' -and (Add-DhcpRelayForOsdNetwork -Network $Network -Config $Config)) { return $true }
+    }
+}
+
 function Get-OsdDistributionPointPromotionCandidates {
     [CmdletBinding()]
     param (
@@ -370,7 +566,12 @@ function Select-OsdClientNetwork {
         if (Test-OsdNetworkHasDistributionPoint -Network $network -Config $Config) {
             return $network
         }
-        if (Add-DistributionPointForOsdNetwork -Network $network -Config $Config) {
+        $existingPath = @(Get-OsdPxePathsForNetwork -Network $network -Config $Config)
+        if ($existingPath.Count -eq 1 -and $existingPath[0].mode -eq 'Relay') {
+            Write-Log "Using stored OSD PXE relay: $network -> $($existingPath[0].relayVM) -> $($existingPath[0].distributionPointVM)." -Success
+            return $network
+        }
+        if (Resolve-OsdPxePathForNetwork -Network $network -Config $Config) {
             return $network
         }
     }
@@ -517,8 +718,8 @@ function Add-NewVMForRole {
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem SiteCode: $SiteCode ParentSiteCode: $parentSiteCode Network: $network"
 
     if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
-        if ($role -eq "Proxy") {
-            # Proxy is always Linux (Ubuntu) -- no OS choice.
+        if ($role -in @('Proxy', 'DHCPRelay')) {
+            # Fixed-purpose infrastructure roles are always Linux -- no OS choice.
             $OperatingSystem = "Ubuntu Server 24.04 LTS"
         }
         elseif ($role -eq "LinuxServer") {
@@ -642,6 +843,16 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enableRDP' -Value $false -Force
     }
 
+    if ($role -eq 'DHCPRelay') {
+        # The management NIC is the only NIC represented by cloud-init.
+        # Mapping NICs are reconciled after first boot and keyed by MAC.
+        $virtualMachine.PSObject.Properties.Remove('tpmEnabled')
+        $virtualMachine.memory = '2GB'
+        $virtualMachine.virtualProcs = 2
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osFamily' -Value 'Linux' -Force
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'relayMappings' -Value @() -Force
+    }
+
     if ($role -eq "LinuxServer") {
         # Generic Linux VM: no TPM, DHCP networking (default in New-LinuxSeedIso),
         # slightly larger footprint than Proxy since it's a general-purpose box.
@@ -681,7 +892,7 @@ function Add-NewVMForRole {
     if ($network) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
     }
-    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC", "Proxy", "LinuxServer", "LinuxClient")) {
+    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC", "Proxy", "DHCPRelay", "LinuxServer", "LinuxClient")) {
         #Match Windows 10 or 11
         if ($operatingSystem.Contains("Windows 1")) {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false -force

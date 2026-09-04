@@ -5574,7 +5574,7 @@ function Set-DeployConfigIPAddresses {
         Iterates all non-hidden VMs in the deploy config, determines
         the correct DHCP scope, and assigns a stable IP:
         - CAS -> .5, Primary -> .10, Secondary -> .15 (fixed well-known)
-        - Proxy (Linux) -> .2 (static cloud-init)
+        - Proxy (Linux) -> .2, DHCPRelay (Linux) -> .4 (static cloud-init)
         - DC -> .1 (set by DSC, but reserve it here)
         - All others -> Get-DhcpServerv4FreeIPAddress from the scope
 
@@ -5954,8 +5954,22 @@ function Set-DeployConfigIPAddresses {
                 'Primary'   { $ip = "$base.10"; $ipSource = 'fixed-role' }
                 'Secondary' { $ip = "$base.15"; $ipSource = 'fixed-role' }
                 'Proxy'     { $ip = "$base.2"; $ipSource = 'fixed-role' }
+                'DHCPRelay' { $ip = "$base.4"; $ipSource = 'fixed-role' }
             }
             if ($ipSource -eq 'fixed-role') { $fixedCount++ }
+        }
+
+        if ($vm.role -eq 'DHCPRelay' -and $ip) {
+            $relayAddressProbe = Get-Command Test-LinuxDhcpRelayAddressAvailable -ErrorAction SilentlyContinue
+            if (-not $relayAddressProbe) {
+                throw "$($vm.vmName): cannot validate fixed relay address $ip because Test-LinuxDhcpRelayAddressAvailable is unavailable"
+            }
+            $relayAddressState = Test-LinuxDhcpRelayAddressAvailable -IPAddress $ip -Network $scopeId `
+                -RelayVmName $vm.vmName -DeployConfig $DeployConfig
+            if (-not $relayAddressState.Available) {
+                Write-Log "$($vm.vmName): refusing fixed DHCPRelay address $ip -- $($relayAddressState.Reason)" -Failure
+                throw "$($vm.vmName): DHCPRelay address $ip is not available: $($relayAddressState.Reason)"
+            }
         }
 
         # Dynamic allocation from the DHCP pool
@@ -6014,7 +6028,7 @@ function Set-DeployConfigIPAddresses {
     $cleanedExclusions = 0
     foreach ($vm in $DeployConfig.virtualMachines) {
         if ($vm.hidden -or -not $vm.AssignedIP) { continue }
-        if ($vm.role -in 'DC', 'BDC', 'CAS', 'Primary', 'Secondary', 'Proxy', 'OSDClient') { continue }
+        if ($vm.role -in 'DC', 'BDC', 'CAS', 'Primary', 'Secondary', 'Proxy', 'DHCPRelay', 'OSDClient') { continue }
         $scopeId = if ($vm.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($vm.network) { $vm.network } else { $defaultNetwork } }
         $removed = Remove-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $vm.AssignedIP -EndRange $vm.AssignedIP -ErrorAction SilentlyContinue -PassThru
         if ($removed) { $cleanedExclusions++ }
@@ -11554,6 +11568,7 @@ function Get-SupportedOptionsCacheSignature {
     catch {}
 
     $signatureObject = [PSCustomObject]@{
+        SchemaVersion           = 2
         OfflineMode             = [bool]$Common.OfflineMode
         DevBranch               = [bool]$Common.DevBranch
         FileListPath            = $fileListPath
@@ -11615,6 +11630,7 @@ function Set-SupportedOptions {
         "BDC",
         "StandaloneRootCA",
         "Proxy",
+        "DHCPRelay",
         "LinuxServer",
         "LinuxClient"
     )
@@ -11636,6 +11652,7 @@ function Set-SupportedOptions {
         "BDC",
         "StandaloneRootCA",
         "Proxy",
+        "DHCPRelay",
         "LinuxServer",
         "LinuxClient"
     )

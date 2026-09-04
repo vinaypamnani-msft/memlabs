@@ -4,23 +4,27 @@
 # Required variables (set by caller before sourcing):
 #   CONF_B64  — base64-encoded squid.conf content
 #
-# Idempotent: skips apt if squid is already running on :3128.
+# Idempotent: skips apt whenever every required package is already installed.
 # Reports PROXY_READY on success.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-# Fast-path: if squid is already installed, active, and listening on 3128,
-# we still rewrite the config (subnets may have changed) and reload, but
-# skip apt-get entirely. Saves ~30-60s on re-runs.
-FAST_PATH=0
-if command -v squid >/dev/null 2>&1 && systemctl is-active --quiet squid && \
-   ss -ltn 'sport = :3128' 2>/dev/null | grep -q ':3128'; then
-    FAST_PATH=1
-fi
+# Package-present path works for both a newly rebaked image (Squid deliberately
+# disabled) and a configured Proxy rerun. An older image takes the unchanged
+# apt fallback, so current code can deploy either image generation.
+PACKAGES_PRESENT=1
+for pkg in squid ufw python3-flask; do
+    if ! dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null | grep -qx installed; then
+        PACKAGES_PRESENT=0
+        break
+    fi
+done
 
-echo "[install-squid] Starting (FAST_PATH=$FAST_PATH)"
+echo "[install-squid] Starting (PACKAGES_PRESENT=$PACKAGES_PRESENT)"
 
-if [ "$FAST_PATH" = "0" ]; then
+if [ "$PACKAGES_PRESENT" = "1" ]; then
+    echo "[install-squid] Package-present path; zero apt invocations"
+else
     # Snapshot packaging state up front so any failure below can be
     # root-caused from the log: dpkg DB already corrupt on arrival? another
     # apt/dpkg/unattended-upgrades run or cloud-init first-boot install still

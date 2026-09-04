@@ -5,12 +5,34 @@ set -euo pipefail
 FAIL=0
 ERRORS=""
 
-for pkg in linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server; do
+for pkg in linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server \
+    dnsmasq-base tcpdump squid ufw python3-flask; do
     if ! dpkg -s "$pkg" >/dev/null 2>&1; then
         ERRORS="${ERRORS}  MISSING package: $pkg\n"
         FAIL=1
     fi
 done
+
+if systemctl is-active --quiet squid.service; then
+    ERRORS="${ERRORS}  ACTIVE generic-image service: squid.service\n"
+    FAIL=1
+fi
+if systemctl is-enabled --quiet squid.service 2>/dev/null; then
+    ERRORS="${ERRORS}  ENABLED generic-image service: squid.service\n"
+    FAIL=1
+fi
+if systemctl is-active --quiet dnsmasq.service 2>/dev/null; then
+    ERRORS="${ERRORS}  ACTIVE generic-image service: dnsmasq.service\n"
+    FAIL=1
+fi
+if ss -H -lunp 2>/dev/null | grep -Eq '(^|[[:space:]])[^[:space:]]*:67[[:space:]]'; then
+    ERRORS="${ERRORS}  UDP/67 listener present in generic Server image\n"
+    FAIL=1
+fi
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ERRORS="${ERRORS}  UFW is active in generic Server image\n"
+    FAIL=1
+fi
 
 if ! systemctl is-enabled hv-kvp-daemon.service >/dev/null 2>&1; then
     ERRORS="${ERRORS}  NOT enabled: hv-kvp-daemon.service\n"
@@ -35,4 +57,4 @@ if [ $FAIL -ne 0 ]; then
     printf "$ERRORS"
     exit 1
 fi
-echo "=== Validation passed: all packages installed, services enabled ==="
+echo "=== Validation passed: packages installed; generic role services inert ==="

@@ -22,6 +22,20 @@ apt_retry apt-get install -y \
     realmd sssd sssd-ad sssd-tools adcli krb5-user packagekit \
     samba-common-bin oddjob oddjob-mkhomedir libnss-sss libpam-sss
 
+# Keep Desktop images lean. The Server VHDX is shared by Proxy, LinuxServer,
+# and DHCPRelay roles, so only inert, topology-free prerequisites belong here.
+# Older Main/Dev deployment scripts remain compatible with this image: their
+# apt-get install is idempotent and runtime role setup still owns every config.
+if [ "${MEMLABS_BAKE_VARIANT:-Server}" = "Server" ]; then
+    echo "=== Server role prerequisites (relay + proxy) ==="
+    apt_retry apt-get install -y dnsmasq-base tcpdump squid ufw python3-flask
+
+    # A generic image must not start a role service. Do not mask Squid because
+    # every branch's Proxy installer must be able to enable it later.
+    systemctl disable --now squid.service >/dev/null 2>&1 || true
+    systemctl disable --now dnsmasq.service >/dev/null 2>&1 || true
+fi
+
 # krb5-user ships a default /etc/krb5.conf and enables no realm; realm-join.sh
 # rewrites it per-domain. Leave the service masked-off state alone -- sssd is
 # configured and started by the join, not by the bake.

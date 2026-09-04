@@ -436,6 +436,12 @@ function Test-VmFunctionality {
         $null = Test-LinuxDomainJoin -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
+    # ---- DHCP relay validation ----
+    if ($testsPassed -and $role -eq 'DHCPRelay') {
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying DHCP relay configuration readiness"
+        $testsPassed = Test-LinuxDhcpRelay -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
     # ---- Proxy validation ----
     # 1) For the Proxy VM itself: verify Squid is listening on TCP 3128.
     if ($testsPassed -and $role -eq 'Proxy') {
@@ -5270,28 +5276,19 @@ function Test-SiteSystemFunctionality {
     if ($CurrentItem.installDP) {
         Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying Distribution Point"
         Write-Log "[Phase $Phase] $VMName [DP]: Local content + PXE checks" -LogOnly
-        # memlabs turns PXE on for EVERY DP (Add-CMDistributionPoint -EnablePxe in
-        # ScriptFunctions.ps1, unconditional), but perfloading only distributes the boot image
-        # to a DP that shares a subnet with an OSDClient -- and never turns PXE back off. So on
-        # every other DP "PXE enabled, no payload" is the state memlabs deliberately built, and
-        # measuring it is guaranteed-fire noise, not a health signal. Skip the PXE checks there
-        # entirely; only this log line records that they were skipped.
-        $osdDefaultNet = "$($DeployConfig.vmOptions.network)"
-        $netOfVm = {
-            param($v)
-            if ($v.network) { return "$($v.network)" }
-            if ($v.thisParams -and $v.thisParams.vmNetwork) { return "$($v.thisParams.vmNetwork)" }
-            return $osdDefaultNet
-        }
-        $osdClientNets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
-                ForEach-Object { & $netOfVm $_ } | Where-Object { $_ } | Select-Object -Unique)
-        $dpServesOsd = [bool]($osdClientNets.Count -gt 0 -and $osdClientNets -contains (& $netOfVm $CurrentItem))
+        # A remote relay target receives the same payload and PXE checks as a
+        # direct target. The serialized model is the oracle; do not reconstruct
+        # target selection from VM subnets here.
+        $dpOsdPaths = @($DeployConfig.osdPxePaths | Where-Object {
+                $_.mode -in @('Direct', 'Relay') -and $_.distributionPointVM -eq $CurrentItem.vmName
+            })
+        $osdClientNets = @($dpOsdPaths | ForEach-Object { $_.clientNetwork } | Where-Object { $_ } | Select-Object -Unique)
+        $dpServesOsd = $dpOsdPaths.Count -gt 0
         if ($dpServesOsd) {
-            Write-Log "[Phase $Phase] $VMName [DP]: OSDClient subnet(s) $($osdClientNets -join ', ') include this DP's $(& $netOfVm $CurrentItem) -- PXE chain will be checked and failures are fatal" -LogOnly
+            Write-Log "[Phase $Phase] $VMName [DP]: selected by OSD PXE path(s) for $($osdClientNets -join ', ') -- PXE chain will be checked and failures are fatal" -LogOnly
         }
         else {
-            $osdNote = if ($osdClientNets.Count) { "OSDClient subnet(s) $($osdClientNets -join ', ') do not include this DP's $(& $netOfVm $CurrentItem)" } else { 'this lab has no OSDClient' }
-            Write-Log "[Phase $Phase] $VMName [DP]: skipping all PXE checks -- $osdNote, so perfloading never distributed the boot image and nothing here can PXE boot" -LogOnly
+            Write-Log "[Phase $Phase] $VMName [DP]: skipping all PXE checks -- this DP is not selected by deployConfig.osdPxePaths" -LogOnly
         }
         $localDpScript = {
             param($dpServesOsdInner)
@@ -11655,38 +11652,21 @@ function Test-CMSiteWideFunctionality {
     } | Select-Object -First 1
     $supServer = if ($supVmObj) { "$($supVmObj.vmName).$domain" } else { '' }
 
-    # Whether any OSDClient exists in this lab. perfloading only distributes OSD
-    # content (boot/OS images) to DP(s) on an OSDClient's subnet (to save space +
-    # because PXE is subnet-local), so with NO OSDClient the boot image is
+    # Whether any OSDClient exists in this lab. With none, OSD content is
     # intentionally not distributed anywhere -- that's INFO, not a WARN.
     $hasOsdClient = [bool]($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | Select-Object -First 1)
 
-    # perfloading used to abort Phase 8 outright when an OSDClient subnet had no DP, or when
-    # a DP failed to join 'OSD DPS'. It now warns and carries on, so these become Phase 11's
-    # to detect -- and they must be measured against the CONFIG, because reading the group's
-    # own membership can only ever confirm itself.
-    $osdDefaultNet = "$($DeployConfig.vmOptions.network)"
-    $osdNetOfVm = {
-        param($vm)
-        if ($vm.network) { return "$($vm.network)" }
-        if ($vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
-        return $osdDefaultNet
-    }
+    # Expected membership comes from config intent, never from the group's own
+    # membership (which can only confirm itself).
     $expectedOsdDpCsv = ''
     $uncoveredOsdSubnetCsv = ''
     try {
-        $osdClientSubnets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
-            ForEach-Object { & $osdNetOfVm $_ } | Where-Object { $_ } | Select-Object -Unique)
-        if ($osdClientSubnets.Count -gt 0) {
-            $configDpVms = @($DeployConfig.virtualMachines | Where-Object {
-                    $_.vmName -and ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Secondary')
-                })
-            $osdDpVms = @($configDpVms | Where-Object { $osdClientSubnets -contains (& $osdNetOfVm $_) })
-            $coveredOsdSubnets = @($osdDpVms | ForEach-Object { & $osdNetOfVm $_ } | Select-Object -Unique)
-            $uncoveredOsdSubnetCsv = (@($osdClientSubnets | Where-Object { $coveredOsdSubnets -notcontains $_ }) -join '|')
-            $expectedOsdDpCsv = (@($osdDpVms | Where-Object { "$($_.siteCode)" -eq $siteCode } |
-                    ForEach-Object { "$($_.vmName).$domain" } | Select-Object -Unique) -join '|')
-        }
+        $resolvedOsdPaths = @($DeployConfig.osdPxePaths)
+        $uncoveredOsdSubnetCsv = (@($resolvedOsdPaths | Where-Object { $_.mode -in @('Missing', 'Invalid') } |
+                ForEach-Object { $_.clientNetwork } | Where-Object { $_ } | Select-Object -Unique) -join '|')
+        $expectedOsdDpCsv = (@($resolvedOsdPaths | Where-Object {
+                    $_.mode -in @('Direct', 'Relay') -and "$($_.distributionPointSiteCode)" -eq $siteCode
+                } | ForEach-Object { "$($_.distributionPointVM).$domain" } | Select-Object -Unique) -join '|')
     }
     catch {
         Write-Log "[Phase $Phase] $VMName [$role ($siteCode)]: Could not derive expected OSD DP coverage from the config: $($_.Exception.Message)" -Warning -LogOnly
@@ -12155,7 +12135,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             if ($isPrimary -and $expectOsd) {
                 if ($uncoveredOsdSubnets.Count -gt 0) {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: OSDClient subnet(s) have no distribution point at all: $($uncoveredOsdSubnets -join ', '). PXE is a subnet-local broadcast, so those clients can never boot. Add a DP on every listed subnet.")
+                    $results.Details.Add("FAIL: OSDClient subnet(s) have Missing or Invalid resolved PXE paths: $($uncoveredOsdSubnets -join ', '). Repair the direct DP or DHCPRelay topology before retrying OSD.")
                 }
                 try {
                     $osdDpGroup = Get-WmiObject -Namespace $ns -Class SMS_DistributionPointGroup -Filter "Name='OSD DPS'" -ErrorAction Stop | Select-Object -First 1
@@ -12167,7 +12147,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         $expectedOsdDpNames = @(Get-WmiObject -Namespace $ns -Class SMS_DPGroupMembers -Filter "GroupID='$($osdDpGroup.GroupID)'" -ErrorAction Stop |
                             ForEach-Object { & $dpNameOf $_.DPNALPath } | Where-Object { $_ } | Select-Object -Unique)
                         # The group's own membership cannot testify that it is complete. Judge it
-                        # against the DPs the config puts on an OSDClient subnet, and require
+                        # against the DPs selected by direct or relayed PXE paths, and require
                         # coverage on those even when the join silently failed.
                         $missingOsdGroupDps = @($configOsdDpNames | Where-Object {
                                 $wantShort = ($_ -split '\.')[0]
@@ -12175,7 +12155,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             })
                         if ($missingOsdGroupDps.Count -gt 0) {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: distribution point group 'OSD DPS' is missing $($missingOsdGroupDps.Count) DP(s) the config puts on an OSDClient subnet: $($missingOsdGroupDps -join ', '). Distribution to the group is a no-op for those, so OSD content never reaches the client.")
+                            $results.Details.Add("FAIL: distribution point group 'OSD DPS' is missing $($missingOsdGroupDps.Count) DP(s) selected by the resolved PXE topology: $($missingOsdGroupDps -join ', '). Distribution to the group is a no-op for those, so OSD content never reaches the client.")
                             $expectedOsdDpNames = @(@($expectedOsdDpNames) + @($missingOsdGroupDps) | Where-Object { $_ } | Select-Object -Unique)
                         }
                         if ($expectedOsdDpNames.Count -eq 0) {
@@ -12459,7 +12439,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                     }
                                 }
                                 elseif (-not $expectOsd) {
-                                    $results.Details.Add("INFO: Boot image '$biName' not distributed to any DP -- no OSDClient in this lab (OSD content is only distributed to an OSDClient-subnet DP to save space)")
+                                    $results.Details.Add("INFO: Boot image '$biName' not distributed to any DP -- no OSDClient in this lab (OSD content is distributed only to resolved serving DPs)")
                                 }
                                 elseif ($biName -match 'arm64') {
                                     # memlabs OSDClients are all x64 Gen2 VMs -- there is no arm64
@@ -12468,7 +12448,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                     $results.Details.Add("INFO: Boot image '$biName' not distributed to any DP -- no arm64 OSDClient in this lab (memlabs OSDClients are x64; only the x64 boot image is distributed for PXE)")
                                 }
                                 else {
-                                    $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) is not on any DP yet, so PXE can't work. An OSDClient exists, so perfloading distributes it to the OSDClient-subnet DP during Phase 8 -- re-run to distribute. If it persists, confirm a DP shares the OSDClient's subnet.")
+                                    $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) is not on any DP yet, so PXE can't work. An OSDClient exists, so perfloading distributes it to the DPs selected by deployConfig.osdPxePaths during Phase 8 -- re-run to distribute. If it persists, inspect the exact direct or relay path logged by Phase 8.")
                                 }
                             }
 
@@ -13662,6 +13642,74 @@ function Test-ProxyAdminWebUI {
     Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - no listener on :8443 (ss output: '$output')" -Failure -LogOnly
     $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Proxy Admin web UI not listening on TCP 8443"; Level = 'Failure' })
     return $false
+}
+
+function Test-LinuxDhcpRelay {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string] $VMName,
+        [Parameter(Mandatory = $true)] [object] $CurrentItem,
+        [Parameter(Mandatory = $true)] [object] $DeployConfig
+    )
+
+    $paths = @($DeployConfig.osdPxePaths | Where-Object {
+            $_.mode -eq 'Relay' -and $_.relayVM -eq $VMName
+        })
+    $managementNetwork = Get-OsdEffectiveNetwork -VM $CurrentItem -Config $DeployConfig
+    $managementIp = "$managementNetwork" -replace '\.0$', '.4'
+    $hostVm = Get-VM2 -Name $VMName -ErrorAction SilentlyContinue
+    if (-not $hostVm) {
+        Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: FAIL - VM is absent from Hyper-V" -Level Failure
+        return $false
+    }
+    $adapters = @($hostVm | Get-VMNetworkAdapter -ErrorAction SilentlyContinue)
+    $managementAdapters = @($adapters | Where-Object { $_.SwitchName -eq $managementNetwork })
+    if ($managementAdapters.Count -ne 1) {
+        Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: FAIL - expected one management adapter on $managementNetwork, found $($managementAdapters.Count)" -Level Failure
+        return $false
+    }
+    $managementMac = "$($managementAdapters[0].MacAddress)"
+
+    if ($paths.Count -eq 0) {
+        $stopped = Invoke-LinuxVmCommand -VmName $VMName -IPAddress $managementIp -Sudo -SuppressLog `
+            -BashCommand 'if systemctl is-active --quiet memlabs-dhcp-relay.service; then exit 1; fi; echo DHCP_RELAY_STOPPED' `
+            -DisplayName 'Validate inactive relay service'
+        if (-not $stopped.CommandResult) {
+            Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: FAIL - zero active paths but relay service is active" -Level Failure
+            return $false
+        }
+        Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: OK - zero active paths and relay service is stopped" -Level Success
+        return $true
+    }
+
+    $expectedRows = @()
+    $desiredSwitches = @($paths | ForEach-Object { $_.clientNetwork } | Select-Object -Unique)
+    foreach ($path in $paths) {
+        $pathAdapters = @($adapters | Where-Object { $_.SwitchName -eq $path.clientNetwork })
+        if ($pathAdapters.Count -ne 1) {
+            Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: FAIL - expected one adapter on $($path.clientNetwork), found $($pathAdapters.Count)" -Level Failure
+            return $false
+        }
+        $expectedRows += "$($pathAdapters[0].MacAddress)|$($path.relayIPv4)|$($path.distributionPointIPv4)"
+    }
+    foreach ($stale in @($adapters | Where-Object { $_.Name -like 'DHCPRelay-*' -and $_.SwitchName -notin $desiredSwitches })) {
+        Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: WARN - stale adapter '$($stale.Name)' remains on '$($stale.SwitchName)' but is excluded from active mappings" -Level Warning
+    }
+
+    $expectedB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($expectedRows -join "`n")))
+    $validationScript = Get-LinuxScript -Name 'relay/validate-dhcp-relay' -Variables @{
+        EXPECTED_MAPPINGS_B64 = $expectedB64
+        MANAGEMENT_IP = $managementIp
+        MANAGEMENT_MAC = $managementMac
+    }
+    $result = Invoke-LinuxVmCommand -VmName $VMName -IPAddress $managementIp -Sudo -TimeoutSeconds 180 `
+        -BashCommand $validationScript -DisplayName 'Validate DHCP relay readiness independently'
+    if (-not $result.CommandResult -or $result.ScriptBlockOutput -notmatch 'DHCP_RELAY_CONFIGURATION_READY') {
+        Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: FAIL - relay readiness validation failed: $($result.ScriptBlockOutput)" -Level Failure
+        return $false
+    }
+    Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: OK - relay configuration is ready for $($paths.Count) mapping(s); successful packet traversal is not established" -Level Success
+    return $true
 }
 
 function Test-LinuxProxyConfig {

@@ -1045,8 +1045,6 @@ write_files:
         version: 2
         ethernets:
           primary:
-            match:
-              name: "e*"
             nameservers:
               addresses: [`$DC_DNS, 1.1.1.1, 8.8.8.8]
       `$SEARCH_LINE
@@ -1591,7 +1589,7 @@ function New-LinuxVirtualMachine {
         # Skip if a reservation already exists for this MAC (rerun scenario).
         if ($DeployConfig) {
             $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
-            if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
+            if ($thisVmConfig -and $thisVmConfig.AssignedIP -and $thisVmConfig.role -notin @('Proxy', 'DHCPRelay')) {
                 # DHCP/Hyper-V CIM calls run isolated (Get-VMMacIsolated /
                 # *DHCPReservation* helpers) so their progress doesn't poison the bars.
                 try {
@@ -1754,15 +1752,16 @@ function New-LinuxVirtualMachine {
                     Write-Log "$VmName`: Network '$netBase' isn't /24 a.b.c.0 form; falling back to DHCP" -Warning
                 }
             }
-            elseif ($thisVm -and $thisVm.role -eq 'Proxy') {
-                # Fallback for Proxy if AssignedIP wasn't set (shouldn't happen normally)
+            elseif ($thisVm -and $thisVm.role -in @('Proxy', 'DHCPRelay')) {
+                # Fixed-role fallback if AssignedIP wasn't set (shouldn't happen normally).
                 $netBase = $thisVm.network
                 if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
                 if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
                     $base = $Matches[1]
-                    $seedArgs.StaticIPv4 = "$base.2"
+                    $fixedOctet = if ($thisVm.role -eq 'Proxy') { 2 } else { 4 }
+                    $seedArgs.StaticIPv4 = "$base.$fixedOctet"
                     $seedArgs.Gateway = "$base.200"
-                    Write-Log "$VmName`: Proxy fallback; pinning to $($seedArgs.StaticIPv4) (gw $($seedArgs.Gateway))"
+                    Write-Log "$VmName`: $($thisVm.role) fallback; pinning to $($seedArgs.StaticIPv4) (gw $($seedArgs.Gateway))"
                 }
             }
             # enableRDP toggle: previously installed xrdp+xfce4+Firefox via
@@ -1814,7 +1813,8 @@ function New-LinuxVirtualMachine {
         # Create DHCP reservation now that VM is started and has a real MAC.
         if ($DeployConfig) {
             $thisVmConfig2 = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
-            if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated) {
+            if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated -and
+                $thisVmConfig2.role -notin @('Proxy', 'DHCPRelay')) {
                 # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
                 try {
                     $vmMac2 = Get-VMMacIsolated -VmName $VmName
@@ -1900,12 +1900,13 @@ function Get-LinuxVmExpectedStaticIP {
     # Pre-assigned IP from Set-DeployConfigIPAddresses
     if ($VmObject.AssignedIP) { return $VmObject.AssignedIP }
 
-    # Legacy fallback for Proxy
-    if ($VmObject.role -eq 'Proxy') {
+    # Legacy fallback for fixed-address Linux infrastructure roles.
+    if ($VmObject.role -in @('Proxy', 'DHCPRelay')) {
         $netBase = $VmObject.network
         if (-not $netBase -and $DeployConfig) { $netBase = $DeployConfig.vmOptions.network }
         if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
-            return "$($Matches[1]).2"
+            $fixedOctet = if ($VmObject.role -eq 'Proxy') { 2 } else { 4 }
+            return "$($Matches[1]).$fixedOctet"
         }
     }
     return $null
@@ -3061,7 +3062,6 @@ function Invoke-LinuxVmCommand {
 
     $sshExe = Get-LinuxSshExePath
     $keyPair = Get-LinuxAdminSshKeyPair
-    $knownHostsPath = Join-Path (Split-Path $keyPair.PrivateKeyPath) "known_hosts"
 
     # Pipe the command in via stdin to avoid Windows command-line quoting
     # mismatches; remote `bash -s` reads the entire script from stdin.
@@ -5671,6 +5671,235 @@ function Remove-ProxyAdminAccessForDomain {
     }
 }
 
+function Test-LinuxDhcpRelayAddressAvailable {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string] $IPAddress,
+        [Parameter(Mandatory = $true)] [string] $Network,
+        [Parameter(Mandatory = $true)] [string] $RelayVmName,
+        [Parameter(Mandatory = $true)] [object] $DeployConfig
+    )
+
+    foreach ($vm in @($DeployConfig.virtualMachines)) {
+        if ($vm.vmName -eq $RelayVmName) { continue }
+        if ($vm.AssignedIP -and "$($vm.AssignedIP)" -eq $IPAddress) {
+            return [pscustomobject]@{ Available = $false; Reason = "configured VM '$($vm.vmName)' owns $IPAddress" }
+        }
+        if ($vm.role -eq 'DHCPRelay' -and @($vm.relayMappings | Where-Object {
+                    "$($_.clientNetwork)" -eq $Network
+                }).Count -gt 0) {
+            return [pscustomobject]@{ Available = $false; Reason = "configured relay '$($vm.vmName)' also maps client network $Network" }
+        }
+    }
+
+    try {
+        $reservation = Get-DhcpServerv4Reservation -ScopeId $Network -ErrorAction Stop |
+            Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1
+        if ($reservation) {
+            return [pscustomobject]@{ Available = $false; Reason = "DHCP reservation '$($reservation.Name)' owns $IPAddress" }
+        }
+        $lease = Get-DhcpServerv4Lease -ScopeId $Network -ErrorAction Stop |
+            Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1
+        if ($lease) {
+            return [pscustomobject]@{ Available = $false; Reason = "DHCP lease for '$($lease.HostName)' owns $IPAddress" }
+        }
+    }
+    catch {
+        return [pscustomobject]@{ Available = $false; Reason = "DHCP ownership could not be measured for $Network`: $($_.Exception.Message)" }
+    }
+
+    try {
+        foreach ($vm in @(Get-VM -ErrorAction Stop)) {
+            foreach ($adapter in @($vm | Get-VMNetworkAdapter -ErrorAction Stop)) {
+                if (@($adapter.IPAddresses) -notcontains $IPAddress) { continue }
+                if ($vm.Name -eq $RelayVmName -and $adapter.SwitchName -eq $Network) { continue }
+                return [pscustomobject]@{ Available = $false; Reason = "live adapter '$($vm.Name)/$($adapter.Name)' reports $IPAddress on '$($adapter.SwitchName)'" }
+            }
+        }
+    }
+    catch {
+        return [pscustomobject]@{ Available = $false; Reason = "live Hyper-V address ownership could not be measured: $($_.Exception.Message)" }
+    }
+
+    try {
+        $neighbor = Get-NetNeighbor -IPAddress $IPAddress -ErrorAction SilentlyContinue | Where-Object {
+            $_.State -notin @('Unreachable', 'Incomplete')
+        } | Select-Object -First 1
+        if ($neighbor -and (Test-Connection -ComputerName $IPAddress -Count 1 -Quiet -ErrorAction SilentlyContinue)) {
+            return [pscustomobject]@{ Available = $false; Reason = "neighbor $($neighbor.LinkLayerAddress) answers at $IPAddress" }
+        }
+    }
+    catch {
+        return [pscustomobject]@{ Available = $false; Reason = "neighbor ownership probe failed: $($_.Exception.Message)" }
+    }
+
+    return [pscustomobject]@{ Available = $true; Reason = $null }
+}
+
+function Sync-LinuxDhcpRelay {
+    <#
+    .SYNOPSIS
+        Reconcile configured OSD relay paths onto dedicated Ubuntu relay VMs.
+    .DESCRIPTION
+        Migrates management netplan ownership to its MAC before any hot-add,
+        creates at most one adapter per client switch, configures each guest
+        interface by MAC, and applies the complete dnsmasq desired state.
+        Stale adapters are reported but never removed.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $DeployConfig
+    )
+
+    $paths = @($DeployConfig.osdPxePaths)
+    if ($paths.Count -eq 0) {
+        $paths = @(Get-OsdPxePaths -Config $DeployConfig)
+    }
+    $badPaths = @($paths | Where-Object { $_.mode -in @('Missing', 'Invalid') })
+    if ($badPaths.Count -gt 0) {
+        $detail = @($badPaths | ForEach-Object { "$($_.clientNetwork)=$($_.mode)($($_.reason))" }) -join '; '
+        throw "DHCP relay reconciliation refused invalid OSD PXE topology: $detail"
+    }
+
+    $relayPaths = @($paths | Where-Object { $_.mode -eq 'Relay' })
+    $relayNames = @(@($relayPaths | ForEach-Object { $_.relayVM }) +
+        @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'DHCPRelay' } | ForEach-Object { $_.vmName }) |
+        Where-Object { $_ } | Select-Object -Unique)
+    foreach ($relayName in $relayNames) {
+        $relayVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $relayName } | Select-Object -First 1
+        if (-not $relayVM) { throw "Relay VM '$relayName' is absent from deployConfig" }
+        $desiredPaths = @($relayPaths | Where-Object { $_.relayVM -eq $relayName })
+        if (@($desiredPaths | Where-Object { -not $_.distributionPointIPv4 }).Count -gt 0) {
+            throw "Relay VM '$relayName' has a target DP without an agreed stable IPv4 address"
+        }
+
+        $managementNetwork = Get-OsdEffectiveNetwork -VM $relayVM -Config $DeployConfig
+        if ($managementNetwork -notmatch '^(\d{1,3}\.){3}0$') { throw "Relay VM '$relayName' has unsupported management network '$managementNetwork'" }
+        $managementIp = "$managementNetwork" -replace '\.0$', '.4'
+        $managementGateway = "$managementNetwork" -replace '\.0$', '.200'
+        $relayHostVm = Get-VM2 -Name $relayName -ErrorAction Stop
+        if ($relayHostVm.State -ne 'Running') { Start-VM2 -Name $relayName | Out-Null }
+        $managementAdapters = @($relayHostVm | Get-VMNetworkAdapter -ErrorAction Stop | Where-Object { $_.SwitchName -eq $managementNetwork })
+        if ($managementAdapters.Count -ne 1) {
+            throw "Relay VM '$relayName' must have exactly one management adapter on '$managementNetwork'; found $($managementAdapters.Count)"
+        }
+        $managementMac = "$($managementAdapters[0].MacAddress)"
+        if (-not $managementMac -or $managementMac -eq '000000000000') { throw "Relay VM '$relayName' management MAC is unavailable" }
+
+        $managementOwnership = Test-LinuxDhcpRelayAddressAvailable -IPAddress $managementIp -Network $managementNetwork `
+            -RelayVmName $relayName -DeployConfig $DeployConfig
+        if (-not $managementOwnership.Available) { throw "Relay VM '$relayName' management address conflict: $($managementOwnership.Reason)" }
+
+        $hadNetworkMarker = Invoke-LinuxVmCommand -VmName $relayName -IPAddress $managementIp -SuppressLog `
+            -BashCommand 'test -f /var/lib/memlabs/relay-network-schema && echo RELAY_NETWORK_SCHEMA_READY' `
+            -DisplayName 'Probe relay network ownership marker'
+        $prepareScript = Get-LinuxScript -Name 'relay/prepare-management-network' -Variables @{
+            MANAGEMENT_MAC = $managementMac
+            MANAGEMENT_IP = $managementIp
+            MANAGEMENT_GATEWAY = $managementGateway
+            DNS_SERVERS = '1.1.1.1, 8.8.8.8'
+            DNS_SEARCH = "$($DeployConfig.vmOptions.domainName)"
+        }
+        $prepared = Invoke-LinuxVmCommand -VmName $relayName -IPAddress $managementIp -Sudo -TimeoutSeconds 180 `
+            -BashCommand $prepareScript -DisplayName 'Prepare MAC-bound relay management networking'
+        if (-not $prepared.CommandResult) { throw "Relay VM '$relayName' management handoff failed: $($prepared.ScriptBlockOutput)" }
+        if ($prepared.ScriptBlockOutput -notmatch 'management profile ready: ([^ ]+) ') {
+            throw "Relay VM '$relayName' management handoff did not report the guest interface identity"
+        }
+        $managementGuestInterface = $Matches[1]
+
+        if ($hadNetworkMarker.ScriptBlockOutput -notmatch 'RELAY_NETWORK_SCHEMA_READY') {
+            Write-Log "$relayName`: management networking is MAC-bound; rebooting once before any NIC hot-add." -Activity
+            $null = Invoke-LinuxVmCommand -VmName $relayName -IPAddress $managementIp -Sudo -SuppressLog `
+                -BashCommand "nohup sh -c 'sleep 2; systemctl reboot' >/dev/null 2>&1 &" -DisplayName 'Reboot relay after network handoff'
+            Start-Sleep -Seconds 15
+            $readyIp = Wait-LinuxVmReady -VmName $relayName -ExpectedIPAddress $managementIp -TimeoutSeconds 600 -MaxRestarts 0
+            if (-not $readyIp) { throw "Relay VM '$relayName' did not restore management SSH at $managementIp after network handoff reboot" }
+            $prepared = Invoke-LinuxVmCommand -VmName $relayName -IPAddress $managementIp -Sudo -TimeoutSeconds 180 `
+                -BashCommand $prepareScript -DisplayName 'Validate relay management networking after reboot'
+            if (-not $prepared.CommandResult) { throw "Relay VM '$relayName' failed post-reboot management validation: $($prepared.ScriptBlockOutput)" }
+            if ($prepared.ScriptBlockOutput -notmatch 'management profile ready: ([^ ]+) ') {
+                throw "Relay VM '$relayName' post-reboot validation did not report the guest interface identity"
+            }
+            $managementGuestInterface = $Matches[1]
+        }
+
+        $relayAdapters = @($relayHostVm | Get-VMNetworkAdapter -ErrorAction Stop)
+        $missingClientSwitches = @($desiredPaths | Where-Object {
+                $_.clientNetwork -ne $managementNetwork -and $_.clientNetwork -notin $relayAdapters.SwitchName
+            } | ForEach-Object { $_.clientNetwork } | Select-Object -Unique)
+        if (($relayAdapters.Count + $missingClientSwitches.Count) -gt 8) {
+            throw "Relay VM '$relayName' would exceed the MemLabs safety guard of 8 total adapters"
+        }
+        $mappingRows = @()
+        $desiredSwitches = @()
+        foreach ($path in $desiredPaths) {
+            $clientNetwork = "$($path.clientNetwork)"
+            $clientIp = "$($path.relayIPv4)"
+            $desiredSwitches += $clientNetwork
+            if (-not (Get-VMSwitch -Name $clientNetwork -ErrorAction SilentlyContinue)) { throw "Relay client switch '$clientNetwork' does not exist" }
+            if (-not (Get-DhcpServerv4Scope -ScopeId $clientNetwork -ErrorAction SilentlyContinue)) { throw "Relay client DHCP scope '$clientNetwork' does not exist" }
+
+            $ownership = Test-LinuxDhcpRelayAddressAvailable -IPAddress $clientIp -Network $clientNetwork `
+                -RelayVmName $relayName -DeployConfig $DeployConfig
+            if (-not $ownership.Available) { throw "Relay path '$clientNetwork' address conflict: $($ownership.Reason)" }
+
+            if ($clientNetwork -eq $managementNetwork) {
+                $mappingRows += "$managementGuestInterface|$clientIp|$($path.distributionPointIPv4)"
+                continue
+            }
+
+            $clientAdapters = @($relayHostVm | Get-VMNetworkAdapter -ErrorAction Stop | Where-Object { $_.SwitchName -eq $clientNetwork })
+            if ($clientAdapters.Count -gt 1) { throw "Relay VM '$relayName' has duplicate adapters on client switch '$clientNetwork'" }
+            if ($clientAdapters.Count -eq 0) {
+                Add-VMNetworkAdapter -VMName $relayName -SwitchName $clientNetwork -Name "DHCPRelay-$clientNetwork" -ErrorAction Stop
+                $clientAdapters = @($relayHostVm | Get-VMNetworkAdapter -ErrorAction Stop | Where-Object { $_.SwitchName -eq $clientNetwork })
+                if ($clientAdapters.Count -ne 1) { throw "Relay VM '$relayName' hot-add on '$clientNetwork' did not produce exactly one adapter" }
+            }
+            $clientMac = "$($clientAdapters[0].MacAddress)"
+            $interfaceScript = Get-LinuxScript -Name 'relay/configure-client-interface' -Variables @{
+                CLIENT_MAC = $clientMac
+                CLIENT_IP = $clientIp
+                CLIENT_NETWORK = $clientNetwork
+            }
+            $interfaceResult = Invoke-LinuxVmCommand -VmName $relayName -IPAddress $managementIp -Sudo -TimeoutSeconds 180 `
+                -BashCommand $interfaceScript -DisplayName "Configure relay interface $clientNetwork by MAC"
+            if (-not $interfaceResult.CommandResult -or $interfaceResult.ScriptBlockOutput -notmatch 'RELAY_INTERFACE_READY=([^|]+)\|') {
+                throw "Relay VM '$relayName' guest interface setup failed for $clientNetwork/$clientMac`: $($interfaceResult.ScriptBlockOutput)"
+            }
+            $guestInterface = $Matches[1]
+            $mappingRows += "$guestInterface|$clientIp|$($path.distributionPointIPv4)"
+        }
+
+        $staleAdapters = @($relayHostVm | Get-VMNetworkAdapter -ErrorAction Stop | Where-Object {
+                $_.Name -like 'DHCPRelay-*' -and $_.SwitchName -notin $desiredSwitches
+            })
+        foreach ($stale in $staleAdapters) {
+            Write-Log "$relayName`: stale relay adapter '$($stale.Name)' remains on '$($stale.SwitchName)' and is excluded from desired dnsmasq state; it was not removed." -Warning
+        }
+
+        $mappingPayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($mappingRows -join "`n")))
+        $serviceScript = Get-LinuxScript -Name 'relay/configure-dhcp-relay' -Variables @{
+            RELAY_MAPPINGS_B64 = $mappingPayload
+        }
+        $serviceResult = Invoke-LinuxVmCommand -VmName $relayName -IPAddress $managementIp -Sudo -TimeoutSeconds 600 `
+            -BashCommand $serviceScript -DisplayName 'Reconcile dnsmasq DHCP relay service'
+        $expectedServiceMarker = if ($mappingRows.Count -eq 0) { 'zero active mappings; service stopped' } else { 'relay configuration is ready' }
+        $expectedServicePattern = [regex]::Escape($expectedServiceMarker)
+        if (-not $serviceResult.CommandResult -or $serviceResult.ScriptBlockOutput -notmatch $expectedServicePattern) {
+            throw "Relay VM '$relayName' service reconciliation failed: $($serviceResult.ScriptBlockOutput)"
+        }
+        if ($mappingRows.Count -eq 0) {
+            Write-Log "$relayName`: no active relay mappings; DHCP relay service is stopped." -Success
+        }
+        else {
+            Write-Log "$relayName`: DHCP relay configuration is ready for $($mappingRows.Count) mapping(s); successful PXE packet traversal is not established." -Success
+        }
+    }
+
+    return $true
+}
+
 function Invoke-LinuxBaseImageBake {
     <#
     .SYNOPSIS
@@ -6045,8 +6274,8 @@ $bakeWriteFilesYaml
             -Script (Get-LinuxScript -Name 'bake/01-system-updates' -IncludeAptRetry)
 
         # ── Step 2: Base packages ────────────────────────────────────────
-        Invoke-BakeStep -Name "Base packages (HVL, qemu-guest-agent)" -Timeout 300 -Retries 2 `
-            -Script (Get-LinuxScript -Name 'bake/02-base-packages' -IncludeAptRetry)
+        Invoke-BakeStep -Name "Base packages (HVL, domain join, Server relay/proxy prerequisites)" -Timeout 300 -Retries 2 `
+            -Script (Get-LinuxScript -Name 'bake/02-base-packages' -IncludeAptRetry -Variables @{ MEMLABS_BAKE_VARIANT = $Variant })
 
         # ── Step 3: Enable base services ─────────────────────────────────
         Invoke-BakeStep -Name "Enable base services" -Timeout 120 `

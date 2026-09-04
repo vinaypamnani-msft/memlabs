@@ -1167,6 +1167,12 @@ function ConvertTo-DeployConfigEx {
         else {
             $thisParams | Add-Member -MemberType NoteProperty -Name "vmNetwork" -Value $deployConfig.vmOptions.network -Force
         }
+        $thisVmKnownIp = $null
+        if ($thisVMObject.AssignedIP) { $thisVmKnownIp = "$($thisVMObject.AssignedIP)" }
+        elseif ($thisVMObject.LastKnownIP) { $thisVmKnownIp = "$($thisVMObject.LastKnownIP)" }
+        if ($thisVmKnownIp) {
+            $thisParams | Add-Member -MemberType NoteProperty -Name 'AssignedIP' -Value $thisVmKnownIp -Force
+        }
 
         $SQLAO = $deployConfig.virtualMachines | Where-Object { $_.role -eq "SQLAO" }
 
@@ -1527,7 +1533,7 @@ function ConvertTo-DeployConfigEx {
 
             # OSDClient and DP-only SiteSystem VMs normally opt out of client
             # push, but PXE clients still require a boundary. Map each OSD
-            # subnet to the site code of its same-subnet DP.
+            # subnet to the site code selected by its direct or relayed PXE path.
             foreach ($osdMapping in @(Get-OsdBoundaryMappings -Config $deployConfig)) {
                 $existingMapping = $sitesAndNetworks | Where-Object { $_.Subnet -eq $osdMapping.Subnet } | Select-Object -First 1
                 if ($existingMapping) {
@@ -1739,6 +1745,13 @@ function ConvertTo-DeployConfigEx {
     # Add Apps
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force
+
+    # Resolve after every VM has thisParams.vmNetwork. Guest-side Phase 8 must
+    # consume this serialized model rather than independently comparing VM
+    # subnets. Passing the expanded VM list keeps conversion deterministic and
+    # avoids a second live Hyper-V inventory read.
+    $osdPxePaths = @(Get-OsdPxePaths -Config $deployConfigEx -Inventory $deployConfigEx.virtualMachines)
+    $deployConfigEx | Add-Member -MemberType NoteProperty -Name 'osdPxePaths' -Value $osdPxePaths -Force
 
     return $deployConfigEx
 }

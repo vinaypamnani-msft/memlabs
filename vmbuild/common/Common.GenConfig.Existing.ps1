@@ -270,12 +270,13 @@ function Show-ExistingNetwork2 {
 }
 
 function Select-RolesForExistingList {
-    $existingRoles = $Common.Supported.RolesForExisting | Where-Object { $_ -ne "PassiveSite" }
+    # DHCPRelay is created and edited only by the OSD PXE-path workflow.
+    $existingRoles = $Common.Supported.RolesForExisting | Where-Object { $_ -notin @("PassiveSite", "DHCPRelay") }
     return $existingRoles
 }
 
 function Select-RolesForNewList {
-    $Roles = $Common.Supported.Roles | Where-Object { $_ -ne "PassiveSite" }
+    $Roles = $Common.Supported.Roles | Where-Object { $_ -notin @("PassiveSite", "DHCPRelay") }
     return $Roles
 }
 
@@ -311,6 +312,7 @@ function Format-Roles {
             "WSUS" { $newRoles += "$($role.PadRight($padding)) [Standalone WSUS Server]" }
             "StandaloneRootCA" { $newRoles += "$($role.PadRight($padding)) [Offline Root CA for two-tier PKI (workgroup, powered off after setup)]" }
             "Proxy" { $newRoles += "$($role.PadRight($padding)) [Linux Squid forward proxy (1 per domain, Ubuntu Server 24.04)]" }
+            "DHCPRelay" { $newRoles += "$($role.PadRight($padding)) [Dedicated Linux DHCP/PXE relay managed by OSD networking]" }
             "LinuxServer" { $newRoles += "$($role.PadRight($padding)) [Generic Ubuntu Server 24.04 VM (DHCP, optional domain join)]" }
             "LinuxClient" { $newRoles += "$($role.PadRight($padding)) [Ubuntu Desktop 24.04 workstation for MDM/EDR testing (GNOME, xrdp, optional domain join)]" }
             default { $newRoles += $role }
@@ -383,7 +385,7 @@ function Select-RolesForExisting {
         @{ Name = "SQL Servers"           ; Roles = @("SqlServer", "SQLAO") }
         @{ Name = "Workgroup / Isolated"  ; Roles = @("WorkgroupMember", "InternetClient", "AADClient", "OSDClient", "LinuxClient") }
         @{ Name = "Configuration Manager" ; Roles = @("CAS", "CAS and Primary", "Primary", "Secondary", "SiteSystem") }
-        @{ Name = "Infrastructure"        ; Roles = @("DC", "BDC", "FileServer", "WSUS", "StandaloneRootCA", "Proxy", "LinuxServer") }
+        @{ Name = "Infrastructure"        ; Roles = @("DC", "BDC", "FileServer", "WSUS", "StandaloneRootCA", "Proxy", "DHCPRelay", "LinuxServer") }
     )
 
     # Build an ordered list of roles bucketed by group, plus an "Other" bucket

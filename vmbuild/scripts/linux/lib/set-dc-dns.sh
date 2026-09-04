@@ -32,8 +32,6 @@ network:
   version: 2
   ethernets:
     primary:
-      match:
-        name: "e*"
       nameservers:
         addresses: [$dc_ip, 1.1.1.1, 8.8.8.8]
         search: [$domain]
