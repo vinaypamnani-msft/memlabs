@@ -224,12 +224,17 @@ Add-NewVMForRole -Role 'SiteSystem' -Domain 'example.test' -ConfigToModify $gene
     -Name 'W11DP' -SiteCode 'ABC' -OperatingSystem 'Windows 11 25H2' -Network '10.0.0.0' -Quiet:$true -Test:$true
 Add-NewVMForRole -Role 'SiteSystem' -Domain 'example.test' -ConfigToModify $generatedConfig `
     -Name 'SRVDPMP' -SiteCode 'ABC' -OperatingSystem 'Server 2022' -Network '10.0.0.0' -Quiet:$true -Test:$true
+Add-NewVMForRole -Role 'SiteSystem' -Domain 'example.test' -ConfigToModify $generatedConfig `
+    -Name 'SRVDP' -SiteCode 'ABC' -OperatingSystem 'Server 2022' -Network '10.0.0.0' -Quiet:$true -Test:$true -DistributionPointOnly:$true
 $generatedClient = $generatedConfig.virtualMachines | Where-Object { $_.vmName -eq 'W11DP' } | Select-Object -First 1
 $generatedServer = $generatedConfig.virtualMachines | Where-Object { $_.vmName -eq 'SRVDPMP' } | Select-Object -First 1
+$generatedDpOnly = $generatedConfig.virtualMachines | Where-Object { $_.vmName -eq 'SRVDP' } | Select-Object -First 1
 Assert-Equal $true $generatedClient.installDP 'new Windows 11 SiteSystem is a DP'
 Assert-PropertiesAbsent $generatedClient $serverRoleProperties 'new Windows 11 SiteSystem is DP-only'
 Assert-Equal $true $generatedServer.installMP 'new Server SiteSystem retains its MP default'
 Assert-PropertiesPresent $generatedServer $serverRoleProperties 'new Server SiteSystem retains all role toggles'
+Assert-Equal $true $generatedDpOnly.installDP 'DP-only SiteSystem retains its DP role'
+Assert-Equal $false $generatedDpOnly.installMP 'DP-only SiteSystem disables its MP default during construction'
 
 $global:ConfigObject = [pscustomobject]@{
     vmOptions       = [pscustomobject]@{ DomainName = 'example.test' }

@@ -57,6 +57,325 @@ function Rename-VirtualMachine {
 
 }
 
+function Test-OsdNetworkHasDistributionPoint {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Network,
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+
+    $allVMs = @(Get-List2 -DeployConfig $Config)
+    $allVMs += @($Config.virtualMachines | Where-Object { $null -ne $_ })
+    if ($global:existingMachines) {
+        $allVMs += @($global:existingMachines | Where-Object { $null -ne $_ })
+    }
+
+    foreach ($candidate in $allVMs) {
+        if (($candidate.installDP -eq $true -or $candidate.enablePullDP -eq $true) -and
+            (Get-OsdEffectiveNetwork -VM $candidate -Config $Config) -eq $Network) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-OsdDistributionPointPromotionCandidates {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Network,
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+
+    $sources = @(
+        [pscustomobject]@{ VMs = @($Config.virtualMachines | Where-Object { -not $_.hidden }); TrackChanges = $false }
+        [pscustomobject]@{ VMs = @($global:existingMachines); TrackChanges = $true }
+    )
+    $seen = @{}
+
+    foreach ($source in $sources) {
+        foreach ($candidate in $source.VMs) {
+            $vmName = "$($candidate.vmName)"
+            if (-not $vmName) { continue }
+            $key = $vmName.ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+
+            if ((Get-OsdEffectiveNetwork -VM $candidate -Config $Config) -ne $Network) { continue }
+            if ($candidate.role -notin @('DomainMember', 'SiteSystem')) { continue }
+            if ($candidate.installDP -eq $true -or $candidate.enablePullDP -eq $true) { continue }
+            if ($candidate.sqlVersion -or $candidate.remoteSQLVM) { continue }
+
+            $operatingSystem = "$($candidate.operatingSystem)"
+            if ($operatingSystem -notlike 'Server *' -and $operatingSystem -notlike 'Windows 11*') { continue }
+
+            [pscustomobject]@{
+                VM           = $candidate
+                TrackChanges = [bool]$source.TrackChanges
+            }
+        }
+    }
+}
+
+function Select-OsdDistributionPointSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Network,
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [Parameter(Mandatory = $false)]
+        [object] $CandidateVM
+    )
+
+    $domain = "$($Config.vmOptions.domainName)"
+    $sites = @(Get-EligiblePushSites -Config $Config -Domain $domain)
+    if ($sites.Count -eq 0) {
+        Write-RedX "A Distribution Point cannot be added because no Primary or Secondary site is available."
+        return $null
+    }
+
+    $validSiteCodes = @($sites | ForEach-Object { "$($_.SiteCode)" })
+    $lockedSiteCode = Get-PushClientSubnetLock -Subnet $Network -Config $Config -Domain $domain -DefaultNet $Config.vmOptions.network
+    if (-not ($lockedSiteCode -and $validSiteCodes -contains "$lockedSiteCode")) { $lockedSiteCode = $null }
+
+    $allVMs = @(Get-List2 -DeployConfig $Config)
+    $allVMs += @($Config.virtualMachines | Where-Object { $_.hidden })
+    if ($global:existingMachines) { $allVMs += @($global:existingMachines) }
+    $assignedSiteCodes = @($allVMs | Where-Object {
+            (Get-OsdEffectiveNetwork -VM $_ -Config $Config) -eq $Network -and
+            ($_.pushClient -is [string]) -and $_.pushClient -and
+            $validSiteCodes -contains "$($_.pushClient)"
+        } | ForEach-Object { "$($_.pushClient)" } | Select-Object -Unique)
+    if ($assignedSiteCodes.Count -gt 1) {
+        Write-RedX "Subnet $Network has conflicting site assignments: $($assignedSiteCodes -join ', '). Resolve them before adding an OSD Distribution Point."
+        return $null
+    }
+
+    $requiredSiteCode = $lockedSiteCode
+    if ($assignedSiteCodes.Count -eq 1) {
+        if ($requiredSiteCode -and $requiredSiteCode -ne $assignedSiteCodes[0]) {
+            Write-RedX "Subnet $Network is owned by site $requiredSiteCode but contains a VM assigned to site $($assignedSiteCodes[0]). Resolve the conflict before adding an OSD Distribution Point."
+            return $null
+        }
+        $requiredSiteCode = $assignedSiteCodes[0]
+    }
+
+    if ($CandidateVM -and $CandidateVM.role -eq 'SiteSystem' -and
+        $CandidateVM.siteCode -and $validSiteCodes -contains "$($CandidateVM.siteCode)") {
+        if ($requiredSiteCode -and $requiredSiteCode -ne "$($CandidateVM.siteCode)") {
+            Write-RedX "SiteSystem '$($CandidateVM.vmName)' belongs to site $($CandidateVM.siteCode), but subnet $Network belongs to site $requiredSiteCode. Choose a different VM or create a new DP."
+            return $null
+        }
+        return "$($CandidateVM.siteCode)"
+    }
+    if ($requiredSiteCode) {
+        return "$requiredSiteCode"
+    }
+
+    $currentSiteCode = $null
+    if ($CandidateVM) {
+        foreach ($preferred in @($CandidateVM.siteCode, $CandidateVM.pushClient)) {
+            if ($preferred -and ($validSiteCodes -contains "$preferred")) {
+                $currentSiteCode = "$preferred"
+                break
+            }
+        }
+    }
+    if (-not $currentSiteCode) {
+        $matchingSite = $sites | Where-Object { $_.Network -eq $Network } | Select-Object -First 1
+        if ($matchingSite) { $currentSiteCode = "$($matchingSite.SiteCode)" }
+    }
+    if (-not $currentSiteCode) {
+        $currentSiteCode = "$((@($sites | Where-Object { $_.Role -eq 'Primary' }) + @($sites))[0].SiteCode)"
+    }
+    if ($sites.Count -eq 1) {
+        return "$($sites[0].SiteCode)"
+    }
+
+    $siteOptions = @($sites | ForEach-Object { "$($_.SiteCode) [$($_.Role), $($_.Network)]" })
+    $currentOption = $siteOptions | Where-Object { $_ -like "$currentSiteCode *" } | Select-Object -First 1
+    if (-not $currentOption) { $currentOption = $currentSiteCode }
+    $selection = Get-Menu2 -MenuName "Select the site that will own the DP on $Network" -Prompt "Select Primary or Secondary site" `
+        -OptionArray $siteOptions -CurrentValue $currentOption -Test:$false -Split
+    if ([string]::IsNullOrWhiteSpace($selection) -or $selection -eq 'ESCAPE') {
+        return $null
+    }
+    return "$selection".Split(' ')[0]
+}
+
+function Set-OsdDistributionPointPromotionProperty {
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $VM,
+        [Parameter(Mandatory = $true)]
+        [string] $Name,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object] $Value,
+        [Parameter(Mandatory = $true)]
+        [bool] $TrackChanges
+    )
+
+    $hasProperty = $VM.PSObject.Properties.Name -contains $Name
+    if ($hasProperty -and $VM.$Name -eq $Value) { return }
+
+    if ($TrackChanges) {
+        $originalName = "$Name-Original"
+        if ($VM.PSObject.Properties.Name -notcontains $originalName) {
+            $originalValue = if ($hasProperty) { $VM.$Name } else { $null }
+            $VM | Add-Member -MemberType NoteProperty -Name $originalName -Value $originalValue -Force
+        }
+    }
+    $VM | Add-Member -MemberType NoteProperty -Name $Name -Value $Value -Force
+}
+
+function Enable-OsdDistributionPointOnCandidate {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Candidate,
+        [Parameter(Mandatory = $true)]
+        [string] $SiteCode,
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+
+    $sourceVM = $Candidate.VM
+    $trackChanges = [bool]$Candidate.TrackChanges
+    $vm = $sourceVM
+    if ($trackChanges) {
+        $vm = $sourceVM | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    }
+    $previousRole = "$($vm.role)"
+    if ($trackChanges -and $vm.PSObject.Properties.Name -notcontains 'ExistingVM') {
+        $vm | Add-Member -MemberType NoteProperty -Name ExistingVM -Value $true -Force
+    }
+
+    Set-OsdDistributionPointPromotionProperty -VM $vm -Name role -Value 'SiteSystem' -TrackChanges:$trackChanges
+    Set-OsdDistributionPointPromotionProperty -VM $vm -Name siteCode -Value $SiteCode -TrackChanges:$trackChanges
+    Set-OsdDistributionPointPromotionProperty -VM $vm -Name installDP -Value $true -TrackChanges:$trackChanges
+    Set-OsdDistributionPointPromotionProperty -VM $vm -Name enablePullDP -Value $false -TrackChanges:$trackChanges
+
+    if ($previousRole -eq 'DomainMember') {
+        foreach ($roleProperty in @('installMP', 'installSUP', 'installRP', 'installSMSProv')) {
+            Set-OsdDistributionPointPromotionProperty -VM $vm -Name $roleProperty -Value $false -TrackChanges:$trackChanges
+        }
+    }
+    Set-SiteSystemPropertiesForOperatingSystem -VirtualMachine $vm
+
+    if ($trackChanges) {
+        $null = Add-ModifiedExistingVMToDeployConfig -VM $vm -ConfigToModify $Config -Hidden:$true
+        if (-not ($Config.virtualMachines | Where-Object { $_.vmName -eq $vm.vmName -and $_.hidden })) {
+            Write-RedX "Could not persist the Distribution Point changes for deployed VM '$($vm.vmName)'."
+            return $null
+        }
+
+        foreach ($propertyName in @($sourceVM.PSObject.Properties.Name)) {
+            if ($vm.PSObject.Properties.Name -notcontains $propertyName) {
+                $sourceVM.PSObject.Properties.Remove($propertyName)
+            }
+        }
+        foreach ($property in $vm.PSObject.Properties) {
+            $sourceVM | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value -Force
+        }
+        $vm = $sourceVM
+    }
+    return $vm
+}
+
+function Add-DistributionPointForOsdNetwork {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Network,
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+
+    while ($true) {
+        $candidates = @(Get-OsdDistributionPointPromotionCandidates -Network $Network -Config $Config)
+        $candidateOptions = @($candidates | ForEach-Object {
+                $source = if ($_.TrackChanges) { 'deployed' } else { 'new' }
+                "$($_.VM.vmName) [$source $($_.VM.role), $($_.VM.operatingSystem)]"
+            })
+        $additionalOptions = [ordered]@{
+            'N'  = "Create a new Distribution Point VM on $Network"
+            'HN' = 'Adds a DP-only SiteSystem VM on the selected subnet'
+            'B'  = 'Choose a different subnet'
+            'HB' = 'Returns to the OSDClient subnet picker without making changes'
+        }
+
+        $selection = Get-Menu2 -MenuName "OSD requires a Distribution Point on $Network" `
+            -Prompt 'Select an existing VM for the DP role, create a new DP VM, or go back' `
+            -OptionArray $candidateOptions -AdditionalOptions $additionalOptions -Test:$false -Split
+        if ([string]::IsNullOrWhiteSpace($selection) -or $selection -in @('B', 'ESCAPE')) {
+            return $false
+        }
+
+        if ($selection -eq 'N') {
+            $siteCode = Select-OsdDistributionPointSiteCode -Network $Network -Config $Config
+            if (-not $siteCode) { continue }
+
+            $machineName = Add-NewVMForRole -Role 'SiteSystem' -Domain $Config.vmOptions.domainName `
+                -ConfigToModify $Config -SiteCode $siteCode -Network $Network -ReturnMachineName:$true -DistributionPointOnly:$true
+            $newDP = $Config.virtualMachines | Where-Object { $_.vmName -eq $machineName } | Select-Object -First 1
+            if (-not $newDP) {
+                Write-RedX "The new Distribution Point VM was not added. Choose another option."
+                continue
+            }
+            $newDP.installDP = $true
+            $newDP | Add-Member -MemberType NoteProperty -Name enablePullDP -Value $false -Force
+            if ($newDP.PSObject.Properties.Name -contains 'installMP') { $newDP.installMP = $false }
+            Set-SiteSystemPropertiesForOperatingSystem -VirtualMachine $newDP
+            Write-Log "Added Distribution Point VM '$($newDP.vmName)' on $Network for site $siteCode." -Success
+            return $true
+        }
+
+        $candidate = $candidates | Where-Object { $_.VM.vmName -eq $selection } | Select-Object -First 1
+        if (-not $candidate) { continue }
+        $siteCode = Select-OsdDistributionPointSiteCode -Network $Network -Config $Config -CandidateVM $candidate.VM
+        if (-not $siteCode) { continue }
+
+        $promotedVM = Enable-OsdDistributionPointOnCandidate -Candidate $candidate -SiteCode $siteCode -Config $Config
+        if (-not $promotedVM) { continue }
+        Write-Log "Enabled the Distribution Point role on '$($promotedVM.vmName)' on $Network for site $siteCode." -Success
+        return $true
+    }
+}
+
+function Select-OsdClientNetwork {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $VM,
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+
+    $currentNetwork = Get-OsdEffectiveNetwork -VM $VM -Config $Config
+    while ($true) {
+        $network = Select-Subnet -ConfigToCheck $Config -CurrentNetworkIsValid:$true -CurrentVM $VM
+        if ([string]::IsNullOrWhiteSpace($network)) { return $currentNetwork }
+
+        $allVMs = @(Get-List2 -DeployConfig $Config)
+        $allVMs += @($Config.virtualMachines | Where-Object { $_.hidden })
+        if ($global:existingMachines) { $allVMs += @($global:existingMachines) }
+        $hasCmSite = @($allVMs | Where-Object { $_.role -in @('CAS', 'Primary', 'Secondary') }).Count -gt 0
+        if (-not $hasCmSite) { return $network }
+
+        if (Test-OsdNetworkHasDistributionPoint -Network $network -Config $Config) {
+            return $network
+        }
+        if (Add-DistributionPointForOsdNetwork -Network $network -Config $Config) {
+            return $network
+        }
+    }
+}
+
 
 function Get-NetworkForVM {
     [CmdletBinding()]
@@ -126,6 +445,12 @@ function Get-NetworkForVM {
             }
         }
         "SiteSystem" {
+            # Interactive edits must allow deliberate remote-DP placement. Creation
+            # uses ReturnIfNotNeeded to inherit the site server's subnet by default.
+            if (-not $ReturnIfNotNeeded) {
+                return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm
+            }
+
             # sitesAndNetworks maps exactly one subnet per site code, so a DP/MP left
             # on the default network sits inside another site's boundary.
             # Get-SiteServerForSiteCode throws when the site code resolves to nothing.
@@ -142,6 +467,9 @@ function Get-NetworkForVM {
         }
         Default {
             if (-not $ReturnIfNotNeeded) {
+                if ($vm.role -eq 'OSDClient') {
+                    return Select-OsdClientNetwork -VM $vm -Config $ConfigToModify
+                }
                 return Select-Subnet -config $configToModify -CurrentNetworkIsValid:$true -CurrentVM $vm
 
             }
@@ -179,7 +507,9 @@ function Add-NewVMForRole {
         [Parameter(Mandatory = $false, HelpMessage = "Test Mode")]
         [bool] $test = $false,
         [Parameter(Mandatory = $false, HelpMessage = "True if this is the Secondary SQLAO Node")]
-        [bool] $secondSQLAO = $false
+        [bool] $secondSQLAO = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Create a SiteSystem with only the Distribution Point role enabled")]
+        [bool] $DistributionPointOnly = $false
     )
 
 
@@ -627,7 +957,7 @@ function Add-NewVMForRole {
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallDP' -Value $true -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallMP' -Value $true -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallMP' -Value (-not $DistributionPointOnly) -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallSUP' -Value $false -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallRP' -Value $false -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallSMSProv' -Value $false -force

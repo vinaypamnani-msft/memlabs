@@ -34,14 +34,6 @@ Function Get-ValidSubnets {
         $subnetlist = Get-ValidNetworksForVM -ConfigToCheck $configToCheck -Currentvm $vmToCheck
     }
 
-    # An OSDClient can only PXE-boot from a DP on its own subnet, so
-    # Get-ValidNetworksForVM already limited the list to subnets that have a DP.
-    # Do NOT append brand-new empty subnets for it (a fresh subnet has no DP and
-    # can never do OSD/PXE); return the DP-restricted list as-is.
-    if ($vmToCheck -and $vmToCheck.Role -eq 'OSDClient') {
-        return @($subnetlist | Where-Object { $_ } | Sort-Object -Property { [System.Version]$_ } | Get-Unique)
-    }
-
     $usedSubnets += $subnetList
     $subnetList = @($subnetList | Sort-Object -Property { [System.Version]$_ } | Get-Unique)
     $addedsubnets = 0
@@ -1531,6 +1523,20 @@ function ConvertTo-DeployConfigEx {
                     SiteCode = $targetSite
                     Subnet   = $vmSubnet
                 }
+            }
+
+            # OSDClient and DP-only SiteSystem VMs normally opt out of client
+            # push, but PXE clients still require a boundary. Map each OSD
+            # subnet to the site code of its same-subnet DP.
+            foreach ($osdMapping in @(Get-OsdBoundaryMappings -Config $deployConfig)) {
+                $existingMapping = $sitesAndNetworks | Where-Object { $_.Subnet -eq $osdMapping.Subnet } | Select-Object -First 1
+                if ($existingMapping) {
+                    if ($existingMapping.SiteCode -ne $osdMapping.SiteCode) {
+                        Write-Log "Warning: OSD subnet $($osdMapping.Subnet) is already mapped to site $($existingMapping.SiteCode), but its Distribution Point belongs to site $($osdMapping.SiteCode)" -Warning
+                    }
+                    continue
+                }
+                $sitesAndNetworks += $osdMapping
             }
 
             $thisParams | Add-Member -MemberType NoteProperty -Name "sitesAndNetworks" -Value $sitesAndNetworks -Force

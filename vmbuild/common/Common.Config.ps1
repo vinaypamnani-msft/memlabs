@@ -1372,7 +1372,7 @@ function Add-ExistingVMsToDeployConfig {
             })
         $configuredOsdDps = @($config.virtualMachines | Where-Object {
                 if (-not ($_.installDP -or $_.enablePullDP)) { return $false }
-                $dpNetwork = if ($_.network) { "$($_.network)" } else { $osdDefaultNetwork }
+                $dpNetwork = Get-OsdEffectiveNetwork -VM $_ -Config $config
                 return $newOsdNetworks -contains $dpNetwork
             })
         $allSiteServersForOsd = @($config.virtualMachines) + @($existingDomainVMsForOsd)
@@ -1415,7 +1415,7 @@ function Add-ExistingVMsToDeployConfig {
         # OSD validated none of it: not the DP that serves PXE, not the Primary that owns the
         # boot image and the task-sequence deployments. Mark them so Phase 11 alone can opt
         # them back in; they still stay out of Phase 1 and 10, which would rebuild them.
-        foreach ($osdVmName in @(@($existingOsdDps | ForEach-Object { $_.vmName }) + @($osdPrimaryNames) | Where-Object { $_ } | Select-Object -Unique)) {
+        foreach ($osdVmName in @(@($existingOsdDps | ForEach-Object { $_.vmName }) + @($osdPrimaryNames) + @($configuredOsdDps | ForEach-Object { $_.vmName }) | Where-Object { $_ } | Select-Object -Unique)) {
             $osdVm = $config.virtualMachines | Where-Object { $_.vmName -eq $osdVmName } | Select-Object -First 1
             if ($osdVm) { $osdVm | Add-Member -MemberType NoteProperty -Name 'osdValidate' -Value $true -Force }
         }
@@ -1658,7 +1658,8 @@ function Add-ModifiedExistingVMToDeployConfig {
     $vmName = $vm.vmName
 
     Write-Log -verbose "Adding Modified $($vmName) to Deploy config"
-    if ($configToModify.virtualMachines.vmName -contains $vmName) {
+    $existingConfigVM = $configToModify.virtualMachines | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
+    if ($existingConfigVM -and -not $existingConfigVM.hidden) {
         Write-Log "Not adding $vmName as it already exists in deployConfig" -LogOnly
         return
     }
@@ -1709,6 +1710,9 @@ function Add-ModifiedExistingVMToDeployConfig {
 
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
+    }
+    if ($existingConfigVM) {
+        $configToModify.virtualMachines = @($configToModify.virtualMachines | Where-Object { $_.vmName -ne $vmName })
     }
     if ($null -eq $configToModify.virtualMachines) {
         $configToModify | Add-Member -MemberType NoteProperty -Name "virtualMachines" -Value @($newVMObject) -Force
@@ -1859,6 +1863,69 @@ function Get-VMDeployedNetwork {
         Write-Log "Get-VMDeployedNetwork: lookup failed for '$VmName': $($_.Exception.Message)" -LogOnly -Warning
     }
     return $null
+}
+
+function Get-OsdEffectiveNetwork {
+    <#
+    .SYNOPSIS
+    Returns a VM's effective subnet for OSD DP placement and validation.
+
+    .DESCRIPTION
+    New VMs carry network directly. Hidden existing-VM entries deliberately do
+    not, so use ConvertTo-DeployConfigEx metadata or the deployed VM as fallback
+    before using the deployment default.
+    #>
+    param (
+        [Parameter(Mandatory = $true)] [object] $VM,
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    if ($VM.network) { return "$($VM.network)" }
+    if ($VM.thisParams -and $VM.thisParams.vmNetwork) { return "$($VM.thisParams.vmNetwork)" }
+    if ($VM.hidden -and $VM.vmName) {
+        $deployedNetwork = Get-VMDeployedNetwork -VmName $VM.vmName -Domain $Config.vmOptions.domainName
+        if ($deployedNetwork) { return "$deployedNetwork" }
+    }
+    return "$($Config.vmOptions.network)"
+}
+
+function Get-OsdBoundaryMappings {
+    <#
+    .SYNOPSIS
+    Returns the boundary mapping required by each OSDClient subnet.
+
+    .DESCRIPTION
+    OSD clients do not receive client push, and a DP-only SiteSystem normally
+    does not either. Derive the subnet's site from its same-subnet DP so an
+    otherwise empty OSD subnet still receives a ConfigMgr boundary group.
+    #>
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    $allVMs = @(Get-List2 -DeployConfig $Config)
+    $allVMs += @($Config.virtualMachines | Where-Object { $_.hidden })
+    $osdClients = @($allVMs | Where-Object { $_.role -eq 'OSDClient' })
+    $distributionPoints = @($allVMs | Where-Object {
+            ($_.installDP -eq $true -or $_.enablePullDP -eq $true) -and $_.siteCode
+        })
+    $mappedSubnets = @{}
+
+    foreach ($osdClient in $osdClients) {
+        $subnet = Get-OsdEffectiveNetwork -VM $osdClient -Config $Config
+        if (-not $subnet -or $mappedSubnets.ContainsKey($subnet)) { continue }
+
+        $distributionPoint = $distributionPoints | Where-Object {
+            (Get-OsdEffectiveNetwork -VM $_ -Config $Config) -eq $subnet
+        } | Select-Object -First 1
+        if (-not $distributionPoint) { continue }
+
+        $mappedSubnets[$subnet] = $true
+        [pscustomobject]@{
+            SiteCode = "$($distributionPoint.siteCode)"
+            Subnet   = "$subnet"
+        }
+    }
 }
 
 function Get-EligiblePushSites {
