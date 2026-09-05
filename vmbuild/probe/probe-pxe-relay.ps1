@@ -62,7 +62,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $vmbuildRoot = Split-Path -Parent $PSScriptRoot
-Set-Location $vmbuildRoot
+$repositoryRoot = Split-Path -Parent $vmbuildRoot
+$invocationDirectory = (Get-Location).Path
 $commonPath = Join-Path $vmbuildRoot 'Common.ps1'
 . $commonPath -FastInit
 
@@ -113,8 +114,21 @@ function Get-NativeText {
 function Resolve-ConfigPath {
     param([string] $RequestedPath)
     if ($RequestedPath) {
-        $resolved = Resolve-Path -LiteralPath $RequestedPath -ErrorAction Stop
-        return $resolved.Path
+        $candidates = [System.Collections.Generic.List[string]]::new()
+        if ([System.IO.Path]::IsPathRooted($RequestedPath)) {
+            $candidates.Add($RequestedPath)
+        }
+        else {
+            $candidates.Add((Join-Path $invocationDirectory $RequestedPath))
+            $candidates.Add((Join-Path $repositoryRoot $RequestedPath))
+            $candidates.Add((Join-Path $vmbuildRoot $RequestedPath))
+        }
+        foreach ($candidate in @($candidates | Select-Object -Unique)) {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return (Resolve-Path -LiteralPath $candidate -ErrorAction Stop).Path
+            }
+        }
+        throw "ConfigPath '$RequestedPath' was not found relative to '$invocationDirectory', '$repositoryRoot', or '$vmbuildRoot'."
     }
 
     $candidates = @(Get-ChildItem -LiteralPath (Join-Path $vmbuildRoot 'logs') -Filter 'VMBuild.*.config.json' -File -ErrorAction SilentlyContinue |
