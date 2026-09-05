@@ -2489,14 +2489,21 @@ function Test-NetworkFastPath {
             return $false
         }
 
-        # 5. Scope DNS option points at THIS domain's DC?
-        # Existence is not correctness: a scope left behind by a previous lab that
-        # owned this subnet keeps that lab's DNS server (option 6), so every VM on
-        # the subnet leases a dead resolver, DC Locator never finds a PDC, and the
-        # domain join hangs. Comparison mirrors Test-DHCPScope so a fast-path pass
-        # means the full path would also have said "already present".
+        # 5. Scope options point at THIS network's host gateway and domain DC?
+        # Existence is not correctness: a scope left behind by a previous lab can
+        # have a stale/missing router (option 3) or DNS server (option 6). DHCP
+        # relay still works without option 3, but the PXE client's subsequent
+        # unicast TFTP/4011 traffic cannot leave its subnet.
+        $scopeOptions = Get-DhcpServerv4OptionValue -ScopeId $NetworkSubnet -ErrorAction SilentlyContinue
+        if ($NetworkName -ne 'Cluster') {
+            $currentRouter = @($scopeOptions | Where-Object OptionID -eq 3 | ForEach-Object { @($_.Value) } | Where-Object { $null -ne $_ -and "$_" })
+            if ($currentRouter.Count -ne 1 -or "$($currentRouter[0])" -ne $desiredIp) {
+                Write-Log "  Fast-path miss: scope '$NetworkSubnet' router option is '$($currentRouter -join ', ')', expected '$desiredIp'." -LogOnly
+                return $false
+            }
+        }
+
         if ($DNSServer) {
-            $scopeOptions = Get-DhcpServerv4OptionValue -ScopeId $NetworkSubnet -ErrorAction SilentlyContinue
             $currentDns = ($scopeOptions | Where-Object OptionID -eq 6).Value
             if ($currentDns -ne $DNSServer) {
                 Write-Log "  Fast-path miss: scope '$NetworkSubnet' DNS option is '$currentDns', expected '$DNSServer'." -LogOnly
@@ -3461,8 +3468,16 @@ function Test-DHCPScope {
         $updateOptions = $false
         $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
         if ($scope) {
+            $scopeOptions = Get-DhcpServerv4OptionValue -ScopeId $scopeID -ErrorAction SilentlyContinue
+            if ($ScopeName -ne 'cluster') {
+                $expectedRouter = $network + ".200"
+                $currentRouter = @($scopeOptions | Where-Object OptionID -eq 3 | ForEach-Object { @($_.Value) } | Where-Object { $null -ne $_ -and "$_" })
+                if ($currentRouter.Count -ne 1 -or "$($currentRouter[0])" -ne $expectedRouter) {
+                    Write-OrangePoint "'$ScopeID ($ScopeName)' scope router ($($currentRouter -join ', ')) does not match preferred ($expectedRouter) — updating options in-place"
+                    $updateOptions = $true
+                }
+            }
             if ($DHCPDNSAddress) {
-                $scopeOptions = get-DhcpServerv4OptionValue -scopeID $scopeID -ErrorAction SilentlyContinue
                 $currentDNS = ($scopeOptions | Where-Object OptionID -eq 6).Value
                 if ($currentDNS -ne $DHCPDNSAddress) {
                     Write-OrangePoint "'$ScopeID ($ScopeName)' scope DNS ($currentDNS) does not match preferred ($DHCPDNSAddress) — updating options in-place"
