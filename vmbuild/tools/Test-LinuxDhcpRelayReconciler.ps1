@@ -34,6 +34,7 @@ $script:Adapters = @()
 $script:AddCalls = 0
 $script:Events = @()
 $script:Reservation = @()
+$script:Lease = @()
 $script:LastClientVariables = $null
 $script:ServicePayload = $null
 $script:ResolverCalls = 0
@@ -44,6 +45,7 @@ function Reset-Fixture {
     $script:AddCalls = 0
     $script:Events = @()
     $script:Reservation = @()
+    $script:Lease = @()
     $script:LastClientVariables = $null
     $script:ServicePayload = $null
     $script:ResolverCalls = 0
@@ -104,7 +106,7 @@ function Get-VMNetworkAdapter {
     process { return @($script:Adapters) }
 }
 function Get-DhcpServerv4Reservation { [CmdletBinding()] param($ScopeId); return @($script:Reservation) }
-function Get-DhcpServerv4Lease { [CmdletBinding()] param($ScopeId); return @() }
+function Get-DhcpServerv4Lease { [CmdletBinding()] param($ScopeId); return @($script:Lease) }
 function Get-NetNeighbor { [CmdletBinding()] param($IPAddress); return @() }
 function Test-Connection { [CmdletBinding()] param($ComputerName, $Count); return $false }
 function Get-VMSwitch { [CmdletBinding()] param($Name); return [pscustomobject]@{ Name = $Name } }
@@ -173,6 +175,27 @@ $foreignReservation = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.
     -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
 Assert-Equal $false $foreignReservation.Available 'blank-name reservation for a different MAC remains a conflict'
 Assert-Equal $true ($foreignReservation.Reason -like '*00-15-5D-01-00-99*') 'unnamed reservation diagnostic identifies its ClientId'
+
+Reset-Fixture
+$script:Lease = @([pscustomobject]@{
+    IPAddress = [pscustomobject]@{ IPAddressToString = '192.168.1.4' }
+    HostName = ''
+    ClientId = '00-15-5D-01-00-01'
+})
+$ownLease = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $true $ownLease.Available 'blank-hostname lease for the exact relay adapter MAC is not a conflict'
+
+Reset-Fixture
+$script:Lease = @([pscustomobject]@{
+    IPAddress = [pscustomobject]@{ IPAddressToString = '192.168.1.4' }
+    HostName = ''
+    ClientId = '00-15-5D-01-00-99'
+})
+$foreignLease = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $false $foreignLease.Available 'blank-hostname lease for a different MAC remains a conflict'
+Assert-Equal $true ($foreignLease.Reason -like '*00-15-5D-01-00-99*') 'unnamed lease diagnostic identifies its ClientId'
 
 Reset-Fixture
 $config = New-FixtureConfig -StalePendingPath

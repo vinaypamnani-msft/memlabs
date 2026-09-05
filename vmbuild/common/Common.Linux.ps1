@@ -5692,11 +5692,10 @@ function Test-LinuxDhcpRelayAddressAvailable {
         }
     }
 
-    # A relay rerun can encounter the DHCP reservation that Phase 3 itself
-    # maintains for the relay's existing adapter. Reservation Name is blank
-    # on the live DhcpServer object, so prove ownership from ClientId versus
-    # the exact Hyper-V adapter MAC on this switch; every mismatch still
-    # fails closed as an address conflict.
+    # A relay rerun can encounter the DHCP reservation and lease records that
+    # Phase 3 maintains for the relay's existing adapter. Their display names
+    # can be blank, so prove ownership from ClientId versus the exact Hyper-V
+    # adapter MAC on this switch; every mismatch still fails closed.
     $relayAdapterMacs = @()
     try {
         $relayHostVm = Get-VM2 -Name $RelayVmName -ErrorAction SilentlyContinue
@@ -5727,7 +5726,13 @@ function Test-LinuxDhcpRelayAddressAvailable {
         $lease = Get-DhcpServerv4Lease -ScopeId $Network -ErrorAction Stop |
             Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1
         if ($lease) {
-            return [pscustomobject]@{ Available = $false; Reason = "DHCP lease for '$($lease.HostName)' owns $IPAddress" }
+            $leaseMac = ("$($lease.ClientId)" -replace '[-:]', '').ToUpperInvariant()
+            if (-not ($leaseMac -and $leaseMac -in $relayAdapterMacs)) {
+                $leaseOwner = "$($lease.HostName)".Trim()
+                if (-not $leaseOwner) { $leaseOwner = "client $($lease.ClientId)".Trim() }
+                if (-not $leaseOwner -or $leaseOwner -eq 'client') { $leaseOwner = 'an unidentified client' }
+                return [pscustomobject]@{ Available = $false; Reason = "DHCP lease for $leaseOwner owns $IPAddress" }
+            }
         }
     }
     catch {
