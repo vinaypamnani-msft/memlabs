@@ -461,6 +461,11 @@ $etlPath = Join-Path $destRoot 'host-pxe.etl'
 $pcapPath = Join-Path $destRoot 'host-pxe.pcapng'
 $packetTextPath = Join-Path $destRoot 'host-pxe.txt'
 $packetKeyPath = Join-Path $destRoot 'host-pxe-key-lines.txt'
+$netshEtlPath = Join-Path $destRoot 'host-pxe-netsh.etl'
+$netshPcapPath = Join-Path $destRoot 'host-pxe-netsh.pcapng'
+$netshSessionName = "MemLabsPXE$PID"
+$netshPath = "$((Get-Command netsh.exe -ErrorAction SilentlyContinue).Source)"
+$netshTraceStarted = $false
 $pktmonLog = [System.Collections.Generic.List[string]]::new()
 $clientActionTaken = $false
 $observeAttempt = $false
@@ -483,6 +488,30 @@ function Invoke-ProbeClientAction {
         Add-ReportLine "Client action  : restart/start '$clientVm' manually while capture is running."
         $script:observeAttempt = $true
     }
+}
+
+function Start-ProbeNetshTrace {
+    if (-not $netshPath) {
+        Add-ReportLine 'Netsh fallback: NOT COLLECTED because netsh.exe is unavailable.'
+        return $false
+    }
+    $traceArgs = @(
+        'trace', 'start', "sessionname=$netshSessionName", 'capture=yes', 'capturetype=vmswitch',
+        'report=no', 'persistent=no', 'maxSize=256', 'fileMode=circular', 'overwrite=yes',
+        "traceFile=$netshEtlPath", 'Ethernet.Type=IPv4', 'Protocol=UDP'
+    )
+    if ($ClientIPAddress -and $dpIP) {
+        $traceArgs += "IPv4.Address=($ClientIPAddress,$dpIP)"
+    }
+    $started = Get-NativeText -FilePath $netshPath -ArgumentList $traceArgs
+    $pktmonLog.Add("===== netsh fallback start rc=$($started.ExitCode) =====`r`n$($started.Text)")
+    if ($started.ExitCode -ne 0) {
+        Add-ReportLine "Netsh fallback: NOT COLLECTED (rc=$($started.ExitCode)): $($started.Text)"
+        return $false
+    }
+    $script:netshTraceStarted = $true
+    Add-ReportLine "Netsh fallback: RUNNING named vSwitch capture '$netshSessionName' for $CaptureSeconds seconds."
+    return $true
 }
 
 try {
@@ -509,6 +538,7 @@ try {
                 }
                 else {
                     Add-ReportLine "Packet capture: NOT COLLECTED because capture could not start with the existing filters (rc=$($started.ExitCode)): $($started.Text)"
+                    $null = Start-ProbeNetshTrace
                 }
             }
             else {
@@ -572,6 +602,11 @@ finally {
         $pktmonLog.Add("===== remove filters rc=$($removed.ExitCode) =====`r`n$($removed.Text)")
         $filtersAdded = $false
     }
+    if ($netshTraceStarted) {
+        $netshStopped = Get-NativeText -FilePath $netshPath -ArgumentList @('trace', 'stop', "sessionname=$netshSessionName")
+        $pktmonLog.Add("===== netsh fallback stop rc=$($netshStopped.ExitCode) =====`r`n$($netshStopped.Text)")
+        $netshTraceStarted = $false
+    }
     Write-Utf8NoBom -Path (Join-Path $destRoot 'pktmon-command.log') -Text ($pktmonLog -join "`r`n")
 }
 
@@ -587,6 +622,17 @@ if ((Test-Path -LiteralPath $etlPath) -and $pktmonPath) {
             Select-Object -First 10000 | ForEach-Object { $_.Line })
         Write-Utf8NoBom -Path $packetKeyPath -Text ($keyLines -join "`r`n")
         Add-ReportLine "Packet key lines: $packetKeyPath ($($keyLines.Count) line(s))"
+    }
+}
+if (Test-Path -LiteralPath $netshEtlPath) {
+    Add-ReportLine "Netsh ETL      : $netshEtlPath"
+    $etlConverter = Get-Command etl2pcapng.exe -ErrorAction SilentlyContinue
+    if ($etlConverter) {
+        $converted = Get-NativeText -FilePath $etlConverter.Source -ArgumentList @($netshEtlPath, $netshPcapPath)
+        Add-ReportLine "Netsh PCAPNG   : $(if ($converted.ExitCode -eq 0) { $netshPcapPath } else { "conversion failed: $($converted.Text)" })"
+    }
+    else {
+        Add-ReportLine 'Netsh PCAPNG   : NOT CREATED because etl2pcapng.exe is unavailable; ETL was preserved.'
     }
 }
 

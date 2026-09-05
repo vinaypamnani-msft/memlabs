@@ -32,6 +32,7 @@ function Import-TestFunction {
 
 $probePath = Join-Path $RootPath 'probe\probe-pxe-relay.ps1'
 . (Import-TestFunction $probePath 'Invoke-ProbeClientAction')
+. (Import-TestFunction $probePath 'Start-ProbeNetshTrace')
 
 $script:RestartClientVM = $true
 $script:clientActionTaken = $false
@@ -45,6 +46,12 @@ function Get-VM { return [pscustomobject]@{ State = 'Running' } }
 function Restart-VM { $script:RestartCalls++ }
 function Start-VM { $script:StartCalls++ }
 function Add-ReportLine { param($Text); $script:Messages += $Text }
+function Get-NativeText {
+    param($FilePath, $ArgumentList)
+    $script:NativeFilePath = $FilePath
+    $script:NativeArguments = @($ArgumentList)
+    return [pscustomobject]@{ ExitCode = 0; Text = 'Trace configuration: Running' }
+}
 
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 Invoke-ProbeClientAction
@@ -55,8 +62,23 @@ Assert-Equal $true $script:observeAttempt 'client restart arms the observation w
 Invoke-ProbeClientAction
 Assert-Equal 1 $script:RestartCalls 'client action is idempotent within one probe run'
 
+$script:netshPath = 'C:\Windows\System32\netsh.exe'
+$script:netshSessionName = 'MemLabsPXE123'
+$script:netshEtlPath = 'C:\temp\host-pxe-netsh.etl'
+$script:ClientIPAddress = '192.168.3.20'
+$script:dpIP = '192.168.2.21'
+$script:netshTraceStarted = $false
+$script:pktmonLog = [System.Collections.Generic.List[string]]::new()
+Assert-Equal $true (Start-ProbeNetshTrace) 'named netsh vSwitch fallback starts successfully'
+Assert-Equal $true $script:netshTraceStarted 'successful netsh start is tracked for scoped cleanup'
+Assert-Equal $true ($script:NativeArguments -contains 'sessionname=MemLabsPXE123') 'netsh start uses a unique named session'
+Assert-Equal $true ($script:NativeArguments -contains 'capturetype=vmswitch') 'netsh fallback captures the Hyper-V vSwitch path'
+Assert-Equal $true ($script:NativeArguments -contains 'IPv4.Address=(192.168.3.20,192.168.2.21)') 'netsh fallback filters to the client/DP flow'
+
 $source = Get-Content -LiteralPath $probePath -Raw
 Assert-Equal $true ($source.Contains('Packet capture: using pre-existing filters that include UDP')) 'probe can reuse existing UDP-covering Packet Monitor filters'
+Assert-Equal $true ($source.Contains("'capturetype=vmswitch'")) 'probe has an independent named netsh vSwitch fallback when Packet Monitor is already running'
+Assert-Equal $true ($source.Contains('sessionname=$netshSessionName')) 'netsh fallback stop targets only the probe-owned named session'
 Assert-Equal $true ($source.Contains('Client action occurred despite packet-capture setup failure')) 'capture setup failure does not suppress an explicit client restart'
 Assert-Equal $true ($source.Contains('if ($filtersAdded)')) 'probe still gates global filter removal on filters it added'
 
