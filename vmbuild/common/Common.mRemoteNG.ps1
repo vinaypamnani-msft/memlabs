@@ -297,6 +297,8 @@ function Format-MRemoteNGTooltip {
 
     $lines = [System.Collections.Generic.List[string]]::new()
     $vmIsLinux = Test-VmIsLinux -Vm $Vm
+    # `u{...} escapes require PowerShell 7; Windows PowerShell 5.1 renders them literally.
+    $separator = '  ' + [char]0x2022 + '  '
 
     # --- Line 1: Role description ---
     $roleLabel = switch ($Vm.Role) {
@@ -322,7 +324,7 @@ function Format-MRemoteNGTooltip {
         default            { $Vm.Role }
     }
     $os = if ($Vm.deployedOS) { $Vm.deployedOS } elseif ($Vm.operatingSystem) { $Vm.operatingSystem } else { '' }
-    if ($os) { $lines.Add("$roleLabel  `u{2022}  $os") } else { $lines.Add($roleLabel) }
+    if ($os) { $lines.Add("$roleLabel$separator$os") } else { $lines.Add($roleLabel) }
 
     # --- Line 2: IP / Memory / vCPUs ---
     $infoParts = @()
@@ -333,7 +335,7 @@ function Format-MRemoteNGTooltip {
         $cpuLabel = if ([int]$Vm.virtualProcs -eq 1) { 'vCPU' } else { 'vCPUs' }
         $infoParts += "$($Vm.virtualProcs) $cpuLabel"
     }
-    if ($infoParts.Count -gt 0) { $lines.Add($infoParts -join '  `u{2022}  ') }
+    if ($infoParts.Count -gt 0) { $lines.Add($infoParts -join $separator) }
 
     # --- Domain ---
     if ($Vm.Domain) { $lines.Add("Domain: $($Vm.Domain)") }
@@ -399,7 +401,7 @@ function Format-MRemoteNGTooltip {
     if ($Vm.useProxy)    { $features += 'Proxy' }
     if ($Vm.enablePullDP) { $features += 'Pull DP' }
     if ($Vm.InstallRP -and $Vm.Role -ne 'SiteSystem') { $features += 'Reporting Point' }
-    if ($features.Count -gt 0) { $lines.Add($features -join '  `u{2022}  ') }
+    if ($features.Count -gt 0) { $lines.Add($features -join $separator) }
 
     # --- User ---
     if ($Vm.domainUser) { $lines.Add("User: $($Vm.domainUser)") }
