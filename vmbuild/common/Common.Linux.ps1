@@ -5751,10 +5751,12 @@ function Sync-LinuxDhcpRelay {
         [Parameter(Mandatory = $true)] [object] $DeployConfig
     )
 
-    $paths = @($DeployConfig.osdPxePaths)
-    if ($paths.Count -eq 0) {
-        $paths = @(Get-OsdPxePaths -Config $DeployConfig)
-    }
+    # Re-resolve from current VM metadata on every reconciliation. A fresh
+    # -StartPhase 3/8 process reloads the pre-Phase config snapshot, whose
+    # serialized relay path may still say the new DP's IPv4 is pending even
+    # though Phase 1 later persisted AssignedIP/LastKnownIP in its VM note.
+    $paths = @(Get-OsdPxePaths -Config $DeployConfig)
+    $DeployConfig | Add-Member -MemberType NoteProperty -Name 'osdPxePaths' -Value $paths -Force
     $badPaths = @($paths | Where-Object { $_.mode -in @('Missing', 'Invalid') })
     if ($badPaths.Count -gt 0) {
         $detail = @($badPaths | ForEach-Object { "$($_.clientNetwork)=$($_.mode)($($_.reason))" }) -join '; '

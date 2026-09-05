@@ -36,6 +36,8 @@ $script:Events = @()
 $script:Reservation = @()
 $script:LastClientVariables = $null
 $script:ServicePayload = $null
+$script:ResolverCalls = 0
+$script:ResolvedPaths = @()
 
 function Reset-Fixture {
     param ([switch] $WithClient, [switch] $DuplicateClient)
@@ -44,6 +46,7 @@ function Reset-Fixture {
     $script:Reservation = @()
     $script:LastClientVariables = $null
     $script:ServicePayload = $null
+    $script:ResolverCalls = 0
     $script:Adapters = @([pscustomobject]@{
             Name = 'Network Adapter'; SwitchName = '192.168.1.0'; MacAddress = '00155D010001'; IPAddresses = @('192.168.1.4')
         })
@@ -60,19 +63,26 @@ function Reset-Fixture {
 }
 
 function New-FixtureConfig {
-    param ([switch] $NoActivePath)
+    param ([switch] $NoActivePath, [switch] $StalePendingPath)
     $relay = [pscustomobject]@{
         vmName = 'RELAY1'; role = 'DHCPRelay'; osFamily = 'Linux'; operatingSystem = 'Ubuntu Server 24.04 LTS'
         network = '192.168.1.0'; relayMappings = @()
     }
     $paths = @()
     if (-not $NoActivePath) {
+        $targetIp = '192.168.1.25'
+        if ($StalePendingPath) { $targetIp = $null }
         $paths += [pscustomobject]@{
             clientNetwork = '192.168.3.0'; mode = 'Relay'; relayVM = 'RELAY1'; relayIPv4 = '192.168.3.4'
             distributionPointVM = 'DP1'; distributionPointNetwork = '192.168.1.0'
-            distributionPointSiteCode = 'PS1'; distributionPointIPv4 = '192.168.1.25'
+            distributionPointSiteCode = 'PS1'; distributionPointIPv4 = $targetIp
         }
     }
+    $script:ResolvedPaths = @($paths | ForEach-Object {
+            $resolvedPath = $_.PSObject.Copy()
+            if ($resolvedPath.mode -eq 'Relay') { $resolvedPath.distributionPointIPv4 = '192.168.1.25' }
+            $resolvedPath
+        })
     [pscustomobject]@{
         vmOptions = [pscustomobject]@{ domainName = 'example.test'; network = '192.168.1.0' }
         virtualMachines = @($relay)
@@ -81,7 +91,10 @@ function New-FixtureConfig {
 }
 
 function Get-OsdEffectiveNetwork { param($VM, $Config) if ($VM.network) { $VM.network } else { $Config.vmOptions.network } }
-function Get-OsdPxePaths { return @() }
+function Get-OsdPxePaths {
+    $script:ResolverCalls++
+    return @($script:ResolvedPaths)
+}
 function Get-VM2 { [CmdletBinding()] param($Name); return [pscustomobject]@{ Name = 'RELAY1'; State = 'Running' } }
 function Start-VM2 { return $true }
 function Get-VM { [CmdletBinding()] param(); return @([pscustomobject]@{ Name = 'RELAY1'; State = 'Running' }) }
@@ -141,8 +154,10 @@ function Write-Log { param($Message, [switch]$Activity, [switch]$Success, [switc
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 
 Reset-Fixture
-$config = New-FixtureConfig
+$config = New-FixtureConfig -StalePendingPath
 Assert-Equal $true (Sync-LinuxDhcpRelay -DeployConfig $config) 'missing relay NIC reconciles successfully'
+Assert-Equal 1 $script:ResolverCalls 'reconciliation refreshes a serialized pending target IPv4 from current metadata'
+Assert-Equal '192.168.1.25' $config.osdPxePaths[0].distributionPointIPv4 'refreshed PXE path replaces stale serialized state'
 Assert-Equal 1 $script:AddCalls 'missing relay NIC is added exactly once'
 Assert-Equal 'prepare,add,configure-client,service' ($script:Events -join ',') 'management handoff completes before hot-add and service restart'
 Assert-Equal '00155D030004' $script:LastClientVariables.CLIENT_MAC 'guest configuration is keyed by captured Hyper-V MAC'
