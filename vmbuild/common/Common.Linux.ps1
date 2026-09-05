@@ -4797,8 +4797,11 @@ function Test-VmUsesProxy {
         state.
 
         Returns $false for the Proxy VM itself (it IS the proxy, so it must
-        never route through itself) and for the DNS-anchor roles (DC/BDC/
-        StandaloneRootCA). Both Windows and Linux VMs can opt in: Windows
+        never route through itself), for the DNS-anchor roles (DC/BDC/
+        StandaloneRootCA), and for OSDClient. A bare OSDClient has no guest
+        proxy configuration while WinPE and Windows OOBE run, so enforcing
+        the direct-egress deny ACL there strands OOBE at "No Internet".
+        Both Windows and Linux VMs can opt in: Windows
         clients are configured via Set-WindowsClientProxy over PSDirect;
         Linux clients via the roles/proxy-client bash module over SSH in
         Phase 3. The $DeployConfig parameter is kept for source
@@ -4813,7 +4816,7 @@ function Test-VmUsesProxy {
     )
 
     if (-not $Vm) { return $false }
-    $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+    $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA', 'OSDClient')
     if ($Vm.role -in $hardExclude) { return $false }
 
     if ($Vm.PSObject.Properties.Name -contains 'useProxy') {

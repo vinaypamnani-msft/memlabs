@@ -1318,15 +1318,16 @@ function Add-NewVMForRole {
 
     # Add useProxy property for VMs that can sensibly route through the
     # domain's Squid proxy. Excludes the Proxy VM itself, DCs (DNS for the
-    # domain itself), and StandaloneRootCA (offline, no networking). Both
-    # Windows and Linux VMs are eligible -- Windows clients are configured
+    # domain itself), StandaloneRootCA (offline, no networking), and OSDClient
+    # (no installed guest in which to configure a proxy before OOBE). Both
+    # Windows and Linux VMs are otherwise eligible -- Windows clients are configured
     # via Set-WindowsClientProxy over PSDirect, Linux clients via the Phase 3
     # roles/proxy-client bash module over SSH.
     # Default is seeded from one of two domainDefaults keys depending on the
     # VM's purpose:
     #   ConfigMgr site-system roles -> UseProxyForCM
     #   everything else (clients, plain DomainMembers, Linux) -> UseProxyForClients
-    $proxyExcluded = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+    $proxyExcluded = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA', 'OSDClient')
     if ($role -notin $proxyExcluded) {
         $cmRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite', 'WSUS', 'SQLAO', 'FileServer')
         $useProxyKey = if ($role -in $cmRoles) { 'UseProxyForCM' } else { 'UseProxyForClients' }

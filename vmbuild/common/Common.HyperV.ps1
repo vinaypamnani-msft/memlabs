@@ -2595,8 +2595,11 @@ function Set-VmProxyEnforcementForConfig {
 
     .DESCRIPTION
         Enumerates the deployConfig, filters via Test-VmUsesProxy, then
-        calls Set-VmProxyEnforcement per VM. No-op when no Proxy VM or no
-        opted-in clients exist.
+        calls Set-VmProxyEnforcement per VM. OSDClient is kept on direct NAT:
+        it has no installed guest in which to configure a proxy, so a deny ACL
+        would strand Windows OOBE at "No Internet". Any stale OSDClient ACLs
+        from an older run are removed. No-op when no Proxy VM or no opted-in
+        clients exist.
     #>
     [CmdletBinding()]
     param (
@@ -2604,6 +2607,10 @@ function Set-VmProxyEnforcementForConfig {
     )
 
     $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    foreach ($osdVm in @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and $_.vmName })) {
+        Clear-VmProxyEnforcement -VmName $osdVm.vmName
+        Write-Log "[Proxy] $($osdVm.vmName): OSDClient uses direct NAT; cleared any stale proxy enforcement ACLs"
+    }
     # Linux clients are intentionally EXCLUDED here: their proxy env/apt
     # config is applied in Phase 3 (roles/proxy-client), which runs AFTER
     # this Phase 2 post-hook. Stamping the deny-ACL now would block the
@@ -2643,10 +2650,11 @@ function Set-VmProxyEnforcementForAllLabs {
 
     .DESCRIPTION
         Enumerates every memlabs VM on the host via Get-List -Type VM.
-        For each VM with useProxy=true in its VM Note (Windows, not
-        role-excluded) -> stamps the fixed RFC 1918 allow + deny ACL set.
-        For each opted-out VM that still has stale ACLs in the memlabs
-        weight band (5000-5099) -> clears them.
+        For each eligible VM with useProxy=true in its VM Note -> stamps the
+        fixed RFC 1918 allow + deny ACL set. For each opted-out or role-excluded
+        VM that still has stale ACLs in the memlabs weight band (5000-5099) ->
+        clears them. OSDClient is role-excluded because it has no installed
+        guest in which to configure a proxy while WinPE/Windows OOBE runs.
 
         Because the allow rules cover all RFC 1918 private space, the ACL
         set is identical for every VM and never needs per-subnet
@@ -2681,12 +2689,13 @@ function Set-VmProxyEnforcementForAllLabs {
     # and Linux clients that opted into useProxy have their guest-side proxy
     # config applied in Phase 3, so stamping their deny-ACL here (post-Phase-11)
     # is safe and enforces the "must use proxy" policy the same way as Windows.
-    $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+    $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA', 'OSDClient')
 
     $applied = 0; $cleared = 0; $skipped = 0; $failed = 0
     foreach ($vm in $allVms) {
         if (-not $vm.vmName) { continue }
-        if ($vm.role -in $hardExclude) { $skipped++; continue }
+        $roleExcluded = $vm.role -in $hardExclude
+        if ($roleExcluded) { $skipped++ }
 
         $optedIn = $false
         if ($vm.PSObject.Properties.Name -contains 'useProxy') {
@@ -2694,15 +2703,16 @@ function Set-VmProxyEnforcementForAllLabs {
         }
 
         try {
-            if ($optedIn) {
+            if ($optedIn -and -not $roleExcluded) {
                 if ($PSCmdlet.ShouldProcess($vm.vmName, "Apply proxy enforcement ACLs")) {
                     $r = Set-VmProxyEnforcement -VmName $vm.vmName
                     if ($r) { $applied++ } else { $failed++ }
                 }
             }
             else {
-                # Not opted-in: clear any stale ACLs from a prior deploy where
-                # useProxy was true. Cheap no-op if the VM has none.
+                # Not eligible/not opted-in: clear any stale ACLs from a prior
+                # deploy where useProxy was true. This is required for OSDClient:
+                # older runs enforced it before the role was excluded.
                 $existing = Get-VMNetworkAdapterExtendedAcl -VMName $vm.vmName -ErrorAction SilentlyContinue
                 $stale = @($existing | Where-Object {
                         $_.Weight -ge $global:MemLabsProxyAclWeightMin -and
