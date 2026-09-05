@@ -98,6 +98,100 @@ Write-DscStatus "$Tag Starting perfloading"
         return $false
     }
 
+    function Sync-MemLabsOsdComputerNameSteps {
+        param (
+            [object[]] $TaskSequences,
+            [object[]] $OsdClients,
+            [string] $StatusTag
+        )
+
+        $managedPrefix = 'MEMLABS set OSDComputerName: '
+        $identityRows = @()
+        $seenNames = @{}
+        $seenMacs = @{}
+        foreach ($osdClient in @($OsdClients | Where-Object { $null -ne $_ })) {
+            $computerName = "$($osdClient.vmName)".Trim()
+            $compactMac = "$($osdClient.osdMacAddress)" -replace '[^0-9A-Fa-f]', ''
+            if (-not $computerName -or $computerName.Length -gt 15 -or $computerName -notmatch '^[A-Za-z0-9][A-Za-z0-9-]*$') {
+                Write-DscStatus "$StatusTag OSDClient name '$computerName' is not a valid Windows computer name (1-15 letters, digits, or hyphens). OSDComputerName steps were not changed." -Failure
+                return $false
+            }
+            if ($compactMac -notmatch '^[0-9A-Fa-f]{12}$') {
+                Write-DscStatus "$StatusTag OSDClient '$computerName' has no usable osdMacAddress ('$($osdClient.osdMacAddress)'). OSDComputerName steps were not changed." -Failure
+                return $false
+            }
+
+            $nameKey = $computerName.ToUpperInvariant()
+            $macKey = $compactMac.ToUpperInvariant()
+            if ($seenNames.ContainsKey($nameKey)) {
+                Write-DscStatus "$StatusTag OSD computer name '$computerName' appears more than once; per-device naming would be ambiguous." -Failure
+                return $false
+            }
+            if ($seenMacs.ContainsKey($macKey)) {
+                Write-DscStatus "$StatusTag OSD MAC '$macKey' is shared by '$($seenMacs[$macKey])' and '$computerName'; per-device naming would be ambiguous." -Failure
+                return $false
+            }
+            $seenNames[$nameKey] = $true
+            $seenMacs[$macKey] = $computerName
+            $identityRows += [pscustomobject]@{
+                ComputerName = $computerName
+                MacAddress   = ($macKey -replace '(..)(?!$)', '$1:')
+            }
+        }
+
+        foreach ($taskSequence in @($TaskSequences | Where-Object { $null -ne $_ })) {
+            try {
+                # Remove only steps owned by this reconciler. Recreate them so a
+                # Hyper-V VM replacement (new MAC) cannot leave a stale condition.
+                $existingManaged = @($taskSequence | Get-CMTSStepSetVariable -ErrorAction Stop | Where-Object {
+                        $_.Name -like "$managedPrefix*"
+                    })
+                foreach ($existingStep in $existingManaged) {
+                    $taskSequence | Remove-CMTSStepSetVariable -StepName $existingStep.Name -Force -ErrorAction Stop
+                }
+
+                $newSteps = @()
+                foreach ($identity in $identityRows) {
+                    # Product TSCore populates _SMSTSMacAddresses as a comma-separated
+                    # list of Win32_NetworkAdapterConfiguration MACAddress values. The
+                    # Like operator uses PathMatchSpecW, whose wildcard is '*'.
+                    $condition = New-CMTSStepConditionVariable `
+                        -ConditionVariableName '_SMSTSMacAddresses' `
+                        -ConditionVariableValue "*$($identity.MacAddress)*" `
+                        -OperatorType Like `
+                        -ErrorAction Stop
+                    $newSteps += New-CMTSStepSetVariable `
+                        -Name "$managedPrefix$($identity.ComputerName)" `
+                        -TaskSequenceVariable 'OSDComputerName' `
+                        -TaskSequenceVariableValue $identity.ComputerName `
+                        -Condition $condition `
+                        -ErrorAction Stop
+                }
+                if ($newSteps.Count -gt 0) {
+                    $taskSequence | Add-CMTaskSequenceStep -Step $newSteps -InsertStepStartIndex 0 -ErrorAction Stop
+                }
+
+                $verified = @($taskSequence | Get-CMTSStepSetVariable -ErrorAction Stop | Where-Object {
+                        $_.Name -like "$managedPrefix*" -and $_.VariableName -eq 'OSDComputerName'
+                    })
+                if ($verified.Count -ne $identityRows.Count) {
+                    throw "read-back found $($verified.Count) managed naming step(s), expected $($identityRows.Count)"
+                }
+                foreach ($identity in $identityRows) {
+                    if (-not ($verified | Where-Object { $_.VariableValue -eq $identity.ComputerName })) {
+                        throw "read-back did not find OSDComputerName='$($identity.ComputerName)'"
+                    }
+                }
+                Write-DscStatus "$StatusTag Reconciled $($identityRows.Count) MAC-matched OSDComputerName step(s) in '$($taskSequence.Name)'"
+            }
+            catch {
+                Write-DscStatus "$StatusTag Failed to reconcile OSDComputerName steps in '$($taskSequence.Name)': $($_.Exception.Message)" -Failure
+                return $false
+            }
+        }
+        return $true
+    }
+
     function Sync-MemLabsScriptLibrary {
         param([string]$ScriptPath = 'C:\tools\Scripts')
 
@@ -1903,6 +1997,20 @@ Write-DscStatus "$Tag Starting perfloading"
         break
 
     }
+    }
+
+    # Reconcile outside the creation guard: existing task sequences need the
+    # naming steps added on upgrade, and a recreated Hyper-V OSD VM has a new
+    # MAC that must replace the old condition. Apply the mapping to every local
+    # MEMLABS task sequence so whichever advertised sequence the bare VM selects
+    # receives the configured computer name before Apply Windows Settings.
+    $siteTaskSequencesForNaming = @(Get-CMTaskSequence -Fast | Where-Object {
+            $_.Name -like 'MEMLABS-*' -and "$($_.PackageID)" -like "$SiteCode*"
+        })
+    $osdClientsForNaming = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })
+    if ($siteTaskSequencesForNaming.Count -gt 0 -and
+        -not (Sync-MemLabsOsdComputerNameSteps -TaskSequences $siteTaskSequencesForNaming -OsdClients $osdClientsForNaming -StatusTag $Tag)) {
+        return
     }
 
     } # end hasOsdMedia

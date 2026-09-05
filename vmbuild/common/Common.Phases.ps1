@@ -1628,6 +1628,42 @@ function Get-MissingHyperVNodes {
     }
 }
 
+function Set-OsdClientMacAddresses {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$DeployConfig
+    )
+
+    $seenMacs = @{}
+    foreach ($osdVm in @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })) {
+        $vmName = "$($osdVm.vmName)".Trim()
+        if (-not $vmName) { throw 'An OSDClient has no vmName; OSDComputerName cannot be authored.' }
+
+        $clientNetwork = Get-OsdEffectiveNetwork -VM $osdVm -Config $DeployConfig
+        $matchingAdapters = @(Get-VMNetworkAdapter -VMName $vmName -ErrorAction Stop | Where-Object {
+                -not $clientNetwork -or $_.SwitchName -eq $clientNetwork
+            })
+        if ($matchingAdapters.Count -ne 1) {
+            throw "OSDClient '$vmName' expected exactly one Hyper-V adapter on '$clientNetwork', found $($matchingAdapters.Count)."
+        }
+
+        $compactMac = "$($matchingAdapters[0].MacAddress)" -replace '[^0-9A-Fa-f]', ''
+        if ($compactMac -notmatch '^[0-9A-Fa-f]{12}$') {
+            throw "OSDClient '$vmName' has unusable Hyper-V MAC '$($matchingAdapters[0].MacAddress)'."
+        }
+        $compactMac = $compactMac.ToUpperInvariant()
+        if ($seenMacs.ContainsKey($compactMac)) {
+            throw "OSDClients '$($seenMacs[$compactMac])' and '$vmName' have the same MAC '$compactMac'; per-device naming would be ambiguous."
+        }
+        $seenMacs[$compactMac] = $vmName
+
+        $colonMac = $compactMac -replace '(..)(?!$)', '$1:'
+        $osdVm | Add-Member -MemberType NoteProperty -Name 'osdMacAddress' -Value $colonMac -Force
+        Write-Log "[Phase 8] OSD identity: $vmName -> $colonMac on $clientNetwork" -LogOnly
+    }
+}
+
 
 function Start-PhaseJobs {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '',
@@ -1837,6 +1873,21 @@ function Start-PhaseJobs {
     # waiting on Primary) would block on the same wall-clock, turning a
     # 30-second misconfig into a 9-hour stuck deploy.
     if ($Phase -eq 8) {
+        try {
+            $null = Set-OsdClientMacAddresses -DeployConfig $deployConfig
+        }
+        catch {
+            Write-Log "[Phase 8] OSD computer-name precondition failed: $($_.Exception.Message)" -Failure
+            return [PSCustomObject]@{
+                Failed          = 1
+                Success         = 0
+                Jobs            = 0
+                Applicable      = $true
+                AdditionalData  = $null
+                PreflightFailed = $true
+            }
+        }
+
         $relayPathsForPhase = @($deployConfig.osdPxePaths | Where-Object { $_.mode -eq 'Relay' })
         $relayVmsForPhase = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'DHCPRelay' })
         if ($relayPathsForPhase.Count -gt 0 -or $relayVmsForPhase.Count -gt 0) {
