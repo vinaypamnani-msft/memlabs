@@ -13696,7 +13696,14 @@ function Test-LinuxDhcpRelay {
         Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: WARN - stale adapter '$($stale.Name)' remains on '$($stale.SwitchName)' but is excluded from active mappings" -Level Warning
     }
 
-    $expectedB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($expectedRows -join "`n")))
+    $expectedText = $expectedRows -join "`n"
+    if ($expectedRows.Count -gt 0) {
+        # Bash `while read` normally skips a final row without a line
+        # terminator. Keep the validation wire format identical to the relay
+        # reconciler so one mapping is measured as one rather than zero.
+        $expectedText += "`n"
+    }
+    $expectedB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($expectedText))
     $validationScript = Get-LinuxScript -Name 'relay/validate-dhcp-relay' -Variables @{
         EXPECTED_MAPPINGS_B64 = $expectedB64
         MANAGEMENT_IP = $managementIp

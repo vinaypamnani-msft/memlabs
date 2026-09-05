@@ -33,7 +33,7 @@ systemctl is-active --quiet "$UNIT_NAME"
 ss -H -lunp | grep -Eq '(^|[[:space:]])[^[:space:]]*:67[[:space:]]' || { echo "UDP/67 is not listening" >&2; exit 3; }
 
 EXPECTED_COUNT=0
-while IFS='|' read -r expected_mac expected_ip expected_target extra; do
+while IFS='|' read -r expected_mac expected_ip expected_target extra || [ -n "${expected_mac}${expected_ip}${expected_target}${extra}" ]; do
     [ -z "${expected_mac}${expected_ip}${expected_target}${extra}" ] && continue
     [ -z "$extra" ] || { echo "malformed expected mapping" >&2; exit 2; }
     IFACE=''

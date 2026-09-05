@@ -29,6 +29,8 @@ function Import-TestFunction {
 $linuxPath = Join-Path $RootPath 'common\Common.Linux.ps1'
 . (Import-TestFunction $linuxPath 'Test-LinuxDhcpRelayAddressAvailable')
 . (Import-TestFunction $linuxPath 'Sync-LinuxDhcpRelay')
+$validationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
+. (Import-TestFunction $validationPath 'Test-LinuxDhcpRelay')
 
 $script:Adapters = @()
 $script:AddCalls = 0
@@ -38,6 +40,7 @@ $script:Lease = @()
 $script:Neighbor = @()
 $script:LastClientVariables = $null
 $script:ServicePayload = $null
+$script:ValidationPayload = $null
 $script:ResolverCalls = 0
 $script:ResolvedPaths = @()
 
@@ -50,6 +53,7 @@ function Reset-Fixture {
     $script:Neighbor = @()
     $script:LastClientVariables = $null
     $script:ServicePayload = $null
+    $script:ValidationPayload = $null
     $script:ResolverCalls = 0
     $script:Adapters = @([pscustomobject]@{
             Name = 'Network Adapter'; SwitchName = '192.168.1.0'; MacAddress = '00155D010001'; IPAddresses = @('192.168.1.4')
@@ -113,6 +117,7 @@ function Get-NetNeighbor { [CmdletBinding()] param($IPAddress); return @($script
 function Test-Connection { [CmdletBinding()] param($ComputerName, $Count, [switch] $Quiet); return $script:Neighbor.Count -gt 0 }
 function Get-VMSwitch { [CmdletBinding()] param($Name); return [pscustomobject]@{ Name = $Name } }
 function Get-DhcpServerv4Scope { [CmdletBinding()] param($ScopeId); return [pscustomobject]@{ ScopeId = $ScopeId } }
+function Add-Phase11Output { param($Text, $Level) }
 function Add-VMNetworkAdapter {
     [CmdletBinding()]
     param($VMName, $SwitchName, $Name)
@@ -129,6 +134,9 @@ function Get-LinuxScript {
     }
     if ($Name -eq 'relay/configure-dhcp-relay') {
         $script:ServicePayload = $Variables.RELAY_MAPPINGS_B64
+    }
+    if ($Name -eq 'relay/validate-dhcp-relay') {
+        $script:ValidationPayload = $Variables.EXPECTED_MAPPINGS_B64
     }
     return "SCRIPT:$Name"
 }
@@ -150,6 +158,9 @@ function Invoke-LinuxVmCommand {
         $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($script:ServicePayload))
         $marker = if ($decoded) { '[dhcp-relay] relay configuration is ready (1 mapping(s)); UDP/67 listener validated' } else { '[dhcp-relay] zero active mappings; service stopped' }
         return [pscustomobject]@{ CommandResult = $true; ScriptBlockOutput = $marker }
+    }
+    if ($BashCommand -eq 'SCRIPT:relay/validate-dhcp-relay') {
+        return [pscustomobject]@{ CommandResult = $true; ScriptBlockOutput = 'DHCP_RELAY_CONFIGURATION_READY mappings=1 management=eth0/192.168.1.4' }
     }
     return [pscustomobject]@{ CommandResult = $true; ScriptBlockOutput = '' }
 }
@@ -233,6 +244,13 @@ Assert-Equal 1 $script:AddCalls 'rerun does not add a second relay NIC'
 Reset-Fixture -WithClient
 $null = Sync-LinuxDhcpRelay -DeployConfig (New-FixtureConfig)
 Assert-Equal 0 $script:AddCalls 'matching relay NIC is a no-op'
+
+Reset-Fixture -WithClient
+$validationConfig = New-FixtureConfig
+Assert-Equal $true (Test-LinuxDhcpRelay -VMName 'RELAY1' -CurrentItem $validationConfig.virtualMachines[0] -DeployConfig $validationConfig) 'Phase 11 relay validation accepts one configured mapping'
+Assert-Equal "00155D030004|192.168.3.4|192.168.1.25`n" ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($script:ValidationPayload))) 'Phase 11 expected mapping is LF-terminated so Bash reads the final row'
+$validatorSource = Get-Content (Join-Path $RootPath 'scripts\linux\relay\validate-dhcp-relay.sh') -Raw
+Assert-Equal $true ($validatorSource.Contains("read -r expected_mac expected_ip expected_target extra || [ -n")) 'validator defensively processes an unterminated final row'
 
 Reset-Fixture -WithClient -DuplicateClient
 $duplicateFailed = $false
