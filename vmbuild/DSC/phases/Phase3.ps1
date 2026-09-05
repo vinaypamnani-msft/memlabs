@@ -405,7 +405,12 @@
                 Ensure    = "Present"
                 Key       = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SMS\DP"
                 ValueName = "RamDiskTFTPBlockSize"
-                ValueData = "4096"
+                # 1456 + 4-byte TFTP + 8-byte UDP + 20-byte IPv4 = 1488,
+                # safely below Ethernet MTU 1500. The old 4096 cap allowed a
+                # UEFI client's 1482-byte request, producing fragmented 1514-
+                # byte datagrams. Cross-subnet capture proved one tail fragment
+                # disappeared per four-block window, stranding ACK at block 290.
+                ValueData = "1456"
                 ValueType = "DWord"
             }
 
