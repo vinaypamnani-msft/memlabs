@@ -2407,7 +2407,8 @@ function Restore-TerminalFocus {
 # full Add-SwitchAndDhcp / Test-NetworkSwitch / Test-DHCPScope path makes.
 #
 # Callers populate $Cache once with bulk queries (Get-VMSwitch, Get-NetNat,
-# Get-NetAdapter, Get-NetIPAddress, Get-DhcpServerv4Scope) and pass it in.
+# Get-NetAdapter, Get-NetIPAddress, Get-NetIPInterface,
+# Get-DhcpServerv4Scope) and pass it in.
 # When $Cache is $null or any check fails, returns $false so the caller
 # falls through to Add-SwitchAndDhcp which has full retry/recovery logic.
 function Test-NetworkFastPath {
@@ -2456,6 +2457,23 @@ function Test-NetworkFastPath {
         return $false
     }
 
+    # The full Test-NetworkSwitch path enables forwarding on every routed lab
+    # vEthernet interface. Verify the same invariant here: DHCP relay traffic
+    # can succeed without host routing, but the PXE client's subsequent TFTP
+    # and port 4011 exchanges with a DP on another subnet require it. A stale
+    # switch with Forwarding=Disabled must fall through so the full path repairs
+    # it rather than reporting a healthy fast-path hit.
+    if ($NetworkName -ne 'ClusterV2') {
+        $ipInterface = $Cache.Interfaces | Where-Object {
+            $_.InterfaceIndex -eq $adapter.InterfaceIndex
+        } | Select-Object -First 1
+        if (-not $ipInterface -or "$($ipInterface.Forwarding)" -ne 'Enabled') {
+            $forwardingState = if ($ipInterface) { "$($ipInterface.Forwarding)" } else { '<not cached>' }
+            Write-Log "  Fast-path miss: adapter '$($adapter.InterfaceAlias)' IPv4 forwarding is '$forwardingState', expected 'Enabled'." -LogOnly
+            return $false
+        }
+    }
+
     # 3. NAT rule exists?
     $hasNat = $Cache.Nats | Where-Object { $_.Name -eq $NetworkSubnet }
     if (-not $hasNat) {
@@ -2488,7 +2506,7 @@ function Test-NetworkFastPath {
     }
 
     # All checks passed — emit the same log lines the full path would.
-    Write-Log "  Fast-path hit for '$NetworkName': switch/IP/NAT/scope/notes/DNS verified from cache." -LogOnly
+    Write-Log "  Fast-path hit for '$NetworkName': switch/IP/forwarding/NAT/scope/notes/DNS verified from cache." -LogOnly
     Write-Log "HyperV Network switch for '$NetworkName' already exists."
     if ($NetworkName -ne 'ClusterV2') {
         Write-GreenCheck "'$NetworkSubnet ($NetworkName)' scope is already present in DHCP."

@@ -855,6 +855,7 @@ try {
                 Nats     = @(Get-NetNat -ErrorAction SilentlyContinue)
                 Adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
                 IPs      = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+                Interfaces = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)
             }
             Write-Log "Pre-cached network state: $($_netCache.Switches.Count) switches, $($_netCache.Scopes.Count) DHCP scopes, $($_netCache.Nats.Count) NAT rules." -LogOnly
         }
