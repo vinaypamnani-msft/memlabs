@@ -7100,6 +7100,39 @@ function Test-ModuleAvailable {
     finally { $global:VerbosePreference = $savedVP }
 }
 
+function Initialize-ModuleAddProxy {
+    # A proxy written to machine.config in Phase 2 is not guaranteed to appear
+    # in the fresh WmiPrvSE AppDomain that hosts a later DSC phase. Phase 3 has
+    # an equivalent in-process bridge; ModuleAdd also runs in Phases 4/5/7 and
+    # must establish it for PackageManagement itself. Return the URI as well so
+    # callers can pass -Proxy explicitly instead of relying only on ambient
+    # WebRequest state.
+    $proxyAddress = [Environment]::GetEnvironmentVariable('HTTPS_PROXY', 'Machine')
+    if ([string]::IsNullOrWhiteSpace($proxyAddress)) {
+        try {
+            $winHttp = (& netsh winhttp show proxy 2>$null) -join "`n"
+            if ($winHttp -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
+                $proxyAddress = $Matches[1].Trim()
+            }
+        }
+        catch { }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($proxyAddress)) { return $null }
+    if ($proxyAddress -notmatch '^https?://') { $proxyAddress = "http://$proxyAddress" }
+
+    try {
+        $proxyUri = [Uri]$proxyAddress
+        [System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy($proxyUri, $true)
+        Write-Verbose "ModuleAdd: using explicit package proxy $proxyUri"
+        return $proxyUri
+    }
+    catch {
+        Write-Verbose "ModuleAdd: configured proxy '$proxyAddress' is not usable: $_"
+        return $null
+    }
+}
+
 [DscResource()]
 class ModuleAdd {
     [DscProperty(Key)]
@@ -7126,6 +7159,14 @@ class ModuleAdd {
         # causing Install-Module to hang or time out for up to 30 minutes.
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+        # PackageManagement does not reliably inherit machine.config proxy
+        # changes in a later DSC AppDomain. This was already fixed for Phase 3
+        # download resources; establish the same bridge here and also pass the
+        # URI explicitly to every network-backed package command.
+        $packageProxyParams = @{}
+        $packageProxy = Initialize-ModuleAddProxy
+        if ($packageProxy) { $packageProxyParams.Proxy = $packageProxy }
+
         # Pre-import package modules quietly to prevent DSC verbose log
         # flooding with hundreds of "Importing cmdlet ..." lines.
         $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
@@ -7146,16 +7187,17 @@ class ModuleAdd {
         try {
         
         IF ($null -eq $NuGet) {
-            #Install-PackageProvider Nuget -force -Confirm:$false
-            Find-PackageProvider -Name NuGet -Force | Install-PackageProvider -Force -Scope AllUsers -Confirm:$false
-            Register-PackageSource -Name nuget.org -Location https://www.nuget.org/api/v2 -ProviderName NuGet -Force -Trusted
+            $provider = Find-PackageProvider -Name NuGet -Force -ErrorAction Stop @packageProxyParams
+            if (-not $provider) { throw 'NuGet package provider discovery returned no provider.' }
+            $provider | Install-PackageProvider -Force -Scope AllUsers -Confirm:$false -ErrorAction Stop @packageProxyParams | Out-Null
+            Register-PackageSource -Name nuget.org -Location https://www.nuget.org/api/v2 -ProviderName NuGet -Force -Trusted -ErrorAction Stop | Out-Null
         }
 
         $module = Get-InstalledModule -Name PowerShellGet -ErrorAction SilentlyContinue -WarningAction SilentlyContinue 
 
         if ($null -eq $module) {
             try { 
-                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
+                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop @packageProxyParams
             }
             catch {
                 $global:VerbosePreference = $savedVP
@@ -7164,7 +7206,7 @@ class ModuleAdd {
                 write-Status "Retry. Installing powershell module PowerShellGet for scope $_userScope"
                 Clear-DnsClientCache -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 20
-                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -ErrorAction Stop -WarningAction SilentlyContinue @packageProxyParams
             }
         }
 
@@ -7180,7 +7222,7 @@ class ModuleAdd {
             if ($this.Clobber -eq 'Yes') {
                 try {
                     write-Status "Installing powershell module $_moduleName for scope $_userScope."
-                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -ErrorAction Stop
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -ErrorAction Stop @packageProxyParams
                 }
                 catch {
                     $global:VerbosePreference = $savedVP
@@ -7189,13 +7231,13 @@ class ModuleAdd {
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope.."
                     Clear-DnsClientCache -ErrorAction SilentlyContinue
                     Start-Sleep -Seconds 20
-                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -SkipPublisherCheck -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -SkipPublisherCheck -ErrorAction Stop -WarningAction SilentlyContinue @packageProxyParams
                 }
             }
             else {
                 try {
                     write-Status "Installing powershell module $_moduleName for scope $_userScope..."
-                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop @packageProxyParams
                 }
                 catch {
                     $global:VerbosePreference = $savedVP
@@ -7204,7 +7246,7 @@ class ModuleAdd {
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope...."
                     Clear-DnsClientCache -ErrorAction SilentlyContinue
                     Start-Sleep -Seconds 20
-                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                    Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -ErrorAction Stop -WarningAction SilentlyContinue @packageProxyParams
                 }
             }
         }

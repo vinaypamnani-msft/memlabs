@@ -106,7 +106,11 @@ try {
         'UpdateServicesDsc',
         'LanguageDsc',
         'GroupPolicyDsc',
-        'CertificateDsc'
+        'CertificateDsc',
+        # ModuleAdd uses Invoke-Sqlcmd in later phases. Bundle this non-DSC
+        # module too so fresh guests do not have to bootstrap NuGet,
+        # PowerShellGet and SqlServer independently from PSGallery.
+        'SqlServer'
     )
 
     if ($DryRun) {
@@ -146,6 +150,23 @@ try {
         Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath $target -Force -Confirm:$false
         Write-Output "Adding TemplateHelpDSC to DSC.zip..."
         Compress-Archive -Path .\TemplateHelpDSC -Update -DestinationPath $target
+        Write-Output "Adding SqlServer to DSC.zip for offline guest installation..."
+        $sqlModule = Get-Module -ListAvailable -Name SqlServer |
+            Sort-Object Version -Descending |
+            Select-Object -First 1
+        if (-not $sqlModule -or -not (Test-Path -LiteralPath $sqlModule.ModuleBase)) {
+            throw 'SqlServer is installed but its module payload could not be located for DSC.zip.'
+        }
+        $sqlStage = Join-Path $env:TEMP ("memlabs-dsc-sqlserver-" + [Guid]::NewGuid().ToString('N'))
+        try {
+            $sqlVersionPath = Join-Path (Join-Path $sqlStage 'SqlServer') ([string]$sqlModule.Version)
+            New-Item -ItemType Directory -Path $sqlVersionPath -Force | Out-Null
+            Copy-Item -Path (Join-Path $sqlModule.ModuleBase '*') -Destination $sqlVersionPath -Recurse -Force -ErrorAction Stop
+            Compress-Archive -Path (Join-Path $sqlStage 'SqlServer') -Update -DestinationPath $target
+        }
+        finally {
+            Remove-Item -LiteralPath $sqlStage -Recurse -Force -ErrorAction SilentlyContinue
+        }
         Write-Output "DSC.zip creation complete."
     } -ArgumentList $dscDir, $zipTarget
 
@@ -278,9 +299,36 @@ try {
     # Wait for background ZIP creation job to finish.
     if ($zipJob) {
         Write-Host "`nWaiting for DSC.zip background job..."
-        $zipOutput = $zipJob | Receive-Job -Wait -AutoRemoveJob
+        $null = $zipJob | Wait-Job
+        $zipOutput = $zipJob | Receive-Job
+        $zipState = $zipJob.State
+        $zipErrors = @($zipJob.ChildJobs | ForEach-Object { $_.Error } | Where-Object { $_ })
+        $zipJob | Remove-Job -Force -ErrorAction SilentlyContinue
         $zipJob = $null
         $zipOutput | ForEach-Object { Write-Host "  $_" }
+        if ($zipState -ne 'Completed' -or $zipErrors.Count -gt 0) {
+            $zipErrorText = ($zipErrors | ForEach-Object { $_.ToString() }) -join '; '
+            throw "DSC.zip background build failed (state=$zipState): $zipErrorText"
+        }
+
+        # Publish-AzVMDscConfiguration only discovers DSC resources; SqlServer
+        # is an ordinary PowerShell module added explicitly above. Validate the
+        # deliverable itself so a failed/missing injection cannot be announced
+        # as 'DSC.zip ready' and discovered later by a guest.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zipTarget)
+        try {
+            $sqlManifest = $archive.Entries | Where-Object {
+                $_.FullName -match '^SqlServer/[^/]+/SqlServer\.psd1$'
+            } | Select-Object -First 1
+            if (-not $sqlManifest) {
+                throw 'DSC.zip validation failed: SqlServer/<version>/SqlServer.psd1 is absent.'
+            }
+            Write-Host "  Verified bundled $($sqlManifest.FullName)" -ForegroundColor Green
+        }
+        finally {
+            $archive.Dispose()
+        }
         Write-Host "DSC.zip ready."
     }
 
