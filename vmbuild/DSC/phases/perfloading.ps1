@@ -192,6 +192,147 @@ Write-DscStatus "$Tag Starting perfloading"
         return $true
     }
 
+    function Sync-MemLabsOsdBootstrapFramework {
+        param (
+            [string] $SourceRoot,
+            [string] $SourceUnc,
+            [object[]] $OsdClients,
+            [object[]] $TaskSequences,
+            [string] $DistributionPointGroupName,
+            [string] $StatusTag
+        )
+
+        $applicationName = 'MEMLABS-OSD Bootstrap'
+        $deploymentTypeName = 'MEMLABS-OSD Bootstrap v1'
+        $collectionName = 'MEMLABS-OSD Clients'
+        $collectionRuleName = 'MEMLABS OSD Clients by configured name'
+        $taskSequenceStepName = 'MEMLABS install OSD Bootstrap'
+        $bootstrapVersion = '1'
+        $markerPath = 'C:\ProgramData\MemLabs\OSDBootstrap\Version.txt'
+        $clients = @($OsdClients | Where-Object { $null -ne $_ })
+        if ($clients.Count -eq 0) { return $true }
+
+        # Framework-only payload. Later customizations belong in this content
+        # folder and increment bootstrapVersion; policy then repairs drift while
+        # the TS step handles first installation immediately after Windows setup.
+        if (-not (Test-Path -LiteralPath $SourceRoot)) {
+            New-Item -ItemType Directory -Path $SourceRoot -Force -ErrorAction Stop | Out-Null
+        }
+        $installScript = @'
+param([string]$Version = '1')
+$ErrorActionPreference = 'Stop'
+$root = Join-Path $env:ProgramData 'MemLabs\OSDBootstrap'
+if (-not (Test-Path -LiteralPath $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
+[IO.File]::WriteAllText((Join-Path $root 'Version.txt'), $Version, [Text.Encoding]::ASCII)
+'@
+        $manifest = [ordered]@{
+            SchemaVersion    = 1
+            BootstrapVersion = $bootstrapVersion
+            Purpose          = 'MemLabs OSD bootstrap extension point; add idempotent customizations to Install.ps1'
+        } | ConvertTo-Json
+        [IO.File]::WriteAllText((Join-Path $SourceRoot 'Install.ps1'), $installScript, (New-Object Text.UTF8Encoding($true)))
+        [IO.File]::WriteAllText((Join-Path $SourceRoot 'Manifest.json'), $manifest, (New-Object Text.UTF8Encoding($true)))
+
+        $detectionScript = @"
+`$marker = '$markerPath'
+if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -Raw).Trim() -eq '$bootstrapVersion')) {
+    Write-Output 'Installed'
+}
+"@
+
+        $application = Get-CMApplication -Name $applicationName -ErrorAction SilentlyContinue
+        if (-not $application) {
+            $application = New-CMApplication -Name $applicationName `
+                -Description 'Versioned MemLabs bootstrap installed during OSD and maintained by required ConfigMgr policy' `
+                -Publisher 'MemLabs' -SoftwareVersion $bootstrapVersion -ErrorAction Stop
+            Add-CMScriptDeploymentType -Application $application `
+                -DeploymentTypeName $deploymentTypeName `
+                -InstallCommand "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -Version $bootstrapVersion" `
+                -ContentLocation $SourceUnc `
+                -ScriptLanguage PowerShell -ScriptText $detectionScript `
+                -InstallationBehaviorType InstallForSystem `
+                -LogonRequirementType WhetherOrNotUserLoggedOn `
+                -ErrorAction Stop | Out-Null
+            $application = Get-CMApplication -Name $applicationName -ErrorAction Stop
+            Write-DscStatus "$StatusTag Created application '$applicationName' version $bootstrapVersion"
+        }
+        elseif ("$($application.SoftwareVersion)" -ne $bootstrapVersion) {
+            Write-DscStatus "$StatusTag Existing '$applicationName' version '$($application.SoftwareVersion)' does not match framework version '$bootstrapVersion'. Refusing to point task sequences at stale bootstrap content." -Failure
+            return $false
+        }
+
+        $deploymentTypes = @(Get-CMDeploymentType -ApplicationName $applicationName -ErrorAction SilentlyContinue)
+        if ($deploymentTypes.Count -ne 1 -or $deploymentTypes[0].LocalizedDisplayName -ne $deploymentTypeName) {
+            Write-DscStatus "$StatusTag '$applicationName' does not have exactly the expected deployment type '$deploymentTypeName'. Refusing to report the bootstrap framework as ready." -Failure
+            return $false
+        }
+
+        if ($DistributionPointGroupName) {
+            try {
+                $null = Start-CMContentDistribution -ApplicationName $applicationName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop
+                Write-DscStatus "$StatusTag Requested '$applicationName' distribution to '$DistributionPointGroupName'"
+            }
+            catch {
+                if ("$($_.Exception.Message)" -notmatch 'already.*distribut|already.*destination|content.*already') { throw }
+                Write-DscStatus "$StatusTag '$applicationName' is already targeted to '$DistributionPointGroupName'"
+            }
+        }
+        else {
+            Write-DscStatus "$StatusTag OSD clients exist but no verified OSD DP target is available; '$applicationName' content was not distributed and no broken policy or task-sequence reference was authored." -Warning
+            return $true
+        }
+
+        $collection = Get-CMDeviceCollection -Name $collectionName -ErrorAction SilentlyContinue
+        if (-not $collection) {
+            $collection = New-CMDeviceCollection -Name $collectionName -LimitingCollectionName 'All Systems' `
+                -Comment 'Configured MemLabs OSD clients after ConfigMgr registration' -ErrorAction Stop
+            Write-DscStatus "$StatusTag Created collection '$collectionName'"
+        }
+        $quotedNames = @($clients | ForEach-Object { "'$($_.vmName)'" }) -join ','
+        $desiredQuery = "select SMS_R_System.ResourceID from SMS_R_System where SMS_R_System.Client = 1 and SMS_R_System.Name in ($quotedNames)"
+        $existingRules = @(Get-CMDeviceCollectionQueryMembershipRule -CollectionId $collection.CollectionID -ErrorAction SilentlyContinue |
+            Where-Object { $_.RuleName -eq $collectionRuleName })
+        $desiredTail = ($desiredQuery -split '(?i)\bfrom\b', 2)[1].Trim()
+        $existingTail = if ($existingRules.Count -eq 1) { ($existingRules[0].QueryExpression -split '(?i)\bfrom\b', 2)[1].Trim() } else { '' }
+        if ($existingRules.Count -ne 1 -or $existingTail -ne $desiredTail) {
+            foreach ($rule in $existingRules) {
+                $null = Remove-CMDeviceCollectionQueryMembershipRule -CollectionId $collection.CollectionID -RuleName $rule.RuleName -Force -ErrorAction Stop
+            }
+            $null = Add-CMDeviceCollectionQueryMembershipRule -CollectionId $collection.CollectionID `
+                -QueryExpression $desiredQuery -RuleName $collectionRuleName -ErrorAction Stop
+            Write-DscStatus "$StatusTag Reconciled '$collectionName' query for: $(($clients.vmName) -join ', ')"
+        }
+        $null = Set-CMCollection -CollectionId $collection.CollectionID -RefreshType Both -ErrorAction Stop
+        $null = Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID -ErrorAction SilentlyContinue
+
+        $deployments = @(Get-CMApplicationDeployment -Application $application -Collection $collection -ErrorAction SilentlyContinue)
+        if ($deployments.Count -eq 0) {
+            $application | New-CMApplicationDeployment -Collection $collection -DeployAction Install `
+                -DeployPurpose Required -UserNotification HideAll -ErrorAction Stop | Out-Null
+            Write-DscStatus "$StatusTag Deployed '$applicationName' as required policy to '$collectionName'"
+        }
+        elseif ($deployments.Count -ne 1) {
+            Write-DscStatus "$StatusTag Found $($deployments.Count) '$applicationName' deployments to '$collectionName'; expected exactly one." -Failure
+            return $false
+        }
+
+        foreach ($taskSequence in @($TaskSequences | Where-Object { $_.Name -like 'MEMLABS-w*-Install OS image' })) {
+            foreach ($existingStep in @($taskSequence | Get-CMTSStepInstallApplication -ErrorAction Stop |
+                    Where-Object { $_.Name -eq $taskSequenceStepName })) {
+                $null = $taskSequence | Remove-CMTSStepInstallApplication -StepName $existingStep.Name -Force -ErrorAction Stop
+            }
+            $installStep = New-CMTSStepInstallApplication -Name $taskSequenceStepName -Application $application -ErrorAction Stop
+            $null = $taskSequence | Add-CMTaskSequenceStep -Step $installStep -ErrorAction Stop
+            $verifiedSteps = @($taskSequence | Get-CMTSStepInstallApplication -StepName $taskSequenceStepName -ErrorAction Stop)
+            if ($verifiedSteps.Count -ne 1) {
+                Write-DscStatus "$StatusTag Read-back found $($verifiedSteps.Count) '$taskSequenceStepName' step(s) in '$($taskSequence.Name)', expected one." -Failure
+                return $false
+            }
+            Write-DscStatus "$StatusTag Appended '$taskSequenceStepName' to '$($taskSequence.Name)'"
+        }
+        return $true
+    }
+
     function Sync-MemLabsScriptLibrary {
         param([string]$ScriptPath = 'C:\tools\Scripts')
 
@@ -2010,6 +2151,17 @@ Write-DscStatus "$Tag Starting perfloading"
     $osdClientsForNaming = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })
     if ($siteTaskSequencesForNaming.Count -gt 0 -and
         -not (Sync-MemLabsOsdComputerNameSteps -TaskSequences $siteTaskSequencesForNaming -OsdClients $osdClientsForNaming -StatusTag $Tag)) {
+        return
+    }
+    $bootstrapSourceRoot = Join-Path $folderPath 'MemLabsOsdBootstrap'
+    $bootstrapSourceUnc = "\\$ThisMachineName\OSD\MemLabsOsdBootstrap"
+    if (-not (Sync-MemLabsOsdBootstrapFramework `
+            -SourceRoot $bootstrapSourceRoot `
+            -SourceUnc $bootstrapSourceUnc `
+            -OsdClients $osdClientsForNaming `
+            -TaskSequences $siteTaskSequencesForNaming `
+            -DistributionPointGroupName $osdDistTarget `
+            -StatusTag $Tag)) {
         return
     }
 
