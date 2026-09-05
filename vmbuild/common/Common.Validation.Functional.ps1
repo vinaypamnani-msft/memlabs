@@ -13652,9 +13652,35 @@ function Test-LinuxDhcpRelay {
         [Parameter(Mandatory = $true)] [object] $DeployConfig
     )
 
-    $paths = @($DeployConfig.osdPxePaths | Where-Object {
+    # GenConfig can serialize a newly authored dynamic DP target before Phase 1
+    # assigns its address. Phase 8 refreshes that model before configuring the
+    # relay, but a later standalone Phase 11 run rebuilds deployConfig from the
+    # original file and can otherwise validate against the stale null target.
+    # Resolve from current VM notes, Hyper-V adapter data, and DHCP reservation
+    # state before constructing the expected dnsmasq declarations.
+    try {
+        $resolvedPaths = @(Get-OsdPxePaths -Config $DeployConfig)
+        $DeployConfig | Add-Member -MemberType NoteProperty -Name 'osdPxePaths' -Value $resolvedPaths -Force
+    }
+    catch {
+        Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: FAIL - could not refresh OSD PXE paths from current VM metadata: $($_.Exception.Message)" -Level Failure
+        return $false
+    }
+
+    $paths = @($resolvedPaths | Where-Object {
             $_.mode -eq 'Relay' -and $_.relayVM -eq $VMName
         })
+    $unresolvedPaths = @($paths | Where-Object {
+            [string]::IsNullOrWhiteSpace("$($_.relayIPv4)") -or
+            [string]::IsNullOrWhiteSpace("$($_.distributionPointIPv4)")
+        })
+    if ($unresolvedPaths.Count -gt 0) {
+        $details = @($unresolvedPaths | ForEach-Object {
+                "$($_.clientNetwork): relay=$($_.relayIPv4), target=$($_.distributionPointVM)/$($_.distributionPointIPv4)"
+            }) -join '; '
+        Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: FAIL - refreshed relay path address is unresolved: $details" -Level Failure
+        return $false
+    }
     $managementNetwork = Get-OsdEffectiveNetwork -VM $CurrentItem -Config $DeployConfig
     $managementIp = "$managementNetwork" -replace '\.0$', '.4'
     $hostVm = Get-VM2 -Name $VMName -ErrorAction SilentlyContinue

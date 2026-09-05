@@ -246,8 +246,11 @@ $null = Sync-LinuxDhcpRelay -DeployConfig (New-FixtureConfig)
 Assert-Equal 0 $script:AddCalls 'matching relay NIC is a no-op'
 
 Reset-Fixture -WithClient
-$validationConfig = New-FixtureConfig
+$validationConfig = New-FixtureConfig -StalePendingPath
+Assert-Equal '' "$($validationConfig.osdPxePaths[0].distributionPointIPv4)" 'Phase 11 regression starts with a serialized pending target IPv4'
 Assert-Equal $true (Test-LinuxDhcpRelay -VMName 'RELAY1' -CurrentItem $validationConfig.virtualMachines[0] -DeployConfig $validationConfig) 'Phase 11 relay validation accepts one configured mapping'
+Assert-Equal 1 $script:ResolverCalls 'Phase 11 refreshes stale serialized PXE paths from current metadata'
+Assert-Equal '192.168.1.25' $validationConfig.osdPxePaths[0].distributionPointIPv4 'Phase 11 replaces the serialized pending target IPv4 before validation'
 Assert-Equal "00155D030004|192.168.3.4|192.168.1.25`n" ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($script:ValidationPayload))) 'Phase 11 expected mapping is LF-terminated so Bash reads the final row'
 $validatorSource = Get-Content (Join-Path $RootPath 'scripts\linux\relay\validate-dhcp-relay.sh') -Raw
 Assert-Equal $true ($validatorSource.Contains("read -r expected_mac expected_ip expected_target extra || [ -n")) 'validator defensively processes an unterminated final row'
