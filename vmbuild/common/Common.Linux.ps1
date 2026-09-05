@@ -5757,7 +5757,10 @@ function Test-LinuxDhcpRelayAddressAvailable {
             $_.State -notin @('Unreachable', 'Incomplete')
         } | Select-Object -First 1
         if ($neighbor -and (Test-Connection -ComputerName $IPAddress -Count 1 -Quiet -ErrorAction SilentlyContinue)) {
-            return [pscustomobject]@{ Available = $false; Reason = "neighbor $($neighbor.LinkLayerAddress) answers at $IPAddress" }
+            $neighborMac = ("$($neighbor.LinkLayerAddress)" -replace '[-:]', '').ToUpperInvariant()
+            if (-not ($neighborMac -and $neighborMac -in $relayAdapterMacs)) {
+                return [pscustomobject]@{ Available = $false; Reason = "neighbor $($neighbor.LinkLayerAddress) answers at $IPAddress" }
+            }
         }
     }
     catch {

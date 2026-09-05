@@ -35,6 +35,7 @@ $script:AddCalls = 0
 $script:Events = @()
 $script:Reservation = @()
 $script:Lease = @()
+$script:Neighbor = @()
 $script:LastClientVariables = $null
 $script:ServicePayload = $null
 $script:ResolverCalls = 0
@@ -46,6 +47,7 @@ function Reset-Fixture {
     $script:Events = @()
     $script:Reservation = @()
     $script:Lease = @()
+    $script:Neighbor = @()
     $script:LastClientVariables = $null
     $script:ServicePayload = $null
     $script:ResolverCalls = 0
@@ -107,8 +109,8 @@ function Get-VMNetworkAdapter {
 }
 function Get-DhcpServerv4Reservation { [CmdletBinding()] param($ScopeId); return @($script:Reservation) }
 function Get-DhcpServerv4Lease { [CmdletBinding()] param($ScopeId); return @($script:Lease) }
-function Get-NetNeighbor { [CmdletBinding()] param($IPAddress); return @() }
-function Test-Connection { [CmdletBinding()] param($ComputerName, $Count); return $false }
+function Get-NetNeighbor { [CmdletBinding()] param($IPAddress); return @($script:Neighbor) }
+function Test-Connection { [CmdletBinding()] param($ComputerName, $Count, [switch] $Quiet); return $script:Neighbor.Count -gt 0 }
 function Get-VMSwitch { [CmdletBinding()] param($Name); return [pscustomobject]@{ Name = $Name } }
 function Get-DhcpServerv4Scope { [CmdletBinding()] param($ScopeId); return [pscustomobject]@{ ScopeId = $ScopeId } }
 function Add-VMNetworkAdapter {
@@ -196,6 +198,25 @@ $foreignLease = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Ne
     -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
 Assert-Equal $false $foreignLease.Available 'blank-hostname lease for a different MAC remains a conflict'
 Assert-Equal $true ($foreignLease.Reason -like '*00-15-5D-01-00-99*') 'unnamed lease diagnostic identifies its ClientId'
+
+Reset-Fixture
+$script:Neighbor = @([pscustomobject]@{
+    State = 'Reachable'
+    LinkLayerAddress = '00-15-5D-01-00-01'
+})
+$ownNeighbor = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $true $ownNeighbor.Available 'reachable neighbor for the exact relay adapter MAC is not a conflict'
+
+Reset-Fixture
+$script:Neighbor = @([pscustomobject]@{
+    State = 'Reachable'
+    LinkLayerAddress = '00-15-5D-01-00-99'
+})
+$foreignNeighbor = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $false $foreignNeighbor.Available 'reachable neighbor for a different MAC remains a conflict'
+Assert-Equal $true ($foreignNeighbor.Reason -like '*00-15-5D-01-00-99*') 'foreign neighbor diagnostic identifies its MAC'
 
 Reset-Fixture
 $config = New-FixtureConfig -StalePendingPath
