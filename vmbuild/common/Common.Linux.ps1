@@ -5692,11 +5692,37 @@ function Test-LinuxDhcpRelayAddressAvailable {
         }
     }
 
+    # A relay rerun can encounter the DHCP reservation that Phase 3 itself
+    # maintains for the relay's existing adapter. Reservation Name is blank
+    # on the live DhcpServer object, so prove ownership from ClientId versus
+    # the exact Hyper-V adapter MAC on this switch; every mismatch still
+    # fails closed as an address conflict.
+    $relayAdapterMacs = @()
+    try {
+        $relayHostVm = Get-VM2 -Name $RelayVmName -ErrorAction SilentlyContinue
+        if ($relayHostVm) {
+            $relayAdapterMacs = @($relayHostVm | Get-VMNetworkAdapter -ErrorAction Stop |
+                Where-Object { $_.SwitchName -eq $Network } |
+                ForEach-Object { ("$($_.MacAddress)" -replace '[-:]', '').ToUpperInvariant() } |
+                Where-Object { $_ -and $_ -ne '000000000000' } | Select-Object -Unique)
+        }
+    }
+    catch {
+        # No trusted owner MAC means a reservation below remains a conflict.
+        $relayAdapterMacs = @()
+    }
+
     try {
         $reservation = Get-DhcpServerv4Reservation -ScopeId $Network -ErrorAction Stop |
             Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1
         if ($reservation) {
-            return [pscustomobject]@{ Available = $false; Reason = "DHCP reservation '$($reservation.Name)' owns $IPAddress" }
+            $reservationMac = ("$($reservation.ClientId)" -replace '[-:]', '').ToUpperInvariant()
+            if (-not ($reservationMac -and $reservationMac -in $relayAdapterMacs)) {
+                $reservationOwner = "$($reservation.Name)".Trim()
+                if (-not $reservationOwner) { $reservationOwner = "client $($reservation.ClientId)".Trim() }
+                if (-not $reservationOwner -or $reservationOwner -eq 'client') { $reservationOwner = 'an unidentified client' }
+                return [pscustomobject]@{ Available = $false; Reason = "DHCP reservation for $reservationOwner owns $IPAddress" }
+            }
         }
         $lease = Get-DhcpServerv4Lease -ScopeId $Network -ErrorAction Stop |
             Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1

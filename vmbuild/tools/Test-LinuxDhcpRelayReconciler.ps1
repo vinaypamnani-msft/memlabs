@@ -154,6 +154,27 @@ function Write-Log { param($Message, [switch]$Activity, [switch]$Success, [switc
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 
 Reset-Fixture
+$script:Reservation = @([pscustomobject]@{
+    IPAddress = [pscustomobject]@{ IPAddressToString = '192.168.1.4' }
+    Name = ''
+    ClientId = '00-15-5D-01-00-01'
+})
+$ownReservation = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $true $ownReservation.Available 'blank-name reservation for the exact relay adapter MAC is not a conflict'
+
+Reset-Fixture
+$script:Reservation = @([pscustomobject]@{
+    IPAddress = [pscustomobject]@{ IPAddressToString = '192.168.1.4' }
+    Name = ''
+    ClientId = '00-15-5D-01-00-99'
+})
+$foreignReservation = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $false $foreignReservation.Available 'blank-name reservation for a different MAC remains a conflict'
+Assert-Equal $true ($foreignReservation.Reason -like '*00-15-5D-01-00-99*') 'unnamed reservation diagnostic identifies its ClientId'
+
+Reset-Fixture
 $config = New-FixtureConfig -StalePendingPath
 Assert-Equal $true (Sync-LinuxDhcpRelay -DeployConfig $config) 'missing relay NIC reconciles successfully'
 Assert-Equal 1 $script:ResolverCalls 'reconciliation refreshes a serialized pending target IPv4 from current metadata'
