@@ -2587,6 +2587,43 @@ function Set-VmProxyEnforcement {
     }
 }
 
+function Suspend-CmSetupProxyEnforcement {
+    <#
+    .SYNOPSIS
+        Remove MemLabs public-egress deny ACLs from CM infrastructure while
+        ConfigMgr setup is allowed to run.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object]$deployConfig
+    )
+
+    $deferredBuildRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
+    $targets = @($deployConfig.virtualMachines | Where-Object {
+            (Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig) -and
+            -not $_.hidden -and -not (Test-VmIsLinux -Vm $_) -and $_.role -in $deferredBuildRoles
+        })
+    $ok = $true
+    foreach ($vm in $targets) {
+        Clear-VmProxyEnforcement -VmName $vm.vmName
+        try {
+            $remaining = @(Get-VMNetworkAdapterExtendedAcl -VMName $vm.vmName -ErrorAction Stop | Where-Object {
+                    $_.Weight -ge $global:MemLabsProxyAclWeightMin -and
+                    $_.Weight -le $global:MemLabsProxyAclWeightMax
+                })
+            if ($remaining.Count -gt 0) {
+                $ok = $false
+                Write-Log "[Proxy] $($vm.vmName): $($remaining.Count) enforcement ACL(s) remain; ConfigMgr setupdl direct downloads would be blocked" -Warning
+            }
+        }
+        catch {
+            $ok = $false
+            Write-Log "[Proxy] $($vm.vmName): could not verify setup-time ACL removal: $($_.Exception.Message)" -Warning
+        }
+    }
+    return $ok
+}
+
 function Set-VmProxyEnforcementForConfig {
     <#
     .SYNOPSIS
@@ -2603,6 +2640,8 @@ function Set-VmProxyEnforcementForConfig {
         [Parameter(Mandatory = $true)] [object]$deployConfig
     )
 
+    if (-not (Suspend-CmSetupProxyEnforcement -deployConfig $deployConfig)) { return $false }
+
     $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
     # Linux clients are intentionally EXCLUDED here: their proxy env/apt
     # config is applied in Phase 3 (roles/proxy-client), which runs AFTER
@@ -2611,7 +2650,17 @@ function Set-VmProxyEnforcementForConfig {
     # on 80/443) before the guest knows to route through Squid. Linux VM ACLs
     # are stamped later by Set-VmProxyEnforcementForAllLabs (post-Phase-11),
     # by which time the Phase 3 proxy config is in place.
-    $clients = @($deployConfig.virtualMachines | Where-Object { (Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig) -and -not (Test-VmIsLinux -Vm $_) })
+    # Defer CM infrastructure for the same lifecycle reason. ConfigMgr's
+    # setupdl.exe explicitly logs "No proxy information is specified. Connect
+    # without proxy" even when WinHTTP/WinINET are configured. Blocking its
+    # direct HTTPS in Phase 2 makes every manifest request fail 0x80072EE2.
+    # Phase 11 verifies CM's own UseProxy settings, then the all-labs sweep
+    # below enforces proxy-only OS egress after setup has finished.
+    $deferredBuildRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
+    $clients = @($deployConfig.virtualMachines | Where-Object {
+            (Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig) -and
+            -not (Test-VmIsLinux -Vm $_) -and $_.role -notin $deferredBuildRoles
+        })
 
     if (-not $clients) { return $true }
     if (-not $proxyVm) {

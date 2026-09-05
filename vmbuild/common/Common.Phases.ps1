@@ -1301,6 +1301,16 @@ function Start-Phase {
     # -> DC extadsch deadlock) can no longer happen. No-op for URL-download CM
     # versions; idempotent on -StartPhase reruns.
     if ($Phase -eq 8) {
+        # setupdl.exe explicitly ignores the configured WinHTTP/WinINET proxy
+        # and downloads prerequisites directly. Phase 2 therefore defers the
+        # public-egress deny ACL for CM infrastructure. Clear any stale ACLs
+        # from an older build before taking the checkpoint, and fail now if
+        # removal cannot be verified instead of burning setupdl's 20 retries.
+        Write-Log "[Phase 8] Allowing direct ConfigMgr setup prerequisite downloads on CM infrastructure until post-Phase-11 proxy enforcement." -LogOnly
+        if (-not (Suspend-CmSetupProxyEnforcement -deployConfig $deployConfig)) {
+            Write-Log "[Phase 8] Could not remove proxy-enforcement ACLs required by ConfigMgr setupdl.exe." -Failure
+            return $false
+        }
         $null = Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
     }
     if ($Phase -eq 8 -or $Phase -eq 9) {

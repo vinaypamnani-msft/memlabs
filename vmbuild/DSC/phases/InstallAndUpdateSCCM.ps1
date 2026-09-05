@@ -600,7 +600,7 @@ CurrentBranch=1
     # and the Phase 3 pre-warm (ScriptWorkflow.ps1 -DownloadOnly) stay in sync.
     $dlOk = Invoke-CMSetupPrereqDownload -CMSetupDL $CMSetupDL -CMRedist $CMRedist -CMLog $CMLog -MaxTries 20
     if (-not $dlOk) {
-        Write-DscStatus "Pre-Req Downloading failed after 20 tries. see $CMLog"
+        Write-DscStatus "Pre-Req Downloading failed after 20 tries. see $CMLog" -Failure
         # Set Status to not 'Running' so it can run again.
         $Configuration.InstallSCCM.Status = 'Failed'
         $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"

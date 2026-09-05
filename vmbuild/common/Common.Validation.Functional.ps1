@@ -468,6 +468,17 @@ function Test-VmFunctionality {
             if (-not (Test-WindowsProxyConfig -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
                 $testsPassed = $false
             }
+            # CM infrastructure keeps direct OS egress through setup because
+            # setupdl.exe ignores the configured system proxy. Setup is now
+            # complete, so apply the deferred deny ACL here and validate it in
+            # the same pass. The post-Phase-11 all-labs sweep remains the final
+            # cross-lab reconciliation; client VMs were enforced in Phase 2.
+            $proxyEnforcementDeferred = $role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
+            if ($testsPassed -and $proxyEnforcementDeferred -and -not (Set-VmProxyEnforcement -VmName $VMName)) {
+                Write-Log "[Phase 11] $VMName [ProxyBlock]: FAIL - could not apply deferred proxy-enforcement ACLs after ConfigMgr setup" -Failure -LogOnly
+                $script:Phase11OutputBuffer.Add(@{ Text = "[Phase 11] $VMName [ProxyBlock]: FAIL - could not apply deferred proxy-enforcement ACLs after ConfigMgr setup"; Level = 'Failure' })
+                $testsPassed = $false
+            }
             if ($testsPassed -and -not (Test-InternetBlocked -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
                 $testsPassed = $false
             }
