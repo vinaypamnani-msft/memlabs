@@ -468,17 +468,6 @@ function Test-VmFunctionality {
             if (-not (Test-WindowsProxyConfig -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
                 $testsPassed = $false
             }
-            # CM infrastructure keeps direct OS egress through setup because
-            # setupdl.exe ignores the configured system proxy. Setup is now
-            # complete, so apply the deferred deny ACL here and validate it in
-            # the same pass. The post-Phase-11 all-labs sweep remains the final
-            # cross-lab reconciliation; client VMs were enforced in Phase 2.
-            $proxyEnforcementDeferred = $role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
-            if ($testsPassed -and $proxyEnforcementDeferred -and -not (Set-VmProxyEnforcement -VmName $VMName)) {
-                Write-Log "[Phase 11] $VMName [ProxyBlock]: FAIL - could not apply deferred proxy-enforcement ACLs after ConfigMgr setup" -Failure -LogOnly
-                $script:Phase11OutputBuffer.Add(@{ Text = "[Phase 11] $VMName [ProxyBlock]: FAIL - could not apply deferred proxy-enforcement ACLs after ConfigMgr setup"; Level = 'Failure' })
-                $testsPassed = $false
-            }
             if ($testsPassed -and -not (Test-InternetBlocked -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
                 $testsPassed = $false
             }
@@ -13899,15 +13888,15 @@ function Test-WindowsProxyConfig {
         $edgePolKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
 
         # Parse the proxy server string out of a DefaultConnectionSettings blob.
-        # Layout: [0..3] counter, [4..7] flags, [8..11] proxy-len, then proxy
-        # bytes (ASCII). Returns '' if absent/unparseable.
+        # Layout: [0..3] version 0x46, [4..7] counter, [8..11] flags,
+        # [12..15] proxy-len, then proxy bytes (ASCII).
         $proxyFromBlob = {
             param($blob)
-            if (-not $blob -or $blob.Length -lt 12) { return '' }
+            if (-not $blob -or $blob.Length -lt 16 -or [BitConverter]::ToUInt32($blob, 0) -ne 0x46) { return '' }
             try {
-                $len = [BitConverter]::ToInt32($blob, 8)
-                if ($len -le 0 -or (12 + $len) -gt $blob.Length) { return '' }
-                return [Text.Encoding]::ASCII.GetString($blob, 12, $len)
+                $len = [BitConverter]::ToInt32($blob, 12)
+                if ($len -le 0 -or (16 + $len) -gt $blob.Length) { return '' }
+                return [Text.Encoding]::ASCII.GetString($blob, 16, $len)
             }
             catch { return '' }
         }

@@ -4893,7 +4893,11 @@ function Set-WindowsClientProxy {
                 $connPath = Join-Path $ieRegPath 'Connections'
                 if (-not (Test-Path $connPath)) { New-Item -Path $connPath -Force | Out-Null }
                 $old = (Get-ItemProperty -Path $connPath -Name 'DefaultConnectionSettings' -EA SilentlyContinue).DefaultConnectionSettings
-                $ctr = $(if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 })
+                # Windows' CONNECTION_SETTINGS binary starts with DWORD version
+                # 0x46, then a change counter, flags, and proxy length. Keep this
+                # exact layout: WinHttpGetIEProxyConfigForCurrentUser rejects the
+                # old MemLabs blob, which omitted version and shifted every field.
+                $ctr = $(if ($old -and $old.Length -ge 8 -and [BitConverter]::ToUInt32($old, 0) -eq 0x46) { [BitConverter]::ToUInt32($old, 4) + 1 } else { 1 })
                 if ($enable) {
                     $pB = [Text.Encoding]::ASCII.GetBytes($proxy)
                     $bB = [Text.Encoding]::ASCII.GetBytes($bypass)
@@ -4902,8 +4906,9 @@ function Set-WindowsClientProxy {
                     $pB = [byte[]]@(); $bB = [byte[]]@()
                     $fl = [uint32]0x09  # present + auto-detect (Windows default)
                 }
-                $blob = New-Object byte[] (4+4+4+$pB.Length+4+$bB.Length+4+32)
+                $blob = New-Object byte[] (4+4+4+4+$pB.Length+4+$bB.Length+4+32)
                 $o = 0
+                [Array]::Copy([BitConverter]::GetBytes([uint32]0x46), 0, $blob, $o, 4); $o += 4
                 [Array]::Copy([BitConverter]::GetBytes([uint32]$ctr), 0, $blob, $o, 4); $o += 4
                 [Array]::Copy([BitConverter]::GetBytes($fl), 0, $blob, $o, 4); $o += 4
                 [Array]::Copy([BitConverter]::GetBytes([uint32]$pB.Length), 0, $blob, $o, 4); $o += 4
@@ -5176,7 +5181,7 @@ function Remove-WindowsClientProxy {
                 $connPath = Join-Path $ieRegPath 'Connections'
                 if (-not (Test-Path $connPath)) { return }
                 $old = (Get-ItemProperty -Path $connPath -Name 'DefaultConnectionSettings' -EA SilentlyContinue).DefaultConnectionSettings
-                $ctr = $(if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 })
+                $ctr = $(if ($old -and $old.Length -ge 8 -and [BitConverter]::ToUInt32($old, 0) -eq 0x46) { [BitConverter]::ToUInt32($old, 4) + 1 } else { 1 })
                 if ($enable) {
                     $pB = [Text.Encoding]::ASCII.GetBytes($proxy)
                     $bB = [Text.Encoding]::ASCII.GetBytes($bypass)
@@ -5185,8 +5190,9 @@ function Remove-WindowsClientProxy {
                     $pB = [byte[]]@(); $bB = [byte[]]@()
                     $fl = [uint32]0x09
                 }
-                $blob = New-Object byte[] (4+4+4+$pB.Length+4+$bB.Length+4+32)
+                $blob = New-Object byte[] (4+4+4+4+$pB.Length+4+$bB.Length+4+32)
                 $o = 0
+                [Array]::Copy([BitConverter]::GetBytes([uint32]0x46), 0, $blob, $o, 4); $o += 4
                 [Array]::Copy([BitConverter]::GetBytes([uint32]$ctr), 0, $blob, $o, 4); $o += 4
                 [Array]::Copy([BitConverter]::GetBytes($fl), 0, $blob, $o, 4); $o += 4
                 [Array]::Copy([BitConverter]::GetBytes([uint32]$pB.Length), 0, $blob, $o, 4); $o += 4
@@ -5444,6 +5450,57 @@ function Set-WindowsClientProxyForConfig {
         $r = Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
                 -ProxyFqdn $proxyFqdn -BypassNetwork $bypassNet
         if (-not $r) { $ok = $false }
+    }
+    return $ok
+}
+
+function Sync-CmSetupProxyClients {
+    <#
+    .SYNOPSIS
+        Reconcile guest proxy discovery and host enforcement before ConfigMgr
+        setup prerequisite downloads.
+
+    .DESCRIPTION
+        Baseline setupdl runs as LocalSystem and deliberately remains in normal
+        mode, where product source calls WinHttpGetIEProxyConfigForCurrentUser.
+        Reapplying Set-WindowsClientProxy repairs VMs configured by an older
+        MemLabs revision whose connection blob omitted the Windows 0x46 header.
+        The host deny ACL is then applied/reconciled so a successful setupdl
+        download proves it used Squid rather than direct public egress.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object]$deployConfig
+    )
+
+    $cmRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
+    $targets = @($deployConfig.virtualMachines | Where-Object {
+            $_.role -in $cmRoles -and
+            -not (Test-VmIsLinux -Vm $_) -and
+            (Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig)
+        })
+    if ($targets.Count -eq 0) { return $true }
+
+    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    if (-not $proxyVm) {
+        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+        if ($existingProxyName) { $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' } }
+    }
+    if (-not $proxyVm) {
+        Write-Log "[Proxy] $($targets.Count) ConfigMgr setup VM(s) require proxy but no Proxy VM is available" -Failure
+        return $false
+    }
+
+    $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+    $ok = $true
+    foreach ($vm in $targets) {
+        $bypassNet = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
+        Write-Log "[Proxy] Reconciling ConfigMgr setup client $($vm.vmName) -> $proxyFqdn`:3128"
+        if (-not (Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName -ProxyFqdn $proxyFqdn -BypassNetwork $bypassNet)) {
+            $ok = $false
+            continue
+        }
+        if (-not (Set-VmProxyEnforcement -VmName $vm.vmName)) { $ok = $false }
     }
     return $ok
 }

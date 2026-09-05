@@ -622,10 +622,11 @@ if ($p -and $p.ProxyEnable -eq 1 -and $p.ProxyServer) {
 $conn = "$hkcu\Connections"
 if (-not (Test-Path $conn)) { New-Item $conn -Force | Out-Null }
 $old = (Get-ItemProperty $conn -Name DefaultConnectionSettings -EA SilentlyContinue).DefaultConnectionSettings
-$ctr = if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old,0)+1 } else { 46 }
+$ctr = $(if ($old -and $old.Length -ge 8 -and [BitConverter]::ToUInt32($old,0) -eq 0x46) { [BitConverter]::ToUInt32($old,4)+1 } else { 1 })
 if ($en) { $pB=[Text.Encoding]::ASCII.GetBytes($pS); $bB=[Text.Encoding]::ASCII.GetBytes($bL); $fl=[uint32]3 }
 else      { $pB=[byte[]]@(); $bB=[byte[]]@(); $fl=[uint32]9 }
-$blob = New-Object byte[] (4+4+4+$pB.Length+4+$bB.Length+4+32); $o=0
+$blob = New-Object byte[] (4+4+4+4+$pB.Length+4+$bB.Length+4+32); $o=0
+[Array]::Copy([BitConverter]::GetBytes([uint32]0x46),0,$blob,$o,4); $o+=4
 [Array]::Copy([BitConverter]::GetBytes([uint32]$ctr),0,$blob,$o,4); $o+=4
 [Array]::Copy([BitConverter]::GetBytes($fl),0,$blob,$o,4); $o+=4
 [Array]::Copy([BitConverter]::GetBytes([uint32]$pB.Length),0,$blob,$o,4); $o+=4
@@ -673,9 +674,10 @@ Set-ItemProperty $ie -Name ProxySettingsPerUser  -Value 0    -Type DWord  -Force
 $conn = ($ie + '\Connections')
 if (-not (Test-Path $conn)) { New-Item $conn -Force | Out-Null }
 $old = (Get-ItemProperty $conn -Name DefaultConnectionSettings -EA SilentlyContinue).DefaultConnectionSettings
-$ctr = if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old,0)+1 } else { 46 }
+$ctr = $(if ($old -and $old.Length -ge 8 -and [BitConverter]::ToUInt32($old,0) -eq 0x46) { [BitConverter]::ToUInt32($old,4)+1 } else { 1 })
 $pB = [Text.Encoding]::ASCII.GetBytes($srv)
-$blob = New-Object byte[] (4+4+4+$pB.Length+4+0+4+32); $o=0
+$blob = New-Object byte[] (4+4+4+4+$pB.Length+4+0+4+32); $o=0
+[Array]::Copy([BitConverter]::GetBytes([uint32]0x46),0,$blob,$o,4); $o+=4
 [Array]::Copy([BitConverter]::GetBytes([uint32]$ctr),0,$blob,$o,4); $o+=4
 [Array]::Copy([BitConverter]::GetBytes([uint32]3),0,$blob,$o,4); $o+=4
 [Array]::Copy([BitConverter]::GetBytes([uint32]$pB.Length),0,$blob,$o,4); $o+=4

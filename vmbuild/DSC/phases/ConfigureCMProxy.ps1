@@ -1,5 +1,9 @@
 ﻿# ConfigureCMProxy.ps1
 # Apply ConfigMgr site-system proxy settings to any opted-in site systems.
+# ConfigMgr's DmpDownloader reads this setting for the SMS Dmp Connector and
+# launches setupdl with the complete EasyUpdate argument set: manifest URLs,
+# redist version, and /ProxyUri. This is the product-owned proxy path used by
+# future in-console update and upgrade prerequisite downloads.
 # Extracted from the tail of InstallRoles.ps1 so it runs unconditionally
 # from ScriptWorkflow (the SUP-skip early-returns inside InstallRoles.ps1
 # meant this never executed for sites with no SUP).

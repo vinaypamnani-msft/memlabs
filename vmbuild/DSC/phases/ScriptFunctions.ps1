@@ -600,7 +600,14 @@ function Invoke-CMSetupPrereqDownload {
         try { if (Test-Path $CMLog) { $logPosBefore = (Get-Item $CMLog -ErrorAction SilentlyContinue).Length } } catch { }
 
         # Start Setupdl.exe asynchronously so we can poll its log for progress
-        # and enforce a per-attempt timeout.
+        # and enforce a per-attempt timeout. Do not append /ProxyUri here:
+        # setupdl source makes any explicit proxy argument select EasyUpdate
+        # mode, whose manifest validation also requires the update-specific
+        # /RedistVersion (and normally /RedistUrl + /LnManifestUrl) supplied by
+        # DmpDownloader. Baseline setup's supported path is normal mode, where
+        # setupdl calls WinHttpGetIEProxyConfigForCurrentUser; Phase 2 writes
+        # that LocalSystem connection blob before applying the direct-egress
+        # deny ACL.
         $dlProc = Start-Process -Filepath ($CMSetupDL) -ArgumentList ('/NOUI ' + $CMRedist) -PassThru
         $dlStart = Get-Date
         $lastLogAdvanceAt = Get-Date
