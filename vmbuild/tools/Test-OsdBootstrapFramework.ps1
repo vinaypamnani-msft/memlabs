@@ -104,6 +104,20 @@ function Get-CMTSStepInstallApplication {
         return $result
     }
 }
+function Get-CMTSStepReboot {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline = $true)]$InputObject, [string]$StepName)
+    process {
+        $result = @($InputObject.Steps | Where-Object { $_.Type -eq 'Reboot' })
+        if ($StepName) { $result = @($result | Where-Object { $_.Name -eq $StepName }) }
+        return $result
+    }
+}
+function Remove-CMTSStepReboot {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline = $true)]$InputObject, [string]$StepName, [switch]$Force)
+    process { $InputObject.Steps = @($InputObject.Steps | Where-Object { $_.Name -ne $StepName }) }
+}
 function Remove-CMTSStepInstallApplication {
     [CmdletBinding()]
     param([Parameter(ValueFromPipeline = $true)]$InputObject, [string]$StepName, [switch]$Force)
@@ -113,6 +127,12 @@ function New-CMTSStepInstallApplication {
     [CmdletBinding()]
     param($Name, $Application)
     return [pscustomobject]@{ Name = $Name; Type = 'InstallApplication'; Application = $Application.Name }
+}
+function New-CMTSStepReboot {
+    [CmdletBinding()]
+    param($Name, $RunAfterRestart, $NotificationMessage, $MessageTimeout)
+    $target = if ($RunAfterRestart -eq 'HardDisk') { 'HD' } else { 'WinPE' }
+    return [pscustomobject]@{ Name = $Name; Type = 'Reboot'; Target = $target }
 }
 function Add-CMTaskSequenceStep {
     [CmdletBinding()]
@@ -148,8 +168,11 @@ try {
     Assert-Equal 'MEMLABS-OSD Bootstrap->OSD DPS' ($script:DistributionRequests -join ',') 'bootstrap content targets the OSD DP group'
     Assert-Equal 'Install,Required,HideAll' $script:NewDeploymentArgs 'ongoing policy is required and silent'
     Assert-Equal $true ($script:Rules[0].QueryExpression -like "*Client = 1*Name in ('OSD1','OSD2')*") 'policy collection is config-name keyed and client gated'
+    Assert-Equal 1 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS restart into installed OS').Count 'Windows 11 install TS gets one explicit environment-transition reboot'
+    Assert-Equal 'HD' @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS restart into installed OS')[0].Target 'Windows 11 bootstrap reboot targets the installed OS'
     Assert-Equal 1 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'Windows 11 install TS gets one bootstrap step'
     Assert-Equal 'MEMLABS install OSD Bootstrap' $taskSequences[0].Steps[-1].Name 'bootstrap step is appended after generated setup actions'
+    Assert-Equal 'MEMLABS restart into installed OS' $taskSequences[0].Steps[-2].Name 'hard-disk reboot immediately precedes the FullOS-only application step'
     Assert-Equal 1 @($taskSequences[1].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'Windows 10 install TS gets one bootstrap step'
     Assert-Equal 0 @($taskSequences[2].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'in-place upgrade TS is not changed'
 
@@ -157,6 +180,7 @@ try {
         -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' -OsdClients $clients `
         -TaskSequences $taskSequences -DistributionPointGroupName 'OSD DPS' -StatusTag '[test]'
     Assert-Equal $true $result 'rerun framework reconcile succeeds'
+    Assert-Equal 1 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS restart into installed OS').Count 'rerun does not duplicate hard-disk restart'
     Assert-Equal 1 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'rerun does not duplicate task-sequence step'
     Assert-Equal 1 $script:Deployments.Count 'rerun does not duplicate required deployment'
     Assert-Equal 1 $script:Rules.Count 'rerun does not duplicate collection rule'

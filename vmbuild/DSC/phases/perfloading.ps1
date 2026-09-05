@@ -206,6 +206,7 @@ Write-DscStatus "$Tag Starting perfloading"
         $deploymentTypeName = 'MEMLABS-OSD Bootstrap v1'
         $collectionName = 'MEMLABS-OSD Clients'
         $collectionRuleName = 'MEMLABS OSD Clients by configured name'
+        $taskSequenceRebootName = 'MEMLABS restart into installed OS'
         $taskSequenceStepName = 'MEMLABS install OSD Bootstrap'
         $bootstrapVersion = '1'
         $markerPath = 'C:\ProgramData\MemLabs\OSDBootstrap\Version.txt'
@@ -317,18 +318,29 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
         }
 
         foreach ($taskSequence in @($TaskSequences | Where-Object { $_.Name -like 'MEMLABS-w*-Install OS image' })) {
+            foreach ($existingReboot in @($taskSequence | Get-CMTSStepReboot -StepName $taskSequenceRebootName -ErrorAction Stop)) {
+                $null = $taskSequence | Remove-CMTSStepReboot -StepName $existingReboot.Name -Force -ErrorAction Stop
+            }
             foreach ($existingStep in @($taskSequence | Get-CMTSStepInstallApplication -ErrorAction Stop |
                     Where-Object { $_.Name -eq $taskSequenceStepName })) {
                 $null = $taskSequence | Remove-CMTSStepInstallApplication -StepName $existingStep.Name -Force -ErrorAction Stop
             }
+            # Setup Windows and Configuration Manager used to be the terminal
+            # action. Its end-of-sequence exit rebooted from WinPE. Once an
+            # Install Application action was appended, execution continued in
+            # WinPE and that FullOS-only action failed with 0x80000032. Make the
+            # environment transition explicit before the bootstrap application.
+            $rebootStep = New-CMTSStepReboot -Name $taskSequenceRebootName -RunAfterRestart HardDisk `
+                -NotificationMessage '' -ErrorAction Stop
             $installStep = New-CMTSStepInstallApplication -Name $taskSequenceStepName -Application $application -ErrorAction Stop
-            $null = $taskSequence | Add-CMTaskSequenceStep -Step $installStep -ErrorAction Stop
+            $null = $taskSequence | Add-CMTaskSequenceStep -Step @($rebootStep, $installStep) -ErrorAction Stop
+            $verifiedReboots = @($taskSequence | Get-CMTSStepReboot -StepName $taskSequenceRebootName -ErrorAction Stop)
             $verifiedSteps = @($taskSequence | Get-CMTSStepInstallApplication -StepName $taskSequenceStepName -ErrorAction Stop)
-            if ($verifiedSteps.Count -ne 1) {
-                Write-DscStatus "$StatusTag Read-back found $($verifiedSteps.Count) '$taskSequenceStepName' step(s) in '$($taskSequence.Name)', expected one." -Failure
+            if ($verifiedReboots.Count -ne 1 -or $verifiedReboots[0].Target -ne 'HD' -or $verifiedSteps.Count -ne 1) {
+                Write-DscStatus "$StatusTag Bootstrap step read-back failed in '$($taskSequence.Name)': reboot count=$($verifiedReboots.Count), target=$(if ($verifiedReboots.Count) { $verifiedReboots[0].Target } else { '<missing>' }), app count=$($verifiedSteps.Count)." -Failure
                 return $false
             }
-            Write-DscStatus "$StatusTag Appended '$taskSequenceStepName' to '$($taskSequence.Name)'"
+            Write-DscStatus "$StatusTag Appended hard-disk restart + '$taskSequenceStepName' to '$($taskSequence.Name)'"
         }
         return $true
     }
