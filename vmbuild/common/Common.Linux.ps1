@@ -5936,7 +5936,8 @@ function Sync-LinuxDhcpRelay {
             Write-Log "$relayName`: no active relay mappings; DHCP relay service is stopped." -Success
         }
         else {
-            Write-Log "$relayName`: DHCP relay configuration is ready for $($mappingRows.Count) mapping(s); successful PXE packet traversal is not established." -Success
+            Write-Log "$relayName`: DHCP relay service and $($mappingRows.Count) mapping(s) passed configuration and listener validation." -Success
+            Write-Log "$relayName`: end-to-end packet forwarding is exercised later when an OSD client PXE-boots." -LogOnly
         }
     }
 

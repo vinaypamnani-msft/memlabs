@@ -13708,7 +13708,7 @@ function Test-LinuxDhcpRelay {
         Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: FAIL - relay readiness validation failed: $($result.ScriptBlockOutput)" -Level Failure
         return $false
     }
-    Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: OK - relay configuration is ready for $($paths.Count) mapping(s); successful packet traversal is not established" -Level Success
+    Add-Phase11Output -Text "[Phase 11] $VMName [DHCPRelay]: OK - relay service and $($paths.Count) mapping(s) passed configuration and listener validation" -Level Success
     return $true
 }
 

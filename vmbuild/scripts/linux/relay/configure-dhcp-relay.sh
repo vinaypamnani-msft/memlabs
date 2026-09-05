@@ -160,4 +160,4 @@ if ! ss -H -lunp | grep -Eq '(^|[[:space:]])[^[:space:]]*:67[[:space:]]'; then
     exit 4
 fi
 
-echo "[dhcp-relay] relay configuration is ready ($MAPPING_COUNT mapping(s)); packet traversal is not established"
+echo "[dhcp-relay] relay configuration is ready ($MAPPING_COUNT mapping(s)); UDP/67 listener validated"

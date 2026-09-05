@@ -148,7 +148,7 @@ function Invoke-LinuxVmCommand {
     if ($BashCommand -eq 'SCRIPT:relay/configure-dhcp-relay') {
         $script:Events += 'service'
         $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($script:ServicePayload))
-        $marker = if ($decoded) { '[dhcp-relay] relay configuration is ready (1 mapping(s)); packet traversal is not established' } else { '[dhcp-relay] zero active mappings; service stopped' }
+        $marker = if ($decoded) { '[dhcp-relay] relay configuration is ready (1 mapping(s)); UDP/67 listener validated' } else { '[dhcp-relay] zero active mappings; service stopped' }
         return [pscustomobject]@{ CommandResult = $true; ScriptBlockOutput = $marker }
     }
     return [pscustomobject]@{ CommandResult = $true; ScriptBlockOutput = '' }
