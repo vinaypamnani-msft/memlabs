@@ -180,7 +180,7 @@ function Get-HostNetworkSnapshot {
         Select-Object Name, InterfaceAlias, InterfaceIndex, Status, MacAddress, LinkSpeed)
     $interfaces = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.InterfaceAlias -in $aliases } |
-        Select-Object InterfaceAlias, InterfaceIndex, ConnectionState, Forwarding, Dhcp, InterfaceMetric)
+        Select-Object InterfaceAlias, InterfaceIndex, ConnectionState, Forwarding, Dhcp, NlMtu, InterfaceMetric)
     $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.InterfaceAlias -in $aliases } |
         Select-Object InterfaceAlias, InterfaceIndex, IPAddress, PrefixLength, AddressState)
@@ -240,6 +240,20 @@ $dpCollector = {
             Select-Object DestinationPrefix, NextHop, InterfaceAlias, RouteMetric)
     }
     catch { $errors.Add("Route lookup: $($_.Exception.Message)") }
+    $ipInterfaces = @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Select-Object InterfaceAlias, InterfaceIndex, ConnectionState, NlMtu, InterfaceMetric)
+    $dpSettings = $null
+    try {
+        $reg = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -ErrorAction Stop
+        $dpSettings = [pscustomobject]@{
+            RamDiskTFTPBlockSize = $reg.RamDiskTFTPBlockSize
+            RamDiskTFTPWindowSize = $reg.RamDiskTFTPWindowSize
+            SccmPxe = $reg.SccmPxe
+            IsActive = $reg.IsActive
+            SupportUnknownMachines = $reg.SupportUnknownMachines
+        }
+    }
+    catch { $errors.Add("DP registry settings: $($_.Exception.Message)") }
 
     $firewall = [System.Collections.Generic.List[object]]::new()
     foreach ($rule in @(Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {
@@ -292,6 +306,8 @@ $dpCollector = {
         UdpListeners = $udp
         ListenerProcesses = @($processes | Sort-Object Id -Unique)
         RoutesToClient = $routes
+        IPInterfaces = $ipInterfaces
+        DpSettings = $dpSettings
         FirewallRules = @($firewall)
         SmsPxePath = $smsPxePath
         SmsPxeSnapshotPath = $snapshotPath
@@ -316,6 +332,7 @@ function Get-RelaySnapshot {
 set -u
 section() { printf '\n===== %s =====\n' "$1"; }
 section identity; hostname; date -u --iso-8601=seconds
+section links; ip -d link show
 section addresses; ip -4 -o address show
 section routes; ip -4 route show table all
 section rules; ip rule show
@@ -431,6 +448,7 @@ $dpForwarding = @($hostBefore.IPInterfaces | Where-Object { $_.InterfaceAlias -e
 Add-ReportLine "Pre-capture DHCP option 3 : $(if ($router.Count) { $router -join ', ' } else { '<absent>' })"
 Add-ReportLine "Pre-capture host forwarding: client=$($clientForwarding -join ',') dp=$($dpForwarding -join ',')"
 Add-ReportLine "Pre-capture DP errors      : $(@($dpBefore.Errors).Count)"
+Add-ReportLine "Pre-capture DP TFTP tuning : block=$($dpBefore.DpSettings.RamDiskTFTPBlockSize) window=$($dpBefore.DpSettings.RamDiskTFTPWindowSize)"
 Add-ReportLine "Pre-capture relay result   : $($relayBefore.CommandResult)"
 Add-ReportLine
 
@@ -444,6 +462,29 @@ $pcapPath = Join-Path $destRoot 'host-pxe.pcapng'
 $packetTextPath = Join-Path $destRoot 'host-pxe.txt'
 $packetKeyPath = Join-Path $destRoot 'host-pxe-key-lines.txt'
 $pktmonLog = [System.Collections.Generic.List[string]]::new()
+$clientActionTaken = $false
+$observeAttempt = $false
+function Invoke-ProbeClientAction {
+    if ($script:clientActionTaken) { return }
+    if ($RestartClientVM) {
+        $clientState = (Get-VM -Name $clientVm -ErrorAction Stop).State
+        if ($clientState -eq 'Running') {
+            Restart-VM -Name $clientVm -Force -ErrorAction Stop
+            Add-ReportLine "Client action  : hard-restarted running VM '$clientVm'."
+        }
+        else {
+            Start-VM -Name $clientVm -ErrorAction Stop | Out-Null
+            Add-ReportLine "Client action  : started VM '$clientVm'."
+        }
+        $script:clientActionTaken = $true
+        $script:observeAttempt = $true
+    }
+    elseif ($captureStarted) {
+        Add-ReportLine "Client action  : restart/start '$clientVm' manually while capture is running."
+        $script:observeAttempt = $true
+    }
+}
+
 try {
     if ($NoPacketCapture) {
         Add-ReportLine 'Packet capture: skipped by -NoPacketCapture.'
@@ -458,7 +499,21 @@ try {
             Add-ReportLine "Packet capture: NOT COLLECTED because Packet Monitor filter inspection failed (rc=$($existingFilters.ExitCode)): $($existingFilters.Text)"
         }
         elseif ($existingFilters.Text -and $existingFilters.Text -notmatch '(?i)no filters|filter count\s*:\s*0') {
-            Add-ReportLine 'Packet capture: NOT COLLECTED because Packet Monitor already has global filters; they were left untouched.'
+            if ($existingFilters.Text -match '(?im)^\s*\d+\s+\S+.*\bUDP\b') {
+                Add-ReportLine 'Packet capture: using pre-existing filters that include UDP; filters will not be modified or removed.'
+                $started = Get-NativeText -FilePath $pktmonPath -ArgumentList @('start', '--capture', '--comp', 'nics', '--pkt-size', '0', '--file-name', $etlPath, '--file-size', '256', '--log-mode', 'circular')
+                $pktmonLog.Add("===== start with pre-existing filters rc=$($started.ExitCode) =====`r`n$($started.Text)")
+                if ($started.ExitCode -eq 0) {
+                    $captureStarted = $true
+                    Add-ReportLine "Packet capture: RUNNING for $CaptureSeconds seconds with pre-existing UDP coverage."
+                }
+                else {
+                    Add-ReportLine "Packet capture: NOT COLLECTED because capture could not start with the existing filters (rc=$($started.ExitCode)): $($started.Text)"
+                }
+            }
+            else {
+                Add-ReportLine 'Packet capture: NOT COLLECTED because existing global filters do not visibly include UDP; they were left untouched.'
+            }
         }
         else {
             foreach ($filter in @(
@@ -477,37 +532,32 @@ try {
             if ($started.ExitCode -ne 0) { throw "pktmon start failed: $($started.Text)" }
             $captureStarted = $true
             Add-ReportLine "Packet capture: RUNNING for $CaptureSeconds seconds. Trigger PXE now."
+        }
+    }
 
-            if ($RestartClientVM) {
-                $clientState = (Get-VM -Name $clientVm -ErrorAction Stop).State
-                if ($clientState -eq 'Running') {
-                    Restart-VM -Name $clientVm -Force -ErrorAction Stop
-                    Add-ReportLine "Client action  : hard-restarted running VM '$clientVm'."
-                }
-                else {
-                    Start-VM -Name $clientVm -ErrorAction Stop | Out-Null
-                    Add-ReportLine "Client action  : started VM '$clientVm'."
-                }
+    Invoke-ProbeClientAction
+    if ($observeAttempt) {
+        $deadline = (Get-Date).AddSeconds($CaptureSeconds)
+        $nextNotice = Get-Date
+        while ((Get-Date) -lt $deadline) {
+            if ((Get-Date) -ge $nextNotice) {
+                $remaining = [Math]::Max(0, [int]($deadline - (Get-Date)).TotalSeconds)
+                Write-Host "  observation remaining: ${remaining}s"
+                $nextNotice = (Get-Date).AddSeconds(10)
             }
-            else {
-                Add-ReportLine "Client action  : restart/start '$clientVm' manually while capture is running."
-            }
-
-            $deadline = (Get-Date).AddSeconds($CaptureSeconds)
-            $nextNotice = Get-Date
-            while ((Get-Date) -lt $deadline) {
-                if ((Get-Date) -ge $nextNotice) {
-                    $remaining = [Math]::Max(0, [int]($deadline - (Get-Date)).TotalSeconds)
-                    Write-Host "  capture remaining: ${remaining}s"
-                    $nextNotice = (Get-Date).AddSeconds(10)
-                }
-                Start-Sleep -Milliseconds 500
-            }
+            Start-Sleep -Milliseconds 500
         }
     }
 }
 catch {
     Add-ReportLine "Packet capture error: $($_.Exception.Message)"
+    if ($RestartClientVM -and -not $clientActionTaken) {
+        try {
+            Invoke-ProbeClientAction
+            Add-ReportLine 'Client action occurred despite packet-capture setup failure; no capture was claimed.'
+        }
+        catch { Add-ReportLine "Client action error: $($_.Exception.Message)" }
+    }
 }
 finally {
     if ($captureStarted) {
