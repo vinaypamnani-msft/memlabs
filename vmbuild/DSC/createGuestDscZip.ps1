@@ -319,7 +319,10 @@ try {
         $archive = [System.IO.Compression.ZipFile]::OpenRead($zipTarget)
         try {
             $sqlManifest = $archive.Entries | Where-Object {
-                $_.FullName -match '^SqlServer/[^/]+/SqlServer\.psd1$'
+                # Compress-Archive writes '/' under PowerShell 7 but '\' under
+                # Windows PowerShell 5.1 (the required DSC build runtime). Both
+                # are valid ZIP entry separators and Expand-Archive handles both.
+                $_.FullName -match '^SqlServer[\\/][^\\/]+[\\/]SqlServer\.psd1$'
             } | Select-Object -First 1
             if (-not $sqlManifest) {
                 throw 'DSC.zip validation failed: SqlServer/<version>/SqlServer.psd1 is absent.'
