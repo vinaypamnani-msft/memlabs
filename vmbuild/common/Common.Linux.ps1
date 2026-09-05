@@ -5914,7 +5914,14 @@ function Sync-LinuxDhcpRelay {
             Write-Log "$relayName`: stale relay adapter '$($stale.Name)' remains on '$($stale.SwitchName)' and is excluded from desired dnsmasq state; it was not removed." -Warning
         }
 
-        $mappingPayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($mappingRows -join "`n")))
+        $mappingText = $mappingRows -join "`n"
+        if ($mappingRows.Count -gt 0) {
+            # Bash `while read` does not execute its body for a final row that
+            # lacks a line terminator. One mapping therefore parsed as zero,
+            # while multiple mappings silently dropped the last row.
+            $mappingText += "`n"
+        }
+        $mappingPayload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($mappingText))
         $serviceScript = Get-LinuxScript -Name 'relay/configure-dhcp-relay' -Variables @{
             RELAY_MAPPINGS_B64 = $mappingPayload
         }

@@ -226,7 +226,7 @@ Assert-Equal '192.168.1.25' $config.osdPxePaths[0].distributionPointIPv4 'refres
 Assert-Equal 1 $script:AddCalls 'missing relay NIC is added exactly once'
 Assert-Equal 'prepare,add,configure-client,service' ($script:Events -join ',') 'management handoff completes before hot-add and service restart'
 Assert-Equal '00155D030004' $script:LastClientVariables.CLIENT_MAC 'guest configuration is keyed by captured Hyper-V MAC'
-Assert-Equal 'eth7|192.168.3.4|192.168.1.25' ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($script:ServicePayload))) 'service mapping uses guest interface and resolved target'
+Assert-Equal "eth7|192.168.3.4|192.168.1.25`n" ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($script:ServicePayload))) 'service mapping is LF-terminated so Bash reads the final row'
 $null = Sync-LinuxDhcpRelay -DeployConfig $config
 Assert-Equal 1 $script:AddCalls 'rerun does not add a second relay NIC'
 
