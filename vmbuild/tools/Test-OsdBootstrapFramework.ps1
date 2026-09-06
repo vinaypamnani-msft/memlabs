@@ -192,7 +192,8 @@ $taskSequences = @(
 try {
     $result = Sync-MemLabsOsdBootstrapFramework -SourceRoot $sourceRoot `
         -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' `
-        -PayloadSourceRoot $payloadSourceRoot -ToolsRoot $toolsRoot -OsdClients $clients `
+        -PayloadSourceRoot $payloadSourceRoot -DataDiskInitializerSource $diskInitializerSource `
+        -ToolsRoot $toolsRoot -OsdClients $clients `
         -TaskSequences $taskSequences -DistributionPointGroupName 'OSD DPS' -StatusTag '[test]'
     Assert-Equal $true $result 'fresh framework reconcile succeeds'
     Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Install.ps1')) 'versioned install payload is staged'
@@ -228,7 +229,8 @@ try {
 
     $result = Sync-MemLabsOsdBootstrapFramework -SourceRoot $sourceRoot `
         -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' `
-        -PayloadSourceRoot $payloadSourceRoot -ToolsRoot $toolsRoot -OsdClients $clients `
+        -PayloadSourceRoot $payloadSourceRoot -DataDiskInitializerSource $diskInitializerSource `
+        -ToolsRoot $toolsRoot -OsdClients $clients `
         -TaskSequences $taskSequences -DistributionPointGroupName 'OSD DPS' -StatusTag '[test]'
     Assert-Equal $true $result 'rerun framework reconcile succeeds'
     Assert-Equal 0 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS restart into installed OS').Count 'rerun keeps bootstrap reboot absent'
@@ -241,7 +243,8 @@ try {
     $script:DeploymentTypes[0].LocalizedDisplayName = 'MEMLABS-OSD Bootstrap v1'
     $result = Sync-MemLabsOsdBootstrapFramework -SourceRoot $sourceRoot `
         -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' `
-        -PayloadSourceRoot $payloadSourceRoot -ToolsRoot $toolsRoot -OsdClients $clients `
+        -PayloadSourceRoot $payloadSourceRoot -DataDiskInitializerSource $diskInitializerSource `
+        -ToolsRoot $toolsRoot -OsdClients $clients `
         -TaskSequences $taskSequences -DistributionPointGroupName 'OSD DPS' -StatusTag '[test]'
     Assert-Equal $true $result 'existing version 1 application revises in place'
     Assert-Equal $originalVersion $script:Application.SoftwareVersion 'application revision restores fingerprinted software version'
@@ -250,7 +253,8 @@ try {
     $clients[0].additionalDisks.E = [int64](21GB)
     $result = Sync-MemLabsOsdBootstrapFramework -SourceRoot $sourceRoot `
         -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' `
-        -PayloadSourceRoot $payloadSourceRoot -ToolsRoot $toolsRoot -OsdClients $clients `
+        -PayloadSourceRoot $payloadSourceRoot -DataDiskInitializerSource $diskInitializerSource `
+        -ToolsRoot $toolsRoot -OsdClients $clients `
         -TaskSequences $taskSequences -DistributionPointGroupName 'OSD DPS' -StatusTag '[test]'
     Assert-Equal $true $result 'disk configuration change revises existing v3 policy'
     Assert-Equal $true ($script:Application.SoftwareVersion -ne $originalVersion) 'disk configuration change produces a new application version'
@@ -263,7 +267,8 @@ try {
     $noDpTaskSequence = [pscustomobject]@{ Name = 'MEMLABS-w11-Install OS image'; Steps = @() }
     $result = Sync-MemLabsOsdBootstrapFramework -SourceRoot $sourceRoot `
         -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' `
-        -PayloadSourceRoot $payloadSourceRoot -ToolsRoot $toolsRoot -OsdClients $clients `
+        -PayloadSourceRoot $payloadSourceRoot -DataDiskInitializerSource $diskInitializerSource `
+        -ToolsRoot $toolsRoot -OsdClients $clients `
         -TaskSequences @($noDpTaskSequence) -DistributionPointGroupName '' -StatusTag '[test]'
     Assert-Equal $true $result 'missing OSD DP is handled without authoring broken references'
     Assert-Equal $true ($null -eq $script:Collection) 'missing OSD DP does not create policy collection'
@@ -277,6 +282,9 @@ finally {
 
 $source = Get-Content $perfloadingPath -Raw
 Assert-Equal $true ($source.Contains('Sync-MemLabsOsdBootstrapFramework')) 'perfloading contains bootstrap reconciler'
+Assert-Equal $true ($source.Contains("`$bootstrapPayloadSource = 'C:\staging'")) 'runtime bootstrap assets come from injected C:\staging payload'
+Assert-Equal $true ($source.Contains("Join-Path `$PSScriptRoot 'Initialize-OsdDataDisks.ps1'")) 'disk initializer resolves beside the running DSC phase'
+Assert-Equal $false ($source.Contains('Split-Path (Split-Path $PSScriptRoot -Parent) -Parent')) 'runtime payload root is not inferred by walking up from DSC phase path'
 Assert-Equal $true ($source.Contains('-DeployPurpose Required -UserNotification HideAll')) 'required policy path is present'
 Assert-Equal $false ($source.Contains('Add-CMTaskSequenceStep -Step @($rebootStep, $installStep)')) 'bootstrap is not executed inside the OS deployment task sequence'
 

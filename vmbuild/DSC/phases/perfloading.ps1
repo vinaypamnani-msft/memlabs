@@ -304,6 +304,7 @@ Write-DscStatus "$Tag Starting perfloading"
             [string] $SourceRoot,
             [string] $SourceUnc,
             [string] $PayloadSourceRoot,
+            [string] $DataDiskInitializerSource,
             [string] $ToolsRoot,
             [object[]] $OsdClients,
             [object[]] $TaskSequences,
@@ -339,7 +340,7 @@ Write-DscStatus "$Tag Starting perfloading"
             @{ Source = Join-Path $PayloadSourceRoot 'bginfo\CLIENT.bgi'; Destination = Join-Path $payloadBgInfo 'CLIENT.bgi' }
             @{ Source = Join-Path $PayloadSourceRoot 'bginfo\bginfo_CLIENT.lnk'; Destination = Join-Path $payloadBgInfo 'bginfo_CLIENT.lnk' }
             @{ Source = Join-Path $PayloadSourceRoot 'bginfo\bginfo.exe'; Destination = Join-Path $payloadBgInfo 'bginfo.exe' }
-            @{ Source = Join-Path $PayloadSourceRoot 'DSC\phases\Initialize-OsdDataDisks.ps1'; Destination = Join-Path $payloadRoot 'Initialize-OsdDataDisks.ps1' }
+            @{ Source = $DataDiskInitializerSource; Destination = Join-Path $payloadRoot 'Initialize-OsdDataDisks.ps1' }
         )
         foreach ($payloadFile in $requiredPayload) {
             if (-not (Test-Path -LiteralPath $payloadFile.Source -PathType Leaf)) {
@@ -2568,11 +2569,18 @@ if ($licensed) { Write-Output 'Activated' }
     }
     $bootstrapSourceRoot = Join-Path $folderPath 'MemLabsOsdBootstrap'
     $bootstrapSourceUnc = "\\$ThisMachineName\OSD\MemLabsOsdBootstrap"
-    $bootstrapPayloadSource = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+    # Base-image payloads are injected into C:\staging. The disk initializer is
+    # shipped with this DSC phase and therefore lives beside perfloading.ps1 at
+    # runtime. Deriving a common root by walking up from $PSScriptRoot resolved
+    # to C:\Windows under DSC and made every OSD-enabled Phase 8 fail before it
+    # could publish Bootstrap content.
+    $bootstrapPayloadSource = 'C:\staging'
+    $dataDiskInitializerSource = Join-Path $PSScriptRoot 'Initialize-OsdDataDisks.ps1'
     if (-not (Sync-MemLabsOsdBootstrapFramework `
             -SourceRoot $bootstrapSourceRoot `
             -SourceUnc $bootstrapSourceUnc `
             -PayloadSourceRoot $bootstrapPayloadSource `
+            -DataDiskInitializerSource $dataDiskInitializerSource `
             -ToolsRoot 'C:\tools' `
             -OsdClients $osdClientsForNaming `
             -TaskSequences $siteTaskSequencesForNaming `
