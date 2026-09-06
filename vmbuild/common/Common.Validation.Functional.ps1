@@ -4147,7 +4147,11 @@ function Test-CMSiteFunctionality {
         if (-not $dpRegPassed) { $passed = $false }
     }
 
-    # Office Install Targets collection: validate + self-heal membership.
+    # Office Install Targets collection: validate + self-heal membership for
+    # already-built clients. OSDClient Office is embedded in the install task
+    # sequence and those empty pre-PXE VMs are deliberately excluded from this
+    # collection; waiting for discovery/membership here only burns two minutes
+    # and emits a false warning.
     # Only on Primaries (perfloading creates the Office app/deployment on the
     # Primary, never on CAS). Pre-emptively confirms every VM with
     # installOffice is resolved into MEMLABS-Office Install Targets and that
@@ -4155,7 +4159,7 @@ function Test-CMSiteFunctionality {
     # received" WARNs in Phase 11 get a definitive parent diagnosis (and an
     # auto-refresh attempt) here instead of falling on the client.
     $officeExpected = @($DeployConfig.virtualMachines | Where-Object {
-        $_.installOffice -and $_.installOffice -ne $false
+        $_.role -ne 'OSDClient' -and $_.installOffice -and $_.installOffice -ne $false
     } | ForEach-Object { $_.vmName })
     if ($passed -and $CurrentItem.role -eq 'Primary' -and $officeExpected.Count -gt 0) {
         Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying Office Install Targets collection"

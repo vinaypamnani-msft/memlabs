@@ -179,6 +179,8 @@ Assert-Equal $true ($source.Contains('-AutoInstall $true')) 'Office applications
 Assert-Equal $true ($source.Contains("`$policyTargetVMs = @(`$OfficeTargetVMs | Where-Object { `$_.role -ne 'OSDClient' })")) 'required-policy collection excludes OSD clients owned by the task sequence'
 Assert-Equal $true ($source.Contains("__MEMLABS_NO_OFFICE_POLICY_TARGET__")) 'OSD-only configuration uses a valid deliberate no-match collection query'
 Assert-Equal $true ($source.Contains('not waiting for Client=1 before PXE')) 'Phase 8 reports why it skips the impossible OSD membership wait'
+$validationSource = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Validation.Functional.ps1') -Raw
+Assert-Equal $true ($validationSource.Contains("`$_.role -ne 'OSDClient' -and `$_.installOffice")) 'Phase 11 collection validation excludes OSD clients owned by task-sequence policy'
 
 if ($script:Failures) { Write-Host "$script:Failures check(s) failed."; exit 1 }
 Write-Host 'All OSD Office task-sequence checks passed.'
