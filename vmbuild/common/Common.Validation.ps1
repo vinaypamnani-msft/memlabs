@@ -119,8 +119,9 @@ function Test-ValidVmOptions {
                 Add-ValidationMessage -Message "VM Options Validation: vmOptions.basePath value [$($ConfigObject.vmOptions.basePath)] is invalid. You must specify a valid path. For example: E:\VirtualMachines" -ReturnObject $ReturnObject -Failure
             }
 
-            if ($driveLetter -in "C", "D", "Z") {
-                Add-ValidationMessage -Message "VM Options Validation: vmOptions.basePath value [$($ConfigObject.vmOptions.basePath)] is invalid. You must specify a drive letter other than C/D/Z. For example: E:\VirtualMachines" -ReturnObject $ReturnObject -Failure
+            if (-not (Test-MemLabsVmStorageDriveAllowed -DriveLetter $driveLetter)) {
+                $driveRule = if ($driveLetter.ToUpperInvariant() -eq 'C') { 'C: is allowed only when the Hyper-V host runs Windows Client; use another drive on Windows Server.' } else { 'D: and Z: are reserved and cannot hold MemLabs virtual machines.' }
+                Add-ValidationMessage -Message "VM Options Validation: vmOptions.basePath value [$($ConfigObject.vmOptions.basePath)] is invalid. $driveRule" -ReturnObject $ReturnObject -Failure
             }
         }
     }
@@ -907,20 +908,31 @@ function Test-ValidVmMemory {
             }
         }
 
-        # Windows 11 memory floor: 4GB. A 2GB Win11 client exhausts commit under the
+        # Windows 11/OSD memory floor: 4GB. A 2GB client exhausts commit under the
         # deploy load (CM client + DSC + first-boot servicing) and trips a known
         # Windows kernel bug -- a critical DcomLaunch svchost dies when a thread stack
         # can't grow at the commit limit (0xEF CRITICAL_PROCESS_DIED / STATUS_STACK_OVERFLOW,
-        # microsoft/OS bug 56918928), BSOD'ing the VM mid-build. genconfig already
-        # defaults Win11 to 4GB, but hand-authored configs can specify less. Detect and
-        # REPAIR in place (raise to 4GB) with a Warning so the config self-heals.
+        # microsoft/OS bug 56918928), BSOD'ing the VM mid-build. OSDClient has no
+        # operatingSystem property before PXE, but WIMGAPI also fails at 2GB with
+        # 0x80070008 (reported by ConfigMgr as 0x800704D3). Detect and REPAIR both
+        # the maximum and dynamic-memory floor so legacy 1GB-2GB OSD VMs cannot
+        # balloon below Windows 11's minimum while applying the image.
         if ($vmMemory -is [string] -and ($vmMemory.ToUpperInvariant().EndsWith("MB") -or $vmMemory.ToUpperInvariant().EndsWith("GB")) `
-                -and $VM.operatingSystem -like "Windows 11*" -and $VM.role -notin @("DC", "BDC")) {
+                -and (($VM.operatingSystem -like "Windows 11*" -and $VM.role -notin @("DC", "BDC")) -or $VM.role -eq 'OSDClient')) {
             $memBytes = 0
             try { $memBytes = [int64]($vmMemory / 1) } catch { $memBytes = 0 }
             if ($memBytes -gt 0 -and $memBytes -lt 4GB) {
                 $VM.memory = "4GB"
-                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] Windows 11 memory [$vmMemory] raised to 4GB. A 2GB Win11 client exhausts commit under the deploy load and can BSOD (0xEF, Windows OS bug 56918928); 4GB is the safe floor." -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory [$vmMemory] raised to 4GB. A 2GB Windows 11/OSD client can exhaust memory during deployment; 4GB is the safe floor." -ReturnObject $ReturnObject -Warning
+            }
+            if ($VM.role -eq 'OSDClient' -and $VM.dynamicMinRam) {
+                $minimumBytes = 0
+                try { $minimumBytes = [int64]($VM.dynamicMinRam / 1) } catch { $minimumBytes = 0 }
+                if ($minimumBytes -gt 0 -and $minimumBytes -lt 4GB) {
+                    $oldMinimum = $VM.dynamicMinRam
+                    $VM.dynamicMinRam = '4GB'
+                    Add-ValidationMessage -Message "$vmRole Validation: [$vmName] dynamic memory floor [$oldMinimum] raised to 4GB so WinPE cannot balloon below the OSD image-application requirement." -ReturnObject $ReturnObject -Warning
+                }
             }
         }
         # Linux memory floor: 2GB. At 1GB a Linux guest sharing a host with 20+

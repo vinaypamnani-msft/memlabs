@@ -1208,7 +1208,10 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installOffice' -Value $false -force
         }
         "OSDClient" {
-            $virtualMachine.memory = "2GB"
+            # Windows 11 and WIMGAPI image application both need a 4GB floor.
+            # A 2GB OSD VM can fail Apply Operating System with WIM error
+            # 0x80070008, which ConfigMgr reports secondarily as 0x800704D3.
+            $virtualMachine.memory = "4GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'vmGeneration' -Value "2" -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installOffice' -Value $false -Force
             $virtualMachine.PsObject.Members.Remove('operatingSystem')
@@ -1388,7 +1391,7 @@ function Add-NewVMForRole {
     if (-not (Test-VmIsLinux -Vm $virtualMachine)) {
         if ($ConfigToModify.domainDefaults.UseDynamicMemory) {
             # SQL workloads need a higher floor; ConfigMgr SQL min server memory is 4GB
-            $defaultMin = if ($virtualMachine.sqlVersion) { "4GB" } else { "1GB" }
+            $defaultMin = if ($role -eq 'OSDClient') { "4GB" } elseif ($virtualMachine.sqlVersion) { "4GB" } else { "1GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $defaultMin -force
         }
         else {
