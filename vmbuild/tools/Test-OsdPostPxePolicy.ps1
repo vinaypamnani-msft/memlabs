@@ -115,6 +115,7 @@ $addVmSource = Get-Content (Join-Path $RootPath 'common\Common.GenConfig.AddVM.p
 $validationSource = Get-Content (Join-Path $RootPath 'common\Common.Validation.ps1') -Raw
 Assert-Equal $true ($configSource.Contains('$vm.role -eq ''OSDClient'' -or')) 'normalization treats OSDClient as client OS for BitLocker'
 Assert-Equal $true ($configSource.Contains('or $vm.role -eq ''OSDClient''')) 'normalization preserves installOffice on OSDClient'
+Assert-Equal $true ($configSource.Contains("$" + "vm.PsObject.Members.Remove('useProxy')")) 'normalization removes dead OSD proxy signal'
 Assert-Equal $true ($addVmSource.Contains('-Name ''installOffice'' -Value $false')) 'new OSDClient exposes existing installOffice signal defaulted off'
 Assert-Equal $true ($validationSource.Contains('$_.role -ne ''OSDClient'' -and $_.pushClient -eq $false')) 'Office validation recognizes task-sequence-installed CM client'
 

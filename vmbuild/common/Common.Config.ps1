@@ -767,6 +767,15 @@ function Get-UserConfiguration {
                 $vm.PsObject.Members.Remove("BitLocker")
             }
 
+            # OSD clients must use direct NAT. They have no guest while PXE and
+            # OOBE run, and no task-sequence/required-policy path configures a
+            # post-install proxy. Older configs can still carry useProxy=true;
+            # remove that dead signal so GenConfig does not offer a setting
+            # which Test-VmUsesProxy and host ACL enforcement intentionally ignore.
+            if ($vm.role -eq 'OSDClient' -and $null -ne $vm.useProxy) {
+                $vm.PsObject.Members.Remove('useProxy')
+            }
+
             # installOffice property: normalize for DomainMember client-OS VMs
             # and OSD clients. OSDClient has no operatingSystem before PXE; its
             # selected task sequence supplies Windows and the CM client.
@@ -1713,7 +1722,9 @@ function Add-ExistingVMsToDeployConfig {
     # Add existing Proxy VM to list when any non-hidden VM opts into useProxy.
     # Phase 5 DSC (ConfigureCMProxy.ps1) needs the Proxy VM in deployConfig
     # to apply Set-CMSiteSystemServer -UseProxy on opted-in site systems.
-    $proxyClients = @($config.virtualMachines | Where-Object { $_.useProxy -eq $true -and -not $_.Hidden })
+    $proxyClients = @($config.virtualMachines | Where-Object {
+            $_.role -ne 'OSDClient' -and $_.useProxy -eq $true -and -not $_.Hidden
+        })
     if ($proxyClients.Count -gt 0) {
         $proxyInConfig = @($config.virtualMachines | Where-Object { $_.role -eq 'Proxy' }).Count -gt 0
         if (-not $proxyInConfig) {

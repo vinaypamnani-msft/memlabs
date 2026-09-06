@@ -78,6 +78,9 @@ Assert-Equal $true (Set-VmProxyEnforcementForConfig -deployConfig $config) 'buil
 Assert-Equal 'CLIENT1,CAS1,PRI1,SEC1,PASSIVE1,DP1' ($script:Applied -join ',') 'Phase 2 enforces every opted-in Windows VM, including CM infrastructure'
 Assert-Equal 'OSD1' ($script:Cleared -join ',') 'Phase 2 clears stale enforcement from bare OSD clients'
 Assert-Equal $false (Test-VmUsesProxy -Vm ($vms | Where-Object role -eq 'OSDClient') -DeployConfig $config) 'OSDClient cannot opt into proxy enforcement before an OS exists'
+
+$configSource = Get-Content (Join-Path $RootPath 'common\Common.Config.ps1') -Raw
+Assert-Equal $true ($configSource.Contains("$" + "vm.PsObject.Members.Remove('useProxy')")) 'normalization removes stale useProxy from OSDClient'
 $script:Applied = @()
 $script:Cleared = @()
 Assert-Equal $true (Set-VmProxyEnforcementForAllLabs) 'all-labs enforcement reconciliation completes'
