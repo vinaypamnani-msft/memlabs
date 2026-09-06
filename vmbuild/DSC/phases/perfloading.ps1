@@ -379,7 +379,7 @@ Write-DscStatus "$Tag Starting perfloading"
                     # level, after Setup Windows and Configuration Manager. The
                     # product InstallApplication action rejects WinPE execution.
                     $taskSequence | Add-CMTaskSequenceStep -Step $newSteps `
-                        -InsertStepStartIndex ([uint32]::MaxValue) -ErrorAction Stop
+                        -InsertStepStartIndex ([int]::MaxValue) -ErrorAction Stop
                 }
 
                 $verified = @($taskSequence | Get-CMTSStepInstallApplication -ErrorAction Stop | Where-Object {

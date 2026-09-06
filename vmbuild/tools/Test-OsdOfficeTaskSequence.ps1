@@ -82,7 +82,12 @@ function New-CMTSStepInstallApplication {
 }
 function Add-CMTaskSequenceStep {
     [CmdletBinding()]
-    param([Parameter(ValueFromPipeline = $true)] $InputObject, [object[]] $Step, [uint32] $InsertStepStartIndex)
+    param(
+        [Parameter(ValueFromPipeline = $true)] $InputObject,
+        [object[]] $Step,
+        [ValidateRange(0, 2147483647)]
+        [long] $InsertStepStartIndex
+    )
     process {
         if ($InsertStepStartIndex -gt $InputObject.Steps.Count) { $InputObject.Steps = @($InputObject.Steps) + @($Step) }
         else { throw 'Test double only supports append semantics' }
