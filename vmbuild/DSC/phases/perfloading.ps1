@@ -299,6 +299,118 @@ Write-DscStatus "$Tag Starting perfloading"
         return $true
     }
 
+    function Sync-MemLabsOsdOfficeSteps {
+        param (
+            [object[]] $TaskSequences,
+            [object[]] $OfficeTargetVMs,
+            [string] $StatusTag
+        )
+
+        $managedPrefix = 'MEMLABS install Office: '
+        $allOfficeTargets = @($OfficeTargetVMs | Where-Object {
+                $null -ne $_ -and $_.installOffice -and $_.installOffice -ne $false
+            })
+        $osdOfficeTargets = @($allOfficeTargets | Where-Object { $_.role -eq 'OSDClient' })
+        $allChannels = @($allOfficeTargets | ForEach-Object { "$($_.installOffice)" } | Select-Object -Unique)
+        $desiredRows = @()
+
+        foreach ($channel in @($osdOfficeTargets | ForEach-Object { "$($_.installOffice)" } | Select-Object -Unique)) {
+            $channelClients = @($osdOfficeTargets | Where-Object { "$($_.installOffice)" -eq $channel })
+            $macConditions = @()
+            $expectedQueries = @()
+            foreach ($client in $channelClients) {
+                $compactMac = "$($client.osdMacAddress)" -replace '[^0-9A-Fa-f]', ''
+                if ($compactMac -notmatch '^[0-9A-Fa-f]{12}$') {
+                    Write-DscStatus "$StatusTag Office-enabled OSDClient '$($client.vmName)' has no usable osdMacAddress ('$($client.osdMacAddress)'). Office task-sequence steps were not changed." -Failure
+                    return $false
+                }
+                $mac = ($compactMac.ToUpperInvariant() -replace '(..)(?!$)', '$1:')
+                $query = "SELECT * FROM Win32_NetworkAdapterConfiguration WHERE MACAddress='$mac'"
+                $expectedQueries += $query
+                $macConditions += New-CMTSStepConditionQueryWmi -Namespace 'root\cimv2' `
+                    -Query $query -ErrorAction Stop
+            }
+
+            $applicationName = if ($allChannels.Count -eq 1) { 'MEMLABS-Microsoft365Apps' } else { "MEMLABS-Microsoft365Apps-$channel" }
+            $application = Get-CMApplication -Name $applicationName -ErrorAction SilentlyContinue
+            if (-not $application) {
+                Write-DscStatus "$StatusTag Office application '$applicationName' is not available, so no OSD task-sequence step was authored for channel '$channel'. A later Phase 8 pass will reconcile it after the Office source download succeeds." -Warning
+                continue
+            }
+            # Required for an Install Application task-sequence action to use
+            # an application without first deploying it to this new client.
+            Set-CMApplication -InputObject $application -AutoInstall $true -ErrorAction Stop | Out-Null
+            $condition = if ($macConditions.Count -eq 1) {
+                $macConditions[0]
+            }
+            else {
+                New-CMTSStepConditionIfStatement -StatementType Any -Condition $macConditions -ErrorAction Stop
+            }
+            $desiredRows += [pscustomobject]@{
+                Channel         = $channel
+                Application     = $application
+                Condition       = $condition
+                ExpectedQueries = $expectedQueries
+            }
+        }
+
+        foreach ($taskSequence in @($TaskSequences | Where-Object {
+                    $null -ne $_ -and $_.Name -like 'MEMLABS-w*-Install OS image'
+                })) {
+            try {
+                $existingManaged = @($taskSequence | Get-CMTSStepInstallApplication -ErrorAction Stop | Where-Object {
+                        $_.Name -like "$managedPrefix*"
+                    })
+                foreach ($existingStep in $existingManaged) {
+                    $taskSequence | Remove-CMTSStepInstallApplication -StepName $existingStep.Name -Force -ErrorAction Stop
+                }
+
+                $newSteps = @()
+                foreach ($row in $desiredRows) {
+                    $newSteps += New-CMTSStepInstallApplication `
+                        -Name "$managedPrefix$($row.Channel)" `
+                        -Application $row.Application `
+                        -Condition $row.Condition `
+                        -RetryCount 2 `
+                        -ErrorAction Stop
+                }
+                if ($newSteps.Count -gt 0) {
+                    # A value beyond the current final index appends at the main
+                    # level, after Setup Windows and Configuration Manager. The
+                    # product InstallApplication action rejects WinPE execution.
+                    $taskSequence | Add-CMTaskSequenceStep -Step $newSteps `
+                        -InsertStepStartIndex ([uint32]::MaxValue) -ErrorAction Stop
+                }
+
+                $verified = @($taskSequence | Get-CMTSStepInstallApplication -ErrorAction Stop | Where-Object {
+                        $_.Name -like "$managedPrefix*"
+                    })
+                if ($verified.Count -ne $desiredRows.Count) {
+                    throw "read-back found $($verified.Count) managed Office step(s), expected $($desiredRows.Count)"
+                }
+                foreach ($row in $desiredRows) {
+                    $verifiedStep = @($verified | Where-Object { $_.Name -eq "$managedPrefix$($row.Channel)" })
+                    if ($verifiedStep.Count -ne 1) {
+                        throw "read-back found $($verifiedStep.Count) Office step(s) for channel '$($row.Channel)', expected one"
+                    }
+                    $actualQueries = @($verifiedStep[0].Condition.Operands | ForEach-Object {
+                            if ($_.OperatorType -eq 'or') { $_.Operands } else { $_ }
+                        } | ForEach-Object { $_.Query } | Where-Object { $_ } | Sort-Object)
+                    $expectedQueries = @($row.ExpectedQueries | Sort-Object)
+                    if (@(Compare-Object $expectedQueries $actualQueries).Count -ne 0) {
+                        throw "read-back MAC conditions for channel '$($row.Channel)' do not match configured OSD clients"
+                    }
+                }
+                Write-DscStatus "$StatusTag Reconciled $($desiredRows.Count) MAC-conditioned Office step(s) in '$($taskSequence.Name)' for $($osdOfficeTargets.Count) OSD client(s)"
+            }
+            catch {
+                Write-DscStatus "$StatusTag Failed to reconcile OSD Office steps in '$($taskSequence.Name)': $($_.Exception.Message)" -Failure
+                return $false
+            }
+        }
+        return $true
+    }
+
     function Sync-MemLabsOsdBootstrapFramework {
         param (
             [string] $SourceRoot,
@@ -943,7 +1055,12 @@ if ($licensed) { Write-Output 'Activated' }
             }
         }
 
-        $nameList = ($OfficeTargetVMs | ForEach-Object { "'$($_.vmName)'" }) -join ","
+        # OSD clients receive their configured channel from the shared install
+        # task sequence. Keep this required-policy collection for already-built
+        # clients only; otherwise a multi-channel deployment would eventually
+        # target every Office application at every newly registered OSD client.
+        $policyTargetVMs = @($OfficeTargetVMs | Where-Object { $_.role -ne 'OSDClient' })
+        $nameList = ($policyTargetVMs | ForEach-Object { "'$($_.vmName)'" }) -join ","
         # Gate membership on Client=1 so a VM only joins the collection ONCE its CM
         # client is installed. This eliminates the app-policy projection race: if a
         # device is added while it is still a non-client, policypv snapshots it as
@@ -953,7 +1070,12 @@ if ($licensed) { Write-Output 'Activated' }
         # forever). By requiring Client=1, the device becomes a BRAND-NEW member at
         # the moment it becomes a client, and new-member adds are the path policypv
         # projects app-deployment policy for reliably.
-        $desiredQuery = "select SMS_R_System.ResourceID from SMS_R_System where SMS_R_System.Client = 1 and SMS_R_System.Name in ($nameList)"
+        $desiredQuery = if ($policyTargetVMs.Count -gt 0) {
+            "select SMS_R_System.ResourceID from SMS_R_System where SMS_R_System.Client = 1 and SMS_R_System.Name in ($nameList)"
+        }
+        else {
+            "select SMS_R_System.ResourceID from SMS_R_System where SMS_R_System.Name = '__MEMLABS_NO_OFFICE_POLICY_TARGET__'"
+        }
         $ruleName = "Office Install Targets Rule"
 
         # Remove any stale direct-membership rules left behind by older builds.
@@ -982,12 +1104,12 @@ if ($licensed) { Write-Output 'Activated' }
                 if ($existingTail -ne $desiredTail) {
                     Remove-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -RuleName $ruleName -Force -ErrorAction SilentlyContinue
                     Add-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -QueryExpression $desiredQuery -RuleName $ruleName -ErrorAction Stop
-                    Write-DscStatus "$Tag Updated query rule on $colName for: $(($OfficeTargetVMs | ForEach-Object { $_.vmName }) -join ', ')"
+                    Write-DscStatus "$Tag Updated query rule on $colName for policy targets: $(if ($policyTargetVMs.Count) { ($policyTargetVMs.vmName -join ', ') } else { '[none; OSD targets install in task sequence]' })"
                 }
             }
             else {
                 Add-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -QueryExpression $desiredQuery -RuleName $ruleName -ErrorAction Stop
-                Write-DscStatus "$Tag Added query membership rule on $colName for: $(($OfficeTargetVMs | ForEach-Object { $_.vmName }) -join ', ')"
+                Write-DscStatus "$Tag Added query membership rule on $colName for policy targets: $(if ($policyTargetVMs.Count) { ($policyTargetVMs.vmName -join ', ') } else { '[none; OSD targets install in task sequence]' })"
             }
         }
         catch {
@@ -1015,12 +1137,21 @@ if ($licensed) { Write-Output 'Activated' }
         # becomes a client and policypv projects the deployment to it then (as a
         # new member). Do a short best-effort wait only to catch the common case
         # where the target clients are already up.
-        $expected = ($OfficeTargetVMs | Measure-Object).Count
+        # OSDClient VMs are intentionally empty until a future PXE boot and are
+        # excluded from this collection because their Office install is owned
+        # by the OS deployment task sequence.
+        $waitTargetNames = @($policyTargetVMs | ForEach-Object { "$($_.vmName)" })
+        $expected = $waitTargetNames.Count
+        if ($expected -eq 0) {
+            Write-DscStatus "$Tag Collection '$colName' has only OSD task-sequence target(s); not waiting for Client=1 before PXE"
+            return $col
+        }
         $deadline = (Get-Date).AddSeconds(60)
         $live = 0
         do {
             Start-Sleep -Seconds 5
-            $live = @(Get-CMCollectionMember -CollectionId $col.CollectionID -ErrorAction SilentlyContinue).Count
+            $live = @(Get-CMCollectionMember -CollectionId $col.CollectionID -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -in $waitTargetNames }).Count
         } while ($live -lt $expected -and (Get-Date) -lt $deadline)
         if ($live -ge $expected) {
             Write-DscStatus "$Tag Collection '$colName' eval complete: live members=$live/$expected (all Office targets are clients)"
@@ -2962,7 +3093,7 @@ Write-Output `$true
                 }
 
                 Write-DscStatus "$Tag Creating application '$channelAppName'"
-                New-CMApplication -Name $channelAppName -Description "Microsoft 365 Apps ($channel channel)" -Publisher "Microsoft" -SoftwareVersion "Latest" -ErrorAction SilentlyContinue
+                New-CMApplication -Name $channelAppName -Description "Microsoft 365 Apps ($channel channel)" -Publisher "Microsoft" -SoftwareVersion "Latest" -AutoInstall $true -ErrorAction SilentlyContinue
 
                 # Script deployment type: ODT install/uninstall with registry detection
                 $installCmd = "setup.exe /configure install.xml"
@@ -3007,6 +3138,25 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         }
     }
     #endregion Microsoft 365 Apps — join background download + create applications
+
+    # Install Office during OSD instead of waiting for the new client to finish
+    # imaging, register, enter a collection, and receive required policy. The
+    # product action consumes policy embedded in the task-sequence environment,
+    # but only after Setup Windows has installed the ConfigMgr client.
+    if ($CurrentRole -ne 'CAS') {
+        $officeTaskSequences = @(Get-CMTaskSequence -Fast | Where-Object {
+                $_.Name -like 'MEMLABS-w*-Install OS image' -and "$($_.PackageID)" -like "$SiteCode*"
+            })
+        $officeTargetsForTaskSequence = @($deployConfig.virtualMachines | Where-Object {
+                $_.installOffice -and $_.installOffice -ne $false
+            })
+        if (-not (Sync-MemLabsOsdOfficeSteps `
+                -TaskSequences $officeTaskSequences `
+                -OfficeTargetVMs $officeTargetsForTaskSequence `
+                -StatusTag $Tag)) {
+            return
+        }
+    }
 
     #we have to make powershell bypass for the baselines to work as expected
     # Custom client settings — top-level site only (replicate to child sites)
