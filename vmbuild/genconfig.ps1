@@ -279,9 +279,10 @@ function Select-ConfigMenu {
                     $response = $response.SubString(2)
                     $deleteDomain = $true
                 }
-                if ($response -as [int] -is [int]) {
-                    if ($domainMap[([int]$response)]) {
-                        $domain = $domainMap[([int]$response)]
+                $domainIndex = 0
+                if ([int]::TryParse([string]$response, [ref]$domainIndex)) {
+                    if ($domainMap[$domainIndex]) {
+                        $domain = $domainMap[$domainIndex]
                         if ($deleteDomain) {
                             Write-Host "Do you want to delete $domain permanently?"
                             $response2 = Read-YesOrNoWithTimeout -Prompt "Are you sure? (Y/n)" -HideHelp -timeout 45 -Default "y"
@@ -294,7 +295,7 @@ function Select-ConfigMenu {
                             }
                         }
                         else {
-                            $SelectedConfig = Select-DomainMenu -DomainName $domainMap[([int]$response)]
+                            $SelectedConfig = Select-DomainMenu -DomainName $domainMap[$domainIndex]
                         }
                     }
                 }
