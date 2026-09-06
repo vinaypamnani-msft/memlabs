@@ -4432,7 +4432,13 @@ function Update-VMFromHyperV {
                             $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                             continue
                         }
-                        { $PSItem -as [int] -is [int] } {
+                        # `'' -as [int]` returns integer 0, so the old broad
+                        # cast test converted every intentionally blank note
+                        # field into zero. In a prefix-free domain that changed
+                        # DC Prefix='' to Prefix=0, and GenConfig displayed new
+                        # OSD names as 0OSD2/0OSD3. Convert only text which is
+                        # lexically an integer; preserve blanks as blank strings.
+                        { $PSItem -is [string] -and $PSItem -match '^[+-]?\d+$' } {
                             $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value ([int]$value) -Force
                             continue
                         }
@@ -4522,6 +4528,22 @@ function Read-VMListDiskCache {
 
         $cached = @(Import-Clixml -Path $cachePath)
         if ($cached.Count -eq 0) { return $null }
+
+        # Caches written before the blank-string parser fix may contain the
+        # prefix as integer 0. Prefix is a string-valued field, so numeric zero
+        # cannot be intentional here. Repair it before New-UserConfig reads the
+        # cache; a later normal Save-VMListDiskCache persists the correction.
+        $repairedPrefixes = 0
+        foreach ($cachedVm in $cached) {
+            if ($cachedVm.PSObject.Properties.Name -contains 'Prefix' -and
+                $cachedVm.Prefix -isnot [string] -and $cachedVm.Prefix -eq 0) {
+                $cachedVm | Add-Member -MemberType NoteProperty -Name Prefix -Value '' -Force
+                $repairedPrefixes++
+            }
+        }
+        if ($repairedPrefixes -gt 0) {
+            Write-Log "Read-VMListDiskCache: repaired $repairedPrefixes numeric-zero Prefix value(s) to blank strings." -LogOnly
+        }
 
         Write-Log "Read-VMListDiskCache: Loaded $($cached.Count) VMs from disk cache ($([int]$cacheAge) min old)." -LogOnly
         return $cached

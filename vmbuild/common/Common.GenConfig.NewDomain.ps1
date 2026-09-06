@@ -312,6 +312,12 @@ function get-PrefixForDomain {
         $existingDC = Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1
         if ($existingDC) {
             $existingPrefix = $existingDC.Prefix
+            # Inventory produced before the blank-string parser fix can carry
+            # an intentionally blank Prefix as integer 0. Prefix is defined as
+            # a string, so treat only that invalid typed value as blank.
+            if ($existingPrefix -isnot [string] -and $existingPrefix -eq 0) {
+                $existingPrefix = ''
+            }
             if (-not [string]::IsNullOrWhiteSpace($existingPrefix)) {
                 return $existingPrefix
             }
