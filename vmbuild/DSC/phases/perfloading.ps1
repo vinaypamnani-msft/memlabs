@@ -317,6 +317,13 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
             return $false
         }
 
+        # Do not execute the bootstrap application inside OSD yet. The generated
+        # task sequence completed successfully before these steps were appended;
+        # both the original FullOS-only app step and the explicit-reboot variant
+        # introduced deployment failures. Keep the application + required-policy
+        # framework, but restore the known-good imaging path by removing only our
+        # managed TS steps. Once the new client registers and enters the collection,
+        # required ConfigMgr policy installs the same application independently.
         foreach ($taskSequence in @($TaskSequences | Where-Object { $_.Name -like 'MEMLABS-w*-Install OS image' })) {
             foreach ($existingReboot in @($taskSequence | Get-CMTSStepReboot -StepName $taskSequenceRebootName -ErrorAction Stop)) {
                 $null = $taskSequence | Remove-CMTSStepReboot -StepName $existingReboot.Name -Force -ErrorAction Stop
@@ -325,22 +332,13 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
                     Where-Object { $_.Name -eq $taskSequenceStepName })) {
                 $null = $taskSequence | Remove-CMTSStepInstallApplication -StepName $existingStep.Name -Force -ErrorAction Stop
             }
-            # Setup Windows and Configuration Manager used to be the terminal
-            # action. Its end-of-sequence exit rebooted from WinPE. Once an
-            # Install Application action was appended, execution continued in
-            # WinPE and that FullOS-only action failed with 0x80000032. Make the
-            # environment transition explicit before the bootstrap application.
-            $rebootStep = New-CMTSStepReboot -Name $taskSequenceRebootName -RunAfterRestart HardDisk `
-                -NotificationMessage '' -ErrorAction Stop
-            $installStep = New-CMTSStepInstallApplication -Name $taskSequenceStepName -Application $application -ErrorAction Stop
-            $null = $taskSequence | Add-CMTaskSequenceStep -Step @($rebootStep, $installStep) -ErrorAction Stop
             $verifiedReboots = @($taskSequence | Get-CMTSStepReboot -StepName $taskSequenceRebootName -ErrorAction Stop)
             $verifiedSteps = @($taskSequence | Get-CMTSStepInstallApplication -StepName $taskSequenceStepName -ErrorAction Stop)
-            if ($verifiedReboots.Count -ne 1 -or $verifiedReboots[0].Target -ne 'HD' -or $verifiedSteps.Count -ne 1) {
-                Write-DscStatus "$StatusTag Bootstrap step read-back failed in '$($taskSequence.Name)': reboot count=$($verifiedReboots.Count), target=$(if ($verifiedReboots.Count) { $verifiedReboots[0].Target } else { '<missing>' }), app count=$($verifiedSteps.Count)." -Failure
+            if ($verifiedReboots.Count -ne 0 -or $verifiedSteps.Count -ne 0) {
+                Write-DscStatus "$StatusTag Failed to remove managed bootstrap steps from '$($taskSequence.Name)': reboot count=$($verifiedReboots.Count), app count=$($verifiedSteps.Count)." -Failure
                 return $false
             }
-            Write-DscStatus "$StatusTag Appended hard-disk restart + '$taskSequenceStepName' to '$($taskSequence.Name)'"
+            Write-DscStatus "$StatusTag Verified '$($taskSequence.Name)' uses the native terminal Setup Windows flow; bootstrap is deferred to required client policy"
         }
         return $true
     }

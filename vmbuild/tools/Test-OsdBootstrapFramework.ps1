@@ -150,7 +150,11 @@ $clients = @(
     [pscustomobject]@{ vmName = 'OSD2' }
 )
 $taskSequences = @(
-    [pscustomobject]@{ Name = 'MEMLABS-w11-Install OS image'; Steps = @([pscustomobject]@{ Name = 'Setup Windows'; Type = 'Other' }) }
+    [pscustomobject]@{ Name = 'MEMLABS-w11-Install OS image'; Steps = @(
+            [pscustomobject]@{ Name = 'Setup Windows'; Type = 'Other' }
+            [pscustomobject]@{ Name = 'MEMLABS restart into installed OS'; Type = 'Reboot'; Target = 'HD' }
+            [pscustomobject]@{ Name = 'MEMLABS install OSD Bootstrap'; Type = 'InstallApplication'; Application = 'MEMLABS-OSD Bootstrap' }
+        ) }
     [pscustomobject]@{ Name = 'MEMLABS-w10-Install OS image'; Steps = @() }
     [pscustomobject]@{ Name = 'MEMLABS-w11-In-Place Upgrade Task Sequence'; Steps = @() }
 )
@@ -168,20 +172,18 @@ try {
     Assert-Equal 'MEMLABS-OSD Bootstrap->OSD DPS' ($script:DistributionRequests -join ',') 'bootstrap content targets the OSD DP group'
     Assert-Equal 'Install,Required,HideAll' $script:NewDeploymentArgs 'ongoing policy is required and silent'
     Assert-Equal $true ($script:Rules[0].QueryExpression -like "*Client = 1*Name in ('OSD1','OSD2')*") 'policy collection is config-name keyed and client gated'
-    Assert-Equal 1 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS restart into installed OS').Count 'Windows 11 install TS gets one explicit environment-transition reboot'
-    Assert-Equal 'HD' @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS restart into installed OS')[0].Target 'Windows 11 bootstrap reboot targets the installed OS'
-    Assert-Equal 1 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'Windows 11 install TS gets one bootstrap step'
-    Assert-Equal 'MEMLABS install OSD Bootstrap' $taskSequences[0].Steps[-1].Name 'bootstrap step is appended after generated setup actions'
-    Assert-Equal 'MEMLABS restart into installed OS' $taskSequences[0].Steps[-2].Name 'hard-disk reboot immediately precedes the FullOS-only application step'
-    Assert-Equal 1 @($taskSequences[1].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'Windows 10 install TS gets one bootstrap step'
+    Assert-Equal 0 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS restart into installed OS').Count 'Windows 11 install TS removes the experimental bootstrap reboot'
+    Assert-Equal 0 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'Windows 11 install TS removes the experimental bootstrap app step'
+    Assert-Equal 'Setup Windows' $taskSequences[0].Steps[-1].Name 'native Setup Windows action is terminal again'
+    Assert-Equal 0 @($taskSequences[1].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'Windows 10 install TS remains free of bootstrap execution steps'
     Assert-Equal 0 @($taskSequences[2].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'in-place upgrade TS is not changed'
 
     $result = Sync-MemLabsOsdBootstrapFramework -SourceRoot $sourceRoot `
         -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' -OsdClients $clients `
         -TaskSequences $taskSequences -DistributionPointGroupName 'OSD DPS' -StatusTag '[test]'
     Assert-Equal $true $result 'rerun framework reconcile succeeds'
-    Assert-Equal 1 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS restart into installed OS').Count 'rerun does not duplicate hard-disk restart'
-    Assert-Equal 1 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'rerun does not duplicate task-sequence step'
+    Assert-Equal 0 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS restart into installed OS').Count 'rerun keeps bootstrap reboot absent'
+    Assert-Equal 0 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'rerun keeps bootstrap app step absent'
     Assert-Equal 1 $script:Deployments.Count 'rerun does not duplicate required deployment'
     Assert-Equal 1 $script:Rules.Count 'rerun does not duplicate collection rule'
 
@@ -203,6 +205,7 @@ finally {
 $source = Get-Content $perfloadingPath -Raw
 Assert-Equal $true ($source.Contains('Sync-MemLabsOsdBootstrapFramework')) 'perfloading contains bootstrap reconciler'
 Assert-Equal $true ($source.Contains('-DeployPurpose Required -UserNotification HideAll')) 'required policy path is present'
+Assert-Equal $false ($source.Contains('Add-CMTaskSequenceStep -Step @($rebootStep, $installStep)')) 'bootstrap is not executed inside the OS deployment task sequence'
 
 if ($script:Failures) { Write-Host "$script:Failures check(s) failed."; exit 1 }
 Write-Host 'All OSD bootstrap framework checks passed.'
