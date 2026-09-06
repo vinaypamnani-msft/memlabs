@@ -236,6 +236,30 @@ $collectScript = {
     $postPxeState.Add("ComputerName=$env:COMPUTERNAME")
 
     try {
+        $diskConfigPath = 'C:\ProgramData\MemLabs\OSDBootstrap\DiskConfig.json'
+        if (Test-Path -LiteralPath $diskConfigPath) {
+            $diskConfig = Get-Content -LiteralPath $diskConfigPath -Raw | ConvertFrom-Json
+            $currentDiskConfig = @($diskConfig.Clients | Where-Object { $_.ComputerName -eq $env:COMPUTERNAME })
+            $postPxeState.Add("DataDisks.ConfigEntries=$($currentDiskConfig.Count)")
+            if ($currentDiskConfig.Count -eq 1) {
+                foreach ($expectedDisk in @($currentDiskConfig[0].Disks | Sort-Object DiskIndex)) {
+                    $postPxeState.Add("DataDisks.Expected[$($expectedDisk.DiskIndex)]=letter=$($expectedDisk.Letter): sizeBytes=$($expectedDisk.SizeBytes) label='$($expectedDisk.Label)'")
+                }
+            }
+        }
+        else { $postPxeState.Add('DataDisks.Config=Absent') }
+        foreach ($disk in @(Get-Disk -ErrorAction Stop | Sort-Object Number)) {
+            $postPxeState.Add("DataDisks.Disk[$($disk.Number)]=style=$($disk.PartitionStyle) sizeBytes=$($disk.Size) boot=$($disk.IsBoot) system=$($disk.IsSystem)")
+            foreach ($partition in @(Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Sort-Object PartitionNumber)) {
+                $letter = if ($partition.DriveLetter) { "$($partition.DriveLetter):" } else { '[none]' }
+                $volume = if ($partition.DriveLetter) { Get-Volume -DriveLetter $partition.DriveLetter -ErrorAction SilentlyContinue | Select-Object -First 1 } else { $null }
+                $postPxeState.Add("DataDisks.Partition[$($disk.Number).$($partition.PartitionNumber)]=letter=$letter sizeBytes=$($partition.Size) fs='$(if ($volume) { $volume.FileSystem })' label='$(if ($volume) { $volume.FileSystemLabel })'")
+            }
+        }
+    }
+    catch { $postPxeState.Add("DataDisks=NOT_MEASURED ($($_.Exception.Message))") }
+
+    try {
         if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) {
             $volume = Get-BitLockerVolume -MountPoint 'C:' -ErrorAction Stop
             $protectorTypes = @($volume.KeyProtector | ForEach-Object { $_.KeyProtectorType } | Where-Object { $_ })

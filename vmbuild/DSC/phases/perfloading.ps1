@@ -312,12 +312,12 @@ Write-DscStatus "$Tag Starting perfloading"
         )
 
         $applicationName = 'MEMLABS-OSD Bootstrap'
-        $deploymentTypeName = 'MEMLABS-OSD Bootstrap v2'
+        $deploymentTypeName = 'MEMLABS-OSD Bootstrap v3'
         $collectionName = 'MEMLABS-OSD Clients'
         $collectionRuleName = 'MEMLABS OSD Clients by configured name'
         $taskSequenceRebootName = 'MEMLABS restart into installed OS'
         $taskSequenceStepName = 'MEMLABS install OSD Bootstrap'
-        $bootstrapVersion = '2'
+        $bootstrapSchemaVersion = '3'
         $markerPath = 'C:\ProgramData\MemLabs\OSDBootstrap\Version.txt'
         $clients = @($OsdClients | Where-Object { $null -ne $_ })
         if ($clients.Count -eq 0) { return $true }
@@ -339,6 +339,7 @@ Write-DscStatus "$Tag Starting perfloading"
             @{ Source = Join-Path $PayloadSourceRoot 'bginfo\CLIENT.bgi'; Destination = Join-Path $payloadBgInfo 'CLIENT.bgi' }
             @{ Source = Join-Path $PayloadSourceRoot 'bginfo\bginfo_CLIENT.lnk'; Destination = Join-Path $payloadBgInfo 'bginfo_CLIENT.lnk' }
             @{ Source = Join-Path $PayloadSourceRoot 'bginfo\bginfo.exe'; Destination = Join-Path $payloadBgInfo 'bginfo.exe' }
+            @{ Source = Join-Path $PayloadSourceRoot 'DSC\phases\Initialize-OsdDataDisks.ps1'; Destination = Join-Path $payloadRoot 'Initialize-OsdDataDisks.ps1' }
         )
         foreach ($payloadFile in $requiredPayload) {
             if (-not (Test-Path -LiteralPath $payloadFile.Source -PathType Leaf)) {
@@ -356,8 +357,36 @@ Write-DscStatus "$Tag Starting perfloading"
         if (Test-Path -LiteralPath $logMachinePayload) { Remove-Item -LiteralPath $logMachinePayload -Recurse -Force -ErrorAction Stop }
         Copy-Item -LiteralPath $logMachineSource -Destination $logMachinePayload -Recurse -Force -ErrorAction Stop
 
+        $diskConfigClients = @()
+        foreach ($client in @($clients | Sort-Object vmName)) {
+            $diskRows = @()
+            $diskIndex = 0
+            foreach ($diskProperty in @($client.additionalDisks.PSObject.Properties | Where-Object { $null -ne $_ })) {
+                $letter = "$($diskProperty.Name)".Trim().TrimEnd(':').ToUpperInvariant()
+                if ($letter -notmatch '^[E-Y]$' -or $letter -eq 'S') {
+                    Write-DscStatus "$StatusTag OSDClient '$($client.vmName)' has unsupported additional-disk letter '$letter'. Expected E:Y except reserved S:." -Failure
+                    return $false
+                }
+                try { $sizeBytes = [int64]($diskProperty.Value / 1) }
+                catch {
+                    Write-DscStatus "$StatusTag OSDClient '$($client.vmName)' disk $letter`: has invalid size '$($diskProperty.Value)'." -Failure
+                    return $false
+                }
+                if ($sizeBytes -lt 1GB) {
+                    Write-DscStatus "$StatusTag OSDClient '$($client.vmName)' disk $letter`: size '$($diskProperty.Value)' is below 1GB." -Failure
+                    return $false
+                }
+                $diskRows += [ordered]@{ DiskIndex = $diskIndex; Letter = $letter; SizeBytes = $sizeBytes; Label = "DATA_$diskIndex" }
+                $diskIndex++
+            }
+            $diskConfigClients += [ordered]@{ ComputerName = "$($client.vmName)"; Disks = @($diskRows) }
+        }
+        $diskConfigJson = [ordered]@{ SchemaVersion = 1; Clients = @($diskConfigClients) } |
+            ConvertTo-Json -Depth 6 -Compress
+        [IO.File]::WriteAllText((Join-Path $payloadRoot 'DiskConfig.json'), $diskConfigJson, (New-Object Text.UTF8Encoding($true)))
+
         $installScript = @'
-param([string]$Version = '2')
+param([string]$Version = '3')
 $ErrorActionPreference = 'Stop'
 $root = Join-Path $env:ProgramData 'MemLabs\OSDBootstrap'
 if (-not (Test-Path -LiteralPath $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
@@ -375,6 +404,18 @@ Copy-Item -LiteralPath (Join-Path $payload 'bginfo\CLIENT.bgi') -Destination (Jo
 Copy-Item -LiteralPath (Join-Path $payload 'bginfo\bginfo_CLIENT.lnk') -Destination (Join-Path $bgInfoTarget 'bginfo_CLIENT.lnk') -Force
 Copy-Item -Path (Join-Path $payload 'LogMachine\*') -Destination $toolsTarget -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $bgInfoTarget 'bginfo_CLIENT.lnk') -Destination (Join-Path $commonStartup 'MemLabs BGInfo.lnk') -Force
+
+$diskInitSource = Join-Path $payload 'Initialize-OsdDataDisks.ps1'
+$diskConfigSource = Join-Path $payload 'DiskConfig.json'
+$diskInitTarget = Join-Path $staging 'Initialize-OsdDataDisks.ps1'
+Copy-Item -LiteralPath $diskInitSource -Destination $diskInitTarget -Force
+. $diskInitTarget
+$diskConfig = Get-Content -LiteralPath $diskConfigSource -Raw | ConvertFrom-Json
+$currentDiskConfig = @($diskConfig.Clients | Where-Object { $_.ComputerName -eq $env:COMPUTERNAME })
+if ($currentDiskConfig.Count -ne 1) { throw "Disk configuration has $($currentDiskConfig.Count) entries for '$env:COMPUTERNAME'; expected one." }
+$diskResults = @(Initialize-MemLabsOsdDataDisks -Entries @($currentDiskConfig[0].Disks))
+$diskResults | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'DiskState.json') -Encoding UTF8
+Copy-Item -LiteralPath $diskConfigSource -Destination (Join-Path $root 'DiskConfig.json') -Force
 
 $shortcutScript = Join-Path $staging 'Enable-LogMachine.ps1'
 $savedErrorActionPreference = $ErrorActionPreference
@@ -401,10 +442,28 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Pr
 
 [IO.File]::WriteAllText((Join-Path $root 'Version.txt'), $Version, [Text.Encoding]::ASCII)
 '@
+        $fingerprintParts = New-Object System.Collections.Generic.List[string]
+        $fingerprintParts.Add($bootstrapSchemaVersion)
+        $fingerprintParts.Add($diskConfigJson)
+        $fingerprintParts.Add($installScript)
+        foreach ($payloadFile in @($requiredPayload | Sort-Object Destination)) {
+            $fingerprintParts.Add("$($payloadFile.Destination)|$((Get-FileHash -LiteralPath $payloadFile.Source -Algorithm SHA256 -ErrorAction Stop).Hash)")
+        }
+        foreach ($logMachineFile in @(Get-ChildItem -LiteralPath $logMachineSource -File -Recurse -ErrorAction Stop | Sort-Object FullName)) {
+            $relative = $logMachineFile.FullName.Substring($logMachineSource.Length).TrimStart('\')
+            $fingerprintParts.Add("LogMachine\$relative|$((Get-FileHash -LiteralPath $logMachineFile.FullName -Algorithm SHA256 -ErrorAction Stop).Hash)")
+        }
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $fingerprintBytes = [Text.Encoding]::UTF8.GetBytes(($fingerprintParts -join "`n"))
+            $fingerprint = ([BitConverter]::ToString($sha256.ComputeHash($fingerprintBytes))).Replace('-', '')
+        }
+        finally { $sha256.Dispose() }
+        $bootstrapVersion = "$bootstrapSchemaVersion.$($fingerprint.Substring(0, 12))"
         $manifest = [ordered]@{
-            SchemaVersion    = 1
+            SchemaVersion    = 2
             BootstrapVersion = $bootstrapVersion
-            Purpose          = 'Post-PXE MemLabs core customization: BGInfo, LogMachine, and desktop shortcuts'
+            Purpose          = 'Post-PXE MemLabs core customization: data disks, BGInfo, LogMachine, and desktop shortcuts'
         } | ConvertTo-Json
         [IO.File]::WriteAllText((Join-Path $SourceRoot 'Install.ps1'), $installScript, (New-Object Text.UTF8Encoding($true)))
         [IO.File]::WriteAllText((Join-Path $SourceRoot 'Manifest.json'), $manifest, (New-Object Text.UTF8Encoding($true)))
@@ -416,12 +475,34 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Pr
     'C:\staging\Enable-LogMachine.ps1',
     'C:\staging\bginfo\bginfo.exe',
     'C:\staging\bginfo\CLIENT.bgi',
+    'C:\staging\Initialize-OsdDataDisks.ps1',
     'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\MemLabs BGInfo.lnk',
     'C:\tools\LogMachine\LogMachine.exe',
+    'C:\ProgramData\MemLabs\OSDBootstrap\DiskConfig.json',
     'C:\Users\Public\Desktop\SCCM Control Panel Applet.lnk',
     'C:\Users\Public\Desktop\Client Logs.lnk'
 )
-if ((@(`$required | Where-Object { -not (Test-Path -LiteralPath `$_) }).Count -eq 0) -and
+`$diskOk = `$false
+try {
+    `$diskConfig = Get-Content -LiteralPath 'C:\ProgramData\MemLabs\OSDBootstrap\DiskConfig.json' -Raw | ConvertFrom-Json
+    `$current = @(`$diskConfig.Clients | Where-Object { `$_.ComputerName -eq `$env:COMPUTERNAME })
+    if (`$current.Count -eq 1) {
+        `$badDisks = @()
+        foreach (`$diskEntry in @(`$current[0].Disks)) {
+            `$volume = Get-Volume -DriveLetter `$diskEntry.Letter -ErrorAction SilentlyContinue | Select-Object -First 1
+            `$partition = Get-Partition -DriveLetter `$diskEntry.Letter -ErrorAction SilentlyContinue | Select-Object -First 1
+            `$disk = if (`$partition) { Get-Disk -Number `$partition.DiskNumber -ErrorAction SilentlyContinue } else { `$null }
+            if (-not `$volume -or `$volume.FileSystem -ne 'NTFS' -or `$volume.FileSystemLabel -ne `$diskEntry.Label -or
+                -not `$disk -or `$disk.IsBoot -or `$disk.IsSystem -or
+                [math]::Abs([int64]`$disk.Size - [int64]`$diskEntry.SizeBytes) -gt 1MB) {
+                `$badDisks += `$diskEntry.Letter
+            }
+        }
+        `$diskOk = `$badDisks.Count -eq 0
+    }
+}
+catch { `$diskOk = `$false }
+if (`$diskOk -and (@(`$required | Where-Object { -not (Test-Path -LiteralPath `$_) }).Count -eq 0) -and
     ((Get-Content -LiteralPath `$marker -Raw).Trim() -eq '$bootstrapVersion') -and
     (Get-ScheduledTask -TaskName 'EnableLogMachine' -ErrorAction SilentlyContinue)) {
     Write-Output 'Installed'
@@ -431,7 +512,7 @@ if ((@(`$required | Where-Object { -not (Test-Path -LiteralPath `$_) }).Count -e
         $application = Get-CMApplication -Name $applicationName -ErrorAction SilentlyContinue
         if (-not $application) {
             $application = New-CMApplication -Name $applicationName `
-                -Description 'Post-PXE MemLabs BGInfo, LogMachine, and desktop customization maintained by required ConfigMgr policy' `
+                -Description 'Post-PXE MemLabs data disks, BGInfo, LogMachine, and desktop customization maintained by required ConfigMgr policy' `
                 -Publisher 'MemLabs' -SoftwareVersion $bootstrapVersion -ErrorAction Stop
             Add-CMScriptDeploymentType -Application $application `
                 -DeploymentTypeName $deploymentTypeName `
@@ -451,12 +532,19 @@ if ((@(`$required | Where-Object { -not (Test-Path -LiteralPath `$_) }).Count -e
         }
         if ("$($application.SoftwareVersion)" -ne $bootstrapVersion -or $deploymentTypes[0].LocalizedDisplayName -ne $deploymentTypeName) {
             $oldDeploymentTypeName = $deploymentTypes[0].LocalizedDisplayName
-            Set-CMScriptDeploymentType -ApplicationName $applicationName -DeploymentTypeName $oldDeploymentTypeName `
-                -NewName $deploymentTypeName -ContentLocation $SourceUnc `
-                -InstallCommand "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -Version $bootstrapVersion" `
-                -ScriptLanguage PowerShell -ScriptText $detectionScript -ErrorAction Stop | Out-Null
+            $deploymentTypeUpdate = @{
+                ApplicationName = $applicationName
+                DeploymentTypeName = $oldDeploymentTypeName
+                ContentLocation = $SourceUnc
+                InstallCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -Version $bootstrapVersion"
+                ScriptLanguage = 'PowerShell'
+                ScriptText = $detectionScript
+                ErrorAction = 'Stop'
+            }
+            if ($oldDeploymentTypeName -ne $deploymentTypeName) { $deploymentTypeUpdate.NewName = $deploymentTypeName }
+            Set-CMScriptDeploymentType @deploymentTypeUpdate | Out-Null
             Set-CMApplication -Name $applicationName -SoftwareVersion $bootstrapVersion `
-                -Description 'Post-PXE MemLabs BGInfo, LogMachine, and desktop customization maintained by required ConfigMgr policy' `
+                -Description 'Post-PXE MemLabs data disks, BGInfo, LogMachine, and desktop customization maintained by required ConfigMgr policy' `
                 -ErrorAction Stop | Out-Null
             $application = Get-CMApplication -Name $applicationName -ErrorAction Stop
             $deploymentTypes = @(Get-CMDeploymentType -ApplicationName $applicationName -ErrorAction Stop)
