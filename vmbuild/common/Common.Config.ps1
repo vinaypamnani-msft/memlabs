@@ -753,8 +753,12 @@ function Get-UserConfiguration {
             # Skip non-domain roles — they never receive ConfigMgr BLM policy.
             if ($blmEnabledForDomain -and $vm.tpmEnabled -and $vm.role -notin 'InternetClient', 'WorkgroupMember', 'AADClient') {
                 if ($null -eq $vm.BitLocker) {
-                    # Default true on client OS, false on server OS
-                    $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+                    # OSDClient has no operatingSystem before PXE, but both
+                    # generated install-image sequences deploy a client OS.
+                    # Default it exactly like a normal Windows client so the
+                    # task-sequence BitLocker steps can be MAC-conditioned.
+                    $isClientOS = $vm.role -eq 'OSDClient' -or
+                        ($vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*")
                     $vm | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
                 }
             }
@@ -763,12 +767,13 @@ function Get-UserConfiguration {
                 $vm.PsObject.Members.Remove("BitLocker")
             }
 
-            # installOffice property: normalize for DomainMember client-OS VMs.
+            # installOffice property: normalize for DomainMember client-OS VMs
+            # and OSD clients. OSDClient has no operatingSystem before PXE; its
+            # selected task sequence supplies Windows and the CM client.
             # Valid values: $false, "Current", "MonthlyEnterprise", "SemiAnnual".
-            # Only allowed on DomainMember VMs with a client OS (Windows 10/11)
-            # and pushClient enabled (SCCM client required for deployment).
+            # DomainMember requires pushClient; OSD gets the client in its TS.
             $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*" -and $vm.operatingSystem -notlike "*Server*"
-            if ($vm.role -eq 'DomainMember' -and $isClientOS) {
+            if (($vm.role -eq 'DomainMember' -and $isClientOS) -or $vm.role -eq 'OSDClient') {
                 if ($null -eq $vm.installOffice) {
                     $vm | Add-Member -MemberType NoteProperty -Name "installOffice" -Value $false -Force
                 }
@@ -782,7 +787,7 @@ function Get-UserConfiguration {
                     }
                 }
                 # Strip if pushClient is explicitly disabled — SCCM client is required
-                if ($vm.installOffice -and $vm.installOffice -ne $false -and $vm.pushClient -eq $false) {
+                if ($vm.role -eq 'DomainMember' -and $vm.installOffice -and $vm.installOffice -ne $false -and $vm.pushClient -eq $false) {
                     $vm.installOffice = $false
                 }
             }
@@ -1339,6 +1344,7 @@ function New-DeployConfig {
             DCName          = $DCName
             ExistingDCName  = $existingDCName
             ThisMachineName = $null
+            IsAzureVM       = [bool]$Common.IsAzureVM
         }
 
         $sysCenterId = "SysCenterId"

@@ -360,8 +360,9 @@ function Test-ValidCmOptions {
             foreach ($vm in $serverOffice) { $vm.installOffice = $false }
         }
 
-        # Reject Office when pushClient is disabled
-        $noPushOffice = $officeVMs | Where-Object { $_.pushClient -eq $false }
+        # OSD clients receive ccmsetup inside the task sequence and therefore
+        # do not carry the host-side pushClient signal.
+        $noPushOffice = $officeVMs | Where-Object { $_.role -ne 'OSDClient' -and $_.pushClient -eq $false }
         if ($noPushOffice) {
             Add-ValidationMessage -Message "Office Validation: installOffice requires pushClient (SCCM client agent needed for deployment). Removing from: $($noPushOffice.vmName -join ', ')." -ReturnObject $ReturnObject -Warning
             foreach ($vm in $noPushOffice) { $vm.installOffice = $false }

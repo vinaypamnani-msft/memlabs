@@ -1,20 +1,13 @@
-# Fix_ActivateWindows: KMS-activate Windows against the Azure public KMS so
-# evaluation timers don't expire on long-lived lab VMs.
-
-$Fix_ActivateWindows = {
+﻿# Shared Windows activation implementation used by Phase 10 and post-PXE policy.
+# The caller supplies Write-FixLog. The scriptblock returns { Success; Message }.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Exported to dot-sourcing Phase 10 and perfloading callers.')]
+$MemLabsWindowsActivationScript = {
     $atkmsHost = 'azkms.core.windows.net'
     $atkmsPort = 1688
     $atkms = "${atkmsHost}:${atkmsPort}"
-    $winp  = 'W269N-WFGWX-YVC9B-4J6C9-T83GX'
-    $wine  = 'NPPR9-FWDCX-D2C8J-H872K-2YT43'
+    $winp = 'W269N-WFGWX-YVC9B-4J6C9-T83GX'
+    $wine = 'NPPR9-FWDCX-D2C8J-H872K-2YT43'
 
-    # Returns the LicenseStatus (int) of the active Windows SKU, or $null if it
-    # can't be read. 1 = Licensed (activated). Only the entry with an installed
-    # PartialProductKey is the active SKU.
-    # Filtered in WQL, not in the pipeline: enumerating every SoftwareLicensingProduct
-    # instance materialises dozens of SKUs and measured ~20s a call on a client VM --
-    # paid 2-3 times per run, it was most of this fix's 69s mean. Falls back to the
-    # unfiltered form if a provider rejects the filter, so behaviour cannot regress.
     $getLicenseStatus = {
         $appId = '55c92734-d682-4d71-983e-d6ec3f16059f'
         try {
@@ -36,9 +29,6 @@ $Fix_ActivateWindows = {
         return $null
     }
 
-    # Hard-timeout TCP probe. Never Test-NetConnection: it can hang well past its own
-    # timeouts on DNS reverse lookups and ICMP fallbacks. Defined inline because this
-    # scriptblock is transported into the guest whole and can reach no shared helper.
     $testTcp = {
         param($computerName, $port, $timeoutMs)
         $client = $null
@@ -50,12 +40,12 @@ $Fix_ActivateWindows = {
                     $client.EndConnect($iar)
                     if ($client.Connected) { return $true }
                 }
-                catch { }
+                catch {}
             }
         }
-        catch { }
+        catch {}
         finally {
-            if ($client) { try { $client.Close() } catch { } }
+            if ($client) { try { $client.Close() } catch {} }
         }
         return $false
     }
@@ -66,22 +56,20 @@ $Fix_ActivateWindows = {
     }
 
     $key = $null
-    if ($cosname -like '*Pro*')            { $key = $winp }
+    if ($cosname -like '*Pro*') { $key = $winp }
     elseif ($cosname -like '*Enterprise*') { $key = $wine }
 
     if (-not $key) {
         return [pscustomobject]@{ Success = $true; Message = "OS '$cosname' is not Pro/Enterprise - activation skipped" }
     }
 
-    # Early no-op: if Windows is already Licensed, don't churn slmgr.
     $startStatus = & $getLicenseStatus
     if ($startStatus -eq 1) {
-        Write-FixLog "Windows already activated (LicenseStatus=1); nothing to do"
-        return [pscustomobject]@{ Success = $true; Message = "Windows already activated" }
+        Write-FixLog 'Windows already activated (LicenseStatus=1); nothing to do'
+        return [pscustomobject]@{ Success = $true; Message = 'Windows already activated' }
     }
 
-    # Set the KMS host and install the product key once up front.
-    Write-FixLog "Setting KMS host and installing product key"
+    Write-FixLog 'Setting KMS host and installing product key'
     $skmsOutput = cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms $atkms 2>&1 | Out-String
     Write-FixLog "slmgr /skms exit=$LASTEXITCODE output: $($skmsOutput.Trim())"
     Start-Sleep -Seconds 2
@@ -89,16 +77,10 @@ $Fix_ActivateWindows = {
     Write-FixLog "slmgr /ipk exit=$LASTEXITCODE output: $($ipkOutput.Trim())"
     Start-Sleep -Seconds 2
 
-    # Retry /ato up to 4 times. Between attempts, run remediations: flush DNS,
-    # resolve the KMS hostname, and probe TCP 1688 so a transient DNS/network
-    # hiccup self-heals instead of failing the fix. Success is confirmed by
-    # reading back LicenseStatus -eq 1, not by trusting the /ato exit code.
     $maxAttempts = 4
     $lastOutput = ''
     $lastExit = -1
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-
-        # Remediation pass before each attempt: confirm the KMS is reachable.
         Write-FixLog "Activation attempt $attempt/${maxAttempts}: flushing DNS and checking KMS reachability"
         try { ipconfig /flushdns | Out-Null } catch { Write-FixLog "ipconfig /flushdns failed: $($_.Exception.Message)" }
 
@@ -148,36 +130,9 @@ $Fix_ActivateWindows = {
         }
 
         Write-FixLog "Not yet activated after attempt $attempt (LicenseStatus=$status)"
-        if ($attempt -lt $maxAttempts) {
-            Start-Sleep -Seconds (10 * $attempt)
-        }
+        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds (10 * $attempt) }
     }
 
     $finalStatus = & $getLicenseStatus
-    [pscustomobject]@{ Success = $false; Message = "Activation failed after $maxAttempts attempts (LicenseStatus=$finalStatus, last /ato exit=$lastExit). Output: $lastOutput" }
-}
-
-# Keep Phase 10 and post-PXE policy on one implementation. The legacy inline
-# definition above remains only to keep this change reviewable; this assignment
-# is the executable source of truth used by the descriptor below.
-$sharedActivationPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'DSC\phases\WindowsActivation.Script.ps1'
-if (-not (Test-Path -LiteralPath $sharedActivationPath -PathType Leaf)) {
-    throw "Shared Windows activation implementation is missing: $sharedActivationPath"
-}
-. $sharedActivationPath
-$Fix_ActivateWindows = $MemLabsWindowsActivationScript
-
-# Azure KMS is only reachable from Azure-hosted VMs; skip on home labs.
-if ($Common.IsAzureVM) {
-    $fixesToPerform += [PSCustomObject]@{
-        FixName           = "Fix_ActivateWindows"
-        FixVersion        = "260616"
-        NeededOnFreshDeploy = $true
-        AppliesToExisting   = $true
-        AppliesToRoles    = @('DomainMember', 'WorkgroupMember', "InternetClient")
-        NotAppliesToRoles = @()
-        DependentVMs      = @()
-        ScriptBlock       = $Fix_ActivateWindows
-        RunAsAccount      = $vmNote.adminName
-    }
+    return [pscustomobject]@{ Success = $false; Message = "Activation failed after $maxAttempts attempts (LicenseStatus=$finalStatus, last /ato exit=$lastExit). Output: $lastOutput" }
 }

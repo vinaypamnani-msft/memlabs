@@ -28,6 +28,7 @@ Write-DscStatus "$Tag Starting perfloading"
 
     # dot source functions
     . $PSScriptRoot\ScriptFunctions.ps1
+    . $PSScriptRoot\WindowsActivation.Script.ps1
 
     # Get required values from config
     $DomainFullName = $deployConfig.parameters.domainName
@@ -228,10 +229,82 @@ Write-DscStatus "$Tag Starting perfloading"
         return $true
     }
 
+    function Sync-MemLabsOsdBitLockerSteps {
+        param (
+            [object[]] $TaskSequences,
+            [object[]] $OsdClients,
+            [string] $StatusTag
+        )
+
+        $enabledClients = @($OsdClients | Where-Object { $null -ne $_ -and $_.BitLocker -eq $true })
+        $macConditions = @()
+        foreach ($client in $enabledClients) {
+            $compactMac = "$($client.osdMacAddress)" -replace '[^0-9A-Fa-f]', ''
+            if ($compactMac -notmatch '^[0-9A-Fa-f]{12}$') {
+                Write-DscStatus "$StatusTag BitLocker-enabled OSDClient '$($client.vmName)' has no usable osdMacAddress ('$($client.osdMacAddress)'). BitLocker steps were not changed." -Failure
+                return $false
+            }
+            $mac = ($compactMac.ToUpperInvariant() -replace '(..)(?!$)', '$1:')
+            $macConditions += New-CMTSStepConditionQueryWmi -Namespace 'root\cimv2' `
+                -Query "SELECT * FROM Win32_NetworkAdapterConfiguration WHERE MACAddress='$mac'" -ErrorAction Stop
+        }
+
+        # One shared install sequence can serve many configured OSD VMs. Its
+        # native BitLocker actions run only when the current NIC matches any VM
+        # whose BitLocker signal is true. With no enabled VM, use a deliberate
+        # no-match query rather than removing native actions from the sequence.
+        if ($macConditions.Count -eq 0) {
+            $desiredCondition = New-CMTSStepConditionQueryWmi -Namespace 'root\cimv2' `
+                -Query "SELECT * FROM Win32_OperatingSystem WHERE BuildNumber='MEMLABS-BITLOCKER-DISABLED'" -ErrorAction Stop
+        }
+        elseif ($macConditions.Count -eq 1) {
+            $desiredCondition = $macConditions[0]
+        }
+        else {
+            $desiredCondition = New-CMTSStepConditionIfStatement -StatementType Any `
+                -Condition $macConditions -ErrorAction Stop
+        }
+
+        foreach ($taskSequence in @($TaskSequences | Where-Object { $null -ne $_ -and $_.Name -like 'MEMLABS-w*-Install OS image' })) {
+            $stepSpecs = @(
+                @{ Name = 'Pre-provision BitLocker'; Get = 'Get-CMTSStepOfflineEnableBitLocker'; Set = 'Set-CMTSStepOfflineEnableBitLocker' }
+                @{ Name = 'Enable BitLocker'; Get = 'Get-CMTSStepEnableBitLocker'; Set = 'Set-CMTSStepEnableBitLocker' }
+            )
+            foreach ($spec in $stepSpecs) {
+                $stepCondition = $desiredCondition
+                if ($spec.Name -eq 'Enable BitLocker') {
+                    # The generated step excludes Windows To Go. Rebuild that
+                    # native guard alongside our managed MAC condition rather
+                    # than clearing it as collateral damage on reconciliation.
+                    $notWindowsToGo = New-CMTSStepConditionVariable -OperatorType NotEquals `
+                        -ConditionVariableName '_SMSTSWTG' -ConditionVariableValue 'true' -ErrorAction Stop
+                    $stepCondition = New-CMTSStepConditionIfStatement -StatementType All `
+                        -Condition @($notWindowsToGo, $desiredCondition) -ErrorAction Stop
+                }
+                $steps = @($taskSequence | & $spec.Get -StepName $spec.Name -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($steps.Count -ne 1) {
+                    Write-DscStatus "$StatusTag '$($taskSequence.Name)' has $($steps.Count) '$($spec.Name)' step(s); expected exactly one, so its BitLocker condition was not changed." -Failure
+                    return $false
+                }
+                $null = $taskSequence | & $spec.Set -StepName $spec.Name -ClearCondition -ErrorAction Stop
+                $null = $taskSequence | & $spec.Set -StepName $spec.Name -AddCondition $stepCondition -ErrorAction Stop
+                $verified = @($taskSequence | & $spec.Get -StepName $spec.Name -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($verified.Count -ne 1 -or @($verified[0].Condition.Operands).Count -ne 1) {
+                    Write-DscStatus "$StatusTag Failed to persist the configured OSD BitLocker condition on '$($taskSequence.Name)' / '$($spec.Name)'." -Failure
+                    return $false
+                }
+            }
+            Write-DscStatus "$StatusTag Reconciled '$($taskSequence.Name)' BitLocker actions for $($enabledClients.Count) enabled OSD client(s)"
+        }
+        return $true
+    }
+
     function Sync-MemLabsOsdBootstrapFramework {
         param (
             [string] $SourceRoot,
             [string] $SourceUnc,
+            [string] $PayloadSourceRoot,
+            [string] $ToolsRoot,
             [object[]] $OsdClients,
             [object[]] $TaskSequences,
             [string] $DistributionPointGroupName,
@@ -239,40 +312,118 @@ Write-DscStatus "$Tag Starting perfloading"
         )
 
         $applicationName = 'MEMLABS-OSD Bootstrap'
-        $deploymentTypeName = 'MEMLABS-OSD Bootstrap v1'
+        $deploymentTypeName = 'MEMLABS-OSD Bootstrap v2'
         $collectionName = 'MEMLABS-OSD Clients'
         $collectionRuleName = 'MEMLABS OSD Clients by configured name'
         $taskSequenceRebootName = 'MEMLABS restart into installed OS'
         $taskSequenceStepName = 'MEMLABS install OSD Bootstrap'
-        $bootstrapVersion = '1'
+        $bootstrapVersion = '2'
         $markerPath = 'C:\ProgramData\MemLabs\OSDBootstrap\Version.txt'
         $clients = @($OsdClients | Where-Object { $null -ne $_ })
         if ($clients.Count -eq 0) { return $true }
 
-        # Framework-only payload. Later customizations belong in this content
-        # folder and increment bootstrapVersion; policy then repairs drift while
-        # the TS step handles first installation immediately after Windows setup.
+        # This application is the post-PXE equivalent of the base-image staging
+        # path. It must be self-contained: an OSDClient is an empty VM while the
+        # host phases run, so no later Phase 2/10/11 or PSDirect pass can be a
+        # prerequisite for its customization.
         if (-not (Test-Path -LiteralPath $SourceRoot)) {
             New-Item -ItemType Directory -Path $SourceRoot -Force -ErrorAction Stop | Out-Null
         }
+        $payloadRoot = Join-Path $SourceRoot 'Payload'
+        $payloadBgInfo = Join-Path $payloadRoot 'bginfo'
+        if (-not (Test-Path -LiteralPath $payloadBgInfo)) {
+            New-Item -ItemType Directory -Path $payloadBgInfo -Force -ErrorAction Stop | Out-Null
+        }
+        $requiredPayload = @(
+            @{ Source = Join-Path $PayloadSourceRoot 'Enable-LogMachine.ps1'; Destination = Join-Path $payloadRoot 'Enable-LogMachine.ps1' }
+            @{ Source = Join-Path $PayloadSourceRoot 'bginfo\CLIENT.bgi'; Destination = Join-Path $payloadBgInfo 'CLIENT.bgi' }
+            @{ Source = Join-Path $PayloadSourceRoot 'bginfo\bginfo_CLIENT.lnk'; Destination = Join-Path $payloadBgInfo 'bginfo_CLIENT.lnk' }
+            @{ Source = Join-Path $PayloadSourceRoot 'bginfo\bginfo.exe'; Destination = Join-Path $payloadBgInfo 'bginfo.exe' }
+        )
+        foreach ($payloadFile in $requiredPayload) {
+            if (-not (Test-Path -LiteralPath $payloadFile.Source -PathType Leaf)) {
+                Write-DscStatus "$StatusTag Required OSD customization payload is missing: '$($payloadFile.Source)'. No stale bootstrap revision was published." -Failure
+                return $false
+            }
+            Copy-Item -LiteralPath $payloadFile.Source -Destination $payloadFile.Destination -Force -ErrorAction Stop
+        }
+        $logMachineSource = Join-Path $ToolsRoot 'LogMachine'
+        $logMachinePayload = Join-Path $payloadRoot 'LogMachine'
+        if (-not (Test-Path -LiteralPath (Join-Path $logMachineSource 'LogMachine.exe') -PathType Leaf)) {
+            Write-DscStatus "$StatusTag Required OSD LogMachine payload is missing: '$logMachineSource\LogMachine.exe'." -Failure
+            return $false
+        }
+        if (Test-Path -LiteralPath $logMachinePayload) { Remove-Item -LiteralPath $logMachinePayload -Recurse -Force -ErrorAction Stop }
+        Copy-Item -LiteralPath $logMachineSource -Destination $logMachinePayload -Recurse -Force -ErrorAction Stop
+
         $installScript = @'
-param([string]$Version = '1')
+param([string]$Version = '2')
 $ErrorActionPreference = 'Stop'
 $root = Join-Path $env:ProgramData 'MemLabs\OSDBootstrap'
 if (-not (Test-Path -LiteralPath $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
+$payload = Join-Path $PSScriptRoot 'Payload'
+$staging = 'C:\staging'
+$bgInfoTarget = Join-Path $staging 'bginfo'
+$toolsTarget = 'C:\tools\LogMachine'
+$commonStartup = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Startup'
+foreach ($folder in @($staging, $bgInfoTarget, $toolsTarget, $commonStartup)) {
+    if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+}
+Copy-Item -LiteralPath (Join-Path $payload 'Enable-LogMachine.ps1') -Destination (Join-Path $staging 'Enable-LogMachine.ps1') -Force
+Copy-Item -LiteralPath (Join-Path $payload 'bginfo\bginfo.exe') -Destination (Join-Path $bgInfoTarget 'bginfo.exe') -Force
+Copy-Item -LiteralPath (Join-Path $payload 'bginfo\CLIENT.bgi') -Destination (Join-Path $bgInfoTarget 'CLIENT.bgi') -Force
+Copy-Item -LiteralPath (Join-Path $payload 'bginfo\bginfo_CLIENT.lnk') -Destination (Join-Path $bgInfoTarget 'bginfo_CLIENT.lnk') -Force
+Copy-Item -Path (Join-Path $payload 'LogMachine\*') -Destination $toolsTarget -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $bgInfoTarget 'bginfo_CLIENT.lnk') -Destination (Join-Path $commonStartup 'MemLabs BGInfo.lnk') -Force
+
+$shortcutScript = Join-Path $staging 'Enable-LogMachine.ps1'
+$savedErrorActionPreference = $ErrorActionPreference
+try {
+    # Optional-role probes in this mature script intentionally tolerate
+    # nonterminating errors. Validate the required client outputs explicitly
+    # instead of rewriting all of its failure semantics from this wrapper.
+    $ErrorActionPreference = 'Continue'
+    & $shortcutScript
+}
+finally {
+    $ErrorActionPreference = $savedErrorActionPreference
+}
+foreach ($requiredShortcut in @('SCCM Control Panel Applet.lnk', 'Client Logs.lnk')) {
+    $shortcutPath = Join-Path 'C:\Users\Public\Desktop' $requiredShortcut
+    if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) { throw "Required desktop shortcut was not created: $shortcutPath" }
+}
+$taskName = 'EnableLogMachine'
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$shortcutScript`""
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+$principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Refresh MemLabs desktop shortcuts and LogMachine associations' -Force | Out-Null
+
 [IO.File]::WriteAllText((Join-Path $root 'Version.txt'), $Version, [Text.Encoding]::ASCII)
 '@
         $manifest = [ordered]@{
             SchemaVersion    = 1
             BootstrapVersion = $bootstrapVersion
-            Purpose          = 'MemLabs OSD bootstrap extension point; add idempotent customizations to Install.ps1'
+            Purpose          = 'Post-PXE MemLabs core customization: BGInfo, LogMachine, and desktop shortcuts'
         } | ConvertTo-Json
         [IO.File]::WriteAllText((Join-Path $SourceRoot 'Install.ps1'), $installScript, (New-Object Text.UTF8Encoding($true)))
         [IO.File]::WriteAllText((Join-Path $SourceRoot 'Manifest.json'), $manifest, (New-Object Text.UTF8Encoding($true)))
 
         $detectionScript = @"
 `$marker = '$markerPath'
-if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -Raw).Trim() -eq '$bootstrapVersion')) {
+`$required = @(
+    `$marker,
+    'C:\staging\Enable-LogMachine.ps1',
+    'C:\staging\bginfo\bginfo.exe',
+    'C:\staging\bginfo\CLIENT.bgi',
+    'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\MemLabs BGInfo.lnk',
+    'C:\tools\LogMachine\LogMachine.exe',
+    'C:\Users\Public\Desktop\SCCM Control Panel Applet.lnk',
+    'C:\Users\Public\Desktop\Client Logs.lnk'
+)
+if ((@(`$required | Where-Object { -not (Test-Path -LiteralPath `$_) }).Count -eq 0) -and
+    ((Get-Content -LiteralPath `$marker -Raw).Trim() -eq '$bootstrapVersion') -and
+    (Get-ScheduledTask -TaskName 'EnableLogMachine' -ErrorAction SilentlyContinue)) {
     Write-Output 'Installed'
 }
 "@
@@ -280,7 +431,7 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
         $application = Get-CMApplication -Name $applicationName -ErrorAction SilentlyContinue
         if (-not $application) {
             $application = New-CMApplication -Name $applicationName `
-                -Description 'Versioned MemLabs bootstrap installed during OSD and maintained by required ConfigMgr policy' `
+                -Description 'Post-PXE MemLabs BGInfo, LogMachine, and desktop customization maintained by required ConfigMgr policy' `
                 -Publisher 'MemLabs' -SoftwareVersion $bootstrapVersion -ErrorAction Stop
             Add-CMScriptDeploymentType -Application $application `
                 -DeploymentTypeName $deploymentTypeName `
@@ -293,15 +444,30 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
             $application = Get-CMApplication -Name $applicationName -ErrorAction Stop
             Write-DscStatus "$StatusTag Created application '$applicationName' version $bootstrapVersion"
         }
-        elseif ("$($application.SoftwareVersion)" -ne $bootstrapVersion) {
-            Write-DscStatus "$StatusTag Existing '$applicationName' version '$($application.SoftwareVersion)' does not match framework version '$bootstrapVersion'. Refusing to point task sequences at stale bootstrap content." -Failure
+        $deploymentTypes = @(Get-CMDeploymentType -ApplicationName $applicationName -ErrorAction SilentlyContinue)
+        if ($deploymentTypes.Count -ne 1) {
+            Write-DscStatus "$StatusTag '$applicationName' has $($deploymentTypes.Count) deployment types; expected exactly one, so it was not revised." -Failure
             return $false
         }
-
-        $deploymentTypes = @(Get-CMDeploymentType -ApplicationName $applicationName -ErrorAction SilentlyContinue)
-        if ($deploymentTypes.Count -ne 1 -or $deploymentTypes[0].LocalizedDisplayName -ne $deploymentTypeName) {
-            Write-DscStatus "$StatusTag '$applicationName' does not have exactly the expected deployment type '$deploymentTypeName'. Refusing to report the bootstrap framework as ready." -Failure
-            return $false
+        if ("$($application.SoftwareVersion)" -ne $bootstrapVersion -or $deploymentTypes[0].LocalizedDisplayName -ne $deploymentTypeName) {
+            $oldDeploymentTypeName = $deploymentTypes[0].LocalizedDisplayName
+            Set-CMScriptDeploymentType -ApplicationName $applicationName -DeploymentTypeName $oldDeploymentTypeName `
+                -NewName $deploymentTypeName -ContentLocation $SourceUnc `
+                -InstallCommand "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -Version $bootstrapVersion" `
+                -ScriptLanguage PowerShell -ScriptText $detectionScript -ErrorAction Stop | Out-Null
+            Set-CMApplication -Name $applicationName -SoftwareVersion $bootstrapVersion `
+                -Description 'Post-PXE MemLabs BGInfo, LogMachine, and desktop customization maintained by required ConfigMgr policy' `
+                -ErrorAction Stop | Out-Null
+            $application = Get-CMApplication -Name $applicationName -ErrorAction Stop
+            $deploymentTypes = @(Get-CMDeploymentType -ApplicationName $applicationName -ErrorAction Stop)
+            if ("$($application.SoftwareVersion)" -ne $bootstrapVersion -or
+                $deploymentTypes.Count -ne 1 -or $deploymentTypes[0].LocalizedDisplayName -ne $deploymentTypeName) {
+                Write-DscStatus "$StatusTag Failed to revise '$applicationName' from '$oldDeploymentTypeName' to '$deploymentTypeName'." -Failure
+                return $false
+            }
+            Update-CMDistributionPoint -ApplicationName $applicationName `
+                -DeploymentTypeName $deploymentTypeName -ErrorAction Stop
+            Write-DscStatus "$StatusTag Revised '$applicationName' to version $bootstrapVersion"
         }
 
         if ($DistributionPointGroupName) {
@@ -375,6 +541,119 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
                 return $false
             }
             Write-DscStatus "$StatusTag Verified '$($taskSequence.Name)' uses the native terminal Setup Windows flow; bootstrap is deferred to required client policy"
+        }
+        return $true
+    }
+
+    function Sync-MemLabsOsdActivationPolicy {
+        param (
+            [string] $SourceRoot,
+            [string] $SourceUnc,
+            [object[]] $OsdClients,
+            [string] $DistributionPointGroupName,
+            [bool] $EnableAzureActivation,
+            [scriptblock] $ActivationScript,
+            [string] $StatusTag
+        )
+
+        if (-not $EnableAzureActivation) {
+            Write-DscStatus "$StatusTag Host is not Azure; no OSD Azure-KMS activation application was authored"
+            return $true
+        }
+        $clients = @($OsdClients | Where-Object { $null -ne $_ })
+        if ($clients.Count -eq 0) { return $true }
+        if (-not $ActivationScript) {
+            Write-DscStatus "$StatusTag Shared Windows activation scriptblock is unavailable; OSD activation policy was not authored." -Failure
+            return $false
+        }
+        if (-not $DistributionPointGroupName) {
+            Write-DscStatus "$StatusTag OSD clients exist but no verified OSD DP target is available; activation policy was not authored." -Warning
+            return $true
+        }
+
+        $applicationName = 'MEMLABS-OSD Activation'
+        $deploymentTypeName = 'MEMLABS-OSD Activation v1'
+        $collectionName = 'MEMLABS-OSD Clients'
+        $version = '1'
+        if (-not (Test-Path -LiteralPath $SourceRoot)) {
+            New-Item -ItemType Directory -Path $SourceRoot -Force -ErrorAction Stop | Out-Null
+        }
+        $activationBody = $ActivationScript.ToString()
+        $installScript = @"
+`$ErrorActionPreference = 'Stop'
+`$logPath = Join-Path `$env:ProgramData 'MemLabs\OSDActivation.log'
+function Write-FixLog { param([string]`$Message); Add-Content -LiteralPath `$logPath -Value "`$(Get-Date -Format o) `$Message" -Encoding UTF8 }
+`$activate = {
+$activationBody
+}
+`$savedErrorActionPreference = `$ErrorActionPreference
+try {
+    # Match Phase 10 semantics. Under Windows PowerShell 5.1 a caller-wide
+    # Stop preference can promote redirected cscript stderr before this shared
+    # implementation evaluates status and performs its bounded retries.
+    `$ErrorActionPreference = 'Continue'
+    `$result = & `$activate
+}
+finally {
+    `$ErrorActionPreference = `$savedErrorActionPreference
+}
+if (-not `$result -or -not `$result.Success) { throw "Windows activation failed: `$(`$result.Message)" }
+Write-FixLog `$result.Message
+"@
+        [IO.File]::WriteAllText((Join-Path $SourceRoot 'Install.ps1'), $installScript, (New-Object Text.UTF8Encoding($true)))
+
+        $detectionScript = @'
+$appId = '55c92734-d682-4d71-983e-d6ec3f16059f'
+$licensed = Get-CimInstance -ClassName SoftwareLicensingProduct -Filter "ApplicationId='$appId' AND PartialProductKey IS NOT NULL" -ErrorAction SilentlyContinue |
+    Where-Object { [int]$_.LicenseStatus -eq 1 } | Select-Object -First 1
+if ($licensed) { Write-Output 'Activated' }
+'@
+
+        $application = Get-CMApplication -Name $applicationName -ErrorAction SilentlyContinue
+        if (-not $application) {
+            $application = New-CMApplication -Name $applicationName `
+                -Description 'Post-PXE activation using the same Azure KMS implementation as Phase 10' `
+                -Publisher 'MemLabs' -SoftwareVersion $version -ErrorAction Stop
+            Add-CMScriptDeploymentType -Application $application -DeploymentTypeName $deploymentTypeName `
+                -InstallCommand 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1' `
+                -ContentLocation $SourceUnc -ScriptLanguage PowerShell -ScriptText $detectionScript `
+                -InstallationBehaviorType InstallForSystem -LogonRequirementType WhetherOrNotUserLoggedOn `
+                -ErrorAction Stop | Out-Null
+            $application = Get-CMApplication -Name $applicationName -ErrorAction Stop
+            Write-DscStatus "$StatusTag Created Azure-gated application '$applicationName'"
+        }
+        elseif ("$($application.SoftwareVersion)" -ne $version) {
+            Write-DscStatus "$StatusTag Existing '$applicationName' version '$($application.SoftwareVersion)' does not match '$version'." -Failure
+            return $false
+        }
+
+        $deploymentTypes = @(Get-CMDeploymentType -ApplicationName $applicationName -ErrorAction SilentlyContinue)
+        if ($deploymentTypes.Count -ne 1 -or $deploymentTypes[0].LocalizedDisplayName -ne $deploymentTypeName) {
+            Write-DscStatus "$StatusTag '$applicationName' does not have exactly '$deploymentTypeName'." -Failure
+            return $false
+        }
+        try {
+            $null = Start-CMContentDistribution -ApplicationName $applicationName `
+                -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop
+        }
+        catch {
+            if ("$($_.Exception.Message)" -notmatch 'already.*distribut|already.*destination|content.*already') { throw }
+        }
+
+        $collection = Get-CMDeviceCollection -Name $collectionName -ErrorAction SilentlyContinue
+        if (-not $collection) {
+            Write-DscStatus "$StatusTag '$collectionName' is missing; core OSD policy must establish it before activation." -Failure
+            return $false
+        }
+        $deployments = @(Get-CMApplicationDeployment -Application $application -Collection $collection -ErrorAction SilentlyContinue)
+        if ($deployments.Count -eq 0) {
+            $application | New-CMApplicationDeployment -Collection $collection -DeployAction Install `
+                -DeployPurpose Required -UserNotification HideAll -ErrorAction Stop | Out-Null
+            Write-DscStatus "$StatusTag Deployed '$applicationName' as required post-PXE policy"
+        }
+        elseif ($deployments.Count -ne 1) {
+            Write-DscStatus "$StatusTag Found $($deployments.Count) '$applicationName' deployments to '$collectionName'; expected one." -Failure
+            return $false
         }
         return $true
     }
@@ -2195,14 +2474,33 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
         -not (Sync-MemLabsOsdComputerNameSteps -TaskSequences $siteTaskSequencesForNaming -OsdClients $osdClientsForNaming -StatusTag $Tag)) {
         return
     }
+    if ($siteTaskSequencesForNaming.Count -gt 0 -and
+        -not (Sync-MemLabsOsdBitLockerSteps -TaskSequences $siteTaskSequencesForNaming -OsdClients $osdClientsForNaming -StatusTag $Tag)) {
+        return
+    }
     $bootstrapSourceRoot = Join-Path $folderPath 'MemLabsOsdBootstrap'
     $bootstrapSourceUnc = "\\$ThisMachineName\OSD\MemLabsOsdBootstrap"
+    $bootstrapPayloadSource = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
     if (-not (Sync-MemLabsOsdBootstrapFramework `
             -SourceRoot $bootstrapSourceRoot `
             -SourceUnc $bootstrapSourceUnc `
+            -PayloadSourceRoot $bootstrapPayloadSource `
+            -ToolsRoot 'C:\tools' `
             -OsdClients $osdClientsForNaming `
             -TaskSequences $siteTaskSequencesForNaming `
             -DistributionPointGroupName $osdDistTarget `
+            -StatusTag $Tag)) {
+        return
+    }
+    $activationSourceRoot = Join-Path $folderPath 'MemLabsOsdActivation'
+    $activationSourceUnc = "\\$ThisMachineName\OSD\MemLabsOsdActivation"
+    if (-not (Sync-MemLabsOsdActivationPolicy `
+            -SourceRoot $activationSourceRoot `
+            -SourceUnc $activationSourceUnc `
+            -OsdClients $osdClientsForNaming `
+            -DistributionPointGroupName $osdDistTarget `
+            -EnableAzureActivation ([bool]$deployConfig.parameters.IsAzureVM) `
+            -ActivationScript $MemLabsWindowsActivationScript `
             -StatusTag $Tag)) {
         return
     }

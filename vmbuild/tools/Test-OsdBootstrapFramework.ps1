@@ -47,6 +47,11 @@ function New-CMApplication {
     $script:Application = [pscustomobject]@{ Name = $Name; SoftwareVersion = "$SoftwareVersion" }
     return $script:Application
 }
+function Set-CMApplication {
+    [CmdletBinding()]
+    param($Name, $SoftwareVersion, $Description)
+    $script:Application.SoftwareVersion = "$SoftwareVersion"
+}
 function Add-CMScriptDeploymentType {
     [CmdletBinding()]
     param($Application, $DeploymentTypeName, $InstallCommand, $ContentLocation, $ScriptLanguage, $ScriptText, $InstallationBehaviorType, $LogonRequirementType)
@@ -61,6 +66,19 @@ function Add-CMScriptDeploymentType {
         })
 }
 function Get-CMDeploymentType { [CmdletBinding()] param($ApplicationName); return $script:DeploymentTypes }
+function Set-CMScriptDeploymentType {
+    [CmdletBinding()]
+    param($ApplicationName, $DeploymentTypeName, $NewName, $InstallCommand, $ContentLocation, $ScriptLanguage, $ScriptText)
+    $script:DeploymentTypes[0].LocalizedDisplayName = $NewName
+    $script:DeploymentTypes[0].InstallCommand = $InstallCommand
+    $script:DeploymentTypes[0].ContentLocation = $ContentLocation
+    $script:DeploymentTypes[0].ScriptLanguage = $ScriptLanguage
+    $script:DeploymentTypes[0].ScriptText = $ScriptText
+}
+function Update-CMDistributionPoint {
+    [CmdletBinding()]
+    param($ApplicationName, $DeploymentTypeName)
+}
 function Start-CMContentDistribution {
     [CmdletBinding()]
     param($ApplicationName, $DistributionPointGroupName)
@@ -145,6 +163,15 @@ $perfloadingPath = Join-Path $RootPath 'DSC\phases\perfloading.ps1'
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 
 $sourceRoot = Join-Path ([IO.Path]::GetTempPath()) ('MemLabsOsdBootstrap-' + [guid]::NewGuid().ToString('N'))
+$payloadSourceRoot = Join-Path ([IO.Path]::GetTempPath()) ('MemLabsOsdPayload-' + [guid]::NewGuid().ToString('N'))
+$toolsRoot = Join-Path ([IO.Path]::GetTempPath()) ('MemLabsOsdTools-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path (Join-Path $payloadSourceRoot 'bginfo') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $toolsRoot 'LogMachine') -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $payloadSourceRoot 'Enable-LogMachine.ps1'), '# test')
+foreach ($name in @('CLIENT.bgi', 'bginfo_CLIENT.lnk', 'bginfo.exe')) {
+    [IO.File]::WriteAllText((Join-Path (Join-Path $payloadSourceRoot 'bginfo') $name), 'test')
+}
+[IO.File]::WriteAllText((Join-Path $toolsRoot 'LogMachine\LogMachine.exe'), 'test')
 $clients = @(
     [pscustomobject]@{ vmName = 'OSD1' }
     [pscustomobject]@{ vmName = 'OSD2' }
@@ -161,12 +188,21 @@ $taskSequences = @(
 
 try {
     $result = Sync-MemLabsOsdBootstrapFramework -SourceRoot $sourceRoot `
-        -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' -OsdClients $clients `
+        -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' `
+        -PayloadSourceRoot $payloadSourceRoot -ToolsRoot $toolsRoot -OsdClients $clients `
         -TaskSequences $taskSequences -DistributionPointGroupName 'OSD DPS' -StatusTag '[test]'
     Assert-Equal $true $result 'fresh framework reconcile succeeds'
     Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Install.ps1')) 'versioned install payload is staged'
     Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Manifest.json')) 'framework manifest is staged'
-    Assert-Equal 'MEMLABS-OSD Bootstrap' $script:Application.Name 'bootstrap application is created'
+    Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\Enable-LogMachine.ps1')) 'desktop shortcut script is staged'
+    Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\bginfo\bginfo.exe')) 'BGInfo executable is staged'
+    Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\LogMachine\LogMachine.exe')) 'LogMachine is staged'
+    $coreInstallText = Get-Content (Join-Path $sourceRoot 'Install.ps1') -Raw
+    Assert-Equal $true ($coreInstallText.Contains("`$ErrorActionPreference = 'Continue'")) 'desktop script runs without inherited Stop semantics'
+    Assert-Equal $true ($coreInstallText.Contains('Required desktop shortcut was not created')) 'desktop policy validates required shortcut postconditions'
+    Assert-Equal 'MEMLABS-OSD Bootstrap' $script:Application.Name 'OSD core application is created'
+    Assert-Equal '2' $script:Application.SoftwareVersion 'OSD core application is version 2'
+    Assert-Equal 'MEMLABS-OSD Bootstrap v2' $script:DeploymentTypes[0].LocalizedDisplayName 'versioned core deployment type is created'
     Assert-Equal 'InstallForSystem' $script:DeploymentTypes[0].InstallationBehaviorType 'deployment type installs as system'
     Assert-Equal 'WhetherOrNotUserLoggedOn' $script:DeploymentTypes[0].LogonRequirementType 'deployment type does not require a user session'
     Assert-Equal 'MEMLABS-OSD Bootstrap->OSD DPS' ($script:DistributionRequests -join ',') 'bootstrap content targets the OSD DP group'
@@ -179,7 +215,8 @@ try {
     Assert-Equal 0 @($taskSequences[2].Steps | Where-Object Name -eq 'MEMLABS install OSD Bootstrap').Count 'in-place upgrade TS is not changed'
 
     $result = Sync-MemLabsOsdBootstrapFramework -SourceRoot $sourceRoot `
-        -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' -OsdClients $clients `
+        -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' `
+        -PayloadSourceRoot $payloadSourceRoot -ToolsRoot $toolsRoot -OsdClients $clients `
         -TaskSequences $taskSequences -DistributionPointGroupName 'OSD DPS' -StatusTag '[test]'
     Assert-Equal $true $result 'rerun framework reconcile succeeds'
     Assert-Equal 0 @($taskSequences[0].Steps | Where-Object Name -eq 'MEMLABS restart into installed OS').Count 'rerun keeps bootstrap reboot absent'
@@ -187,12 +224,23 @@ try {
     Assert-Equal 1 $script:Deployments.Count 'rerun does not duplicate required deployment'
     Assert-Equal 1 $script:Rules.Count 'rerun does not duplicate collection rule'
 
+    $script:Application.SoftwareVersion = '1'
+    $script:DeploymentTypes[0].LocalizedDisplayName = 'MEMLABS-OSD Bootstrap v1'
+    $result = Sync-MemLabsOsdBootstrapFramework -SourceRoot $sourceRoot `
+        -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' `
+        -PayloadSourceRoot $payloadSourceRoot -ToolsRoot $toolsRoot -OsdClients $clients `
+        -TaskSequences $taskSequences -DistributionPointGroupName 'OSD DPS' -StatusTag '[test]'
+    Assert-Equal $true $result 'existing version 1 application revises in place'
+    Assert-Equal '2' $script:Application.SoftwareVersion 'application revision updates software version'
+    Assert-Equal 'MEMLABS-OSD Bootstrap v2' $script:DeploymentTypes[0].LocalizedDisplayName 'application revision updates deployment type'
+
     $script:Collection = $null
     $script:Rules = @()
     $script:Deployments = @()
     $noDpTaskSequence = [pscustomobject]@{ Name = 'MEMLABS-w11-Install OS image'; Steps = @() }
     $result = Sync-MemLabsOsdBootstrapFramework -SourceRoot $sourceRoot `
-        -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' -OsdClients $clients `
+        -SourceUnc '\\PS1SITE\OSD\MemLabsOsdBootstrap' `
+        -PayloadSourceRoot $payloadSourceRoot -ToolsRoot $toolsRoot -OsdClients $clients `
         -TaskSequences @($noDpTaskSequence) -DistributionPointGroupName '' -StatusTag '[test]'
     Assert-Equal $true $result 'missing OSD DP is handled without authoring broken references'
     Assert-Equal $true ($null -eq $script:Collection) 'missing OSD DP does not create policy collection'
@@ -200,6 +248,8 @@ try {
 }
 finally {
     Remove-Item -LiteralPath $sourceRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $payloadSourceRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $toolsRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $source = Get-Content $perfloadingPath -Raw

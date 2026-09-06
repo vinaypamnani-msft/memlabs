@@ -1175,6 +1175,7 @@ function Add-NewVMForRole {
         "OSDClient" {
             $virtualMachine.memory = "2GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'vmGeneration' -Value "2" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installOffice' -Value $false -Force
             $virtualMachine.PsObject.Members.Remove('operatingSystem')
         }
         "SiteSystem" {
@@ -1264,7 +1265,8 @@ function Add-NewVMForRole {
     # Add BitLocker property if BLM is enabled and VM has TPM + client OS.
     # Non-domain roles (InternetClient, WorkgroupMember, AADClient) never receive BLM policy.
     if ($virtualMachine.tpmEnabled -and $ConfigToModify.cmOptions -and $ConfigToModify.cmOptions.EnableBLM -and $role -notin 'InternetClient', 'WorkgroupMember', 'AADClient') {
-        $isClientOS = $virtualMachine.operatingSystem -and $virtualMachine.operatingSystem -like "Windows 1*"
+        $isClientOS = $role -eq 'OSDClient' -or
+            ($virtualMachine.operatingSystem -and $virtualMachine.operatingSystem -like "Windows 1*")
         $virtualMachine | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
     }
 
