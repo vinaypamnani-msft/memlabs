@@ -231,6 +231,79 @@ $collectScript = {
     }
     catch { "Task Sequence registry read failed: $($_.Exception.Message)" | Out-File (Join-Path $StagePath 'task-sequence-registry.txt') -Encoding utf8 }
 
+    $postPxeState = New-Object System.Collections.Generic.List[string]
+    $postPxeState.Add("CapturedUtc=$([DateTime]::UtcNow.ToString('o'))")
+    $postPxeState.Add("ComputerName=$env:COMPUTERNAME")
+
+    try {
+        if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) {
+            $volume = Get-BitLockerVolume -MountPoint 'C:' -ErrorAction Stop
+            $protectorTypes = @($volume.KeyProtector | ForEach-Object { $_.KeyProtectorType } | Where-Object { $_ })
+            $postPxeState.Add("BitLocker.VolumeStatus=$($volume.VolumeStatus)")
+            $postPxeState.Add("BitLocker.ProtectionStatus=$($volume.ProtectionStatus)")
+            $postPxeState.Add("BitLocker.EncryptionPercentage=$($volume.EncryptionPercentage)")
+            $postPxeState.Add("BitLocker.KeyProtectors=$(if ($protectorTypes.Count) { $protectorTypes -join ',' } else { '[none]' })")
+        }
+        else {
+            $postPxeState.Add('BitLocker=NOT_MEASURED (Get-BitLockerVolume unavailable)')
+        }
+    }
+    catch { $postPxeState.Add("BitLocker=NOT_MEASURED ($($_.Exception.Message))") }
+
+    try {
+        $office = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
+        if ($office -and $office.VersionToReport) {
+            $postPxeState.Add("Office.Installed=True")
+            $postPxeState.Add("Office.Version=$($office.VersionToReport)")
+            $postPxeState.Add("Office.Channel=$($office.UpdateChannel)")
+        }
+        else {
+            $postPxeState.Add('Office.Installed=False')
+        }
+    }
+    catch { $postPxeState.Add("Office=NOT_MEASURED ($($_.Exception.Message))") }
+
+    try {
+        $appId = '55c92734-d682-4d71-983e-d6ec3f16059f'
+        $license = Get-CimInstance -ClassName SoftwareLicensingProduct `
+            -Filter "ApplicationId='$appId' AND PartialProductKey IS NOT NULL" -ErrorAction Stop |
+            Select-Object -First 1
+        if ($license) {
+            $postPxeState.Add("Activation.LicenseStatus=$($license.LicenseStatus)")
+            $postPxeState.Add("Activation.Sku=$($license.Name)")
+            $postPxeState.Add("Activation.PartialProductKey=$($license.PartialProductKey)")
+        }
+        else {
+            $postPxeState.Add('Activation=NOT_MEASURED (no active Windows licensing product)')
+        }
+    }
+    catch { $postPxeState.Add("Activation=NOT_MEASURED ($($_.Exception.Message))") }
+
+    $statePaths = [ordered]@{
+        'Bootstrap.Version' = 'C:\ProgramData\MemLabs\OSDBootstrap\Version.txt'
+        'BgInfo.Executable' = 'C:\staging\bginfo\bginfo.exe'
+        'BgInfo.Template' = 'C:\staging\bginfo\CLIENT.bgi'
+        'BgInfo.StartupShortcut' = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\MemLabs BGInfo.lnk'
+        'LogMachine.Executable' = 'C:\tools\LogMachine\LogMachine.exe'
+        'Desktop.SccmApplet' = 'C:\Users\Public\Desktop\SCCM Control Panel Applet.lnk'
+        'Desktop.ClientLogs' = 'C:\Users\Public\Desktop\Client Logs.lnk'
+    }
+    foreach ($statePath in $statePaths.GetEnumerator()) {
+        $exists = Test-Path -LiteralPath $statePath.Value
+        $postPxeState.Add("$($statePath.Key).Exists=$exists")
+        if ($statePath.Key -eq 'Bootstrap.Version' -and $exists) {
+            try { $postPxeState.Add("Bootstrap.Version.Value=$((Get-Content -LiteralPath $statePath.Value -Raw).Trim())") }
+            catch { $postPxeState.Add("Bootstrap.Version.Value=NOT_MEASURED ($($_.Exception.Message))") }
+        }
+    }
+    try {
+        $shortcutTask = Get-ScheduledTask -TaskName 'EnableLogMachine' -ErrorAction SilentlyContinue
+        $postPxeState.Add("Desktop.RefreshTask.Exists=$([bool]$shortcutTask)")
+        if ($shortcutTask) { $postPxeState.Add("Desktop.RefreshTask.State=$($shortcutTask.State)") }
+    }
+    catch { $postPxeState.Add("Desktop.RefreshTask=NOT_MEASURED ($($_.Exception.Message))") }
+    [IO.File]::WriteAllLines((Join-Path $StagePath 'post-pxe-state.txt'), $postPxeState.ToArray())
+
     return $records.ToArray()
 }
 
@@ -250,7 +323,7 @@ try {
         catch { $copyFailures.Add("$($record.SourcePath): $($_.Exception.Message)") }
     }
 
-    foreach ($diagnosticName in @('system.txt', 'ipconfig-all.txt', 'network-cim.txt', 'task-sequence-registry.txt')) {
+    foreach ($diagnosticName in @('system.txt', 'ipconfig-all.txt', 'network-cim.txt', 'task-sequence-registry.txt', 'post-pxe-state.txt')) {
         $remotePath = Join-Path $remoteStage $diagnosticName
         try { Copy-Item -FromSession $session -LiteralPath $remotePath -Destination (Join-Path $destination $diagnosticName) -Force -ErrorAction Stop }
         catch { $copyFailures.Add("${remotePath}: $($_.Exception.Message)") }
