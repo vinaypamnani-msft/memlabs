@@ -96,10 +96,12 @@ function Remove-CMTSStepSetVariable {
     param ([Parameter(ValueFromPipeline = $true)] $InputObject, [string] $StepName, [switch] $Force)
     process { $InputObject.Steps = @($InputObject.Steps | Where-Object { $_.Name -ne $StepName }) }
 }
-function New-CMTSStepConditionVariable {
+function New-CMTSStepConditionQueryWmi {
     [CmdletBinding()]
-    param ([string] $ConditionVariableName, [string] $ConditionVariableValue, [string] $OperatorType)
-    return [pscustomobject]@{ Variable = $ConditionVariableName; Value = $ConditionVariableValue; Operator = $OperatorType }
+    param ([string[]] $Namespace, [string] $Query)
+    return [pscustomobject]@{
+        Operands = @([pscustomobject]@{ Namespace = "$Namespace"; Query = $Query })
+    }
 }
 function New-CMTSStepSetVariable {
     [CmdletBinding()]
@@ -128,8 +130,8 @@ Assert-Equal $true (Sync-MemLabsOsdComputerNameSteps -TaskSequences $taskSequenc
 foreach ($taskSequence in $taskSequences) {
     $managed = @($taskSequence.Steps | Where-Object { $_.Name -like 'MEMLABS set OSDComputerName: *' })
     Assert-Equal 2 $managed.Count "$($taskSequence.Name) gets one naming step per OSD VM"
-    Assert-Equal '*00:15:5D:00:04:CD*' (($managed | Where-Object VariableValue -eq 'OSD1').Condition.Value) "$($taskSequence.Name) matches OSD1 MAC with PathMatchSpec wildcard"
-    Assert-Equal '*00:15:5D:00:04:CE*' (($managed | Where-Object VariableValue -eq 'OSD2').Condition.Value) "$($taskSequence.Name) matches OSD2 MAC with PathMatchSpec wildcard"
+    Assert-Equal "SELECT * FROM Win32_NetworkAdapterConfiguration WHERE MACAddress='00:15:5D:00:04:CD'" (($managed | Where-Object VariableValue -eq 'OSD1').Condition.Operands[0].Query) "$($taskSequence.Name) matches OSD1 through WinPE WMI"
+    Assert-Equal "SELECT * FROM Win32_NetworkAdapterConfiguration WHERE MACAddress='00:15:5D:00:04:CE'" (($managed | Where-Object VariableValue -eq 'OSD2').Condition.Operands[0].Query) "$($taskSequence.Name) matches OSD2 through WinPE WMI"
 }
 Assert-Equal 1 @($taskSequences[0].Steps | Where-Object Name -eq 'Keep me').Count 'reconciliation preserves unmanaged steps'
 
@@ -138,13 +140,13 @@ Assert-Equal $true (Sync-MemLabsOsdComputerNameSteps -TaskSequences @($singleTas
 $singleNamingStep = @($singleTaskSequence.Steps | Where-Object VariableName -eq 'OSDComputerName')
 Assert-Equal 1 $singleNamingStep.Count 'single-client task sequence gets one naming step'
 Assert-Equal 'OSD1' $singleNamingStep[0].VariableValue 'single-client task sequence uses configured VM name'
-Assert-Equal $true ($null -eq $singleNamingStep[0].Condition) 'single-client naming is unconditional and does not depend on a dynamic MAC variable'
+Assert-Equal "SELECT * FROM Win32_NetworkAdapterConfiguration WHERE MACAddress='00:15:5D:00:04:CD'" $singleNamingStep[0].Condition.Operands[0].Query 'single-client naming uses the same WMI MAC discriminator as multi-client naming'
 
 $config.virtualMachines[0].osdMacAddress = '00:15:5D:AA:BB:CC'
 Assert-Equal $true (Sync-MemLabsOsdComputerNameSteps -TaskSequences $taskSequences -OsdClients $osdClients -StatusTag '[test]') 'rerun replaces stale MAC conditions'
 $osd1Steps = @($taskSequences[0].Steps | Where-Object VariableValue -eq 'OSD1')
 Assert-Equal 1 $osd1Steps.Count 'rerun does not duplicate the OSD1 naming step'
-Assert-Equal '*00:15:5D:AA:BB:CC*' $osd1Steps[0].Condition.Value 'rerun writes the replacement OSD1 MAC condition'
+Assert-Equal "SELECT * FROM Win32_NetworkAdapterConfiguration WHERE MACAddress='00:15:5D:AA:BB:CC'" $osd1Steps[0].Condition.Operands[0].Query 'rerun writes the replacement OSD1 WMI MAC condition'
 
 $badClients = @([pscustomobject]@{ vmName = 'THIS-NAME-IS-WAY-TOO-LONG'; osdMacAddress = '00:15:5D:00:04:CD' })
 Assert-Equal $false (Sync-MemLabsOsdComputerNameSteps -TaskSequences $taskSequences -OsdClients $badClients -StatusTag '[test]') 'invalid Windows computer name fails reconciliation'

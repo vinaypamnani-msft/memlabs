@@ -152,27 +152,20 @@ Write-DscStatus "$Tag Starting perfloading"
 
                 $newSteps = @()
                 foreach ($identity in $identityRows) {
-                    $stepArguments = @{
-                        Name                      = "$managedPrefix$($identity.ComputerName)"
-                        TaskSequenceVariable      = 'OSDComputerName'
-                        TaskSequenceVariableValue = $identity.ComputerName
-                        ErrorAction               = 'Stop'
-                    }
-                    if ($identityRows.Count -gt 1) {
-                        # Product TSCore populates _SMSTSMacAddresses as a comma-separated
-                        # list of Win32_NetworkAdapterConfiguration MACAddress values. The
-                        # Like operator uses PathMatchSpecW, whose wildcard is '*'. Multi-
-                        # client sites need that discriminator. A single configured OSD
-                        # client does not: setting its name unconditionally avoids making
-                        # basic naming depend on a dynamic variable being available before
-                        # the first task-sequence instruction executes.
-                        $stepArguments.Condition = New-CMTSStepConditionVariable `
-                            -ConditionVariableName '_SMSTSMacAddresses' `
-                            -ConditionVariableValue "*$($identity.MacAddress)*" `
-                            -OperatorType Like `
-                            -ErrorAction Stop
-                    }
-                    $newSteps += New-CMTSStepSetVariable @stepArguments
+                    # Use the same discriminator for one client or many. WinPE
+                    # exposes this exact colon-delimited value through
+                    # Win32_NetworkAdapterConfiguration.MACAddress before the
+                    # first TS action. A direct WMI condition does not depend on
+                    # _SMSTSMacAddresses having been populated in the TS environment.
+                    $macQuery = "SELECT * FROM Win32_NetworkAdapterConfiguration WHERE MACAddress='$($identity.MacAddress)'"
+                    $condition = New-CMTSStepConditionQueryWmi -Namespace 'root\cimv2' `
+                        -Query $macQuery -ErrorAction Stop
+                    $newSteps += New-CMTSStepSetVariable `
+                        -Name "$managedPrefix$($identity.ComputerName)" `
+                        -TaskSequenceVariable 'OSDComputerName' `
+                        -TaskSequenceVariableValue $identity.ComputerName `
+                        -Condition $condition `
+                        -ErrorAction Stop
                 }
                 if ($newSteps.Count -gt 0) {
                     $taskSequence | Add-CMTaskSequenceStep -Step $newSteps -InsertStepStartIndex 0 -ErrorAction Stop
@@ -185,8 +178,15 @@ Write-DscStatus "$Tag Starting perfloading"
                     throw "read-back found $($verified.Count) managed naming step(s), expected $($identityRows.Count)"
                 }
                 foreach ($identity in $identityRows) {
-                    if (-not ($verified | Where-Object { $_.VariableValue -eq $identity.ComputerName })) {
-                        throw "read-back did not find OSDComputerName='$($identity.ComputerName)'"
+                    $verifiedStep = @($verified | Where-Object { $_.VariableValue -eq $identity.ComputerName })
+                    if ($verifiedStep.Count -ne 1) {
+                        throw "read-back found $($verifiedStep.Count) OSDComputerName='$($identity.ComputerName)' step(s), expected one"
+                    }
+                    $expectedQuery = "SELECT * FROM Win32_NetworkAdapterConfiguration WHERE MACAddress='$($identity.MacAddress)'"
+                    $operands = @($verifiedStep[0].Condition.Operands)
+                    if ($operands.Count -ne 1 -or
+                        $operands[0].Namespace -ne 'root\cimv2' -or $operands[0].Query -ne $expectedQuery) {
+                        throw "read-back did not find exactly one WMI MAC condition for OSDComputerName='$($identity.ComputerName)'"
                     }
                 }
                 Write-DscStatus "$StatusTag Reconciled $($identityRows.Count) MAC-matched OSDComputerName step(s) in '$($taskSequence.Name)'"
