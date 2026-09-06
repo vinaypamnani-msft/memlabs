@@ -450,6 +450,7 @@ function get-VMString {
     $vmStringCacheKey = $null
     try {
         $cacheParts = [ordered]@{
+            formatVersion = 2
             vm     = $virtualMachine
             vms    = $config.virtualMachines
             opts   = $config.vmOptions
@@ -519,7 +520,11 @@ function get-VMString {
     if ($modified) {
         $name = $name + "(Modified)"
     }
-    $name += " VM [$mem RAM,$procs CPU, $($virtualMachine.OperatingSystem)]"
+    $name += " VM [$mem RAM,$procs CPU"
+    if ($virtualMachine.OperatingSystem) {
+        $name += ", $($virtualMachine.OperatingSystem)"
+    }
+    $name += "]"
 
     # if ($virtualMachine.additionalDisks) {
     #     $name += ", $($virtualMachine.additionalDisks.psobject.Properties.Value.count) Extra Disk(s)]"
