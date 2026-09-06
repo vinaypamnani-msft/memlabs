@@ -199,6 +199,35 @@ Write-DscStatus "$Tag Starting perfloading"
         return $true
     }
 
+    function Sync-MemLabsBareOsdTaskSequenceShape {
+        param (
+            [object[]] $TaskSequences,
+            [string] $StatusTag
+        )
+
+        # These task sequences deploy to bare OSDClient VMs with no source OS
+        # or user state. New-CMTaskSequence creates capture/restore groups when
+        # CaptureUserSetting is true; after the first boot, Restore User Files
+        # then runs loadstate against an empty C:\_SMSTaskSequence\UserState,
+        # returns exit 27/0x8007001B, and pollutes an otherwise successful OSD.
+        $unwantedGroups = @('Capture User Files and Settings', 'Restore User Files and Settings')
+        foreach ($taskSequence in @($TaskSequences | Where-Object { $null -ne $_ -and $_.Name -like 'MEMLABS-w*-Install OS image' })) {
+            foreach ($groupName in $unwantedGroups) {
+                $existingGroups = @($taskSequence | Get-CMTaskSequenceGroup -StepName $groupName -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($existingGroups.Count -gt 0) {
+                    $null = $taskSequence | Remove-CMTaskSequenceGroup -StepName $groupName -Force -ErrorAction Stop
+                }
+                $remaining = @($taskSequence | Get-CMTaskSequenceGroup -StepName $groupName -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($remaining.Count -ne 0) {
+                    Write-DscStatus "$StatusTag Failed to remove bare-metal-inapplicable group '$groupName' from '$($taskSequence.Name)'." -Failure
+                    return $false
+                }
+            }
+            Write-DscStatus "$StatusTag Verified '$($taskSequence.Name)' has no user-state capture/restore groups"
+        }
+        return $true
+    }
+
     function Sync-MemLabsOsdBootstrapFramework {
         param (
             [string] $SourceRoot,
@@ -1914,7 +1943,6 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
         $win11OSimagepackageID = & $resolveSitePackageId 'Windows 11 OS image' (Get-CMOperatingSystemImage -Name "windows 11")
         $win10OSimagepackageID = & $resolveSitePackageId 'Windows 10 OS image' (Get-CMOperatingSystemImage -Name "windows 10")
         $ClientPackagePackageId = & $resolveSitePackageId 'Configuration Manager Client Package' (Get-CMPackage -Fast -Name "Configuration Manager Client Package")
-        $UserStateMigrationToolPackageId = & $resolveSitePackageId 'User State Migration Tool' (Get-CMPackage -Fast -Name "User State Migration Tool for Windows")
         if (-not $BootImagePackageID) {
             # Five of the seven task sequences take -BootImagePackageId. Creating the other two
             # would leave a partial set that Phase 11 counts as present, so build none.
@@ -1935,13 +1963,12 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
         # selected by an OSD PXE path. No OSDClient -> skip so the multi-GB content
         # doesn't fill every DP; a re-run distributes once an OSDClient is added.
         if ($hasOsdTargets) {
-            Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
             Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
             Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
-            Write-DscStatus "$Tag Distributed OS image + upgrade + USMT content to '$osdDistTarget' (DPs serving OSD clients)"
+            Write-DscStatus "$Tag Distributed OS image + upgrade content to '$osdDistTarget' (DPs serving OSD clients)"
         }
         else {
-            Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing OS image/upgrade/USMT content (saves space); will distribute when an OSDClient is added"
+            Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing OS image/upgrade content (saves space); will distribute when an OSDClient is added"
         }
      
 
@@ -2022,10 +2049,7 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
             BootImagePackageId              = $BootImagePackageID
             HighPerformance                 = $true
             CaptureNetworkSetting           = $true
-            CaptureUserSetting              = $true
-            SaveLocally                     = $true
-            CaptureLocallyUsingLink         = $true
-            UserStateMigrationToolPackageId = $UserStateMigrationToolPackageId
+            CaptureUserSetting              = $false
             CaptureWindowsSetting           = $true
             ConfigureBitLocker              = $true
             PartitionAndFormatTarget        = $true
@@ -2056,10 +2080,7 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
             BootImagePackageId              = $BootImagePackageID
             HighPerformance                 = $true
             CaptureNetworkSetting           = $true
-            CaptureUserSetting              = $true
-            SaveLocally                     = $true
-            CaptureLocallyUsingLink         = $true
-            UserStateMigrationToolPackageId = $UserStateMigrationToolPackageId
+            CaptureUserSetting              = $false
             CaptureWindowsSetting           = $true
             ConfigureBitLocker              = $true
             PartitionAndFormatTarget        = $true
@@ -2165,6 +2186,10 @@ if ((Test-Path -LiteralPath `$marker) -and ((Get-Content -LiteralPath `$marker -
     $siteTaskSequencesForNaming = @(Get-CMTaskSequence -Fast | Where-Object {
             $_.Name -like 'MEMLABS-*' -and "$($_.PackageID)" -like "$SiteCode*"
         })
+    if ($siteTaskSequencesForNaming.Count -gt 0 -and
+        -not (Sync-MemLabsBareOsdTaskSequenceShape -TaskSequences $siteTaskSequencesForNaming -StatusTag $Tag)) {
+        return
+    }
     $osdClientsForNaming = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })
     if ($siteTaskSequencesForNaming.Count -gt 0 -and
         -not (Sync-MemLabsOsdComputerNameSteps -TaskSequences $siteTaskSequencesForNaming -OsdClients $osdClientsForNaming -StatusTag $Tag)) {
