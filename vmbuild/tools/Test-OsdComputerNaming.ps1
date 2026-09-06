@@ -133,6 +133,13 @@ foreach ($taskSequence in $taskSequences) {
 }
 Assert-Equal 1 @($taskSequences[0].Steps | Where-Object Name -eq 'Keep me').Count 'reconciliation preserves unmanaged steps'
 
+$singleTaskSequence = [pscustomobject]@{ Name = 'MEMLABS-w11-Install OS image'; Steps = @() }
+Assert-Equal $true (Sync-MemLabsOsdComputerNameSteps -TaskSequences @($singleTaskSequence) -OsdClients @($osdClients[0]) -StatusTag '[test]') 'single-client naming reconciliation succeeds'
+$singleNamingStep = @($singleTaskSequence.Steps | Where-Object VariableName -eq 'OSDComputerName')
+Assert-Equal 1 $singleNamingStep.Count 'single-client task sequence gets one naming step'
+Assert-Equal 'OSD1' $singleNamingStep[0].VariableValue 'single-client task sequence uses configured VM name'
+Assert-Equal $true ($null -eq $singleNamingStep[0].Condition) 'single-client naming is unconditional and does not depend on a dynamic MAC variable'
+
 $config.virtualMachines[0].osdMacAddress = '00:15:5D:AA:BB:CC'
 Assert-Equal $true (Sync-MemLabsOsdComputerNameSteps -TaskSequences $taskSequences -OsdClients $osdClients -StatusTag '[test]') 'rerun replaces stale MAC conditions'
 $osd1Steps = @($taskSequences[0].Steps | Where-Object VariableValue -eq 'OSD1')

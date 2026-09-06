@@ -152,20 +152,27 @@ Write-DscStatus "$Tag Starting perfloading"
 
                 $newSteps = @()
                 foreach ($identity in $identityRows) {
-                    # Product TSCore populates _SMSTSMacAddresses as a comma-separated
-                    # list of Win32_NetworkAdapterConfiguration MACAddress values. The
-                    # Like operator uses PathMatchSpecW, whose wildcard is '*'.
-                    $condition = New-CMTSStepConditionVariable `
-                        -ConditionVariableName '_SMSTSMacAddresses' `
-                        -ConditionVariableValue "*$($identity.MacAddress)*" `
-                        -OperatorType Like `
-                        -ErrorAction Stop
-                    $newSteps += New-CMTSStepSetVariable `
-                        -Name "$managedPrefix$($identity.ComputerName)" `
-                        -TaskSequenceVariable 'OSDComputerName' `
-                        -TaskSequenceVariableValue $identity.ComputerName `
-                        -Condition $condition `
-                        -ErrorAction Stop
+                    $stepArguments = @{
+                        Name                      = "$managedPrefix$($identity.ComputerName)"
+                        TaskSequenceVariable      = 'OSDComputerName'
+                        TaskSequenceVariableValue = $identity.ComputerName
+                        ErrorAction               = 'Stop'
+                    }
+                    if ($identityRows.Count -gt 1) {
+                        # Product TSCore populates _SMSTSMacAddresses as a comma-separated
+                        # list of Win32_NetworkAdapterConfiguration MACAddress values. The
+                        # Like operator uses PathMatchSpecW, whose wildcard is '*'. Multi-
+                        # client sites need that discriminator. A single configured OSD
+                        # client does not: setting its name unconditionally avoids making
+                        # basic naming depend on a dynamic variable being available before
+                        # the first task-sequence instruction executes.
+                        $stepArguments.Condition = New-CMTSStepConditionVariable `
+                            -ConditionVariableName '_SMSTSMacAddresses' `
+                            -ConditionVariableValue "*$($identity.MacAddress)*" `
+                            -OperatorType Like `
+                            -ErrorAction Stop
+                    }
+                    $newSteps += New-CMTSStepSetVariable @stepArguments
                 }
                 if ($newSteps.Count -gt 0) {
                     $taskSequence | Add-CMTaskSequenceStep -Step $newSteps -InsertStepStartIndex 0 -ErrorAction Stop
