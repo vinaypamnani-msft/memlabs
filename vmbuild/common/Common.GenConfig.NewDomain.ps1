@@ -412,7 +412,9 @@ function Set-DefaultLocaleForVM {
         [switch] $RequireAvailable
     )
 
-    if ($VirtualMachine.osFamily -eq 'Linux' -or "$($VirtualMachine.operatingSystem)" -like 'Ubuntu*') { return }
+    $operatingSystem = "$($VirtualMachine.operatingSystem)"
+    if ($VirtualMachine.osFamily -eq 'Linux' -or $operatingSystem -like 'Ubuntu*') { return }
+    if ($VirtualMachine.role -eq 'OSDClient' -and [string]::IsNullOrWhiteSpace($operatingSystem)) { return }
 
     $locale = if ($VirtualMachine.locale) {
         $VirtualMachine.locale
@@ -439,7 +441,7 @@ function Set-DefaultLocaleForVM {
         $localeDefinition = $localeProfiles[$locale]
     }
 
-    $acquisitionMethod = Get-LocaleAcquisitionMethod -Profile $localeDefinition -OperatingSystem $VirtualMachine.operatingSystem -ConfigPath $Common.ConfigPath
+    $acquisitionMethod = Get-LocaleAcquisitionMethod -Profile $localeDefinition -OperatingSystem $operatingSystem -ConfigPath $Common.ConfigPath
     if ($RequireAvailable -and -not $acquisitionMethod) {
         Write-Log "Locale '$locale' is not available for '$($VirtualMachine.operatingSystem)'; using en-US for $($VirtualMachine.vmName)." -Warning
         $locale = 'en-US'

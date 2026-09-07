@@ -125,6 +125,20 @@ Set-DefaultLocaleForVM -ConfigToCheck $perVmConfig -VirtualMachine $secondVM -Ca
 Assert-Equal -Expected 'ja-JP' -Actual $firstVM.locale -What 'first VM inherits the domain locale default'
 Assert-Equal -Expected 'ja-JP' -Actual $secondVM.locale -What 'second VM inherits the domain locale default'
 
+$osdVM = [pscustomobject]@{ vmName = 'OSD1'; role = 'OSDClient' }
+Set-DefaultLocaleForVM -ConfigToCheck $perVmConfig -VirtualMachine $osdVM -CatalogPath $catalogPath
+Assert-True -Condition (-not $osdVM.psobject.Properties['locale']) -What 'OS-less OSD client defers locale initialization'
+Assert-True -Condition (-not $osdVM.psobject.Properties['localeAcquisition']) -What 'OS-less OSD client has no locale acquisition route'
+
+$missingOsRejected = $false
+try {
+    Set-DefaultLocaleForVM -ConfigToCheck $perVmConfig -VirtualMachine ([pscustomobject]@{ vmName = 'BROKEN'; role = 'DomainMember' }) -CatalogPath $catalogPath
+}
+catch {
+    $missingOsRejected = $_.Exception.Message -like "*parameter 'OperatingSystem'*empty string*"
+}
+Assert-True -Condition $missingOsRejected -What 'OS-less non-OSD VM still fails locale initialization'
+
 $script:MenuLocale = 'en-US'
 $null = Select-Locale -ConfigToCheck $perVmConfig -Target $firstVM -CatalogPath $catalogPath
 Assert-Equal -Expected 'en-US' -Actual $firstVM.locale -What 'one VM can override the domain locale default'
