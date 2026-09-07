@@ -2397,6 +2397,7 @@ function Invoke-LinuxSshReadyProbe {
     )
 
     $sshArgs = @(
+        '-n',
         '-i', $PrivateKeyPath,
         '-o', 'StrictHostKeyChecking=no',
         '-o', 'UserKnownHostsFile=NUL',
