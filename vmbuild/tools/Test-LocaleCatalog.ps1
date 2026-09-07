@@ -69,6 +69,7 @@ function Write-Log {
 
 $sourcePath = Join-Path $RootPath 'common\Common.GenConfig.NewDomain.ps1'
 $localeModulePath = Join-Path $RootPath 'common\Common.Locale.ps1'
+$summaryPath = Join-Path $RootPath 'common\Common.GenConfig.Summary.ps1'
 . (Import-TestFunction -Path $localeModulePath -Name 'Get-LocaleMediaSource')
 . (Import-TestFunction -Path $localeModulePath -Name 'Get-LocaleMediaFiles')
 . (Import-TestFunction -Path $localeModulePath -Name 'Test-LocaleMediaFiles')
@@ -77,6 +78,7 @@ $localeModulePath = Join-Path $RootPath 'common\Common.Locale.ps1'
 . (Import-TestFunction -Path $sourcePath -Name 'Set-DefaultLocaleForVM')
 . (Import-TestFunction -Path $sourcePath -Name 'Initialize-PerVmLocales')
 . (Import-TestFunction -Path $sourcePath -Name 'Select-Locale')
+. (Import-TestFunction -Path $summaryPath -Name 'Get-SortedProperties')
 
 $global:Common = [pscustomobject]@{ ConfigPath = (Join-Path $RootPath 'config') }
 $config = [pscustomobject]@{
@@ -125,10 +127,29 @@ Set-DefaultLocaleForVM -ConfigToCheck $perVmConfig -VirtualMachine $secondVM -Ca
 Assert-Equal -Expected 'ja-JP' -Actual $firstVM.locale -What 'first VM inherits the domain locale default'
 Assert-Equal -Expected 'ja-JP' -Actual $secondVM.locale -What 'second VM inherits the domain locale default'
 
-$osdVM = [pscustomobject]@{ vmName = 'OSD1'; role = 'OSDClient' }
+$osdVM = [pscustomobject]@{
+    vmName = 'OSD1'
+    role = 'OSDClient'
+    locale = 'en-US'
+    localeSettings = [pscustomobject]@{ LanguageTag = 'en-US' }
+    localeAcquisition = 'Included'
+}
 Set-DefaultLocaleForVM -ConfigToCheck $perVmConfig -VirtualMachine $osdVM -CatalogPath $catalogPath
 Assert-True -Condition (-not $osdVM.psobject.Properties['locale']) -What 'OS-less OSD client defers locale initialization'
+Assert-True -Condition (-not $osdVM.psobject.Properties['localeSettings']) -What 'OS-less OSD client discards stale locale settings'
 Assert-True -Condition (-not $osdVM.psobject.Properties['localeAcquisition']) -What 'OS-less OSD client has no locale acquisition route'
+
+$localeMenuVM = [pscustomobject]@{
+    vmName = 'CLIENT3'
+    operatingSystem = 'Windows 11 Latest'
+    locale = 'ja-JP'
+    localeSettings = [pscustomobject]@{ LanguageTag = 'ja-JP' }
+    localeAcquisition = 'WindowsUpdate'
+}
+$localeMenuProperties = @(Get-SortedProperties -Property $localeMenuVM)
+Assert-True -Condition ($localeMenuProperties -contains 'locale') -What 'VM menu exposes the locale picker'
+Assert-True -Condition ($localeMenuProperties -notcontains 'localeSettings') -What 'VM menu hides structured locale settings'
+Assert-True -Condition ($localeMenuProperties -notcontains 'localeAcquisition') -What 'VM menu hides derived locale acquisition'
 
 $missingOsRejected = $false
 try {
@@ -230,6 +251,7 @@ $vmList = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.GenConfig
 $summary = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.GenConfig.Summary.ps1') -Raw
 $common = Get-Content -LiteralPath (Join-Path $RootPath 'Common.ps1') -Raw
 Assert-True -Condition ($addVm -match 'Set-DefaultLocaleForVM.+-RequireAvailable') -What 'new VM creation applies only an available domain locale default'
+Assert-True -Condition ($addVm -match "'operatingSystem', 'locale', 'localeSettings', 'localeAcquisition'") -What 'new OSD clients discard provisional OS locale metadata'
 Assert-True -Condition ($vmList -match '"DefaultLocale"\s*\{') -What 'domain default has a locale menu handler'
 Assert-True -Condition ($vmList -match 'Select-Locale -ConfigToCheck \$global:config -Target \$property') -What 'VM locale edits target only the selected VM'
 Assert-True -Condition ($summary -match 'Initialize-PerVmLocales -ConfigToCheck \$Global:Config') -What 'authoring migrates legacy global locales before rendering'

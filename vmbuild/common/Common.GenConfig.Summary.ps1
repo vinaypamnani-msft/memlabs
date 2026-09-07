@@ -243,6 +243,8 @@ function Get-SortedProperties {
         '_autoAddedByProxy'
         'pushClientToDomainMembers'
         'osFamily'
+        'localeSettings'
+        'localeAcquisition'
         'replicaSqlAutoAdded'
         'replicaSqlOrigMemory'
         'replicaSqlOrigVirtualProcs'

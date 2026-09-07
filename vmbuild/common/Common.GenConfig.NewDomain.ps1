@@ -414,7 +414,14 @@ function Set-DefaultLocaleForVM {
 
     $operatingSystem = "$($VirtualMachine.operatingSystem)"
     if ($VirtualMachine.osFamily -eq 'Linux' -or $operatingSystem -like 'Ubuntu*') { return }
-    if ($VirtualMachine.role -eq 'OSDClient' -and [string]::IsNullOrWhiteSpace($operatingSystem)) { return }
+    if ($VirtualMachine.role -eq 'OSDClient' -and [string]::IsNullOrWhiteSpace($operatingSystem)) {
+        foreach ($propertyName in @('locale', 'localeSettings', 'localeAcquisition')) {
+            if ($VirtualMachine.psobject.Properties[$propertyName]) {
+                $VirtualMachine.psobject.Properties.Remove($propertyName)
+            }
+        }
+        return
+    }
 
     $locale = if ($VirtualMachine.locale) {
         $VirtualMachine.locale

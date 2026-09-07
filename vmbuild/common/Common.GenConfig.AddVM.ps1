@@ -1217,7 +1217,9 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'vmGeneration' -Value "2" -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installOffice' -Value $false -Force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osdTaskSequence' -Value $null -Force
-            $virtualMachine.PsObject.Members.Remove('operatingSystem')
+            foreach ($propertyName in @('operatingSystem', 'locale', 'localeSettings', 'localeAcquisition')) {
+                $virtualMachine.PsObject.Properties.Remove($propertyName)
+            }
         }
         "SiteSystem" {
             $virtualMachine.memory = "4GB"
