@@ -44,7 +44,7 @@ $global:Phase10Job = {
         if ($FreshDeployOnly) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Running fresh-deploy fixes only: $FreshDeployOnly"
         }
-        if ($currentItem.Role -in @("OSDClient", "AADClient")) {
+        if ($currentItem.Role -in @("AADClient")) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success
         }
         # Linux VMs have no Windows-side maintenance; Start-VMMaintenance also
@@ -2060,7 +2060,7 @@ $global:VM_Create = {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to mount OS ISO $IsoPath after retries" -Failure -OutputStream
                         return
                     }
-                    $dirname = (join-path $driveLetter "OSD" $isoFile.id)
+                    $dirname = "$driveLetter\OSD\$($isoFile.id)"
 
                     $CopyIsoFiles = {
                         param ($dirname)
@@ -3125,6 +3125,37 @@ $global:VM_Config = {
             }
         }
 
+        # OSD bootstrap content is authored from C:\staging on the site server.
+        # Existing site VMs predate files newly added to the base-image payload,
+        # so refresh this small portable set before Phase 8 reconciles the app.
+        $hasOsdClients = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' }).Count -gt 0
+        if ($Phase -eq 8 -and $hasOsdClients -and $currentItem.role -in @('CAS', 'Primary', 'Secondary')) {
+            $sharedCustomizationFiles = @(
+                'Invoke-MemLabsCustomization.ps1'
+                'Optimize-Defender.ps1'
+                'Set-MemLabsMachineSettings.ps1'
+                'Set-MemLabsUserShell.ps1'
+            )
+            try {
+                Invoke-Command -Session $ps -ScriptBlock {
+                    New-Item -Path 'C:\staging' -ItemType Directory -Force | Out-Null
+                } -ErrorAction Stop
+                foreach ($sharedCustomizationFile in $sharedCustomizationFiles) {
+                    $sharedCustomizationSource = Join-Path $Common.StagingInjectPath "staging\$sharedCustomizationFile"
+                    if (-not (Test-Path -LiteralPath $sharedCustomizationSource -PathType Leaf)) {
+                        throw "Required shared customization payload is missing: $sharedCustomizationSource"
+                    }
+                    Copy-Item -ToSession $ps -LiteralPath $sharedCustomizationSource `
+                        -Destination "C:\staging\$sharedCustomizationFile" -Force -ErrorAction Stop
+                }
+                Write-Log "[Phase 8]: $($currentItem.vmName): refreshed shared OSD customization payload in C:\staging." -LogOnly
+            }
+            catch {
+                Write-Log "[Phase 8]: $($currentItem.vmName): failed to stage shared OSD customization payload: $_" -Failure -OutputStream
+                return
+            }
+        }
+
 
         # Re-assert the Windows Update service stop+disable once per run per VM
         # (gated by $quietWUThisRun, computed in Common.Phases.ps1 -- mirrors the
@@ -3653,9 +3684,14 @@ $global:VM_Config = {
                                     # mid-reservation (that cascades "Failed to reserve
                                     # IP address" onto every concurrent job).
                                     Invoke-WithDhcpMutex -ScriptBlock {
-                                        Stop-Service "DHCPServer" -ErrorAction SilentlyContinue | Out-Null
-                                        Start-Sleep -Seconds 3
-                                        $null = Start-DHCP
+                                        if (Test-MemLabsUsesDhcpAppliance) {
+                                            $null = Restart-MemLabsDhcpApplianceScope -ScopeId $currentNetwork
+                                        }
+                                        else {
+                                            Stop-Service "DHCPServer" -ErrorAction SilentlyContinue | Out-Null
+                                            Start-Sleep -Seconds 3
+                                            $null = Start-DHCP
+                                        }
                                     }
                                     Start-Sleep -Seconds 10
                                     $null = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
@@ -3669,9 +3705,14 @@ $global:VM_Config = {
                                 try {
                                     # Serialize the shared-DHCP-server bounce (see retry 1 above).
                                     Invoke-WithDhcpMutex -ScriptBlock {
-                                        Stop-Service "DHCPServer" -ErrorAction SilentlyContinue | Out-Null
-                                        Start-Sleep -Seconds 5
-                                        $null = Start-DHCP
+                                        if (Test-MemLabsUsesDhcpAppliance) {
+                                            $null = Restart-MemLabsDhcpApplianceScope -ScopeId $currentNetwork
+                                        }
+                                        else {
+                                            Stop-Service "DHCPServer" -ErrorAction SilentlyContinue | Out-Null
+                                            Start-Sleep -Seconds 5
+                                            $null = Start-DHCP
+                                        }
                                     }
                                     $null = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
                                 }
@@ -3995,17 +4036,21 @@ $global:VM_Config = {
             Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] ToolInjectTotal completed in $([math]::Round($toolInjectSw.Elapsed.TotalSeconds, 1)) seconds (ok=$injectedOk recovered=$toolInjectRecovered)" -LogOnly
         }
         
-        # copy language packs when locale is set to other than en-US
-        if (($Phase -eq 2) -and ($deployConfig.vmOptions.locale -and $deployConfig.vmOptions.locale -ne "en-US")) {
+        $currentLocale = if ($currentItem.locale) { $currentItem.locale } elseif ($deployConfig.domainDefaults.DefaultLocale) { $deployConfig.domainDefaults.DefaultLocale } elseif ($deployConfig.vmOptions.locale) { $deployConfig.vmOptions.locale } else { 'en-US' }
+        $currentLocaleSettings = if ($currentItem.localeSettings) { $currentItem.localeSettings } else { $deployConfig.vmOptions.localeSettings }
+        $currentLocaleAcquisition = if ($currentItem.localeAcquisition) { $currentItem.localeAcquisition } else { 'Media' }
+
+        # copy language packs when this VM's locale is set to other than en-US
+        if (($Phase -eq 2) -and $currentLocale -ne "en-US" -and $currentLocaleAcquisition -ne 'WindowsUpdate') {
             Write-Progress2 $Activity -Status "Copying language packs" -percentcomplete 15 -force
-            $copied = Copy-LanguagePacksToVM -VmName $currentItem.vmName -ShowProgress
+            $copied = Copy-LanguagePacksToVM -VmName $currentItem.vmName -Locale $currentLocale -OperatingSystem $currentItem.operatingSystem -ShowProgress
             if (-not $copied) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not copy language packs to the VM." -Warning
             }
         }
 
-        # Ad-hoc: copy _localeConfig.json
-        if (($Phase -eq 2) -and ($deployConfig.vmOptions.locale -and $deployConfig.vmOptions.locale -ne "en-US")) {
+        # Legacy configs do not embed localeSettings and still need the old file.
+        if (($Phase -eq 2) -and $currentLocale -ne "en-US" -and -not $currentLocaleSettings) {
             Write-Progress2 $Activity -Status "Copying language packs" -percentcomplete 18 -force
             $copied = Copy-LocaleConfigToVM -VmName $currentItem.vmName -ShowProgress
             if (-not $copied) {
@@ -5486,25 +5531,29 @@ $global:VM_Config = {
                 # Add locale settings to Configuration Data
                 # Default is en-US and may not be used
                 $cd.LocaleSettings = @{ LanguageTag = "en-US" }
-                $locale = $deployConfig.vmOptions.locale
+                $locale = if ($currentItem.locale) { $currentItem.locale } elseif ($deployConfig.domainDefaults.DefaultLocale) { $deployConfig.domainDefaults.DefaultLocale } elseif ($deployConfig.vmOptions.locale) { $deployConfig.vmOptions.locale } else { 'en-US' }
                 if ($locale -and $locale -ne "en-US") {
-                    $localeConfigPath = "C:\staging\locale\_localeConfig.json"
-                    $localeConfig = Get-Content -Path $localeConfigPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $localeSettings = if ($currentItem.localeSettings) { $currentItem.localeSettings } else { $deployConfig.vmOptions.localeSettings }
+                    if (-not $localeSettings) {
+                        $localeConfigPath = "C:\staging\locale\_localeConfig.json"
+                        $localeConfig = Get-Content -Path $localeConfigPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                        $localeSettings = $localeConfig.$locale
+                    }
 
                     # Picking up current locale
                     $l = @{
                         LanguageTag          = $locale
 
                         # These are used for LanguageDsc
-                        LocationID           = $localeConfig.$locale.LocationID
-                        MUILanguage          = $localeConfig.$locale.MUILanguage
-                        MUIFallbackLanguage  = $localeConfig.$locale.MUIFallbackLanguage
-                        SystemLocale         = $localeConfig.$locale.SystemLocale
-                        AddInputLanguages    = $localeConfig.$locale.AddInputLanguages
-                        RemoveInputLanguages = $localeConfig.$locale.RemoveInputLanguages
-                        UserLocale           = $localeConfig.$locale.UserLocale
+                        LocationID           = $localeSettings.LocationID
+                        MUILanguage          = $localeSettings.MUILanguage
+                        MUIFallbackLanguage  = $localeSettings.MUIFallbackLanguage
+                        SystemLocale         = $localeSettings.SystemLocale
+                        AddInputLanguages    = $localeSettings.AddInputLanguages
+                        RemoveInputLanguages = $localeSettings.RemoveInputLanguages
+                        UserLocale           = $localeSettings.UserLocale
                         # This is used for SSMS (TBD)
-                        LanguageID           = $localeConfig.$locale.LanguageID
+                        LanguageID           = $localeSettings.LanguageID
                     }
                     $cd.LocaleSettings = $l
                 }

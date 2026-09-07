@@ -804,6 +804,18 @@ function Get-UserConfiguration {
                 $vm.PsObject.Members.Remove("installOffice")
             }
 
+            # Optional exact task-sequence selection for blank OSD clients.
+            # Preserve invalid values for final validation to report rather than
+            # silently changing an explicitly requested deployment.
+            if ($vm.role -eq 'OSDClient') {
+                if (-not $vm.PSObject.Properties['osdTaskSequence']) {
+                    $vm | Add-Member -MemberType NoteProperty -Name 'osdTaskSequence' -Value $null -Force
+                }
+            }
+            elseif ($vm.PSObject.Properties['osdTaskSequence']) {
+                $vm.PSObject.Members.Remove('osdTaskSequence')
+            }
+
             # pushClient property: auto-add for DomainMember and site system VMs.
             # Precedence: existing per-VM value > legacy cmOptions.pushClientToDomainMembers
             # (DomainMember-only) > domainDefaults.PushCMClientToClients/Servers/SiteSystems
@@ -996,7 +1008,10 @@ function Get-FilesForConfiguration {
     # Get unique items from config
     if ($config) {
         $cfgCmOptions = Get-ConfigCmOptions -Config $config
-        $operatingSystemsToGet = $config.virtualMachines.operatingSystem | Select-Object -Unique
+        $operatingSystemsToGet = @($config.virtualMachines.operatingSystem | Select-Object -Unique)
+        if (Test-MemLabsUsesDhcpAppliance) {
+            $operatingSystemsToGet = @($operatingSystemsToGet + 'Ubuntu Server 24.04 LTS' | Select-Object -Unique)
+        }
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
         $cmVersionsToGet = $cfgCmOptions.version | Select-Object -Unique
         if ($cfgCmOptions.PrePopulateObjects) {
@@ -3512,8 +3527,10 @@ function Set-VmBgInfoConfig {
     Writes the HKLM:\SOFTWARE\MemLabs\BgInfo values consumed by the "MemLabs
     Configuration" block in SERVER.bgi / CLIENT.bgi, and refreshes those two .bgi
     files under C:\staging\bginfo so a VM built from a base image that predates the
-    block still renders it. BgInfo runs from a Startup shortcut, so the refreshed
-    text appears at the next logon.
+    block still renders it. It also replaces the x86 executable with x64 when that
+    payload is available: ConfigMgr's native registry keys are otherwise redirected
+    to an empty WOW64 view. BgInfo runs from a Startup shortcut, so the refreshed text
+    appears at the next logon.
 
     Purely cosmetic, so failures are logged and never thrown.
 
@@ -3562,12 +3579,89 @@ function Set-VmBgInfoConfig {
         Write-Log "[BgInfo] $vmName`: Found $($bgiFiles.Count) of 2 .bgi templates under $($Common.StagingInjectPath)\staging\bginfo; the guest may keep rendering an older layout." -Warning -LogOnly
     }
 
+    $exeSource = Join-Path $Common.StagingInjectPath "staging\bginfo\bginfo.exe"
+    $getBgInfoMachine = {
+        param([string] $Path)
+        try {
+            $candidateBytes = [IO.File]::ReadAllBytes($Path)
+            $candidatePeOffset = [BitConverter]::ToInt32($candidateBytes, 0x3c)
+            return [BitConverter]::ToUInt16($candidateBytes, $candidatePeOffset + 4)
+        }
+        catch {
+            return $null
+        }
+    }
+
+    $exeMachine = & $getBgInfoMachine $exeSource
+    if ($exeMachine -ne 0x8664) {
+        # VM phase workers run in parallel but share this staging file. Serialize the
+        # one small download so they cannot truncate each other's destination.
+        $downloadMutex = [Threading.Mutex]::new($false, "Global\MemLabsBgInfoX64Download")
+        $downloadLockTaken = $false
+        try {
+            try {
+                $downloadLockTaken = $downloadMutex.WaitOne([TimeSpan]::FromMinutes(3))
+            }
+            catch [Threading.AbandonedMutexException] {
+                $downloadLockTaken = $true
+            }
+
+            if ($downloadLockTaken) {
+                # Another worker may have fixed the shared file while this one waited.
+                $exeMachine = & $getBgInfoMachine $exeSource
+                if ($exeMachine -ne 0x8664) {
+                    $bgInfoSource = "$($Common.AzureFileList.Urls.BgInfo)"
+                    if ([string]::IsNullOrWhiteSpace($bgInfoSource) -or
+                        $bgInfoSource -eq "https://live.sysinternals.com/bginfo.exe") {
+                        $bgInfoSource = "https://live.sysinternals.com/Bginfo64.exe"
+                    }
+                    $downloaded = Get-File -Source $bgInfoSource -Destination $exeSource `
+                        -DisplayName "Downloading x64 bginfo.exe" -Action Downloading -Silent -ForceDownload
+                    if ($downloaded) {
+                        $exeMachine = & $getBgInfoMachine $exeSource
+                    }
+                }
+            }
+            else {
+                Write-Log "[BgInfo] $vmName`: Timed out waiting to stage x64 bginfo.exe." -Warning -LogOnly
+            }
+        }
+        catch {
+            Write-Log "[BgInfo] $vmName`: Failed to stage x64 bginfo.exe: $($_.Exception.Message)" -Warning -LogOnly
+        }
+        finally {
+            if ($downloadLockTaken) { $downloadMutex.ReleaseMutex() }
+            $downloadMutex.Dispose()
+        }
+    }
+
+    $bgInfoExecutable = $null
+    if (Test-Path -LiteralPath $exeSource -PathType Leaf) {
+        try {
+            $exeBytes = [IO.File]::ReadAllBytes($exeSource)
+            $peOffset = [BitConverter]::ToInt32($exeBytes, 0x3c)
+            $exeMachine = [BitConverter]::ToUInt16($exeBytes, $peOffset + 4)
+            if ($exeMachine -eq 0x8664) {
+                $bgInfoExecutable = [PSCustomObject]@{
+                    Base64 = [Convert]::ToBase64String($exeBytes)
+                    Sha256 = (Get-FileHash -LiteralPath $exeSource -Algorithm SHA256).Hash
+                }
+            }
+            else {
+                Write-Log "[BgInfo] $vmName`: Staged bginfo.exe is not x64 (PE machine 0x$('{0:X4}' -f $exeMachine)); it will not be sent to the guest." -Warning -LogOnly
+            }
+        }
+        catch {
+            Write-Log "[BgInfo] $vmName`: Could not validate staged bginfo.exe: $($_.Exception.Message)" -Warning -LogOnly
+        }
+    }
+    else {
+        Write-Log "[BgInfo] $vmName`: Staged bginfo.exe is absent; an older x86 guest cannot be migrated." -Warning -LogOnly
+    }
+
     $write_BgInfoConfig = {
-        param($Items, $BgiFiles)
-        # BgInfo ships 32-bit (live.sysinternals.com/bginfo.exe, PE machine 0x014C) and the
-        # shortcut launches it, so WOW64 redirects its HKLM\SOFTWARE reads into WOW6432Node.
-        # Writing only the native view renders "(none)" for every field while a 64-bit
-        # readback truthfully reports them all present -- it is reading the other view.
+        param($Items, $BgiFiles, $BgInfoExecutable)
+        # Keep both views for VMs that have not received the x64 executable yet.
         $regPaths = @("HKLM:\SOFTWARE\MemLabs\BgInfo")
         if (Test-Path -LiteralPath "HKLM:\SOFTWARE\WOW6432Node") {
             $regPaths += "HKLM:\SOFTWARE\WOW6432Node\MemLabs\BgInfo"
@@ -3619,7 +3713,36 @@ function Set-VmBgInfoConfig {
                     $refreshed++
                 }
             }
+
+            $exeTarget = Join-Path $bgiDir "bginfo.exe"
+            $exeRefreshed = $false
+            if ($BgInfoExecutable) {
+                $currentHash = if (Test-Path -LiteralPath $exeTarget -PathType Leaf) {
+                    (Get-FileHash -LiteralPath $exeTarget -Algorithm SHA256).Hash
+                }
+                else { "" }
+                if ($currentHash -ne $BgInfoExecutable.Sha256) {
+                    [IO.File]::WriteAllBytes($exeTarget, [Convert]::FromBase64String($BgInfoExecutable.Base64))
+                    $exeRefreshed = $true
+                }
+            }
+
+            $exeMachine = $null
+            try {
+                $exeBytes = [IO.File]::ReadAllBytes($exeTarget)
+                $peOffset = [BitConverter]::ToInt32($exeBytes, 0x3c)
+                $exeMachine = [BitConverter]::ToUInt16($exeBytes, $peOffset + 4)
+            }
+            catch {}
+
             $bgiNote = ", $refreshed of $(@($BgiFiles).Count) .bgi template(s) refreshed"
+            if ($exeMachine -eq 0x8664) {
+                $exeState = if ($exeRefreshed) { "refreshed" } else { "current" }
+                $bgiNote += ", x64 bginfo.exe $exeState"
+            }
+            else {
+                $bgiNote += "; BGINFO.EXE NOT X64 (PE machine 0x$('{0:X4}' -f $exeMachine))"
+            }
         }
         $note = "$readable/$total values readable in $($regPaths.Count) registry view(s)$bgiNote"
         if ($missing.Count) { $note += "; MISSING: $($missing -join ', ')" }
@@ -3627,7 +3750,7 @@ function Set-VmBgInfoConfig {
     }
 
     $result = Invoke-VmCommand -VmName $vmName -VmDomainName $DeployConfig.vmOptions.domainName -ScriptBlock $write_BgInfoConfig `
-        -ArgumentList @($items, $bgiFiles) -DisplayName "Update BgInfo lab configuration" -SuppressLog
+        -ArgumentList @($items, $bgiFiles, $bgInfoExecutable) -DisplayName "Update BgInfo lab configuration" -SuppressLog
 
     if ($result.ScriptBlockFailed) {
         Write-Log "[BgInfo] $vmName`: Failed to publish the lab configuration to the guest. $($result.ScriptBlockOutput)" -Warning -LogOnly
@@ -3636,7 +3759,7 @@ function Set-VmBgInfoConfig {
 
     # The guest counts what it can read back, so MISSING means the wallpaper will
     # render "(none)" -- say so here rather than leaving it to be discovered visually.
-    if ("$($result.ScriptBlockOutput)" -match 'MISSING|NOT PRESENT') {
+    if ("$($result.ScriptBlockOutput)" -match 'MISSING|NOT PRESENT|NOT X64') {
         Write-Log "[BgInfo] $vmName`: $($result.ScriptBlockOutput)" -Warning -LogOnly
         return $false
     }
@@ -4824,6 +4947,11 @@ function Get-List {
             $return = $return | Where-Object { $_.domain -and ($_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) }
         }
 
+        # Host-wide DHCP appliances are MemLabs infrastructure, not members of
+        # any user lab. Keep them out of VM/domain/switch inventory consumers;
+        # the appliance reconciler discovers them directly from Hyper-V notes.
+        $return = $return | Where-Object { $_.infrastructureType -ne 'MemLabsDhcpAppliance' }
+
         $return = $return | Sort-Object -Property * #-Unique
 
         if ($Type -eq "VM") {
@@ -5233,7 +5361,6 @@ Function Show-Summary {
 
     #$CHECKMARK = ([char]8730)
     $containsPS = $fixedConfig.role -contains "Primary"
-    $containsSecondary = $fixedConfig.role -contains "Secondary"
     $containsSiteSystem = $fixedConfig.role -contains "SiteSystem"
     $containsMember = $fixedConfig.role -contains "DomainMember"
     $containsPassive = $fixedConfig.role -contains "PassiveSite"
@@ -5414,10 +5541,7 @@ Function Show-Summary {
     }
     else {
         Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
-        if (($deployConfig.cmOptions.install -eq $true) -and $containsPassive) {
-            $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
-        }
-        else {
+        if (-not (($deployConfig.cmOptions.install -eq $true) -and $containsPassive)) {
             Write-RedX "ConfigMgr will not be installed"
         }
     }

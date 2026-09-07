@@ -221,7 +221,6 @@ foreach ($name in $scanSettings.Keys) {
     try {
         $splat = @{ $name = $scanSettings[$name] }
         Set-MpPreference @splat -ErrorAction Stop
-        $applied.Add("$name=$($scanSettings[$name])")
     }
     catch { $failures.Add("$name : $($_.Exception.Message)") }
 }
@@ -289,6 +288,12 @@ if ($policyNames.Count -gt 0) {
 }
 
 $afterPreference = Get-MpPreference -ErrorAction SilentlyContinue
+foreach ($name in $scanSettings.Keys) {
+    $wanted = $scanSettings[$name]
+    $actual = if ($afterPreference) { $afterPreference.$name } else { $null }
+    if ("$actual" -eq "$wanted") { $applied.Add("$name=$wanted") }
+    else { $blocked.Add("$name (wanted $wanted, still $actual)") }
+}
 foreach ($name in $protectedSettings.Keys) {
     $wanted = $protectedSettings[$name]
     $actual = if ($afterPreference) { $afterPreference.$name } else { $null }

@@ -28,7 +28,9 @@ Write-DscStatus "$Tag Starting perfloading"
 
     # dot source functions
     . $PSScriptRoot\ScriptFunctions.ps1
-    . $PSScriptRoot\WindowsActivation.Script.ps1
+    $activationScriptPath = Join-Path $PSScriptRoot 'WindowsActivation.Script.ps1'
+    $activationScriptText = [IO.File]::ReadAllText($activationScriptPath).TrimStart([char]0xFEFF)
+    . ([scriptblock]::Create($activationScriptText))
 
     # Get required values from config
     $DomainFullName = $deployConfig.parameters.domainName
@@ -225,6 +227,93 @@ Write-DscStatus "$Tag Starting perfloading"
                 }
             }
             Write-DscStatus "$StatusTag Verified '$($taskSequence.Name)' has no user-state capture/restore groups"
+        }
+        return $true
+    }
+
+    function Sync-MemLabsOsdTaskSequenceDeployments {
+        param (
+            [object[]] $OsdClients,
+            [object[]] $TaskSequences,
+            [string] $StatusTag
+        )
+
+        $managedTargets = [ordered]@{
+            'MEMLABS-w11-Install OS image' = 'MEMLABS-OSD Required - Windows 11'
+            'MEMLABS-w10-Install OS image' = 'MEMLABS-OSD Required - Windows 10'
+        }
+        $clients = @($OsdClients | Where-Object { $null -ne $_ })
+
+        foreach ($selectedClient in @($clients | Where-Object { "$($_.osdTaskSequence)".Trim() })) {
+            $selectedName = "$($selectedClient.osdTaskSequence)".Trim()
+            if (-not $managedTargets.Contains($selectedName)) {
+                Write-DscStatus "$StatusTag OSDClient '$($selectedClient.vmName)' selects unsupported task sequence '$selectedName'." -Failure
+                return $false
+            }
+            if ("$($selectedClient.osdMacAddress)" -notmatch '^([0-9A-F]{2}:){5}[0-9A-F]{2}$') {
+                Write-DscStatus "$StatusTag OSDClient '$($selectedClient.vmName)' selects '$selectedName' but has no usable captured MAC address." -Failure
+                return $false
+            }
+        }
+
+        foreach ($selectedName in @($clients.osdTaskSequence | Where-Object { "$_".Trim() } | Select-Object -Unique)) {
+            $resolvedTaskSequence = @($TaskSequences | Where-Object { $_.Name -eq $selectedName })
+            if ($resolvedTaskSequence.Count -ne 1 -or -not "$($resolvedTaskSequence[0].PackageID)") {
+                Write-DscStatus "$StatusTag Required OSD task sequence '$selectedName' resolved to $($resolvedTaskSequence.Count) site-owned object(s); expected one." -Failure
+                return $false
+            }
+        }
+
+        foreach ($entry in $managedTargets.GetEnumerator()) {
+            $taskSequenceName = $entry.Key
+            $collectionName = $entry.Value
+            $desiredClients = @($clients | Where-Object { "$($_.osdTaskSequence)".Trim() -eq $taskSequenceName })
+            $collection = Get-CMDeviceCollection -Name $collectionName -ErrorAction SilentlyContinue
+
+            if ($desiredClients.Count -gt 0 -and -not $collection) {
+                $collection = New-CMDeviceCollection -Name $collectionName -LimitingCollectionName 'All Systems' `
+                    -Comment "MemLabs-managed prestaged OSD clients required to run $taskSequenceName" -ErrorAction Stop
+                Write-DscStatus "$StatusTag Created required OSD collection '$collectionName'"
+            }
+            if (-not $collection) { continue }
+
+            $directRules = @(Get-CMDeviceCollectionDirectMembershipRule -CollectionId $collection.CollectionID -ErrorAction SilentlyContinue)
+            foreach ($client in $clients) {
+                $existingRule = @($directRules | Where-Object {
+                        $_.RuleName -eq $client.vmName -or $_.ResourceName -eq $client.vmName
+                    } | Select-Object -First 1)
+                if ($client -in $desiredClients) {
+                    if (-not $existingRule) {
+                        $null = Import-CMComputerInformation -ComputerName $client.vmName `
+                            -MacAddress $client.osdMacAddress -CollectionId $collection.CollectionID `
+                            -MergeIfExist -ErrorAction Stop
+                        Write-DscStatus "$StatusTag Prestaged '$($client.vmName)' ($($client.osdMacAddress)) in '$collectionName'"
+                    }
+                }
+                elseif ($existingRule) {
+                    Remove-CMDeviceCollectionDirectMembershipRule -CollectionId $collection.CollectionID `
+                        -ResourceName $client.vmName -Force -ErrorAction Stop
+                    Write-DscStatus "$StatusTag Removed stale required OSD membership '$($client.vmName)' from '$collectionName'"
+                }
+            }
+            $null = Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID -ErrorAction SilentlyContinue
+
+            if ($desiredClients.Count -eq 0) { continue }
+            $taskSequence = @($TaskSequences | Where-Object { $_.Name -eq $taskSequenceName })
+            $deployments = @(Get-CMDeployment -CollectionName $collectionName -ErrorAction SilentlyContinue |
+                Where-Object { $_.PackageID -eq $taskSequence[0].PackageID })
+            if ($deployments.Count -eq 0) {
+                $available = (Get-Date).AddMinutes(-5)
+                New-CMTaskSequenceDeployment -TaskSequencePackageId $taskSequence[0].PackageID `
+                    -CollectionId $collection.CollectionID -DeployPurpose Required `
+                    -MakeAvailableTo ClientsMediaAndPxe -RerunBehavior RerunIfFailedPreviousAttempt `
+                    -AvailableDateTime $available -ScheduleEvent AsSoonAsPossible -ErrorAction Stop
+                Write-DscStatus "$StatusTag Deployed '$taskSequenceName' as required to '$collectionName'"
+            }
+            elseif ($deployments.Count -ne 1) {
+                Write-DscStatus "$StatusTag '$taskSequenceName' has $($deployments.Count) deployments to '$collectionName'; expected exactly one." -Failure
+                return $false
+            }
         }
         return $true
     }
@@ -430,7 +519,7 @@ Write-DscStatus "$Tag Starting perfloading"
         $collectionRuleName = 'MEMLABS OSD Clients by configured name'
         $taskSequenceRebootName = 'MEMLABS restart into installed OS'
         $taskSequenceStepName = 'MEMLABS install OSD Bootstrap'
-        $bootstrapSchemaVersion = '3'
+        $bootstrapSchemaVersion = '5'
         $markerPath = 'C:\ProgramData\MemLabs\OSDBootstrap\Version.txt'
         $clients = @($OsdClients | Where-Object { $null -ne $_ })
         if ($clients.Count -eq 0) { return $true }
@@ -449,6 +538,10 @@ Write-DscStatus "$Tag Starting perfloading"
         }
         $requiredPayload = @(
             @{ Source = Join-Path $PayloadSourceRoot 'Enable-LogMachine.ps1'; Destination = Join-Path $payloadRoot 'Enable-LogMachine.ps1' }
+            @{ Source = Join-Path $PayloadSourceRoot 'Invoke-MemLabsCustomization.ps1'; Destination = Join-Path $payloadRoot 'Invoke-MemLabsCustomization.ps1' }
+            @{ Source = Join-Path $PayloadSourceRoot 'Optimize-Defender.ps1'; Destination = Join-Path $payloadRoot 'Optimize-Defender.ps1' }
+            @{ Source = Join-Path $PayloadSourceRoot 'Set-MemLabsMachineSettings.ps1'; Destination = Join-Path $payloadRoot 'Set-MemLabsMachineSettings.ps1' }
+            @{ Source = Join-Path $PayloadSourceRoot 'Set-MemLabsUserShell.ps1'; Destination = Join-Path $payloadRoot 'Set-MemLabsUserShell.ps1' }
             @{ Source = Join-Path $PayloadSourceRoot 'bginfo\CLIENT.bgi'; Destination = Join-Path $payloadBgInfo 'CLIENT.bgi' }
             @{ Source = Join-Path $PayloadSourceRoot 'bginfo\bginfo_CLIENT.lnk'; Destination = Join-Path $payloadBgInfo 'bginfo_CLIENT.lnk' }
             @{ Source = Join-Path $PayloadSourceRoot 'bginfo\bginfo.exe'; Destination = Join-Path $payloadBgInfo 'bginfo.exe' }
@@ -512,6 +605,9 @@ foreach ($folder in @($staging, $bgInfoTarget, $toolsTarget, $commonStartup)) {
     if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
 }
 Copy-Item -LiteralPath (Join-Path $payload 'Enable-LogMachine.ps1') -Destination (Join-Path $staging 'Enable-LogMachine.ps1') -Force
+foreach ($customizationFile in @('Invoke-MemLabsCustomization.ps1', 'Optimize-Defender.ps1', 'Set-MemLabsMachineSettings.ps1', 'Set-MemLabsUserShell.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $payload $customizationFile) -Destination (Join-Path $staging $customizationFile) -Force
+}
 Copy-Item -LiteralPath (Join-Path $payload 'bginfo\bginfo.exe') -Destination (Join-Path $bgInfoTarget 'bginfo.exe') -Force
 Copy-Item -LiteralPath (Join-Path $payload 'bginfo\CLIENT.bgi') -Destination (Join-Path $bgInfoTarget 'CLIENT.bgi') -Force
 Copy-Item -LiteralPath (Join-Path $payload 'bginfo\bginfo_CLIENT.lnk') -Destination (Join-Path $bgInfoTarget 'bginfo_CLIENT.lnk') -Force
@@ -522,13 +618,22 @@ $diskInitSource = Join-Path $payload 'Initialize-OsdDataDisks.ps1'
 $diskConfigSource = Join-Path $payload 'DiskConfig.json'
 $diskInitTarget = Join-Path $staging 'Initialize-OsdDataDisks.ps1'
 Copy-Item -LiteralPath $diskInitSource -Destination $diskInitTarget -Force
-. $diskInitTarget
+$diskInitText = [IO.File]::ReadAllText($diskInitTarget).TrimStart([char]0xFEFF)
+. ([scriptblock]::Create($diskInitText))
 $diskConfig = Get-Content -LiteralPath $diskConfigSource -Raw | ConvertFrom-Json
 $currentDiskConfig = @($diskConfig.Clients | Where-Object { $_.ComputerName -eq $env:COMPUTERNAME })
 if ($currentDiskConfig.Count -ne 1) { throw "Disk configuration has $($currentDiskConfig.Count) entries for '$env:COMPUTERNAME'; expected one." }
 $diskResults = @(Initialize-MemLabsOsdDataDisks -Entries @($currentDiskConfig[0].Disks))
 $diskResults | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'DiskState.json') -Encoding UTF8
 Copy-Item -LiteralPath $diskConfigSource -Destination (Join-Path $root 'DiskConfig.json') -Force
+
+$runnerPath = Join-Path $staging 'Invoke-MemLabsCustomization.ps1'
+$runnerText = [IO.File]::ReadAllText($runnerPath).TrimStart([char]0xFEFF)
+$customizationResult = & ([scriptblock]::Create($runnerText)) `
+    -Name @('DefenderTuning', 'WindowsMachine', 'WindowsUserRegistration') -RootPath $staging -ContinueOnError
+if (-not $customizationResult.Success) {
+    throw "$($customizationResult.Message): $(@($customizationResult.Errors) -join '; ')"
+}
 
 $shortcutScript = Join-Path $staging 'Enable-LogMachine.ps1'
 $savedErrorActionPreference = $ErrorActionPreference
@@ -576,7 +681,7 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Pr
         $manifest = [ordered]@{
             SchemaVersion    = 2
             BootstrapVersion = $bootstrapVersion
-            Purpose          = 'Post-PXE MemLabs core customization: data disks, BGInfo, LogMachine, and desktop shortcuts'
+            Purpose          = 'Post-PXE MemLabs core customization: machine policy, user shell registration, Defender, data disks, BGInfo, LogMachine, and desktop shortcuts'
         } | ConvertTo-Json
         [IO.File]::WriteAllText((Join-Path $SourceRoot 'Install.ps1'), $installScript, (New-Object Text.UTF8Encoding($true)))
         [IO.File]::WriteAllText((Join-Path $SourceRoot 'Manifest.json'), $manifest, (New-Object Text.UTF8Encoding($true)))
@@ -586,6 +691,10 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Pr
 `$required = @(
     `$marker,
     'C:\staging\Enable-LogMachine.ps1',
+    'C:\staging\Invoke-MemLabsCustomization.ps1',
+    'C:\staging\Optimize-Defender.ps1',
+    'C:\staging\Set-MemLabsMachineSettings.ps1',
+    'C:\staging\Set-MemLabsUserShell.ps1',
     'C:\staging\bginfo\bginfo.exe',
     'C:\staging\bginfo\CLIENT.bgi',
     'C:\staging\Initialize-OsdDataDisks.ps1',
@@ -597,7 +706,7 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Pr
 )
 `$diskOk = `$false
 try {
-    `$diskConfig = Get-Content -LiteralPath 'C:\ProgramData\MemLabs\OSDBootstrap\DiskConfig.json' -Raw | ConvertFrom-Json
+    `$diskConfig = Get-Content -LiteralPath 'C:\ProgramData\MemLabs\OSDBootstrap\DiskConfig.json' -Raw -ErrorAction Stop | ConvertFrom-Json
     `$current = @(`$diskConfig.Clients | Where-Object { `$_.ComputerName -eq `$env:COMPUTERNAME })
     if (`$current.Count -eq 1) {
         `$badDisks = @()
@@ -615,7 +724,14 @@ try {
     }
 }
 catch { `$diskOk = `$false }
-if (`$diskOk -and (@(`$required | Where-Object { -not (Test-Path -LiteralPath `$_) }).Count -eq 0) -and
+`$machineOk = `$false
+`$userRegistrationOk = `$false
+try { `$machineOk = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' -ErrorAction Stop).DisableWindowsConsumerFeatures -eq 1 } catch { }
+try { `$userRegistrationOk = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{9EA95B85-EEB7-4A88-AE03-1C377BBFD411}' -ErrorAction Stop).Version -eq '1,0,0,0' } catch { }
+`$defenderPreference = Get-MpPreference -ErrorAction SilentlyContinue
+`$defenderOk = `$defenderPreference -and `$defenderPreference.ScanAvgCPULoadFactor -eq 10
+if (`$diskOk -and `$machineOk -and `$userRegistrationOk -and `$defenderOk -and
+    (@(`$required | Where-Object { -not (Test-Path -LiteralPath `$_) }).Count -eq 0) -and
     ((Get-Content -LiteralPath `$marker -Raw).Trim() -eq '$bootstrapVersion') -and
     (Get-ScheduledTask -TaskName 'EnableLogMachine' -ErrorAction SilentlyContinue)) {
     Write-Output 'Installed'
@@ -2685,11 +2801,15 @@ if ($licensed) { Write-Output 'Activated' }
     $siteTaskSequencesForNaming = @(Get-CMTaskSequence -Fast | Where-Object {
             $_.Name -like 'MEMLABS-*' -and "$($_.PackageID)" -like "$SiteCode*"
         })
+    $osdClientsForNaming = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })
+    if (-not (Sync-MemLabsOsdTaskSequenceDeployments -OsdClients $osdClientsForNaming `
+            -TaskSequences $siteTaskSequencesForNaming -StatusTag $Tag)) {
+        return
+    }
     if ($siteTaskSequencesForNaming.Count -gt 0 -and
         -not (Sync-MemLabsBareOsdTaskSequenceShape -TaskSequences $siteTaskSequencesForNaming -StatusTag $Tag)) {
         return
     }
-    $osdClientsForNaming = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })
     if ($siteTaskSequencesForNaming.Count -gt 0 -and
         -not (Sync-MemLabsOsdComputerNameSteps -TaskSequences $siteTaskSequencesForNaming -OsdClients $osdClientsForNaming -StatusTag $Tag)) {
         return
@@ -4335,6 +4455,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         $amEdits = @(
             @{ Label = 'real-time protection off'; Args = @{ RealTimeProtectionOn = $false } }
             @{ Label = 'scan scope reduced'; Args = @{ ScanArchive = $false; ScanEmail = $false; ScanNetworkDrive = $false; ScanRemovableStorage = $false } }
+            @{ Label = 'scheduled scan CPU limit seeded'; Args = @{ EnableScheduledScan = $true; LimitCpuUsage = 10 } }
             @{ Label = 'scheduled scan off'; Args = @{ EnableScheduledScan = $false } }
             @{
                 Label = 'exclusions'
@@ -4368,6 +4489,22 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             catch {
                 Write-DscStatus "$Tag WARNING: Default antimalware policy '$($amEdit.Label)' failed: $($_.Exception.Message)"
             }
+        }
+        try {
+            $rawAntimalwarePolicy = Get-WmiObject -Namespace "root\sms\site_$SiteCode" `
+                -Class SMS_AntimalwareSettingsDefault -ErrorAction Stop | Select-Object -First 1
+            $rawAntimalwarePolicy.Get()
+            $rawAntimalwareConfig = $rawAntimalwarePolicy.AgentConfiguration
+            if (-not $rawAntimalwareConfig -or $rawAntimalwareConfig.EnableScheduledScan -or
+                [int]$rawAntimalwareConfig.LimitCPUUsage -ne 10) {
+                Write-DscStatus "$Tag Default antimalware policy verification failed: EnableScheduledScan=$($rawAntimalwareConfig.EnableScheduledScan), LimitCPUUsage=$($rawAntimalwareConfig.LimitCPUUsage)." -Failure
+                return
+            }
+            Write-DscStatus "$Tag Default antimalware policy verified: scheduled scan off, CPU limit 10"
+        }
+        catch {
+            Write-DscStatus "$Tag Default antimalware policy verification failed: $($_.Exception.Message)" -Failure
+            return
         }
     }
     } # end top-level client settings
@@ -4472,7 +4609,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
 
         # Get the language setting
-        $lang = $deployConfig.vmOptions.locale
+        $lang = if ($ThisVM.locale) { $ThisVM.locale } elseif ($deployConfig.domainDefaults.DefaultLocale) { $deployConfig.domainDefaults.DefaultLocale } elseif ($deployConfig.vmOptions.locale) { $deployConfig.vmOptions.locale } else { 'en-US' }
 
         # Define language mappings
         switch ($lang) {

@@ -335,9 +335,11 @@ function Resolve-TestConfigNetworks {
     foreach ($sw in @(Get-VMSwitch -SwitchType Internal -ErrorAction SilentlyContinue)) {
         if ($sw.Name -match '^\d{1,3}(\.\d{1,3}){3}$') { $hostSubnets[$sw.Name] = "$($sw.Notes)" }
     }
-    foreach ($scope in @(Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)) {
-        $scopeId = "$($scope.ScopeId)"
-        if ($scopeId -and -not $hostSubnets.ContainsKey($scopeId)) { $hostSubnets[$scopeId] = '' }
+    if (-not (Test-MemLabsUsesDhcpAppliance)) {
+        foreach ($scope in @(Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)) {
+            $scopeId = "$($scope.ScopeId)"
+            if ($scopeId -and -not $hostSubnets.ContainsKey($scopeId)) { $hostSubnets[$scopeId] = '' }
+        }
     }
 
     $networkUses = @([PSCustomObject]@{ Source = $defaultNetwork; VM = $null })

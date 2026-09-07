@@ -1664,6 +1664,15 @@ function Set-OsdClientMacAddresses {
     }
 }
 
+function Test-OsdClientCreatedThisRun {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VMName
+    )
+    return [bool]($global:OsdClientsCreatedThisRun -and $VMName -in @($global:OsdClientsCreatedThisRun))
+}
+
 
 function Start-PhaseJobs {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '',
@@ -2366,6 +2375,23 @@ DROP TABLE #memlabs_idxprobe;
     $maxRoleNameLength = 0
     $existingVMs = Get-List -Type VM
 
+    # Phase 0 runs before every deployment and clears any set left by an earlier
+    # New-Lab call in the same PowerShell process. Phase 1 captures its OSD work
+    # before creating VMs; only these fresh blank placeholders may be powered off
+    # by later phases while PXE policy is still being authored.
+    if ($Phase -eq 0) {
+        $global:OsdClientsCreatedThisRun = @()
+    }
+    elseif ($Phase -eq 1) {
+        $freshOsdClients = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'OSDClient' -and -not $_.hidden -and $_.vmName -notin $existingVMs.vmName
+            } | ForEach-Object { $_.vmName })
+        $global:OsdClientsCreatedThisRun = @(@($global:OsdClientsCreatedThisRun) + $freshOsdClients | Select-Object -Unique)
+        if ($global:OsdClientsCreatedThisRun.Count -gt 0) {
+            Write-Log "[Phase 1] Fresh OSD placeholders to keep off until PXE policy is ready: $($global:OsdClientsCreatedThisRun -join ', ')" -LogOnly
+        }
+    }
+
     # Phase 10/11: start all required VMs in parallel before the per-VM job
     # dispatch loop.  Phases 2-9 use Invoke-SmartStartVMs via ConfigurationData,
     # but Phase 10/11 skip that path.  Doing it here in bulk avoids sequential
@@ -2876,10 +2902,19 @@ DROP TABLE #memlabs_idxprobe;
             continue
         }
 
-        # Skip everything for OSDClient, nothing for us to do
+        # OSD clients have no MemLabs phase work after VM creation. Keep only a
+        # blank target created by this run's Phase 1 off until PXE policy is
+        # ready; never change the power state of a pre-existing OSD client.
         if ($Phase -gt 1 -and $currentItem.role -eq "OSDClient") {
-            stop-vm2 -Name $currentItem.vmName -TurnOff
-            continue
+            if (Test-OsdClientCreatedThisRun -VMName $currentItem.vmName) {
+                Stop-VM2 -Name $currentItem.vmName -TurnOff
+                continue
+            }
+            if ($Phase -ne 10) {
+                Write-Log "[Phase $Phase] $($currentItem.vmName): pre-existing OSDClient; preserving its power state" -LogOnly
+                continue
+            }
+            Write-Log "[Phase 10] $($currentItem.vmName): installed OSDClient; running portable maintenance customizations" -LogOnly
         }
 
         # Linux VMs have no Windows DSC config. Phase 2 has a dedicated
@@ -3005,7 +3040,7 @@ DROP TABLE #memlabs_idxprobe;
                 }
             }
             elseif ($Phase -eq 10) {         
-                if ($currentItem.Role -in @("OSDClient", "AADClient")) {
+                if ($currentItem.Role -in @("AADClient")) {
                     continue
                 }
                 if ($phase10SkipSet.ContainsKey($currentItem.vmName)) {

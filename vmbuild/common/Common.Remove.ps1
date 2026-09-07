@@ -312,7 +312,7 @@ function Remove-VirtualMachine {
     Write-Log "VM '$VmName' exists. Removing." -SubActivity
 
     # -- DHCP cleanup --
-    if ($vmFromList.ClusterIPAddress) {
+    if (-not (Test-MemLabsUsesDhcpAppliance) -and $vmFromList.ClusterIPAddress) {
         # Cluster IP is on the domain subnet — remove its DHCP exclusion range.
         $clusterScopeId = if ($vmFromList.network) { $vmFromList.network } else { $null }
         if ($clusterScopeId) {
@@ -322,7 +322,7 @@ function Remove-VirtualMachine {
                 -ErrorAction SilentlyContinue -WhatIf:$WhatIf
         }
     }
-    if ($vmFromList.AGIPAddress) {
+    if (-not (Test-MemLabsUsesDhcpAppliance) -and $vmFromList.AGIPAddress) {
         # AG listener IP is on the domain subnet, not the cluster subnet.
         $agScopeId = if ($vmFromList.network) { $vmFromList.network } else { $null }
         if ($agScopeId) {
@@ -542,6 +542,11 @@ function Remove-DhcpScope {
         return
     }
 
+    if (Test-MemLabsUsesDhcpAppliance) {
+        Write-Log "Remove-DhcpScope: appliance scope '$ScopeId' is derived from live VM notes and will be removed during reconciliation." -LogOnly
+        return
+    }
+
     $dhcpScope = Get-DhcpServerv4Scope -ScopeID $ScopeId -ErrorAction SilentlyContinue
     if ($dhcpScope) {
         Write-Log "DHCP Scope '$($dhcpScope.Name)' exists. Removing." -SubActivity
@@ -596,9 +601,11 @@ function Remove-OrphanedNetNats {
             Remove-NetNat -Name $nat.Name -Confirm:$false -ErrorAction SilentlyContinue
 
             # Also clean up the DHCP scope for this orphan
-            $dhcp = Get-DhcpServerv4Scope -ScopeID $nat.Name -ErrorAction SilentlyContinue
-            if ($dhcp) {
-                $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
+            if (-not (Test-MemLabsUsesDhcpAppliance)) {
+                $dhcp = Get-DhcpServerv4Scope -ScopeID $nat.Name -ErrorAction SilentlyContinue
+                if ($dhcp) {
+                    $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
+                }
             }
         }
     }
@@ -684,7 +691,7 @@ function Remove-Orphaned {
 
     $keptScopes = @()
     Write-Log "Detecting orphaned DHCP Scopes" -Activity
-    $scopes = Get-DhcpServerv4Scope
+    $scopes = $(if (Test-MemLabsUsesDhcpAppliance) { @() } else { @(Get-DhcpServerv4Scope) })
     foreach ($scope in $scopes) {
         $scopeId = $scope.ScopeId.ToString() # This requires us to replace "Internet" with subnet
         if ($vmNetworksInUse2 -notcontains $scopeId) {
@@ -1025,6 +1032,10 @@ function Remove-Domain {
     # networking, and a subset removal that happened to include the DC used to
     # delete the switches out from under the VMs that were staying.
     if ($all) {
+        if (-not $WhatIf.IsPresent -and (Test-MemLabsUsesDhcpAppliance)) {
+            Get-List -FlushCache | Out-Null
+            $null = Sync-MemLabsDhcpAppliance
+        }
         if ($scopesToDelete) {
             Write-Log "Removing ALL DHCP Scopes for '$DomainName'" -Activity
             foreach ($scope in $scopesToDelete) {
@@ -1104,6 +1115,10 @@ function Remove-All {
     }
 
     if ($scopesToDelete) {
+        if (-not $WhatIf.IsPresent -and (Test-MemLabsUsesDhcpAppliance)) {
+            Get-List -FlushCache | Out-Null
+            $null = Sync-MemLabsDhcpAppliance
+        }
         Write-Log "Removing ALL DHCP Scopes" -Activity
         foreach ($scope in $scopesToDelete) {
             Remove-DhcpScope -ScopeId $scope -WhatIf:$WhatIf

@@ -374,36 +374,205 @@ function select-timezone {
     }
     return $timezone
 }
+function Get-LocaleProfiles {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string[]] $Path
+    )
+
+    $profiles = [ordered]@{}
+    foreach ($profilePath in @($Path | Where-Object { $_ } | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $profilePath)) { continue }
+
+        try {
+            $profileData = Get-Content -LiteralPath $profilePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            foreach ($profileProperty in @($profileData.psobject.Properties)) {
+                $profiles[$profileProperty.Name] = $profileProperty.Value
+            }
+        }
+        catch {
+            Write-Log "Could not load locale profiles from '$profilePath': $($_.Exception.Message)" -Warning
+        }
+    }
+
+    return $profiles
+}
+
+function Set-DefaultLocaleForVM {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $ConfigToCheck,
+        [Parameter(Mandatory = $true)]
+        [object] $VirtualMachine,
+        [Parameter(Mandatory = $false)]
+        [string] $CatalogPath = (Join-Path $PSScriptRoot "LocaleCatalog.json"),
+        [Parameter(Mandatory = $false)]
+        [switch] $RequireAvailable
+    )
+
+    if ($VirtualMachine.osFamily -eq 'Linux' -or "$($VirtualMachine.operatingSystem)" -like 'Ubuntu*') { return }
+
+    $locale = if ($VirtualMachine.locale) {
+        $VirtualMachine.locale
+    }
+    elseif ($ConfigToCheck.domainDefaults.DefaultLocale) {
+        $ConfigToCheck.domainDefaults.DefaultLocale
+    }
+    elseif ($ConfigToCheck.vmOptions.locale) {
+        $ConfigToCheck.vmOptions.locale
+    }
+    else {
+        'en-US'
+    }
+
+    $legacyPath = Join-Path $Common.ConfigPath "_localeConfig.json"
+    $localeProfiles = Get-LocaleProfiles -Path @($CatalogPath, $legacyPath)
+    $localeDefinition = $localeProfiles[$locale]
+    if (-not $localeDefinition -and $ConfigToCheck.vmOptions.locale -eq $locale) {
+        $localeDefinition = $ConfigToCheck.vmOptions.localeSettings
+    }
+    if (-not $localeDefinition -and $locale -ne 'en-US') {
+        Write-Log "Locale '$locale' is not defined in the locale catalog; using en-US for $($VirtualMachine.vmName)." -Warning
+        $locale = 'en-US'
+        $localeDefinition = $localeProfiles[$locale]
+    }
+
+    $acquisitionMethod = Get-LocaleAcquisitionMethod -Profile $localeDefinition -OperatingSystem $VirtualMachine.operatingSystem -ConfigPath $Common.ConfigPath
+    if ($RequireAvailable -and -not $acquisitionMethod) {
+        Write-Log "Locale '$locale' is not available for '$($VirtualMachine.operatingSystem)'; using en-US for $($VirtualMachine.vmName)." -Warning
+        $locale = 'en-US'
+        $localeDefinition = $localeProfiles[$locale]
+        $acquisitionMethod = 'Included'
+    }
+
+    $VirtualMachine | Add-Member -MemberType NoteProperty -Name 'locale' -Value $locale -Force
+    if ($localeDefinition) {
+        $VirtualMachine | Add-Member -MemberType NoteProperty -Name 'localeSettings' -Value $localeDefinition -Force
+    }
+    if ($acquisitionMethod) {
+        $VirtualMachine | Add-Member -MemberType NoteProperty -Name 'localeAcquisition' -Value $acquisitionMethod -Force
+    }
+}
+
+function Get-LocaleAcquisitionMethod {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [object] $Profile,
+        [Parameter(Mandatory = $true)]
+        [string] $OperatingSystem,
+        [Parameter(Mandatory = $true)]
+        [string] $ConfigPath,
+        [Parameter(Mandatory = $false)]
+        [bool] $OfflineMode = [bool]$Common.OfflineMode
+    )
+
+    if (-not $Profile) { return $null }
+    if ($Profile.LanguageTag -eq 'en-US') { return 'Included' }
+
+    $mediaPath = Join-Path (Join-Path $ConfigPath 'locales') $OperatingSystem
+    if ($Profile.LanguageCapabilities) {
+        $mediaFiles = @(Get-LocaleMediaFiles -Path $mediaPath -LocaleDefinition $Profile)
+        if (Test-LocaleMediaFiles -Files $mediaFiles -LocaleDefinition $Profile) { return 'Media' }
+    }
+    elseif (Test-Path -Path (Join-Path $mediaPath '*.cab')) {
+        return 'Media'
+    }
+
+    if (-not $OfflineMode) {
+        foreach ($pattern in @($Profile.WindowsUpdateOperatingSystems)) {
+            if ($OperatingSystem -like $pattern) { return 'WindowsUpdate' }
+        }
+        if (Get-LocaleMediaSource -LocaleDefinition $Profile -OperatingSystem $OperatingSystem) {
+            return 'MicrosoftMedia'
+        }
+    }
+
+    return $null
+}
+
+function Initialize-PerVmLocales {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $ConfigToCheck,
+        [Parameter(Mandatory = $false)]
+        [string] $CatalogPath = (Join-Path $PSScriptRoot "LocaleCatalog.json")
+    )
+
+    if (-not $ConfigToCheck.domainDefaults) {
+        $ConfigToCheck | Add-Member -MemberType NoteProperty -Name 'domainDefaults' -Value ([pscustomobject]@{}) -Force
+    }
+    if (-not $ConfigToCheck.domainDefaults.DefaultLocale) {
+        $defaultLocale = if ($ConfigToCheck.vmOptions.locale) { $ConfigToCheck.vmOptions.locale } else { 'en-US' }
+        $ConfigToCheck.domainDefaults | Add-Member -MemberType NoteProperty -Name 'DefaultLocale' -Value $defaultLocale -Force
+    }
+
+    foreach ($virtualMachine in @($ConfigToCheck.virtualMachines | Where-Object { $null -ne $_ })) {
+        Set-DefaultLocaleForVM -ConfigToCheck $ConfigToCheck -VirtualMachine $virtualMachine -CatalogPath $CatalogPath
+    }
+
+    foreach ($legacyProperty in @('locale', 'localeSettings')) {
+        if ($ConfigToCheck.vmOptions.psobject.Properties[$legacyProperty]) {
+            $ConfigToCheck.vmOptions.psobject.Properties.Remove($legacyProperty)
+        }
+    }
+}
+
 function Select-Locale {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
-        [Object] $ConfigToCheck = $global:config
+        [Object] $ConfigToCheck = $global:config,
+        [Parameter(Mandatory = $false)]
+        [Object] $Target,
+        [Parameter(Mandatory = $false)]
+        [string] $LocalePropertyName = 'locale',
+        [Parameter(Mandatory = $false)]
+        [string] $ProfilePropertyName = 'localeSettings',
+        [Parameter(Mandatory = $false)]
+        [string] $CatalogPath = (Join-Path $PSScriptRoot "LocaleCatalog.json")
     )
 
-    # default locale is en-US
-    $commonLocales = @()
-    $commonLocales += "en-US"
-
-    # add selection if locale configuration file exists
-    $localeConfigPath = Join-Path $Common.ConfigPath "_localeConfig.json"
-    if (Test-Path $localeConfigPath) {
-        try {
-            $localeConfig = Get-Content -Path $localeConfigPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            $localeConfig.psobject.Properties | ForEach-Object {
-                $commonLocales += $_.Name
-            }
-        }
-        catch {
-            Write-Log "Something wrong with _localeConfig.json. Only en-US is available." -Warning
+    if (-not $Target) { $Target = $ConfigToCheck.vmOptions }
+    $legacyPath = Join-Path $Common.ConfigPath "_localeConfig.json"
+    $localeProfiles = Get-LocaleProfiles -Path @($CatalogPath, $legacyPath)
+    $commonLocales = @('en-US')
+    foreach ($localeName in @($localeProfiles.Keys)) {
+        if (-not $Target.operatingSystem -or (Get-LocaleAcquisitionMethod -Profile $localeProfiles[$localeName] -OperatingSystem $Target.operatingSystem -ConfigPath $Common.ConfigPath)) {
+            $commonLocales += $localeName
         }
     }
+    $currentLocale = $Target."$LocalePropertyName"
+    if ($currentLocale) { $commonLocales += $currentLocale }
+    $commonLocales = @($commonLocales | Select-Object -Unique)
 
-    $commonLanguages = $commonLanguages | Select-Object -Unique
-    $locale = Get-Menu2 -MenuName "Locale Menu using _localeConfig.json"  -Prompt "Select Locale" -OptionArray $commonLocales -CurrentValue $($ConfigToCheck.vmOptions.locale)
+    if (-not $currentLocale) { $currentLocale = 'en-US' }
+    $locale = Get-Menu2 -MenuName "Locale Selection" -Prompt "Select Locale" -OptionArray $commonLocales -CurrentValue $currentLocale
     if ($null -eq $locale -or $locale -eq "ESCAPE") {
-        $locale = $($ConfigToCheck.vmOptions.locale)
+        $locale = $currentLocale
     }
+
+    $Target | Add-Member -MemberType NoteProperty -Name $LocalePropertyName -Value $locale -Force
+    $selectedProfile = $localeProfiles[$locale]
+    if ($ProfilePropertyName -and $selectedProfile) {
+        $Target | Add-Member -MemberType NoteProperty -Name $ProfilePropertyName -Value $selectedProfile -Force
+    }
+    elseif ($ProfilePropertyName -and $Target.psobject.Properties[$ProfilePropertyName]) {
+        $Target.psobject.Properties.Remove($ProfilePropertyName)
+    }
+    if ($Target.operatingSystem) {
+        $acquisitionMethod = Get-LocaleAcquisitionMethod -Profile $selectedProfile -OperatingSystem $Target.operatingSystem -ConfigPath $Common.ConfigPath
+        if ($acquisitionMethod) {
+            $Target | Add-Member -MemberType NoteProperty -Name 'localeAcquisition' -Value $acquisitionMethod -Force
+        }
+        elseif ($Target.psobject.Properties['localeAcquisition']) {
+            $Target.psobject.Properties.Remove('localeAcquisition')
+        }
+    }
+
     return $locale
 }
 function select-NewDomainName {
@@ -568,6 +737,7 @@ function Get-NewDomainConfigHelp {
         "Network" { "Select the Network VMs will join.  Only /24 ranges are acceptable. " }
         "DefaultServerOS" { "When adding new server VMs, they will default to this OS. Can be changed on individual VMs." }
         "DefaultClientOS" { "When adding new client VMs, they will default to this OS. Can be changed on individual VMs." }
+        "DefaultLocale" { "Default language for new Windows VMs. Each VM can override this setting." }
         "DefaultSqlVersion" { "When adding new SQL instances, they will default to this version. Can be changed on individual VMs." }
         "UseDynamicMemory" { "Enable Dynamic Memory on each new VM.  Can be turned off in the settings for each VM, using dynamicMinRam" }
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
@@ -602,6 +772,7 @@ function Select-NewDomainConfig {
         Network             = ($subnetList | Select-Object -First 1)
         DefaultClientOS     = "Windows 11 Latest"
         DefaultServerOS     = "Server 2022"
+        DefaultLocale       = "en-US"
         DefaultSqlVersion   = "Sql Server 2022"
         UseDynamicMemory    = $true
         IncludeClients              = $true

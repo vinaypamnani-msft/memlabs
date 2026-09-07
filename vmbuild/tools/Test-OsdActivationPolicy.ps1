@@ -64,7 +64,8 @@ function New-CMApplicationDeployment {
 
 $perfloadingPath = Join-Path $RootPath 'DSC\phases\perfloading.ps1'
 $sharedPath = Join-Path $RootPath 'DSC\phases\WindowsActivation.Script.ps1'
-. $sharedPath
+$sharedText = [IO.File]::ReadAllText($sharedPath).TrimStart([char]0xFEFF)
+. ([scriptblock]::Create($sharedText))
 . (Import-TestFunction $perfloadingPath 'Sync-MemLabsOsdActivationPolicy')
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 
@@ -87,6 +88,8 @@ try {
     Assert-Equal $true ($installText.Contains("`$ErrorActionPreference = 'Continue'")) 'activation preserves Phase 10 native-command error semantics'
     $fixText = Get-Content (Join-Path $RootPath 'Fixes\Fix_ActivateWindows.ps1') -Raw
     Assert-Equal $true ($fixText.Contains('$Fix_ActivateWindows = $MemLabsWindowsActivationScript')) 'Phase 10 binds the same shared scriptblock'
+    $perfloadingText = Get-Content $perfloadingPath -Raw
+    Assert-Equal $true ($perfloadingText.Contains('TrimStart([char]0xFEFF)')) 'perfloading tolerates duplicate BOMs in the shared activation script'
 }
 finally {
     Remove-Item -LiteralPath $sourceRoot -Recurse -Force -ErrorAction SilentlyContinue

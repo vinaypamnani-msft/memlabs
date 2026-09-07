@@ -307,17 +307,25 @@ if ($s) {
     Set-Service  'SysMain' -StartupType Disabled -ErrorAction SilentlyContinue
 }
 
-# Microsoft Defender: MsMpEng.exe real-time scanning of the ConfigMgr content
-# library, SQL data files and the C:\staging DSC tree is the top CPU consumer
-# on a lab VM. Fix-DefenderTuning re-applies this on existing VMs.
-Update-Log "Apply Defender exclusions and scan throttling"
-$defenderScript = "C:\staging\Optimize-Defender.ps1"
-if (Test-Path $defenderScript) {
-    $defenderResult = & $defenderScript
-    Update-Log "     $($defenderResult.Message)"
+# Apply the same portable implementation used by OSD policy and Phase 10.
+# The existing settings above remain as compatibility coverage while their
+# remaining base-image-only values are migrated incrementally.
+Update-Log "Apply shared Defender, machine, and user customizations"
+$customizationRunner = 'C:\staging\Invoke-MemLabsCustomization.ps1'
+if (Test-Path -LiteralPath $customizationRunner -PathType Leaf) {
+    $customizationResult = & $customizationRunner `
+        -Name DefenderTuning, WindowsMachine, WindowsUserRegistration, WindowsUser `
+        -RootPath (Split-Path $customizationRunner -Parent) -ContinueOnError
+    Update-Log "     $($customizationResult.Message)"
+    foreach ($customizationError in @($customizationResult.Errors)) {
+        Update-Log "     $customizationError"
+    }
+    if (-not $customizationResult.Success) {
+        throw "Shared Windows customization failed: $($customizationResult.Errors -join '; ')"
+    }
 }
 else {
-    Update-Log "     $defenderScript not found; skipped."
+    throw "Required shared customization runner is missing: $customizationRunner"
 }
 
 Update-Log "Add tools paths to PATH variable"

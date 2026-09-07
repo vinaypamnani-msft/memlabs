@@ -2271,6 +2271,19 @@ function Test-Configuration {
         # and Phase 11 cannot disagree about whether the path is direct or relayed.
         $osdClientVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "OSDClient" })
         if ($osdClientVMs.Count -gt 0) {
+            $validOsdTaskSequences = @(
+                'MEMLABS-w11-Install OS image'
+                'MEMLABS-w10-Install OS image'
+            )
+            foreach ($osdClient in $osdClientVMs) {
+                $selectedTaskSequence = "$($osdClient.osdTaskSequence)".Trim()
+                if ($selectedTaskSequence -and $selectedTaskSequence -notin $validOsdTaskSequences) {
+                    Add-ValidationMessage -Message "OSDClient Validation: [$($osdClient.vmName)] selects unsupported task sequence [$selectedTaskSequence]. Choose MEMLABS-w11-Install OS image, MEMLABS-w10-Install OS image, or leave it empty to prompt at PXE." -ReturnObject $return -Failure
+                }
+                elseif ($selectedTaskSequence -and (-not $deployConfig.cmOptions -or -not $deployConfig.cmOptions.PrePopulateObjects)) {
+                    Add-ValidationMessage -Message "OSDClient Validation: [$($osdClient.vmName)] selects task sequence [$selectedTaskSequence], but cmOptions.PrePopulateObjects is not enabled, so MemLabs cannot author and deploy it." -ReturnObject $return -Failure
+                }
+            }
             $osdPaths = @(Get-OsdPxePaths -Config $deployConfig)
             foreach ($path in $osdPaths) {
                 if ($path.mode -eq 'Missing') {

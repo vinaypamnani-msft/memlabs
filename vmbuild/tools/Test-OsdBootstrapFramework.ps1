@@ -169,6 +169,10 @@ New-Item -ItemType Directory -Path (Join-Path $payloadSourceRoot 'bginfo') -Forc
 New-Item -ItemType Directory -Path (Join-Path $payloadSourceRoot 'DSC\phases') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $toolsRoot 'LogMachine') -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $payloadSourceRoot 'Enable-LogMachine.ps1'), '# test')
+$sharedPayloadRoot = Join-Path $RootPath 'baseimagestaging\filesToInject\staging'
+foreach ($name in @('Invoke-MemLabsCustomization.ps1', 'Optimize-Defender.ps1', 'Set-MemLabsMachineSettings.ps1', 'Set-MemLabsUserShell.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $sharedPayloadRoot $name) -Destination (Join-Path $payloadSourceRoot $name) -Force
+}
 foreach ($name in @('CLIENT.bgi', 'bginfo_CLIENT.lnk', 'bginfo.exe')) {
     [IO.File]::WriteAllText((Join-Path (Join-Path $payloadSourceRoot 'bginfo') $name), 'test')
 }
@@ -199,6 +203,10 @@ try {
     Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Install.ps1')) 'versioned install payload is staged'
     Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Manifest.json')) 'framework manifest is staged'
     Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\Enable-LogMachine.ps1')) 'desktop shortcut script is staged'
+    Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\Invoke-MemLabsCustomization.ps1')) 'shared customization runner is staged'
+    Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\Optimize-Defender.ps1')) 'shared Defender implementation is staged'
+    Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\Set-MemLabsMachineSettings.ps1')) 'shared machine settings are staged'
+    Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\Set-MemLabsUserShell.ps1')) 'shared user shell settings are staged'
     Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\bginfo\bginfo.exe')) 'BGInfo executable is staged'
     Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\LogMachine\LogMachine.exe')) 'LogMachine is staged'
     Assert-Equal $true (Test-Path (Join-Path $sourceRoot 'Payload\Initialize-OsdDataDisks.ps1')) 'data-disk initializer is staged'
@@ -213,8 +221,10 @@ try {
     Assert-Equal $true ($coreInstallText.Contains("`$ErrorActionPreference = 'Continue'")) 'desktop script runs without inherited Stop semantics'
     Assert-Equal $true ($coreInstallText.Contains('Required desktop shortcut was not created')) 'desktop policy validates required shortcut postconditions'
     Assert-Equal $true ($coreInstallText.Contains('Initialize-MemLabsOsdDataDisks')) 'installer invokes data-disk initializer before marking compliance'
+    Assert-Equal $true ($coreInstallText.Contains('TrimStart([char]0xFEFF)')) 'installer tolerates duplicate BOMs in the staged disk initializer'
+    Assert-Equal $true ($coreInstallText.Contains("'DefenderTuning', 'WindowsMachine', 'WindowsUserRegistration'")) 'installer invokes the shared OSD customization profile'
     Assert-Equal 'MEMLABS-OSD Bootstrap' $script:Application.Name 'OSD core application is created'
-    Assert-Equal $true ($script:Application.SoftwareVersion -match '^3\.[0-9A-F]{12}$') 'OSD core application uses a v3 content fingerprint version'
+    Assert-Equal $true ($script:Application.SoftwareVersion -match '^5\.[0-9A-F]{12}$') 'OSD core application uses a v5 content fingerprint version'
     Assert-Equal 'MEMLABS-OSD Bootstrap v3' $script:DeploymentTypes[0].LocalizedDisplayName 'versioned core deployment type is created'
     Assert-Equal 'InstallForSystem' $script:DeploymentTypes[0].InstallationBehaviorType 'deployment type installs as system'
     Assert-Equal 'WhetherOrNotUserLoggedOn' $script:DeploymentTypes[0].LogonRequirementType 'deployment type does not require a user session'
@@ -260,6 +270,9 @@ try {
     Assert-Equal $true ($script:Application.SoftwareVersion -ne $originalVersion) 'disk configuration change produces a new application version'
     Assert-Equal 'MEMLABS-OSD Bootstrap v3' $script:DeploymentTypes[0].LocalizedDisplayName 'content-only v3 revision preserves deployment type name'
     Assert-Equal $true ($script:DeploymentTypes[0].ScriptText.Contains('FileSystemLabel')) 'detection verifies configured filesystem labels'
+    Assert-Equal $true ($script:DeploymentTypes[0].ScriptText.Contains('DisableWindowsConsumerFeatures')) 'detection verifies shared machine settings'
+    Assert-Equal $true ($script:DeploymentTypes[0].ScriptText.Contains('{9EA95B85-EEB7-4A88-AE03-1C377BBFD411}')) 'detection verifies Active Setup registration'
+    Assert-Equal $true ($script:DeploymentTypes[0].ScriptText.Contains('ScanAvgCPULoadFactor')) 'detection verifies shared Defender tuning'
 
     $script:Collection = $null
     $script:Rules = @()
@@ -283,9 +296,14 @@ finally {
 $source = Get-Content $perfloadingPath -Raw
 Assert-Equal $true ($source.Contains('Sync-MemLabsOsdBootstrapFramework')) 'perfloading contains bootstrap reconciler'
 Assert-Equal $true ($source.Contains("`$bootstrapPayloadSource = 'C:\staging'")) 'runtime bootstrap assets come from injected C:\staging payload'
+$scriptBlocksSource = Get-Content (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1') -Raw
+Assert-Equal $true ($scriptBlocksSource.Contains('refreshed shared OSD customization payload')) 'Phase 8 refreshes shared payload on existing site servers'
+Assert-Equal $true ($scriptBlocksSource.Contains('Copy-Item -ToSession $ps -LiteralPath $sharedCustomizationSource')) 'Phase 8 transports shared payload through its established VM session'
 Assert-Equal $true ($source.Contains("Join-Path `$PSScriptRoot 'Initialize-OsdDataDisks.ps1'")) 'disk initializer resolves beside the running DSC phase'
 Assert-Equal $false ($source.Contains('Split-Path (Split-Path $PSScriptRoot -Parent) -Parent')) 'runtime payload root is not inferred by walking up from DSC phase path'
 Assert-Equal $true ($source.Contains('-DeployPurpose Required -UserNotification HideAll')) 'required policy path is present'
+Assert-Equal $true ($source.Contains("Label = 'scheduled scan CPU limit seeded'")) 'ConfigMgr CPU limit is seeded while scheduled scanning is enabled'
+Assert-Equal $true ($source.Contains('[int]$rawAntimalwareConfig.LimitCPUUsage -ne 10')) 'ConfigMgr CPU policy is verified through the hydrated provider object'
 Assert-Equal $false ($source.Contains('Add-CMTaskSequenceStep -Step @($rebootStep, $installStep)')) 'bootstrap is not executed inside the OS deployment task sequence'
 
 if ($script:Failures) { Write-Host "$script:Failures check(s) failed."; exit 1 }

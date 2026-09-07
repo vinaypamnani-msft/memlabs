@@ -113,6 +113,8 @@ Assert-Equal $true ($sequence.Steps[1].Condition.Operands[0].Operands[1].Query -
 $configSource = Get-Content (Join-Path $RootPath 'common\Common.Config.ps1') -Raw
 $addVmSource = Get-Content (Join-Path $RootPath 'common\Common.GenConfig.AddVM.ps1') -Raw
 $validationSource = Get-Content (Join-Path $RootPath 'common\Common.Validation.ps1') -Raw
+$perfloadingSource = Get-Content $perfloadingPath -Raw
+Assert-Equal $true ($perfloadingSource.Contains("DiskConfig.json' -Raw -ErrorAction Stop")) 'bootstrap detection treats a missing pre-install disk manifest as NotInstalled'
 Assert-Equal $true ($configSource.Contains('$vm.role -eq ''OSDClient'' -or')) 'normalization treats OSDClient as client OS for BitLocker'
 Assert-Equal $true ($configSource.Contains('or $vm.role -eq ''OSDClient''')) 'normalization preserves installOffice on OSDClient'
 Assert-Equal $true ($configSource.Contains("$" + "vm.PsObject.Members.Remove('useProxy')")) 'normalization removes dead OSD proxy signal'

@@ -1,13 +1,11 @@
 ﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 function get-VMOptionsSummary {
 
+    Initialize-PerVmLocales -ConfigToCheck $Global:Config
     $options = $Global:Config.vmOptions
     if ($null -eq $options.timeZone) {
         $currentTimeZone = (Get-TimeZone).Id
         $options | Add-Member -MemberType NoteProperty -Name "timeZone" -Value $currentTimeZone -Force
-    }
-    if ($null -eq $options.locale) {
-        $options | Add-Member -MemberType NoteProperty -Name "locale" -Value "en-US" -Force
     }
 
     # Color-coded tokens (Option C: hybrid — labels only where the value is ambiguous)
@@ -15,7 +13,6 @@ function get-VMOptionsSummary {
     #   Domain          -> Gold              (the headline)
     #   Network         -> LightSteelBlue
     #   Admin user      -> Chartreuse
-    #   Locale          -> Plum              (least useful, drops first when truncated)
     #   TZ              -> Plum
     #   Path            -> LightSteelBlue    (last — drops first)
     #   Separator       -> DimGray
@@ -26,7 +23,6 @@ function get-VMOptionsSummary {
         Format-OptionToken -Color "Gold" -Text $options.domainName
         Format-OptionToken -Color "LightSteelBlue" -Text $options.network
         Format-OptionToken -Color "Chartreuse" -Text $options.adminName
-        (Format-OptionToken -Color "DimGray" -Text "Loc ") + (Format-OptionToken -Color "Plum" -Text $options.locale)
         (Format-OptionToken -Color "DimGray" -Text "TZ ") + (Format-OptionToken -Color "Plum" -Text $options.timeZone)
         Format-OptionToken -Color "LightSteelBlue" -Text $options.basePath
     )
@@ -171,6 +167,7 @@ function Get-SortedProperties {
         'network'             = 'Network'
         'DefaultServerOS'     = 'DefaultServerOS'
         'DefaultClientOS'     = 'DefaultClientOS'
+        'DefaultLocale'       = 'DefaultLocale'
         'DefaultSqlVersion'   = 'DefaultSqlVersion'
         'UseDynamicMemory'    = 'UseDynamicMemory'
         'IncludeClients'      = 'IncludeClients'
@@ -213,6 +210,7 @@ function Get-SortedProperties {
         'BitLocker'           = 'BitLocker'
         'InstallSSMS'         = 'InstallSSMS'
         'installOffice'       = 'InstallOffice'
+        'osdTaskSequence'     = 'OSDTaskSequence'
         'pushClient'          = 'pushClient'
         'additionalDisks'     = 'AdditionalDisks'
         'installDP'           = 'InstallDP'

@@ -30,17 +30,132 @@
     if ($AdminUserName -match '\\') { $AdminUserName = ($AdminUserName -split '\\', 2)[1] }
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
-    $l = $ConfigurationData.LocaleSettings
+    $legacyLocaleSettings = $ConfigurationData.LocaleSettings
 
     Node $AllNodes.NodeName
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName }
+        $languageTag = if ($ThisVM.locale) { $ThisVM.locale } elseif ($deployConfig.domainDefaults.DefaultLocale) { $deployConfig.domainDefaults.DefaultLocale } elseif ($deployConfig.vmOptions.locale) { $deployConfig.vmOptions.locale } else { 'en-US' }
+        $l = $ThisVM.localeSettings
+        if (-not $l -and $legacyLocaleSettings.LanguageTag -eq $languageTag) { $l = $legacyLocaleSettings }
+        $localeAcquisition = if ($ThisVM.localeAcquisition) { $ThisVM.localeAcquisition } else { 'Media' }
 
         # Install Language Packs
-        if ($l -and $l.LanguageTag -and $l.LanguageTag -ne "en-US") {
-            LanguagePack InstallLanguagePack {
-                LanguagePackName     = $l.LanguageTag
-                LanguagePackLocation = "C:\LanguagePacks"
+        if ($l -and $languageTag -ne "en-US") {
+            $languageTagForNode = $languageTag
+            $languageDependency = '[LanguagePack]InstallLanguagePack'
+            if ($localeAcquisition -eq 'WindowsUpdate') {
+                Script InstallLanguagePackOnline {
+                    GetScript  = {
+                        $installed = @((Get-CimInstance -ClassName Win32_OperatingSystem -Property MUILanguages).MUILanguages)
+                        @{ Result = ($installed -join ',') }
+                    }
+                    TestScript = {
+                        $installed = @((Get-CimInstance -ClassName Win32_OperatingSystem -Property MUILanguages).MUILanguages)
+                        return ($installed -icontains $using:languageTagForNode)
+                    }
+                    SetScript  = {
+                        $language = $using:languageTagForNode
+                        if (-not (Get-Command -Name Install-Language -ErrorAction SilentlyContinue)) {
+                            throw "Install-Language is unavailable on this operating system."
+                        }
+
+                        $wuPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+                        $auPath = "$wuPath\AU"
+                        $policyState = @(
+                            [pscustomobject]@{ Path = $wuPath; Name = 'DoNotConnectToWindowsUpdateInternetLocations'; Exists = $false; Value = $null }
+                            [pscustomobject]@{ Path = $wuPath; Name = 'DisableWindowsUpdateAccess'; Exists = $false; Value = $null }
+                            [pscustomobject]@{ Path = $auPath; Name = 'UseWUServer'; Exists = $false; Value = $null }
+                        )
+                        foreach ($policy in $policyState) {
+                            $existing = Get-ItemProperty -Path $policy.Path -Name $policy.Name -ErrorAction SilentlyContinue
+                            if ($null -ne $existing) {
+                                $policy.Exists = $true
+                                $policy.Value = $existing.($policy.Name)
+                            }
+                        }
+
+                        $serviceState = @{}
+                        foreach ($serviceName in @('wuauserv', 'UsoSvc')) {
+                            $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+                            if ($service) {
+                                $serviceState[$serviceName] = [pscustomobject]@{ StartType = $service.StartType; Status = $service.Status }
+                            }
+                        }
+
+                        try {
+                            New-Item -Path $auPath -Force | Out-Null
+                            Remove-ItemProperty -Path $wuPath -Name 'DoNotConnectToWindowsUpdateInternetLocations' -Force -ErrorAction SilentlyContinue
+                            Remove-ItemProperty -Path $wuPath -Name 'DisableWindowsUpdateAccess' -Force -ErrorAction SilentlyContinue
+                            New-ItemProperty -Path $auPath -Name 'UseWUServer' -PropertyType DWord -Value 0 -Force | Out-Null
+                            foreach ($serviceName in @('wuauserv', 'UsoSvc')) {
+                                $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+                                if ($service -and $service.StartType -eq 'Disabled') {
+                                    Set-Service -Name $serviceName -StartupType Manual -ErrorAction Stop
+                                }
+                                if ($service) { Start-Service -Name $serviceName -ErrorAction SilentlyContinue }
+                            }
+
+                            Install-Language -Language $language -ErrorAction Stop | Out-Null
+                            $global:DSCMachineStatus = 1
+                        }
+                        finally {
+                            foreach ($policy in $policyState) {
+                                if ($policy.Exists) {
+                                    New-Item -Path $policy.Path -Force | Out-Null
+                                    New-ItemProperty -Path $policy.Path -Name $policy.Name -PropertyType DWord -Value $policy.Value -Force | Out-Null
+                                }
+                                else {
+                                    Remove-ItemProperty -Path $policy.Path -Name $policy.Name -Force -ErrorAction SilentlyContinue
+                                }
+                            }
+                            foreach ($serviceName in @('wuauserv', 'UsoSvc')) {
+                                $savedService = $serviceState[$serviceName]
+                                if (-not $savedService) { continue }
+                                if ($savedService.Status -ne 'Running') {
+                                    Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+                                }
+                                Set-Service -Name $serviceName -StartupType $savedService.StartType -ErrorAction SilentlyContinue
+                                if ($savedService.Status -eq 'Running') {
+                                    Start-Service -Name $serviceName -ErrorAction SilentlyContinue
+                                }
+                            }
+                        }
+                    }
+                }
+                $languageDependency = '[Script]InstallLanguagePackOnline'
+            }
+            else {
+                LanguagePack InstallLanguagePack {
+                    LanguagePackName     = $languageTag
+                    LanguagePackLocation = "C:\LanguagePacks"
+                }
+
+                $languageCapabilitiesForNode = @($l.LanguageCapabilities | Where-Object { $_ })
+                if ($languageCapabilitiesForNode.Count -gt 0) {
+                    Script InstallLanguageFeaturesOffline {
+                        DependsOn  = '[LanguagePack]InstallLanguagePack'
+                        GetScript  = { @{ Result = 'Language capabilities' } }
+                        TestScript = {
+                            foreach ($capability in $using:languageCapabilitiesForNode) {
+                                $name = "Language.$capability~~~$using:languageTagForNode~0.0.1.0"
+                                $state = Get-WindowsCapability -Online -Name $name -ErrorAction SilentlyContinue
+                                if (-not $state -or $state.State -ne 'Installed') { return $false }
+                            }
+                            return $true
+                        }
+                        SetScript  = {
+                            foreach ($capability in $using:languageCapabilitiesForNode) {
+                                $name = "Language.$capability~~~$using:languageTagForNode~0.0.1.0"
+                                $state = Get-WindowsCapability -Online -Name $name -ErrorAction Stop
+                                if ($state.State -eq 'Installed') { continue }
+                                $result = Add-WindowsCapability -Online -Name $name -Source 'C:\LanguagePacks' -LimitAccess -ErrorAction Stop
+                                if ($result.RestartNeeded) { $global:DSCMachineStatus = 1 }
+                            }
+                        }
+                    }
+                    $languageDependency = '[Script]InstallLanguageFeaturesOffline'
+                }
             }
 
             Language ConfigureLanguage {
@@ -54,7 +169,7 @@
                 UserLocale           = $l.UserLocale
                 CopySystem           = $true
                 CopyNewUser          = $true
-                DependsOn            = "[LanguagePack]InstallLanguagePack"
+                DependsOn            = $languageDependency
             }
 
             LocalConfigurationManager {

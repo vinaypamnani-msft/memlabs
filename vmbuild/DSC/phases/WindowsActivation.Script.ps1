@@ -1,4 +1,4 @@
-﻿# Shared Windows activation implementation used by Phase 10 and post-PXE policy.
+﻿﻿# Shared Windows activation implementation used by Phase 10 and post-PXE policy.
 # The caller supplies Write-FixLog. The scriptblock returns { Success; Message }.
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Exported to dot-sourcing Phase 10 and perfloading callers.')]
 $MemLabsWindowsActivationScript = {

@@ -1,4 +1,4 @@
-﻿# Initializes only data disks explicitly assigned to the current OSD client.
+﻿﻿# Initializes only data disks explicitly assigned to the current OSD client.
 # Safe for required-policy reruns: an existing matching NTFS volume is verified,
 # while an unexpected occupied letter or non-NTFS filesystem is never formatted.
 function Initialize-MemLabsOsdDataDisks {

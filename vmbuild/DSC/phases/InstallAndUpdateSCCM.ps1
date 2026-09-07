@@ -55,13 +55,17 @@ $PSVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisVM.thi
 $cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
 $CM = if ($cmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
-# Read locale settings
-$locale = $deployConfig.vmOptions.locale
+# Read this VM's locale settings. The global values are retained for old configs.
+$locale = if ($ThisVM.locale) { $ThisVM.locale } elseif ($deployConfig.domainDefaults.DefaultLocale) { $deployConfig.domainDefaults.DefaultLocale } elseif ($deployConfig.vmOptions.locale) { $deployConfig.vmOptions.locale } else { 'en-US' }
 $cmLanguage = "ENG"
 if ($locale -and $locale -ne "en-US") {
-    $localeConfigPath = "C:\staging\locale\_localeConfig.json"
-    $localeConfig = Get-Content -Path $localeConfigPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    $cmLanguage = $localeConfig.$locale.CMLanguage
+    $localeSettings = if ($ThisVM.localeSettings) { $ThisVM.localeSettings } else { $deployConfig.vmOptions.localeSettings }
+    if (-not $localeSettings) {
+        $localeConfigPath = "C:\staging\locale\_localeConfig.json"
+        $localeConfig = Get-Content -Path $localeConfigPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $localeSettings = $localeConfig.$locale
+    }
+    $cmLanguage = $localeSettings.CMLanguage
 
     # Falling back to ENG if invalid language was set
     if ($cmLanguage.Length -ne 3) {

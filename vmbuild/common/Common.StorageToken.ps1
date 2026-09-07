@@ -66,7 +66,7 @@ function Set-MemlabsHostSetting {
 #   2. host-settings.json -> vmStorageRoot   (sticky from a previous run)
 #   3. E:\VirtualMachines                    (lab-host convention, when E: exists)
 #   4. interactive picker over fixed drives (largest free space first), saved for next time
-# Validator already rejects basePath drive letters C/D/Z, so those are excluded from the picker.
+# C: is eligible only on Windows Client; D:/Z: remain reserved on every host.
 # -NoPrompt callers (cleanup, jobs) get $null instead of a prompt if nothing's been chosen.
 function Get-MemlabsVmStorageRoot {
     [CmdletBinding()]
@@ -100,7 +100,7 @@ function Get-MemlabsVmStorageRoot {
 
     $eligible = @(Get-MemlabsEligibleStorageDrives)
     if ($eligible.Count -eq 0) {
-        Write-Log "Get-MemlabsVmStorageRoot: No eligible fixed drives found (need a fixed drive other than C/D/Z)." -Warning
+        Write-Log "Get-MemlabsVmStorageRoot: No eligible fixed drives found (D:/Z: are reserved; C: requires Windows Client)." -Warning
         return $null
     }
 
@@ -139,12 +139,12 @@ function Get-MemlabsVmStorageRoot {
 }
 
 function Get-MemlabsEligibleStorageDrives {
-    # Fixed disks (DriveType=3) only. C/D/Z are reserved (system/recovery/storage) per validator.
-    $excluded = @('C', 'D', 'Z')
+    # Fixed disks (DriveType=3) only. C: is supported on Windows Client,
+    # while D:/Z: remain reserved for recovery/storage conventions.
     Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue |
         ForEach-Object {
             $letter = $_.DeviceID.TrimEnd(':')
-            if ($letter -and ($excluded -notcontains $letter.ToUpper())) {
+            if ($letter -and (Test-MemLabsVmStorageDriveAllowed -DriveLetter $letter)) {
                 [PSCustomObject]@{
                     DriveLetter = $letter
                     FreeSpace   = [int64]$_.FreeSpace

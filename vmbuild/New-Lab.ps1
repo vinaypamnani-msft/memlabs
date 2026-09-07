@@ -477,6 +477,15 @@ try {
     Write-Log "Post-init: Calling Install-HyperV..." -LogOnly
     Flush-LogBuffer -All
     Install-HyperV
+    # Refresh capability evidence after Install-HyperV may have enabled the
+    # Client optional feature, then repair any appliance serving existing labs
+    # before maintenance is allowed to start VMs.
+    $Common.DhcpBackend = Get-MemLabsDhcpBackend
+    if ((Test-MemLabsUsesDhcpAppliance) -and -not $Configuration) {
+        Write-Log "Post-init: reconciling Windows Client DHCP appliance infrastructure..." -LogOnly
+        $dhcpReady = Sync-MemLabsDhcpAppliance
+        if (-not $dhcpReady) { throw 'Windows Client DHCP appliance reconciliation failed.' }
+    }
     Write-Log "Post-init: Install-HyperV complete." -LogOnly
     Flush-LogBuffer -All
 
@@ -851,7 +860,7 @@ try {
         try {
             $_netCache = @{
                 Switches = @(Get-VMSwitch -SwitchType Internal -ErrorAction SilentlyContinue)
-                Scopes   = @(Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)
+                Scopes   = $(if (Test-MemLabsUsesDhcpAppliance) { @() } else { @(Get-DhcpServerv4Scope -ErrorAction SilentlyContinue) })
                 Nats     = @(Get-NetNat -ErrorAction SilentlyContinue)
                 Adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
                 IPs      = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)
@@ -950,12 +959,23 @@ try {
         }
     }
 
+    if (Test-MemLabsUsesDhcpAppliance) {
+        Write-Log "Reconciling authoritative DHCP appliance before Phase 1." -Activity
+        $dhcpReady = Sync-MemLabsDhcpAppliance -DeployConfig $deployConfig -WhatIf:$WhatIf
+        if (-not $dhcpReady) {
+            Write-Log "DHCP appliance did not reach a validated ready state. Refusing to start deployment VMs." -Failure
+            exit 1
+        }
+    }
+
     #Make sure DHCP is still running
-    get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' } | start-service
-    $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
-    if ($service) {
-        Write-Log "DHCPServer Service could not be started." -Failure
-        exit 1
+    if (-not (Test-MemLabsUsesDhcpAppliance)) {
+        get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' } | start-service
+        $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
+        if ($service) {
+            Write-Log "DHCPServer Service could not be started." -Failure
+            exit 1
+        }
     }
 
     # Remove existing jobs

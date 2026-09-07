@@ -59,6 +59,9 @@ function Select-Options {
         if ($null -eq $property) {
             return $null
         }
+        if ($property.vmName) {
+            Set-DefaultLocaleForVM -ConfigToCheck $Global:Config -VirtualMachine $property
+        }
         $existingPropList = $Global:Common.Supported.UpdatablePropList
         $isVM = $false
         # Get the Property Names and Values.. Present as Options.
@@ -342,6 +345,10 @@ function Select-Options {
                 Get-OperatingSystemMenuClient -property $property -name $name -CurrentValue $value                    
                 continue MainLoop
             }
+            "DefaultLocale" {
+                $null = Select-Locale -ConfigToCheck $global:config -Target $property -LocalePropertyName 'DefaultLocale' -ProfilePropertyName ''
+                continue MainLoop
+            }
             "DefaultServerOS" {
                 Get-OperatingSystemMenuServer -property $property -name $name -CurrentValue $value
                 continue MainLoop
@@ -415,8 +422,7 @@ function Select-Options {
                 continue MainLoop
             }
             "locale" {
-                $locale = Select-Locale
-                $property.locale = $locale
+                $null = Select-Locale -ConfigToCheck $global:config -Target $property
                 Get-TestResult -SuccessOnError | out-null
                 continue MainLoop
             }
@@ -588,6 +594,25 @@ function Select-Options {
                     }
                     else {
                         $property.installOffice = $selection
+                    }
+                }
+                continue MainLoop
+            }
+            "osdTaskSequence" {
+                $taskSequences = @(
+                    "Prompt at PXE"
+                    "MEMLABS-w11-Install OS image"
+                    "MEMLABS-w10-Install OS image"
+                )
+                $currentDisplay = if ([string]::IsNullOrWhiteSpace("$value")) { "Prompt at PXE" } else { "$value" }
+                Write-Log -Activity -NoNewLine "OSD Task Sequence Selection"
+                $selection = Get-Menu2 -MenuName "OSD Task Sequence" -Prompt "Select the task sequence this OSD client must run" -OptionArray $taskSequences -CurrentValue $currentDisplay -Test:$false -NoClear
+                if ($selection -ne "ESCAPE") {
+                    if ($selection -eq "Prompt at PXE") {
+                        $property.osdTaskSequence = $null
+                    }
+                    else {
+                        $property.osdTaskSequence = $selection
                     }
                 }
                 continue MainLoop

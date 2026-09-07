@@ -102,7 +102,9 @@ function New-Item {
     return [pscustomobject]@{ FullName = $Path }
 }
 
-. (Join-Path $RootPath 'DSC\phases\Initialize-OsdDataDisks.ps1')
+$initializerPath = Join-Path $RootPath 'DSC\phases\Initialize-OsdDataDisks.ps1'
+$initializerText = [IO.File]::ReadAllText($initializerPath).TrimStart([char]0xFEFF)
+. ([scriptblock]::Create($initializerText))
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 
 Reset-TestStorage

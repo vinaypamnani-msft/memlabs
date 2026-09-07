@@ -57,7 +57,7 @@ Write-Host "=" -NoNewline
 }
 else {
     $files = @(Get-ChildItem $Path -Recurse -Include *.ps1, *.psm1 -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notmatch '\\(logs|azureFiles|temp)\\' })
+            Where-Object { $_.FullName -notmatch '\\(logs|azureFiles|temp)\\' -and $_.FullName -notmatch '\\baseimagestaging\\filesToInject\\tools\\' })
     foreach ($file in $files) {
         $parseErrors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$parseErrors)

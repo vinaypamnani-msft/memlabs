@@ -164,7 +164,8 @@ $sharedActivationPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'DSC\phases
 if (-not (Test-Path -LiteralPath $sharedActivationPath -PathType Leaf)) {
     throw "Shared Windows activation implementation is missing: $sharedActivationPath"
 }
-. $sharedActivationPath
+$sharedActivationText = [IO.File]::ReadAllText($sharedActivationPath).TrimStart([char]0xFEFF)
+. ([scriptblock]::Create($sharedActivationText))
 $Fix_ActivateWindows = $MemLabsWindowsActivationScript
 
 # Azure KMS is only reachable from Azure-hosted VMs; skip on home labs.

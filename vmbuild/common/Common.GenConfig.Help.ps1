@@ -23,6 +23,7 @@ function Get-GenericHelp {
         "Network" { "Select the Network VMs will join.  Only /24 ranges are acceptable. " }
         "DefaultServerOS" { "When adding new server VMs, they will default to this OS. Can be changed on individual VMs." }
         "DefaultClientOS" { "When adding new client VMs, they will default to this OS. Can be changed on individual VMs." }
+        "DefaultLocale" { "Default language for new Windows VMs. Each VM can override this setting." }
         "DefaultSqlVersion" { "When adding new SQL instances, they will default to this version. Can be changed on individual VMs." }
         "UseDynamicMemory" { "Enable Dynamic Memory on each new VM. Can be overridden per VM via the dynamicMinRam setting" }
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
@@ -38,7 +39,7 @@ function Get-GenericHelp {
         "AdminName" { "Change the default administrator name for all machines and domains. Not recommended to change." }
         "BasePath" { "Change the location to save hyper-v VHDX and other files. Not recommended to change." }
         "domainNetBiosName" { "Change the NetBIOS name of the domain. This will result in a disjoint namespace if it does not match the FQDN" }
-        "locale" { "If you have configured _localeConfig.json, you can change the default language of your VMs via language packs" }
+        "locale" { "Select a language available to this VM through the OS image, Windows Update, or matching cached language-pack media." }
         "timeZone" { "Change the timezone of all new VMs deployed in this session." }
 
         # Global CM
@@ -72,6 +73,7 @@ function Get-GenericHelp {
         "useProxy" { "Route this VM's outbound HTTP/HTTPS through the domain's Squid Proxy VM. CM site systems also get Set-CMSiteSystemServer -UseProxy. Requires a Proxy VM." }
         "pushClient" { "Site code to push the ConfigMgr client from, or No. Picking a site assigns this VM's subnet to that site's boundary group (a boundary is created for the subnet). All VMs on the same subnet must push from the same site. Defaults are seeded from domainDefaults.PushCMClientToClients (client OS), PushCMClientToServers (server OS DomainMembers), or PushCMClientToSiteSystems (site system roles) and resolved to the matching site (or the first Primary)." }
         "BitLocker" { "Enable BitLocker encryption on this VM. Adds the computer to the ConfigMgr BLM collection so the BitLocker policy targets it. Requires tpmEnabled and cmOptions.EnableBLM." }
+        "osdTaskSequence" { "Select the Windows install task sequence this blank OSD client must run. Prompt at PXE preserves the interactive chooser; a selected sequence prestages the VM by MAC and runs automatically." }
         "InstallCA" { "Installs and configures a Certificate Authority on this VM" }
         "ForestTrust" { "This option allows you to create a Forest Trust between this domain, and another already deployed domain." }
         "Add Additional Disk" { "Adds another VHDX to this VM" }

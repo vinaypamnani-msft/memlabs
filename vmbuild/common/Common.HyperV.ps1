@@ -1,5 +1,8 @@
 ﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 function Install-HyperV {
+    $hostBackend = if ($Common -and $Common.DhcpBackend) { $Common.DhcpBackend } else { Get-MemLabsDhcpBackend }
+    $hostIsClient = ($hostBackend.HostType -eq 'Client')
+
     # Cache the Hyper-V feature state — Get-WindowsFeature is a CIM call via
     # ServerManager that shows "Collecting data..." and can stall for minutes.
     # Once Hyper-V is installed it stays installed; only re-check once per 24 hours.
@@ -42,18 +45,31 @@ function Install-HyperV {
     }
 
     if (-not $hvInstalled) {
-        Write-Log "Install-HyperV: Calling Get-WindowsFeature Hyper-V (CIM — may be slow)..." -LogOnly
-        if ((Get-WindowsFeature -Name Hyper-V).InstallState -ne 'Installed') {
-
-            Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
-
-            Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
-
-            if ((Get-WindowsFeature -Name Hyper-V).InstallState -eq 'Installed') {
-                Write-Log "Hyper-V and management tools installed successfully." -Success
+        if ($hostIsClient) {
+            Write-Log "Install-HyperV: Windows Client detected; checking the Microsoft-Hyper-V-All optional feature." -LogOnly
+            $clientFeature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction Stop
+            if ($clientFeature.State -ne 'Enabled') {
+                $enableResult = Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart -ErrorAction Stop
+                if ($enableResult.RestartNeeded) {
+                    throw 'Install-HyperV: Hyper-V was enabled on Windows Client and requires a restart. Restart the host, then rerun MemLabs.'
+                }
             }
-            else {
-                Write-Log "Failed to install Hyper-V and management tools." -Failure
+            $hvInstalled = $true
+        }
+        else {
+            Write-Log "Install-HyperV: Calling Get-WindowsFeature Hyper-V (CIM — may be slow)..." -LogOnly
+            if ((Get-WindowsFeature -Name Hyper-V).InstallState -ne 'Installed') {
+
+                Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
+
+                Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
+
+                if ((Get-WindowsFeature -Name Hyper-V).InstallState -eq 'Installed') {
+                    Write-Log "Hyper-V and management tools installed successfully." -Success
+                }
+                else {
+                    Write-Log "Failed to install Hyper-V and management tools." -Failure
+                }
             }
         }
         # Cache the result (installed)
@@ -273,7 +289,10 @@ function Remove-VMSwitch2 {
             }
         }
 
-        if ($subnetId -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
+        if (Test-MemLabsUsesDhcpAppliance) {
+            Write-Log "Switch '$NetworkName' uses appliance DHCP; no native scope cleanup is required." -LogOnly
+        }
+        elseif ($subnetId -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
             Write-Log "Switch '$NetworkName' has no subnet mapping; skipping DHCP scope lookup." -LogOnly
         }
         else {
@@ -2314,7 +2333,7 @@ function Restore-DynamicMemory {
     # No Common.ps1 dot-source needed. Just fan out via ThreadJob so 20 VMs
     # don't take 20*per-call time when called from the finally block. Throttle
     # at 8 to avoid hammering VMMS with too many concurrent reconfigs.
-    $useThreadJob = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -ne $null
+    $useThreadJob = $null -ne (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)
 
     $restoreWorker = {
         param($vmConfig)

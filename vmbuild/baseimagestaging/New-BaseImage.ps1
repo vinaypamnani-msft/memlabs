@@ -106,13 +106,48 @@ else {
     }
 }
 
-# Validate/Download bginfo.exe
+# Validate/download the x64 BgInfo build. The templates read ConfigMgr values from
+# HKLM\SOFTWARE\Microsoft\SMS, and the x86 build is redirected to an empty WOW64 view.
 $bgInfoPath = "$($Common.StagingInjectPath)\staging\bginfo\bginfo.exe"
-if (-not (Test-Path $bgInfoPath)) {
-    $worked = Get-File -Source $($Common.AzureFileList.Urls.BgInfo) -Destination $bgInfoPath -DisplayName "Downloading bginfo.exe" -Action "Downloading" -Silent
+$bgInfoSource = "$($Common.AzureFileList.Urls.BgInfo)"
+if ([string]::IsNullOrWhiteSpace($bgInfoSource) -or
+    $bgInfoSource -eq "https://live.sysinternals.com/bginfo.exe") {
+    # Older cached file lists still name the x86 endpoint. Keep base-image creation
+    # correct while the remote metadata catches up.
+    $bgInfoSource = "https://live.sysinternals.com/Bginfo64.exe"
+}
+$bgInfoMachine = $null
+if (Test-Path -LiteralPath $bgInfoPath -PathType Leaf) {
+    try {
+        $bgInfoBytes = [IO.File]::ReadAllBytes($bgInfoPath)
+        $peOffset = [BitConverter]::ToInt32($bgInfoBytes, 0x3c)
+        $bgInfoMachine = [BitConverter]::ToUInt16($bgInfoBytes, $peOffset + 4)
+    }
+    catch {
+        Write-Log "Existing bginfo.exe is not a readable PE file and will be replaced. $($_.Exception.Message)" -Warning
+    }
+}
+
+if ($bgInfoMachine -ne 0x8664) {
+    $worked = Get-File -Source $bgInfoSource -Destination $bgInfoPath -DisplayName "Downloading x64 bginfo.exe" -Action "Downloading" -Silent -ForceDownload
     if (-not $worked -and -not $IgnoreBginfo.IsPresent) {
-        Write-Log "$bgInfoPath not found, and download failed. Use IgnoreBginfo switch if you don't care about this." -Warning
+        Write-Log "An x64 $bgInfoPath was not available, and download failed. Use IgnoreBginfo switch if you don't care about this." -Warning
         return
+    }
+
+    if ($worked) {
+        try {
+            $bgInfoBytes = [IO.File]::ReadAllBytes($bgInfoPath)
+            $peOffset = [BitConverter]::ToInt32($bgInfoBytes, 0x3c)
+            $bgInfoMachine = [BitConverter]::ToUInt16($bgInfoBytes, $peOffset + 4)
+        }
+        catch {
+            $bgInfoMachine = $null
+        }
+        if ($bgInfoMachine -ne 0x8664 -and -not $IgnoreBginfo.IsPresent) {
+            Write-Log "Downloaded bginfo.exe is not x64 (PE machine 0x$('{0:X4}' -f $bgInfoMachine)); refusing to stage it." -Warning
+            return
+        }
     }
 }
 

@@ -38,7 +38,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 if (-not $Path) {
     $files = @(Get-ChildItem -Path (Join-Path $repoRoot 'vmbuild') -Filter *.ps1 -File -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notmatch '\\(temp|logs|azureFiles)\\' })
+            Where-Object { $_.FullName -notmatch '\\(temp|logs|azureFiles)\\' -and $_.FullName -notmatch '\\baseimagestaging\\filesToInject\\tools\\' })
 }
 else {
     $files = @($Path | ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue })

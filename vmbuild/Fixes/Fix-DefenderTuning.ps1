@@ -4,21 +4,22 @@
 # fix framework share one implementation.
 
 $Fix_DefenderTuning = {
-    $script = "$env:SystemDrive\staging\Optimize-Defender.ps1"
-    if (-not (Test-Path -LiteralPath $script)) {
-        return [pscustomobject]@{ Success = $false; Message = "$script was not injected"; Errors = @("Missing $script") }
+    $runner = "$env:SystemDrive\staging\Invoke-MemLabsCustomization.ps1"
+    if (-not (Test-Path -LiteralPath $runner)) {
+        return [pscustomobject]@{ Success = $false; Message = "$runner was not injected"; Errors = @("Missing $runner") }
     }
-    & $script
+    $runnerText = [IO.File]::ReadAllText($runner).TrimStart([char]0xFEFF)
+    & ([scriptblock]::Create($runnerText)) -Name DefenderTuning -RootPath (Split-Path $runner -Parent)
 }
 
 $fixesToPerform += [PSCustomObject]@{
     FixName             = "Fix-DefenderTuning"
-    FixVersion          = "260810"
+    FixVersion          = "260907.1"
     NeededOnFreshDeploy = $true
     AppliesToExisting   = $true
     AppliesToRoles      = @()
-    NotAppliesToRoles   = @("OSDClient", "AADClient")
+    NotAppliesToRoles   = @("AADClient")
     DependentVMs        = @()
     ScriptBlock         = $Fix_DefenderTuning
-    InjectFiles         = @("Optimize-Defender.ps1") # must exist in filesToInject\staging dir
+    InjectFiles         = @("Invoke-MemLabsCustomization.ps1", "Optimize-Defender.ps1")
 }

@@ -30,10 +30,12 @@ param (
     [Parameter()]
     [switch]$DisableInitContextCache,
     [Parameter()]
-    # IsAzureVM / CorpNet detection effectively never changes for a given host,
-    # so cache it for 30 days (43200 min). A short TTL caused Phase 10 child
-    # jobs (InJob path) to read an expired cache, default IsAzureVM to $false,
-    # and silently drop Azure-gated fixes like Fix_ActivateWindows.
+    # Positive IsAzureVM / CorpNet detection effectively never changes for a
+    # given host, so cache it for 30 days (43200 min). Negative Azure results
+    # are trusted for only 5 minutes because an IMDS miss can be transient.
+    # A short positive TTL caused Phase 10 child jobs (InJob path) to read an
+    # expired cache, default IsAzureVM to $false, and silently drop Azure-gated
+    # fixes like Fix_ActivateWindows.
     [ValidateRange(1, 525600)]
     [int]$InitContextCacheMinutes = 43200,
     [Parameter()]
@@ -2541,6 +2543,11 @@ function Add-SwitchAndDhcp {
         return $true
     }
 
+    if (Test-MemLabsUsesDhcpAppliance) {
+        Write-Log "Creating/verifying Hyper-V switch and NAT for '$NetworkName'; DHCP is provided by the Client-host appliance." -Activity
+        return (Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet -DomainName $DomainName)
+    }
+
     Write-Log "Creating/verifying Hyper-V switch and DHCP Scopes for '$NetworkName' network." -Activity
 
     # This is the host-side networking chokepoint (runs once per network at the
@@ -2896,6 +2903,15 @@ function Test-NoRRAS {
         return
     }
 
+    if (Test-MemLabsUsesDhcpAppliance) {
+        Write-Log "Windows Client host: skipping Server-only RRAS feature remediation; validating NAT and per-switch IPv4 forwarding." -LogOnly
+        $natValid = Test-Networks
+        if (-not $natValid) {
+            exit 1
+        }
+        return
+    }
+
     $router = (Get-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters).IpEnableRouter
     $routingFeatureInstalled = $false
 
@@ -3162,6 +3178,8 @@ function Repair-CimProxyTempPath {
 }
 
 function Reset-CimProxyModuleState {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'didReset', Justification = 'The flag is assigned inside a ForEach-Object closure and read after the closure.')]
+    param()
     # Companion to Repair-CimProxyTempPath for the case where recreating the temp
     # dir alone does NOT fix the "...remoteIpMoProxy_...format.ps1xml could not be
     # found" error (telltale sign: the SAME proxy GUID reappears on every retry).
@@ -3250,6 +3268,11 @@ function Start-DHCP {
         [Parameter(Mandatory = $false)]
         [switch]$Restart
     )
+
+    if (Test-MemLabsUsesDhcpAppliance) {
+        Write-Log "Start-DHCP: Windows Client selected the dnsmasq appliance backend; native DHCP startup is not applicable." -LogOnly
+        return $true
+    }
 
     if (-not (Get-Command -Name "Get-Service" -ErrorAction SilentlyContinue)) {
         Write-Log "Start-DHCP: Get-Service cmdlet is unavailable; skipping DHCP initialization." -Warning
@@ -3425,6 +3448,10 @@ function Test-DHCPScope {
         [Parameter(Mandatory = $false, HelpMessage = "Override DNS Server")]
         [string]$DNSServer
     )
+    if (Test-MemLabsUsesDhcpAppliance) {
+        $desired = Get-MemLabsDhcpDesiredState
+        return [bool](@($desired.Scopes | Where-Object { $_.ScopeId -eq $ScopeID }).Count -eq 1)
+    }
     try {
 
         write-log -logonly "Test-DHCPScope called with ScopeID: $ScopeID ScopeName: $ScopeName DomainName: $DomainName DNSSERVER: $DNSServer"
@@ -4528,6 +4555,9 @@ function Get-DHCPReservationIPForMac {
         [Parameter(Mandatory = $true)][string] $ScopeId,
         [Parameter(Mandatory = $true)][string] $Mac
     )
+    if (Test-MemLabsUsesDhcpAppliance) {
+        return Get-MemLabsDhcpReservationIpForMac -ScopeId $ScopeId -Mac $Mac
+    }
     return Invoke-IsolatedCim -ArgumentList $ScopeId, $Mac -ScriptBlock {
         param($scopeId, $mac)
         $r = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
@@ -4795,6 +4825,22 @@ function Get-VMMacAndDhcpIsolated {
         [switch] $ExcludeCluster,
         [string[]] $VmNames
     )
+    if (Test-MemLabsUsesDhcpAppliance) {
+        $map = @{}
+        $names = @($VmNames | Where-Object { $_ })
+        $vms = if ($names.Count -gt 0) { @(Get-VM -Name $names -ErrorAction SilentlyContinue) } else { @(Get-VM -ErrorAction SilentlyContinue) }
+        foreach ($vm in $vms) {
+            $adapter = @(Get-MemLabsVmAdapters -VM $vm | Where-Object { -not $ExcludeCluster -or $_.SwitchName -notmatch 'Cluster' } | Select-Object -First 1)
+            $map[$vm.Name] = if ($adapter) { [string]$adapter[0].MacAddress } else { $null }
+        }
+        return [pscustomobject]@{
+            MacMap       = $map
+            Reservations = @(Get-MemLabsAllDhcpReservations)
+            MacMs        = 0
+            DhcpMs       = 0
+            Scoped       = ($names.Count -gt 0)
+        }
+    }
     $scopedNames = @($VmNames | Where-Object { $_ })
     $results = Invoke-IsolatedCim -ArgumentList $ExcludeCluster.IsPresent, $scopedNames -ScriptBlock {
         param($excludeCluster, $vmNames)
@@ -4858,6 +4904,9 @@ function Get-VMMacAndDhcpIsolated {
 # isolated runspace (the CDXML .IPAddress type adapter is NOT applied there --
 # see Get-DHCPReservationIPForMac for the full rationale).
 function Get-AllDHCPReservationsIsolated {
+    if (Test-MemLabsUsesDhcpAppliance) {
+        return @(Get-MemLabsAllDhcpReservations)
+    }
     return Invoke-IsolatedCim -ScriptBlock {
         $out = @()
         foreach ($scope in (Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)) {
@@ -5096,6 +5145,13 @@ function Add-DHCPReservationIsolated {
         # $null means "unknown", which must always fall back to scanning.
         [hashtable] $KnownReservedMacs
     )
+
+    if (Test-MemLabsUsesDhcpAppliance) {
+        Invoke-WithDhcpMutex -ScriptBlock {
+            Set-MemLabsDhcpApplianceReservation -ScopeId $ScopeId -IPAddress $IPAddress -Mac $Mac -Action add
+        }
+        return
+    }
 
     $tag = if ($LogContext) { "$LogContext`: " } else { '' }
     $purgeMac = $PurgeMacFirst.IsPresent
@@ -5382,6 +5438,19 @@ function Remove-DHCPReservation {
         [string] $vmName
     )
 
+    if (Test-MemLabsUsesDhcpAppliance) {
+        if ($ip -and $mac) {
+            Set-MemLabsDhcpApplianceReservation -ScopeId (($ip -replace '\.\d+$', '.0')) -IPAddress $ip -Mac $mac -Action remove
+        }
+        elseif ($mac) {
+            Invoke-WithDhcpMutex -ScriptBlock { Remove-MemLabsDhcpApplianceReservationByMac -Mac $mac }
+        }
+        else {
+            Write-Log "$vmName`: appliance reservation removal has no MAC; desired-state reconciliation will omit the reservation after VM removal." -LogOnly
+        }
+        return
+    }
+
     # The DhcpServer CDXML cmdlets emit CIM progress that permanently poisons
     # the calling runspace's Progress stream (collapsing the managed per-VM
     # progress bars when this runs inside a Phase job). Run the entire
@@ -5627,6 +5696,11 @@ function Set-DeployConfigIPAddresses {
     $defaultNetwork = $DeployConfig.vmOptions.network
     if (-not $defaultNetwork) {
         Write-Log "Set-DeployConfigIPAddresses: No default network in vmOptions. Cannot allocate IPs." -Failure
+        return
+    }
+
+    if (Test-MemLabsUsesDhcpAppliance) {
+        $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $DeployConfig
         return
     }
 
@@ -11050,6 +11124,10 @@ function Copy-LanguagePacksToVM {
         [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
         [string]$VmName,
         [Parameter(Mandatory = $false)]
+        [string]$Locale,
+        [Parameter(Mandatory = $false)]
+        [string]$OperatingSystem,
+        [Parameter(Mandatory = $false)]
         [switch]$ShowProgress,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf
@@ -11065,25 +11143,45 @@ function Copy-LanguagePacksToVM {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
     }
 
+    $success = $true
     foreach ($vm in $allVMs) {
         $vmName = $vm.vmName
+        $vmLocale = if ($Locale) { $Locale } elseif ($vm.locale) { $vm.locale } else { 'en-US' }
+        $vmOperatingSystem = if ($OperatingSystem) { $OperatingSystem } else { $vm.operatingSystem }
         Write-Log "$vmName`: Trying to copy Language Packs to $destDir inside the VM" -Activity
 
-        $sourceDir = Join-Path $Common.ConfigPath "locales" $vm.operatingSystem
-        if (-not (Test-Path -Path "${sourceDir}\*" -Include *.cab)) {
+        if (-not (Initialize-LocaleMedia -Locale $vmLocale -OperatingSystem $vmOperatingSystem -WhatIf:$WhatIf)) {
+            Write-Log "$vmName`: Could not prepare $vmLocale language media for $vmOperatingSystem." -Warning
+            $success = $false
+            continue
+        }
+
+        $sourceDir = Join-Path $Common.ConfigPath "locales" $vmOperatingSystem
+        $catalog = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'common\LocaleCatalog.json') -Raw | ConvertFrom-Json
+        $localeDefinition = $catalog.$vmLocale
+        $sourceFiles = if ($localeDefinition) {
+            @(Get-LocaleMediaFiles -Path $sourceDir -LocaleDefinition $localeDefinition)
+        }
+        else {
+            @(Get-ChildItem -LiteralPath $sourceDir -File -Filter '*.cab' -ErrorAction SilentlyContinue)
+        }
+        if ($sourceFiles.Count -eq 0) {
             Write-Log "$vmName`: Cannot find language pack(s) in $sourceDir. Skipping copy." -Warning
+            $success = $false
             continue
         }
 
         # Get VM Session
         if ($vm.State -ne "Running") {
             Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
+            $success = $false
             continue
         }
 
         $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
         if (-not $ps) {
             Write-Log "$vmName`: Failed to get a session with the VM." -Failure
+            $success = $false
             continue
         }
 
@@ -11091,14 +11189,17 @@ function Copy-LanguagePacksToVM {
             Write-Progress2 "Copying language packs" -Status "Copying language packs to $VmName"
         }
 
-        Write-Log "$vmName`: Copying '${sourceDir}\*' from HOST to VM (${destDir}\)."
+        Write-Log "$vmName`: Copying $($sourceFiles.Count) $vmLocale package(s) from HOST to VM (${destDir}\)."
 
         try {
             $progressPref = $ProgressPreference
             $ProgressPreference = "SilentlyContinue"
 
 
-            Copy-Item -ToSession $ps -Filter "*.cab" -Path "${sourceDir}" -Destination "${destDir}" -Recurse -WhatIf:$WhatIf -ErrorAction Stop
+            Invoke-Command -Session $ps -ScriptBlock { $null = New-Item -Path 'C:\LanguagePacks' -ItemType Directory -Force } -ErrorAction Stop
+            foreach ($sourceFile in $sourceFiles) {
+                Copy-Item -ToSession $ps -LiteralPath $sourceFile.FullName -Destination $destDir -WhatIf:$WhatIf -ErrorAction Stop
+            }
         }
         catch {
             Write-Log "$vmName`: Failed to copy language packs. $_" -Failure
@@ -11115,7 +11216,7 @@ function Copy-LanguagePacksToVM {
         Write-Progress2 "Copying language packs" -Status "Done" -Completed
     }
 
-    return $true
+    return $success
 }
 
 function Copy-LocaleConfigToVM {
@@ -11699,7 +11800,7 @@ function Set-SupportedOptions {
     # can be ADDED to an existing VM (PatchMyPC installs in Phase 8 from
     # InstallPatchMyPC; pushClient re-runs the client push in Phase 8). Like the
     # SUP, PatchMyPC has no removal path, so genconfig locks it once deployed.
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy", "installOffice", "useDatabaseReplica", "replicaSqlServerVM", "replicaDbName", "wsusDataBaseServer", "wsusContentDir", "InstallPatchMyPC", "PatchMyPCFileServer", "pushClient")
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy", "installOffice", "useDatabaseReplica", "replicaSqlServerVM", "replicaDbName", "wsusDataBaseServer", "wsusContentDir", "InstallPatchMyPC", "PatchMyPCFileServer", "pushClient", "locale")
     $propsToUpdate = $updatablePropList
 
     $cmVersions += Get-CMVersions
@@ -12014,6 +12115,7 @@ if ($removeOnlyProfile) {
     if ($PSVersionTable.PSVersion.Major -ge 7) {
         . $PSScriptRoot\common\Common.Linux.ps1
     }
+    . $PSScriptRoot\common\Common.DhcpAppliance.ps1
 }
 else {
 
@@ -12038,6 +12140,7 @@ if (-not $InJob) {
 . $PSScriptRoot\common\Common.Remove.ps1
 . $PSScriptRoot\common\Common.Maintenance.ps1
 . $PSScriptRoot\common\Common.DownloadCache.ps1
+. $PSScriptRoot\common\Common.Locale.ps1
 . $PSScriptRoot\common\Common.ScriptBlocks.ps1
 # Config wizard, menus and RDP-client writers are host-only: no function in them is
 # reachable from a job scriptblock, so a job spends ~376ms compiling code it cannot call.
@@ -12062,6 +12165,7 @@ if (-not $InJob) {
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     . $PSScriptRoot\common\Common.Linux.ps1
 }
+. $PSScriptRoot\common\Common.DhcpAppliance.ps1
 . $PSScriptRoot\common\Common.snapshots.ps1
 # Host-side PKI is driven from New-Lab (Install-PKI); the in-guest PKI work is DSC.
 if (-not $InJob) {
@@ -12129,7 +12233,8 @@ if ($StartupProfile -eq "Fast" -or $removeOnlyProfile) {
 
 $effectiveSkipStorageInit = $profileSkipStorageInit -or $SkipStorageInit.IsPresent
 $effectiveSkipMaintenanceRefresh = $profileSkipMaintenanceRefresh -or $SkipMaintenanceRefresh.IsPresent
-$effectiveSkipEnvironmentDetection = $profileSkipEnvironmentDetection -or $SkipEnvironmentDetection.IsPresent
+$environmentDetectionExplicitlySkipped = $profileSkipEnvironmentDetection -or $SkipEnvironmentDetection.IsPresent
+$effectiveSkipEnvironmentDetection = $environmentDetectionExplicitlySkipped
 $effectiveSkipHostPreparation = $profileSkipHostPreparation -or $SkipHostPreparation.IsPresent
 
 # Jobs inherit context from the parent process; skip expensive probes
@@ -12348,8 +12453,10 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
         if (-not $DisableInitContextCache) {
             try {
                 if (Test-Path $initContextCacheFile) {
+                    $envCachePeek = Get-Content $initContextCacheFile -Raw -ErrorAction Stop | ConvertFrom-Json
                     $cacheAgeMin = ((Get-Date) - (Get-Item $initContextCacheFile -ErrorAction Stop).LastWriteTime).TotalMinutes
-                    if ($cacheAgeMin -le $InitContextCacheMinutes) {
+                    $cacheTtlMinutes = if ([bool]$envCachePeek.IsAzureVM) { $InitContextCacheMinutes } else { 5 }
+                    if ($cacheAgeMin -le $cacheTtlMinutes) {
                         $envCacheLikelyStale = $false
                     }
                 }
@@ -12406,7 +12513,8 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
                         if ($cachedInitContext -and $cachedInitContext.GeneratedOnUtc) {
                             $cachedGeneratedOnUtc = [DateTime]::Parse($cachedInitContext.GeneratedOnUtc)
                             $cacheAgeMinutes = [Math]::Abs(((Get-Date).ToUniversalTime() - $cachedGeneratedOnUtc).TotalMinutes)
-                            if ($cacheAgeMinutes -le $InitContextCacheMinutes) {
+                            $cacheTtlMinutes = if ([bool]$cachedInitContext.IsAzureVM) { $InitContextCacheMinutes } else { 5 }
+                            if ($cacheAgeMinutes -le $cacheTtlMinutes) {
                                 $corpNetInterfaceIndex = $cachedInitContext.CorpNetInterfaceIndex
                                 $isAzureVM = [bool]$cachedInitContext.IsAzureVM
                                 $loadedInitContextCache = $true
@@ -12472,7 +12580,9 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
                     }
                 }
 
-                if (-not $DisableInitContextCache) {
+                # A skipped probe measured nothing. Never persist its default
+                # false value, or one fast/init helper can suppress Azure work.
+                if (-not $DisableInitContextCache -and -not $environmentDetectionExplicitlySkipped) {
                     try {
                         [PSCustomObject]@{
                             GeneratedOnUtc       = (Get-Date).ToUniversalTime().ToString("o")
@@ -12503,7 +12613,7 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
             # stale, fall back to a cheap inline probe so Azure-gated work (e.g.
             # Fix_ActivateWindows) still registers instead of silently defaulting
             # IsAzureVM to $false and dropping the fix.
-            if (-not $effectiveSkipEnvironmentDetection) {
+            if (-not $environmentDetectionExplicitlySkipped) {
                 try {
                     if (Get-NetIPAddress -AddressFamily IPV4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
                 }
@@ -12603,6 +12713,7 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
             Colors                      = $colors
             IsAzureVM                   = $isAzureVM
             CorpNetInterfaceIndex       = $corpNetInterfaceIndex
+            DhcpBackend                = Get-MemLabsDhcpBackend
             OfflineMode                 = $false
             MouseEnabled                = $mouseEnabled
             NewestStorageConfigFileName = "_storageConfig2026.1.json"

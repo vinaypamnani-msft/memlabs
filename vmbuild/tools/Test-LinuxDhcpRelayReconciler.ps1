@@ -43,6 +43,8 @@ $script:ServicePayload = $null
 $script:ValidationPayload = $null
 $script:ResolverCalls = 0
 $script:ResolvedPaths = @()
+$script:UseDhcpAppliance = $false
+$script:NativeDhcpReads = 0
 
 function Reset-Fixture {
     param ([switch] $WithClient, [switch] $DuplicateClient)
@@ -55,6 +57,7 @@ function Reset-Fixture {
     $script:ServicePayload = $null
     $script:ValidationPayload = $null
     $script:ResolverCalls = 0
+    $script:NativeDhcpReads = 0
     $script:Adapters = @([pscustomobject]@{
             Name = 'Network Adapter'; SwitchName = '192.168.1.0'; MacAddress = '00155D010001'; IPAddresses = @('192.168.1.4')
         })
@@ -111,8 +114,10 @@ function Get-VMNetworkAdapter {
     param([Parameter(ValueFromPipeline = $true)]$VM)
     process { return @($script:Adapters) }
 }
-function Get-DhcpServerv4Reservation { [CmdletBinding()] param($ScopeId); return @($script:Reservation) }
-function Get-DhcpServerv4Lease { [CmdletBinding()] param($ScopeId); return @($script:Lease) }
+function Test-MemLabsUsesDhcpAppliance { return $script:UseDhcpAppliance }
+function Test-MemLabsDhcpApplianceScopeReady { param($ScopeId); return $true }
+function Get-DhcpServerv4Reservation { [CmdletBinding()] param($ScopeId); $script:NativeDhcpReads++; return @($script:Reservation) }
+function Get-DhcpServerv4Lease { [CmdletBinding()] param($ScopeId); $script:NativeDhcpReads++; return @($script:Lease) }
 function Get-NetNeighbor { [CmdletBinding()] param($IPAddress); return @($script:Neighbor) }
 function Test-Connection { [CmdletBinding()] param($ComputerName, $Count, [switch] $Quiet); return $script:Neighbor.Count -gt 0 }
 function Get-VMSwitch { [CmdletBinding()] param($Name); return [pscustomobject]@{ Name = $Name } }
@@ -209,6 +214,19 @@ $foreignLease = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Ne
     -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
 Assert-Equal $false $foreignLease.Available 'blank-hostname lease for a different MAC remains a conflict'
 Assert-Equal $true ($foreignLease.Reason -like '*00-15-5D-01-00-99*') 'unnamed lease diagnostic identifies its ClientId'
+
+Reset-Fixture
+$script:UseDhcpAppliance = $true
+$script:Reservation = @([pscustomobject]@{
+    IPAddress = [pscustomobject]@{ IPAddressToString = '192.168.1.4' }
+    Name = 'native DHCP sentinel'
+    ClientId = '00-15-5D-01-00-99'
+})
+$applianceOwnership = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $true $applianceOwnership.Available 'appliance backend judges relay ownership without native DHCP state'
+Assert-Equal 0 $script:NativeDhcpReads 'appliance backend skips native DHCP reservation and lease reads'
+$script:UseDhcpAppliance = $false
 
 Reset-Fixture
 $script:Neighbor = @([pscustomobject]@{

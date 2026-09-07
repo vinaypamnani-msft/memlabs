@@ -1589,7 +1589,7 @@ function New-LinuxVirtualMachine {
         # Skip if a reservation already exists for this MAC (rerun scenario).
         if ($DeployConfig) {
             $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
-            if ($thisVmConfig -and $thisVmConfig.AssignedIP -and $thisVmConfig.role -notin @('Proxy', 'DHCPRelay')) {
+            if ($thisVmConfig -and $thisVmConfig.AssignedIP -and $thisVmConfig.role -notin @('Proxy', 'DHCPRelay', 'DHCPAppliance')) {
                 # DHCP/Hyper-V CIM calls run isolated (Get-VMMacIsolated /
                 # *DHCPReservation* helpers) so their progress doesn't poison the bars.
                 try {
@@ -1814,7 +1814,7 @@ function New-LinuxVirtualMachine {
         if ($DeployConfig) {
             $thisVmConfig2 = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated -and
-                $thisVmConfig2.role -notin @('Proxy', 'DHCPRelay')) {
+                $thisVmConfig2.role -notin @('Proxy', 'DHCPRelay', 'DHCPAppliance')) {
                 # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
                 try {
                     $vmMac2 = Get-VMMacIsolated -VmName $VmName
@@ -2387,6 +2387,62 @@ tail -40 /var/log/cloud-init.log 2>&1 || true
     return $false
 }
 
+function Invoke-LinuxSshReadyProbe {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $SshExe,
+        [Parameter(Mandatory = $true)] [string] $PrivateKeyPath,
+        [Parameter(Mandatory = $true)] [string] $IPAddress,
+        [ValidateRange(1, 60)] [int] $TimeoutSeconds = 10
+    )
+
+    $sshArgs = @(
+        '-i', $PrivateKeyPath,
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=NUL',
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=5',
+        '-o', 'ServerAliveInterval=5',
+        '-o', 'ServerAliveCountMax=1',
+        '-o', 'LogLevel=ERROR',
+        "vmbuildadmin@$IPAddress",
+        'true'
+    )
+    $quotedArgs = foreach ($argument in $sshArgs) {
+        if ($argument -match '[\s"]') { '"' + ($argument -replace '"', '""') + '"' }
+        else { $argument }
+    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $SshExe
+    $startInfo.Arguments = ($quotedArgs -join ' ')
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+
+    $process = $null
+    try {
+        $process = [Diagnostics.Process]::Start($startInfo)
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) {
+            try { $process.Kill() } catch { }
+            try { [void]$process.WaitForExit(2000) } catch { }
+        }
+        $stdout = if ($stdoutTask.IsCompleted) { $stdoutTask.Result } else { '' }
+        $stderr = if ($stderrTask.IsCompleted) { $stderrTask.Result } else { '' }
+        return [pscustomobject]@{
+            ExitCode = $(if ($timedOut) { 124 } else { $process.ExitCode })
+            Output   = (@($stdout, $stderr) | Where-Object { $_ }) -join "`n"
+            TimedOut = $timedOut
+        }
+    }
+    finally {
+        if ($process) { $process.Dispose() }
+    }
+}
+
 function Wait-LinuxVmReady {
     <#
     .SYNOPSIS
@@ -2605,20 +2661,14 @@ function Wait-LinuxVmReady {
             # NEW entries; it rejects mismatches). UserKnownHostsFile=NUL
             # + StrictHostKeyChecking=no bypasses both. Lab vSwitch traffic
             # never leaves the host, so MITM risk is nil.
-            $sshArgs = @(
-                '-i', $keyPair.PrivateKeyPath,
-                '-o', 'StrictHostKeyChecking=no',
-                '-o', 'UserKnownHostsFile=NUL',
-                '-o', 'BatchMode=yes',
-                '-o', 'ConnectTimeout=5',
-                '-o', 'LogLevel=ERROR',
-                "vmbuildadmin@$ip",
-                'true'
-            )
             # Capture stderr (was swallowed with 2>$null). Don't spam the
-            # log; throttle to once per $sshErrLogIntervalSec.
-            $sshErr = & $sshExe @sshArgs 2>&1
-            if ($LASTEXITCODE -eq 0) {
+            # log; throttle to once per $sshErrLogIntervalSec. ConnectTimeout
+            # only bounds connection establishment, so run the whole probe in
+            # a bounded child process: an established SSH session whose remote
+            # `true` never exits otherwise blocks this polling loop forever.
+            $sshProbe = Invoke-LinuxSshReadyProbe -SshExe $sshExe -PrivateKeyPath $keyPair.PrivateKeyPath -IPAddress $ip -TimeoutSeconds 10
+            $sshErr = $sshProbe.Output
+            if ($sshProbe.ExitCode -eq 0) {
                 Write-Log "$VmName`: SSH ready at $ip" -LogOnly
                 write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH ready at $ip" -force
                 # SSH is up, but on first boot cloud-init may still be running its
@@ -2634,7 +2684,7 @@ function Wait-LinuxVmReady {
                 $lastSshErrLogSec = $elapsed
                 $errText = ($sshErr | Out-String).Trim()
                 if (-not $errText) { $errText = '(no stderr output)' }
-                Write-Log "$VmName`: SSH probe failed (elapsed ${elapsed}s, exit=$LASTEXITCODE, tcp/22=$tcpProbeOk): $errText" -LogOnly
+                Write-Log "$VmName`: SSH probe failed (elapsed ${elapsed}s, exit=$($sshProbe.ExitCode), timedOut=$($sshProbe.TimedOut), tcp/22=$tcpProbeOk): $errText" -LogOnly
             }
 
             # "identity_sign: private key ... contents do not match public" is a
@@ -4386,6 +4436,7 @@ function Get-LinuxRealmJoinBashScript {
         Phase 3 SSH dispatch and cloud-init seed.
     #>
     [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'AdminPassword', Justification = 'This renderer must inject the already-decrypted deployment credential into an ephemeral SSH-delivered shell script.')]
     param (
         [Parameter(Mandatory = $true)][string]$Domain,
         [Parameter(Mandatory = $true)][string]$DcIp,
@@ -5771,32 +5822,34 @@ function Test-LinuxDhcpRelayAddressAvailable {
         $relayAdapterMacs = @()
     }
 
-    try {
-        $reservation = Get-DhcpServerv4Reservation -ScopeId $Network -ErrorAction Stop |
-            Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1
-        if ($reservation) {
-            $reservationMac = ("$($reservation.ClientId)" -replace '[-:]', '').ToUpperInvariant()
-            if (-not ($reservationMac -and $reservationMac -in $relayAdapterMacs)) {
-                $reservationOwner = "$($reservation.Name)".Trim()
-                if (-not $reservationOwner) { $reservationOwner = "client $($reservation.ClientId)".Trim() }
-                if (-not $reservationOwner -or $reservationOwner -eq 'client') { $reservationOwner = 'an unidentified client' }
-                return [pscustomobject]@{ Available = $false; Reason = "DHCP reservation for $reservationOwner owns $IPAddress" }
+    if (-not (Test-MemLabsUsesDhcpAppliance)) {
+        try {
+            $reservation = Get-DhcpServerv4Reservation -ScopeId $Network -ErrorAction Stop |
+                Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1
+            if ($reservation) {
+                $reservationMac = ("$($reservation.ClientId)" -replace '[-:]', '').ToUpperInvariant()
+                if (-not ($reservationMac -and $reservationMac -in $relayAdapterMacs)) {
+                    $reservationOwner = "$($reservation.Name)".Trim()
+                    if (-not $reservationOwner) { $reservationOwner = "client $($reservation.ClientId)".Trim() }
+                    if (-not $reservationOwner -or $reservationOwner -eq 'client') { $reservationOwner = 'an unidentified client' }
+                    return [pscustomobject]@{ Available = $false; Reason = "DHCP reservation for $reservationOwner owns $IPAddress" }
+                }
+            }
+            $lease = Get-DhcpServerv4Lease -ScopeId $Network -ErrorAction Stop |
+                Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1
+            if ($lease) {
+                $leaseMac = ("$($lease.ClientId)" -replace '[-:]', '').ToUpperInvariant()
+                if (-not ($leaseMac -and $leaseMac -in $relayAdapterMacs)) {
+                    $leaseOwner = "$($lease.HostName)".Trim()
+                    if (-not $leaseOwner) { $leaseOwner = "client $($lease.ClientId)".Trim() }
+                    if (-not $leaseOwner -or $leaseOwner -eq 'client') { $leaseOwner = 'an unidentified client' }
+                    return [pscustomobject]@{ Available = $false; Reason = "DHCP lease for $leaseOwner owns $IPAddress" }
+                }
             }
         }
-        $lease = Get-DhcpServerv4Lease -ScopeId $Network -ErrorAction Stop |
-            Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1
-        if ($lease) {
-            $leaseMac = ("$($lease.ClientId)" -replace '[-:]', '').ToUpperInvariant()
-            if (-not ($leaseMac -and $leaseMac -in $relayAdapterMacs)) {
-                $leaseOwner = "$($lease.HostName)".Trim()
-                if (-not $leaseOwner) { $leaseOwner = "client $($lease.ClientId)".Trim() }
-                if (-not $leaseOwner -or $leaseOwner -eq 'client') { $leaseOwner = 'an unidentified client' }
-                return [pscustomobject]@{ Available = $false; Reason = "DHCP lease for $leaseOwner owns $IPAddress" }
-            }
+        catch {
+            return [pscustomobject]@{ Available = $false; Reason = "DHCP ownership could not be measured for $Network`: $($_.Exception.Message)" }
         }
-    }
-    catch {
-        return [pscustomobject]@{ Available = $false; Reason = "DHCP ownership could not be measured for $Network`: $($_.Exception.Message)" }
     }
 
     try {
@@ -5934,7 +5987,13 @@ function Sync-LinuxDhcpRelay {
             $clientIp = "$($path.relayIPv4)"
             $desiredSwitches += $clientNetwork
             if (-not (Get-VMSwitch -Name $clientNetwork -ErrorAction SilentlyContinue)) { throw "Relay client switch '$clientNetwork' does not exist" }
-            if (-not (Get-DhcpServerv4Scope -ScopeId $clientNetwork -ErrorAction SilentlyContinue)) { throw "Relay client DHCP scope '$clientNetwork' does not exist" }
+            $scopeReady = $(if (Test-MemLabsUsesDhcpAppliance) {
+                Test-MemLabsDhcpApplianceScopeReady -ScopeId $clientNetwork
+            }
+            else {
+                [bool](Get-DhcpServerv4Scope -ScopeId $clientNetwork -ErrorAction SilentlyContinue)
+            })
+            if (-not $scopeReady) { throw "Relay client DHCP scope '$clientNetwork' does not exist or is not ready" }
 
             $ownership = Test-LinuxDhcpRelayAddressAvailable -IPAddress $clientIp -Network $clientNetwork `
                 -RelayVmName $relayName -DeployConfig $DeployConfig

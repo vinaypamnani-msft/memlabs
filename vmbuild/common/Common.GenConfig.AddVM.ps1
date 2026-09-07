@@ -938,6 +938,8 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'joinDomain' -Value $false -Force
     }
 
+    Set-DefaultLocaleForVM -ConfigToCheck $ConfigToModify -VirtualMachine $virtualMachine -RequireAvailable
+
     if ($network) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
     }
@@ -1214,6 +1216,7 @@ function Add-NewVMForRole {
             $virtualMachine.memory = "4GB"
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'vmGeneration' -Value "2" -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installOffice' -Value $false -Force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osdTaskSequence' -Value $null -Force
             $virtualMachine.PsObject.Members.Remove('operatingSystem')
         }
         "SiteSystem" {
