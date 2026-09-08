@@ -33,10 +33,20 @@ function Import-TestFunction {
 
 $phasePath = Join-Path $RootPath 'common\Common.Phases.ps1'
 . (Import-TestFunction $phasePath 'Test-OsdClientCreatedThisRun')
+. (Import-TestFunction $phasePath 'Get-OsdClientPhaseAction')
 
 $global:OsdClientsCreatedThisRun = @('OSD2')
 Assert-Equal $true (Test-OsdClientCreatedThisRun -VMName 'OSD2') 'Phase 1 OSD placeholder is owned by this run'
 Assert-Equal $false (Test-OsdClientCreatedThisRun -VMName 'OSD1') 'pre-existing OSD client is not owned by this run'
+Assert-Equal 'Continue' (Get-OsdClientPhaseAction -Phase 1 -VMName 'OSD2') 'Phase 1 retains normal OSD creation handling'
+foreach ($phase in 2..8) {
+    Assert-Equal 'StopFreshPlaceholder' (Get-OsdClientPhaseAction -Phase $phase -VMName 'OSD2') "Phase $phase keeps a fresh blank OSD target off while PXE policy is authored"
+    Assert-Equal 'Skip' (Get-OsdClientPhaseAction -Phase $phase -VMName 'OSD1') "Phase $phase preserves a pre-existing OSD client"
+}
+foreach ($phase in 9..11) {
+    Assert-Equal 'Skip' (Get-OsdClientPhaseAction -Phase $phase -VMName 'OSD2') "Phase $phase preserves a current-run OSD client after policy authoring"
+    Assert-Equal 'Skip' (Get-OsdClientPhaseAction -Phase $phase -VMName 'OSD1') "Phase $phase preserves a pre-existing OSD client"
+}
 $global:OsdClientsCreatedThisRun = @()
 Assert-Equal $false (Test-OsdClientCreatedThisRun -VMName 'OSD2') 'rerun without Phase 1 owns no OSD clients'
 $global:OsdClientsCreatedThisRun = $null
@@ -44,11 +54,11 @@ Assert-Equal $false (Test-OsdClientCreatedThisRun -VMName 'OSD2') 'missing run s
 
 $phaseSource = Get-Content $phasePath -Raw
 Assert-Equal $true ($phaseSource.Contains("`$_.vmName -notin `$existingVMs.vmName")) 'Phase 1 records only OSD clients absent before creation'
-Assert-Equal $true ($phaseSource.Contains('if (Test-OsdClientCreatedThisRun -VMName $currentItem.vmName)')) 'phase routing gates OSD power-off on Phase 1 ownership'
+Assert-Equal $true ($phaseSource.Contains('$osdPhaseAction = Get-OsdClientPhaseAction -Phase $Phase -VMName $currentItem.vmName')) 'phase routing uses the tested OSD action policy'
 Assert-Equal $false ($phaseSource.Contains('stop-vm2 -Name $currentItem.vmName -TurnOff')) 'unconditional legacy OSD stop is removed'
-Assert-Equal $true ($phaseSource.Contains('if ($Phase -ne 10)')) 'installed OSD clients are allowed through only for Phase 10'
-$phase10Route = [regex]::Match($phaseSource, 'elseif \(\$Phase -eq 10\).*?if \(\$currentItem\.Role -in @\("AADClient"\)\)', 'Singleline').Success
-Assert-Equal $true $phase10Route 'Phase 10 dispatcher no longer excludes installed OSD clients'
+Assert-Equal $false ($phaseSource.Contains('installed OSDClient; running portable maintenance customizations')) 'Phase routing never opts an OSD client into maintenance'
+$phase10Route = [regex]::Match($phaseSource, 'elseif \(\$Phase -eq 10\).*?if \(\$currentItem\.Role -in @\("OSDClient", "AADClient"\)\)', 'Singleline').Success
+Assert-Equal $true $phase10Route 'Phase 10 dispatcher excludes every OSD client'
 $phase11Route = [regex]::Match($phaseSource, 'if \(\$Phase -eq 11\).*?if \(\$currentItem\.Role -in @\("OSDClient", "AADClient"\)\)', 'Singleline').Success
 Assert-Equal $true $phase11Route 'Phase 11 retains its existing OSD client exclusion'
 

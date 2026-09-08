@@ -1686,6 +1686,20 @@ function Test-OsdClientCreatedThisRun {
     return [bool]($global:OsdClientsCreatedThisRun -and $VMName -in @($global:OsdClientsCreatedThisRun))
 }
 
+function Get-OsdClientPhaseAction {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$Phase,
+        [Parameter(Mandatory = $true)]
+        [string]$VMName
+    )
+
+    if ($Phase -le 1) { return 'Continue' }
+    if ($Phase -le 8 -and (Test-OsdClientCreatedThisRun -VMName $VMName)) { return 'StopFreshPlaceholder' }
+    return 'Skip'
+}
+
 
 function Start-PhaseJobs {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '',
@@ -2917,17 +2931,17 @@ DROP TABLE #memlabs_idxprobe;
 
         # OSD clients have no MemLabs phase work after VM creation. Keep only a
         # blank target created by this run's Phase 1 off until PXE policy is
-        # ready; never change the power state of a pre-existing OSD client.
+        # ready; never change the power state of a pre-existing OSD client and
+        # never run Phase 10 maintenance on it. Post-PXE customization belongs
+        # in the task sequence or ConfigMgr policy.
         if ($Phase -gt 1 -and $currentItem.role -eq "OSDClient") {
-            if (Test-OsdClientCreatedThisRun -VMName $currentItem.vmName) {
+            $osdPhaseAction = Get-OsdClientPhaseAction -Phase $Phase -VMName $currentItem.vmName
+            if ($osdPhaseAction -eq 'StopFreshPlaceholder') {
                 Stop-VM2 -Name $currentItem.vmName -TurnOff
                 continue
             }
-            if ($Phase -ne 10) {
-                Write-Log "[Phase $Phase] $($currentItem.vmName): pre-existing OSDClient; preserving its power state" -LogOnly
-                continue
-            }
-            Write-Log "[Phase 10] $($currentItem.vmName): installed OSDClient; running portable maintenance customizations" -LogOnly
+            Write-Log "[Phase $Phase] $($currentItem.vmName): OSDClient is externally managed; preserving its power state and skipping phase work" -LogOnly
+            continue
         }
 
         # Linux VMs have no Windows DSC config. Phase 2 has a dedicated
@@ -3053,7 +3067,7 @@ DROP TABLE #memlabs_idxprobe;
                 }
             }
             elseif ($Phase -eq 10) {         
-                if ($currentItem.Role -in @("AADClient")) {
+                if ($currentItem.Role -in @("OSDClient", "AADClient")) {
                     continue
                 }
                 if ($phase10SkipSet.ContainsKey($currentItem.vmName)) {
