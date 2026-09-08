@@ -1,4 +1,333 @@
 {
+  "ar-SA": {
+    "DisplayName": "Arabic (Saudi Arabia)",
+    "LanguageTag": "ar-SA",
+    "LocationID": 205,
+    "MUILanguage": "ar-SA",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "ar-SA",
+    "AddInputLanguages": [
+      "0401:00000401"
+    ],
+    "RemoveInputLanguages": [],
+    "UserLocale": "ar-SA",
+    "LanguageID": 1025,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "bg-BG": {
+    "DisplayName": "Bulgarian (Bulgaria)",
+    "LanguageTag": "bg-BG",
+    "LocationID": 35,
+    "MUILanguage": "bg-BG",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "bg-BG",
+    "AddInputLanguages": [
+      "0402:00030402"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "bg-BG",
+    "LanguageID": 1026,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "LanguageCapabilitiesByOperatingSystem": {
+      "Server 2025*": [
+        "Basic",
+        "Handwriting",
+        "OCR",
+        "TextToSpeech"
+      ]
+    },
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "cs-CZ": {
+    "DisplayName": "Czech (Czechia)",
+    "LanguageTag": "cs-CZ",
+    "LocationID": 75,
+    "MUILanguage": "cs-CZ",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "cs-CZ",
+    "AddInputLanguages": [
+      "0405:00000405"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "cs-CZ",
+    "LanguageID": 1029,
+    "CMLanguage": "CSY",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "da-DK": {
+    "DisplayName": "Danish (Denmark)",
+    "LanguageTag": "da-DK",
+    "LocationID": 61,
+    "MUILanguage": "da-DK",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "da-DK",
+    "AddInputLanguages": [
+      "0406:00000406"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "da-DK",
+    "LanguageID": 1030,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "de-DE": {
+    "DisplayName": "German (Germany)",
+    "LanguageTag": "de-DE",
+    "LocationID": 94,
+    "MUILanguage": "de-DE",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "de-DE",
+    "AddInputLanguages": [
+      "0407:00000407"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "de-DE",
+    "LanguageID": 1031,
+    "CMLanguage": "DEU",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "el-GR": {
+    "DisplayName": "Greek (Greece)",
+    "LanguageTag": "el-GR",
+    "LocationID": 98,
+    "MUILanguage": "el-GR",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "el-GR",
+    "AddInputLanguages": [
+      "0408:00000408"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "el-GR",
+    "LanguageID": 1032,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "en-GB": {
+    "DisplayName": "English (United Kingdom)",
+    "LanguageTag": "en-GB",
+    "LocationID": 242,
+    "MUILanguage": "en-GB",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "en-GB",
+    "AddInputLanguages": [
+      "0809:00000809"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "en-GB",
+    "LanguageID": 2057,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
   "en-US": {
     "DisplayName": "English (United States)",
     "LanguageTag": "en-US",
@@ -14,6 +343,485 @@
     "LanguageID": 1033,
     "CMLanguage": "ENG",
     "WindowsUpdateOperatingSystems": []
+  },
+  "es-ES": {
+    "DisplayName": "Spanish (Spain)",
+    "LanguageTag": "es-ES",
+    "LocationID": 217,
+    "MUILanguage": "es-ES",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "es-ES",
+    "AddInputLanguages": [
+      "0C0A:0000040A"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "es-ES",
+    "LanguageID": 3082,
+    "CMLanguage": "ESN",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "es-MX": {
+    "DisplayName": "Spanish (Mexico)",
+    "LanguageTag": "es-MX",
+    "LocationID": 166,
+    "MUILanguage": "es-MX",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "es-MX",
+    "AddInputLanguages": [
+      "080A:0000080A"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "es-MX",
+    "LanguageID": 2058,
+    "CMLanguage": "ESN",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "et-EE": {
+    "DisplayName": "Estonian (Estonia)",
+    "LanguageTag": "et-EE",
+    "LocationID": 70,
+    "MUILanguage": "et-EE",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "et-EE",
+    "AddInputLanguages": [
+      "0425:00000425"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "et-EE",
+    "LanguageID": 1061,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic"
+    ],
+    "LanguageCapabilitiesByOperatingSystem": {
+      "Server 2025*": [
+        "Basic",
+        "Handwriting"
+      ]
+    },
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "fi-FI": {
+    "DisplayName": "Finnish (Finland)",
+    "LanguageTag": "fi-FI",
+    "LocationID": 77,
+    "MUILanguage": "fi-FI",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "fi-FI",
+    "AddInputLanguages": [
+      "040B:0000040B"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "fi-FI",
+    "LanguageID": 1035,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "fr-CA": {
+    "DisplayName": "French (Canada)",
+    "LanguageTag": "fr-CA",
+    "LocationID": 39,
+    "MUILanguage": "fr-CA",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "fr-CA",
+    "AddInputLanguages": [
+      "0C0C:00001009"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "fr-CA",
+    "LanguageID": 3084,
+    "CMLanguage": "FRA",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "fr-FR": {
+    "DisplayName": "French (France)",
+    "LanguageTag": "fr-FR",
+    "LocationID": 84,
+    "MUILanguage": "fr-FR",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "fr-FR",
+    "AddInputLanguages": [
+      "040C:0000040C"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "fr-FR",
+    "LanguageID": 1036,
+    "CMLanguage": "FRA",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "he-IL": {
+    "DisplayName": "Hebrew (Israel)",
+    "LanguageTag": "he-IL",
+    "LocationID": 117,
+    "MUILanguage": "he-IL",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "he-IL",
+    "AddInputLanguages": [
+      "040D:0002040D"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "he-IL",
+    "LanguageID": 1037,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "TextToSpeech"
+    ],
+    "LanguageCapabilitiesByOperatingSystem": {
+      "Server 2025*": [
+        "Basic",
+        "Handwriting",
+        "TextToSpeech"
+      ]
+    },
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "hr-HR": {
+    "DisplayName": "Croatian (Croatia)",
+    "LanguageTag": "hr-HR",
+    "LocationID": 108,
+    "MUILanguage": "hr-HR",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "hr-HR",
+    "AddInputLanguages": [
+      "041A:0000041A"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "hr-HR",
+    "LanguageID": 1050,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "hu-HU": {
+    "DisplayName": "Hungarian (Hungary)",
+    "LanguageTag": "hu-HU",
+    "LocationID": 109,
+    "MUILanguage": "hu-HU",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "hu-HU",
+    "AddInputLanguages": [
+      "040E:0000040E"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "hu-HU",
+    "LanguageID": 1038,
+    "CMLanguage": "HUN",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "LanguageCapabilitiesByOperatingSystem": {
+      "Server 2025*": [
+        "Basic",
+        "Handwriting",
+        "OCR",
+        "TextToSpeech"
+      ]
+    },
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "it-IT": {
+    "DisplayName": "Italian (Italy)",
+    "LanguageTag": "it-IT",
+    "LocationID": 118,
+    "MUILanguage": "it-IT",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "it-IT",
+    "AddInputLanguages": [
+      "0410:00000410"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "it-IT",
+    "LanguageID": 1040,
+    "CMLanguage": "ITA",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
   },
   "ja-JP": {
     "DisplayName": "Japanese (Japan)",
@@ -31,15 +839,15 @@
     "UserLocale": "ja-JP",
     "LanguageID": 1041,
     "CMLanguage": "JPN",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
     "LanguageCapabilities": [
       "Basic",
       "Handwriting",
       "OCR",
       "Speech",
       "TextToSpeech"
-    ],
-    "WindowsUpdateOperatingSystems": [
-      "Windows 11*"
     ],
     "MediaSources": [
       {
@@ -53,7 +861,897 @@
       },
       {
         "OperatingSystemPattern": "Server 2025*",
-        "Url": "https://go.microsoft.com/fwlink/?linkid=2273506",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "ko-KR": {
+    "DisplayName": "Korean (Korea)",
+    "LanguageTag": "ko-KR",
+    "LocationID": 134,
+    "MUILanguage": "ko-KR",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "ko-KR",
+    "AddInputLanguages": [
+      "0412:{A028AE76-01B1-46C2-99C4-ACD9858AE02F}{B5FE1F02-D5F2-4445-9C03-C568F23C99A1}"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "ko-KR",
+    "LanguageID": 1042,
+    "CMLanguage": "KOR",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "lt-LT": {
+    "DisplayName": "Lithuanian (Lithuania)",
+    "LanguageTag": "lt-LT",
+    "LocationID": 141,
+    "MUILanguage": "lt-LT",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "lt-LT",
+    "AddInputLanguages": [
+      "0427:00010427"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "lt-LT",
+    "LanguageID": 1063,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic"
+    ],
+    "LanguageCapabilitiesByOperatingSystem": {
+      "Server 2025*": [
+        "Basic",
+        "Handwriting"
+      ]
+    },
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "lv-LV": {
+    "DisplayName": "Latvian (Latvia)",
+    "LanguageTag": "lv-LV",
+    "LocationID": 140,
+    "MUILanguage": "lv-LV",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "lv-LV",
+    "AddInputLanguages": [
+      "0426:00020426"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "lv-LV",
+    "LanguageID": 1062,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic"
+    ],
+    "LanguageCapabilitiesByOperatingSystem": {
+      "Server 2025*": [
+        "Basic",
+        "Handwriting"
+      ]
+    },
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "nb-NO": {
+    "DisplayName": "Norwegian Bokmal (Norway)",
+    "LanguageTag": "nb-NO",
+    "LocationID": 177,
+    "MUILanguage": "nb-NO",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "nb-NO",
+    "AddInputLanguages": [
+      "0414:00000414"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "nb-NO",
+    "LanguageID": 1044,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "nl-NL": {
+    "DisplayName": "Dutch (Netherlands)",
+    "LanguageTag": "nl-NL",
+    "LocationID": 176,
+    "MUILanguage": "nl-NL",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "nl-NL",
+    "AddInputLanguages": [
+      "0413:00020409"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "nl-NL",
+    "LanguageID": 1043,
+    "CMLanguage": "NLD",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "pl-PL": {
+    "DisplayName": "Polish (Poland)",
+    "LanguageTag": "pl-PL",
+    "LocationID": 191,
+    "MUILanguage": "pl-PL",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "pl-PL",
+    "AddInputLanguages": [
+      "0415:00000415"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "pl-PL",
+    "LanguageID": 1045,
+    "CMLanguage": "PLK",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "pt-BR": {
+    "DisplayName": "Portuguese (Brazil)",
+    "LanguageTag": "pt-BR",
+    "LocationID": 32,
+    "MUILanguage": "pt-BR",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "pt-BR",
+    "AddInputLanguages": [
+      "0416:00000416"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "pt-BR",
+    "LanguageID": 1046,
+    "CMLanguage": "PTB",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "pt-PT": {
+    "DisplayName": "Portuguese (Portugal)",
+    "LanguageTag": "pt-PT",
+    "LocationID": 193,
+    "MUILanguage": "pt-PT",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "pt-PT",
+    "AddInputLanguages": [
+      "0816:00000816"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "pt-PT",
+    "LanguageID": 2070,
+    "CMLanguage": "PTG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "ro-RO": {
+    "DisplayName": "Romanian (Romania)",
+    "LanguageTag": "ro-RO",
+    "LocationID": 200,
+    "MUILanguage": "ro-RO",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "ro-RO",
+    "AddInputLanguages": [
+      "0418:00010418"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "ro-RO",
+    "LanguageID": 1048,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "ru-RU": {
+    "DisplayName": "Russian (Russia)",
+    "LanguageTag": "ru-RU",
+    "LocationID": 203,
+    "MUILanguage": "ru-RU",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "ru-RU",
+    "AddInputLanguages": [
+      "0419:00000419"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "ru-RU",
+    "LanguageID": 1049,
+    "CMLanguage": "RUS",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "sk-SK": {
+    "DisplayName": "Slovak (Slovakia)",
+    "LanguageTag": "sk-SK",
+    "LocationID": 143,
+    "MUILanguage": "sk-SK",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "sk-SK",
+    "AddInputLanguages": [
+      "041B:0000041B"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "sk-SK",
+    "LanguageID": 1051,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "sl-SI": {
+    "DisplayName": "Slovenian (Slovenia)",
+    "LanguageTag": "sl-SI",
+    "LocationID": 212,
+    "MUILanguage": "sl-SI",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "sl-SI",
+    "AddInputLanguages": [
+      "0424:00000424"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "sl-SI",
+    "LanguageID": 1060,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "sr-Latn-RS": {
+    "DisplayName": "Serbian (Latin, Serbia)",
+    "LanguageTag": "sr-Latn-RS",
+    "LocationID": 271,
+    "MUILanguage": "sr-Latn-RS",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "sr-Latn-RS",
+    "AddInputLanguages": [
+      "241A:0000081A"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "sr-Latn-RS",
+    "LanguageID": 9242,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "sv-SE": {
+    "DisplayName": "Swedish (Sweden)",
+    "LanguageTag": "sv-SE",
+    "LocationID": 221,
+    "MUILanguage": "sv-SE",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "sv-SE",
+    "AddInputLanguages": [
+      "041D:0000041D"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "sv-SE",
+    "LanguageID": 1053,
+    "CMLanguage": "SVE",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "th-TH": {
+    "DisplayName": "Thai (Thailand)",
+    "LanguageTag": "th-TH",
+    "LocationID": 227,
+    "MUILanguage": "th-TH",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "th-TH",
+    "AddInputLanguages": [
+      "041E:0000041E"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "th-TH",
+    "LanguageID": 1054,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "TextToSpeech"
+    ],
+    "LanguageCapabilitiesByOperatingSystem": {
+      "Server 2025*": [
+        "Basic",
+        "Handwriting",
+        "TextToSpeech"
+      ]
+    },
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "tr-TR": {
+    "DisplayName": "Turkish (Turkiye)",
+    "LanguageTag": "tr-TR",
+    "LocationID": 235,
+    "MUILanguage": "tr-TR",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "tr-TR",
+    "AddInputLanguages": [
+      "041F:0000041F"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "tr-TR",
+    "LanguageID": 1055,
+    "CMLanguage": "TRK",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "uk-UA": {
+    "DisplayName": "Ukrainian (Ukraine)",
+    "LanguageTag": "uk-UA",
+    "LocationID": 241,
+    "MUILanguage": "uk-UA",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "uk-UA",
+    "AddInputLanguages": [
+      "0422:00020422"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "uk-UA",
+    "LanguageID": 1058,
+    "CMLanguage": "ENG",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic"
+    ],
+    "LanguageCapabilitiesByOperatingSystem": {
+      "Server 2025*": [
+        "Basic",
+        "Handwriting"
+      ]
+    },
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "zh-CN": {
+    "DisplayName": "Chinese (China)",
+    "LanguageTag": "zh-CN",
+    "LocationID": 45,
+    "MUILanguage": "zh-CN",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "zh-CN",
+    "AddInputLanguages": [
+      "0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "zh-CN",
+    "LanguageID": 2052,
+    "CMLanguage": "CHS",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
+        "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
+        "Size": 6864345088,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      }
+    ]
+  },
+  "zh-TW": {
+    "DisplayName": "Chinese (Taiwan)",
+    "LanguageTag": "zh-TW",
+    "LocationID": 237,
+    "MUILanguage": "zh-TW",
+    "MUIFallbackLanguage": "en-US",
+    "SystemLocale": "zh-TW",
+    "AddInputLanguages": [
+      "0404:{B115690A-EA02-48D5-A231-E3578D2FDF80}{B2F9C502-1742-11D4-9790-0080C882687E}"
+    ],
+    "RemoveInputLanguages": [
+      "0409:00000409"
+    ],
+    "UserLocale": "zh-TW",
+    "LanguageID": 1028,
+    "CMLanguage": "CHT",
+    "WindowsUpdateOperatingSystems": [
+      "Windows 11*"
+    ],
+    "LanguageCapabilities": [
+      "Basic",
+      "Handwriting",
+      "OCR",
+      "Speech",
+      "TextToSpeech"
+    ],
+    "MediaSources": [
+      {
+        "OperatingSystemPattern": "Server 2022*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2195333",
+        "IsoRelativePath": "language\\Server2022\\SERVER_LOF_PACKAGES_OEM.iso",
+        "SHA256": "850A318C277F9B0D7436031EFD91B36F5D27DAD6E8EA9972179204A3FC756517",
+        "Size": 6085509120,
+        "VolumeLabel": "SERVER_FOD_LP_X64FRE_MULTI_DV9",
+        "RepositoryPath": "LanguagesAndOptionalFeatures"
+      },
+      {
+        "OperatingSystemPattern": "Server 2025*",
+        "Url": "https://go.microsoft.com/fwlink/p/?linkid=2273506",
         "IsoRelativePath": "language\\Server2025\\SERVER_LOF_PACKAGES_OEM.iso",
         "SHA256": "72C33705D0C35610CBA354DE8C3CBF1274B55A096227135B5BD8BABB8B222BE3",
         "Size": 6864345088,

@@ -384,6 +384,14 @@ function Test-VmFunctionality {
         $null = Test-DscIdle -VMName $VMName -Domain $domain
     }
 
+    # Verify the machine-level locale state configured by Phase 3. Do not use
+    # the remoting account's HKCU culture: it may legitimately predate the
+    # selected default-user locale.
+    if ($testsPassed -and -not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying selected language"
+        $testsPassed = Test-LocaleFunctionality -VMName $VMName -Domain $domain -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
     # Cross-forest trust validation. On a DC that joined a Forest Trust, verify
     # the trust object + secure channel, forward AND reverse DNS, the remote
     # admin landing in local Administrators, the remote root CA being trusted +
@@ -7562,6 +7570,134 @@ function Test-DscIdle {
     # $true here; the WARN: detail lines still reach the console/log via the
     # Phase 11 output buffer.
     return (Format-TestResult -VMName $VMName -RoleLabel 'DSC' -Result $result)
+}
+
+function Test-LocaleFunctionality {
+    <#
+    .SYNOPSIS
+        Verifies the selected Windows language and Server language capabilities.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$Domain,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $expectedLocale = if ($CurrentItem.locale) {
+        [string]$CurrentItem.locale
+    }
+    elseif ($DeployConfig.domainDefaults.DefaultLocale) {
+        [string]$DeployConfig.domainDefaults.DefaultLocale
+    }
+    elseif ($DeployConfig.vmOptions.locale) {
+        [string]$DeployConfig.vmOptions.locale
+    }
+    else {
+        'en-US'
+    }
+    $localeSettings = if ($CurrentItem.localeSettings) { $CurrentItem.localeSettings } else { $DeployConfig.vmOptions.localeSettings }
+    $expectedMUILanguage = if ($localeSettings.MUILanguage) { [string]$localeSettings.MUILanguage } else { $expectedLocale }
+    $expectedSystemLocale = if ($localeSettings.SystemLocale) { [string]$localeSettings.SystemLocale } else { $expectedLocale }
+    $expectedCapabilities = @($localeSettings.LanguageCapabilities | Where-Object { $_ })
+    $expectedCapabilitiesCsv = $expectedCapabilities -join ','
+    $localeAcquisition = if ($CurrentItem.localeAcquisition) { [string]$CurrentItem.localeAcquisition } else { 'Media' }
+    $validateCapabilities = $localeAcquisition -in @('Media', 'MicrosoftMedia')
+    Write-Log "[Phase $Phase] $VMName [Locale]: Checking selected language '$expectedLocale'" -LogOnly
+
+    $scriptBlock = {
+        param($locale, $muiLanguage, $systemLocaleExpected, $capabilityCsv, $checkCapabilities)
+
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $capabilities = @($capabilityCsv -split ',' | Where-Object { $_ })
+
+        try {
+            $muiLanguages = @((Get-CimInstance -ClassName Win32_OperatingSystem -Property MUILanguages -ErrorAction Stop).MUILanguages)
+            if ($muiLanguages -icontains $locale) {
+                $results.Details.Add("OK: Installed MUI languages include '$locale'")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Installed MUI languages are '$($muiLanguages -join ',')'; expected '$locale'")
+            }
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Could not read installed MUI languages: $($_.Exception.Message)")
+        }
+
+        try {
+            $systemLocale = (Get-WinSystemLocale -ErrorAction Stop).Name
+            if ($systemLocale -ieq $systemLocaleExpected) {
+                $results.Details.Add("OK: System locale is '$systemLocaleExpected'")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: System locale is '$systemLocale'; expected '$systemLocaleExpected'")
+            }
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Could not read system locale: $($_.Exception.Message)")
+        }
+
+        try {
+            $preferredUILanguage = $null
+            if (Get-Command Get-SystemPreferredUILanguage -ErrorAction SilentlyContinue) {
+                $preferredUILanguage = Get-SystemPreferredUILanguage -ErrorAction Stop
+            }
+            else {
+                $preferredUILanguages = @(Get-ItemPropertyValue `
+                    'Registry::HKEY_USERS\S-1-5-18\Control Panel\Desktop\MuiCached' `
+                    -Name 'MachinePreferredUILanguages' -ErrorAction Stop | Where-Object { $null -ne $_ })
+                $preferredUILanguage = [string]($preferredUILanguages | Select-Object -First 1)
+                if ([string]::IsNullOrWhiteSpace($preferredUILanguage)) {
+                    throw "SYSTEM MachinePreferredUILanguages is empty"
+                }
+            }
+            if ($preferredUILanguage -ieq $muiLanguage) {
+                $results.Details.Add("OK: System preferred UI language is '$muiLanguage'")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: System preferred UI language is '$preferredUILanguage'; expected '$muiLanguage'")
+            }
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Could not read system preferred UI language: $($_.Exception.Message)")
+        }
+
+        if ($checkCapabilities) {
+            foreach ($capability in @($capabilities | Where-Object { $_ })) {
+                $name = "Language.$capability~~~$locale~0.0.1.0"
+                try {
+                    $state = Get-WindowsCapability -Online -Name $name -ErrorAction Stop
+                    if ($state.State -eq 'Installed') {
+                        $results.Details.Add("OK: $name is installed")
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: $name state is '$($state.State)'; expected 'Installed'")
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Could not read $name state: $($_.Exception.Message)")
+                }
+            }
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
+        -ScriptBlock $scriptBlock -ArgumentList @($expectedLocale, $expectedMUILanguage, $expectedSystemLocale, $expectedCapabilitiesCsv, $validateCapabilities) `
+        -DisplayName 'Phase11-Locale-Test' -SuppressLog -AsJob -TimeoutSeconds 180 -RebootIfUnresponsive
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'Locale' -Result $result)
 }
 
 function Test-PassiveSiteFunctionality {

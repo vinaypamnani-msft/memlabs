@@ -1235,6 +1235,10 @@ function Start-Phase {
     # Start-Phase's return value is the phase pass/fail gate in New-Lab, and anything
     # one of these emits to the success stream would turn it into a truthy array.
     if ($Phase -eq 2) {
+        if (-not (Initialize-LocaleMediaForPhase2 -DeployConfig $deployConfig)) {
+            Write-Log '[Phase 2] Locale media preparation failed; aborting before worker dispatch.' -Failure
+            return $false
+        }
         $null = Build-ToolZipsForPhase2 -deployConfig $deployConfig
     }
 

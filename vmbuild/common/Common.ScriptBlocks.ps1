@@ -5552,6 +5552,7 @@ $global:VM_Config = {
                         AddInputLanguages    = $localeSettings.AddInputLanguages
                         RemoveInputLanguages = $localeSettings.RemoveInputLanguages
                         UserLocale           = $localeSettings.UserLocale
+                        LanguageCapabilities = $localeSettings.LanguageCapabilities
                         # This is used for SSMS (TBD)
                         LanguageID           = $localeSettings.LanguageID
                     }

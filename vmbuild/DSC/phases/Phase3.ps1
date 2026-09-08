@@ -350,7 +350,10 @@
             DependsOn   = "[WriteStatus]InstallDotNet"
         }
 
-        $nextDepend = "[InstallDotNet4]DotNet"
+        $nextDepend = @("[InstallDotNet4]DotNet")
+        if ($l -and $languageTag -ne "en-US") {
+            $nextDepend += "[Language]ConfigureLanguage"
+        }
         if ($ThisVM.installSSMS -eq $true -or (($null -eq $ThisVM.installSSMS) -and $ThisVM.SQLVersion)) {
             # Check if false, for older configs that didn't have this prop
 

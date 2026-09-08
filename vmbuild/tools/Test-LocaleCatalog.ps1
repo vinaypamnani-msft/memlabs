@@ -71,8 +71,14 @@ $sourcePath = Join-Path $RootPath 'common\Common.GenConfig.NewDomain.ps1'
 $localeModulePath = Join-Path $RootPath 'common\Common.Locale.ps1'
 $summaryPath = Join-Path $RootPath 'common\Common.GenConfig.Summary.ps1'
 . (Import-TestFunction -Path $localeModulePath -Name 'Get-LocaleMediaSource')
+. (Import-TestFunction -Path $localeModulePath -Name 'Get-LocaleDefinitionForOperatingSystem')
 . (Import-TestFunction -Path $localeModulePath -Name 'Get-LocaleMediaFiles')
 . (Import-TestFunction -Path $localeModulePath -Name 'Test-LocaleMediaFiles')
+. (Import-TestFunction -Path $localeModulePath -Name 'Test-LocaleMediaIso')
+. (Import-TestFunction -Path $localeModulePath -Name 'Clear-LocaleMediaIsoValidationCache')
+. (Import-TestFunction -Path $localeModulePath -Name 'Get-LocaleMediaMutexName')
+. (Import-TestFunction -Path $localeModulePath -Name 'Initialize-LocaleMedia')
+. (Import-TestFunction -Path $localeModulePath -Name 'Initialize-LocaleMediaForPhase2')
 . (Import-TestFunction -Path $localeModulePath -Name 'Update-CatalogLocaleSettings')
 . (Import-TestFunction -Path $sourcePath -Name 'Get-LocaleProfiles')
 . (Import-TestFunction -Path $sourcePath -Name 'Get-LocaleAcquisitionMethod')
@@ -81,13 +87,84 @@ $summaryPath = Join-Path $RootPath 'common\Common.GenConfig.Summary.ps1'
 . (Import-TestFunction -Path $sourcePath -Name 'Select-Locale')
 . (Import-TestFunction -Path $summaryPath -Name 'Get-SortedProperties')
 
-$global:Common = [pscustomobject]@{ ConfigPath = (Join-Path $RootPath 'config') }
+$global:Common = [pscustomobject]@{ ConfigPath = (Join-Path $RootPath 'config'); AzureFilesPath = (Join-Path $RootPath 'azureFiles') }
 $config = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ locale = 'en-US' }
 }
 
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 $catalogPath = Join-Path $RootPath 'common\LocaleCatalog.json'
+$catalog = Get-Content -LiteralPath $catalogPath -Raw | ConvertFrom-Json
+$catalogTags = @($catalog.PSObject.Properties.Name | Sort-Object)
+$expectedTags = @(
+    'ar-SA', 'bg-BG', 'cs-CZ', 'da-DK', 'de-DE', 'el-GR', 'en-GB', 'en-US', 'es-ES', 'es-MX',
+    'et-EE', 'fi-FI', 'fr-CA', 'fr-FR', 'he-IL', 'hr-HR', 'hu-HU', 'it-IT', 'ja-JP', 'ko-KR',
+    'lt-LT', 'lv-LV', 'nb-NO', 'nl-NL', 'pl-PL', 'pt-BR', 'pt-PT', 'ro-RO', 'ru-RU', 'sk-SK',
+    'sl-SI', 'sr-Latn-RS', 'sv-SE', 'th-TH', 'tr-TR', 'uk-UA', 'zh-CN', 'zh-TW'
+) | Sort-Object
+Assert-Equal -Expected 38 -Actual $catalogTags.Count -What 'catalog contains the 38-language Server and Windows client intersection'
+Assert-Equal -Expected ($expectedTags -join ',') -Actual ($catalogTags -join ',') -What 'catalog language tags match the measured intersection'
+Assert-True -Condition ($catalog.'ar-SA'.PSObject.Properties.Name -contains 'RemoveInputLanguages') -What 'Arabic explicitly defines input languages to remove'
+Assert-True -Condition ($catalog.'ar-SA'.RemoveInputLanguages -is [array]) -What 'Arabic input-language removal remains an array'
+Assert-Equal -Expected 0 -Actual $catalog.'ar-SA'.RemoveInputLanguages.Count -What 'Arabic retains the Windows English fallback input method'
+
+$server2022Capabilities = @{
+    'ar-SA' = 'Basic,OCR,TextToSpeech'; 'bg-BG' = 'Basic,OCR,TextToSpeech'; 'cs-CZ' = 'Basic,Handwriting,OCR,TextToSpeech'
+    'da-DK' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'; 'de-DE' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'
+    'el-GR' = 'Basic,Handwriting,OCR,TextToSpeech'; 'en-GB' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'
+    'es-ES' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'; 'es-MX' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'
+    'et-EE' = 'Basic'; 'fi-FI' = 'Basic,Handwriting,OCR,TextToSpeech'; 'fr-CA' = 'Basic,OCR,Speech,TextToSpeech'
+    'fr-FR' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'; 'he-IL' = 'Basic,TextToSpeech'
+    'hr-HR' = 'Basic,Handwriting,OCR,TextToSpeech'; 'hu-HU' = 'Basic,OCR,TextToSpeech'
+    'it-IT' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'; 'ja-JP' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'
+    'ko-KR' = 'Basic,Handwriting,OCR,TextToSpeech'; 'lt-LT' = 'Basic'; 'lv-LV' = 'Basic'
+    'nb-NO' = 'Basic,Handwriting,OCR,TextToSpeech'; 'nl-NL' = 'Basic,Handwriting,OCR,TextToSpeech'
+    'pl-PL' = 'Basic,Handwriting,OCR,TextToSpeech'; 'pt-BR' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'
+    'pt-PT' = 'Basic,Handwriting,OCR,TextToSpeech'; 'ro-RO' = 'Basic,Handwriting,OCR,TextToSpeech'
+    'ru-RU' = 'Basic,Handwriting,OCR,TextToSpeech'; 'sk-SK' = 'Basic,Handwriting,OCR,TextToSpeech'
+    'sl-SI' = 'Basic,Handwriting,OCR,TextToSpeech'; 'sr-Latn-RS' = 'Basic,Handwriting,OCR'
+    'sv-SE' = 'Basic,Handwriting,OCR,TextToSpeech'; 'th-TH' = 'Basic,TextToSpeech'
+    'tr-TR' = 'Basic,Handwriting,OCR,TextToSpeech'; 'uk-UA' = 'Basic'
+    'zh-CN' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'; 'zh-TW' = 'Basic,Handwriting,OCR,Speech,TextToSpeech'
+}
+$server2025Capabilities = @{}
+foreach ($tag in $server2022Capabilities.Keys) { $server2025Capabilities[$tag] = $server2022Capabilities[$tag] }
+$server2025Capabilities['bg-BG'] = 'Basic,Handwriting,OCR,TextToSpeech'
+$server2025Capabilities['et-EE'] = 'Basic,Handwriting'
+$server2025Capabilities['he-IL'] = 'Basic,Handwriting,TextToSpeech'
+$server2025Capabilities['hu-HU'] = 'Basic,Handwriting,OCR,TextToSpeech'
+$server2025Capabilities['lt-LT'] = 'Basic,Handwriting'
+$server2025Capabilities['lv-LV'] = 'Basic,Handwriting'
+$server2025Capabilities['th-TH'] = 'Basic,Handwriting,TextToSpeech'
+$server2025Capabilities['uk-UA'] = 'Basic,Handwriting'
+
+$nativeCMLanguages = @{
+    'en-US' = 'ENG'; 'zh-CN' = 'CHS'; 'zh-TW' = 'CHT'; 'cs-CZ' = 'CSY'; 'de-DE' = 'DEU'
+    'es-ES' = 'ESN'; 'es-MX' = 'ESN'; 'fr-CA' = 'FRA'; 'fr-FR' = 'FRA'; 'hu-HU' = 'HUN'
+    'it-IT' = 'ITA'; 'ja-JP' = 'JPN'; 'ko-KR' = 'KOR'; 'nl-NL' = 'NLD'; 'pl-PL' = 'PLK'
+    'pt-BR' = 'PTB'; 'pt-PT' = 'PTG'; 'ru-RU' = 'RUS'; 'sv-SE' = 'SVE'; 'tr-TR' = 'TRK'
+}
+
+foreach ($tag in $expectedTags) {
+    $localeProfile = $catalog.PSObject.Properties[$tag].Value
+    $culture = [Globalization.CultureInfo]::GetCultureInfo($tag)
+    $region = New-Object Globalization.RegionInfo($tag)
+    $canonicalTips = @((New-WinUserLanguageList -Language $tag)[0].InputMethodTips)
+    Assert-Equal -Expected $culture.LCID -Actual $localeProfile.LanguageID -What "$tag uses the Windows LCID"
+    Assert-Equal -Expected $region.GeoId -Actual $localeProfile.LocationID -What "$tag uses the Windows GeoID"
+    Assert-Equal -Expected ($canonicalTips -join ',') -Actual (@($localeProfile.AddInputLanguages) -join ',') -What "$tag uses the canonical Windows input method"
+    $expectedCMLanguage = if ($nativeCMLanguages.ContainsKey($tag)) { $nativeCMLanguages[$tag] } else { 'ENG' }
+    Assert-Equal -Expected $expectedCMLanguage -Actual $localeProfile.CMLanguage -What "$tag uses an available ConfigMgr 2509 language"
+
+    if ($tag -eq 'en-US') { continue }
+    Assert-Equal -Expected 2 -Actual ($localeProfile.MediaSources | Where-Object { $null -ne $_ }).Count -What "$tag has Server 2022 and 2025 media sources"
+    Assert-Equal -Expected 'Windows 11*' -Actual @($localeProfile.WindowsUpdateOperatingSystems)[0] -What "$tag is available to Windows 11 clients"
+    $server2022Profile = Get-LocaleDefinitionForOperatingSystem -LocaleDefinition $localeProfile -OperatingSystem 'Server 2022'
+    $server2025Profile = Get-LocaleDefinitionForOperatingSystem -LocaleDefinition $localeProfile -OperatingSystem 'Server 2025'
+    Assert-Equal -Expected $server2022Capabilities[$tag] -Actual (@($server2022Profile.LanguageCapabilities) -join ',') -What "$tag matches the Server 2022 capability set"
+    Assert-Equal -Expected $server2025Capabilities[$tag] -Actual (@($server2025Profile.LanguageCapabilities) -join ',') -What "$tag matches the Server 2025 capability set"
+}
+
 $selected = Select-Locale -ConfigToCheck $config -CatalogPath $catalogPath
 
 Assert-Equal -Expected 'ja-JP' -Actual $selected -What 'Japanese can be selected from the locale menu'
@@ -152,6 +229,7 @@ Assert-True -Condition ($phase3 -match '\$ThisVM\.localeSettings') -What 'Phase 
 Assert-True -Condition ($phase3 -match "\$localeAcquisition -eq 'WindowsUpdate'") -What 'Phase 3 selects the online acquisition resource per VM'
 Assert-True -Condition ($phase3 -match 'Install-Language -Language \$language') -What 'online acquisition downloads the selected language'
 Assert-True -Condition ($phase3 -match '\$global:DSCMachineStatus = 1') -What 'online acquisition requests an automatic DSC reboot'
+Assert-True -Condition ($phase3 -match '(?s)\$nextDepend\s*=\s*@\("\[InstallDotNet4\]DotNet"\).*?\$nextDepend\s*\+=\s*"\[Language\]ConfigureLanguage"') -What 'Phase 3 completion waits for DotNet and configured language convergence'
 Assert-True -Condition ($scriptBlocks -match "\$currentLocaleAcquisition -ne 'WindowsUpdate'") -What 'online acquisition skips CAB copying'
 Assert-True -Condition ($perfloading -match '\$ThisVM\.locale') -What 'SUP language selection consumes the per-VM locale'
 
@@ -271,6 +349,97 @@ finally {
     Remove-Item -LiteralPath $packageRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+$isoProbePath = Join-Path ([IO.Path]::GetTempPath()) ("memlabs-locale-iso-" + [guid]::NewGuid().ToString('N') + '.iso')
+try {
+    [IO.File]::WriteAllBytes($isoProbePath, [byte[]](1, 2, 3, 4))
+    $isoFileTime = (Get-Item -LiteralPath $isoProbePath).LastWriteTimeUtc
+    $isoProbeHash = (Get-FileHash -LiteralPath $isoProbePath -Algorithm SHA256).Hash
+    $isoProbeSource = [pscustomobject]@{ Size = 4; SHA256 = $isoProbeHash }
+    Assert-True -Condition (Test-LocaleMediaIso -Path $isoProbePath -Source $isoProbeSource) -What 'offline locale media accepts a cached ISO with exact size and hash'
+    $isoProbeSource.Size = 5
+    Assert-True -Condition (-not (Test-LocaleMediaIso -Path $isoProbePath -Source $isoProbeSource)) -What 'offline locale media rejects a cached ISO with the wrong size'
+    $isoProbeSource.Size = 4
+    $isoProbeSource.SHA256 = '00'
+    Assert-True -Condition (-not (Test-LocaleMediaIso -Path $isoProbePath -Source $isoProbeSource)) -What 'offline locale media rejects a cached ISO with the wrong hash'
+    Assert-True -Condition (-not (Test-LocaleMediaIso -Path "$isoProbePath.missing" -Source $isoProbeSource)) -What 'offline locale media rejects a missing cached ISO'
+
+    Clear-LocaleMediaIsoValidationCache
+    $isoProbeSource.SHA256 = $isoProbeHash
+    Assert-True -Condition (Test-LocaleMediaIso -Path $isoProbePath -Source $isoProbeSource) -What 'first locale validates its shared cached ISO'
+    Assert-True -Condition (Test-LocaleMediaIso -Path $isoProbePath -Source $isoProbeSource) -What 'second locale reuses validation for the unchanged shared ISO'
+
+    $originalAzureFilesPath = $global:Common.AzureFilesPath
+    $originalCommonConfigPath = $global:Common.ConfigPath
+    $global:Common.AzureFilesPath = Split-Path -Parent $isoProbePath
+    $global:Common.ConfigPath = Join-Path (Split-Path -Parent $isoProbePath) ('empty-config-' + [guid]::NewGuid().ToString('N'))
+    $offlineProfile = $japaneseProfile | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $offlineProfile.MediaSources = @([pscustomobject]@{
+            OperatingSystemPattern = 'Server 2022*'
+            IsoRelativePath        = Split-Path -Leaf $isoProbePath
+            Size                   = 4
+            SHA256                 = $isoProbeHash
+        })
+    $offlineCatalogPath = "$isoProbePath.catalog.json"
+    [pscustomobject]@{ 'en-US' = $catalog.'en-US'; 'ja-JP' = $offlineProfile } |
+        ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $offlineCatalogPath -Encoding UTF8
+    $offlineConfig = [pscustomobject]@{
+        domainDefaults = [pscustomobject]@{ DefaultLocale = 'ja-JP' }
+        vmOptions      = [pscustomobject]@{}
+    }
+    $offlineVm = [pscustomobject]@{ vmName = 'OFFLINE-S22'; operatingSystem = 'Server 2022' }
+    $hadOfflineMode = $global:Common.PSObject.Properties.Name -contains 'OfflineMode'
+    $originalOfflineMode = $global:Common.OfflineMode
+    $global:Common | Add-Member -MemberType NoteProperty -Name OfflineMode -Value $true -Force
+    Set-DefaultLocaleForVM -ConfigToCheck $offlineConfig -VirtualMachine $offlineVm -CatalogPath $offlineCatalogPath -RequireAvailable
+    Assert-Equal -Expected 'ja-JP' -Actual $offlineVm.locale -What 'offline authoring preserves a locale backed by a hash-valid cached ISO'
+    Assert-Equal -Expected 'MicrosoftMedia' -Actual $offlineVm.localeAcquisition -What 'offline authoring routes a valid cached ISO through Microsoft media extraction'
+    Clear-LocaleMediaIsoValidationCache
+    $offlineProfile.MediaSources[0].SHA256 = '00'
+    [pscustomobject]@{ 'en-US' = $catalog.'en-US'; 'ja-JP' = $offlineProfile } |
+        ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $offlineCatalogPath -Encoding UTF8
+    $invalidOfflineVm = [pscustomobject]@{ vmName = 'INVALID-S22'; operatingSystem = 'Server 2022' }
+    Set-DefaultLocaleForVM -ConfigToCheck $offlineConfig -VirtualMachine $invalidOfflineVm -CatalogPath $offlineCatalogPath -RequireAvailable
+    Assert-Equal -Expected 'en-US' -Actual $invalidOfflineVm.locale -What 'offline authoring rejects a cached ISO whose hash is invalid'
+    $global:Common.OfflineMode = $originalOfflineMode
+    $global:Common.AzureFilesPath = $originalAzureFilesPath
+    $global:Common.ConfigPath = $originalCommonConfigPath
+    $isoProbeSource.SHA256 = $isoProbeHash
+    Assert-True -Condition (Test-LocaleMediaIso -Path $isoProbePath -Source $isoProbeSource) -What 'direct validation reacquires the ISO lock after authoring cleanup'
+    $writeBlocked = $false
+    try { [IO.File]::WriteAllBytes($isoProbePath, [byte[]](4, 3, 2, 1)) } catch { $writeBlocked = $true }
+    Assert-True -Condition $writeBlocked -What 'validated ISO bytes cannot change while validation is reused'
+    Clear-LocaleMediaIsoValidationCache
+    [IO.File]::WriteAllBytes($isoProbePath, [byte[]](4, 3, 2, 1))
+    (Get-Item -LiteralPath $isoProbePath).LastWriteTimeUtc = $isoFileTime
+    Assert-True -Condition (-not (Test-LocaleMediaIso -Path $isoProbePath -Source $isoProbeSource)) -What 'same-size same-timestamp changed ISO bytes fail fresh validation'
+    Assert-Equal -Expected (Get-LocaleMediaMutexName -Path $isoProbePath) -Actual (Get-LocaleMediaMutexName -Path $isoProbePath) -What 'locale media mutex identity is stable for one ISO path'
+}
+finally {
+    Clear-LocaleMediaIsoValidationCache
+    if ($originalAzureFilesPath) { $global:Common.AzureFilesPath = $originalAzureFilesPath }
+    if ($originalCommonConfigPath) { $global:Common.ConfigPath = $originalCommonConfigPath }
+    if ($hadOfflineMode) {
+        $global:Common.OfflineMode = $originalOfflineMode
+    }
+    elseif ($global:Common.PSObject.Properties.Name -contains 'OfflineMode') {
+        $global:Common.PSObject.Properties.Remove('OfflineMode')
+    }
+    Remove-Item -LiteralPath "$isoProbePath.catalog.json" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $isoProbePath -Force -ErrorAction SilentlyContinue
+}
+
+$localeModuleText = Get-Content -LiteralPath $localeModulePath -Raw
+$cachedIsoCheckIndex = $localeModuleText.IndexOf('$cachedIsoValid = Test-LocaleMediaIso')
+$offlineRejectIndex = $localeModuleText.IndexOf('if ($Common.OfflineMode -and -not $cachedIsoValid)')
+Assert-True -Condition ($cachedIsoCheckIndex -ge 0 -and $offlineRejectIndex -gt $cachedIsoCheckIndex) -What 'offline rejection occurs only after cached ISO validation'
+Assert-True -Condition ($localeModuleText -match 'Get-FileWithHash.+-ForceDownload:\$replaceInvalidCache') -What 'online acquisition replaces an existing ISO that failed direct validation'
+Assert-True -Condition ($localeModuleText -match '\[Threading\.Mutex\]::new') -What 'shared locale ISO validation and extraction are serialized across direct callers'
+Assert-True -Condition ($localeModuleText -match '\$WhatIf -and -not \$Common\.OfflineMode') -What 'online dry run reports downloadable locale media as viable'
+Assert-True -Condition ($localeModuleText -match 'if \(-not \$RetainIsoValidation\) \{ Clear-LocaleMediaIsoValidationCache \}') -What 'direct locale initialization releases cached ISO validation handles'
+Assert-True -Condition ($localeModuleText -match 'Initialize-LocaleMedia.+-RetainIsoValidation') -What 'Phase 2 batch retains ISO validation only across serial pre-staging'
+Assert-True -Condition ($localeModuleText -match 'Get-LocaleMediaMutexName -Path \$isoPath') -What 'locale media mutex follows the contested ISO path'
+Assert-True -Condition ($localeModuleText -match '(?s)Dismount-DiskImage.+?finally \{\s*Remove-Item -LiteralPath \$stagePath') -What 'staging cleanup still runs when media dismount fails'
+
 $legacyConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ locale = 'ja-JP'; localeSettings = $japaneseProfile }
     virtualMachines = @(
@@ -289,6 +458,7 @@ $addVm = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.GenConfig.
 $vmList = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.GenConfig.VMList.ps1') -Raw
 $summary = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.GenConfig.Summary.ps1') -Raw
 $common = Get-Content -LiteralPath (Join-Path $RootPath 'Common.ps1') -Raw
+$phases = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Phases.ps1') -Raw
 Assert-True -Condition ($addVm -match 'Set-DefaultLocaleForVM.+-RequireAvailable') -What 'new VM creation applies only an available domain locale default'
 Assert-True -Condition ($addVm -match "'operatingSystem', 'locale', 'localeSettings', 'localeAcquisition'") -What 'new OSD clients discard provisional OS locale metadata'
 Assert-True -Condition ($vmList -match '"DefaultLocale"\s*\{') -What 'domain default has a locale menu handler'
@@ -296,10 +466,70 @@ Assert-True -Condition ($vmList -match 'Select-Locale -ConfigToCheck \$global:co
 Assert-True -Condition ($summary -match 'Initialize-PerVmLocales -ConfigToCheck \$Global:Config') -What 'authoring migrates legacy global locales before rendering'
 Assert-True -Condition ($common -match 'Common\.Locale\.ps1') -What 'shared locale media helpers load in phase workers'
 Assert-True -Condition ($common -match 'Initialize-LocaleMedia -Locale \$vmLocale -OperatingSystem \$vmOperatingSystem') -What 'language-pack copy prepares missing Microsoft media automatically'
+Assert-True -Condition ($common -match 'Get-LocaleDefinitionForOperatingSystem -LocaleDefinition \$catalog\.\$vmLocale -OperatingSystem \$vmOperatingSystem') -What 'language-pack copy resolves OS-specific capability overrides'
+Assert-True -Condition ($common -match 'Test-LocaleMediaFiles -Files \$sourceFiles -LocaleDefinition \$localeDefinition') -What 'language-pack copy rejects incomplete OS-specific package sets'
+Assert-True -Condition ($phases -match 'Initialize-LocaleMediaForPhase2 -DeployConfig \$deployConfig') -What 'Phase 2 prepares unique locale media before worker fan-out'
 Assert-True -Condition ($scriptBlocks -match '\$locale = if \(\$currentItem\.locale\)') -What 'DSC multi-config compilation consumes the per-VM locale'
 Assert-True -Condition ($scriptBlocks -match '\$localeSettings = if \(\$currentItem\.localeSettings\)') -What 'DSC multi-config compilation consumes the per-VM locale profile'
+Assert-True -Condition ($scriptBlocks -match 'LanguageCapabilities\s*=\s*\$localeSettings\.LanguageCapabilities') -What 'legacy DSC configuration data preserves language capabilities'
 Assert-True -Condition ($phase3 -match 'InstallLanguageFeaturesOffline') -What 'Phase 3 installs Server language capabilities from cached media'
+Assert-True -Condition ($phase3 -match '\$l\.LanguageCapabilities') -What 'Phase 3 consumes language capabilities from configuration data'
 Assert-True -Condition ($phase3.Contains("Add-WindowsCapability -Online -Name `$name -Source 'C:\LanguagePacks' -LimitAccess")) -What 'Server language features cannot fall through to Windows Update'
+
+$script:PreparedLocaleRequests = [Collections.Generic.List[string]]::new()
+$script:ClearLocaleCacheCalls = 0
+function Initialize-LocaleMedia {
+    param ([string] $Locale, [string] $OperatingSystem, [switch] $RetainIsoValidation)
+    $script:PreparedLocaleRequests.Add("$Locale|$OperatingSystem")
+    return $true
+}
+function Clear-LocaleMediaIsoValidationCache { $script:ClearLocaleCacheCalls++ }
+
+$domainFallbackConfig = [pscustomobject]@{
+    domainDefaults  = [pscustomobject]@{ DefaultLocale = 'ja-JP' }
+    vmOptions       = [pscustomobject]@{}
+    virtualMachines = @([pscustomobject]@{ vmName = 'DOMAIN-FALLBACK'; operatingSystem = 'Server 2022' })
+}
+Assert-True -Condition (Initialize-LocaleMediaForPhase2 -DeployConfig $domainFallbackConfig) -What 'Phase 2 pre-stage accepts a domain-default-only locale'
+Assert-True -Condition ($script:PreparedLocaleRequests -contains 'ja-JP|Server 2022') -What 'Phase 2 pre-stage prepares the domain-default locale before fan-out'
+
+$script:PreparedLocaleRequests.Clear()
+$legacyFallbackConfig = [pscustomobject]@{
+    domainDefaults  = [pscustomobject]@{}
+    vmOptions       = [pscustomobject]@{ locale = 'ko-KR' }
+    virtualMachines = @([pscustomobject]@{ vmName = 'LEGACY-FALLBACK'; operatingSystem = 'Server 2025' })
+}
+Assert-True -Condition (Initialize-LocaleMediaForPhase2 -DeployConfig $legacyFallbackConfig) -What 'Phase 2 pre-stage accepts a legacy-root-only locale'
+Assert-True -Condition ($script:PreparedLocaleRequests -contains 'ko-KR|Server 2025') -What 'Phase 2 pre-stage prepares the legacy root locale before fan-out'
+Assert-Equal -Expected 2 -Actual $script:ClearLocaleCacheCalls -What 'Phase 2 fallback pre-stage clears validation handles after each batch'
+
+# A cleanup cmdlet that writes success output must not turn a failed media
+# preparation into a truthy multi-item result.
+. $localeModulePath
+function Get-LocaleMediaFiles { @() }
+function Test-LocaleMediaFiles { $false }
+function Test-LocaleMediaIso { $true }
+function Mount-DiskImage { [pscustomobject]@{ Mounted = $true } }
+function Get-Volume { [pscustomobject]@{ FileSystemLabel = 'SERVER_FOD_LP_X64FRE_MULTI_DV9'; DriveLetter = 'Z' } }
+function Dismount-DiskImage { [pscustomobject]@{ Dismounted = $true } }
+function Clear-LocaleMediaIsoValidationCache { }
+$failureConfigRoot = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-locale-failure-' + [guid]::NewGuid().ToString('N'))
+$savedCommon = $global:Common
+try {
+    $global:Common = [pscustomobject]@{
+        ConfigPath     = $failureConfigRoot
+        AzureFilesPath = $failureConfigRoot
+        TempPath       = $failureConfigRoot
+        OfflineMode    = $false
+    }
+    $failureResult = @(Initialize-LocaleMedia -Locale 'ja-JP' -OperatingSystem 'Server 2022')
+    Assert-Equal -Expected 1 -Actual $failureResult.Count -What 'media preparation failure remains one scalar result when dismount emits output'
+    Assert-Equal -Expected $false -Actual $failureResult[0] -What 'media preparation failure remains false after cleanup'
+}
+finally {
+    $global:Common = $savedCommon
+    Remove-Item -LiteralPath $failureConfigRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 if ($script:Failures -ne 0) {
     throw "$script:Failures locale catalog test(s) failed"

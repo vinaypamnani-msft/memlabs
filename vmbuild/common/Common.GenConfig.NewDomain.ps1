@@ -448,6 +448,8 @@ function Set-DefaultLocaleForVM {
         $localeDefinition = $localeProfiles[$locale]
     }
 
+    $localeDefinition = Get-LocaleDefinitionForOperatingSystem -LocaleDefinition $localeDefinition -OperatingSystem $operatingSystem
+
     $acquisitionMethod = Get-LocaleAcquisitionMethod -Profile $localeDefinition -OperatingSystem $operatingSystem -ConfigPath $Common.ConfigPath
     if ($RequireAvailable -and -not $acquisitionMethod) {
         Write-Log "Locale '$locale' is not available for '$($VirtualMachine.operatingSystem)'; using en-US for $($VirtualMachine.vmName)." -Warning
@@ -475,27 +477,39 @@ function Get-LocaleAcquisitionMethod {
         [Parameter(Mandatory = $true)]
         [string] $ConfigPath,
         [Parameter(Mandatory = $false)]
-        [bool] $OfflineMode = [bool]$Common.OfflineMode
+        [bool] $OfflineMode = [bool]$Common.OfflineMode,
+        [Parameter(Mandatory = $false)]
+        [bool] $ReleaseIsoValidation = $true
     )
 
     if (-not $Profile) { return $null }
-    if ($Profile.LanguageTag -eq 'en-US') { return 'Included' }
+    $effectiveProfile = Get-LocaleDefinitionForOperatingSystem -LocaleDefinition $Profile -OperatingSystem $OperatingSystem
+    if ($effectiveProfile.LanguageTag -eq 'en-US') { return 'Included' }
 
     $mediaPath = Join-Path (Join-Path $ConfigPath 'locales') $OperatingSystem
-    if ($Profile.LanguageCapabilities) {
-        $mediaFiles = @(Get-LocaleMediaFiles -Path $mediaPath -LocaleDefinition $Profile)
-        if (Test-LocaleMediaFiles -Files $mediaFiles -LocaleDefinition $Profile) { return 'Media' }
+    if ($effectiveProfile.LanguageCapabilities) {
+        $mediaFiles = @(Get-LocaleMediaFiles -Path $mediaPath -LocaleDefinition $effectiveProfile)
+        if (Test-LocaleMediaFiles -Files $mediaFiles -LocaleDefinition $effectiveProfile) { return 'Media' }
     }
     elseif (Test-Path -Path (Join-Path $mediaPath '*.cab')) {
         return 'Media'
     }
 
     if (-not $OfflineMode) {
-        foreach ($pattern in @($Profile.WindowsUpdateOperatingSystems)) {
+        foreach ($pattern in @($effectiveProfile.WindowsUpdateOperatingSystems)) {
             if ($OperatingSystem -like $pattern) { return 'WindowsUpdate' }
         }
-        if (Get-LocaleMediaSource -LocaleDefinition $Profile -OperatingSystem $OperatingSystem) {
-            return 'MicrosoftMedia'
+    }
+
+    $source = Get-LocaleMediaSource -LocaleDefinition $effectiveProfile -OperatingSystem $OperatingSystem
+    if ($source -and -not $OfflineMode) { return 'MicrosoftMedia' }
+    if ($source -and $OfflineMode) {
+        $isoPath = Join-Path $Common.AzureFilesPath $source.IsoRelativePath
+        try {
+            if (Test-LocaleMediaIso -Path $isoPath -Source $source) { return 'MicrosoftMedia' }
+        }
+        finally {
+            if ($ReleaseIsoValidation) { Clear-LocaleMediaIsoValidationCache }
         }
     }
 
@@ -549,10 +563,15 @@ function Select-Locale {
     $legacyPath = Join-Path $Common.ConfigPath "_localeConfig.json"
     $localeProfiles = Get-LocaleProfiles -Path @($CatalogPath, $legacyPath)
     $commonLocales = @('en-US')
-    foreach ($localeName in @($localeProfiles.Keys)) {
-        if (-not $Target.operatingSystem -or (Get-LocaleAcquisitionMethod -Profile $localeProfiles[$localeName] -OperatingSystem $Target.operatingSystem -ConfigPath $Common.ConfigPath)) {
-            $commonLocales += $localeName
+    try {
+        foreach ($localeName in @($localeProfiles.Keys)) {
+            if (-not $Target.operatingSystem -or (Get-LocaleAcquisitionMethod -Profile $localeProfiles[$localeName] -OperatingSystem $Target.operatingSystem -ConfigPath $Common.ConfigPath -ReleaseIsoValidation $false)) {
+                $commonLocales += $localeName
+            }
         }
+    }
+    finally {
+        Clear-LocaleMediaIsoValidationCache
     }
     $currentLocale = $Target."$LocalePropertyName"
     if ($currentLocale) { $commonLocales += $currentLocale }
@@ -566,6 +585,9 @@ function Select-Locale {
 
     $Target | Add-Member -MemberType NoteProperty -Name $LocalePropertyName -Value $locale -Force
     $selectedProfile = $localeProfiles[$locale]
+    if ($selectedProfile -and $Target.operatingSystem) {
+        $selectedProfile = Get-LocaleDefinitionForOperatingSystem -LocaleDefinition $selectedProfile -OperatingSystem "$($Target.operatingSystem)"
+    }
     if ($ProfilePropertyName -and $selectedProfile) {
         $Target | Add-Member -MemberType NoteProperty -Name $ProfilePropertyName -Value $selectedProfile -Force
     }

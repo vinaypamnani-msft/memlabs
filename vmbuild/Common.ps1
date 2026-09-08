@@ -11156,9 +11156,9 @@ function Copy-LanguagePacksToVM {
             continue
         }
 
-        $sourceDir = Join-Path $Common.ConfigPath "locales" $vmOperatingSystem
+        $sourceDir = Join-Path (Join-Path $Common.ConfigPath "locales") $vmOperatingSystem
         $catalog = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'common\LocaleCatalog.json') -Raw | ConvertFrom-Json
-        $localeDefinition = $catalog.$vmLocale
+        $localeDefinition = Get-LocaleDefinitionForOperatingSystem -LocaleDefinition $catalog.$vmLocale -OperatingSystem $vmOperatingSystem
         $sourceFiles = if ($localeDefinition) {
             @(Get-LocaleMediaFiles -Path $sourceDir -LocaleDefinition $localeDefinition)
         }
@@ -11167,6 +11167,11 @@ function Copy-LanguagePacksToVM {
         }
         if ($sourceFiles.Count -eq 0) {
             Write-Log "$vmName`: Cannot find language pack(s) in $sourceDir. Skipping copy." -Warning
+            $success = $false
+            continue
+        }
+        if ($localeDefinition -and -not (Test-LocaleMediaFiles -Files $sourceFiles -LocaleDefinition $localeDefinition)) {
+            Write-Log "$vmName`: The cached $vmLocale package set is incomplete for $vmOperatingSystem. Skipping copy." -Warning
             $success = $false
             continue
         }
