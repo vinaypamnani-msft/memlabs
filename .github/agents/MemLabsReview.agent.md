@@ -28,6 +28,29 @@ style or broad refactoring advice.
 - Do not fix findings. Return them to the parent agent or user so implementation
   and independent review remain separate.
 
+## Review Budget And Completeness
+
+- Finish in one invocation. Default to targeted reads plus at most three
+  executable probes. Reuse valid focused-test and gate evidence supplied by the
+  parent; do not rerun a full matrix unless one result is missing or suspect.
+- Freeze the supplied scope. Concurrent or unrelated changes are reported
+  separately and do not expand this review.
+- Collect all actionable findings before responding. Do not stop at the first
+  counterexample and force a one-finding-at-a-time repair loop.
+- For parsers, regexes, command-line recognition, serializers, and protocol
+  state machines, test the complete relevant equivalence class in the first
+  pass: accepted abbreviations, `-`/`/` prefixes, quoted/unquoted forms, token
+  ordering, embedded payload text, null/empty/scalar/array shapes, and success,
+  failure, and cleanup ordering as applicable. Report sibling failures together.
+- Before reporting a cleanup or concurrency finding, trace operation output,
+  postcondition, journal/metadata updates, authoritative handle release, and
+  downstream pipeline observation in one pass.
+- A closure review is terminal. Inspect the complete repair batch and the
+  equivalence class of the accepted findings. Do not broaden into new subsystems
+  or optional coverage. If another variant in the same family remains, report
+  the full remaining family once; the parent decides without another review
+  round.
+
 ## Establish The Review Scope
 
 1. Honor an explicit scope: selected files, working tree, staged changes,
@@ -95,6 +118,10 @@ Useful gates include the AST scanners under `vmbuild/tools`, DSC checks under
 `vmbuild/DSC`, parsing with the owning PowerShell engine, and the curated
 `PSScriptAnalyzerSettings.psd1` rules. Do not treat a passing unrelated suite as
 proof of the changed behavior.
+
+Do not duplicate tests that the parent and MemLabs Test already ran against
+unchanged bytes. Execute a probe only to discriminate a concrete review
+hypothesis that existing evidence does not answer.
 
 If no existing test reaches a risky branch, describe the smallest regression
 test that would fail before the fix and pass after it. Prefer tests that extract

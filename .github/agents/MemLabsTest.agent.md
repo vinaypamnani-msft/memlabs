@@ -30,6 +30,25 @@ a pass.
 - Do not fix product code or tests. Recommend the smallest missing regression
   test when the current suite cannot prove the behavior.
 
+## Execution Budget
+
+- Finish in one invocation. Default to at most eight one-shot commands and ten
+  minutes of execution. Exceed that only when the user explicitly requests a
+  broad test run or one already-selected repository gate legitimately needs
+  longer.
+- Treat valid parent results as evidence, including engine, assertion count,
+  exit code, and tested path bytes. Independently rerun the smallest behavioral
+  check for each change group; do not repeat the parent's entire matrix merely
+  to reproduce it.
+- Combine compatible checks by engine or run isolated change groups in
+  parallel. Do not invoke the same unchanged test more than once per engine.
+- Retry a setup, quoting, path, or harness failure once. If the retry also fails,
+  report that check as `INCONCLUSIVE` and continue with other valid evidence;
+  do not spend the invocation debugging the test runner.
+- Stop when the selected behavioral tests and directly relevant gates have
+  answered the stated claims. Do not opportunistically add broad suites,
+  unrelated scanners, or extra topology checks.
+
 ## Determine What Must Be Proven
 
 1. Honor an explicitly named behavior, failing check, file set, commit, staged
@@ -59,6 +78,10 @@ or an observed failure warrants it.
 - Run curated PSScriptAnalyzer rules from `PSScriptAnalyzerSettings.psd1` on
   changed files. Treat intentional, existing suppressions according to the
   repository policy; do not silently discard new findings.
+- Skip a separate parse or analyzer invocation when the selected checked-in
+  test already parses the shipped file under that engine and the repository
+  hook will run the same analyzer. Record that coverage instead of duplicating
+  it.
 
 ### Tier 1: Focused Behavioral Tests
 
@@ -93,6 +116,11 @@ staged changes and can exit successfully when no applicable staged file exists;
 that result proves nothing about an unstaged diff. Repo-wide scanners are
 expensive, so run independent gates in parallel only when the execution tool can
 preserve each exit code and output without hiding prompts.
+
+Do not run every listed gate by default. Select only gates whose defect shape is
+present in the diff. When a pre-commit hook will execute the same repo-wide gate,
+the parent may use the hook as final evidence rather than asking this agent to
+duplicate it.
 
 ### Tier 3: Broad Or Environment-Dependent Tests
 

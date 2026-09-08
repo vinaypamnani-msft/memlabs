@@ -5,6 +5,10 @@
 - Treat production behavior, shared helpers, background jobs, remoting, DSC,
   deployment phases, configuration schemas, validation, diagnostics, recovery,
   and repository test gates as substantive changes.
+- For review/commit/push requests, freeze the initial path list before testing.
+  "All working-tree changes" means that snapshot. Report paths created or
+  changed concurrently after the snapshot; do not restart review or add them to
+  the commit without explicit user approval.
 - After implementing a substantive change and running its first focused check,
   delegate to **MemLabs Test** for independent test selection and execution.
   Give it the exact diff scope, behavioral claim, target PowerShell engines, and
@@ -12,13 +16,51 @@
 - Then delegate to **MemLabs Review** with the same scope plus the test results.
   Ask it to review logic, failure semantics, regressions, and missing coverage.
 - The specialists are read-only. The parent agent owns all edits and decides how
-  to address findings. After a repair, repeat the affected focused tests and
-  independent review before finalizing.
+  to address findings.
+- Bound independent verification to one initial **MemLabs Test** call and one
+  initial **MemLabs Review** call. Batch all accepted repairs, rerun only the
+  affected focused tests, then allow at most one closure call to each specialist
+  for the complete repair batch. Do not recurse into one-finding-at-a-time
+  review loops. If closure raises another variant in the same defect family,
+  the parent must test the whole equivalence class directly and make the final
+  decision without another specialist round.
+- Reuse valid test evidence from the current session when the tested path bytes
+  have not changed. Do not rerun an unchanged full matrix before review, after
+  review, before commit, and after commit. Pre-commit hooks count as the final
+  repository gates they actually execute.
+- Prefer existing focused tests and checked-in gates. Do not build ad hoc nested
+  PowerShell command harnesses for checks already covered by those tests. After
+  one setup/quoting failure, switch to the existing script or a simple direct
+  check instead of iterating on the harness.
+- Run independent focused tests in parallel across unrelated change groups when
+  their fixtures are isolated. Test both PowerShell engines only for code that
+  actually runs under both; do not duplicate host-only checks under 5.1.
 - Skip this delegation loop for documentation-only, comment-only, formatting,
   generated-output, or other behavior-neutral changes unless the user asks for
   review or testing.
 - If a specialist is unavailable, perform its documented workflow directly and
   state that independent delegation was unavailable.
+
+## Fast Commit Path
+
+When the user asks to review, commit, and push existing work, use this sequence:
+
+1. Snapshot changed paths and the remote SHA once. Do not map the broader repo.
+2. Group the snapshot by feature and inspect each diff directly. Do not call an
+  Explore agent and MemLabs Review for the same scope.
+3. Run missing focused tests once, parallelized by independent feature group.
+  Reuse same-session results for unchanged files.
+4. Invoke MemLabs Test once and MemLabs Review once for the complete snapshot.
+5. Batch accepted repairs, run only affected tests, then use at most one bounded
+  closure round. Apply the terminal closure rule above.
+6. Let pre-commit hooks supply duplicate repository-wide gate evidence. Commit
+  with explicit pathspecs and verify each commit's path list.
+7. Push with the frozen remote lease and verify the remote SHA. Do not rerun the
+  unchanged test matrix after path-scoped commits.
+
+For a previously tested clean snapshot, the normal path is inventory, missing
+focused checks, one independent test/review pass, commit, and push. Stop and ask
+the user before exceeding two Test calls, two Review calls, or one full matrix.
 
 ## Specialist Routing
 
