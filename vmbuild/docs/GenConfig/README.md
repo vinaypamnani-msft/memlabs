@@ -14,7 +14,8 @@ Use GenConfig to:
 - select supported operating systems, ConfigMgr and SQL versions from the
   current media manifest;
 - configure ConfigMgr hierarchy, SQL, SUP, PKI, HTTPS, BitLocker Management,
-  client push, HA, and specialized lab roles;
+  client push, HA, OSD task-sequence targeting, direct or relayed PXE, and
+  specialized lab roles;
 - inspect and operate existing MemLabs VMs, networks, snapshots, disks, tools,
   dynamic memory, and connection-file settings;
 - validate, summarize, save, and optionally deploy a configuration.
@@ -207,7 +208,7 @@ menu; action implementations are in
 | `3` | Compact VHDXs | Selects VMs, cleans/stops them, merges checkpoints, zeroes/compacts disks, then restores prior running state. | Reclaim host storage. |
 | `S` | Snapshot all VMs | Stops the domain, creates coordinated checkpoints, then restarts it. | Capture a recoverable point before risky changes. |
 | `R` | Restore all VMs to a snapshot; only when MemLabs checkpoints exist | Restores a selected domain checkpoint. | Roll back the coordinated lab. |
-| `X` | Delete/merge domain snapshots; only when checkpoints exist | Merges selected checkpoints into their VHDXs. | Remove checkpoints and reduce chain overhead. |
+| `X` | Delete (merge) domain Snapshots; only when checkpoints exist | Merges selected checkpoints into their VHDXs. | Remove checkpoints and reduce chain overhead. |
 | `E` | Enable Dynamic Memory; only when eligible VMs exist | Multi-selects VMs and sets a role-aware minimum. | Reduce idle memory while retaining configured maximums. |
 | `F` | Disable Dynamic Memory; only when enabled VMs exist | Multi-selects VMs and pins minimum to startup memory. | Stabilize memory-sensitive workloads. |
 | `D` | Delete VMs in Domain | Multi-selects and permanently removes Hyper-V VMs. | Remove selected machines or the entire deployed domain. |
@@ -303,14 +304,16 @@ The new-domain defaults menu exposes `DefaultLocale`. Each Windows VM inherits t
 | Existing-domain number | Existing domains found in Hyper-V VM notes | Creates an add-to-existing authoring object and imports domain, CM, and PKI settings. | Extend a deployed lab. |
 | `N` Add New Subnet | Existing-domain subnet picker | Offers unused generated networks, then adds a per-VM/default override. | Put a site or workload on a new boundary. |
 | `C` Custom Subnet | New-subnet picker | Prompts for a custom `/24`. | Use a deliberate RFC1918 range. |
-| Existing subnet row | Existing-domain picker | Reuses that domain subnet, subject to role/topology restrictions. | Co-locate VMs with an existing site or DP. |
+| Existing subnet row | Existing-domain picker | Reuses that domain subnet, subject to role/topology restrictions. For OSDClient, a missing PXE path opens remediation instead of hiding the subnet. | Co-locate VMs or deliberately place an OSD client on a remote subnet. |
 
 Accepted networks are `/24` network addresses in `10.0.0.0/8`,
 `172.16.0.0/12`, or `192.168.0.0/16`. The `.0` suffix is required. Reserved
 subnets include `10.250.250.0` (Cluster), `10.250.251.0` (ClusterV2),
 `10.1.0.0` (External), and `172.31.250.0` (Internet). Site-server placement
-avoids overlapping site boundaries. An OSDClient is offered DP-bearing subnets
-when any exist.
+avoids overlapping site boundaries. An OSDClient can select any valid subnet.
+When ConfigMgr exists and the selected subnet has no DP, GenConfig requires the
+operator to add/enable a local DP, configure a relay to a remote DP, or choose a
+different subnet.
 
 ## VM and role options
 
@@ -323,7 +326,7 @@ when any exist.
 role list and defaults. Numeric keys depend on the current filtered list; select
 by label. `H` is the stable **Enable High Availability** action.
 
-| Displayed role | What it creates | When/why to use it |
+| Role/workflow label | What it creates | When/why to use it |
 |---|---|---|
 | DomainMember (Client) | Domain-joined Windows client, 2 GB or 4 GB for Windows 11, optional domain user/Office/client push. | Test client management and applications. |
 | DomainMember (Server) | Domain-joined Windows server. | Add a general member server. |
@@ -331,7 +334,7 @@ by label. `H` is the stable **Enable High Availability** action.
 | WorkgroupMember | Windows VM with Internet access but no domain join. | Test non-domain Windows behavior. |
 | InternetClient | Isolated workgroup client on the Internet network. | Test CM internet-client scenarios. |
 | AADClient | Client that boots to OOBE for Entra/AAD join. | Test cloud join and enrollment. |
-| OSDClient | Bare VM with no `operatingSystem`, generation 2 by default. | PXE boot a ConfigMgr OSD task sequence. |
+| OSDClient | Bare VM with no `operatingSystem` or locale, 4 GB RAM, generation 2, optional exact `osdTaskSequence`, and no proxy setting. Selecting a DP-less subnet opens PXE remediation. | PXE boot interactively or prestage one of the generated Windows install task sequences. |
 | CAS and Primary | Creates a CAS; CAS creation recursively adds a child Primary and default DP/MP. | Start a ConfigMgr hierarchy. |
 | Primary | Standalone or child Primary; parent picker offers `X` for no parent. | Start a standalone site or add a Primary to a CAS. |
 | Secondary | Secondary site with required Primary parent and normally a distinct subnet. | Test hierarchy distribution/administration below a Primary. |
@@ -343,14 +346,16 @@ by label. `H` is the stable **Enable High Availability** action.
 | BDC | Additional domain controller. | Add AD/DNS resilience after a DC exists. |
 | StandaloneRootCA | Workgroup offline root CA VM. | Build two-tier PKI; normally auto-added by PKI Settings. |
 | Proxy | One Ubuntu Server Squid proxy per domain. | Force selected VMs through observable/controlled HTTP(S) egress. |
+| DHCPRelay | Ubuntu Server PXE relay with `relayMappings`; hidden from the normal role picker and created/updated only by OSD network remediation. | Relay DHCP/PXE from one or more OSD subnets to a DP on another subnet without moving Windows DHCP off the host. |
 | LinuxServer | Ubuntu Server 24.04, DHCP, optional xrdp and domain join. | General Linux/server interoperability testing. |
 | LinuxClient | Ubuntu Desktop 24.04, GNOME/xrdp, optional domain join. | Linux MDM/EDR/workstation testing. |
 | `H` Enable HA | Selects an eligible CAS/Primary and adds a PassiveSite plus FileServer if needed. | Configure ConfigMgr site-server high availability. |
 
 Role availability is conditional. DC is removed after a domain DC exists;
-PassiveSite is reached through `H`, not the normal role list; Proxy is removed
-once the domain already has one. OS lists are role-filtered and, in offline mode,
-contain only fully downloaded media.
+PassiveSite is reached through `H`, not the normal role list; DHCPRelay is
+reached through OSDClient network remediation; Proxy is removed once the domain
+already has one. OS lists are role-filtered and, in offline mode, contain only
+fully downloaded media.
 
 ### Common VM properties
 
@@ -370,7 +375,8 @@ These labels are stable; numbers are not an API.
 | `tpmEnabled` | Boolean; required for Windows 11. | Enable vTPM and permit unattended BitLocker. |
 | `vmGeneration` | `1` or `2`; Gen 1 is allowed only for OSDClient. | Test legacy PXE only when required. |
 | `DomainUser` | Valid, non-reserved AD user name. | Create/reuse a per-VM account and make it a local administrator. |
-| `InstallOffice` | `Disabled`, `Current`, `MonthlyEnterprise`, or `SemiAnnual`. | Deploy Microsoft 365 Apps to a CM client; requires Primary, prepopulation, client OS, and client push. |
+| `InstallOffice` | `Disabled`, `Current`, `MonthlyEnterprise`, or `SemiAnnual`. | Deploy Microsoft 365 Apps to a CM client; requires Primary and prepopulation. A normal DomainMember client also requires client push; OSDClient uses its task-sequence/policy path. |
+| `osdTaskSequence` | OSDClient only: empty/**Prompt at PXE**, `MEMLABS-w11-Install OS image`, or `MEMLABS-w10-Install OS image`. | Leave empty for the interactive PXE chooser, or prestage the VM by name/MAC and deploy the selected sequence as Required. A selection requires `PrePopulateObjects=true`. |
 | `InstallSSMS` | Boolean. | Install SQL Server Management Studio even when SQL is remote. |
 | `useFakeWSUSServer` | Boolean on eligible Windows clients. | Prevent normal Windows Update by pointing at a fake WSUS endpoint. |
 | `useProxy` | Boolean; requires exactly one Proxy VM. | Route HTTP/HTTPS through Squid and block direct host egress. |
@@ -470,6 +476,30 @@ opens the only top-level directly or asks which hierarchy to edit.
 | CM version row | Selects baseline or upgrade target; labels show the baseline used for upgrade. | Reproduce installation versus in-place update. |
 | OS/SQL version rows | Select values from the active supported manifest. | Keep media choices deployable on this checkout. |
 | Forest Trust: domain / `NONE` | Sets `ForestTrust`; selecting a domain can also select its managing site code. | Build cross-forest trust and optional client management. |
+
+### OSD network and task-sequence submenus
+
+`Select-OsdClientNetwork`, `Resolve-OsdPxePathForNetwork`, and
+`Add-DhcpRelayForOsdNetwork` in
+[Common.GenConfig.AddVM.ps1](../../common/Common.GenConfig.AddVM.ps1) own the
+interactive PXE-path workflow.
+
+| Menu/key | Availability | What it does | When/why to use it |
+|---|---|---|---|
+| OSDClient `Network` row | OSDClient property menu | Selects any valid subnet. A no-CM lab accepts it directly; a CM lab resolves PXE before accepting it. | Place a blank client on the subnet where it should boot. |
+| `D` Install or enable a Distribution Point | Selected CM subnet has no DP | Opens eligible VM promotion/new-DP choices for that subnet. | Prefer a direct PXE path on the client subnet. |
+| VM row in DP remediation | New or deployed DomainMember/SiteSystem on the subnet; Server OS or Windows 11; no SQL; not already a DP | Converts it to SiteSystem as needed, assigns an eligible site, enables DP, disables Pull DP, and persists deployed-VM changes as hidden authoring state. | Reuse an appropriate machine instead of adding another VM. |
+| `N` Create a new Distribution Point VM | DP remediation menu | Adds a DP-only SiteSystem on the OSD subnet (`InstallDP=true`, `InstallMP=false`). | Give an otherwise empty subnet a dedicated direct-PXE endpoint. |
+| `R` Install or update a DHCP relay VM | A remote DP candidate has one agreed stable IPv4 address, or is a newly configured DP whose address can be assigned in Phase 1 | Creates the domain's one DHCPRelay or updates it, then maps the selected client subnet to the chosen remote DP. | Serve cross-subnet PXE without adding a local DP. |
+| Remote DP row | Relay target picker | Stores its VM name in the relay mapping. The DP must have a site code and be on another subnet. | Select which site/DP owns PXE and the generated client boundary. |
+| `B` / Escape | PXE remediation menus | Returns to subnet selection without accepting a broken path. | Choose another subnet or cancel the edit. |
+| OSDClient `osdTaskSequence` row | OSDClient property menu | Selects prompt mode, Windows 11 install, or Windows 10 install. | Make PXE interactive or deterministic per VM. |
+
+Direct PXE takes precedence over a stored relay mapping. Multiple direct DPs on
+one client subnet are accepted only when they agree on site ownership. Relay
+mappings are deduplicated by client subnet; conflicting mappings, missing relay
+or DP VMs, non-DP targets, conflicting target addresses, and multiple relay VMs
+are invalid.
 
 Important dependencies:
 
@@ -647,6 +677,13 @@ confuse that with:
 - `New-Lab` reloads the saved JSON, runs `Test-Configuration -Final`, creates the
   expanded deploy model, and starts the phase workflow. `-SkipValidation` exists
   for deliberate recovery but is explicitly discouraged.
+- In an add-to-existing run with no newly authored top-level site server,
+  changed root `cmOptions` are copied onto hidden site-role deployment entries.
+  A changed options block adds an existing Primary as a Phase 8 target; after a
+  successful Phase 8, MemLabs writes the effective options to the authoritative
+  standalone Primary or parent CAS VM note and verifies the write. Conflicting
+  hierarchy values or a failed note update fail the phase rather than leaving
+  stale GenConfig state.
 
 ## Configuration file reference
 
@@ -667,6 +704,11 @@ important authored fields include:
 - `additionalDisks`: object keyed by drive letter with normalized GB strings;
 - `hidden`: marks an existing VM folded into a deploy config, not a new VM;
 - `osFamily: "Linux"`: internal marker automatically added to Linux roles;
+- OSDClient `osdTaskSequence`: null for an interactive PXE prompt, or one of the
+  two exact generated Windows install task-sequence names;
+- DHCPRelay `relayMappings`: an array of `{clientNetwork,
+  distributionPointVM}` intent records; relay/target IP addresses are resolved,
+  not authored;
 - `_autoAddedByOfflineRootCA` / `_autoAddedByProxy`: session markers that let
   GenConfig safely remove only VMs it created automatically;
 - `replicaSqlAutoAdded` and `replicaSqlOrig*`: internal state used to undo local
@@ -683,6 +725,7 @@ Saved proposed VM names and references are generally unprefixed. During
 
 - `vmName`, `remoteSQLVM`, `replicaSqlServerVM`, `pullDPSourceDP`, and non-WID
   `wsusDataBaseServer`;
+- DHCPRelay `relayMappings[].distributionPointVM`;
 - `domainUser`, SQLAO nodes/cluster/listener/FileServer;
 - PassiveSite `remoteContentLibVM`, Patch My PC FileServer, and PKI VM
   references.
@@ -693,7 +736,9 @@ validate.
 
 ### Accepted values and dynamic lists
 
-- Stored roles are the nineteen values listed in **Add VM role picker**;
+- `Common.Supported.Roles` contains twenty stored roles. The picker presents
+  friendly DomainMember/SqlServer and CAS-and-Primary variants, hides
+  PassiveSite behind HA, and hides DHCPRelay behind OSD PXE remediation.
   `SqlServer` is stored as `role: "DomainMember"` plus SQL properties.
 - Windows OS, SQL, and CM version lists come from `Common.AzureFileList`. They
   change with the checkout and available offline media.
@@ -712,6 +757,8 @@ Do not copy these back into a hand-authored file unless debugging the expansion:
 - root `parameters` (`DomainName`, DC names, current machine, optional IDs);
 - per-VM `thisParams` (networks, site relationships, client-push targets,
   account lists, SQL/WSUS/PKI/topology details);
+- resolved `osdPxePaths` (Direct/Relay/Invalid/Missing mode, relay/DP names and
+  addresses) and generated OSD MAC/boundary targeting;
 - `DNSForwarders`, `Tools`, and `URLS`;
 - hidden existing VMs and runtime VM-note properties.
 
@@ -749,7 +796,8 @@ notices and are not necessarily the same as validation warnings.
 | SQLAO | Two nodes on one subnet, SQL 2017+, port 1433, domain SQL service/agent accounts, valid FileServer. |
 | WSUS/SUP | Content path required; SUP needs site code and parent ordering; WID needs at least 8 GB. |
 | PKI/proxy | CA/root references must exist; one offline root; one Linux Proxy per domain; any `useProxy=true` requires it. |
-| DP/OSD/HA | OSDClient needs a same-subnet DP when CM exists; Pull DP needs a standard same-site local-content DP; HA needs remote content library and dedicated real DP. |
+| DP/OSD/HA | With CM, each OSD subnet needs either same-subnet DP coverage or exactly one valid DHCPRelay mapping to a remote DP. Direct DPs on a subnet must agree on site ownership. A selected OSD task sequence must be one of the two generated install sequences and requires prepopulation. Pull DP needs a standard same-site local-content DP; HA needs remote content library and dedicated real DP. |
+| DHCP relay | One DHCPRelay per domain; one mapping per client subnet; target must be a site-owned DP on another subnet with one stable IPv4 source (a new DP may defer address assignment to Phase 1); the relay's fixed `.4` address on each client subnet must be available. |
 | MP replica | Dedicated Primary-site SiteSystem MP only; separate SQL from site DB; unique shared-host instance per MP; LocalSystem SQL services. |
 | Host resources | Full validation checks base-image copy space; final validation checks available memory and required URLs/media. |
 
@@ -1012,22 +1060,27 @@ Expected validation: issuing/root references must exist and have appropriate
 roles; exactly one StandaloneRootCA is allowed; UseOfflineRoot requires that
 root; CM HTTPS requires a valid CM option block and PKI infrastructure.
 
-### 5. Standalone Primary with OSD/PXE client
+### 5. Standalone Primary with direct OSD/PXE client
 
 Derived from
 [OSDTest-C-StandalonePrimary.json](../../config/tests/OSDTest-C-StandalonePrimary.json).
 
 **Prerequisites:** A Primary with `PrePopulateObjects=true`, ConfigMgr/ADK/WinPE
 and OS deployment media available to the current manifest, and a DP capable of
-hosting PXE/OSD content.
+hosting PXE/OSD content. The OSD VM needs at least 4 GB for WIMGAPI image apply.
 
 1. Create a **Primary Site only** domain and keep its default SiteSystem DP/MP.
 2. Select the SiteSystem and verify `InstallDP=true`.
 3. Choose `N` **Add New Virtual Machine**, then **OSDClient**.
 4. In the OSDClient property menu, select `Network`. Choose the same subnet as
-   the DP; when DP-bearing subnets exist, the picker restricts choices to them.
-5. Keep `vmGeneration=2` unless deliberately testing legacy Gen 1 PXE.
-6. Choose `D` to validate and deploy.
+  the DP. If you choose a DP-less subnet instead, choose `D` to promote an
+  eligible VM or `N` to create a DP-only SiteSystem there.
+5. Select `osdTaskSequence`. Keep **Prompt at PXE**, or select the exact Windows
+  11/Windows 10 install sequence for unattended required deployment.
+6. Keep `vmGeneration=2` unless deliberately testing legacy Gen 1 PXE, and keep
+  memory at 4 GB or higher.
+7. Choose `D` to validate, save, and deploy; standalone GenConfig users choose
+  `S` and run the printed `New-Lab.ps1 -Configuration` command.
 
 Why: the OSDClient is an empty VM intended to PXE boot a generated ConfigMgr
 task sequence, not a normal base-image VM.
@@ -1052,17 +1105,95 @@ task sequence, not a normal base-image VM.
       "vmName": "OSD1",
       "role": "OSDClient",
       "network": "192.168.80.0",
-      "memory": "2GB",
+      "memory": "4GB",
       "virtualProcs": 2,
-      "vmGeneration": "2"
+      "vmGeneration": "2",
+      "osdTaskSequence": "MEMLABS-w11-Install OS image"
     }
   ]
 }
 ```
 
-Expected validation: no `operatingSystem` is required for OSDClient. If a CM
-site exists, the OSD subnet must contain a DP/Pull DP; otherwise validation
-reports the unusable PXE topology.
+Expected validation: no `operatingSystem` or locale is required for OSDClient.
+The selected task sequence requires `PrePopulateObjects=true`. If a CM site
+exists, the OSD subnet must resolve to a direct or relayed PXE path; missing
+coverage is a warning, while ambiguous/conflicting topology is a failure.
+
+### 6. Cross-subnet OSD through DHCP relay
+
+Derived from the direct/relay resolver cases in
+[Test-GenConfigNetworkSelection.ps1](../../tools/Test-GenConfigNetworkSelection.ps1)
+and [Test-OsdPxePaths.ps1](../../tools/Test-OsdPxePaths.ps1). There is no
+checked-in relay JSON fixture in the current checkout.
+
+**Prerequisites:** A ConfigMgr Primary/Secondary and remote DP, an unused valid
+client `/24`, DHCP available from the Hyper-V host, and a DP with a single
+agreed IPv4 address. For a newly authored DPMP, GenConfig may defer that address
+to Phase 1. Keep `PrePopulateObjects=true` when selecting an exact task
+sequence.
+
+1. Create or load a Primary-site configuration with a DP, then choose `N` ->
+   **OSDClient**.
+2. Open the OSDClient, select `Network`, and choose a valid subnet that has no
+   local DP, such as `192.168.91.0`.
+3. At **OSD requires a PXE path**, choose `R` **Install or update a DHCP relay
+   VM**. `R` is hidden when no eligible remote DP has usable address evidence.
+4. Select the remote DP. GenConfig creates one Ubuntu DHCPRelay on the default
+   network, or adds the client-network mapping to the existing relay.
+5. Set `osdTaskSequence` to **Prompt at PXE** or one generated Windows install
+   sequence. Review the generated DHCPRelay and OSDClient rows.
+6. Choose `D` to validate, save, and deploy; or choose `S` and run the printed
+   deployment command later.
+
+Why: this keeps the DP on its site subnet while giving a remote subnet a
+deterministic DHCP/PXE path. Windows DHCP remains on the Hyper-V host; the relay
+gets a mapping NIC and forwards to the selected DP.
+
+```json
+{
+  "vmOptions": {
+    "prefix": "RLY-",
+    "domainName": "relay.test",
+    "network": "192.168.90.0"
+  },
+  "virtualMachines": [
+    {
+      "vmName": "PS1DP1",
+      "role": "SiteSystem",
+      "siteCode": "PS1",
+      "network": "192.168.90.0",
+      "installDP": true
+    },
+    {
+      "vmName": "RELAY1",
+      "role": "DHCPRelay",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "network": "192.168.90.0",
+      "relayMappings": [
+        {
+          "clientNetwork": "192.168.91.0",
+          "distributionPointVM": "PS1DP1"
+        }
+      ]
+    },
+    {
+      "vmName": "OSD1",
+      "role": "OSDClient",
+      "network": "192.168.91.0",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "vmGeneration": "2",
+      "osdTaskSequence": null
+    }
+  ]
+}
+```
+
+Expected validation: the relay and target names resolve, only one relay mapping
+owns `192.168.91.0`, the target is a site-owned DP on another subnet, address
+evidence does not conflict, and the relay's derived `.4` address is available.
+The resolver maps the client subnet to the target DP's site for boundaries.
 
 ### Specialized extensions
 
@@ -1086,6 +1217,10 @@ These can be layered onto the preceding recipes:
 | Validation warning prevents deployment | Validation warnings increment `Problems`; they are not informational notices. | Read/fix the warning, or use the explicit recovery bypass only when understood. |
 | Proxy VM reappears | At least one non-hidden VM still has `useProxy=true`. | Set all proxy users false, or delete the Proxy through GenConfig so cleanup clears opt-ins. |
 | No valid site/subnet choice | Site-server networks and existing boundary ownership exclude conflicting subnets. | Add a new `/24`; for OSD, first add/enable a DP on the desired subnet. |
+| OSD subnet opens remediation | ConfigMgr exists but the selected subnet has no direct DP or valid stored relay. | Choose `D` for a local DP, conditional `R` for a remote-DP relay, or `B` to pick another subnet. |
+| Relay option `R` is missing | No remote site-owned DP has one agreed stable IPv4 address, and no newly configured DP can receive one in Phase 1. | Correct the DP/site/address metadata or use a direct DP on the OSD subnet. |
+| Relay validation fails | Typical causes are duplicate subnet mappings, multiple relay VMs, missing/non-DP targets, address disagreement, or use of the relay's derived `.4` address. | Keep one relay and one mapping per client subnet; select a site-owned remote DP with stable address evidence and free `.4`. |
+| Selected OSD task sequence fails validation | The name is not one of the two generated install sequences, or `PrePopulateObjects` is false. | Use the OSD task-sequence picker and enable ConfigMgr prepopulation, or return to **Prompt at PXE**. |
 | Pull DP validation fails | Source is missing, wrong site, not `installDP`, another Pull DP, or an HA site server without local content. | Point it at a dedicated standard SiteSystem DP. |
 | Disk cannot be removed | A role path uses it, or it would leave a FileServer with fewer than E:/F:. | Move/change the role path first; retain two FileServer disks. |
 | Existing property is grey/read-only | Existing-VM edits are restricted to `UpdatablePropList`; deployed SUP/Patch My PC are one-way. | Add a supported role/property or rebuild the VM for unsupported changes. |
@@ -1122,7 +1257,7 @@ These can be layered onto the preceding recipes:
 | [Common.GenConfig.NewDomain.ps1](../../common/Common.GenConfig.NewDomain.ps1) | Naming, site codes, sticky defaults, deployment-type wizard, initial VM set. | Domain/network; Recipes. |
 | [Common.GenConfig.Existing.ps1](../../common/Common.GenConfig.Existing.ps1) | Existing-domain discovery, role grouping, subnet rules, base authoring object. | Main menu; Domain/network; VM roles. |
 | [Common.GenConfig.ConfigFiles.ps1](../../common/Common.GenConfig.ConfigFiles.ps1) | Load list/legend, compatibility migration, atomic JSON writes. | Loading/saving; Troubleshooting. |
-| [Common.GenConfig.AddVM.ps1](../../common/Common.GenConfig.AddVM.ps1) | Per-role defaults and recursive/automatic dependency VMs. | VM roles; ConfigMgr; PKI; Recipes. |
+| [Common.GenConfig.AddVM.ps1](../../common/Common.GenConfig.AddVM.ps1) | Per-role defaults, OSD direct/relay remediation, DP promotion/creation, and recursive/automatic dependency VMs. | Domain/network; VM roles; ConfigMgr; Recipes. |
 | [Common.GenConfig.VMList.ps1](../../common/Common.GenConfig.VMList.ps1) | Generic property editor, existing/new VM actions, SQL/HA/user/disk removal dispatch. | VM properties and actions. |
 | [Common.GenConfig.RoleMenus.ps1](../../common/Common.GenConfig.RoleMenus.ps1) | Pull DP, remote/replica SQL, FileServer, HA and add-role pickers. | VM roles; ConfigMgr submenus. |
 | [Common.GenConfig.CmMenus.ps1](../../common/Common.GenConfig.CmMenus.ps1) | CM/OS/SQL/site/trust/push/SUP/account selectors and SQL placement. | ConfigMgr options. |
@@ -1134,12 +1269,15 @@ These can be layered onto the preceding recipes:
 | [Common.Menu.ps1](../../common/Common.Menu.ps1) | Domain VM operations, RDC settings, input prompts. | Main menu; Tools/host. |
 | [Common.NewMenu.ps1](../../common/Common.NewMenu.ps1) | Keyboard/mouse/multi-select/delete/paging behavior. | Navigation. |
 | [Common.Layout.ps1](../../common/Common.Layout.ps1) | Existing-VM status table shown by menu panels. | Main menu resource views. |
-| [Common.Config.ps1](../../common/Common.Config.ps1) | CM option resolution, deploy-model expansion, final summary. | UI flow; Config model; Summary. |
+| [Common.Config.ps1](../../common/Common.Config.ps1) | CM option resolution/persistence targeting, OSD PXE-path resolution/boundaries, deploy-model expansion, final summary. | UI flow; Persistence; Config model; Validation. |
+| [Common.Phases.ps1](../../common/Common.Phases.ps1) | Phase 1 relay-target address completion and successful-Phase-8 top-level CM-option note persistence. | Deployment handoff; Validation. |
 | [Common.Validation.ps1](../../common/Common.Validation.ps1) | Fast/full/final validation and severity semantics. | Validation and error handling. |
 | [New-Lab.ps1](../../New-Lab.ps1) | Integrated invocation, config reload, final validation, phase handoff. | Quick start; Deployment handoff. |
 | [VMBuild.cmd](../../VMBuild.cmd) | Stable launcher, update/maintenance, PowerShell selection. | Quick start. |
 | [NOCM-A-DC.json](../../config/tests/NOCM-A-DC.json), [PSTest1-A-PS.json](../../config/tests/PSTest1-A-PS.json), [CSTest1-A-CSPS.json](../../config/tests/CSTest1-A-CSPS.json), [OSDTest-C-StandalonePrimary.json](../../config/tests/OSDTest-C-StandalonePrimary.json), [Wacky-A-KitchenSink.json](../../config/tests/Wacky-A-KitchenSink.json), [ReportingTest-A.json](../../config/tests/ReportingTest-A.json) | Representative no-CM, Primary, hierarchy, OSD, PKI/mixed, Linux/proxy/SQLAO, and reporting intent. | Environment recipes. |
 | [Test-ConfigJsonWrite.ps1](../../tools/Test-ConfigJsonWrite.ps1) | Executed atomic-write regression test. | Saving; validation record. |
+| [Test-GenConfigNetworkSelection.ps1](../../tools/Test-GenConfigNetworkSelection.ps1), [Test-OsdPxePaths.ps1](../../tools/Test-OsdPxePaths.ps1), [Test-OsdTaskSequenceSelection.ps1](../../tools/Test-OsdTaskSequenceSelection.ps1) | OSD subnet remediation, direct/relay resolver, boundary ownership, and task-sequence targeting contracts. | Domain/network; OSD submenus; Validation; Recipes. |
+| [Test-ExistingDomainCmOptions.ps1](../../tools/Test-ExistingDomainCmOptions.ps1) | Add-to-existing option-only Phase 8 targeting and authoritative VM-note persistence. | Deployment handoff; Validation. |
 
 The menu-call audit covered all `Get-Menu2` calls in `genconfig.ps1`,
 `Common.GenConfig*.ps1`, and the shared GenConfig management functions in
@@ -1159,6 +1297,9 @@ The menu-call audit covered all `Get-Menu2` calls in `genconfig.ps1`,
 - Numeric property and role keys are generated from filtered arrays. Use the
   displayed label; only keys explicitly listed as stable in this document
   should be treated as stable.
+- DHCPRelay is a supported stored role but not a general-purpose **Add VM**
+  choice. Its `R` workflow is intentionally conditional on current DP/address
+  evidence; GenConfig does not offer a manual relay editor.
 - Checked-in test configurations include legacy schemas and deliberate stress
   values. They demonstrate scenarios but are not guaranteed to be clean authoring
   templates for the current checkout.
