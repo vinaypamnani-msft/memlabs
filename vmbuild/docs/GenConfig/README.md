@@ -629,14 +629,17 @@ skipped with a warning.
 
 ### Saving
 
-`Save-Config` proposes a name built from domain, shape (`ADD`, `NOSCCM`, `CAS`,
-or `PRI`), CM version, and VM count. `.json` is appended automatically. For a
-loaded file, Enter keeps/overwrites its current path; typing a different basename
-creates a new file in `vmbuild/config`.
+`Save-Config` proposes an intent-based name using the domain's first DNS label
+and VM count: `fabrikam-newdomain-1vm.json` for a new domain or
+`fabrikam-expand-2vm.json` for an existing-domain expansion. For a fresh config,
+an existing name is never overwritten; GenConfig selects `-2`, `-3`, and so on.
+For a loaded file, Enter overwrites its current path. Typing a different basename
+creates a collision-safe variant in `vmbuild/config`.
 
 `Write-ConfigJsonFile` serializes to a sibling temporary file, parses it back,
 then atomically moves/replaces the destination and removes temporary/backup
-files. A failed replacement leaves the original file intact.
+files. Fresh saves use atomic no-clobber moves and retry with the next suffix if
+a late collision occurs. A failed replacement leaves the original file intact.
 
 ### Cloning and importing
 
@@ -1224,9 +1227,9 @@ These can be layered onto the preceding recipes:
 | Pull DP validation fails | Source is missing, wrong site, not `installDP`, another Pull DP, or an HA site server without local content. | Point it at a dedicated standard SiteSystem DP. |
 | Disk cannot be removed | A role path uses it, or it would leave a FileServer with fewer than E:/F:. | Move/change the role path first; retain two FileServer disks. |
 | Existing property is grey/read-only | Existing-VM edits are restricted to `UpdatablePropList`; deployed SUP/Patch My PC are one-way. | Add a supported role/property or rebuild the VM for unsupported changes. |
-| Save filename overwrote the loaded file | Enter accepts the loaded file's existing path. | Type a new basename at **Save Filename** to create a variant. |
+| Save filename overwrote the loaded file | Enter accepts the loaded file's existing path, including after restoring in-progress edits. | Type a new basename at **Save Filename** to create a collision-safe variant. |
 | Invalid JSON does not appear in Load | `Select-Config` catches parse failures and skips the file. | Repair it with a JSON parser, then reopen the load menu. |
-| In-progress edits seem missing | `!` holds them only in `Global:SavedConfig`; exiting the process loses them. | Choose **Restore In-Progress configuration**, then `S` or `D`. |
+| In-progress edits seem missing | `!` holds the config and its loaded source path only for this process; exiting loses them. | Choose **Restore In-Progress configuration**, then `S` or `D`. |
 | Menu option is off-screen | The engine paginates and may drop optional inline disk rows. | Use Page Down/wheel or open **Manage Disks**. |
 | Start/stop appears unfinished | Domain operations may be background jobs and the menu displays a live banner. | Wait for the banner to complete and inspect its failure count. |
 

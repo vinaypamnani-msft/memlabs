@@ -7,7 +7,9 @@ function Write-ConfigJsonFile {
         [object] $Config,
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [string] $Path
+        [string] $Path,
+        [Parameter(Mandatory = $false)]
+        [switch] $NoClobber
     )
 
     $fullPath = [System.IO.Path]::GetFullPath($Path)
@@ -23,7 +25,10 @@ function Write-ConfigJsonFile {
         $json | Out-File -LiteralPath $tempPath -ErrorAction Stop
         $null = Get-Content -LiteralPath $tempPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
 
-        if ([System.IO.File]::Exists($fullPath)) {
+        if ($NoClobber) {
+            [System.IO.File]::Move($tempPath, $fullPath)
+        }
+        elseif ([System.IO.File]::Exists($fullPath)) {
             [System.IO.File]::Replace($tempPath, $fullPath, $backupPath)
         }
         else {

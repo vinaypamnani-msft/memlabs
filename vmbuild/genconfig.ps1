@@ -196,8 +196,7 @@ function Select-ConfigMenu {
             }
             "!" {
                 if ($Global:SavedConfig) {
-                    $SelectedConfig = $Global:SavedConfig
-                    $Global:SavedConfig = $null
+                    $SelectedConfig = Restore-SavedConfigState
                 }
                 else {
                     continue
@@ -769,6 +768,19 @@ function Test-AnyExistingVMModified {
     return $false
 }
 
+function Save-CurrentConfigState {
+    $Global:SavedConfig = $Global:Config
+    $Global:SavedConfigFile = $Global:configfile
+}
+
+function Restore-SavedConfigState {
+    $restoredConfig = $Global:SavedConfig
+    $Global:configfile = $Global:SavedConfigFile
+    $Global:SavedConfig = $null
+    $Global:SavedConfigFile = $null
+    return $restoredConfig
+}
+
 # Shared exit handler for the '!' (return-to-main-menu) and '*' (go-back) paths
 # in Select-MainMenu. Both prompt to confirm losing unsaved edits to existing
 # VMs, flush the VM cache, and signal the outer loop via a global flag.
@@ -804,7 +816,7 @@ function Invoke-MainMenuExit {
     }
     else {
         $global:GoBack = $true
-        $global:SavedConfig = $global:Config
+        Save-CurrentConfigState
     }
     $global:DisableSmartUpdate = $false
     Get-List -FlushCache
@@ -1109,6 +1121,33 @@ function Build-MainMenuOptions {
 }
 
 
+function Get-AvailableConfigFilePath {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+
+    $candidate = $Path
+    if (-not $candidate.ToLowerInvariant().EndsWith('.json')) {
+        $candidate += '.json'
+    }
+    if (-not [System.IO.File]::Exists($candidate)) {
+        return $candidate
+    }
+
+    $directory = [System.IO.Path]::GetDirectoryName($candidate)
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($candidate)
+    $extension = [System.IO.Path]::GetExtension($candidate)
+    $suffix = 2
+    do {
+        $candidate = Join-Path $directory "$baseName-$suffix$extension"
+        $suffix++
+    } while ([System.IO.File]::Exists($candidate))
+
+    return $candidate
+}
+
 function Save-Config {
     [CmdletBinding()]
     param (
@@ -1121,26 +1160,14 @@ function Save-Config {
 
 
 
-    $file = "$($config.vmOptions.domainName)"
-    $cfgCmOptions = Get-ConfigCmOptions -Config $config
-    if ($config.vmOptions.existingDCNameWithPrefix) {
-        $file += "-ADD-"
+    $domainName = "$($config.vmOptions.domainName)"
+    $domainLabel = $domainName.Split('.')[0].ToLowerInvariant()
+    $intent = 'expand'
+    if ($config.virtualMachines | Where-Object { $_.Role -eq 'DC' }) {
+        $intent = 'newdomain'
     }
-    elseif (-not $cfgCmOptions) {
-        $file += "-NOSCCM-"
-    }
-    elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }) {
-        $file += "-CAS-$($cfgCmOptions.version)-"
-    }
-    elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }) {
-        $file += "-PRI-$($cfgCmOptions.version)-"
-    }
-
-    $file += "$($config.virtualMachines.Count)VMs"
-    #$date = Get-Date -Format "yyyy-MM-dd"
-    #$file = $date + "-" + $file
-
-    $filename = Join-Path $configDir $file
+    $virtualMachineCount = @($config.virtualMachines | Where-Object { $null -ne $_ }).Count
+    $filename = "$domainLabel-$intent-${virtualMachineCount}vm"
     $fullFileName = $null
     if ($Global:configfile) {
         write-host $Global:configfile
@@ -1151,8 +1178,14 @@ function Save-Config {
         #}
         #$filename = Join-Path $configDir $filename
         $fullFilename = $Global:configfile
-        $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress) -eq
-        ($config | ConvertTo-Json -Depth 5 -Compress)
+        $contentEqual = $false
+        try {
+            $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress) -eq
+            ($config | ConvertTo-Json -Depth 5 -Compress)
+        }
+        catch {
+            Write-Log "Loaded config '$fullFileName' can no longer be parsed and will be replaced if this save is confirmed: $($_.Exception.Message)" -Warning
+        }
         if ($contentEqual) {
             #return Split-Path -Path $fileName -Leaf
             Write-Log -HostOnly -Verbose "(2)Returning File: $fileName"
@@ -1192,8 +1225,29 @@ function Save-Config {
         $filename += ".json"
     }
 
+    $sameAsLoadedConfig = $fullFileName -and [string]::Equals(
+        [System.IO.Path]::GetFullPath($filename),
+        [System.IO.Path]::GetFullPath($fullFileName),
+        [System.StringComparison]::OrdinalIgnoreCase)
     try {
-        Write-ConfigJsonFile -Config $config -Path $filename
+        if ($sameAsLoadedConfig) {
+            Write-ConfigJsonFile -Config $config -Path $filename
+        }
+        else {
+            $requestedFilename = $filename
+            while ($true) {
+                $filename = Get-AvailableConfigFilePath -Path $requestedFilename
+                try {
+                    Write-ConfigJsonFile -Config $config -Path $filename -NoClobber
+                    break
+                }
+                catch [System.IO.IOException] {
+                    if (-not [System.IO.File]::Exists($filename)) {
+                        throw
+                    }
+                }
+            }
+        }
         #$return.ConfigFileName = Split-Path -Path $fileName -Leaf
         Write-Host "Saved to $filename"
     }
@@ -1208,6 +1262,7 @@ function Save-Config {
 }
 
 $Global:SavedConfig = $null
+$Global:SavedConfigFile = $null
 do {
     $Global:Config = $null
     $Global:configfile = $null
@@ -1226,7 +1281,7 @@ do {
        
         if ($Global:GoBack -eq $true) {
             
-            $Global:SavedConfig = $global:Config
+            Save-CurrentConfigState
             $Global:Config = Select-ConfigMenu
             Write-Host "Configuration restored to previous state."            
             $Global:GoBack = $false
@@ -1236,7 +1291,7 @@ do {
 
         if ($global:StartOver -eq $true) {
             Write-Host2 -ForegroundColor MediumAquamarine "Saving Configuration... use ""!"" to return."
-            $Global:SavedConfig = $global:Config
+            Save-CurrentConfigState
             Write-Host
             break
         }

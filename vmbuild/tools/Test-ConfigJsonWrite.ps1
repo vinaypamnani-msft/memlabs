@@ -74,8 +74,9 @@ if (-not (Test-Path -LiteralPath $sourcePath)) {
 $parseErrors = $null
 $tokens = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $sourcePath).Path, [ref]$tokens, [ref]$parseErrors)
-if (@($parseErrors).Count -ne 0) {
-    Write-Host "SETUP FAIL: $SourceFile has $(@($parseErrors).Count) parse error(s)" -ForegroundColor Red
+$parseErrors = @($parseErrors | Where-Object { $null -ne $_ })
+if ($parseErrors.Count -ne 0) {
+    Write-Host "SETUP FAIL: $SourceFile has $($parseErrors.Count) parse error(s)" -ForegroundColor Red
     exit 2
 }
 
@@ -122,6 +123,12 @@ try {
     & $FunctionName -Config $second -Path $target
     Assert-Equal 'second.example' (Get-Content -LiteralPath $target -Raw | ConvertFrom-Json).vmOptions.domainName 'overwrite replaces the previous content'
     Assert-Equal 0 (Get-OrphanCount) 'no temp or backup file left after overwrite'
+
+    $noClobberThrew = $false
+    try { & $FunctionName -Config $first -Path $target -NoClobber } catch { $noClobberThrew = $true }
+    Assert-Equal $true $noClobberThrew 'no-clobber mode refuses an existing config'
+    Assert-Equal 'second.example' (Get-Content -LiteralPath $target -Raw | ConvertFrom-Json).vmOptions.domainName 'no-clobber mode preserves the existing config'
+    Assert-Equal 0 (Get-OrphanCount) 'no temp or backup file left after a no-clobber collision'
 
     # The reason the function exists: a write that cannot complete must not consume the original.
     $contentBefore = Get-Content -LiteralPath $target -Raw
