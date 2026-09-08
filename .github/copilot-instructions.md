@@ -30,6 +30,13 @@
   resource pressure, critical paths, and performance-regression analysis to
   **MemLabs Performance**. Give it raw artifact paths and provenance rather than
   relying on pasted excerpts when those artifacts are available.
+- Use the manually selected **MemLabs Live Ops** agent for live Hyper-V, VM,
+  PowerShell Direct, deployment, DSC, ConfigMgr, SQL, network, checkpoint, VHD,
+  or other lab-state operations. Other agents may perform read-only host and VM
+  inspection under the standing authorization, but every state change must run
+  synchronously through `vmbuild/tools/Invoke-MemLabsLiveOperation.ps1` and own
+  its host-wide mutation lease for the full operation and postcondition check.
+  Never break another session's lease or kill its owner to proceed.
 
 ## Evidence And Safety
 
@@ -37,6 +44,9 @@
   beyond the user-approved paths.
 - Do not report a scanner or test as passing when it measured zero applicable
   inputs, skipped the changed path, or failed during setup.
-- Do not run live lab, VM, DSC, ConfigMgr, SQL, Azure, download, or installation
-  operations as validation without explicit user authorization and a named
-  target.
+- The user has granted standing authorization for live operations against all
+  Hyper-V VMs on this host. Always name the target and classify the operation as
+  Observe, Mutate, or Destructive. Observation may run concurrently. Mutation
+  and destructive work must follow the **MemLabs Live Ops** lease protocol;
+  destructive work must record the exact action, expected loss, and recovery
+  path before execution.
