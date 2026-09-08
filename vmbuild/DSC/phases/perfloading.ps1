@@ -101,6 +101,116 @@ Write-DscStatus "$Tag Starting perfloading"
         return $false
     }
 
+    function Get-MemLabsManagedDistributionPointNames {
+        param (
+            [object[]] $VirtualMachines,
+            [string] $DefaultDomainName
+        )
+
+        @($VirtualMachines | Where-Object {
+                $_.installDP -eq $true -or $_.enablePullDP -eq $true -or "$($_.role)" -eq 'Secondary'
+            } | ForEach-Object {
+                $vmName = "$($_.vmName)".Trim()
+                if (-not $vmName) { return }
+                if ($vmName.Contains('.')) { return $vmName }
+                $domainName = if ($_.domain) { "$($_.domain)".Trim() } else { $DefaultDomainName }
+                if ($domainName) { return "$vmName.$domainName" }
+                return $vmName
+            } | Select-Object -Unique)
+    }
+
+    function Test-MemLabsDistributionPointGroupMember {
+        param (
+            [hashtable] $MemberKeys,
+            [string] $DistributionPointName
+        )
+
+        if (-not $DistributionPointName) { return $false }
+        return $MemberKeys.ContainsKey($DistributionPointName.ToUpperInvariant())
+    }
+
+    function Test-MemLabsDistributionPointGroupCoverage {
+        param (
+            [string] $SiteCode,
+            [string] $GroupName,
+            [string[]] $ExpectedDistributionPointNames,
+            [string] $StatusTag,
+            [int] $Attempts = 6,
+            [int] $RetrySeconds = 5
+        )
+
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            try {
+                $group = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$GroupName'" -ErrorAction Stop
+                if (-not $group) { throw "group was not found" }
+                $memberRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($group.GroupID)'" -ErrorAction Stop)
+                $memberKeys = @{}
+                foreach ($memberRow in $memberRows) {
+                    if ("$($memberRow.DPNALPath)" -match '\\([^\\"\]]+)') {
+                        $memberKeys[$Matches[1].ToUpperInvariant()] = $true
+                    }
+                }
+                $missingNames = @($ExpectedDistributionPointNames | Where-Object {
+                        -not (Test-MemLabsDistributionPointGroupMember -MemberKeys $memberKeys -DistributionPointName $_)
+                    })
+                if ($memberRows.Count -gt 0 -and $missingNames.Count -eq 0) {
+                    Write-DscStatus "$StatusTag Verified '$GroupName' membership: $($memberRows.Count) total DP(s), all $($ExpectedDistributionPointNames.Count) MemLabs-managed DP(s) present"
+                    return $true
+                }
+                $reason = if ($memberRows.Count -eq 0) { 'the group is empty' } else { "missing: $($missingNames -join ', ')" }
+            }
+            catch {
+                $reason = $_.Exception.Message
+            }
+            if ($attempt -lt $Attempts) {
+                Write-DscStatus "$StatusTag '$GroupName' membership is not ready ($reason); retry $attempt/$Attempts in ${RetrySeconds}s"
+                Start-Sleep -Seconds $RetrySeconds
+            }
+        }
+        Write-DscStatus "$StatusTag '$GroupName' membership could not be verified after $Attempts attempts ($reason). Content distribution was not requested." -Failure
+        return $false
+    }
+
+    function Sync-MemLabsContentDistribution {
+        param (
+            [ValidateSet('Application', 'Package', 'DeploymentPackage')]
+            [string] $ContentType,
+            [string] $ContentName,
+            [string] $DistributionPointGroupName,
+            [string] $LegacyDistributionPointGroupName,
+            [bool] $MigrateLegacy,
+            [string] $StatusTag
+        )
+
+        try {
+            switch ($ContentType) {
+                'Application' { Start-CMContentDistribution -ApplicationName $ContentName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+                'Package' { Start-CMContentDistribution -PackageName $ContentName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+                'DeploymentPackage' { Start-CMContentDistribution -DeploymentPackageName $ContentName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+            }
+            Write-DscStatus "$StatusTag Requested $ContentType '$ContentName' distribution to '$DistributionPointGroupName'"
+        }
+        catch {
+            Write-DscStatus "$StatusTag Failed to distribute $ContentType '$ContentName' to '$DistributionPointGroupName'; legacy targeting was retained: $($_.Exception.Message)" -Failure
+            return $false
+        }
+
+        if ($MigrateLegacy) {
+            try {
+                switch ($ContentType) {
+                    'Application' { Remove-CMContentDistribution -ApplicationName $ContentName -DistributionPointGroupName $LegacyDistributionPointGroupName -Force -ErrorAction Stop }
+                    'Package' { Remove-CMContentDistribution -PackageName $ContentName -DistributionPointGroupName $LegacyDistributionPointGroupName -Force -ErrorAction Stop }
+                    'DeploymentPackage' { Remove-CMContentDistribution -DeploymentPackageName $ContentName -DistributionPointGroupName $LegacyDistributionPointGroupName -Force -ErrorAction Stop }
+                }
+                Write-DscStatus "$StatusTag Migrated $ContentType '$ContentName' from '$LegacyDistributionPointGroupName' to '$DistributionPointGroupName'"
+            }
+            catch {
+                Write-DscStatus "$StatusTag WARNING: $ContentType '$ContentName' is targeted to '$DistributionPointGroupName', but legacy '$LegacyDistributionPointGroupName' targeting could not be removed: $($_.Exception.Message)"
+            }
+        }
+        return $true
+    }
+
     function Sync-MemLabsOsdComputerNameSteps {
         param (
             [object[]] $TaskSequences,
@@ -1348,26 +1458,30 @@ if ($licensed) { Write-Output 'Activated' }
         }
     }
 
-    #create all DPs group to distribute the content (its easier to distribute the content to a DP group than enumerating all DPs)
-    $DPGroupName = "ALL DPS"
+    # Use a DP group so content can be targeted once rather than per DP. The
+    # legacy name is retained, but MemLabs only adds DPs declared in its config;
+    # external DPs and CMGs remain explicit, manually managed opt-ins.
+    $DPGroupName = "All MEMLABS DPs"
+    $LegacyDPGroupName = "ALL DPS"
     $existingDPGroups = @(Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name)
+    $legacyDPGroupExists = $LegacyDPGroupName -in $existingDPGroups
 
     if ($DPGroupName -in $existingDPGroups) {
         Write-DscStatus "$Tag DP group: $DPGroupName already exists"
     }
     else {
-        $null = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all Distribution Points" -ErrorAction SilentlyContinue
+        $null = New-CMDistributionPointGroup -Name $DPGroupName -Description "Distribution points created and managed by MEMLABS" -ErrorAction SilentlyContinue
         Write-DscStatus "$Tag DP group: $DPGroupName created successfully"
     }
 
-    # ALWAYS reconcile group membership against the current DP list -- do NOT
-    # gate this on the group being newly created. "ALL DPS" is hierarchy-global
+    # ALWAYS reconcile managed group membership against the current DP list -- do NOT
+    # gate this on the group being newly created. This group is hierarchy-global
     # data: on a child Primary the group is usually created+replicated by the
     # CAS (which runs this same block first, before the role gate) BEFORE this
     # site's DP exists, so it arrives here already-existing but EMPTY (or missing
     # this site's DP). The old code only populated the group in the freshly-
     # created branch, so on the child Primary the group stayed empty and every
-    # Start-CMContentDistribution -DistributionPointGroupName "ALL DPS" failed
+    # Start-CMContentDistribution to the group failed
     # with "No content destination was found" -- silently skipping boot image,
     # application, and package distribution to this site's DP. (Only the boot-
     # image call surfaced it; the app/package calls use -ErrorAction
@@ -1380,8 +1494,15 @@ if ($licensed) { Write-Output 'Activated' }
         if ("$NalPath" -match '\\([^\\"\]]+)') { return $Matches[1] }
         return $null
     }
-    $DistributionPoints = @(Get-CMDistributionPoint -AllSite)
-    Write-DscStatus "$Tag Reconciling '$DPGroupName' membership against $($DistributionPoints.Count) distribution point(s)"
+    $managedDpNames = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $deployConfig.virtualMachines -DefaultDomainName $DomainFullName)
+    $managedDpKeys = @{}
+    foreach ($managedDpName in $managedDpNames) { $managedDpKeys[$managedDpName.ToUpper()] = $true }
+    $allDistributionPoints = @(Get-CMDistributionPoint -AllSite)
+    $DistributionPoints = @($allDistributionPoints | Where-Object {
+            $liveDpName = ($_.NetworkOSPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
+            $managedDpKeys.ContainsKey($liveDpName.ToUpper())
+        })
+    Write-DscStatus "$Tag Reconciling '$DPGroupName' membership for $($DistributionPoints.Count) MemLabs-managed DP(s); $($allDistributionPoints.Count - $DistributionPoints.Count) external DP(s)/CMG(s) are left unchanged"
     $existingAllDpMemberKeys = @{}
     try {
         $allGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$DPGroupName'" -ErrorAction Stop
@@ -1390,7 +1511,6 @@ if ($licensed) { Write-Output 'Activated' }
                 $memberHostName = & $serverFromNal $memberRow.DPNALPath
                 if (-not $memberHostName) { continue }
                 $existingAllDpMemberKeys[$memberHostName.ToUpper()] = $true
-                $existingAllDpMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
             }
         }
     }
@@ -1399,8 +1519,7 @@ if ($licensed) { Write-Output 'Activated' }
     }
     foreach ($dp in $DistributionPoints) {
         $DPName = ($dp.NetworkOSPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
-        $dpShortName = ($DPName -split '\.')[0]
-        if ($existingAllDpMemberKeys.ContainsKey($DPName.ToUpper()) -or $existingAllDpMemberKeys.ContainsKey($dpShortName.ToUpper())) {
+        if (Test-MemLabsDistributionPointGroupMember -MemberKeys $existingAllDpMemberKeys -DistributionPointName $DPName) {
             Write-DscStatus "$Tag Distribution Point '$DPName' is already in '$DPGroupName' -- skipping add"
             continue
         }
@@ -1414,21 +1533,9 @@ if ($licensed) { Write-Output 'Activated' }
         }
     }
 
-    # VERIFY the add actually took. A silently-failed add (e.g. wrong name form,
-    # like the short-name-vs-FQDN bug that left 'OSD DPS' empty) makes every
-    # Start-CMContentDistribution to the group a no-op. Re-query membership from
-    # WMI and WARN loudly if the group is empty despite having DPs to add.
-    try {
-        $allGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$DPGroupName'" -ErrorAction SilentlyContinue
-        $allMemberCount = if ($allGrpWmi) { @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($allGrpWmi.GroupID)'" -ErrorAction SilentlyContinue).Count } else { 0 }
-        if ($DistributionPoints.Count -gt 0 -and $allMemberCount -eq 0) {
-            Write-DscStatus "$Tag WARNING: '$DPGroupName' has NO members after reconcile despite $($DistributionPoints.Count) DP(s) -- content distribution to the group will be a no-op"
-        }
-        else {
-            Write-DscStatus "$Tag Verified '$DPGroupName' membership: $allMemberCount DP(s)"
-        }
+    if (-not (Test-MemLabsDistributionPointGroupCoverage -SiteCode $SiteCode -GroupName $DPGroupName -ExpectedDistributionPointNames $managedDpNames -StatusTag $Tag)) {
+        return
     }
-    catch { Write-DscStatus "$Tag Could not verify '$DPGroupName' membership: $($_.Exception.Message)" }
 
 
     #Enable Site features (hierarchy-level — top-level site only)
@@ -1479,7 +1586,8 @@ if ($licensed) { Write-Output 'Activated' }
         #creating an application
         $appname = "MEMLABS-" + "$($_.Name)"
 
-        if (Get-CMApplication -Name "$appname" -Fast -ErrorAction SilentlyContinue) {
+        $appExists = [bool](Get-CMApplication -Name "$appname" -Fast -ErrorAction SilentlyContinue)
+        if ($appExists) {
             Write-DscStatus "$Tag Application '$appname' already exists, skipping"
         }
         else {
@@ -1491,18 +1599,16 @@ if ($licensed) { Write-Output 'Activated' }
             Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
             Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
 
-            Write-DscStatus "$Tag Distributing MEMLABS application $($_.Name) to all DPs"
-            Start-CMContentDistribution -ApplicationName "$appname" -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-            Write-DscStatus "$Tag Successfully distributed MEMLABS application $($_.Name) to all DPs"
-
             Write-DscStatus "$Tag Deploying MEMLABS application $($_.Name) to all Systems as available deployment"
             New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
             Write-DscStatus "$Tag successfully deployed MEMLABS application $($_.Name) to all Systems as available deployment"
         }
+        if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $appname -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($appExists -and $legacyDPGroupExists) -StatusTag $Tag)) { return }
 
         $pkgName = "MEMLABS-$($_.Name)"
 
-        if (Get-CMPackage -Name "$pkgName" -Fast -ErrorAction SilentlyContinue) {
+        $packageExists = [bool](Get-CMPackage -Name "$pkgName" -Fast -ErrorAction SilentlyContinue)
+        if ($packageExists) {
             Write-DscStatus "$Tag Package '$pkgName' already exists, skipping"
         }
         else {
@@ -1515,14 +1621,11 @@ if ($licensed) { Write-Output 'Activated' }
             New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
             Write-DscStatus "$Tag Successfully created a MEMLABS package deployment for $($_.Name) as Package model"
 
-            Write-DscStatus "$Tag Distributing MEMLABS package $($_.Name) to all DPs"
-            Start-CMContentDistribution -PackageId $Package.PackageID -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-            Write-DscStatus "$Tag Successfully distributed MEMLABS package $($_.Name) to all DPs"
-
             Write-DscStatus "$Tag Deploying MEMLABS package $($_.Name) to all Systems as available deployment"
             New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
             Write-DscStatus "$Tag successfully deployed MEMLABS package $($_.Name) to all Systems as available deployment"
         }
+        if (-not (Sync-MemLabsContentDistribution -ContentType Package -ContentName $pkgName -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($packageExists -and $legacyDPGroupExists) -StatusTag $Tag)) { return }
     }
 
     #region Microsoft 365 Apps deployment via ODT (background download)
@@ -1876,7 +1979,7 @@ if ($licensed) { Write-Output 'Activated' }
                 # resolves -DistributionPointName against the DP's ServerName (FQDN); passing the short
                 # name ('PL-PANCETTA') fails to match, the error is swallowed, and the group is left EMPTY
                 # -- so every Start-CMContentDistribution to 'OSD DPS' becomes a no-op and OSD content never
-                # lands (the Phase 11 'not on any DP' WARN). This mirrors the working 'ALL DPS' block above.
+                # lands (the Phase 11 'not on any DP' WARN). This mirrors the working MemLabs DP group block above.
                 if ($osdMembershipRead -and ($osdMemberKeys.ContainsKey($d.Fqdn.ToUpper()) -or $osdMemberKeys.ContainsKey($d.Short.ToUpper()))) {
                     Write-DscStatus "$Tag OSD DP '$($d.Fqdn)' is already in '$OsdDpGroupName' -- skipping add"
                 }
@@ -3207,49 +3310,48 @@ Write-Output `$true
                 $channelAppName = if ($channels.Count -eq 1) { $officeAppName } else { "$officeAppName-$channel" }
                 $contentUNC = "\\$ThisMachineName\$officeShareName\$channel"
 
-                if (Get-CMApplication -Name $channelAppName -Fast -ErrorAction SilentlyContinue) {
+                $channelAppExists = [bool](Get-CMApplication -Name $channelAppName -Fast -ErrorAction SilentlyContinue)
+                if ($channelAppExists) {
                     Write-DscStatus "$Tag Application '$channelAppName' already exists, skipping"
-                    continue
                 }
+                else {
+                    Write-DscStatus "$Tag Creating application '$channelAppName'"
+                    New-CMApplication -Name $channelAppName -Description "Microsoft 365 Apps ($channel channel)" -Publisher "Microsoft" -SoftwareVersion "Latest" -AutoInstall $true -ErrorAction SilentlyContinue
 
-                Write-DscStatus "$Tag Creating application '$channelAppName'"
-                New-CMApplication -Name $channelAppName -Description "Microsoft 365 Apps ($channel channel)" -Publisher "Microsoft" -SoftwareVersion "Latest" -AutoInstall $true -ErrorAction SilentlyContinue
-
-                # Script deployment type: ODT install/uninstall with registry detection
-                $installCmd = "setup.exe /configure install.xml"
-                $uninstallCmd = "setup.exe /configure uninstall.xml"
-                $detectScript = @'
+                    # Script deployment type: ODT install/uninstall with registry detection
+                    $installCmd = "setup.exe /configure install.xml"
+                    $uninstallCmd = "setup.exe /configure uninstall.xml"
+                    $detectScript = @'
 $ctr = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
 if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
 '@
-                Add-CMScriptDeploymentType -ApplicationName $channelAppName `
-                    -DeploymentTypeName "ODT Install ($channel)" `
-                    -ContentLocation $contentUNC `
-                    -InstallCommand $installCmd `
-                    -UninstallCommand $uninstallCmd `
-                    -ScriptLanguage PowerShell `
-                    -ScriptText $detectScript `
-                    -LogonRequirementType WhetherOrNotUserLoggedOn `
-                    -UserInteractionMode Hidden `
-                    -InstallationBehaviorType InstallForSystem `
-                    -MaximumRuntimeMins 120 `
-                    -EstimatedRuntimeMins 30 `
-                    -Force `
-                    -ErrorAction SilentlyContinue
+                    Add-CMScriptDeploymentType -ApplicationName $channelAppName `
+                        -DeploymentTypeName "ODT Install ($channel)" `
+                        -ContentLocation $contentUNC `
+                        -InstallCommand $installCmd `
+                        -UninstallCommand $uninstallCmd `
+                        -ScriptLanguage PowerShell `
+                        -ScriptText $detectScript `
+                        -LogonRequirementType WhetherOrNotUserLoggedOn `
+                        -UserInteractionMode Hidden `
+                        -InstallationBehaviorType InstallForSystem `
+                        -MaximumRuntimeMins 120 `
+                        -EstimatedRuntimeMins 30 `
+                        -Force `
+                        -ErrorAction SilentlyContinue
 
-                Write-DscStatus "$Tag Distributing '$channelAppName' to all DPs"
-                Start-CMContentDistribution -ApplicationName $channelAppName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+                    # Deploy as Required to target VMs
+                    $officeCollectionName = "MEMLABS-Office Install Targets"
+                    Write-DscStatus "$Tag Deploying '$channelAppName' as Required to collection '$officeCollectionName'"
+                    New-CMApplicationDeployment -ApplicationName $channelAppName `
+                        -CollectionName $officeCollectionName `
+                        -DeployAction Install `
+                        -DeployPurpose Required `
+                        -UserNotification DisplayAll `
+                        -ErrorAction SilentlyContinue
+                }
 
-                # Deploy as Required to target VMs
-                $officeCollectionName = "MEMLABS-Office Install Targets"
-                Write-DscStatus "$Tag Deploying '$channelAppName' as Required to collection '$officeCollectionName'"
-                New-CMApplicationDeployment -ApplicationName $channelAppName `
-                    -CollectionName $officeCollectionName `
-                    -DeployAction Install `
-                    -DeployPurpose Required `
-                    -UserNotification DisplayAll `
-                    -ErrorAction SilentlyContinue
-
+                if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $channelAppName -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($channelAppExists -and $legacyDPGroupExists) -StatusTag $Tag)) { return }
                 Write-DscStatus "$Tag Office application '$channelAppName' deployment complete"
             }
         }
@@ -4870,13 +4972,12 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 [string]$PackageDescription
             )
     
-            if (!(Get-CMSoftwareUpdateDeploymentPackage -Name $PackageName)) {
+            $updatePackageExists = [bool](Get-CMSoftwareUpdateDeploymentPackage -Name $PackageName)
+            if (-not $updatePackageExists) {
                 Write-DscStatus "$Tag Creating package: $PackageName"
                 try {
                     New-CMSoftwareUpdateDeploymentPackage -Name $PackageName -Path $PackagePath -Description $PackageDescription
                     Write-DscStatus "$Tag Successfully created package: $PackageName"
-                    Start-CMContentDistribution -DeploymentPackageName $PackageName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-                    Write-DscStatus "$Tag Successfully distributed MEMLABS $PackageName to all DPs"
                     New-CMSoftwareUpdateGroup -Name $PackageName -Description $PackageDescription
                     Write-DscStatus "$Tag Successfully created SUG $PackageName"
                 
@@ -4888,6 +4989,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             else {
                 Write-DscStatus "$Tag Package already exists: $PackageName"
             }
+            if (-not (Sync-MemLabsContentDistribution -ContentType DeploymentPackage -ContentName $PackageName -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($updatePackageExists -and $legacyDPGroupExists) -StatusTag $Tag)) { return }
         }
     
         # Loop through each package and create it if it doesn't exist
