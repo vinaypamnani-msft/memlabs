@@ -6565,14 +6565,14 @@ $global:VM_Config = {
         [int]$firstRestartHeartbeatThreshold = $failedHeartbeatThreshold * 3
         [int]$forcedRestartCount = 0   # restarts since the last status progress
         [int]$forcedRestartMax = 3     # after this many with no progress, FAIL the VM instead of power-cycling forever
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): heartbeat-recovery: $heartbeatRunningVmCount running VMs -> threshold=$failedHeartbeatThreshold (first restart at $firstRestartHeartbeatThreshold), maxRestarts=$forcedRestartMax" -LogOnly
+        $staleRestartMax = 2
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): heartbeat-recovery: $heartbeatRunningVmCount running VMs -> threshold=$failedHeartbeatThreshold (first restart at $firstRestartHeartbeatThreshold), maxRestarts=$forcedRestartMax, rebootResumeMax=$staleRestartMax" -LogOnly
 
         $noStatus = $true
         $lastStatusChangeTime = [DateTime]::UtcNow
         $staleWarningMinutes = 15
         $staleRestartMinutes = 30
         $staleRestartCount = 0
-        $staleRestartMax = 2
         $lastStaleWarningTime = [DateTime]::MinValue
         $deadWorkflowConfirmations = 0     # consecutive stale checks that proved the ScriptWorkflow task is not running
         $deadWorkflowMax = 3               # after this many, the wait is provably unclearable -- fail instead of warning forever
@@ -6924,6 +6924,12 @@ $global:VM_Config = {
                         Write-log "[Phase $Phase]: $($currentItem.vmName): $($dscStatus.ScriptBlockOutput) $($dscStatus.ScriptBlockOutput) $($dscStatus.ScriptBlockOutput.Error)"
                         $dscFails++
                         if ($dscFails -ge 20) {
+                            if ($forcedRestartCount -ge $forcedRestartMax) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC status transport failed after $forcedRestartCount VM restart attempt(s). Refusing another restart to prevent a reboot loop." -Failure -OutputStream
+                                break
+                            }
+                            $forcedRestartCount++
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC status transport remained unavailable for 20 probes. Restarting VM (attempt $forcedRestartCount/$forcedRestartMax)." -Warning -OutputStream
                             stop-vm2 -name $currentItem.vmName
                             start-sleep -Seconds 10
                             start-vm2 -name $currentItem.vmName
@@ -6934,33 +6940,6 @@ $global:VM_Config = {
                     }
                     else {
                         $dscFails = 0
-                    }
-
-                    if (-not $rebooted -and $dscStatus.ScriptBlockOutput.RebootRequested -eq $true) {
-                        # Reboot the machine
-                        start-sleep -Seconds 30 # Wait 30 seconds and re-request.. maybe its going to reboot itself.
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC requested reboot, Waiting 30 seconds to see if it reboots itself."
-                        $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
-                            $ProgressPreference = 'SilentlyContinue'
-                            try { 
-                                Get-DscConfigurationStatus | out-null
-                            }
-                            catch {}
-
-                            $ProgressPreference = 'Continue'
-                        } -SuppressLog:$suppressNoisyLogging
-                        # Reboot the machine
-                        if ($dscStatus.ScriptBlockOutput.RebootRequested) {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC requested reboot, but has not rebooted.  Forcing Restart."
-                            stop-vm2 -name $currentItem.vmName
-                            start-sleep -Seconds 10
-                            start-vm2 -name $currentItem.vmName
-                            Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
-                            $rebooted = $true
-                        }
-                    }
-                    else {
-                        $rebooted = $false
                     }
 
 
@@ -6977,6 +6956,7 @@ $global:VM_Config = {
                     else {
                         if ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -ne "Success") {
                             $badResources = $dscStatus.ScriptBlockOutput.ResourcesNotInDesiredState
+                            $adServerRestarted = $false
                             foreach ($badResource in $badResources) {
                                 if (-not $badResource.Error) {
                                     continue
@@ -7006,9 +6986,16 @@ $global:VM_Config = {
                                     }
                                     Write-ProgressElapsed -stopwatch $FailStopWatch -timespan $FailtimeSpan -text "[Phase $Phase]: $($currentItem.vmName): Status: $($dscStatus.ScriptBlockOutput.Status) (Currently Retrying) : $msg"
                                     if ($msg.Contains("ADServerDownException")) {
-                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: ADServerDownException from VM. Restarting the VM" -Warning
+                                        if ($staleRestartCount -ge $staleRestartMax) {
+                                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: ADServerDownException restart budget exhausted after $staleRestartCount attempt(s). Refusing another restart to prevent a reboot loop." -Failure -OutputStream
+                                            $failure = $true
+                                            break
+                                        }
+                                        $staleRestartCount++
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: ADServerDownException from VM. Restarting the VM (attempt $staleRestartCount/$staleRestartMax)." -Warning
                                         Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "ADServerDownException" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
-                                        Continue
+                                        $adServerRestarted = $true
+                                        break
                                     }
                                     if (-not $failure) {
                                         continue
@@ -7018,6 +7005,7 @@ $global:VM_Config = {
                                     Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Non Terminating error from DSC. Attempting to restart."
                                 }
                             }
+                            if ($adServerRestarted) { continue }
 
                             # Write-Output, and bail
                             if (-not $msg) {
@@ -7287,15 +7275,16 @@ $global:VM_Config = {
                         }
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
                         $previousStatus = $currentStatus
-                        $lastStatusChangeTime = [DateTime]::UtcNow
-                        $lastStaleWarningTime = [DateTime]::MinValue
-                        $deadWorkflowConfirmations = 0
-                        $staleNoticeCount = 0
-                        if (-not $dscConfigReRan) {
+                        if ($dscStatusIsNew) {
+                            $lastStatusChangeTime = [DateTime]::UtcNow
+                            $lastStaleWarningTime = [DateTime]::MinValue
+                            $deadWorkflowConfirmations = 0
+                            $staleNoticeCount = 0
                             $lcmIdleSince = $null   # status advanced -> work is progressing; reset every stuck clock
                             $lcmRebootPendingSince = $null
                             $lcmPendingNoRebootSince = $null
                             $dscResumeCount = 0
+                            $staleRestartCount = 0 # a never-before-seen status starts a fresh bounded reboot episode
                             $forcedRestartCount = 0 # real progress -> reset the reboot-of-last-resort budget
                         }
 
@@ -7483,34 +7472,74 @@ $global:VM_Config = {
 
                         if ($lcmRebootPendingSince -and $rebootMins -ge $rebootPendingStuckMinutes -and $staleRestartCount -lt $staleRestartMax) {
                             # The LCM has been parked reboot-pending (PendingReboot / PendingConfiguration /
-                            # RebootRequested) with the status frozen for the confirmation window -- the restart
-                            # DSC scheduled never fired. Observed on Win10/11 client renames, where the LCM logs
-                            # 'A reboot is scheduled to progress further' but the box never restarts, leaving the
-                            # whole phase waiting forever. Unlike a Busy LCM, a reboot-pending park is literally
-                            # asking for a restart, so a host reboot is the correct, non-destructive recovery -- it
-                            # lets the LCM resume from pending.mof. Respect a running ScriptWorkflow task (Phase 8/9
+                            # RebootRequested) with the status frozen for the confirmation window. Unlike a Busy
+                            # LCM, this state explicitly requires a restart. The host owns that restart so it can
+                            # enforce a finite budget, then lets the LCM resume from pending.mof. Respect a running
+                            # ScriptWorkflow task (Phase 8/9
                             # can legitimately hold a reboot-pending state while a task does background work).
-                            $swTaskRunning = $false
                             $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
-                                $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
-                                if ($t -and $t.State -eq 'Running') { 'Running' } else { $null }
+                                $probeSucceeded = $false
+                                $running = $false
+                                try {
+                                    $t = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'ScriptWorkflow' } | Select-Object -First 1
+                                    $running = [bool]($t -and $t.State -eq 'Running')
+                                    $probeSucceeded = $true
+                                }
+                                catch { }
+                                [pscustomobject]@{ ProbeSucceeded = $probeSucceeded; Running = $running }
                             } -SuppressLog
-                            if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput -eq 'Running') {
-                                $swTaskRunning = $true
+                            $swResult = if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput) { $swCheck.ScriptBlockOutput | Select-Object -First 1 } else { $null }
+                            $swTaskProbeSucceeded = $swResult -and $swResult.ProbeSucceeded
+                            $swTaskRunning = $swTaskProbeSucceeded -and $swResult.Running
+                            if (-not $swTaskProbeSucceeded) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM reboot-pending ${rebootMins}m, but ScriptWorkflow state could not be verified. Extending the window; not restarting." -LogOnly
+                                $lcmRebootPendingSince = [DateTime]::UtcNow
+                                $lastStaleWarningTime = [DateTime]::MinValue
                             }
-                            if ($swTaskRunning) {
+                            elseif ($swTaskRunning) {
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM reboot-pending ${rebootMins}m but ScriptWorkflow task is still running. Not restarting." -Warning
                                 $lcmRebootPendingSince = [DateTime]::UtcNow   # task is doing work -- restart the reboot-pending window
                                 $lastStaleWarningTime = [DateTime]::MinValue
                             }
                             else {
                                 $staleRestartCount++
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM parked reboot-pending ($lcmState) for ${rebootMins}m with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). The DSC-scheduled reboot never fired -- restarting VM to let the LCM resume (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM parked reboot-pending ($lcmState) for ${rebootMins}m with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Executing the host-owned reboot so the LCM can resume (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
                                 Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "DSC reboot-pending stuck" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
                                 $lastStatusChangeTime = [DateTime]::UtcNow
                                 $lcmRebootPendingSince = $null
                                 $lcmIdleSince = $null
                                 $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                        }
+                        elseif ($lcmRebootPendingSince -and $rebootMins -ge $rebootPendingStuckMinutes -and $staleRestartCount -ge $staleRestartMax) {
+                            $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
+                                $probeSucceeded = $false
+                                $running = $false
+                                try {
+                                    $t = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'ScriptWorkflow' } | Select-Object -First 1
+                                    $running = [bool]($t -and $t.State -eq 'Running')
+                                    $probeSucceeded = $true
+                                }
+                                catch { }
+                                [pscustomobject]@{ ProbeSucceeded = $probeSucceeded; Running = $running }
+                            } -SuppressLog
+                            $swResult = if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput) { $swCheck.ScriptBlockOutput | Select-Object -First 1 } else { $null }
+                            $swTaskProbeSucceeded = $swResult -and $swResult.ProbeSucceeded
+                            $swTaskRunning = $swTaskProbeSucceeded -and $swResult.Running
+                            if (-not $swTaskProbeSucceeded) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: reboot budget exhausted, but ScriptWorkflow state could not be verified. Extending the confirmation window; not failing." -LogOnly
+                                $lcmRebootPendingSince = [DateTime]::UtcNow
+                                $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                            elseif ($swTaskRunning) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: reboot budget exhausted ($staleRestartCount/$staleRestartMax), but ScriptWorkflow is still running. Continuing to wait." -Warning
+                                $lcmRebootPendingSince = [DateTime]::UtcNow
+                                $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                            else {
+                                $resourceDetail = if ($lcmDetail) { " inside '$lcmDetail'" } else { '' }
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: reboot budget exhausted after $staleRestartCount host-owned restart/resume attempt(s); the LCM still requests another reboot$resourceDetail with status unchanged ('$($currentStatus.Trim())'). Refusing another restart to prevent a reboot loop." -Failure -OutputStream
+                                break
                             }
                         }
                         elseif ($lcmPendingNoRebootSince -and $pendingMins -ge $rebootStuckMinutes -and ((($dscResumeCount -lt $dscResumeMax) -and ($dscResumeTotal -lt $dscResumeTotalMax)) -or $staleRestartCount -lt $staleRestartMax)) {
@@ -7573,15 +7602,26 @@ $global:VM_Config = {
                                 }
                             }
 
-                            $swTaskRunning = $false
                             $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
-                                $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
-                                if ($t -and $t.State -eq 'Running') { 'Running' } else { $null }
+                                $probeSucceeded = $false
+                                $running = $false
+                                try {
+                                    $t = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'ScriptWorkflow' } | Select-Object -First 1
+                                    $running = [bool]($t -and $t.State -eq 'Running')
+                                    $probeSucceeded = $true
+                                }
+                                catch { }
+                                [pscustomobject]@{ ProbeSucceeded = $probeSucceeded; Running = $running }
                             } -SuppressLog
-                            if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput -eq 'Running') {
-                                $swTaskRunning = $true
+                            $swResult = if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput) { $swCheck.ScriptBlockOutput | Select-Object -First 1 } else { $null }
+                            $swTaskProbeSucceeded = $swResult -and $swResult.ProbeSucceeded
+                            $swTaskRunning = $swTaskProbeSucceeded -and $swResult.Running
+                            if (-not $swTaskProbeSucceeded) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM PendingConfiguration ${pendingMins}m, but ScriptWorkflow state could not be verified. Extending the window; not intervening." -LogOnly
+                                $lcmPendingNoRebootSince = [DateTime]::UtcNow
+                                $lastStaleWarningTime = [DateTime]::MinValue
                             }
-                            if ($swTaskRunning) {
+                            elseif ($swTaskRunning) {
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM PendingConfiguration ${pendingMins}m but ScriptWorkflow task is still running. Not intervening." -Warning
                                 $lcmPendingNoRebootSince = [DateTime]::UtcNow   # task is doing work -- restart the window
                                 $lastStaleWarningTime = [DateTime]::MinValue
@@ -7895,15 +7935,26 @@ $global:VM_Config = {
                             # consistency-engine cycle to auto-rerun and did not). Before rebooting, check the
                             # ScriptWorkflow task -- Phase 8/9 keep a scheduled task running after DSC goes
                             # idle (e.g. during WSUS sync waits); restarting would kill it mid-work.
-                            $swTaskRunning = $false
                             $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
-                                $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
-                                if ($t -and $t.State -eq 'Running') { 'Running' } else { $null }
+                                $probeSucceeded = $false
+                                $running = $false
+                                try {
+                                    $t = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'ScriptWorkflow' } | Select-Object -First 1
+                                    $running = [bool]($t -and $t.State -eq 'Running')
+                                    $probeSucceeded = $true
+                                }
+                                catch { }
+                                [pscustomobject]@{ ProbeSucceeded = $probeSucceeded; Running = $running }
                             } -SuppressLog
-                            if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput -eq 'Running') {
-                                $swTaskRunning = $true
+                            $swResult = if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput) { $swCheck.ScriptBlockOutput | Select-Object -First 1 } else { $null }
+                            $swTaskProbeSucceeded = $swResult -and $swResult.ProbeSucceeded
+                            $swTaskRunning = $swTaskProbeSucceeded -and $swResult.Running
+                            if (-not $swTaskProbeSucceeded) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM idle ${idleMins}m, but ScriptWorkflow state could not be verified. Extending the window; not restarting." -LogOnly
+                                $lcmIdleSince = [DateTime]::UtcNow
+                                $lastStaleWarningTime = [DateTime]::MinValue
                             }
-                            if ($swTaskRunning) {
+                            elseif ($swTaskRunning) {
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM idle ${idleMins}m but ScriptWorkflow task is still running. Not restarting." -Warning
                                 $lcmIdleSince = [DateTime]::UtcNow   # task is doing work -- restart the idle window
                                 $lastStaleWarningTime = [DateTime]::MinValue
@@ -7918,25 +7969,40 @@ $global:VM_Config = {
                                 $lastStaleWarningTime = [DateTime]::MinValue
                             }
                         }
-                        elseif (($staleRestartCount -ge $staleRestartMax) -and ($dscResumeTotal -ge $dscResumeTotalMax) -and
-                            (($lcmPendingNoRebootSince -and $pendingMins -ge $rebootStuckMinutes) -or ($lcmIdleSince -and $idleMins -ge $staleRestartMinutes))) {
-                            # Every recovery avenue is spent -- $dscResumeTotalMax in-place resumes AND
-                            # $staleRestartMax VM restarts -- and the LCM is parked on the same config again.
+                        elseif ((($lcmPendingNoRebootSince -and $pendingMins -ge $rebootStuckMinutes) -and
+                                $staleRestartCount -ge $staleRestartMax -and
+                                ($dscResumeCount -ge $dscResumeMax -or $dscResumeTotal -ge $dscResumeTotalMax)) -or
+                            (($lcmIdleSince -and $idleMins -ge $staleRestartMinutes) -and $staleRestartCount -ge $staleRestartMax)) {
+                            # Every recovery avenue for the current state is spent and the LCM is parked on
+                            # the same config again: stranded state used its in-place resume plus restarts,
+                            # or idle state used its restart budget.
                             # Nothing else is going to run, so the rest of the phase budget is dead time we
                             # spend politely polling a failure that cannot clear: Phase 6 ConfigureWSUS burned
                             # ~5h per affected run re-applying a config that threw on the same missing
                             # WebServer cert every cycle. A running ScriptWorkflow can legitimately park the
                             # LCM (Phase 8/9), so re-arm and keep waiting in that case; otherwise name the
                             # resource that died and fail the VM now.
-                            $swTaskRunning = $false
                             $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
-                                $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
-                                if ($t -and $t.State -eq 'Running') { 'Running' } else { $null }
+                                $probeSucceeded = $false
+                                $running = $false
+                                try {
+                                    $t = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'ScriptWorkflow' } | Select-Object -First 1
+                                    $running = [bool]($t -and $t.State -eq 'Running')
+                                    $probeSucceeded = $true
+                                }
+                                catch { }
+                                [pscustomobject]@{ ProbeSucceeded = $probeSucceeded; Running = $running }
                             } -SuppressLog
-                            if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput -eq 'Running') {
-                                $swTaskRunning = $true
+                            $swResult = if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput) { $swCheck.ScriptBlockOutput | Select-Object -First 1 } else { $null }
+                            $swTaskProbeSucceeded = $swResult -and $swResult.ProbeSucceeded
+                            $swTaskRunning = $swTaskProbeSucceeded -and $swResult.Running
+                            if (-not $swTaskProbeSucceeded) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: recovery budget exhausted, but ScriptWorkflow state could not be verified. Extending the confirmation window; not failing." -LogOnly
+                                if ($lcmPendingNoRebootSince) { $lcmPendingNoRebootSince = [DateTime]::UtcNow }
+                                if ($lcmIdleSince) { $lcmIdleSince = [DateTime]::UtcNow }
+                                $lastStaleWarningTime = [DateTime]::MinValue
                             }
-                            if ($swTaskRunning) {
+                            elseif ($swTaskRunning) {
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: recovery budget exhausted ($dscResumeTotal resume(s), $staleRestartCount restart(s)) but ScriptWorkflow task is still running. Continuing to wait." -Warning
                                 if ($lcmPendingNoRebootSince) { $lcmPendingNoRebootSince = [DateTime]::UtcNow }
                                 if ($lcmIdleSince) { $lcmIdleSince = [DateTime]::UtcNow }

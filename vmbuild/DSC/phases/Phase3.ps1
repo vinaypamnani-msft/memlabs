@@ -43,9 +43,14 @@
         # Install Language Packs
         if ($l -and $languageTag -ne "en-US") {
             $languageTagForNode = $languageTag
+            WriteStatus ApplyingLocale {
+                Status = "Applying $languageTag locale: language pack"
+            }
+            $localeStatusDependency = '[WriteStatus]ApplyingLocale'
             $languageDependency = '[LanguagePack]InstallLanguagePack'
             if ($localeAcquisition -eq 'WindowsUpdate') {
                 Script InstallLanguagePackOnline {
+                    DependsOn = $localeStatusDependency
                     GetScript  = {
                         $installed = @((Get-CimInstance -ClassName Win32_OperatingSystem -Property MUILanguages).MUILanguages)
                         @{ Result = ($installed -join ',') }
@@ -129,12 +134,18 @@
                 LanguagePack InstallLanguagePack {
                     LanguagePackName     = $languageTag
                     LanguagePackLocation = "C:\LanguagePacks"
+                    DependsOn            = $localeStatusDependency
                 }
 
                 $languageCapabilitiesForNode = @($l.LanguageCapabilities | Where-Object { $_ })
                 if ($languageCapabilitiesForNode.Count -gt 0) {
+                    WriteStatus ApplyingLanguageFeatures {
+                        DependsOn = '[LanguagePack]InstallLanguagePack'
+                        Status    = "Applying $languageTag locale: language capabilities"
+                    }
+
                     Script InstallLanguageFeaturesOffline {
-                        DependsOn  = '[LanguagePack]InstallLanguagePack'
+                        DependsOn  = '[WriteStatus]ApplyingLanguageFeatures'
                         GetScript  = { @{ Result = 'Language capabilities' } }
                         TestScript = {
                             foreach ($capability in $using:languageCapabilitiesForNode) {
@@ -158,6 +169,11 @@
                 }
             }
 
+            WriteStatus ConfiguringLocale {
+                DependsOn = $languageDependency
+                Status    = "Applying $languageTag locale: regional settings"
+            }
+
             Language ConfigureLanguage {
                 IsSingleInstance     = "Yes"
                 LocationID           = $l.LocationID
@@ -169,14 +185,14 @@
                 UserLocale           = $l.UserLocale
                 CopySystem           = $true
                 CopyNewUser          = $true
-                DependsOn            = $languageDependency
+                DependsOn            = '[WriteStatus]ConfiguringLocale'
             }
+        }
 
-            LocalConfigurationManager {
-                RebootNodeIfNeeded = $true
-                ActionAfterReboot  = "ContinueConfiguration"
-                ConfigurationMode  = "ApplyAndAutoCorrect"
-            }
+        LocalConfigurationManager {
+            RebootNodeIfNeeded = $false
+            ActionAfterReboot  = "ContinueConfiguration"
+            ConfigurationMode  = "ApplyAndAutoCorrect"
         }
 
         # Install feature roles. (The PKI IIS web-server cert request that used

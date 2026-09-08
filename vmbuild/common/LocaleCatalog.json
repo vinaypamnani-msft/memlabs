@@ -1301,9 +1301,7 @@
     "AddInputLanguages": [
       "0419:00000419"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "ru-RU",
     "LanguageID": 1049,
     "CMLanguage": "RUS",
