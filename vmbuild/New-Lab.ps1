@@ -525,6 +525,7 @@ try {
         if ($configResult.Loaded) {
             Write-GreenCheck "Loaded Configuration: $Configuration"
             $userConfig = $configResult.Config
+            Update-CatalogLocaleSettings -Config $userConfig
             $Global:configfile = $configResult.ConfigPath
             Write-Log -LogOnly "Config file: $($configResult.ConfigPath)"
         }

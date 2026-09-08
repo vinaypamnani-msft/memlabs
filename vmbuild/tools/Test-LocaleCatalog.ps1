@@ -73,6 +73,7 @@ $summaryPath = Join-Path $RootPath 'common\Common.GenConfig.Summary.ps1'
 . (Import-TestFunction -Path $localeModulePath -Name 'Get-LocaleMediaSource')
 . (Import-TestFunction -Path $localeModulePath -Name 'Get-LocaleMediaFiles')
 . (Import-TestFunction -Path $localeModulePath -Name 'Test-LocaleMediaFiles')
+. (Import-TestFunction -Path $localeModulePath -Name 'Update-CatalogLocaleSettings')
 . (Import-TestFunction -Path $sourcePath -Name 'Get-LocaleProfiles')
 . (Import-TestFunction -Path $sourcePath -Name 'Get-LocaleAcquisitionMethod')
 . (Import-TestFunction -Path $sourcePath -Name 'Set-DefaultLocaleForVM')
@@ -100,6 +101,44 @@ Assert-Equal -Expected '0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-552
 $roundTrip = $config | ConvertTo-Json -Depth 5 | ConvertFrom-Json
 Assert-Equal -Expected 'ja-JP' -Actual $roundTrip.vmOptions.localeSettings.LanguageTag -What 'embedded profile survives config serialization'
 Assert-Equal -Expected '0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-5523-4E90-AAFA-4DB112F9AC76}' -Actual @($roundTrip.vmOptions.localeSettings.AddInputLanguages)[0] -What 'input language survives config serialization'
+
+$staleProfileConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{
+        locale = 'ja-JP'
+        localeSettings = [pscustomobject]@{ LanguageTag = 'ja-JP'; AddInputLanguages = @('0411:00000411') }
+    }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'STALE-JP'
+            locale = 'ja-JP'
+            localeSettings = [pscustomobject]@{ LanguageTag = 'ja-JP'; AddInputLanguages = @('0411:00000411') }
+        },
+        [pscustomobject]@{
+            vmName = 'SECOND-JP'
+            locale = 'ja-JP'
+            localeSettings = [pscustomobject]@{ LanguageTag = 'ja-JP'; AddInputLanguages = @('0411:00000411') }
+        },
+        [pscustomobject]@{
+            vmName = 'CUSTOM'
+            locale = 'custom-locale'
+            localeSettings = [pscustomobject]@{ LanguageTag = 'custom-locale'; AddInputLanguages = @('custom-input') }
+        }
+    )
+}
+Update-CatalogLocaleSettings -Config $staleProfileConfig -CatalogPath $catalogPath
+Assert-Equal -Expected '0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-5523-4E90-AAFA-4DB112F9AC76}' -Actual @($staleProfileConfig.virtualMachines[0].localeSettings.AddInputLanguages)[0] -What 'config loading refreshes stale catalog-backed locale settings'
+Assert-Equal -Expected '0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-5523-4E90-AAFA-4DB112F9AC76}' -Actual @($staleProfileConfig.vmOptions.localeSettings.AddInputLanguages)[0] -What 'config loading refreshes legacy root locale settings'
+Assert-Equal -Expected 'custom-input' -Actual @($staleProfileConfig.virtualMachines[2].localeSettings.AddInputLanguages)[0] -What 'config loading preserves custom locale settings'
+$staleProfileConfig.virtualMachines[0].localeSettings.AddInputLanguages[0] = 'mutated'
+Assert-Equal -Expected '0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-5523-4E90-AAFA-4DB112F9AC76}' -Actual @($staleProfileConfig.virtualMachines[1].localeSettings.AddInputLanguages)[0] -What 'catalog profiles are deep-cloned per VM'
+$missingCatalogConfig = [pscustomobject]@{ virtualMachines = @([pscustomobject]@{ locale = 'ja-JP'; localeSettings = [pscustomobject]@{ AddInputLanguages = @('unchanged') } }) }
+Update-CatalogLocaleSettings -Config $missingCatalogConfig -CatalogPath (Join-Path ([IO.Path]::GetTempPath()) 'missing-locale-catalog.json')
+Assert-Equal -Expected 'unchanged' -Actual @($missingCatalogConfig.virtualMachines[0].localeSettings.AddInputLanguages)[0] -What 'missing locale catalog leaves config unchanged'
+$newLabSource = Get-Content -LiteralPath (Join-Path $RootPath 'New-Lab.ps1') -Raw
+$loadIndex = $newLabSource.IndexOf('Get-UserConfiguration -Configuration $Configuration')
+$refreshIndex = $newLabSource.IndexOf('Update-CatalogLocaleSettings -Config $userConfig')
+$validateIndex = $newLabSource.IndexOf('Test-Configuration -InputObject $userConfig')
+Assert-True -Condition ($loadIndex -ge 0 -and $refreshIndex -gt $loadIndex -and $validateIndex -gt $refreshIndex) -What 'New-Lab refreshes locale profiles after loading and before validation'
 
 $scriptBlocks = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1') -Raw
 $installCm = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\InstallAndUpdateSCCM.ps1') -Raw

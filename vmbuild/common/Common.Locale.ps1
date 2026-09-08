@@ -13,6 +13,29 @@ function Get-LocaleMediaSource {
     return $null
 }
 
+function Update-CatalogLocaleSettings {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [Parameter(Mandatory = $false)]
+        [string] $CatalogPath = (Join-Path $PSScriptRoot 'LocaleCatalog.json')
+    )
+
+    if (-not (Test-Path -LiteralPath $CatalogPath)) { return }
+    $catalog = Get-Content -LiteralPath $CatalogPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $targets = @($Config.vmOptions | Where-Object { $null -ne $_ })
+    $targets += @($Config.virtualMachines | Where-Object { $null -ne $_ })
+    foreach ($target in $targets) {
+        $locale = [string]$target.locale
+        if ([string]::IsNullOrWhiteSpace($locale)) { continue }
+        $catalogEntry = $catalog.PSObject.Properties[$locale]
+        if (-not $catalogEntry) { continue }
+        $localeDefinition = $catalogEntry.Value | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
+        $target | Add-Member -MemberType NoteProperty -Name 'localeSettings' -Value $localeDefinition -Force
+    }
+}
+
 function Get-LocaleMediaFiles {
     [CmdletBinding()]
     param (
