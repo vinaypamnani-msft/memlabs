@@ -96,10 +96,10 @@ Assert-Equal -Expected 'ja-JP' -Actual $config.vmOptions.localeSettings.Language
 Assert-Equal -Expected 122 -Actual $config.vmOptions.localeSettings.LocationID -What 'selection embeds the Japan GeoID'
 Assert-Equal -Expected 1041 -Actual $config.vmOptions.localeSettings.LanguageID -What 'selection embeds the Japanese LCID'
 Assert-Equal -Expected 'JPN' -Actual $config.vmOptions.localeSettings.CMLanguage -What 'selection embeds the ConfigMgr language code'
-Assert-Equal -Expected '0411:00000411' -Actual @($config.vmOptions.localeSettings.AddInputLanguages)[0] -What 'selection embeds the Japanese input language'
+Assert-Equal -Expected '0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-5523-4E90-AAFA-4DB112F9AC76}' -Actual @($config.vmOptions.localeSettings.AddInputLanguages)[0] -What 'selection embeds the Japanese Microsoft IME TIP'
 $roundTrip = $config | ConvertTo-Json -Depth 5 | ConvertFrom-Json
 Assert-Equal -Expected 'ja-JP' -Actual $roundTrip.vmOptions.localeSettings.LanguageTag -What 'embedded profile survives config serialization'
-Assert-Equal -Expected '0411:00000411' -Actual @($roundTrip.vmOptions.localeSettings.AddInputLanguages)[0] -What 'input language survives config serialization'
+Assert-Equal -Expected '0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-5523-4E90-AAFA-4DB112F9AC76}' -Actual @($roundTrip.vmOptions.localeSettings.AddInputLanguages)[0] -What 'input language survives config serialization'
 
 $scriptBlocks = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1') -Raw
 $installCm = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\InstallAndUpdateSCCM.ps1') -Raw

@@ -6591,6 +6591,8 @@ $global:VM_Config = {
         $dscResumeAwaitingProgress = $false # closure is emitted only when status advances after an in-place resume
         $dscResumeStartedUtc = $null
         $dscResumeFromStatus = ''
+        $firstStatusResumeAwaitingProgress = $false
+        $firstStatusRecoveryExhausted = $false
         # Every status this phase has already emitted. A resumed config that lands on one
         # of them has re-run from the top, not advanced -- "different from last poll" alone
         # cannot tell those apart, and reading a re-run as progress resets every stall clock.
@@ -6684,10 +6686,97 @@ $global:VM_Config = {
                         # instead of emitting a warning (which also downgrades the phase summary from success)
                         # and spending a 300s round-trip on a recovery that can only no-op.
                         $lcmPush = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -ScriptBlock {
-                            try { (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState } catch { 'unreachable' }
+                            $state = 'unreachable'
+                            try { $state = [string](Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState } catch { }
+                            $rebootRequested = $false
+                            try { $rebootRequested = [bool]((Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1).RebootRequested) } catch { }
+                            [pscustomobject]@{ LcmState = $state; RebootRequested = $rebootRequested }
                         } -SuppressLog
-                        $lcmPushState = if ((-not $lcmPush.ScriptBlockFailed) -and $lcmPush.ScriptBlockOutput) { [string]$lcmPush.ScriptBlockOutput } else { 'unreachable' }
-                        if ($lcmPushState -ne 'Idle') {
+                        $lcmPushResult = if ((-not $lcmPush.ScriptBlockFailed) -and $lcmPush.ScriptBlockOutput) { $lcmPush.ScriptBlockOutput | Select-Object -First 1 } else { $null }
+                        $lcmPushState = if ($lcmPushResult) { [string]$lcmPushResult.LcmState } else { 'unreachable' }
+                        $rebootOwed = $lcmPushResult -and ($lcmPushState -eq 'PendingReboot' -or ($lcmPushState -eq 'PendingConfiguration' -and $lcmPushResult.RebootRequested))
+                        $firstStatusRecoveryState = if ($rebootOwed) {
+                            $lcmPushState
+                        }
+                        elseif ($firstStatusResumeAwaitingProgress -and $lcmPushState -eq 'PendingConfiguration') {
+                            $lcmPushState
+                        }
+                        else {
+                            $null
+                        }
+                        if ($firstStatusRecoveryState) {
+                            $rebootProbe = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -ScriptBlock {
+                            $taskProbeSucceeded = $false
+                            $scriptWorkflowRunning = $false
+                            try {
+                                $task = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'ScriptWorkflow' } | Select-Object -First 1
+                                $scriptWorkflowRunning = [bool]($task -and $task.State -eq 'Running')
+                                $taskProbeSucceeded = $true
+                            }
+                            catch { }
+
+                            $lcmProbeSucceeded = $false
+                            $lcmState = 'unreachable'
+                            $rebootRequested = $false
+                            try { $rebootRequested = [bool]((Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1).RebootRequested) } catch { }
+                            try {
+                                $lcmState = [string](Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState
+                                $lcmProbeSucceeded = $true
+                            }
+                            catch { }
+
+                            [pscustomobject]@{
+                                LcmProbeSucceeded      = $lcmProbeSucceeded
+                                LcmState               = $lcmState
+                                RebootRequested        = $rebootRequested
+                                TaskProbeSucceeded     = $taskProbeSucceeded
+                                ScriptWorkflowRunning = $scriptWorkflowRunning
+                            }
+                        } -SuppressLog
+                            $rebootProbeResult = if ((-not $rebootProbe.ScriptBlockFailed) -and $rebootProbe.ScriptBlockOutput) { $rebootProbe.ScriptBlockOutput | Select-Object -First 1 } else { $null }
+                            $confirmedLcmState = if ($rebootProbeResult -and $rebootProbeResult.LcmProbeSucceeded) { [string]$rebootProbeResult.LcmState } else { 'unreachable' }
+                            $confirmedRebootOwed = $rebootProbeResult -and ($confirmedLcmState -eq 'PendingReboot' -or ($confirmedLcmState -eq 'PendingConfiguration' -and $rebootProbeResult.RebootRequested))
+                            $confirmedStrandedResume = $firstStatusResumeAwaitingProgress -and $confirmedLcmState -eq 'PendingConfiguration'
+                            if (-not $confirmedRebootOwed -and -not $confirmedStrandedResume) {
+                                $dcReadySince = [DateTime]::UtcNow
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status; initial LCM state was $firstStatusRecoveryState but the confirmation state is '$confirmedLcmState'. Extending the window; not restarting." -LogOnly
+                            }
+                            elseif (-not $rebootProbeResult.TaskProbeSucceeded) {
+                                $dcReadySince = [DateTime]::UtcNow
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status and the LCM is $firstStatusRecoveryState, but ScriptWorkflow state could not be verified. Extending the window; not restarting." -LogOnly
+                            }
+                            elseif ($rebootProbeResult.ScriptWorkflowRunning) {
+                                $dcReadySince = [DateTime]::UtcNow
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status and the LCM is $firstStatusRecoveryState, but ScriptWorkflow is still running. Extending the window; not restarting." -LogOnly
+                            }
+                            elseif ($staleRestartCount -lt $staleRestartMax) {
+                                $staleRestartCount++
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after $([Math]::Round($recoveryMinutes, 1)) min and the LCM is $firstStatusRecoveryState. Restarting VM and explicitly resuming the pending configuration (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
+                                Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "DSC first-status reboot pending" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
+                                $resumePending = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 60 -ScriptBlock {
+                                    try {
+                                        Start-DscConfiguration -UseExisting -Force -ErrorAction Stop
+                                        'RESUMED'
+                                    }
+                                    catch {
+                                        Write-Error "Could not resume pending DSC after reboot: $($_.Exception.Message)"
+                                    }
+                                } -SuppressLog
+                                if ($resumePending.ScriptBlockFailed -or $resumePending.ScriptBlockOutput -notcontains 'RESUMED') {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Reboot completed, but Start-DscConfiguration -UseExisting did not resume the pending configuration: $($resumePending.ScriptBlockOutput)" -Warning -OutputStream
+                                }
+                                else {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Reboot completed and pending DSC was resumed explicitly." -LogOnly
+                                }
+                                $firstStatusResumeAwaitingProgress = $true
+                                $dcReadySince = [DateTime]::UtcNow
+                                $lastStatusChangeTime = [DateTime]::UtcNow
+                            }
+                            else {
+                                $firstStatusRecoveryExhausted = $true
+                            }
+                        }
+                        elseif ($lcmPushState -ne 'Idle') {
                             $dcReadySince = [DateTime]::UtcNow
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after $([Math]::Round($recoveryMinutes, 1)) min ($nodeCount nodes), but the guest LCM is '$lcmPushState' -- the DC's push arrived and is still applying. Extending the window; not compiling locally." -LogOnly
                         }
@@ -7000,6 +7089,23 @@ $global:VM_Config = {
                     $statusTextSnapshot = $status.ScriptBlockOutput
                 }
                 $stopwatch2.Stop()
+
+                if ($firstStatusRecoveryExhausted) {
+                    $statusReadSucceeded = $status -and -not $status.ScriptBlockFailed
+                    $freshStatusExists = $statusReadSucceeded -and $statusTextSnapshot -and $statusTextSnapshot -is [string]
+                    $freshCompletionExists = $statusReadSucceeded -and $expectedRunId -and $completedRunIdSnapshot -eq $expectedRunId
+                    if ($freshStatusExists -or $freshCompletionExists) {
+                        $firstStatusRecoveryExhausted = $false
+                        if ($freshCompletionExists -and -not $freshStatusExists) {
+                            $statusTextSnapshot = 'Complete!'
+                        }
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): First DSC status arrived while recovery exhaustion was being confirmed; processing the fresh result instead of failing." -LogOnly
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC recovery exhausted after $staleRestartCount restart/resume attempt(s); a fresh read still found no status or completion sentinel." -Failure -OutputStream
+                        break
+                    }
+                }
 
                 if (-not $status -or ($status.ScriptBlockFailed)) {
                     if ($stopwatch2.elapsed.TotalSeconds -gt 10) {
