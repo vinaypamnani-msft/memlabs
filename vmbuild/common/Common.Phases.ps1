@@ -1367,6 +1367,19 @@ function Start-Phase {
         $null = Clean-StaleToolZips
     }
 
+    # Hidden existing site servers skip New-VmNote, so persist the effective
+    # hierarchy options once all Phase 8 workers have succeeded. A verified
+    # write is required: otherwise the next extension reconstructs stale state.
+    if ($Phase -eq 8 -and $result.Failed -eq 0) {
+        try {
+            $null = Sync-AddToExistingCmOptionsNotes -DeployConfig $deployConfig
+        }
+        catch {
+            Write-Log "[Phase 8] Failed to persist add-to-existing ConfigMgr options: $($_.Exception.Message)" -Failure
+            $result.Failed++
+        }
+    }
+
     # Eject the SQL ISO after a SUCCESSFUL Phase 4. On failure leave it mounted
     # so the VM can be inspected; a -StartPhase 4 retry re-mounts idempotently.
     if ($Phase -eq 4 -and $result.Failed -eq 0) {
@@ -4751,13 +4764,31 @@ function Get-Phase8ConfigurationData {
                 $_.role -in $pushableRoles -and -not $_.hidden -and ($_.pushClient -ne $false)
             })
         $newOsdVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
-        if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0 -or $newOsdVMs.Count -gt 0) {
+        $cmOptionsTargets = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'Primary' -and $_.hidden -and $_.cmOptionsChanged -eq $true -and
+                (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
+            })
+        $blmHierarchyTargets = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'Primary' -and $_.hidden -and $_.blmHierarchyTarget -eq $true -and
+                (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
+            })
+        $clientPushTargets = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'Primary' -and $_.hidden -and $_.clientPushTarget -eq $true -and
+                (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
+            })
+        if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0 -or $newOsdVMs.Count -gt 0 -or $cmOptionsTargets.Count -gt 0) {
             $hiddenPrimaries = @($deployConfig.virtualMachines | Where-Object {
                 $_.role -eq "Primary" -and $_.hidden -and
                 (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
             })
             if ($newOsdVMs.Count -eq 0) {
-                $hiddenPrimaries = @($hiddenPrimaries | Select-Object -First 1)
+                $workloadTargets = @($cmOptionsTargets) + @($blmHierarchyTargets) + @($clientPushTargets)
+                $workloadTargetNames = @($workloadTargets | ForEach-Object { $_.vmName } | Where-Object { $_ } | Select-Object -Unique)
+                if ($workloadTargetNames.Count -gt 0) {
+                    $hiddenPrimaries = @($hiddenPrimaries | Where-Object { $_.vmName -in $workloadTargetNames })
+                } else {
+                    $hiddenPrimaries = @($hiddenPrimaries | Select-Object -First 1)
+                }
             }
             foreach ($hiddenPrimary in $hiddenPrimaries) {
                 if ($cd.AllNodes.NodeName -contains $hiddenPrimary.vmName) { continue }

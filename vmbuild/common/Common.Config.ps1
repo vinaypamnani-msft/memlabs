@@ -297,6 +297,256 @@ function Set-VmCmOptionsResolved {
     }
 }
 
+function Set-AddToExistingCmOptionsOnHiddenSiteRole {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config,
+        [Parameter(Mandatory = $true)] [object] $VM
+    )
+
+    $siteRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
+    if (-not $Config.cmOptions -or -not $VM.hidden -or $VM.role -notin $siteRoles) { return }
+    $owner = Get-AddToExistingCmOptionsOwner -Config $Config
+    if (-not $owner -or -not (Test-CmOptionsOwnerContainsVM -Config $Config -Owner $owner -VM $VM)) { return }
+
+    $cmOptionsClone = $Config.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+    $VM | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $cmOptionsClone -Force
+}
+
+function Get-CmOptionsFingerprint {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)] [object] $CmOptions
+    )
+
+    if (-not $CmOptions) { return '' }
+    $seenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $values = @{}
+    if ($CmOptions -is [System.Collections.IDictionary]) {
+        foreach ($key in $CmOptions.Keys) {
+            $name = "$key"
+            if (-not $seenNames.Add($name)) {
+                throw "cmOptions contains ambiguous keys that differ only by case or stringify to '$name'."
+            }
+            $values[$name] = $CmOptions[$key]
+        }
+    }
+    else {
+        foreach ($property in $CmOptions.PSObject.Properties) {
+            if (-not $seenNames.Add($property.Name)) {
+                throw "cmOptions contains ambiguous properties that differ only by case: '$($property.Name)'."
+            }
+            $values[$property.Name] = $property.Value
+        }
+    }
+
+    $names = [string[]]@($values.Keys)
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $orderedOptions = [ordered]@{}
+    foreach ($name in $names) {
+        $value = $values[$name]
+        if ($null -ne $value -and $value -isnot [string] -and -not $value.GetType().IsValueType) {
+            throw "cmOptions property '$name' has unsupported non-scalar type '$($value.GetType().FullName)'."
+        }
+        $orderedOptions[$name] = $value
+    }
+    return ($orderedOptions | ConvertTo-Json -Compress)
+}
+
+function Get-AddToExistingCmOptionsOwner {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    if (-not $Config.cmOptions -or -not $Config.vmOptions.domainName) { return $null }
+    $domainName = "$($Config.vmOptions.domainName)"
+    $authoredTopLevel = $Config.virtualMachines | Where-Object {
+        $candidateDomain = "$($_.domain)"
+        $candidateIsLocal = -not $candidateDomain -or $candidateDomain -eq $domainName
+        -not $_.hidden -and $candidateIsLocal -and $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
+    } | Select-Object -First 1
+    if ($authoredTopLevel) { return $null }
+
+    $candidates = @(Get-List -Type VM | Where-Object {
+            (-not $_.domain -or $_.domain -eq $domainName) -and
+            $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
+        } | Sort-Object `
+            @{ Expression = { if ($_.domain -eq $domainName) { 0 } else { 1 } } }, `
+            @{ Expression = { if ($_.role -eq 'CAS') { 0 } else { 1 } } }, `
+            vmName)
+    $ownerName = "$($Config.cmOptionsOwnerVM)".Trim()
+    if ($ownerName) {
+        $owner = $candidates | Where-Object { $_.vmName -eq $ownerName } | Select-Object -First 1
+        if (-not $owner) {
+            throw "ConfigMgr options owner '$ownerName' was not found in domain '$domainName'."
+        }
+        return $owner
+    }
+    if ($candidates.Count -eq 0) { return $null }
+
+    if ($candidates.Count -eq 1) {
+        $owner = $candidates[0]
+    }
+    else {
+        $candidateNames = @($candidates | ForEach-Object { $_.vmName }) -join ', '
+        throw "ConfigMgr options are ambiguous for domain '$domainName'. Top-level sites: $candidateNames. Regenerate the add-to-existing configuration so it records cmOptionsOwnerVM."
+    }
+
+    $Config | Add-Member -MemberType NoteProperty -Name 'cmOptionsOwnerVM' -Value $owner.vmName -Force
+    return $owner
+}
+
+function Get-LegacyCmOptionsRecoverySite {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    if (-not $Config.vmOptions.domainName) { return $null }
+    $domainName = "$($Config.vmOptions.domainName)"
+    $candidates = @(Get-List -Type VM | Where-Object {
+            (-not $_.domain -or $_.domain -eq $domainName) -and
+            $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
+        } | Sort-Object `
+            @{ Expression = { if ($_.domain -eq $domainName) { 0 } else { 1 } } }, `
+            @{ Expression = { if ($_.role -eq 'CAS') { 0 } else { 1 } } }, `
+            vmName)
+
+    $ownerName = "$($Config.cmOptionsOwnerVM)".Trim()
+    if ($ownerName) {
+        $owner = $candidates | Where-Object { $_.vmName -eq $ownerName } | Select-Object -First 1
+        if (-not $owner) {
+            throw "Legacy cmOptions recovery owner '$ownerName' was not found in domain '$domainName'."
+        }
+        return $owner
+    }
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+    if ($candidates.Count -gt 1) {
+        Write-Log "New-DeployConfig: skipping legacy cmOptions recovery for ownerless multi-hierarchy domain '$domainName'." -LogOnly
+    }
+    return $null
+}
+
+function Test-CmOptionsOwnerContainsVM {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config,
+        [Parameter(Mandatory = $true)] [object] $Owner,
+        [Parameter(Mandatory = $true)] [object] $VM
+    )
+
+    $domainName = "$($Config.vmOptions.domainName)"
+    $vmDomain = "$($VM.domain)"
+    if ($vmDomain -and $domainName -and $vmDomain -ne $domainName) { return $false }
+    if ($VM.vmName -eq $Owner.vmName) { return $true }
+    $ownedSiteCodes = @("$($Owner.siteCode)")
+    if ($Owner.role -eq 'CAS') {
+        $inventory = @(@($Config.virtualMachines) + @(Get-List -Type VM | Where-Object {
+                    -not $_.domain -or $_.domain -eq $domainName
+                }))
+        $ownedSiteCodes += @($inventory | Where-Object {
+                $_.role -eq 'Primary' -and $_.parentSiteCode -eq $Owner.siteCode
+            } | ForEach-Object { "$($_.siteCode)" })
+    }
+    $ownedSiteCodes = @($ownedSiteCodes | Where-Object { $_ } | Select-Object -Unique)
+    return $VM.siteCode -in $ownedSiteCodes -or $VM.parentSiteCode -in $ownedSiteCodes
+}
+
+function Get-CmOptionsOwnerPrimaryNames {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config,
+        [Parameter(Mandatory = $true)] [object] $Owner
+    )
+
+    if ($Owner.role -eq 'Primary') { return @($Owner.vmName) }
+    $domainName = "$($Config.vmOptions.domainName)"
+    $primaries = @(Get-List -Type VM | Where-Object {
+            (-not $_.domain -or $_.domain -eq $domainName) -and
+            $_.role -eq 'Primary' -and $_.parentSiteCode -eq $Owner.siteCode
+        })
+    return @($primaries | Sort-Object vmName | ForEach-Object { $_.vmName })
+}
+
+function Test-AddToExistingCmOptionsChanged {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    $owner = Get-AddToExistingCmOptionsOwner -Config $Config
+    if (-not $owner) { return $false }
+    $persistedNote = Get-VMNote -VMName $owner.vmName
+    $authoredFingerprint = Get-CmOptionsFingerprint -CmOptions $Config.cmOptions
+    $persistedFingerprint = Get-CmOptionsFingerprint -CmOptions $persistedNote.cmOptions
+    return $authoredFingerprint -ne $persistedFingerprint
+}
+
+function Add-CmOptionsPersistenceTargetForPhase8 {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+
+    if (-not (Test-AddToExistingCmOptionsChanged -Config $Config)) { return $false }
+    $owner = Get-AddToExistingCmOptionsOwner -Config $Config
+    $primaryNames = @(Get-CmOptionsOwnerPrimaryNames -Config $Config -Owner $owner)
+    if ($primaryNames.Count -eq 0) {
+        throw "ConfigMgr options changed for '$($owner.vmName)', but no Primary in that hierarchy was found to apply them."
+    }
+
+    foreach ($primaryName in $primaryNames) {
+        Add-ExistingVMToDeployConfig -VmName $primaryName -ConfigToModify $Config
+        $primary = $Config.virtualMachines | Where-Object { $_.vmName -eq $primaryName -and $_.hidden } | Select-Object -First 1
+        if (-not $primary) {
+            throw "Existing Primary '$primaryName' could not be added as the Phase 8 ConfigMgr-options target."
+        }
+        $primary | Add-Member -MemberType NoteProperty -Name 'cmOptionsChanged' -Value $true -Force
+    }
+    Write-Log "ConfigMgr options differ from top-level site '$($owner.vmName)'; added Primary target(s): $($primaryNames -join ', ')." -Verbose
+    return $true
+}
+
+function Sync-AddToExistingCmOptionsNotes {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $DeployConfig
+    )
+
+    if (-not $DeployConfig.cmOptions -or -not $DeployConfig.virtualMachines) { return }
+    $sources = @($DeployConfig.virtualMachines | Where-Object {
+            $_.hidden -and $_.role -eq 'Primary' -and $_.cmOptionsChanged -eq $true
+        })
+    if ($sources.Count -eq 0) { return }
+
+    $owner = Get-AddToExistingCmOptionsOwner -Config $DeployConfig
+    if (-not $owner) { throw 'ConfigMgr options owner could not be resolved for persistence.' }
+    $expectedFingerprint = Get-CmOptionsFingerprint -CmOptions $DeployConfig.cmOptions
+    foreach ($source in $sources) {
+        if (-not (Test-CmOptionsOwnerContainsVM -Config $DeployConfig -Owner $owner -VM $source)) {
+            throw "Phase 8 options target '$($source.vmName)' is outside hierarchy '$($owner.vmName)'."
+        }
+        $sourceFingerprint = Get-CmOptionsFingerprint -CmOptions $source.cmOptions
+        if ($sourceFingerprint -ne $expectedFingerprint) {
+            throw "Conflicting cmOptions resolved for Phase 8 target '$($source.vmName)'."
+        }
+    }
+
+    $cmOptionsClone = $DeployConfig.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+    $existingNote = Get-VMNote -VMName $owner.vmName
+    if (-not $existingNote) {
+        throw "Could not read the existing VM note for top-level site server '$($owner.vmName)'."
+    }
+    Set-VMNote -VmName $owner.vmName -VmNote ([pscustomobject]@{ cmOptions = $cmOptionsClone })
+    $persistedNote = Get-VMNote -VMName $owner.vmName
+    $persistedFingerprint = Get-CmOptionsFingerprint -CmOptions $persistedNote.cmOptions
+    if ($persistedFingerprint -ne $expectedFingerprint) {
+        throw "VM note verification failed for top-level site server '$($owner.vmName)'."
+    }
+    Write-Log "Persisted add-to-existing cmOptions on top-level site server '$($owner.vmName)' after Phase 8 completed." -Verbose
+}
+
 # Migrates a config's root-level cmOptions onto the top-level site server VM.
 # Idempotent: a no-op when root cmOptions is already absent. Called from
 # Get-UserConfiguration after all existing root-level reads have completed.
@@ -311,14 +561,21 @@ function Move-CmOptionsToTopLevelSiteServer {
         [object] $Config
     )
     if ($null -eq $Config.cmOptions) { return }
-    $topLevel = Get-TopLevelSiteServer -Config $Config
+    $topLevel = $Config.virtualMachines | Where-Object {
+        -not $_.hidden -and $_.role -eq 'CAS' -and -not $_.parentSiteCode
+    } | Select-Object -First 1
     if (-not $topLevel) {
+        $topLevel = $Config.virtualMachines | Where-Object {
+            -not $_.hidden -and $_.role -eq 'Primary' -and -not $_.parentSiteCode
+        } | Select-Object -First 1
+    }
+    if (-not $topLevel -and -not $Config.cmOptionsOwnerVM) {
         # Add-to-existing scenarios: the file may only contain a child Primary
         # (parentSiteCode references a CAS in the existing deployment, which
         # isn't in this file). Fall back to any CAS/Primary so the authored
         # cmOptions are preserved instead of silently dropped.
         $topLevel = $Config.virtualMachines | Where-Object {
-            $_.role -in @('CAS', 'Primary')
+            -not $_.hidden -and $_.role -in @('CAS', 'Primary')
         } | Select-Object -First 1
     }
     if (-not $topLevel) {
@@ -335,6 +592,7 @@ function Move-CmOptionsToTopLevelSiteServer {
         $topLevel | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
     }
     $Config.PSObject.Properties.Remove('cmOptions')
+    $Config.PSObject.Properties.Remove('cmOptionsOwnerVM')
 }
 
 function Resolve-ConfigVmReference {
@@ -1179,8 +1437,7 @@ function New-DeployConfig {
         # to its note, so this is skipped for it.
         if ($Common -and -not $Common.InJob -and $configObject.vmOptions.domainName) {
             try {
-                $existingDomainVMs = Get-List -Type VM -DomainName $configObject.vmOptions.domainName
-                $topSiteServer = $existingDomainVMs | Where-Object { $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode } | Select-Object -First 1
+                $topSiteServer = Get-LegacyCmOptionsRecoverySite -Config $configObject
                 if ($topSiteServer -and -not $topSiteServer.cmOptions) {
                     $backupCm = Get-CmOptionsFromSiteServerBackup -VmName $topSiteServer.vmName -DomainName $configObject.vmOptions.domainName
                     if ($backupCm) {
@@ -1397,6 +1654,10 @@ function New-DeployConfig {
             parameters      = $params
         }
 
+        if ($configObject.cmOptionsOwnerVM) {
+            $deploy | Add-Member -MemberType NoteProperty -Name 'cmOptionsOwnerVM' -Value $configObject.cmOptionsOwnerVM -Force
+        }
+
         if ($configObject.domainDefaults) {
             $deploy | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $configObject.domainDefaults -force
         }
@@ -1454,6 +1715,11 @@ function Add-ExistingVMsToDeployConfig {
     # Add DCs from other domains, if needed
     $dc = $config.virtualMachines | Where-Object { $_.role -eq "DC" }
 
+    # A cmOptions-only edit can otherwise leave Phase 8 with no applicable VM
+    # (for example, toggling BLM while adding only a FileServer). Pull in one
+    # local Primary and mark it so the change is applied and durably persisted.
+    $null = Add-CmOptionsPersistenceTargetForPhase8 -Config $config
+
     # Add Primary to list when new VMs need BLM collection membership (Phase 8 EnableBLM),
     # ConfigMgr client push (Phase 8 PushClients), or OSD content/PXE reconciliation.
     # Without a hidden Primary, Get-Phase8ConfigurationData returns no nodes and Phase 8
@@ -1467,8 +1733,18 @@ function Add-ExistingVMsToDeployConfig {
         })
     $newOsdVMs = @($config.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
     $phase8PrimaryNames = @()
-    if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0) {
-        $phase8PrimaryNames += @(Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role "Primary" | Select-Object -First 1)
+    $blmPrimaryNames = @()
+    $pushPrimaryNames = @()
+    if ($newBLMVMs.Count -gt 0) {
+        $cmOptionsOwner = Get-AddToExistingCmOptionsOwner -Config $config
+        if ($cmOptionsOwner) {
+            $blmPrimaryNames = @(Get-CmOptionsOwnerPrimaryNames -Config $config -Owner $cmOptionsOwner)
+            $phase8PrimaryNames += $blmPrimaryNames
+        }
+    }
+    if ($newPushVMs.Count -gt 0) {
+        $pushPrimaryNames = @(Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role "Primary" | Select-Object -First 1)
+        $phase8PrimaryNames += $pushPrimaryNames
     }
     $existingOsdDps = @()
     $existingOsdRelays = @()
@@ -1527,6 +1803,14 @@ function Add-ExistingVMsToDeployConfig {
 
     foreach ($primaryName in @($phase8PrimaryNames | Where-Object { $_ } | Select-Object -Unique)) {
         Add-ExistingVMToDeployConfig -vmName $primaryName -configToModify $config
+        if ($primaryName -in $blmPrimaryNames) {
+            $blmPrimary = $config.virtualMachines | Where-Object { $_.vmName -eq $primaryName -and $_.hidden } | Select-Object -First 1
+            if ($blmPrimary) { $blmPrimary | Add-Member -MemberType NoteProperty -Name 'blmHierarchyTarget' -Value $true -Force }
+        }
+        if ($primaryName -in $pushPrimaryNames) {
+            $pushPrimary = $config.virtualMachines | Where-Object { $_.vmName -eq $primaryName -and $_.hidden } | Select-Object -First 1
+            if ($pushPrimary) { $pushPrimary | Add-Member -MemberType NoteProperty -Name 'clientPushTarget' -Value $true -Force }
+        }
     }
 
     if ($newOsdVMs.Count -gt 0) {
@@ -1819,7 +2103,6 @@ function Add-ModifiedExistingVMToDeployConfig {
         "inProgress",
         "success",
         "deployedOS",
-        "domain",
         "network",
         "prefix",
         "domaindefaults"
@@ -1842,6 +2125,8 @@ function Add-ModifiedExistingVMToDeployConfig {
         }
         $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
     }
+
+    Set-AddToExistingCmOptionsOnHiddenSiteRole -Config $configToModify -VM $newVMObject
 
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
@@ -1871,7 +2156,9 @@ function Add-ExistingVMToDeployConfig {
     )
 
     Write-Log -verbose "Adding $vmName to Deploy config"
-    if ($configToModify.virtualMachines.vmName -contains $vmName) {
+    $existingConfigVM = $configToModify.virtualMachines | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
+    if ($existingConfigVM) {
+        Set-AddToExistingCmOptionsOnHiddenSiteRole -Config $configToModify -VM $existingConfigVM
         Write-Log "Not adding $vmName as it already exists in deployConfig" -LogOnly
         return
     }
@@ -1911,6 +2198,8 @@ function Add-ExistingVMToDeployConfig {
         }
         $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
     }
+
+    Set-AddToExistingCmOptionsOnHiddenSiteRole -Config $configToModify -VM $newVMObject
 
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"

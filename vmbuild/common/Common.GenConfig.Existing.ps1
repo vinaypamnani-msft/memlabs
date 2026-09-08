@@ -969,18 +969,16 @@ function New-UserConfig {
     $existingPkiOptions = $DC.pkiOptions
 
     # Import cmOptions from existing top-level site server (CAS or standalone Primary)
-    $allDomainVMs = Get-List -Type VM -DomainName $Domain
+    $allDomainVMs = @(Get-List -Type VM | Where-Object {
+            -not $_.domain -or $_.domain -eq $Domain
+        })
     $topLevelSite = $allDomainVMs | Where-Object {
-        $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
-    } | Select-Object -First 1
+        $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
+    } | Sort-Object `
+        @{ Expression = { if ($_.domain -eq $Domain) { 0 } else { 1 } } }, `
+        @{ Expression = { if ($_.role -eq 'CAS') { 0 } else { 1 } } }, `
+        vmName | Select-Object -First 1
     $existingCmOptions = $topLevelSite.cmOptions
-    # Also locate any CAS/Primary regardless of cmOptions presence, for the
-    # synthesis fallback below when cmOptions was never persisted.
-    if (-not $topLevelSite) {
-        $topLevelSite = $allDomainVMs | Where-Object {
-            $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
-        } | Select-Object -First 1
-    }
 
     if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
@@ -1041,6 +1039,9 @@ function New-UserConfig {
         }
         $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $synthesized -force
         Write-Log "New-UserConfig: Synthesized cmOptions from defaults (Version=$inferredVersion, UsePKI=$inferredUsePKI) for domain $Domain - existing site server $($topLevelSite.vmName) had no cmOptions in VM note." -Verbose
+    }
+    if ($topLevelSite -and $configGenerated.cmOptions) {
+        $configGenerated | Add-Member -MemberType NoteProperty -Name 'cmOptionsOwnerVM' -Value $topLevelSite.vmName -Force
     }
 
     # Import PKI settings from existing DC so new VMs inherit CA configuration

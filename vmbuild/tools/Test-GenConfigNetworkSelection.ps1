@@ -58,6 +58,7 @@ $existingPath = Join-Path $RootPath 'common\Common.GenConfig.Existing.ps1'
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdPxePaths')
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdBoundaryMappings')
 . (Import-TestFunction -Path $configPath -Name 'Add-ModifiedExistingVMToDeployConfig')
+. (Import-TestFunction -Path $configPath -Name 'Set-AddToExistingCmOptionsOnHiddenSiteRole')
 . (Import-TestFunction -Path $genConfigPath -Name 'Get-ValidSubnets')
 foreach ($functionName in @(
         'Test-OsdNetworkHasDistributionPoint',
