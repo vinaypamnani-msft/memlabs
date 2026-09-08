@@ -562,10 +562,15 @@ function Select-Locale {
     if (-not $Target) { $Target = $ConfigToCheck.vmOptions }
     $legacyPath = Join-Path $Common.ConfigPath "_localeConfig.json"
     $localeProfiles = Get-LocaleProfiles -Path @($CatalogPath, $legacyPath)
+    $configMgrSupportedLocales = @(
+        'en-US', 'cs-CZ', 'de-DE', 'es-ES', 'fr-FR', 'hu-HU', 'it-IT', 'ja-JP', 'ko-KR',
+        'nl-NL', 'pl-PL', 'pt-BR', 'pt-PT', 'ru-RU', 'sv-SE', 'tr-TR', 'zh-CN', 'zh-TW'
+    )
     $commonLocales = @('en-US')
     try {
         foreach ($localeName in @($localeProfiles.Keys)) {
-            if (-not $Target.operatingSystem -or (Get-LocaleAcquisitionMethod -Profile $localeProfiles[$localeName] -OperatingSystem $Target.operatingSystem -ConfigPath $Common.ConfigPath -ReleaseIsoValidation $false)) {
+            $localeProfile = $localeProfiles[$localeName]
+            if ($localeName -in $configMgrSupportedLocales -and (-not $Target.operatingSystem -or (Get-LocaleAcquisitionMethod -Profile $localeProfile -OperatingSystem $Target.operatingSystem -ConfigPath $Common.ConfigPath -ReleaseIsoValidation $false))) {
                 $commonLocales += $localeName
             }
         }
@@ -574,7 +579,12 @@ function Select-Locale {
         Clear-LocaleMediaIsoValidationCache
     }
     $currentLocale = $Target."$LocalePropertyName"
-    if ($currentLocale) { $commonLocales += $currentLocale }
+    if ($currentLocale -and $currentLocale -in $configMgrSupportedLocales) {
+        $commonLocales += $currentLocale
+    }
+    elseif ($currentLocale) {
+        $currentLocale = 'en-US'
+    }
     $commonLocales = @($commonLocales | Select-Object -Unique)
 
     if (-not $currentLocale) { $currentLocale = 'en-US' }
