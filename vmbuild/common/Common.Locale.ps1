@@ -353,3 +353,109 @@ function Initialize-LocaleMediaForPhase2 {
         Clear-LocaleMediaIsoValidationCache
     }
 }
+
+function Get-Phase3LocaleMediaIssues {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $DeployConfig,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]] $ApplicableVMNames
+    )
+
+    $catalogPath = Join-Path $PSScriptRoot 'LocaleCatalog.json'
+    $catalog = Get-Content -LiteralPath $catalogPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $requests = @($DeployConfig.virtualMachines | Where-Object {
+            $_.operatingSystem -and $ApplicableVMNames -contains [string]$_.vmName
+        } | ForEach-Object {
+            $vm = $_
+            $locale = if ($vm.locale) {
+                [string]$vm.locale
+            }
+            elseif ($DeployConfig.domainDefaults.DefaultLocale) {
+                [string]$DeployConfig.domainDefaults.DefaultLocale
+            }
+            elseif ($DeployConfig.vmOptions.locale) {
+                [string]$DeployConfig.vmOptions.locale
+            }
+            else {
+                'en-US'
+            }
+            $acquisition = if ($vm.localeAcquisition) { [string]$vm.localeAcquisition } else { 'Media' }
+            if ($locale -ne 'en-US' -and $acquisition -ne 'WindowsUpdate') {
+                [pscustomobject]@{
+                    VMName          = [string]$vm.vmName
+                    Domain          = [string]$DeployConfig.vmOptions.domainName
+                    Locale          = $locale
+                    OperatingSystem = [string]$vm.operatingSystem
+                }
+            }
+        })
+
+    foreach ($request in $requests) {
+        $localeDefinition = Get-LocaleDefinitionForOperatingSystem -LocaleDefinition $catalog.($request.Locale) -OperatingSystem $request.OperatingSystem
+        $sourceDir = Join-Path (Join-Path $Common.ConfigPath 'locales') $request.OperatingSystem
+        $sourceFiles = if ($localeDefinition) {
+            @(Get-LocaleMediaFiles -Path $sourceDir -LocaleDefinition $localeDefinition)
+        }
+        else {
+            @(Get-ChildItem -LiteralPath $sourceDir -File -Filter '*.cab' -ErrorAction SilentlyContinue)
+        }
+
+        if ($sourceFiles.Count -eq 0 -or ($localeDefinition -and -not (Test-LocaleMediaFiles -Files $sourceFiles -LocaleDefinition $localeDefinition))) {
+            [pscustomobject]@{
+                VMName          = $request.VMName
+                Locale          = $request.Locale
+                OperatingSystem = $request.OperatingSystem
+                Stage           = 'HostCache'
+                Reason          = "the complete Phase 2 package set is absent from '$sourceDir'"
+            }
+            continue
+        }
+
+        $session = Get-VmSession -VmName $request.VMName -VmDomainName $request.Domain
+        if (-not $session) {
+            [pscustomobject]@{
+                VMName          = $request.VMName
+                Locale          = $request.Locale
+                OperatingSystem = $request.OperatingSystem
+                Stage           = 'GuestProbe'
+                Reason          = 'the guest could not be queried for Phase 2 language-package staging'
+            }
+            continue
+        }
+
+        try {
+            $guestFiles = @(Invoke-Command -Session $session -ScriptBlock {
+                    @(Get-ChildItem -LiteralPath 'C:\LanguagePacks' -File -Filter '*.cab' -ErrorAction SilentlyContinue | ForEach-Object {
+                            [pscustomobject]@{ Name = $_.Name; Length = $_.Length }
+                        })
+                } -ErrorAction Stop)
+        }
+        catch {
+            [pscustomobject]@{
+                VMName          = $request.VMName
+                Locale          = $request.Locale
+                OperatingSystem = $request.OperatingSystem
+                Stage           = 'GuestProbe'
+                Reason          = "the guest language-package probe failed: $($_.Exception.Message)"
+            }
+            continue
+        }
+
+        $missingFiles = @($sourceFiles | Where-Object {
+                $sourceFile = $_
+                -not ($guestFiles | Where-Object { $_.Name -ieq $sourceFile.Name -and [int64]$_.Length -eq [int64]$sourceFile.Length } | Select-Object -First 1)
+            } | Select-Object -ExpandProperty Name)
+        if ($missingFiles.Count -gt 0) {
+            [pscustomobject]@{
+                VMName          = $request.VMName
+                Locale          = $request.Locale
+                OperatingSystem = $request.OperatingSystem
+                Stage           = 'GuestMedia'
+                Reason          = "C:\LanguagePacks is missing or has mismatched package(s): $($missingFiles -join ', ')"
+            }
+        }
+    }
+}

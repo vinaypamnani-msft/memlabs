@@ -110,13 +110,59 @@ function Get-WindowsCapability {
 }
 
 $validationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
+$validationText = Get-Content -LiteralPath $validationPath -Raw
 $probe = Get-TestNestedScriptBlock -Path $validationPath -FunctionName 'Test-LocaleFunctionality' -VariableName '$scriptBlock'
+$timeSyncEvidence = Get-TestNestedScriptBlock -Path $validationPath -FunctionName 'Test-DomainMemberFunctionality' -VariableName '$getTimeSyncEvidence'
 . (Import-TestFunction -Path $validationPath -Name 'Test-LocaleFunctionality')
 $capabilities = @('Basic', 'Handwriting', 'OCR', 'Speech', 'TextToSpeech')
 $serverArguments = @('ja-JP', 'ja-JP', 'ja-JP', ($capabilities -join ','), $true)
 $clientArguments = @('ja-JP', 'ja-JP', 'ja-JP', ($capabilities -join ','), $false)
 
 Write-Host "engine : $($PSVersionTable.PSVersion)"
+Assert-Equal $true ($validationText -match 'INFO: Windows Time secondary evidence unavailable \(\$diagnostic\)') 'successful sync surfaces secondary collector failures as informational evidence'
+
+$japaneseW32tm = @(
+    'localized leap indicator: 0'
+    'localized last sync label: 2026/09/08 11:23:23'
+)
+$testNow = [datetimeoffset]'2026-09-08T16:00:00Z'
+$structuredTimeStatus = @([pscustomobject]@{ Name = 'LastSuccessfulSyncTime'; Value = '2026-09-08T15:23:23.566Z' })
+$structuredEvidenceOutput = @(& $timeSyncEvidence $japaneseW32tm 0 $structuredTimeStatus $null $testNow @())
+Assert-Equal 1 $structuredEvidenceOutput.Count 'structured time evaluator returns exactly one result'
+$structuredEvidence = $structuredEvidenceOutput[0]
+Assert-Equal $true $structuredEvidence.Synchronized 'Japanese w32tm output passes with structured last-sync evidence'
+Assert-Equal 'last successful sync 2026-09-08T15:23:23.566Z' $structuredEvidence.Evidence 'structured sync evidence remains language-neutral'
+
+$structuredWithCollectorFailure = & $timeSyncEvidence $japaneseW32tm 0 $structuredTimeStatus $null $testNow @('W32Time counter query failed: unavailable')
+Assert-Equal 'W32Time counter query failed: unavailable' ($structuredWithCollectorFailure.Diagnostics -join ',') 'successful evidence preserves secondary collector failures'
+
+$sourceEvidence = & $timeSyncEvidence $japaneseW32tm 0 @() ([pscustomobject]@{ NTPClientTimeSourceCount = 1 }) $testNow @()
+Assert-Equal $false $sourceEvidence.Synchronized 'active W32Time source alone does not prove successful synchronization'
+
+$englishEvidence = & $timeSyncEvidence @('Last Successful Sync Time: 9/8/2026 11:23:23 AM') 0 @() $null $testNow @()
+Assert-Equal $true $englishEvidence.Synchronized 'older English systems retain the w32tm text fallback'
+
+$missingTimeEvidence = & $timeSyncEvidence $japaneseW32tm 0 @() ([pscustomobject]@{ NTPClientTimeSourceCount = 0 }) $testNow @()
+Assert-Equal $false $missingTimeEvidence.Synchronized 'time validation warns when no structured sync evidence or active source exists'
+
+$uninitializedTimeStatus = @([pscustomobject]@{ Name = 'LastSuccessfulSyncTime'; Value = '1601-01-01T00:00:00.000Z' })
+$uninitializedEvidence = & $timeSyncEvidence $japaneseW32tm 0 $uninitializedTimeStatus ([pscustomobject]@{ NTPClientTimeSourceCount = 0 }) $testNow @()
+Assert-Equal $false $uninitializedEvidence.Synchronized 'uninitialized FILETIME epoch is not accepted as a successful sync'
+
+$staleTimeStatus = @([pscustomobject]@{ Name = 'LastSuccessfulSyncTime'; Value = '2026-09-01T15:23:23.566Z' })
+$staleEvidence = & $timeSyncEvidence $japaneseW32tm 0 $staleTimeStatus $null $testNow @()
+Assert-Equal $false $staleEvidence.Synchronized 'structured sync evidence older than 24 hours is rejected'
+
+$invalidEnglishEvidence = & $timeSyncEvidence @('Last Successful Sync Time: unspecified') 0 @() $null $testNow @()
+Assert-Equal $false $invalidEnglishEvidence.Synchronized 'English fallback requires a parseable recent timestamp'
+
+$failedTimeQuery = & $timeSyncEvidence @('localized error') 5 $structuredTimeStatus ([pscustomobject]@{ NTPClientTimeSourceCount = 1 }) $testNow @()
+Assert-Equal $false $failedTimeQuery.Synchronized 'failed w32tm query is not hidden by a stale source counter'
+
+$collectorFailureOutput = @(& $timeSyncEvidence $japaneseW32tm 0 @() $null $testNow @('event 260 query failed: unavailable'))
+Assert-Equal 1 $collectorFailureOutput.Count 'warning time evaluator returns exactly one result'
+$collectorFailure = $collectorFailureOutput[0]
+Assert-Equal $true ($collectorFailure.Evidence -like '*event 260 query failed: unavailable*') 'collector failures remain visible in warning evidence'
 
 $healthy = & $probe @serverArguments
 Assert-Equal $true $healthy.Passed 'matching MUI, system locale, and capabilities pass'
@@ -138,6 +184,20 @@ $script:PreferredUILanguage = 'en-US'
 $wrongPreferredUi = & $probe @serverArguments
 Assert-Equal $false $wrongPreferredUi.Passed 'wrong system preferred UI language fails'
 Assert-Equal 1 @($wrongPreferredUi.Details | Where-Object { $_ -like "FAIL: System preferred UI language*" }).Count 'preferred-UI failure is actionable'
+$script:PreferredUILanguage = 'ja-JP'
+
+$russianArguments = @('ru-RU', 'ru-RU', 'ru-RU', ($capabilities -join ','), $true)
+$script:MuiLanguages = @('en-US', 'ru-RU')
+$script:SystemLocale = 'ru-RU'
+$script:PreferredUILanguage = 'ru'
+$neutralPreferredUi = & $probe @russianArguments
+Assert-Equal $true $neutralPreferredUi.Passed 'neutral parent system preferred UI language matches the configured regional language'
+Assert-Equal 1 @($neutralPreferredUi.Details | Where-Object { $_ -eq "OK: System preferred UI language 'ru' is the neutral parent of 'ru-RU'" }).Count 'neutral parent success reports both language values'
+$script:PreferredUILanguage = 'en'
+$wrongNeutralPreferredUi = & $probe @russianArguments
+Assert-Equal $false $wrongNeutralPreferredUi.Passed 'unrelated neutral system preferred UI language fails'
+$script:MuiLanguages = @('en-US', 'ja-JP')
+$script:SystemLocale = 'ja-JP'
 $script:PreferredUILanguage = 'ja-JP'
 
 $script:PreferredUiCommandAvailable = $false

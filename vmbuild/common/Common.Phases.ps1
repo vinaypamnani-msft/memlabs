@@ -1893,6 +1893,39 @@ function Start-PhaseJobs {
         }
     }
 
+    if ($Phase -eq 3) {
+        try {
+            $localeMediaIssues = @()
+            if ($ConfigurationData) {
+                $phase3LocaleNodes = @($ConfigurationData.AllNodes.NodeName | Where-Object { $_ -and $_ -ne '*' -and $_ -ne 'LOCALHOST' })
+                if ($OnlyVMs) {
+                    $phase3LocaleNodes = @($phase3LocaleNodes | Where-Object { $_ -in $OnlyVMs })
+                }
+                if ($phase3LocaleNodes.Count -gt 0) {
+                    $localeMediaIssues = @(Get-Phase3LocaleMediaIssues -DeployConfig $deployConfig -ApplicableVMNames $phase3LocaleNodes)
+                }
+            }
+        }
+        catch {
+            Write-Log "[Phase 3] Locale media preflight FAILED: $($_.Exception.Message). Aborting before any per-VM jobs are dispatched." -Failure
+            $localeMediaIssues = @([pscustomobject]@{ VMName = '<preflight>'; Locale = ''; OperatingSystem = ''; Stage = 'Probe'; Reason = $_.Exception.Message })
+        }
+        if ($localeMediaIssues.Count -gt 0) {
+            foreach ($issue in $localeMediaIssues) {
+                Write-Log "[Phase 3] Locale media preflight FAILED for $($issue.VMName) [$($issue.OperatingSystem), $($issue.Locale), $($issue.Stage)]: $($issue.Reason)." -Failure
+            }
+            Write-Log '[Phase 3] Aborting before DSC dispatch. Re-run from Phase 2 so MemLabs can automatically download, validate, and copy the required language media.' -Failure
+            return [PSCustomObject]@{
+                Failed          = $localeMediaIssues.Count
+                Success         = 0
+                Jobs            = 0
+                Applicable      = $true
+                AdditionalData  = $null
+                PreflightFailed = $true
+            }
+        }
+    }
+
     # Phase 8 preflight: ensure each CAS/Primary's machine account is in local
     # Administrators on every SQL host it will use. ConfigMgr Setup walks the
     # AG replica nodes via remote WMI to read the SQL config; if the site

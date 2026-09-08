@@ -79,6 +79,7 @@ $summaryPath = Join-Path $RootPath 'common\Common.GenConfig.Summary.ps1'
 . (Import-TestFunction -Path $localeModulePath -Name 'Get-LocaleMediaMutexName')
 . (Import-TestFunction -Path $localeModulePath -Name 'Initialize-LocaleMedia')
 . (Import-TestFunction -Path $localeModulePath -Name 'Initialize-LocaleMediaForPhase2')
+. (Import-TestFunction -Path $localeModulePath -Name 'Get-Phase3LocaleMediaIssues')
 . (Import-TestFunction -Path $localeModulePath -Name 'Update-CatalogLocaleSettings')
 . (Import-TestFunction -Path $sourcePath -Name 'Get-LocaleProfiles')
 . (Import-TestFunction -Path $sourcePath -Name 'Get-LocaleAcquisitionMethod')
@@ -107,6 +108,7 @@ Assert-Equal -Expected ($expectedTags -join ',') -Actual ($catalogTags -join ','
 Assert-True -Condition ($catalog.'ar-SA'.PSObject.Properties.Name -contains 'RemoveInputLanguages') -What 'Arabic explicitly defines input languages to remove'
 Assert-True -Condition ($catalog.'ar-SA'.RemoveInputLanguages -is [array]) -What 'Arabic input-language removal remains an array'
 Assert-Equal -Expected 0 -Actual $catalog.'ar-SA'.RemoveInputLanguages.Count -What 'Arabic retains the Windows English fallback input method'
+Assert-Equal -Expected 0 -Actual $catalog.'ru-RU'.RemoveInputLanguages.Count -What 'Russian retains the Windows English fallback input method'
 
 $server2022Capabilities = @{
     'ar-SA' = 'Basic,OCR,TextToSpeech'; 'bg-BG' = 'Basic,OCR,TextToSpeech'; 'cs-CZ' = 'Basic,Handwriting,OCR,TextToSpeech'
@@ -228,7 +230,22 @@ $perfloading = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\perfloa
 Assert-True -Condition ($phase3 -match '\$ThisVM\.localeSettings') -What 'Phase 3 consumes the per-VM profile'
 Assert-True -Condition ($phase3 -match "\$localeAcquisition -eq 'WindowsUpdate'") -What 'Phase 3 selects the online acquisition resource per VM'
 Assert-True -Condition ($phase3 -match 'Install-Language -Language \$language') -What 'online acquisition downloads the selected language'
-Assert-True -Condition ($phase3 -match '\$global:DSCMachineStatus = 1') -What 'online acquisition requests an automatic DSC reboot'
+Assert-True -Condition ($phase3 -match '\$global:DSCMachineStatus = 1') -What 'online acquisition records that a reboot is required'
+Assert-True -Condition ($phase3 -match '(?s)\n        \}\r?\n\r?\n        LocalConfigurationManager \{\r?\n            RebootNodeIfNeeded\s*=\s*\$false') -What 'every Phase 3 node leaves reboot execution to the bounded host recovery monitor'
+Assert-True -Condition ($scriptBlocks -match '\$staleRestartMax\s*=\s*2') -What 'host recovery bounds each unchanged-status reboot episode to two attempts'
+Assert-True -Condition ($scriptBlocks -match '(?s)if \(\$dscStatusIsNew\) \{.*?\$staleRestartCount = 0 # a never-before-seen status starts a fresh bounded reboot episode') -What 'only genuine DSC status advancement starts a new bounded reboot episode'
+Assert-True -Condition ($scriptBlocks -match 'rebootResumeMax=\$staleRestartMax') -What 'host recovery logs the effective reboot and resume budget'
+Assert-True -Condition ($scriptBlocks -match 'reboot budget exhausted after \$staleRestartCount host-owned restart/resume attempt') -What 'host recovery fails instead of issuing an unbounded additional reboot'
+Assert-True -Condition ($scriptBlocks -match 'Refusing another restart to prevent a reboot loop') -What 'reboot-loop failure explains why the host stopped recovery'
+Assert-True -Condition ($scriptBlocks -match 'ScriptWorkflow state could not be verified\. Extending the confirmation window; not failing') -What 'an unknown workflow state cannot become a false reboot-loop failure'
+Assert-True -Condition ($scriptBlocks -match '\[pscustomobject\]@\{ ProbeSucceeded = \$probeSucceeded; Running = \$running \}') -What 'workflow probes distinguish query failure from a task that is not running'
+Assert-Equal -Expected 5 -Actual ([regex]::Matches($scriptBlocks, '\[pscustomobject\]@\{ ProbeSucceeded = \$probeSucceeded; Running = \$running \}').Count) -What 'all mutating and terminal workflow checks carry explicit probe provenance'
+Assert-True -Condition ($scriptBlocks.Contains("Get-ScheduledTask -ErrorAction Stop | Where-Object { `$_.TaskName -eq 'ScriptWorkflow' }")) -What 'workflow probes treat an absent task as a successful query result'
+Assert-True -Condition ($scriptBlocks -match 'ADServerDownException restart budget exhausted after \$staleRestartCount attempt') -What 'ADServerDownException recovery cannot restart indefinitely'
+Assert-True -Condition ($scriptBlocks -match '(?s)\$adServerRestarted = \$true\s*break.*?if \(\$adServerRestarted\) \{ continue \}') -What 'ADServerDownException recovery refreshes DSC state after one restart per snapshot'
+Assert-True -Condition ($scriptBlocks -match 'DSC status transport failed after \$forcedRestartCount VM restart attempt') -What 'DSC status transport failures cannot power-cycle indefinitely'
+Assert-True -Condition ($scriptBlocks -notmatch 'DSC requested reboot, Waiting 30 seconds to see if it reboots itself') -What 'dead duplicate reboot polling path remains removed'
+Assert-True -Condition ($scriptBlocks -match '(?s)\$lcmPendingNoRebootSince.*?\$staleRestartCount -ge \$staleRestartMax.*?\$dscResumeCount -ge \$dscResumeMax.*?-or.*?\$lcmIdleSince.*?\$staleRestartCount -ge \$staleRestartMax') -What 'idle and stranded states reach terminal failure when their actual recovery actions are exhausted'
 Assert-True -Condition ($phase3 -match '(?s)\$nextDepend\s*=\s*@\("\[InstallDotNet4\]DotNet"\).*?\$nextDepend\s*\+=\s*"\[Language\]ConfigureLanguage"') -What 'Phase 3 completion waits for DotNet and configured language convergence'
 Assert-True -Condition ($scriptBlocks -match "\$currentLocaleAcquisition -ne 'WindowsUpdate'") -What 'online acquisition skips CAB copying'
 Assert-True -Condition ($perfloading -match '\$ThisVM\.locale') -What 'SUP language selection consumes the per-VM locale'
@@ -469,9 +486,15 @@ Assert-True -Condition ($common -match 'Initialize-LocaleMedia -Locale \$vmLocal
 Assert-True -Condition ($common -match 'Get-LocaleDefinitionForOperatingSystem -LocaleDefinition \$catalog\.\$vmLocale -OperatingSystem \$vmOperatingSystem') -What 'language-pack copy resolves OS-specific capability overrides'
 Assert-True -Condition ($common -match 'Test-LocaleMediaFiles -Files \$sourceFiles -LocaleDefinition \$localeDefinition') -What 'language-pack copy rejects incomplete OS-specific package sets'
 Assert-True -Condition ($phases -match 'Initialize-LocaleMediaForPhase2 -DeployConfig \$deployConfig') -What 'Phase 2 prepares unique locale media before worker fan-out'
+Assert-True -Condition ($phases -match '(?s)\$localeMediaIssues\s*=\s*@\(\).*?if \(\$ConfigurationData\).*?if \(\$phase3LocaleNodes\.Count -gt 0\).*?Get-Phase3LocaleMediaIssues') -What 'Linux-only Phase 3 bypasses locale media probing when ConfigurationData has no Windows nodes'
 Assert-True -Condition ($scriptBlocks -match '\$locale = if \(\$currentItem\.locale\)') -What 'DSC multi-config compilation consumes the per-VM locale'
 Assert-True -Condition ($scriptBlocks -match '\$localeSettings = if \(\$currentItem\.localeSettings\)') -What 'DSC multi-config compilation consumes the per-VM locale profile'
 Assert-True -Condition ($scriptBlocks -match 'LanguageCapabilities\s*=\s*\$localeSettings\.LanguageCapabilities') -What 'legacy DSC configuration data preserves language capabilities'
+Assert-True -Condition ($phase3 -match 'WriteStatus ApplyingLocale\s*\{\s*Status\s*=\s*"Applying \$languageTag locale: language pack"') -What 'Phase 3 reports language-pack progress before applying the resource'
+Assert-True -Condition ($phase3 -match '(?s)Script InstallLanguagePackOnline\s*\{\s*DependsOn\s*=\s*\$localeStatusDependency') -What 'online language installation waits for the locale status message'
+Assert-True -Condition ($phase3 -match '(?s)LanguagePack InstallLanguagePack\s*\{.*?DependsOn\s*=\s*\$localeStatusDependency') -What 'media-backed language installation waits for the locale status message'
+Assert-True -Condition ($phase3 -match '(?s)WriteStatus ApplyingLanguageFeatures\s*\{.*?Status\s*=\s*"Applying \$languageTag locale: language capabilities".*?Script InstallLanguageFeaturesOffline\s*\{\s*DependsOn\s*=\s*''\[WriteStatus\]ApplyingLanguageFeatures''') -What 'Phase 3 reports capability progress before applying offline language features'
+Assert-True -Condition ($phase3 -match '(?s)WriteStatus ConfiguringLocale\s*\{.*?Status\s*=\s*"Applying \$languageTag locale: regional settings".*?Language ConfigureLanguage\s*\{.*?DependsOn\s*=\s*''\[WriteStatus\]ConfiguringLocale''') -What 'Phase 3 reports regional-settings progress before applying the locale'
 Assert-True -Condition ($phase3 -match 'InstallLanguageFeaturesOffline') -What 'Phase 3 installs Server language capabilities from cached media'
 Assert-True -Condition ($phase3 -match '\$l\.LanguageCapabilities') -What 'Phase 3 consumes language capabilities from configuration data'
 Assert-True -Condition ($phase3.Contains("Add-WindowsCapability -Online -Name `$name -Source 'C:\LanguagePacks' -LimitAccess")) -What 'Server language features cannot fall through to Windows Update'
@@ -529,6 +552,80 @@ try {
 finally {
     $global:Common = $savedCommon
     Remove-Item -LiteralPath $failureConfigRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+. (Import-TestFunction -Path $localeModulePath -Name 'Get-LocaleMediaFiles')
+. (Import-TestFunction -Path $localeModulePath -Name 'Test-LocaleMediaFiles')
+$phase3GateRoot = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-locale-phase3-' + [guid]::NewGuid().ToString('N'))
+$savedCommon = $global:Common
+$script:GuestLocaleFiles = @()
+$script:LocaleSessionCalls = 0
+function Get-VmSession {
+    $script:LocaleSessionCalls++
+    [pscustomobject]@{ Name = 'locale-phase3-test' }
+}
+function Invoke-Command {
+    [CmdletBinding()]
+    param ([object] $Session, [scriptblock] $ScriptBlock)
+    return @($script:GuestLocaleFiles)
+}
+try {
+    $global:Common = [pscustomobject]@{ ConfigPath = $phase3GateRoot }
+    $phase3GateConfig = [pscustomobject]@{
+        domainDefaults  = [pscustomobject]@{}
+        vmOptions       = [pscustomobject]@{ domainName = 'example.test' }
+        virtualMachines = @([pscustomobject]@{
+                vmName           = 'JP-SERVER'
+                operatingSystem  = 'Server 2025'
+                locale           = 'ja-JP'
+                localeAcquisition = 'MicrosoftMedia'
+            })
+    }
+    $hostPackageDir = Join-Path (Join-Path $phase3GateRoot 'locales') 'Server 2025'
+    $null = New-Item -Path $hostPackageDir -ItemType Directory -Force
+    $server2025JapaneseProfile = Get-LocaleDefinitionForOperatingSystem -LocaleDefinition $japaneseProfile -OperatingSystem 'Server 2025'
+    $expectedPackageNames = @("Microsoft-Windows-Server-Language-Pack_x64_ja-jp.cab")
+    foreach ($capability in $server2025JapaneseProfile.LanguageCapabilities) {
+        $expectedPackageNames += "Microsoft-Windows-LanguageFeatures-$capability-ja-jp-Package~31bf3856ad364e35~amd64~~.cab"
+    }
+    foreach ($packageName in $expectedPackageNames) {
+        Set-Content -LiteralPath (Join-Path $hostPackageDir $packageName) -Value $packageName -Encoding ASCII
+    }
+
+    $missingGuestIssues = @(Get-Phase3LocaleMediaIssues -DeployConfig $phase3GateConfig -ApplicableVMNames @('JP-SERVER'))
+    Assert-Equal -Expected 1 -Actual $missingGuestIssues.Count -What 'Phase 3 locale gate rejects a guest whose Phase 2 package copy is absent'
+    Assert-Equal -Expected 'GuestMedia' -Actual $missingGuestIssues[0].Stage -What 'Phase 3 locale gate identifies guest staging as the missing prerequisite'
+
+    $script:GuestLocaleFiles = @(Get-ChildItem -LiteralPath $hostPackageDir -File | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Length = $_.Length } })
+    Assert-Equal -Expected 0 -Actual @(Get-Phase3LocaleMediaIssues -DeployConfig $phase3GateConfig -ApplicableVMNames @('JP-SERVER')).Count -What 'Phase 3 locale gate accepts a complete Phase 2 host and guest package set'
+
+    Remove-Item -LiteralPath (Join-Path $hostPackageDir $expectedPackageNames[0]) -Force
+    $missingHostIssues = @(Get-Phase3LocaleMediaIssues -DeployConfig $phase3GateConfig -ApplicableVMNames @('JP-SERVER'))
+    Assert-Equal -Expected 1 -Actual $missingHostIssues.Count -What 'Phase 3 locale gate rejects an incomplete Phase 2 host package cache'
+    Assert-Equal -Expected 'HostCache' -Actual $missingHostIssues[0].Stage -What 'Phase 3 locale gate identifies host preparation as the missing prerequisite'
+
+    $phase3GateConfig.virtualMachines[0].localeAcquisition = 'WindowsUpdate'
+    Assert-Equal -Expected 0 -Actual @(Get-Phase3LocaleMediaIssues -DeployConfig $phase3GateConfig -ApplicableVMNames @('JP-SERVER')).Count -What 'Phase 3 locale gate bypasses Windows Update locale acquisition'
+
+    $phase3GateConfig.virtualMachines = @(
+        'WorkgroupMember', 'InternetClient', 'OSDClient', 'OtherDC', 'AADClient', 'StandaloneRootCA', 'Proxy', 'DHCPRelay', 'LinuxServer', 'LinuxClient' |
+            ForEach-Object {
+                [pscustomobject]@{
+                    vmName            = "EXCLUDED-$_"
+                    role              = $_
+                    operatingSystem   = 'Server 2025'
+                    locale            = 'ja-JP'
+                    localeAcquisition = 'MicrosoftMedia'
+                }
+            }
+    )
+    $sessionCallsBeforeExcludedRoles = $script:LocaleSessionCalls
+    Assert-Equal -Expected 0 -Actual @(Get-Phase3LocaleMediaIssues -DeployConfig $phase3GateConfig -ApplicableVMNames @()).Count -What 'Phase 3 locale gate ignores roles excluded from Phase 3 ConfigurationData'
+    Assert-Equal -Expected $sessionCallsBeforeExcludedRoles -Actual $script:LocaleSessionCalls -What 'Phase 3 locale gate does not probe guests excluded from Phase 3 ConfigurationData'
+}
+finally {
+    $global:Common = $savedCommon
+    Remove-Item -LiteralPath $phase3GateRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 if ($script:Failures -ne 0) {

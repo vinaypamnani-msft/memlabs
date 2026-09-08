@@ -7657,8 +7657,13 @@ function Test-LocaleFunctionality {
                     throw "SYSTEM MachinePreferredUILanguages is empty"
                 }
             }
+            $muiCulture = [System.Globalization.CultureInfo]::GetCultureInfo($muiLanguage)
+            $neutralMUILanguage = $muiCulture.Parent.Name
             if ($preferredUILanguage -ieq $muiLanguage) {
                 $results.Details.Add("OK: System preferred UI language is '$muiLanguage'")
+            }
+            elseif ($neutralMUILanguage -and $preferredUILanguage -ieq $neutralMUILanguage) {
+                $results.Details.Add("OK: System preferred UI language '$preferredUILanguage' is the neutral parent of '$muiLanguage'")
             }
             else {
                 $results.Passed = $false
@@ -9047,14 +9052,74 @@ function Test-DomainMemberFunctionality {
         }
 
         # Time sync
+        $getTimeSyncEvidence = {
+            param($w32tmOutput, [int]$w32tmExitCode, $timeStatusData, $timeService, [datetimeoffset]$collectedAtUtc, $collectorErrors)
+
+            $diagnostics = @($collectorErrors | Where-Object { $_ } | ForEach-Object { [string]$_ })
+            $structuredSync = $timeStatusData | Where-Object { $_.Name -eq 'LastSuccessfulSyncTime' } | Select-Object -First 1
+            $structuredSyncTime = [datetimeoffset]::MinValue
+            if ($w32tmExitCode -eq 0 -and $structuredSync -and [datetimeoffset]::TryParse([string]$structuredSync.Value, [ref]$structuredSyncTime)) {
+                $structuredAge = $collectedAtUtc - $structuredSyncTime.ToUniversalTime()
+                if ($structuredSyncTime.Year -ge 2000 -and $structuredAge.TotalMinutes -ge -5 -and $structuredAge.TotalHours -le 24) {
+                    return [pscustomobject]@{ Synchronized = $true; Evidence = "last successful sync $($structuredSync.Value)"; Diagnostics = $diagnostics }
+                }
+            }
+
+            $englishStatus = $w32tmOutput | Where-Object { $_ -match 'Last Successful Sync Time' } | Select-Object -First 1
+            if ($w32tmExitCode -eq 0 -and $englishStatus) {
+                $englishSyncValue = ([string]$englishStatus -split ':', 2)[1].Trim()
+                $englishSyncTime = [datetimeoffset]::MinValue
+                if ([datetimeoffset]::TryParse($englishSyncValue, [ref]$englishSyncTime)) {
+                    $englishAge = $collectedAtUtc - $englishSyncTime.ToUniversalTime()
+                    if ($englishSyncTime.Year -ge 2000 -and $englishAge.TotalMinutes -ge -5 -and $englishAge.TotalHours -le 24) {
+                        return [pscustomobject]@{ Synchronized = $true; Evidence = $englishStatus.Trim(); Diagnostics = $diagnostics }
+                    }
+                }
+            }
+
+            $reasonParts = [System.Collections.Generic.List[string]]::new()
+            if ($w32tmExitCode -ne 0) { $null = $reasonParts.Add("w32tm exited $w32tmExitCode") }
+            else { $null = $reasonParts.Add('no valid successful sync within the last 24 hours was reported') }
+            if ($timeService -and [int]$timeService.NTPClientTimeSourceCount -gt 0) {
+                $null = $reasonParts.Add("$($timeService.NTPClientTimeSourceCount) NTP source(s) are active but do not prove a successful sync")
+            }
+            foreach ($collectorError in @($collectorErrors | Where-Object { $_ })) { $null = $reasonParts.Add([string]$collectorError) }
+            $reason = $reasonParts -join '; '
+            return [pscustomobject]@{ Synchronized = $false; Evidence = $reason; Diagnostics = $diagnostics }
+        }
+
         try {
             $w32tm = & w32tm.exe /query /status 2>&1
-            $offsetLine = $w32tm | Where-Object { $_ -match 'Last Successful Sync Time' } | Select-Object -First 1
-            if ($offsetLine) {
-                $results.Details.Add("OK: w32tm reports last successful sync ($($offsetLine.Trim()))")
+            $w32tmExitCode = $LASTEXITCODE
+
+            $timeStatusData = @()
+            $timeEvidenceErrors = [System.Collections.Generic.List[string]]::new()
+            try {
+                $timeStatusEvent = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Time-Service/Operational'; Id = 260 } -MaxEvents 1 -ErrorAction Stop
+                if ($timeStatusEvent) {
+                    [xml]$timeStatusXml = $timeStatusEvent.ToXml()
+                    $timeStatusData = @($timeStatusXml.Event.EventData.Data | ForEach-Object {
+                            [pscustomobject]@{ Name = [string]$_.Name; Value = [string]$_.'#text' }
+                        })
+                }
+            }
+            catch { $null = $timeEvidenceErrors.Add("event 260 query failed: $($_.Exception.Message)") }
+
+            $timeService = $null
+            try {
+                $timeService = Get-CimInstance -Namespace 'root\cimv2' -ClassName 'Win32_PerfFormattedData_MicrosoftWindowsW32TimePerf_WindowsTimeService' -ErrorAction Stop
+            }
+            catch { $null = $timeEvidenceErrors.Add("W32Time counter query failed: $($_.Exception.Message)") }
+
+            $syncEvidence = & $getTimeSyncEvidence $w32tm $w32tmExitCode $timeStatusData $timeService ([datetimeoffset]::UtcNow) $timeEvidenceErrors
+            if ($syncEvidence.Synchronized) {
+                $results.Details.Add("OK: Windows Time reports successful synchronization ($($syncEvidence.Evidence))")
+                foreach ($diagnostic in @($syncEvidence.Diagnostics | Where-Object { $_ })) {
+                    $results.Details.Add("INFO: Windows Time secondary evidence unavailable ($diagnostic)")
+                }
             }
             else {
-                $results.Details.Add("WARN: w32tm did not report a successful sync time")
+                $results.Details.Add("WARN: Windows Time did not report successful synchronization ($($syncEvidence.Evidence))")
             }
         }
         catch {
