@@ -172,6 +172,18 @@ function Add-MemLabsDeploymentProcessToJob {
     }
 }
 
+function Resolve-MemLabsConfigurationPath {
+    param (
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $BasePath
+    )
+
+    if ([IO.Path]::IsPathFullyQualified($Path)) {
+        return [IO.Path]::GetFullPath($Path)
+    }
+    return [IO.Path]::GetFullPath((Join-Path $BasePath $Path))
+}
+
 function Save-MemLabsDeploymentDiagnostics {
     param (
         [Parameter(Mandatory)][string[]] $VMName,
@@ -235,7 +247,7 @@ if ($Phase -and -not $PSBoundParameters.ContainsKey('ExpectedCompletedPhase')) {
 }
 
 $vmbuildRoot = Split-Path -Parent $PSScriptRoot
-$configurationPath = [IO.Path]::GetFullPath((Join-Path (Get-Location) $Configuration))
+$configurationPath = Resolve-MemLabsConfigurationPath -Path $Configuration -BasePath (Get-Location).ProviderPath
 if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) { throw "Configuration not found: $configurationPath" }
 $config = Get-Content -LiteralPath $configurationPath -Raw | ConvertFrom-Json -ErrorAction Stop
 $domainName = [string]$config.vmOptions.domainName

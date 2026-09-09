@@ -31,6 +31,17 @@ function Import-MonitoredTestFunction {
 . (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1')
 $monitorSource = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Raw
 $childSource = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-MemLabsDeploymentChild.ps1') -Raw
+$pathFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-path-fixture-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -Path $pathFixtureRoot -ItemType Directory -Force
+try {
+    $absoluteConfigPath = Join-Path $pathFixtureRoot 'absolute.json'
+    $null = New-Item -Path $absoluteConfigPath -ItemType File
+    Assert-Equal $absoluteConfigPath (Resolve-MemLabsConfigurationPath -Path $absoluteConfigPath -BasePath $RootPath) 'absolute configuration path is not prefixed with the current directory'
+    Assert-Equal $absoluteConfigPath (Resolve-MemLabsConfigurationPath -Path 'absolute.json' -BasePath $pathFixtureRoot) 'relative configuration path is anchored to the current directory'
+}
+finally {
+    Remove-Item -LiteralPath $pathFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 $timeoutBlockStart = $monitorSource.IndexOf('if ($reason) {')
 $timeoutBlockEnd = $monitorSource.IndexOf('throw "Monitored deployment stopped:', $timeoutBlockStart)
 $timeoutBlock = if ($timeoutBlockStart -ge 0 -and $timeoutBlockEnd -gt $timeoutBlockStart) { $monitorSource.Substring($timeoutBlockStart, $timeoutBlockEnd - $timeoutBlockStart) } else { '' }
