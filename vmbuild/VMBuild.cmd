@@ -25,26 +25,6 @@ pushd "%MEMLABS_VMBUILD_ROOT%"
 cls
 
 REM ============================================================
-REM Check if running as a local account (not AAD)
-REM ============================================================
-FOR /F "tokens=*" %%A IN ('powershell -NoLogo -NonInteractive -Command "if ($env:USERDNSDOMAIN -or $env:USERNAME -match '@') { Write-Output AAD } else { Write-Output LOCAL }"') DO SET ACCOUNTTYPE=%%A
-
-IF "%ACCOUNTTYPE%"=="AAD" (
-    ECHO.
-    ECHO ============================================================
-    ECHO  WARNING: You are logged in with an AAD/domain account.
-    ECHO  This may cause bearer token authentication to fail due
-    ECHO  to Conditional Access policies.
-    ECHO.
-    ECHO  For best results, run this script as a local account
-    ECHO  e.g. .\labadmin instead of your AAD account.
-    ECHO ============================================================
-    ECHO.
-    ECHO Press any key to continue anyway, or Ctrl+C to exit...
-    PAUSE > NUL
-)
-
-REM ============================================================
 REM Git update
 REM ============================================================
 @ECHO ON

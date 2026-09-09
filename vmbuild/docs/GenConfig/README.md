@@ -35,8 +35,6 @@ shown in the UI.
 - Keep the checkout and its current media manifest together. OS, SQL, and
   ConfigMgr choices are derived from the manifest and are further restricted in
   offline mode.
-- Use a local account where possible. `VMBuild.cmd` warns that an AAD/domain
-  host login can interfere with bearer-token authentication.
 - Ensure the configured VM storage drive exists. `C:` is accepted on Windows
   Client hosts; Windows Server requires another drive. `D:` and `Z:` are reserved.
 
