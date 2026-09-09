@@ -1069,6 +1069,18 @@ function Start-Phase {
         foreach ($item in $dnsTargets) {
             Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
 
+            # A replacement BDC cannot reuse a controller name the way an ordinary
+            # member join reuses a machine account. Install-ADDSDomainController
+            # rejects the old DC object with "The specified account already exists."
+            # Remove it only when this BDC is absent from Hyper-V and Phase 1 is about
+            # to recreate it; existing BDCs are never touched by this path.
+            if ($item.role -eq 'BDC') {
+                $adOutcome = Remove-StaleAdComputer -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -ComputerName $item.vmName -Reason "BDC rebuild of $($item.vmName)"
+                if ("$adOutcome" -notin @('Removed', 'NotPresent')) { $blockingAdObjects.Add($item.vmName) }
+                $metadataOutcome = Remove-StaleAdDomainControllerMetadata -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -ComputerName $item.vmName -Reason "BDC rebuild of $($item.vmName)"
+                if ("$metadataOutcome" -notin @('Removed', 'NotPresent')) { $blockingAdObjects.Add("$($item.vmName) Sites/Services metadata") }
+            }
+
             # SQLAO: when a node is recreated, also clear the cluster's virtual
             # DNS records -- the Cluster Name A record and the AG listener A
             # record. WSFC and the AG listener register these against the
@@ -1116,11 +1128,7 @@ function Start-Phase {
             }
         }
 
-        # Phase 1 counts only its VM jobs, so without this a run that already knows
-        # Phase 5 cannot form its cluster still prints "0 warnings" and scrolls past.
-        if ($blockingAdObjects.Count -gt 0) {
-            Write-Log "[Phase $Phase] $($blockingAdObjects.Count) stale AD object(s) could NOT be removed and WILL block the SQLAO rebuild at Phase 5: $($blockingAdObjects -join ', '). Remove them on $existingDC (clear ProtectedFromAccidentalDeletion first) before continuing." -Warning
-        }
+        Assert-StaleAdCleanupSucceeded -BlockingAdObjects $blockingAdObjects -DCName $existingDC -Phase $Phase
     }
 
     # Pre-allocate DHCP IPs for every VM before Phase 1 jobs start.
@@ -5179,4 +5187,22 @@ function Save-BuildStats {
     catch {
         Write-Log "[BuildStats] Failed to save stats: $_" -LogOnly
     }
+}
+
+function Assert-StaleAdCleanupSucceeded {
+    param (
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [System.Collections.ICollection] $BlockingAdObjects,
+        [Parameter(Mandatory)]
+        [string] $DCName,
+        [Parameter(Mandatory)]
+        [int] $Phase
+    )
+
+    if ($BlockingAdObjects.Count -eq 0) { return }
+
+    $message = "[Phase $Phase] $($BlockingAdObjects.Count) stale AD object(s) could NOT be removed and WILL block the rebuild: $($BlockingAdObjects -join ', '). Remove them on $DCName (clear ProtectedFromAccidentalDeletion first) before continuing."
+    Write-Log $message -Failure
+    throw $message
 }

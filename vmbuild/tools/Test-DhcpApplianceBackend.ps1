@@ -119,6 +119,8 @@ $deploy = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ network = '192.168.55.0'; domainName = 'new.test' }
     virtualMachines = @(
         [pscustomobject]@{ vmName = 'NEW-DC1'; role = 'DC' },
+        [pscustomobject]@{ vmName = 'NEW-SQL1'; role = 'SQLAO'; OtherNode = 'NEW-SQL2' },
+        [pscustomobject]@{ vmName = 'NEW-SQL2'; role = 'SQLAO' },
         [pscustomobject]@{ vmName = 'NEW-W11'; role = 'DomainMember' },
         [pscustomobject]@{ vmName = 'NEW-W10'; role = 'DomainMember' },
         [pscustomobject]@{ vmName = 'NEW-OSD'; role = 'OSDClient' }
@@ -126,13 +128,18 @@ $deploy = [pscustomobject]@{
 }
 $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $deploy -LiveVMs @()
 Assert-Equal '192.168.55.1' $deploy.virtualMachines[0].AssignedIP 'DC receives fixed .1'
-Assert-Equal '192.168.55.20' $deploy.virtualMachines[1].AssignedIP 'first dynamic VM receives .20'
-Assert-Equal '192.168.55.21' $deploy.virtualMachines[2].AssignedIP 'second dynamic VM receives .21'
-Assert-True (-not $deploy.virtualMachines[3].PSObject.Properties['AssignedIP']) 'OSD client remains dynamic'
+Assert-Equal '192.168.55.201' $deploy.virtualMachines[1].ClusterIPAddress 'SQLAO owner receives cluster IP above the DHCP pool'
+Assert-Equal '192.168.55.202' $deploy.virtualMachines[1].AGIPAddress 'SQLAO owner receives distinct AG listener IP above the DHCP pool'
+Assert-Equal '192.168.55.20' $deploy.virtualMachines[1].AssignedIP 'first SQL node receives first dynamic VM address'
+Assert-Equal '192.168.55.21' $deploy.virtualMachines[2].AssignedIP 'second SQL node receives second dynamic VM address'
+Assert-Equal '192.168.55.22' $deploy.virtualMachines[3].AssignedIP 'first domain member follows SQL nodes without colliding with virtual IPs'
+Assert-Equal '192.168.55.23' $deploy.virtualMachines[4].AssignedIP 'second domain member follows SQL nodes without colliding with virtual IPs'
+Assert-True (-not $deploy.virtualMachines[5].PSObject.Properties['AssignedIP']) 'OSD client remains dynamic'
 
 $rerunNote = [pscustomobject]@{
-    lastUpdate = '09/06/2026 00:00'; role = 'DomainMember'; domain = 'new.test'
+    lastUpdate = '09/06/2026 00:00'; role = 'SQLAO'; domain = 'new.test'
     network = '192.168.55.0'; AssignedIP = '192.168.55.77'
+    ClusterIPAddress = '192.168.55.210'; AGIPAddress = '192.168.55.211'
 } | ConvertTo-Json -Compress
 $rerunLive = @([pscustomobject]@{
     Name = 'NEW-EXISTING'; Notes = $rerunNote
@@ -140,10 +147,143 @@ $rerunLive = @([pscustomobject]@{
 })
 $rerunDeploy = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ network = '192.168.55.0'; domainName = 'new.test' }
-    virtualMachines = @([pscustomobject]@{ vmName = 'NEW-EXISTING'; role = 'DomainMember' })
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'NEW-EXISTING'; role = 'SQLAO'; OtherNode = 'NEW-SECOND' },
+        [pscustomobject]@{ vmName = 'NEW-SECOND'; role = 'SQLAO' }
+    )
 }
 $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $rerunDeploy -LiveVMs $rerunLive
 Assert-Equal '192.168.55.77' $rerunDeploy.virtualMachines[0].AssignedIP 'rerun reuses AssignedIP from VM note'
+Assert-Equal '192.168.55.210' $rerunDeploy.virtualMachines[0].ClusterIPAddress 'rerun restores SQLAO cluster IP from VM note'
+Assert-Equal '192.168.55.211' $rerunDeploy.virtualMachines[0].AGIPAddress 'rerun restores SQLAO AG listener IP from VM note'
+Assert-Equal '192.168.55.20' $rerunDeploy.virtualMachines[1].AssignedIP 'restored SQLAO virtual IPs remain excluded from ordinary allocation'
+
+$survivingPartnerNote = [pscustomobject]@{
+    AssignedIP = '192.168.55.78'
+    ClusterIPAddress = '192.168.55.212'; AGIPAddress = '192.168.55.213'
+} | ConvertTo-Json -Compress
+$survivingPartnerLive = @([pscustomobject]@{
+    Name = 'NEW-SECOND'; Notes = $survivingPartnerNote
+    NetworkAdapters = @([pscustomobject]@{ IPAddresses = @('192.168.55.212', '192.168.55.213') })
+})
+$survivingPartnerDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.55.0'; domainName = 'new.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'NEW-EXISTING'; role = 'SQLAO'; OtherNode = 'NEW-SECOND' },
+        [pscustomobject]@{ vmName = 'NEW-SECOND'; role = 'SQLAO' }
+    )
+}
+$null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $survivingPartnerDeploy -LiveVMs $survivingPartnerLive
+Assert-Equal '192.168.55.212' $survivingPartnerDeploy.virtualMachines[0].ClusterIPAddress 'rebuilt SQLAO owner restores cluster IP from surviving partner note'
+Assert-Equal '192.168.55.213' $survivingPartnerDeploy.virtualMachines[0].AGIPAddress 'rebuilt SQLAO owner restores listener IP from surviving partner note'
+
+$disagreeingPairLive = @(
+    [pscustomobject]@{ Name = 'SQL-D1'; Notes = ([pscustomobject]@{ ClusterIPAddress = '192.168.55.214'; AGIPAddress = '192.168.55.215' } | ConvertTo-Json -Compress); NetworkAdapters = @() },
+    [pscustomobject]@{ Name = 'SQL-D2'; Notes = ([pscustomobject]@{ ClusterIPAddress = '192.168.55.216'; AGIPAddress = '192.168.55.215' } | ConvertTo-Json -Compress); NetworkAdapters = @() }
+)
+$disagreeingPairDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.55.0'; domainName = 'new.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-D1'; role = 'SQLAO'; OtherNode = 'SQL-D2' },
+        [pscustomobject]@{ vmName = 'SQL-D2'; role = 'SQLAO' }
+    )
+}
+$pairDisagreementRejected = $false
+try { $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $disagreeingPairDeploy -LiveVMs $disagreeingPairLive }
+catch { $pairDisagreementRejected = $_.Exception.Message -like '*persisted SQLAO ClusterIPAddress values disagree*' }
+Assert-True $pairDisagreementRejected 'SQLAO pair rejects disagreeing persisted virtual IPs'
+
+$duplicateVirtualIpDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.56.0'; domainName = 'duplicate.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-A1'; role = 'SQLAO'; OtherNode = 'SQL-A2'; ClusterIPAddress = '192.168.56.201'; AGIPAddress = '192.168.56.202' },
+        [pscustomobject]@{ vmName = 'SQL-A2'; role = 'SQLAO' },
+        [pscustomobject]@{ vmName = 'SQL-B1'; role = 'SQLAO'; OtherNode = 'SQL-B2'; ClusterIPAddress = '192.168.56.201'; AGIPAddress = '192.168.56.203' },
+        [pscustomobject]@{ vmName = 'SQL-B2'; role = 'SQLAO' }
+    )
+}
+$duplicateVirtualIpRejected = $false
+try { $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $duplicateVirtualIpDeploy -LiveVMs @() }
+catch { $duplicateVirtualIpRejected = $_.Exception.Message -like '*already in use by another VM or virtual endpoint*' }
+Assert-True $duplicateVirtualIpRejected 'SQLAO virtual IP shared by two owners is rejected'
+
+foreach ($invalidVirtualIp in '192.168.56.20', '192.168.56.200', '192.168.56.255', '192.168.56.999') {
+    $invalidVirtualIpDeploy = [pscustomobject]@{
+        vmOptions = [pscustomobject]@{ network = '192.168.56.0'; domainName = 'invalid.test' }
+        virtualMachines = @(
+            [pscustomobject]@{ vmName = 'SQL-I1'; role = 'SQLAO'; OtherNode = 'SQL-I2'; ClusterIPAddress = $invalidVirtualIp; AGIPAddress = '192.168.56.202' },
+            [pscustomobject]@{ vmName = 'SQL-I2'; role = 'SQLAO' }
+        )
+    }
+    $invalidVirtualIpRejected = $false
+    try { $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $invalidVirtualIpDeploy -LiveVMs @() }
+    catch { $invalidVirtualIpRejected = $_.Exception.Message -like '*must be a canonical IPv4 address*' }
+    Assert-True $invalidVirtualIpRejected "SQLAO rejects unusable persisted virtual IP $invalidVirtualIp"
+}
+
+$ordinaryConflictNote = [pscustomobject]@{ AssignedIP = '192.168.57.201' } | ConvertTo-Json -Compress
+$ordinaryConflictLive = @([pscustomobject]@{ Name = 'OTHER-VM'; Notes = $ordinaryConflictNote; NetworkAdapters = @() })
+$ordinaryConflictDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.57.0'; domainName = 'claims.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-C1'; role = 'SQLAO'; OtherNode = 'SQL-C2'; ClusterIPAddress = '192.168.57.201'; AGIPAddress = '192.168.57.202' },
+        [pscustomobject]@{ vmName = 'SQL-C2'; role = 'SQLAO' }
+    )
+}
+$ordinaryConflictRejected = $false
+try { $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $ordinaryConflictDeploy -LiveVMs $ordinaryConflictLive }
+catch { $ordinaryConflictRejected = $_.Exception.Message -like '*already in use by another VM or virtual endpoint*' }
+Assert-True $ordinaryConflictRejected 'SQLAO virtual IP claimed by another VM ordinary note is rejected'
+
+$pairAdapterNote = [pscustomobject]@{ ClusterIPAddress = '192.168.58.201'; AGIPAddress = '192.168.58.202' } | ConvertTo-Json -Compress
+$pairAdapterLive = @(
+    [pscustomobject]@{ Name = 'SQL-P1'; Notes = $pairAdapterNote; NetworkAdapters = @([pscustomobject]@{ IPAddresses = @() }) },
+    [pscustomobject]@{ Name = 'SQL-P2'; Notes = ''; NetworkAdapters = @([pscustomobject]@{ IPAddresses = @('192.168.58.201', '192.168.58.202') }) }
+)
+$pairAdapterDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.58.0'; domainName = 'pair.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-P1'; role = 'SQLAO'; OtherNode = 'SQL-P2' },
+        [pscustomobject]@{ vmName = 'SQL-P2'; role = 'SQLAO' }
+    )
+}
+$null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $pairAdapterDeploy -LiveVMs $pairAdapterLive
+Assert-Equal '192.168.58.201' $pairAdapterDeploy.virtualMachines[0].ClusterIPAddress 'SQLAO pair adapter may host the persisted cluster IP'
+Assert-Equal '192.168.58.202' $pairAdapterDeploy.virtualMachines[0].AGIPAddress 'SQLAO pair adapter may host the persisted AG listener IP'
+
+foreach ($configuredOwnerFirst in $false, $true) {
+    $missingPair = @(
+        [pscustomobject]@{ vmName = 'SQL-M1'; role = 'SQLAO'; OtherNode = 'SQL-M2' },
+        [pscustomobject]@{ vmName = 'SQL-M2'; role = 'SQLAO' }
+    )
+    $configuredPair = @(
+        [pscustomobject]@{ vmName = 'SQL-E1'; role = 'SQLAO'; OtherNode = 'SQL-E2'; ClusterIPAddress = '192.168.59.201/24'; AGIPAddress = '192.168.59.202/24' },
+        [pscustomobject]@{ vmName = 'SQL-E2'; role = 'SQLAO' }
+    )
+    $orderedPairs = if ($configuredOwnerFirst) { @($configuredPair + $missingPair) } else { @($missingPair + $configuredPair) }
+    $orderedDeploy = [pscustomobject]@{
+        vmOptions = [pscustomobject]@{ network = '192.168.59.0'; domainName = 'ordered.test' }
+        virtualMachines = $orderedPairs
+    }
+    $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $orderedDeploy -LiveVMs @()
+    $effectiveConfigured = $orderedDeploy.virtualMachines | Where-Object vmName -eq 'SQL-E1'
+    $effectiveMissing = $orderedDeploy.virtualMachines | Where-Object vmName -eq 'SQL-M1'
+    Assert-Equal '192.168.59.201' $effectiveConfigured.ClusterIPAddress "configured SQLAO cluster IP survives owner ordering (configured first=$configuredOwnerFirst)"
+    Assert-Equal '192.168.59.202' $effectiveConfigured.AGIPAddress "configured SQLAO AG IP survives owner ordering (configured first=$configuredOwnerFirst)"
+    Assert-Equal '192.168.59.203' $effectiveMissing.ClusterIPAddress "missing SQLAO cluster IP allocates after pre-seeded values (configured first=$configuredOwnerFirst)"
+    Assert-Equal '192.168.59.204' $effectiveMissing.AGIPAddress "missing SQLAO AG IP allocates after pre-seeded values (configured first=$configuredOwnerFirst)"
+}
+
+$partialDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.60.0'; domainName = 'partial.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-X1'; role = 'SQLAO'; OtherNode = 'SQL-X2'; ClusterIPAddress = '192.168.60.202' },
+        [pscustomobject]@{ vmName = 'SQL-X2'; role = 'SQLAO' }
+    )
+}
+$null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $partialDeploy -LiveVMs @()
+Assert-Equal '192.168.60.202' $partialDeploy.virtualMachines[0].ClusterIPAddress 'partial configured SQLAO cluster IP is preserved'
+Assert-Equal '192.168.60.201' $partialDeploy.virtualMachines[0].AGIPAddress 'partial missing SQLAO AG IP uses first remaining reserved address'
 
 # Execute the Client branches lifted from Common.ps1. Native DHCP access is a
 # throwing sentinel: any accidental fall-through fails the test immediately.

@@ -58,6 +58,10 @@ if ($DryRun) {
 
 # Defined before the try so the finally block can never fall back to the repo copy.
 $zipTarget = if ($DryRun) { Join-Path $dryRunRoot 'DSC.zip' } else { Join-Path $PSScriptRoot 'DSC.zip' }
+$zipBuildTarget = Join-Path (Split-Path $zipTarget -Parent) ('.DSC.{0}.building.zip' -f [guid]::NewGuid().ToString('N'))
+$zipBackupTarget = "$zipBuildTarget.backup"
+$zipJob = $null
+$parseCheckJob = $null
 
 if (-not $configName) {
     Write-Host "Using test config: CSTest1-A-CSPS.json, and test VM Name: CT1-DC1"
@@ -141,13 +145,14 @@ try {
     $dscDir = $PSScriptRoot
     $zipJob = Start-Job -ScriptBlock {
         param($dir, $target)
+        $ErrorActionPreference = 'Stop'
         Set-Location $dir
         Write-Output "Creating DSC.zip at $target..."
         Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath $target -Force -Confirm:$false
         Write-Output "Adding TemplateHelpDSC to DSC.zip..."
         Compress-Archive -Path .\TemplateHelpDSC -Update -DestinationPath $target
         Write-Output "DSC.zip creation complete."
-    } -ArgumentList $dscDir, $zipTarget
+    } -ArgumentList $dscDir, $zipBuildTarget
 
     # Tell common to re-init (runs in parallel with ZIP creation above)
     if ($Common.Initialized) {
@@ -262,11 +267,9 @@ try {
                 Write-Host "    $($f.Errors)" -ForegroundColor DarkYellow
             }
             Write-Host ""
-            # Delete the zip so the next run rebuilds it. $zipTarget, not the repo copy --
-            # a dry run must never remove the real DSC.zip.
-            if (Test-Path $zipTarget) {
-                Remove-Item $zipTarget -Force -ErrorAction SilentlyContinue
-                Write-Host "Deleted $zipTarget so next run will rebuild." -ForegroundColor Yellow
+            if (Test-Path $zipBuildTarget) {
+                Remove-Item $zipBuildTarget -Force -ErrorAction SilentlyContinue
+                Write-Host "Deleted incomplete archive $zipBuildTarget." -ForegroundColor Yellow
             }
             throw "PS5.1 parse check failed. Fix the above files before deploying to guest VMs."
         }
@@ -278,9 +281,26 @@ try {
     # Wait for background ZIP creation job to finish.
     if ($zipJob) {
         Write-Host "`nWaiting for DSC.zip background job..."
-        $zipOutput = $zipJob | Receive-Job -Wait -AutoRemoveJob
+        $zipJob | Wait-Job | Out-Null
+        $zipState = $zipJob.State
+        $zipReason = $zipJob.ChildJobs[0].JobStateInfo.Reason
+        if ($zipState -ne 'Completed') {
+            $zipJob | Remove-Job -Force -ErrorAction SilentlyContinue
+            $zipJob = $null
+            throw "DSC.zip background job ended in state $zipState`: $zipReason"
+        }
+        $zipOutput = $zipJob | Receive-Job -ErrorAction Stop
+        $zipJob | Remove-Job -Force -ErrorAction Stop
         $zipJob = $null
         $zipOutput | ForEach-Object { Write-Host "  $_" }
+        & (Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\Update-LanguageDscArchive.ps1') -ArchivePath $zipBuildTarget
+        if (Test-Path -LiteralPath $zipTarget) {
+            [IO.File]::Replace($zipBuildTarget, $zipTarget, $zipBackupTarget)
+            Remove-Item -LiteralPath $zipBackupTarget -Force -ErrorAction Stop
+        }
+        else {
+            Move-Item -LiteralPath $zipBuildTarget -Destination $zipTarget -ErrorAction Stop
+        }
         Write-Host "DSC.zip ready."
     }
 
@@ -329,20 +349,20 @@ try {
     Write-Host "MemLabsVersion updated: $oldVersion -> $newVersion (verified in version.json)" -ForegroundColor Cyan
 }
 finally {
-    if ($zipJob -and $zipJob.State -eq 'Running') {
-        $zipJob | Stop-Job -PassThru | Remove-Job -Force -ErrorAction SilentlyContinue
+    if ($zipJob) {
+        if ($zipJob.State -eq 'Running') { $zipJob | Stop-Job -ErrorAction SilentlyContinue }
+        $zipJob | Remove-Job -Force -ErrorAction SilentlyContinue
     }
-    if ($parseCheckJob -and $parseCheckJob.State -eq 'Running') {
-        $parseCheckJob | Stop-Job -PassThru | Remove-Job -Force -ErrorAction SilentlyContinue
+    if ($parseCheckJob) {
+        if ($parseCheckJob.State -eq 'Running') { $parseCheckJob | Stop-Job -ErrorAction SilentlyContinue }
+        $parseCheckJob | Remove-Job -Force -ErrorAction SilentlyContinue
     }
-    # If we terminated with an error, delete the zip so the next run rebuilds. Uses
-    # $zipTarget, so a dry run reaching here removes only its scratch copy -- this runs on
-    # every exit path, including the dry run's own return.
-    if (-not $?) {
-        if ($zipTarget -and (Test-Path $zipTarget)) {
-            Remove-Item $zipTarget -Force -ErrorAction SilentlyContinue
-            Write-Host "Deleted $zipTarget due to build failure." -ForegroundColor Yellow
-        }
+    if ($zipBuildTarget -and (Test-Path $zipBuildTarget)) {
+        Remove-Item $zipBuildTarget -Force -ErrorAction SilentlyContinue
+        Write-Host "Deleted incomplete archive $zipBuildTarget." -ForegroundColor Yellow
+    }
+    if ($zipBackupTarget -and (Test-Path $zipBackupTarget)) {
+        Remove-Item $zipBackupTarget -Force -ErrorAction SilentlyContinue
     }
     $parentDir = Split-Path -Path $PSScriptRoot -Parent
     Set-Location $parentDir

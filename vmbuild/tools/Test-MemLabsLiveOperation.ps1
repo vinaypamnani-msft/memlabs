@@ -47,6 +47,17 @@ $helper = Join-Path $RootPath 'tools\Invoke-MemLabsLiveOperation.ps1'
 $helperSource = Get-Content -LiteralPath $helper -Raw
 . (Import-LiveOpsTestFunction -Path $helper -Name 'Test-LiveOpsConflictingCommandLine')
 . (Import-LiveOpsTestFunction -Path $helper -Name 'Read-LiveOpsActiveOwner')
+$vmStateFunction = Import-LiveOpsTestFunction -Path $helper -Name 'Get-LiveOpsVmState'
+$missingState = @(& {
+        param($FunctionDefinition)
+        function Get-Command { [pscustomobject]@{ Name = 'Get-VM' } }
+        function Get-VM { param([string] $Name) @() }
+        . $FunctionDefinition
+        Get-LiveOpsVmState -Name 'DELETED-VM' -Type VM -AllowMissing
+    } $vmStateFunction)
+Assert-LiveOpsEqual 1 $missingState.Count 'Post-operation VM snapshot returns one record for a deleted target'
+Assert-LiveOpsEqual $false $missingState[0].Exists 'Post-operation VM snapshot records an intentionally deleted target as absent'
+Assert-LiveOpsEqual $true ($helperSource -match 'Get-LiveOpsVmState -Name \$normalizedTargets -Type \$TargetType -AllowMissing') 'Post-operation snapshots opt into missing-target representation'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-liveops-test-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -Path $testRoot -ItemType Directory -Force
 $heldStream = $null
@@ -167,6 +178,28 @@ param($Helper, $TestRoot)
     $mutateResult = & $helper -Mode Mutate -Intent 'harmless mutation fixture' -Target 'TEST-RESOURCE' -TargetType HostResource -TestCoordinationRoot $testRoot -Operation { [pscustomobject]@{ Changed = $true } } -Postcondition { param($Output) Write-Warning 'hidden postcondition warning'; return [bool]($Output.Count -eq 1 -and $Output[0].Changed) } -FailureDiagnostics {} -SkipActiveProcessCheck -IncludeOperationOutput
     Assert-LiveOpsEqual $true $mutateResult.Output[0].Changed 'Mutation executes after lease is released'
     Assert-LiveOpsEqual $true $mutateResult.PostconditionPassed 'Successful mutation records its postcondition result'
+
+    $handoffNames = @('MEMLABS_LIVEOPS_OPERATION_ID', 'MEMLABS_LIVEOPS_LEASE_PATH', 'MEMLABS_LIVEOPS_HANDOFF_TOKEN', 'MEMLABS_LIVEOPS_OWNER_PID', 'MEMLABS_LIVEOPS_OWNER_START_UTC')
+    $beforeHandoffEnvironment = @{}
+    foreach ($name in $handoffNames) { $beforeHandoffEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process) }
+    $handoffResult = & $helper -Mode Mutate -Intent 'child handoff fixture' -Target 'TEST-RESOURCE' -TargetType HostResource -TestCoordinationRoot $testRoot -Operation {
+        $metadata = Get-Content -LiteralPath $env:MEMLABS_LIVEOPS_LEASE_PATH -Raw | ConvertFrom-Json
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try { $tokenHash = [Convert]::ToHexString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($env:MEMLABS_LIVEOPS_HANDOFF_TOKEN))) }
+        finally { $sha256.Dispose() }
+        [pscustomobject]@{
+            OperationMatches = $metadata.OperationId -eq $env:MEMLABS_LIVEOPS_OPERATION_ID
+            TokenMatches = $metadata.HandoffHash -eq $tokenHash
+            OwnerMatches = [int]$env:MEMLABS_LIVEOPS_OWNER_PID -eq $PID
+            StartMatches = [string]$metadata.ProcessStartUtc -and $env:MEMLABS_LIVEOPS_OWNER_START_UTC
+        }
+    } -Postcondition { param($Output) return [bool]($Output.Count -eq 1 -and $Output[0].OperationMatches -and $Output[0].TokenMatches -and $Output[0].OwnerMatches -and $Output[0].StartMatches) } -FailureDiagnostics {} -SkipActiveProcessCheck -IncludeOperationOutput
+    Assert-LiveOpsEqual $true $handoffResult.PostconditionPassed 'Lease-held callback receives a handoff matching active owner metadata'
+    $handoffEnvironmentRestored = $true
+    foreach ($name in $handoffNames) {
+        if ([Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process) -ne $beforeHandoffEnvironment[$name]) { $handoffEnvironmentRestored = $false }
+    }
+    Assert-LiveOpsEqual $true $handoffEnvironmentRestored 'Live Ops restores child handoff environment after the callback'
 
     $multiOutputResult = & $helper -Mode Mutate -Intent 'two-output cardinality fixture' -Target 'TEST-RESOURCE' -TargetType HostResource -TestCoordinationRoot $testRoot -Operation { 'first'; 'second' } -Postcondition { param($Output) return [bool]($Output.Count -eq 2 -and $Output[0] -eq 'first' -and $Output[1] -eq 'second') } -FailureDiagnostics {} -SkipActiveProcessCheck -IncludeOperationOutput
     Assert-LiveOpsEqual 2 $multiOutputResult.Output.Count 'Postcondition receives operation output without an extra array wrapper'
@@ -322,6 +355,7 @@ param($Helper, $TestRoot)
     Assert-LiveOpsEqual 'rerun fixture setup' $destructiveRequest.Owner.RecoveryPath 'Journal records destructive recovery path'
 
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -File C:\memlabs\vmbuild\New-Lab.ps1') 'Active-process matcher detects New-Lab entry point'
+    Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -File C:\memlabs\vmbuild\tools\Invoke-MemLabsDeploymentChild.ps1 -Configuration x.json') 'Active-process matcher detects an uncoordinated deployment child'
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -Command "Start-Phase -Phase 3"') 'Active-process matcher detects direct Start-Phase command'
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -Command "Start-Phase; Write-Host done"') 'Active-process matcher detects semicolon-delimited Start-Phase command'
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -EncodedCommand ZgBpAHgAdAB1AHIAZQA=') 'Active-process matcher conservatively detects encoded PowerShell commands'

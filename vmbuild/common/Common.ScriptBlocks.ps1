@@ -1,5 +1,38 @@
 ﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 
+function Get-DscFatalGuestEvents {
+    param (
+        [Parameter(Mandatory)][string] $VMName,
+        [Parameter(Mandatory)][datetime] $StartTime,
+        [scriptblock] $EventQuery
+    )
+
+    if (-not $EventQuery) {
+        $EventQuery = {
+            param($Filter)
+            Get-WinEvent -FilterHashtable $Filter -ErrorAction Stop
+        }
+    }
+
+    try {
+        $startTimeUtc = $StartTime.ToUniversalTime()
+        $vmNamePattern = '(?i)(?<![A-Z0-9_-])' + [regex]::Escape($VMName) + '(?![A-Z0-9_-])'
+        $filter = @{
+            LogName   = 'Microsoft-Windows-Hyper-V-Worker-Admin'
+            Id        = 18560, 18590, 18602
+            StartTime = $startTimeUtc.ToLocalTime()
+        }
+        return @(& $EventQuery $filter | Where-Object {
+                $_.TimeCreated.ToUniversalTime() -ge $startTimeUtc -and
+                $_.Id -in $filter.Id -and
+                $_.Message -match $vmNamePattern
+            })
+    }
+    catch {
+        return @()
+    }
+}
+
 
 $global:Phase10Job = {
     param (
@@ -3180,7 +3213,8 @@ $global:VM_Config = {
                         if (Test-Path -LiteralPath $pendingKey.Path) { $servicingPending += $pendingKey.Name }
                     }
                     if (Test-Path -LiteralPath 'C:\Windows\WinSxS\pending.xml') { $servicingPending += 'WinSxS pending.xml' }
-                    $updateExeVolatile = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Updates' -Name 'UpdateExeVolatile' -ErrorAction SilentlyContinue
+                    $updatesKey = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Updates' -ErrorAction SilentlyContinue
+                    $updateExeVolatile = if ($updatesKey -and $updatesKey.PSObject.Properties.Name -contains 'UpdateExeVolatile') { $updatesKey.UpdateExeVolatile } else { $null }
                     if ($null -ne $updateExeVolatile -and [int]$updateExeVolatile -ne 0) { $servicingPending += "UpdateExeVolatile=$updateExeVolatile" }
 
                     $acted = @()
@@ -6570,6 +6604,7 @@ $global:VM_Config = {
 
         $noStatus = $true
         $lastStatusChangeTime = [DateTime]::UtcNow
+        $lastDscProgressTime = $lastStatusChangeTime
         $staleWarningMinutes = 15
         $staleRestartMinutes = 30
         $staleRestartCount = 0
@@ -7145,26 +7180,19 @@ $global:VM_Config = {
                     # 18560 (triple fault) / 18590 (unrecoverable processor error) /
                     # 18602 (guest reported a fatal error / bugcheck). None of these are
                     # ever emitted by a healthy-but-slow boot, so their presence is an
-                    # unambiguous "the guest OS is broken" signal. Detecting >=2 in the
-                    # recent window (a genuine loop, not a single transient BSOD) lets us
+                    # unambiguous "the guest OS is broken" signal. Detecting >=2 since
+                    # the last genuine DSC progress (a loop, not a single transient BSOD) lets us
                     # stop after the first restart instead of burning the full restart
                     # budget + ~150 heartbeat tries (~30+ min) on a VM that must be
                     # deleted and recreated. Best-effort: any query failure falls through
                     # to the normal restart/timeout behavior.
-                    try {
-                        $fatalEvents = @(Get-WinEvent -FilterHashtable @{
-                                LogName   = 'Microsoft-Windows-Hyper-V-Worker-Admin'
-                                Id        = 18560, 18590, 18602
-                                StartTime = (Get-Date).AddMinutes(-20)
-                            } -ErrorAction SilentlyContinue | Where-Object { $_.Message -match [regex]::Escape($currentItem.vmName) })
-                        if ($fatalEvents.Count -ge 2) {
-                            $codes = ($fatalEvents | Group-Object Id | ForEach-Object { "$($_.Name)x$($_.Count)" }) -join ' '
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: guest OS is bugchecking / triple-faulting on boot (Hyper-V-Worker events $codes in the last 20 min). The guest is CORRUPT -- almost always from a hard power-off during OOBE/specialize -- and cannot be recovered by another power-cycle. Failing this VM now; DELETE and RECREATE it (remove the VM + its folder, then re-run New-Lab), then resume the deploy." -Failure -OutputStream
-                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Guest is corrupt (BSOD/triple-fault boot loop); failing -- delete + recreate this VM"
-                            return
-                        }
+                    $fatalEvents = @(Get-DscFatalGuestEvents -VMName $currentItem.vmName -StartTime $lastDscProgressTime)
+                    if ($fatalEvents.Count -ge 2) {
+                        $codes = ($fatalEvents | Group-Object Id | ForEach-Object { "$($_.Name)x$($_.Count)" }) -join ' '
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: guest OS is bugchecking / triple-faulting on boot (Hyper-V-Worker events $codes since the last DSC status progress). The guest is CORRUPT -- almost always from a hard power-off during OOBE/specialize -- and cannot be recovered by another power-cycle. Failing this VM now; DELETE and RECREATE it (remove the VM + its folder, then re-run New-Lab), then resume the deploy." -Failure -OutputStream
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Guest is corrupt (BSOD/triple-fault boot loop); failing -- delete + recreate this VM"
+                        return
                     }
-                    catch {}
                     if ($forcedRestartCount -ge $forcedRestartMax) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: VM still unresponsive after $forcedRestartCount restart attempt(s) and $failedHeartbeats heartbeat tries. Failing this VM instead of power-cycling it again (a forced power-off mid-OOBE/specialize corrupts the guest)." -Failure -OutputStream
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "VM unresponsive; failing after $forcedRestartCount restart attempt(s)"
@@ -7277,6 +7305,7 @@ $global:VM_Config = {
                         $previousStatus = $currentStatus
                         if ($dscStatusIsNew) {
                             $lastStatusChangeTime = [DateTime]::UtcNow
+                            $lastDscProgressTime = $lastStatusChangeTime
                             $lastStaleWarningTime = [DateTime]::MinValue
                             $deadWorkflowConfirmations = 0
                             $staleNoticeCount = 0

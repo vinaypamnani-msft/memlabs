@@ -10558,6 +10558,7 @@ class PromoteDomainController {
 
         # Snapshot error count so we can scrub errors added by the cmdlet.
         $errorsBefore = $global:Error.Count
+        $promotionErrors = [System.Collections.Generic.List[string]]::new()
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
         # Use -ErrorAction SilentlyContinue and 2>&1 to prevent the
@@ -10565,9 +10566,11 @@ class PromoteDomainController {
         # error stream.  The -Force on Install-ADDSDomainController already
         # auto-answers the confirmation; we just need to keep the error
         # record out of DSC's view.
+        $promotionCommandErrors = @()
         try {
-            Install-ADDSDomainController @params -ErrorAction SilentlyContinue 2>&1 | ForEach-Object {
+            Install-ADDSDomainController @params -ErrorAction SilentlyContinue -ErrorVariable promotionCommandErrors 2>&1 | ForEach-Object {
                 if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                    $promotionErrors.Add($_.Exception.Message)
                     Write-Verbose "PromoteDomainController: (suppressed error) $($_.Exception.Message)"
                 }
                 else {
@@ -10576,7 +10579,12 @@ class PromoteDomainController {
             }
         }
         catch {
+            $promotionErrors.Add($_.Exception.Message)
             Write-Verbose "PromoteDomainController: Install-ADDSDomainController exception: $_"
+        }
+        foreach ($commandError in @($promotionCommandErrors)) {
+            $message = $commandError.Exception.Message
+            if ($message -and -not $promotionErrors.Contains($message)) { $promotionErrors.Add($message) }
         }
         $sw.Stop()
         Write-Verbose "PromoteDomainController: Install-ADDSDomainController completed in $($sw.Elapsed.ToString())"
@@ -10610,7 +10618,8 @@ class PromoteDomainController {
         $postSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
         Write-Verbose "PromoteDomainController: Post-install - SysVol verified: $promotionVerified, ntds.dit exists: $(Test-Path $ditPath), NTDS: $(if ($postSvc) { $postSvc.Status } else { 'not found' })"
         if (-not $promotionVerified) {
-            Write-Verbose "PromoteDomainController: WARNING - Netlogon SysVol key not present after Install-ADDSDomainController; promotion may have failed"
+            $details = if ($promotionErrors.Count -gt 0) { $promotionErrors -join ' | ' } else { 'Install-ADDSDomainController returned without a usable error record' }
+            throw "Domain controller promotion for '$env:COMPUTERNAME' did not complete: Netlogon SysVol was not created. $details"
         }
 
         Write-Verbose "PromoteDomainController: Requesting reboot to complete promotion"

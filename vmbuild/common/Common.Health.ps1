@@ -50,7 +50,21 @@ function Get-HealthStats {
         }
     }
 
-    $disk = Get-Volume -DriveLetter E -ErrorAction SilentlyContinue
+    $vmStorageRoot = Get-MemlabsVmStorageRoot -NoPrompt -ReadOnly
+    $diskDriveLetter = $null
+    if (-not [string]::IsNullOrWhiteSpace($vmStorageRoot)) {
+        $storagePath = [string]$vmStorageRoot
+        if ($storagePath.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -lt 0) {
+            try {
+                $diskRoot = [System.IO.Path]::GetPathRoot($storagePath)
+                if ($diskRoot -match '^(?<Drive>[A-Za-z]):[\\/]$') {
+                    $diskDriveLetter = $Matches.Drive.ToUpperInvariant()
+                }
+            }
+            catch {}
+        }
+    }
+    $disk = if ($diskDriveLetter) { Get-Volume -DriveLetter $diskDriveLetter -ErrorAction SilentlyContinue } else { $null }
     $os = Get-Ciminstance Win32_OperatingSystem |
         Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } },
                       @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
@@ -62,6 +76,8 @@ function Get-HealthStats {
 
     $Global:HealthStatsCache = [PSCustomObject]@{
         Timestamp    = Get-Date
+        DiskDriveLetter = $diskDriveLetter
+        DiskAvailable = [bool]$disk
         DiskTotalGB  = if ($disk) { [math]::Round($disk.Size / 1GB, 0) } else { 0 }
         DiskFreeGB   = if ($disk) { [math]::Round($disk.SizeRemaining / 1GB, 0) } else { 0 }
         FreeMemGB    = $os.FreeGB
@@ -175,14 +191,15 @@ function Check-OverallHealth {
             Thresh  = $vmThresh
         }
         [PSCustomObject]@{
-            Label   = 'Disk E:'
-            Value   = "$($stats.DiskFreeGB)/$($stats.DiskTotalGB)GB"
+            Label   = if ($stats.DiskDriveLetter) { "Disk $($stats.DiskDriveLetter):" } else { 'Disk' }
+            Value   = if ($stats.DiskAvailable) { "$($stats.DiskFreeGB)/$($stats.DiskTotalGB)GB" } else { 'unavailable' }
             Percent = $diskPct
             Thresh  = $diskThresh
+            Available = [bool]$stats.DiskAvailable
         }
         [PSCustomObject]@{
             Label   = 'Memory'
-            Value   = "$($stats.FreeMemGB)/$($stats.TotalMemGB)GB"
+            Value   = "$($stats.FreeMemGB)/$($stats.TotalMemGB)GB Free"
             Percent = $memPct
             Thresh  = $memThresh
         }
@@ -191,10 +208,24 @@ function Check-OverallHealth {
     foreach ($r in $rows) {
         Write-Host $pad -NoNewline
         Write-Host ($r.Label.PadRight($labelWidth)) -NoNewline -ForegroundColor White
-        Write-HealthBar -Percent $r.Percent -Width $barWidth -GreenAt $r.Thresh.GreenAt -YellowAt $r.Thresh.YellowAt
+        if ($r.PSObject.Properties['Available'] -and -not $r.Available) {
+            Write-Host '[' -NoNewline
+            Write-Host2 -ForegroundColor DarkGray ('░' * $barWidth) -NoNewline
+            Write-Host ']' -NoNewline
+        }
+        else {
+            Write-HealthBar -Percent $r.Percent -Width $barWidth -GreenAt $r.Thresh.GreenAt -YellowAt $r.Thresh.YellowAt
+        }
         Write-Host ' ' -NoNewline
         Write-Host ($r.Value.PadRight($valueWidth)) -NoNewline
-        Write-HealthStatusIcon -Percent $r.Percent -GreenAt $r.Thresh.GreenAt -YellowAt $r.Thresh.YellowAt
+        if ($r.PSObject.Properties['Available'] -and -not $r.Available) {
+            Write-Host '[' -NoNewline
+            Write-Host2 -ForegroundColor DarkGray '-' -NoNewline
+            Write-Host ']' -NoNewline
+        }
+        else {
+            Write-HealthStatusIcon -Percent $r.Percent -GreenAt $r.Thresh.GreenAt -YellowAt $r.Thresh.YellowAt
+        }
         Write-Host
     }
 

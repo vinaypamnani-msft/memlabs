@@ -229,7 +229,8 @@
                 Description           = $primaryVM.thisParams.SQLAO.WitnessShare
                 FolderEnumerationMode = 'AccessBased'
                 FullAccess            = $primaryVM.thisParams.SQLAO.GroupMembersFQ
-                ReadAccess            = "Everyone"
+                ChangeAccess          = @()
+                ReadAccess            = @()
                 DependsOn             = "[NTFSAccessEntry]ClusterWitnessPermissions$i"
             }
 
@@ -239,7 +240,8 @@
                 Description           = $primaryVM.thisParams.SQLAO.BackupShare
                 FolderEnumerationMode = 'AccessBased'
                 FullAccess            = $primaryVM.thisParams.SQLAO.SqlServiceAccountFQ, $primaryVM.thisParams.SQLAO.SqlAgentServiceAccountFQ, "$netbiosName\$DomainAdminName", "$netbiosName\vmbuildadmin"
-                ReadAccess            = "Everyone"
+                ChangeAccess          = @()
+                ReadAccess            = @()
                 DependsOn             = "[NTFSAccessEntry]ClusterBackupPermissions$i"
             }
             $WaitDepend += "[SmbShare]BackupShare$i"
@@ -370,7 +372,7 @@
 
         WaitForAny WaitForClusterJoin {
             NodeName             = $node2
-            ResourceName         = '[ClusterQuorum]ClusterWitness'
+            ResourceName         = '[Script]ClusterWitness'
             RetryIntervalSec     = 10
             RetryCount           = 360
             PsDscRunAsCredential = $Admincreds
@@ -469,7 +471,7 @@
                 ServerPermission
                 {
                     State      = 'Grant'
-                    Permission = @('AlterAnyAvailabilityGroup', 'ViewServerState')
+                    Permission = @('ConnectSql', 'AlterAnyAvailabilityGroup', 'ViewServerState')
                 }
                 ServerPermission
                 {
@@ -1029,15 +1031,34 @@
             DependsOn = '[WaitForAny]FileShareComplete'
         }
 
-
-        ClusterQuorum 'ClusterWitness' {
-            IsSingleInstance     = 'Yes'
-            Type                 = 'NodeAndFileShareMajority'
-            Resource             = $node1VM.thisParams.SQLAO.WitnessShareFQ
+        $_witnessShare = $node1VM.thisParams.SQLAO.WitnessShareFQ
+        Script 'ClusterWitness' {
+            GetScript = {
+                $quorum = Get-ClusterQuorum -ErrorAction Stop
+                $sharePath = if ($quorum.QuorumResource) {
+                    $quorum.QuorumResource | Get-ClusterParameter -Name SharePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Value
+                }
+                return @{ Result = [string]$sharePath }
+            }
+            TestScript = {
+                try {
+                    $quorum = Get-ClusterQuorum -ErrorAction Stop
+                    $sharePath = if ($quorum.QuorumResource) {
+                        $quorum.QuorumResource | Get-ClusterParameter -Name SharePath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Value
+                    }
+                    return $null -ne $quorum.QuorumResource -and
+                        [string]$quorum.QuorumResource.State -eq 'Online' -and
+                        [string]$sharePath -eq [string]$using:_witnessShare
+                }
+                catch { return $false }
+            }
+            SetScript = {
+                Set-ClusterQuorum -FileShareWitness $using:_witnessShare -ErrorAction Stop | Out-Null
+            }
             DependsOn            = '[WaitForAny]FileShareComplete'
             PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[ClusterQuorum]ClusterWitness'
+        $nextDepend = '[Script]ClusterWitness'
         } # end if (-not $clusterIPOnHeartbeat)
 
         WriteStatus SqlLogins {
@@ -1097,7 +1118,7 @@
                 ServerPermission
                 {
                     State      = 'Grant'
-                    Permission = @('AlterAnyAvailabilityGroup', 'ViewServerState')
+                    Permission = @('ConnectSql', 'AlterAnyAvailabilityGroup', 'ViewServerState')
                 }
                 ServerPermission
                 {
@@ -1212,29 +1233,111 @@
         }
 
         $nextDepend = '[SqlAGReplica]AddReplica'
-        if ($Node.DBName) {
-
-            WaitForAll RecoveryModel {
-                ResourceName     = '[SqlDatabase]SetRecoveryModel'
-                NodeName         = $node1
-                RetryIntervalSec = 5
-                RetryCount       = 450
-                DependsOn        = $nextDepend
-                PsDscRunAsCredential = $Admincreds
-            }
-
-            WaitForAll AddAGDatabaseMemberships {
-                ResourceName     = '[SqlAGDatabase]AddAGDatabaseMemberships'
-                NodeName         = $node1
-                RetryIntervalSec = 5
-                RetryCount       = 450
-                DependsOn        = '[WaitForAll]RecoveryModel'
-                PsDscRunAsCredential = $Admincreds
-            }
-
-            $nextDepend = '[WaitForAll]AddAGDatabaseMemberships'
-
+        WaitForAll RecoveryModel {
+            ResourceName         = '[SqlDatabase]SetRecoveryModel'
+            NodeName             = $node1
+            RetryIntervalSec     = 5
+            RetryCount           = 450
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
         }
+
+        WaitForAll AddAGDatabaseMemberships {
+            ResourceName         = '[SqlAGDatabase]AddAGDatabaseMemberships'
+            NodeName             = $node1
+            RetryIntervalSec     = 5
+            RetryCount           = 450
+            DependsOn            = '[WaitForAll]RecoveryModel'
+            PsDscRunAsCredential = $Admincreds
+        }
+
+        $nextDepend = '[WaitForAll]AddAGDatabaseMemberships'
+
+        $_phase5Database = 'TESTDB'
+        $_phase5AgName = $node1VM.thisParams.SQLAO.AlwaysOnGroupName
+        $_phase5Instance = $node1VM.sqlInstanceName
+        $_phase5Primary = if ($_phase5Instance -eq 'MSSQLSERVER') { $node1 } else { "$node1\$_phase5Instance" }
+        $_phase5Local = if ($_phase5Instance -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$_phase5Instance" }
+        $_phase5BackupPath = $node1VM.thisParams.SQLAO.BackupShareFQ
+        Script EnsurePhase5DatabaseOnSecondary {
+            GetScript = { @{ Result = '' } }
+            TestScript = {
+                try {
+                    $database = [string]$using:_phase5Database
+                    $localServer = [string]$using:_phase5Local
+                    $escapedDatabase = $database.Replace("'", "''")
+                    $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$localServer;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+                    try {
+                        $connection.Open()
+                        $command = $connection.CreateCommand()
+                        $command.CommandTimeout = 30
+                        $command.CommandText = "SELECT COUNT(*) FROM sys.dm_hadr_database_replica_states drs JOIN sys.availability_databases_cluster adc ON drs.group_database_id = adc.group_database_id WHERE drs.is_local = 1 AND adc.database_name = N'$escapedDatabase'"
+                        return [int]$command.ExecuteScalar() -eq 1
+                    }
+                    finally { $connection.Dispose() }
+                }
+                catch { return $false }
+            }
+            SetScript = {
+                $database = [string]$using:_phase5Database
+                $availabilityGroup = [string]$using:_phase5AgName
+                $primary = [string]$using:_phase5Primary
+                $localServer = [string]$using:_phase5Local
+                $backupPath = [string]$using:_phase5BackupPath
+                $databaseIdentifier = $database.Replace(']', ']]')
+                $agIdentifier = $availabilityGroup.Replace(']', ']]')
+                $databaseLiteral = $database.Replace("'", "''")
+                $fullBackup = Join-Path $backupPath "$database-MemLabs-Seed.bak"
+                $logBackup = Join-Path $backupPath "$database-MemLabs-Seed.trn"
+                $fullBackupLiteral = $fullBackup.Replace("'", "''")
+                $logBackupLiteral = $logBackup.Replace("'", "''")
+
+                function Invoke-Phase5Sql {
+                    param([string]$Server, [string]$Query)
+                    $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$Server;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+                    try {
+                        $connection.Open()
+                        $command = $connection.CreateCommand()
+                        $command.CommandTimeout = 600
+                        $command.CommandText = $Query
+                        $command.ExecuteNonQuery() | Out-Null
+                    }
+                    finally { $connection.Dispose() }
+                }
+
+                Invoke-Phase5Sql -Server $primary -Query "BACKUP DATABASE [$databaseIdentifier] TO DISK = N'$fullBackupLiteral' WITH COPY_ONLY, INIT, CHECKSUM; BACKUP LOG [$databaseIdentifier] TO DISK = N'$logBackupLiteral' WITH INIT, CHECKSUM;"
+                $restoreQuery = @"
+IF DB_ID(N'$databaseLiteral') IS NOT NULL AND DATABASEPROPERTYEX(N'$databaseLiteral', 'Status') <> 'RESTORING'
+BEGIN
+    ALTER DATABASE [$databaseIdentifier] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+END;
+RESTORE DATABASE [$databaseIdentifier] FROM DISK = N'$fullBackupLiteral' WITH NORECOVERY, REPLACE;
+RESTORE LOG [$databaseIdentifier] FROM DISK = N'$logBackupLiteral' WITH NORECOVERY;
+ALTER DATABASE [$databaseIdentifier] SET HADR AVAILABILITY GROUP = [$agIdentifier];
+"@
+                Invoke-Phase5Sql -Server $localServer -Query $restoreQuery
+
+                $deadline = (Get-Date).AddMinutes(2)
+                do {
+                    $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$localServer;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+                    try {
+                        $connection.Open()
+                        $command = $connection.CreateCommand()
+                        $command.CommandTimeout = 30
+                        $command.CommandText = "SELECT COUNT(*) FROM sys.dm_hadr_database_replica_states drs JOIN sys.availability_databases_cluster adc ON drs.group_database_id = adc.group_database_id WHERE drs.is_local = 1 AND adc.database_name = N'$databaseLiteral'"
+                        if ([int]$command.ExecuteScalar() -eq 1) { return }
+                    }
+                    finally { $connection.Dispose() }
+                    Start-Sleep -Seconds 5
+                } while ((Get-Date) -lt $deadline)
+                throw "Database '$database' did not join availability group '$availabilityGroup' on $env:COMPUTERNAME within 2 minutes."
+            }
+            DependsOn            = '[WaitForAll]AddAGDatabaseMemberships'
+            PsDscRunAsCredential = $Admincreds
+        }
+
+        $nextDepend = '[Script]EnsurePhase5DatabaseOnSecondary'
+
         $AgentJobSet = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Set.sql"
         $AgentJobTest = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Test.sql"
         $AgentJobGet = "C:\staging\DSC\SQLScripts\SQLAO-AgentJob-Get.sql"

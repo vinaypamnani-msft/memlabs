@@ -26,8 +26,8 @@
   decision without another specialist round.
 - Reuse valid test evidence from the current session when the tested path bytes
   have not changed. Do not rerun an unchanged full matrix before review, after
-  review, before commit, and after commit. Pre-commit hooks count as the final
-  repository gates they actually execute.
+  review, before commit, and after commit. The fast pre-commit hook proves only
+  staged-byte safety, encoding, and syntax; semantic gates remain Test evidence.
 - Prefer existing focused tests and checked-in gates. Do not build ad hoc nested
   PowerShell command harnesses for checks already covered by those tests. After
   one setup/quoting failure, switch to the existing script or a simple direct
@@ -41,7 +41,42 @@
 - If a specialist is unavailable, perform its documented workflow directly and
   state that independent delegation was unavailable.
 
+### Urgent Push-First Exception
+
+When the user explicitly selects `Priority: urgent` and supplies exact paths,
+commit message, and ownership mode, **MemLabs Push** may publish a feature-branch
+commit before Test/Review delegation so remote labs can consume it immediately.
+
+- Freeze hashes and the remote lease, run mandatory pre-commit hooks once, push,
+  verify the remote SHA, and return the provisional commit first.
+- Do not run optional tests, analyzers, Test, or Review before that push.
+- MemLabs Push must run the required focused Test/Review after publishing and
+  before ending, including when directly user-invoked. The parent runs any
+  requested remote-lab validation against the published commit.
+- Later findings are repaired in a new commit. Do not rewrite, conceal, or roll
+  back the provisional commit unless the user explicitly requests it.
+- Slow semantic gates run through MemLabs Test after an urgent push and before
+  a normal or thorough push.
+- This exception never permits hook bypass, ambiguous ownership, scope growth,
+  weakened leases, destructive operations, or an unconfirmed unverified push to
+  `main`, `master`, or `develop`.
+
 ## Fast Commit Path
+
+Route an exact-path commit or push request to the **MemLabs Push** agent when the
+user supplies or can confirm the paths, commit message, priority, and ownership
+mode (`whole-file`, `patch`, or `commit`). Pass all valid same-session test/review
+evidence so the agent can reuse it. Priority is:
+
+- `urgent`: push exact feature-branch bytes first with hooks once, return the
+  provisional SHA, then have MemLabs Push run Test/Review before ending; the
+  parent owns requested remote-lab checks.
+- `normal`: fill missing focused evidence, then publish.
+- `thorough`: include only explicitly requested or blast-radius-justified wider
+  checks before publishing.
+
+The push agent owns only Git publication. It never repairs findings or expands
+the approved path list.
 
 When the user asks to review, commit, and push existing work, use this sequence:
 
@@ -53,8 +88,8 @@ When the user asks to review, commit, and push existing work, use this sequence:
 4. Invoke MemLabs Test once and MemLabs Review once for the complete snapshot.
 5. Batch accepted repairs, run only affected tests, then use at most one bounded
   closure round. Apply the terminal closure rule above.
-6. Let pre-commit hooks supply duplicate repository-wide gate evidence. Commit
-  with explicit pathspecs and verify each commit's path list.
+6. Run the fast pre-commit hook once. It does not replace semantic gate evidence.
+  Commit with explicit pathspecs and verify each commit's path list.
 7. Push with the frozen remote lease and verify the remote SHA. Do not rerun the
   unchanged test matrix after path-scoped commits.
 

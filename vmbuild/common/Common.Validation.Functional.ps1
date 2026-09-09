@@ -716,20 +716,21 @@ function Test-DCFunctionality {
             $results.Details.Add("CMD: repadmin /syncall /e /d /A (force inbound sync of all partitions)")
             try {
                 # /e = enterprise (cross-site)  /d = DNS names  /A = all naming contexts
-                $syncOutput = & repadmin.exe /syncall /e /d /A 2>&1
-                $syncErrors = @($syncOutput | Where-Object { $_ -match 'SyncAll terminated with no errors' } )
-                if ($syncErrors.Count -gt 0) {
+                $savedErrorActionPreference = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = 'Continue'
+                    $syncOutput = @(& repadmin.exe /syncall /e /d /A 2>&1)
+                    $syncExitCode = $LASTEXITCODE
+                }
+                finally {
+                    $ErrorActionPreference = $savedErrorActionPreference
+                }
+                if ($syncExitCode -eq 0) {
                     $results.Details.Add("OK: repadmin /syncall completed successfully")
                 }
                 else {
-                    # Check for actual errors vs. just informational output
-                    $errs = @($syncOutput | Where-Object { $_ -match 'error|failed' -and $_ -notmatch 'no errors' })
-                    if ($errs.Count -gt 0) {
-                        $results.Details.Add("WARN: repadmin /syncall reported issues: $($errs[0].Trim())")
-                    }
-                    else {
-                        $results.Details.Add("OK: repadmin /syncall completed")
-                    }
+                    $firstOutput = @($syncOutput | Where-Object { "$_".Trim() } | Select-Object -First 1)
+                    $results.Details.Add("WARN: repadmin /syncall failed with exit $syncExitCode$(if ($firstOutput) { ": $("$firstOutput".Trim())" })")
                 }
 
                 # Wait for convergence — DNS zone changes propagate via AD replication,
@@ -6314,20 +6315,23 @@ function Test-CAFunctionality {
             $results.Details.Add("FAIL: certutil -ping exception: $($_.Exception.Message)")
         }
 
-        # Verify the CA certificate is valid
-        $results.Details.Add("CMD: certutil.exe -cainfo name")
+        # Resolve the active CA and its certificate through typed configuration.
+        # certutil labels are localized, so parsing "CA name:" is invalid on a
+        # non-English CA and makes a healthy NTAuth publication look uncertain.
+        $results.Details.Add("CMD: CertSvc configuration and LocalMachine certificate stores")
+        $activeCaName = $null
+        $localCaCert = $null
         try {
-            $caInfo = & certutil.exe -cainfo name 2>&1
-            $caName = ($caInfo | Where-Object { $_ -match 'CA name:' }) -replace '.*CA name:\s*', ''
-            if ($caName) {
-                $results.Details.Add("OK: CA name = '$caName'")
-            }
-            else {
-                $results.Details.Add("WARN: Could not parse CA name from certutil output")
-            }
+            $activeCaName = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration' -Name Active -ErrorAction Stop).Active
+            $caConfig = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$activeCaName" -ErrorAction Stop
+            $caThumbprint = "$($caConfig.CACertHash)" -replace '\s', ''
+            $localCaCert = Get-ChildItem Cert:\LocalMachine\CA, Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                Where-Object { ($_.Thumbprint -replace '\s', '') -eq $caThumbprint } | Select-Object -First 1
+            if (-not $localCaCert) { throw "certificate '$caThumbprint' was not found in LocalMachine CA/My stores" }
+            $results.Details.Add("OK: Active CA '$activeCaName' certificate = $($localCaCert.Thumbprint)")
         }
         catch {
-            $results.Details.Add("WARN: CA name check failed: $($_.Exception.Message)")
+            $results.Details.Add("WARN: Active CA certificate check failed: $($_.Exception.Message)")
         }
 
         # AD-specific checks — skip for standalone (offline root) CAs that are
@@ -6337,19 +6341,21 @@ function Test-CAFunctionality {
         # Confirm the CA cert is published into the AD NTAuthCertificates store.
         # Without this, domain client-auth certs issued by the CA won't be
         # honoured for 802.1x / CM client comms.
-        $results.Details.Add("CMD: certutil.exe -store -enterprise NTAuth")
+        $results.Details.Add("CMD: Get-ADObject NTAuthCertificates cACertificate")
         try {
-            $ntAuth = & certutil.exe -store -enterprise NTAuth 2>&1
-            $ntAuthText = $ntAuth -join "`n"
-            if ($LASTEXITCODE -eq 0 -and $caName -and $ntAuthText -match [regex]::Escape($caName.Trim())) {
-                $results.Details.Add("OK: CA '$($caName.Trim())' is published in enterprise NTAuthCertificates")
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $cfg = (Get-ADRootDSE -ErrorAction Stop).configurationNamingContext
+            $ntAuthObject = Get-ADObject -Identity "CN=NTAuthCertificates,CN=Public Key Services,CN=Services,$cfg" -Properties cACertificate -ErrorAction Stop
+            $ntAuthThumbprints = @($ntAuthObject.cACertificate | ForEach-Object {
+                    (New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (,[byte[]]$_)).Thumbprint
+                })
+            if ($localCaCert -and $ntAuthThumbprints -contains $localCaCert.Thumbprint) {
+                $results.Details.Add("OK: CA '$activeCaName' certificate is published in enterprise NTAuthCertificates")
             }
-            elseif ($LASTEXITCODE -eq 0 -and $ntAuthText -match 'Certificate \d+:') {
-                $results.Details.Add("OK: enterprise NTAuthCertificates store has entries (CA name unverified)")
+            elseif (-not $localCaCert) {
+                $results.Details.Add("WARN: Cannot verify NTAuth publication because the active local CA certificate was not resolved")
             }
-            else {
-                $results.Details.Add("WARN: CA cert may not be published to NTAuthCertificates -- client-auth scenarios will fail")
-            }
+            else { $results.Details.Add("WARN: CA '$activeCaName' certificate is not published to NTAuthCertificates -- client-auth scenarios will fail") }
         }
         catch {
             $results.Details.Add("WARN: NTAuth check failed: $($_.Exception.Message)")
@@ -15349,17 +15355,38 @@ ORDER BY ar.replica_server_name, adb.database_name
                     }
                 }
 
-                # 6. Backup and Witness shares
-                foreach ($share in @(@{Name = 'Witness'; Path = $witnessShare}, @{Name = 'Backup'; Path = $backupShare})) {
-                    if ($share.Path) {
-                        $results.Details.Add("CMD: Test-Path '$($share.Path)'")
-                        if (Test-Path $share.Path -ErrorAction SilentlyContinue) {
-                            $results.Details.Add("OK: $($share.Name) share '$($share.Path)' is accessible")
+                # 6. Witness and backup shares. The witness share intentionally
+                # grants only cluster identities, so an admin Test-Path is not a
+                # valid access oracle. The online quorum resource and its typed
+                # SharePath parameter prove that WSFC can use the witness.
+                if ($witnessShare) {
+                    $results.Details.Add("CMD: Get-ClusterQuorum / Get-ClusterParameter SharePath")
+                    try {
+                        $quorum = Get-ClusterQuorum -ErrorAction Stop
+                        $configuredWitness = if ($quorum.QuorumResource) {
+                            $quorum.QuorumResource | Get-ClusterParameter -Name SharePath -ErrorAction Stop | Select-Object -ExpandProperty Value
+                        }
+                        if ([string]$configuredWitness -eq [string]$witnessShare -and [string]$quorum.QuorumResource.State -eq 'Online') {
+                            $results.Details.Add("OK: Online quorum witness uses '$configuredWitness'")
                         }
                         else {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: $($share.Name) share '$($share.Path)' is not accessible")
+                            $results.Details.Add("FAIL: Quorum witness state/path mismatch: state='$($quorum.QuorumResource.State)' configured='$configuredWitness' expected='$witnessShare'")
                         }
+                    }
+                    catch {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Quorum witness query failed: $($_.Exception.Message)")
+                    }
+                }
+                if ($backupShare) {
+                    $results.Details.Add("CMD: Test-Path '$backupShare'")
+                    if (Test-Path $backupShare -ErrorAction SilentlyContinue) {
+                        $results.Details.Add("OK: Backup share '$backupShare' is accessible")
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Backup share '$backupShare' is not accessible")
                     }
                 }
             }

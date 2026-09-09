@@ -1,0 +1,176 @@
+{
+  "cmOptions": {
+    "version": "2509",
+    "install": true,
+    "pushClientToDomainMembers": true,
+    "PrePopulateObjects": true,
+    "EVALVersion": false,
+    "OfflineSCP": false,
+    "OfflineSUP": false,
+    "UsePKI": false,
+    "EnableBLM": false
+  },
+  "vmOptions": {
+    "prefix": "LH1-",
+    "basePath": "C:\\MemLabs-VMs",
+    "domainName": "locale1.lab",
+    "domainNetBiosName": "LOC1",
+    "adminName": "admin",
+    "network": "10.221.211.0",
+    "timeZone": "Eastern Standard Time"
+  },
+  "domainDefaults": {
+    "DeploymentType": "Standalone Primary",
+    "CMVersion": "2509",
+    "DomainName": "locale1.lab",
+    "Network": "10.221.211.0",
+    "DefaultClientOS": "Windows 11 Latest",
+    "DefaultServerOS": "Server 2022",
+    "DefaultLocale": "en-US",
+    "DefaultSqlVersion": "SQL Server 2022",
+    "UseDynamicMemory": true,
+    "IncludeClients": true,
+    "IncludeSSMSOnNONSQL": false
+  },
+  "virtualMachines": [
+    {
+      "vmName": "DC1",
+      "role": "DC",
+      "operatingSystem": "Server 2025",
+      "memory": "4GB",
+      "dynamicMinRam": "1GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "locale": "pl-PL",
+      "localeAcquisition": "MicrosoftMedia"
+    },
+    {
+      "vmName": "BDC1",
+      "role": "BDC",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "dynamicMinRam": "1GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "locale": "zh-TW",
+      "localeAcquisition": "MicrosoftMedia"
+    },
+    {
+      "vmName": "FS1",
+      "role": "FileServer",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "dynamicMinRam": "1GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "additionalDisks": {
+        "E": "600GB",
+        "F": "200GB"
+      },
+      "locale": "pt-BR",
+      "localeAcquisition": "MicrosoftMedia"
+    },
+    {
+      "vmName": "SQL1",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2022",
+      "memory": "16GB",
+      "dynamicMinRam": "16GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "OtherNode": "SQL2",
+      "fileServerVM": "FS1",
+      "ClusterName": "SQLCLUSTER",
+      "AlwaysOnGroupName": "L01 Availability Group",
+      "AlwaysOnListenerName": "L01SQL",
+      "SqlServiceAccount": "L01SqlSvc",
+      "SqlAgentAccount": "L01SqlAgent",
+      "installRP": false,
+      "locale": "pt-PT",
+      "localeAcquisition": "MicrosoftMedia"
+    },
+    {
+      "vmName": "SQL2",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2022",
+      "memory": "16GB",
+      "dynamicMinRam": "16GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "L01SqlSvc",
+      "SqlAgentAccount": "L01SqlAgent",
+      "locale": "sv-SE",
+      "localeAcquisition": "MicrosoftMedia"
+    },
+    {
+      "vmName": "PS1SITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2022",
+      "memory": "10GB",
+      "dynamicMinRam": "4GB",
+      "virtualProcs": 8,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "L01",
+      "siteName": "Locale High Memory Set 1",
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": false,
+      "remoteSQLVM": "SQL1",
+      "locale": "tr-TR",
+      "localeAcquisition": "MicrosoftMedia"
+    },
+    {
+      "vmName": "DPMP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2025",
+      "memory": "4GB",
+      "dynamicMinRam": "1GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "L01",
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": false,
+      "locale": "zh-CN",
+      "localeAcquisition": "MicrosoftMedia"
+    },
+    {
+      "vmName": "CL1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 Latest",
+      "memory": "4GB",
+      "dynamicMinRam": "1GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "domainUser": "bob",
+      "locale": "ar-SA",
+      "localeAcquisition": "WindowsUpdate"
+    }
+  ]
+}

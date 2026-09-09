@@ -593,9 +593,65 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
         $nextDepend = '[Script]EnsureSqlReachable'
 
         # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
-        $sqlDependency = @('[Script]EnsureSqlReachable')
+        $managedSQLSysAdminAccounts = @($SQLSysAdminAccounts | Where-Object {
+                $_ -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM', 'NT AUTHORITY\System')
+            })
+        $localSystemSidHex = '010100000000000512000000'
+        $localSystemTest = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+`$cs = 'Data Source=$cvSqlDs;Initial Catalog=master;Integrated Security=True;Connect Timeout=5;Encrypt=False;TrustServerCertificate=True'
+try {
+    `$c = New-Object System.Data.SqlClient.SqlConnection `$cs
+    `$c.Open()
+    `$cmd = `$c.CreateCommand()
+    `$cmd.CommandText = "SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.server_principals WHERE sid = 0x$localSystemSidHex AND IS_SRVROLEMEMBER('sysadmin', name) = 1) THEN 1 ELSE 0 END"
+    `$ok = [int]`$cmd.ExecuteScalar() -eq 1
+    `$c.Close(); `$c.Dispose()
+    return `$ok
+} catch { return `$false }
+"@
+        $localSystemSet = @"
+`$ErrorActionPreference = 'Stop'
+`$cs = 'Data Source=$cvSqlDs;Initial Catalog=master;Integrated Security=True;Connect Timeout=5;Encrypt=False;TrustServerCertificate=True'
+`$c = New-Object System.Data.SqlClient.SqlConnection `$cs
+try {
+    `$c.Open()
+    `$cmd = `$c.CreateCommand()
+    `$cmd.CommandText = @'
+DECLARE @sid varbinary(85) = 0x$localSystemSidHex;
+DECLARE @name sysname = SUSER_SNAME(@sid);
+IF @name IS NULL THROW 51000, 'Windows could not resolve the LocalSystem SID S-1-5-18.', 1;
+DECLARE @sql nvarchar(max);
+IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE sid = @sid)
+BEGIN
+    SET @sql = N'CREATE LOGIN ' + QUOTENAME(@name) + N' FROM WINDOWS';
+    EXEC sys.sp_executesql @sql;
+END;
+IF IS_SRVROLEMEMBER(N'sysadmin', @name) <> 1
+BEGIN
+    SET @sql = N'ALTER SERVER ROLE [sysadmin] ADD MEMBER ' + QUOTENAME(@name);
+    EXEC sys.sp_executesql @sql;
+END;
+'@
+    `$cmd.ExecuteNonQuery() | Out-Null
+}
+finally {
+    if (`$c.State -ne [Data.ConnectionState]::Closed) { `$c.Close() }
+    `$c.Dispose()
+}
+"@
+
+        Script EnsureLocalSystemSqlSysadmin {
+            DependsOn            = '[Script]EnsureSqlReachable'
+            PsDscRunAsCredential = $Admincreds
+            GetScript            = { @{ Result = '' } }
+            TestScript           = $localSystemTest
+            SetScript            = $localSystemSet
+        }
+
+        $sqlDependency = @('[Script]EnsureLocalSystemSqlSysadmin')
         $i = 0
-        foreach ($account in $SQLSysAdminAccounts | Where-Object { $_ -notlike "BUILTIN*" } ) {
+        foreach ($account in $managedSQLSysAdminAccounts | Where-Object { $_ -notlike "BUILTIN*" } ) {
             if (-not $account) {
                 continue
             }
@@ -607,7 +663,7 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
                 LoginType               = 'WindowsUser'
                 InstanceName            = $SQLInstanceName
                 LoginMustChangePassword = $false
-                DependsOn               = $nextDepend
+                DependsOn               = '[Script]EnsureLocalSystemSqlSysadmin'
             }
             $sqlDependency += "[SqlLogin]AddSqlLogin$i"
         }
@@ -615,7 +671,7 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
         SqlRole SqlRole {
             Ensure           = 'Present'
             ServerRoleName   = 'sysadmin'
-            MembersToInclude = $SQLSysAdminAccounts
+            MembersToInclude = $managedSQLSysAdminAccounts
             InstanceName     = $SQLInstanceName
             DependsOn        = $sqlDependency
         }
@@ -810,7 +866,8 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
                         Write-Verbose ('SPNTIME total={0}ms via={1}' -f [int]`$sw.Elapsed.TotalMilliseconds, `$usedDc)
                         if (-not `$user) { return `$false }
                         foreach (`$s in `$spns) {
-                            if (`$user.servicePrincipalName -notcontains `$s) { return `$false }
+                            `$holders = @(Get-ADObject -Filter { servicePrincipalName -eq `$s } -Server `$usedDc -ErrorAction SilentlyContinue)
+                            if (`$holders.Count -ne 1 -or `$holders[0].DistinguishedName -ne `$user.DistinguishedName) { return `$false }
                         }
                         return `$true
                     "
@@ -822,33 +879,38 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
                         foreach (`$cand in @('$cvDCFqdn', '$cvDCName')) {
                             if (Get-ADUser -Identity `$account -Server `$cand -ErrorAction SilentlyContinue) { `$dc = `$cand; break }
                         }
-                        foreach (`$s in `$spns) {
-                            # Try adding the SPN directly first — this is a fast
-                            # targeted write. Only if it fails with a duplicate
-                            # constraint do we scan the directory for the holder.
+                        `$invalid = @()
+                        foreach (`$attempt in 1..3) {
+                            `$lastError = ''
                             try {
-                                Set-ADUser -Identity `$account -Server `$dc -Add @{ servicePrincipalName = `$s } -ErrorAction Stop
-                            }
-                            catch {
-                                if (`$_.Exception.Message -match 'constraint|already exists|duplicate|not unique') {
-                                    # SPN is held by another account — find and remove it
-                                    `$holder = Get-ADObject -Filter { servicePrincipalName -eq `$s } -Server `$dc -Properties servicePrincipalName -ErrorAction SilentlyContinue
-                                    if (`$holder) {
-                                        foreach (`$h in `$holder) {
-                                            Set-ADObject -Identity `$h -Server `$dc -Remove @{ servicePrincipalName = `$s } -ErrorAction SilentlyContinue
+                                `$target = Get-ADUser -Identity `$account -Server `$dc -ErrorAction Stop
+                                foreach (`$s in `$spns) {
+                                    `$holders = @(Get-ADObject -Filter { servicePrincipalName -eq `$s } -Server `$dc -Properties servicePrincipalName -ErrorAction Stop)
+                                    foreach (`$holder in `$holders) {
+                                        if (`$holder.DistinguishedName -ne `$target.DistinguishedName) {
+                                            Set-ADObject -Identity `$holder -Server `$dc -Remove @{ servicePrincipalName = `$s } -ErrorAction Stop
                                         }
                                     }
-                                    # Retry the add after clearing
-                                    Set-ADUser -Identity `$account -Server `$dc -Add @{ servicePrincipalName = `$s } -ErrorAction Stop
+                                    `$holders = @(Get-ADObject -Filter { servicePrincipalName -eq `$s } -Server `$dc -Properties servicePrincipalName -ErrorAction Stop)
+                                    if (-not (`$holders | Where-Object DistinguishedName -eq `$target.DistinguishedName)) {
+                                        Set-ADUser -Identity `$target -Server `$dc -Add @{ servicePrincipalName = `$s } -ErrorAction Stop
+                                    }
                                 }
-                                elseif (`$_.Exception.Message -match 'specified value already exists') {
-                                    # SPN already on this account — nothing to do
+
+                                `$target = Get-ADUser -Identity `$account -Server `$dc -ErrorAction Stop
+                                `$invalid = @()
+                                foreach (`$s in `$spns) {
+                                    `$holders = @(Get-ADObject -Filter { servicePrincipalName -eq `$s } -Server `$dc -Properties servicePrincipalName -ErrorAction Stop)
+                                    if (`$holders.Count -ne 1 -or `$holders[0].DistinguishedName -ne `$target.DistinguishedName) {
+                                        `$invalid += `"`$s -> `$(`$holders.DistinguishedName -join ',')`"
+                                    }
                                 }
-                                else {
-                                    throw
-                                }
+                                if (`$invalid.Count -eq 0) { return }
                             }
+                            catch { `$lastError = `$_.Exception.Message }
+                            if (`$attempt -lt 3) { Start-Sleep -Seconds 2 }
                         }
+                        throw `"SQL SPN ownership did not converge to '`$account' on '`$dc' after 3 attempts: `$(`$invalid -join '; '). Last mutation error: `$lastError`"
                     "
                 }
                 $spnDependency += '[Script]SetSQLSPNs'

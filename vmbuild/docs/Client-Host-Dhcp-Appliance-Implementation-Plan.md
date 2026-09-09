@@ -15,9 +15,9 @@ The lifecycle should be:
 1. On every MemLabs startup, detect and record the host/backend capability.
 2. If no managed lab networks exist, defer appliance creation.
 3. On the first deployment, after the configuration is validated and its network set is known, download/verify the appliance image, create the switches/NATs, create the appliance, apply DHCP desired state, and prove it healthy **before Phase 1 starts any VM**.
-4. On later startups, if managed lab VMs or networks already exist, reconcile the appliance before maintenance or deployment. Missing or provably corrupt appliances are rebuilt from deployment configuration, MemLabs VM notes, and live Hyper-V topology.
+4. On later deployments, reconcile the appliance after configuration selection and validation, before any deployment phase can start a VM. Missing or provably corrupt appliances are rebuilt from deployment configuration, MemLabs VM notes, and live Hyper-V topology. GenConfig startup remains read-only with respect to live VMs.
 
-“Automatic rebuild” initially means **at the next MemLabs startup/deployment and at every pre-Phase-1 health gate**. The first version should not run a background task that autonomously deletes and recreates VMs; destructive recovery must run in the foreground with full ownership proof and diagnostics.
+“Automatic rebuild” initially means **at the next deployment and at every pre-Phase-1 health gate**. The first version should not run a background task that autonomously deletes and recreates VMs; destructive recovery must run in the foreground with full ownership proof and diagnostics.
 
 ## Why not install Windows DHCP Server on Client
 
@@ -185,9 +185,9 @@ No appliance, switch, image download, or background VM is created merely by open
 9. Atomically activate it, restart/reload the service, and verify service state, UDP/67 listeners, interfaces, addresses, and config hash.
 10. Only after that gate succeeds, run IP preallocation/reservation creation and Phase 1.
 
-### Later startup with existing labs
+### Later deployment with existing labs
 
-Before maintenance/menu work that may start VMs:
+After the deployment configuration is selected and validated, before deployment work may start VMs:
 
 1. Rebuild desired state from live VM notes/topology and surviving appliance placement notes.
 2. Inspect every expected appliance.
@@ -299,7 +299,7 @@ The appliance is infrastructure, not a normal lab VM:
 
 - Split switch/NAT transport creation from DHCP creation.
 - Reconcile the appliance after files and networks are ready but before `Set-DeployConfigIPAddresses`/Phase 1.
-- Reconcile existing labs during Client startup before maintenance.
+- Keep GenConfig startup read-only; reconcile existing labs only after deployment selection and validation.
 - Add a second health gate before PXE/relay operations.
 
 ### Phase 6 — Recovery and cleanup

@@ -226,6 +226,15 @@ Assert-True -Condition ($scriptBlocks -match '-and -not \$currentLocaleSettings'
 Assert-True -Condition ($installCm -match '\$ThisVM\.localeSettings') -What 'ConfigMgr setup consumes the per-VM profile'
 
 $phase3 = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase3.ps1') -Raw
+$phase4Path = Join-Path $RootPath 'DSC\phases\Phase4.ps1'
+$phase4 = Get-Content -LiteralPath $phase4Path -Raw
+$phase5 = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase5.ps1') -Raw
+$phase8 = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase8.ps1') -Raw
+$phase4Tokens = $null
+$phase4ParseErrors = $null
+[void][Management.Automation.Language.Parser]::ParseFile($phase4Path, [ref]$phase4Tokens, [ref]$phase4ParseErrors)
+$phase4StructuralErrors = @($phase4ParseErrors | Where-Object { $_.Message -notmatch '^Could not find the module ' })
+Assert-Equal -Expected 0 -Actual $phase4StructuralErrors.Count -What 'Phase 4 has no structural parser errors beyond unavailable guest DSC modules'
 $perfloading = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\perfloading.ps1') -Raw
 Assert-True -Condition ($phase3 -match '\$ThisVM\.localeSettings') -What 'Phase 3 consumes the per-VM profile'
 Assert-True -Condition ($phase3 -match "\$localeAcquisition -eq 'WindowsUpdate'") -What 'Phase 3 selects the online acquisition resource per VM'
@@ -244,6 +253,9 @@ Assert-True -Condition ($scriptBlocks.Contains("Get-ScheduledTask -ErrorAction S
 Assert-True -Condition ($scriptBlocks -match 'ADServerDownException restart budget exhausted after \$staleRestartCount attempt') -What 'ADServerDownException recovery cannot restart indefinitely'
 Assert-True -Condition ($scriptBlocks -match '(?s)\$adServerRestarted = \$true\s*break.*?if \(\$adServerRestarted\) \{ continue \}') -What 'ADServerDownException recovery refreshes DSC state after one restart per snapshot'
 Assert-True -Condition ($scriptBlocks -match 'DSC status transport failed after \$forcedRestartCount VM restart attempt') -What 'DSC status transport failures cannot power-cycle indefinitely'
+Assert-Equal -Expected 2 -Actual ([regex]::Matches($scriptBlocks, '\$lastDscProgressTime\s*=')).Count -What 'fatal-event window changes only at monitor start and genuine DSC progress'
+Assert-True -Condition ($scriptBlocks -match 'Get-DscFatalGuestEvents -VMName \$currentItem\.vmName -StartTime \$lastDscProgressTime') -What 'fatal-event detection spans the whole unchanged DSC status episode'
+Assert-True -Condition ($scriptBlocks -notmatch 'StartTime\s*=\s*\(Get-Date\)\.AddMinutes\(-20\)') -What 'fatal-event detection is not limited to a sliding 20-minute window'
 Assert-True -Condition ($scriptBlocks -notmatch 'DSC requested reboot, Waiting 30 seconds to see if it reboots itself') -What 'dead duplicate reboot polling path remains removed'
 Assert-True -Condition ($scriptBlocks -match '(?s)\$lcmPendingNoRebootSince.*?\$staleRestartCount -ge \$staleRestartMax.*?\$dscResumeCount -ge \$dscResumeMax.*?-or.*?\$lcmIdleSince.*?\$staleRestartCount -ge \$staleRestartMax') -What 'idle and stranded states reach terminal failure when their actual recovery actions are exhausted'
 Assert-True -Condition ($phase3 -match '(?s)\$nextDepend\s*=\s*@\("\[InstallDotNet4\]DotNet"\).*?\$nextDepend\s*\+=\s*"\[Language\]ConfigureLanguage"') -What 'Phase 3 completion waits for DotNet and configured language convergence'
@@ -498,6 +510,78 @@ Assert-True -Condition ($phase3 -match '(?s)WriteStatus ConfiguringLocale\s*\{.*
 Assert-True -Condition ($phase3 -match 'InstallLanguageFeaturesOffline') -What 'Phase 3 installs Server language capabilities from cached media'
 Assert-True -Condition ($phase3 -match '\$l\.LanguageCapabilities') -What 'Phase 3 consumes language capabilities from configuration data'
 Assert-True -Condition ($phase3.Contains("Add-WindowsCapability -Online -Name `$name -Source 'C:\LanguagePacks' -LimitAccess")) -What 'Server language features cannot fall through to Windows Update'
+Assert-True -Condition ($phase3 -match '(?s)Registry RAMDiskTFTPWIndowSize\s*\{.*?Key\s*=\s*["'']HKLM:\\SOFTWARE\\Microsoft\\SMS\\DP["''].*?\}') -What 'Phase 3 TFTP window registry resource uses a provider-qualified HKLM path'
+Assert-True -Condition ($phase3 -match '(?s)Registry RAMDiskTFTPBlockSize\s*\{.*?Key\s*=\s*["'']HKLM:\\SOFTWARE\\Microsoft\\SMS\\DP["''].*?\}') -What 'Phase 3 TFTP block registry resource uses a provider-qualified HKLM path'
+Assert-True -Condition ($phase3 -notmatch 'Key\s*=\s*["'']HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\SMS\\DP["'']') -What 'Phase 3 DP registry resources reject an unqualified registry hive path'
+Assert-True -Condition ($phase4 -match '(?s)\$managedSQLSysAdminAccounts\s*=.*?NT AUTHORITY\\SYSTEM.*?foreach \(\$account in \$managedSQLSysAdminAccounts') -What 'Phase 4 does not recreate the locale-dependent LocalSystem SQL login name'
+Assert-True -Condition ($phase4 -match 'MembersToInclude\s*=\s*\$managedSQLSysAdminAccounts') -What 'Phase 4 leaves the existing LocalSystem SID role membership unchanged'
+$localSystemSidDefinitionIndex = $phase4.IndexOf("`$localSystemSidHex = '010100000000000512000000'")
+$localSystemSidUseIndex = $phase4.IndexOf('DECLARE @sid varbinary(85) = 0x$localSystemSidHex')
+$localSystemNameIndex = $phase4.IndexOf('SUSER_SNAME(@sid)')
+$localSystemLoginIndex = $phase4.IndexOf('CREATE LOGIN')
+$localSystemRoleIndex = $phase4.IndexOf('ALTER SERVER ROLE [sysadmin] ADD MEMBER')
+Assert-True -Condition ($localSystemSidDefinitionIndex -ge 0 -and $localSystemSidUseIndex -gt $localSystemSidDefinitionIndex -and $localSystemNameIndex -gt $localSystemSidUseIndex -and $localSystemLoginIndex -gt $localSystemNameIndex -and $localSystemRoleIndex -gt $localSystemLoginIndex) -What 'Phase 4 repairs the LocalSystem SQL login and sysadmin role through stable SID resolution'
+Assert-True -Condition ($phase4 -match '(?s)Script EnsureLocalSystemSqlSysadmin\s*\{.*?PsDscRunAsCredential\s*=\s*\$Admincreds') -What 'Phase 4 LocalSystem SQL repair uses a separately privileged credential'
+Assert-Equal -Expected 2 -Actual ([regex]::Matches($phase4, 'EXEC sys\.sp_executesql @sql').Count) -What 'Phase 4 LocalSystem SQL repair executes valid dynamic statements through sp_executesql'
+$spnSetStart = $phase4.IndexOf('Script SetSQLSPNs')
+$spnSetEnd = $phase4.IndexOf('Script GrantSPNWritePermission', $spnSetStart)
+$spnSetBlock = if ($spnSetStart -ge 0 -and $spnSetEnd -gt $spnSetStart) { $phase4.Substring($spnSetStart, $spnSetEnd - $spnSetStart) } else { '' }
+$spnHolderIndex = $spnSetBlock.IndexOf('`$holders = @(Get-ADObject -Filter { servicePrincipalName -eq `$s }')
+$spnRemoveIndex = $spnSetBlock.IndexOf('Set-ADObject -Identity `$holder')
+$spnAddIndex = $spnSetBlock.IndexOf('Set-ADUser -Identity `$target')
+Assert-True -Condition ($spnHolderIndex -ge 0 -and $spnRemoveIndex -gt $spnHolderIndex -and $spnAddIndex -gt $spnRemoveIndex) -What 'Phase 4 transfers SPNs from typed AD owners before adding them to the service account'
+Assert-True -Condition ($spnSetBlock -match '(?s)foreach \(`\$attempt in 1\.\.3\).*?`\$holders\.Count -ne 1.*?after 3 attempts') -What 'Phase 4 bounds SPN reconciliation and requires target-exclusive final ownership'
+Assert-True -Condition ($spnSetBlock -match '(?s)TestScript.*?Get-ADObject -Filter \{ servicePrincipalName -eq `\$s \}.*?`\$holders\.Count -ne 1.*?DistinguishedName -ne `\$user\.DistinguishedName') -What 'Phase 4 SPN compliance rejects target-plus-foreign duplicate ownership'
+Assert-True -Condition ($spnSetBlock -match '(?s)try \{.*?Set-ADUser -Identity `\$target.*?`\$target = Get-ADUser.*?Get-ADObject.*?catch \{ `\$lastError') -What 'Phase 4 retries transient SPN mutation and verification failures together'
+Assert-True -Condition ($phase4 -notmatch '\$_.Exception.Message -match [''"].*?(?:constraint|already exists|duplicate|not unique)') -What 'Phase 4 SPN ownership repair does not parse localized exception text'
+$clusterShareStart = $phase5.IndexOf('SmbShare "ClusterShare$i"')
+$backupShareStart = $phase5.IndexOf('SmbShare "BackupShare$i"')
+$clusterShareBlock = if ($clusterShareStart -ge 0 -and $backupShareStart -gt $clusterShareStart) { $phase5.Substring($clusterShareStart, $backupShareStart - $clusterShareStart) } else { '' }
+$backupShareEnd = $phase5.IndexOf('$WaitDepend += "[SmbShare]BackupShare$i"', $backupShareStart)
+$backupShareBlock = if ($backupShareStart -ge 0 -and $backupShareEnd -gt $backupShareStart) { $phase5.Substring($backupShareStart, $backupShareEnd - $backupShareStart) } else { '' }
+Assert-True -Condition ($clusterShareBlock -match 'FullAccess\s*=\s*\$primaryVM\.thisParams\.SQLAO\.GroupMembersFQ' -and $clusterShareBlock -match 'ChangeAccess\s*=\s*@\(\)' -and $clusterShareBlock -match 'ReadAccess\s*=\s*@\(\)' -and $clusterShareBlock -match 'DependsOn\s*=\s*"\[NTFSAccessEntry\]ClusterWitnessPermissions\$i"') -What 'Phase 5 witness share grants only the intended full-access principals'
+Assert-True -Condition ($backupShareBlock -match 'FullAccess\s*=\s*\$primaryVM\.thisParams\.SQLAO\.SqlServiceAccountFQ.*?SqlAgentServiceAccountFQ.*?DomainAdminName.*?vmbuildadmin' -and $backupShareBlock -match 'ChangeAccess\s*=\s*@\(\)' -and $backupShareBlock -match 'ReadAccess\s*=\s*@\(\)' -and $backupShareBlock -match 'DependsOn\s*=\s*"\[NTFSAccessEntry\]ClusterBackupPermissions\$i"') -What 'Phase 5 backup share grants only the intended full-access principals'
+Assert-True -Condition ($clusterShareBlock -notmatch 'Everyone|Todos|S-1-1-0' -and $backupShareBlock -notmatch 'Everyone|Todos|S-1-1-0') -What 'Phase 5 SMB shares do not use locale-dependent world-access account names'
+Assert-True -Condition ($phase5 -match '(?s)Script ''ClusterWitness''\s*\{.*?Get-ClusterQuorum.*?Get-ClusterParameter -Name SharePath.*?Set-ClusterQuorum -FileShareWitness') -What 'Phase 5 quorum configuration uses the locale-neutral SharePath parameter'
+Assert-True -Condition ($phase5 -notmatch "ClusterQuorum 'ClusterWitness'") -What 'Phase 5 does not use locale-sensitive FailoverClusterDsc quorum detection'
+Assert-True -Condition ($phase5 -match "ResourceName\s*=\s*'\[Script\]ClusterWitness'") -What 'Phase 5 primary node waits for the locale-neutral quorum resource'
+$clusSvcPermissionStarts = @([regex]::Matches($phase5, "SqlPermission 'AddNTServiceClusSvcPermissions'\s*\{") | ForEach-Object { $_.Index })
+$clusSvcPermissionBlocks = @(foreach ($startIndex in $clusSvcPermissionStarts) {
+    $endIndex = $phase5.IndexOf('# Create a DatabaseMirroring endpoint', $startIndex)
+        if ($endIndex -gt $startIndex) { $phase5.Substring($startIndex, $endIndex - $startIndex) }
+    })
+Assert-Equal -Expected 2 -Actual $clusSvcPermissionBlocks.Count -What 'Phase 5 defines one ClusSvc permission resource per SQLAO replica path'
+Assert-True -Condition (@($clusSvcPermissionBlocks | Where-Object { $_ -notmatch "Permission\s*=\s*@\('ConnectSql', 'AlterAnyAvailabilityGroup', 'ViewServerState'\)" }).Count -eq 0) -What 'Phase 5 grants ClusSvc all permissions required by SqlServerDsc on both replicas'
+Assert-True -Condition ($phase5 -notmatch 'if \(\$Node\.DBName\)') -What 'Phase 5 SQLAO secondary always waits for the phase-owned TESTDB seed'
+Assert-True -Condition ($phase5 -match '(?s)WaitForAll RecoveryModel.*?WaitForAll AddAGDatabaseMemberships.*?\$nextDepend = ''\[WaitForAll\]AddAGDatabaseMemberships''') -What 'Phase 5 SQLAO secondary completion depends on TESTDB recovery and AG membership'
+Assert-True -Condition ($phase5 -match '(?s)Script EnsurePhase5DatabaseOnSecondary.*?sys\.dm_hadr_database_replica_states.*?BACKUP DATABASE.*?BACKUP LOG.*?RESTORE DATABASE.*?RESTORE LOG.*?SET HADR AVAILABILITY GROUP.*?DependsOn\s*=\s*''\[WaitForAll\]AddAGDatabaseMemberships''') -What 'Phase 5 repairs a missing local TESTDB replica with fresh full and log backups'
+Assert-True -Condition ($phase5 -match '(?s)\$_phase5Primary = if \(\$_phase5Instance -eq ''MSSQLSERVER''\).*?\$_phase5Local = if \(\$_phase5Instance -eq ''MSSQLSERVER''\)') -What 'Phase 5 secondary seeding targets default and named SQL instances explicitly'
+Assert-True -Condition ([regex]::Matches($phase5, 'Data Source=\$localServer;Initial Catalog=master').Count -eq 2 -and $phase5 -notmatch "Data Source=localhost;Initial Catalog=master") -What 'Phase 5 restore and membership polling use the same default or named local SQL instance'
+Assert-True -Condition ($phase5.Contains("DATABASEPROPERTYEX(N'`$databaseLiteral', 'Status') <> 'RESTORING'")) -What 'Phase 5 secondary seeding preserves an existing restoring database before replacement'
+Assert-True -Condition ($phase5 -match '(?s)Script ''ClusterWitness''.*?TestScript.*?QuorumResource\.State -eq ''Online''.*?sharePath -eq') -What 'Phase 5 quorum resource requires online state and the expected SharePath'
+$functionalValidation = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Validation.Functional.ps1') -Raw
+Assert-True -Condition ($functionalValidation -match '(?s)Get-ClusterQuorum.*?Get-ClusterParameter -Name SharePath.*?QuorumResource\.State.*?Online') -What 'post-Phase-5 validation uses typed online quorum witness state'
+Assert-True -Condition ($functionalValidation -notmatch 'Test-Path \$witnessShare') -What 'post-Phase-5 validation does not probe the restricted witness as an admin'
+Assert-True -Condition ($phase8 -match '(?s)Script EnsurePMPCAppsAccess.*?SecurityIdentifier\]''S-1-1-0''.*?Translate\(\[Security\.Principal\.NTAccount\]\).*?New-SmbShare.*?-FullAccess @\(\$worldName, \$adminName\)') -What 'Phase 8 PMPCApps access resolves the world SID to the localized account name'
+Assert-True -Condition ($phase8 -notmatch '(?s)(?:NTFSAccessEntry PMPCApps|SmbShare "PMPCShare").*?Everyone') -What 'Phase 8 PMPCApps resources do not use the English Everyone account name'
+Assert-True -Condition ($phase8 -match '(?s)EnsurePMPCAppsAccess.*?share\.Path.*?E:\\PMPCApps.*?Remove-SmbShare.*?New-SmbShare') -What 'Phase 8 PMPCApps repairs an existing share that targets the wrong path'
+Assert-True -Condition ($phase8 -match '(?s)EnsurePMPCAppsAccess.*?ContainerInherit.*?ObjectInherit.*?PropagationFlags.*?None.*?RemoveAccessRuleSpecific') -What 'Phase 8 PMPCApps requires inherited full access and removes explicit deny rules'
+Assert-True -Condition ($phase8 -match '(?s)\$_pmpcAdmin.*?targetSids.*?adminSid.*?FullAccess @\(\$worldName, \$adminName\)') -What 'Phase 8 PMPCApps preserves explicit domain-admin full access'
+$highMemoryRunner = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-LocaleCmSqlAoHighMemoryTest.ps1') -Raw
+$highMemoryConfigPath = Join-Path $RootPath 'config\tests\Locale-CM-SqlAo-HighMemory.json'
+$highMemoryConfig = Get-Content -LiteralPath $highMemoryConfigPath -Raw | ConvertFrom-Json
+Assert-True -Condition ($highMemoryRunner -match 'TotalPhysicalMemory' -and $highMemoryRunner -match '-not \$PlanOnly -and \$totalMemoryGB -lt 120') -What 'high-memory SQLAO locale test refuses real runs below the 128 GB class'
+Assert-Equal -Expected 2 -Actual ([regex]::Matches($highMemoryRunner, "= '16GB'").Count) -What 'high-memory SQLAO locale test pins SQL maximum and minimum to 16 GB'
+Assert-True -Condition ($highMemoryRunner -match '(?s)StartPhase -eq 0.*?target VM\(s\) already exist.*?StartPhase -gt 0.*?target VM\(s\) are missing') -What 'high-memory SQLAO locale test distinguishes fresh and resume VM safety'
+Assert-True -Condition ($highMemoryRunner -match 'Invoke-MemLabsMonitoredDeployment\.ps1' -and $highMemoryRunner -match 'ExpectedCompletedPhase\s*=\s*11') -What 'high-memory SQLAO locale test requires monitored Phase 11 completion'
+Assert-Equal -Expected 'DC,BDC,FileServer,SQLAO,SQLAO,Primary,SiteSystem,DomainMember' -Actual (@($highMemoryConfig.virtualMachines.role) -join ',') -What 'high-memory SQLAO config covers identity, storage, cluster, ConfigMgr, site-system, and client roles'
+Assert-Equal -Expected 61GB -Actual (@($highMemoryConfig.virtualMachines | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum -What 'high-memory SQLAO config remains within a 128 GB host budget'
+$setLocaleMatches = [regex]::Matches($highMemoryRunner, "(?:DC1|BDC1|FS1|SQL1|SQL2|PS1SITE|DPMP1|CL1) = '([^']+)'")
+$setLocales = @($setLocaleMatches | ForEach-Object { $_.Groups[1].Value })
+Assert-Equal -Expected 40 -Actual $setLocales.Count -What 'five high-memory locale sets assign all eight roles'
+Assert-Equal -Expected 38 -Actual @($setLocales | Sort-Object -Unique).Count -What 'high-memory locale sets cover all 38 catalog locales'
+Assert-Equal -Expected ($catalogTags -join ',') -Actual (@($setLocales | Sort-Object -Unique) -join ',') -What 'high-memory locale-set coverage exactly matches the locale catalog'
+Assert-Equal -Expected 'tr-TR,es-ES,it-IT,ru-RU,fr-FR' -Actual (@([regex]::Matches($highMemoryRunner, "PS1SITE = '([^']+)'") | ForEach-Object { $_.Groups[1].Value }) -join ',') -What 'high-memory sets exercise five native ConfigMgr setup languages'
 
 $script:PreparedLocaleRequests = [Collections.Generic.List[string]]::new()
 $script:ClearLocaleCacheCalls = 0

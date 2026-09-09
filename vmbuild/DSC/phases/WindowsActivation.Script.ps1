@@ -1,4 +1,4 @@
-﻿﻿# Shared Windows activation implementation used by Phase 10 and post-PXE policy.
+﻿﻿﻿# Shared Windows activation implementation used by Phase 10 and post-PXE policy.
 # The caller supplies Write-FixLog. The scriptblock returns { Success; Message }.
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Exported to dot-sourcing Phase 10 and perfloading callers.')]
 $MemLabsWindowsActivationScript = {
@@ -8,13 +8,13 @@ $MemLabsWindowsActivationScript = {
     $winp = 'W269N-WFGWX-YVC9B-4J6C9-T83GX'
     $wine = 'NPPR9-FWDCX-D2C8J-H872K-2YT43'
 
-    $getLicenseStatus = {
+    $getWindowsProduct = {
         $appId = '55c92734-d682-4d71-983e-d6ec3f16059f'
         try {
             $win = Get-CimInstance -ClassName SoftwareLicensingProduct `
                 -Filter "ApplicationId='$appId' AND PartialProductKey IS NOT NULL" `
                 -ErrorAction Stop | Select-Object -First 1
-            if ($win) { return [int]$win.LicenseStatus }
+            if ($win) { return $win }
         }
         catch {
             Write-FixLog "Filtered SoftwareLicensingProduct query failed ($($_.Exception.Message)); falling back to full enumeration"
@@ -23,9 +23,15 @@ $MemLabsWindowsActivationScript = {
             $win = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction Stop |
                 Where-Object { $_.ApplicationId -eq $appId -and $_.PartialProductKey } |
                 Select-Object -First 1
-            if ($win) { return [int]$win.LicenseStatus }
+            if ($win) { return $win }
         }
         catch {}
+        return $null
+    }
+
+    $getLicenseStatus = {
+        $win = & $getWindowsProduct
+        if ($win) { return [int]$win.LicenseStatus }
         return $null
     }
 
@@ -50,17 +56,18 @@ $MemLabsWindowsActivationScript = {
         return $false
     }
 
-    $cosname = (Get-CimInstance -Class Win32_OperatingSystem -ErrorAction SilentlyContinue).Name
-    if (-not $cosname) {
-        return [pscustomobject]@{ Success = $false; Message = 'Could not query Win32_OperatingSystem.Name' }
+    $activeProduct = & $getWindowsProduct
+    if (-not $activeProduct) {
+        return [pscustomobject]@{ Success = $false; Message = 'Could not query the active Windows licensing product' }
     }
 
+    $skuName = "$($activeProduct.Name) $($activeProduct.Description)"
     $key = $null
-    if ($cosname -like '*Pro*') { $key = $winp }
-    elseif ($cosname -like '*Enterprise*') { $key = $wine }
+    if ($skuName -match '(?i)\bEnterprise\b') { $key = $wine }
+    elseif ($skuName -match '(?i)\bPro(?:fessional)?\b') { $key = $winp }
 
     if (-not $key) {
-        return [pscustomobject]@{ Success = $true; Message = "OS '$cosname' is not Pro/Enterprise - activation skipped" }
+        return [pscustomobject]@{ Success = $true; Message = "Windows licensing product '$skuName' is not Pro/Enterprise - activation skipped" }
     }
 
     $startStatus = & $getLicenseStatus

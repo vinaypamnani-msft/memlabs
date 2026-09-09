@@ -510,23 +510,11 @@ try {
     }
 
     # Refresh capability evidence after Install-HyperV may have enabled the
-    # Client optional feature, then repair any appliance serving existing labs
-    # before maintenance is allowed to start VMs.
+    # Client optional feature. DHCP appliance reconciliation is deferred until
+    # a deployment configuration has been selected.
     $Common.DhcpBackend = Get-MemLabsDhcpBackend
-    if ((Test-MemLabsUsesDhcpAppliance) -and -not $Configuration) {
-        Write-Log "Post-init: reconciling Windows Client DHCP appliance infrastructure..." -LogOnly
-        $dhcpReady = Sync-MemLabsDhcpAppliance
-        if (-not $dhcpReady) { throw 'Windows Client DHCP appliance reconciliation failed.' }
-    }
     Write-Log "Post-init: Install-HyperV complete." -LogOnly
     Flush-LogBuffer -All
-
-    ### Run maintenance
-    if (-not $Configuration) {
-        Write-Log "Post-init: Starting maintenance..." -LogOnly
-        Start-Maintenance
-        Write-Log "Post-init: Maintenance complete." -LogOnly
-    }
 
     # Get config
     if (-not $Configuration) {
@@ -1362,9 +1350,6 @@ try {
 
         }
         $global:mutexes = @()
-
-        #This is now done in Phase 10
-        # Start-Maintenance -DeployConfig $deployConfig
 
         $updateExistingRequired = $false
         foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {

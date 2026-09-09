@@ -67,11 +67,13 @@ function Set-MemlabsHostSetting {
 #   3. E:\VirtualMachines                    (lab-host convention, when E: exists)
 #   4. interactive picker over fixed drives (largest free space first), saved for next time
 # C: is eligible only on Windows Client; D:/Z: remain reserved on every host.
-# -NoPrompt callers (cleanup, jobs) get $null instead of a prompt if nothing's been chosen.
+# -NoPrompt resolves without prompting and persists a newly selected default.
+# -ReadOnly neither prompts nor persists; an unusable saved root returns $null.
 function Get-MemlabsVmStorageRoot {
     [CmdletBinding()]
     param(
-        [switch]$NoPrompt
+        [switch]$NoPrompt,
+        [switch]$ReadOnly
     )
 
     $envOverride = $env:MEMLABS_VM_STORAGE_ROOT
@@ -85,16 +87,21 @@ function Get-MemlabsVmStorageRoot {
         $saved = $settings.vmStorageRoot
     }
     if (-not [string]::IsNullOrWhiteSpace($saved)) {
-        $savedRoot = [System.IO.Path]::GetPathRoot($saved)
-        if ($savedRoot -and [System.IO.Directory]::Exists($savedRoot)) {
-            return $saved
+        $savedPath = [string]$saved
+        $savedRoot = $null
+        if ($savedPath.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -lt 0) {
+            try { $savedRoot = [System.IO.Path]::GetPathRoot($savedPath) } catch {}
         }
-        Write-Log "Get-MemlabsVmStorageRoot: Saved vmStorageRoot '$saved' is on a drive that no longer exists; re-resolving." -Warning
+        if ($savedRoot -and [System.IO.Directory]::Exists($savedRoot)) {
+            return $savedPath
+        }
+        Write-Log "Get-MemlabsVmStorageRoot: Saved vmStorageRoot '$savedPath' is invalid or unavailable; re-resolving." -Warning
+        if ($ReadOnly) { return $null }
     }
 
     if ([System.IO.Directory]::Exists('E:\')) {
         $default = 'E:\VirtualMachines'
-        Set-MemlabsHostSetting -Name 'vmStorageRoot' -Value $default
+        if (-not $ReadOnly) { Set-MemlabsHostSetting -Name 'vmStorageRoot' -Value $default }
         return $default
     }
 
@@ -104,10 +111,10 @@ function Get-MemlabsVmStorageRoot {
         return $null
     }
 
-    if ($NoPrompt -or $Common.InJob -or -not [Environment]::UserInteractive) {
+    if ($ReadOnly -or $NoPrompt -or $Common.InJob -or -not [Environment]::UserInteractive) {
         $pick = $eligible[0]
         $path = "$($pick.DriveLetter):\VirtualMachines"
-        Set-MemlabsHostSetting -Name 'vmStorageRoot' -Value $path
+        if (-not $ReadOnly) { Set-MemlabsHostSetting -Name 'vmStorageRoot' -Value $path }
         return $path
     }
 

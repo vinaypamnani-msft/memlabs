@@ -54,50 +54,91 @@
         }
         $nextDepend = "[File]PMPCApps"
 
-        NTFSAccessEntry PMPCApps {
-            Path              = 'E:\PMPCApps'
-            AccessControlList = @(
-                NTFSAccessControlList {
-                    Principal          = "Everyone"
-                    ForcePrincipal     = $false
-                    AccessControlEntry = @(
-                        NTFSAccessControlEntry {
-                            AccessControlType = 'Allow'
-                            FileSystemRights  = 'FullControl'
-                            Inheritance       = 'This folder subfolders and files'
-                            Ensure            = 'Present'
-                        }
-                    )
+        $_pmpcAdmin = "$netbiosName\$DomainAdminName"
+        Script EnsurePMPCAppsAccess {
+            GetScript = { @{ Result = '' } }
+            TestScript = {
+                try {
+                    $worldSid = [Security.Principal.SecurityIdentifier]'S-1-1-0'
+                    $adminSid = (New-Object Security.Principal.NTAccount($using:_pmpcAdmin)).Translate([Security.Principal.SecurityIdentifier])
+                    $targetSids = @($worldSid.Value, $adminSid.Value)
+                    $acl = Get-Acl 'E:\PMPCApps' -ErrorAction Stop
+                    $ntfsOk = $true
+                    foreach ($targetSid in $targetSids) {
+                        $targetRules = @($acl.Access | Where-Object {
+                                try { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $targetSid }
+                                catch { $false }
+                            })
+                        $allow = @($targetRules | Where-Object {
+                                $_.AccessControlType -eq 'Allow' -and
+                                ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+                                ($_.InheritanceFlags -band [Security.AccessControl.InheritanceFlags]::ContainerInherit) -and
+                                ($_.InheritanceFlags -band [Security.AccessControl.InheritanceFlags]::ObjectInherit) -and
+                                $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None
+                            })
+                        if ($allow.Count -eq 0 -or @($targetRules | Where-Object AccessControlType -eq 'Deny').Count -gt 0) { $ntfsOk = $false }
+                    }
+                    $share = Get-SmbShare -Name 'PMPCApps' -ErrorAction Stop
+                    $shareAccess = @($share | Get-SmbShareAccess -ErrorAction Stop)
+                    $shareOk = [IO.Path]::GetFullPath([string]$share.Path).TrimEnd('\') -eq 'E:\PMPCApps'
+                    foreach ($targetSid in $targetSids) {
+                        $targetAccess = @($shareAccess | Where-Object {
+                                try { (New-Object Security.Principal.NTAccount($_.AccountName)).Translate([Security.Principal.SecurityIdentifier]).Value -eq $targetSid }
+                                catch { $false }
+                            })
+                        if (@($targetAccess | Where-Object { $_.AccessControlType -eq 'Allow' -and $_.AccessRight -eq 'Full' }).Count -eq 0 -or @($targetAccess | Where-Object AccessControlType -eq 'Deny').Count -gt 0) { $shareOk = $false }
+                    }
+                    return $ntfsOk -and $shareOk
                 }
-                            
-                NTFSAccessControlList {
-                    Principal          = "$netbiosName\$DomainAdminName"
-                    ForcePrincipal     = $false
-                    AccessControlEntry = @(
-                        NTFSAccessControlEntry {
-                            AccessControlType = 'Allow'
-                            FileSystemRights  = 'FullControl'
-                            Inheritance       = 'This folder subfolders and files'
-                            Ensure            = 'Present'
-                        }
+                catch { return $false }
+            }
+            SetScript = {
+                $worldSid = [Security.Principal.SecurityIdentifier]'S-1-1-0'
+                $worldName = $worldSid.Translate([Security.Principal.NTAccount]).Value
+                $adminName = [string]$using:_pmpcAdmin
+                $adminSid = (New-Object Security.Principal.NTAccount($adminName)).Translate([Security.Principal.SecurityIdentifier])
+                $targets = @(
+                    [pscustomobject]@{ Name = $worldName; Sid = $worldSid }
+                    [pscustomobject]@{ Name = $adminName; Sid = $adminSid }
+                )
+                $acl = Get-Acl 'E:\PMPCApps' -ErrorAction Stop
+                foreach ($target in $targets) {
+                    foreach ($deny in @($acl.Access | Where-Object {
+                                if ($_.IsInherited -or $_.AccessControlType -ne 'Deny') { return $false }
+                                try { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $target.Sid.Value }
+                                catch { $false }
+                            })) {
+                        $acl.RemoveAccessRuleSpecific($deny)
+                    }
+                    $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+                        $target.Sid,
+                        [Security.AccessControl.FileSystemRights]::FullControl,
+                        [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+                        [Security.AccessControl.PropagationFlags]::None,
+                        [Security.AccessControl.AccessControlType]::Allow
                     )
+                    $acl.SetAccessRule($rule)
                 }
-            )
-            DependsOn         = $nextDepend
-        }
-        $nextDepend = "[NTFSAccessEntry]PMPCApps"
+                Set-Acl -Path 'E:\PMPCApps' -AclObject $acl -ErrorAction Stop
 
-        SmbShare "PMPCShare" {
-            Name        = "PMPCApps"
-            Path        = 'E:\PMPCApps'
-            #Ensure                = "Present"
-            Description = "Share for PMPC Apps"
-            #FolderEnumerationMode = 'Unrestricted'
-            FullAccess  = "Everyone"
-            #ReadAccess            = "Everyone"
-            DependsOn   = $nextDepend
+                $share = Get-SmbShare -Name 'PMPCApps' -ErrorAction SilentlyContinue
+                if ($share -and [IO.Path]::GetFullPath([string]$share.Path).TrimEnd('\') -ne 'E:\PMPCApps') {
+                    Remove-SmbShare -Name 'PMPCApps' -Force -ErrorAction Stop
+                    $share = $null
+                }
+                if (-not $share) {
+                    New-SmbShare -Name 'PMPCApps' -Path 'E:\PMPCApps' -Description 'Share for PMPC Apps' -FullAccess @($worldName, $adminName) -ErrorAction Stop | Out-Null
+                }
+                else {
+                    foreach ($target in $targets) {
+                        Revoke-SmbShareAccess -Name 'PMPCApps' -AccountName $target.Name -Force -ErrorAction SilentlyContinue | Out-Null
+                        Grant-SmbShareAccess -Name 'PMPCApps' -AccountName $target.Name -AccessRight Full -Force -ErrorAction Stop | Out-Null
+                    }
+                }
+            }
+            DependsOn = $nextDepend
         }
-        $nextDepend = "[SmbShare]PMPCShare"
+        $nextDepend = '[Script]EnsurePMPCAppsAccess'
 
 
         WriteStatus Complete {

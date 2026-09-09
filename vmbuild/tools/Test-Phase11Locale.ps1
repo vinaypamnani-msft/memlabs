@@ -120,6 +120,9 @@ $clientArguments = @('ja-JP', 'ja-JP', 'ja-JP', ($capabilities -join ','), $fals
 
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 Assert-Equal $true ($validationText -match 'INFO: Windows Time secondary evidence unavailable \(\$diagnostic\)') 'successful sync surfaces secondary collector failures as informational evidence'
+Assert-Equal $true ($validationText -match '\$syncExitCode = \$LASTEXITCODE') 'repadmin validation captures the native exit code immediately'
+Assert-Equal $true ($validationText -match 'if \(\$syncExitCode -eq 0\)') 'localized repadmin success is decided by exit code'
+Assert-Equal $false ($validationText -match "SyncAll terminated with no errors") 'repadmin validation does not parse English success text'
 
 $japaneseW32tm = @(
     'localized leap indicator: 0'

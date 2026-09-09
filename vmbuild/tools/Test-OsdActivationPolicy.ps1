@@ -85,11 +85,32 @@ try {
 
     $installText = Get-Content (Join-Path $sourceRoot 'Install.ps1') -Raw
     Assert-Equal $true ($installText.Contains('Activation attempt $attempt/${maxAttempts}')) 'published installer contains shared retry implementation'
+    Assert-Equal $true ($installText.Contains('$skuName = "$($activeProduct.Name) $($activeProduct.Description)"')) 'activation chooses the key from the active licensing product'
+    Assert-Equal $false ($installText.Contains('Win32_OperatingSystem')) 'activation does not infer edition from the localized OS name'
     Assert-Equal $true ($installText.Contains("`$ErrorActionPreference = 'Continue'")) 'activation preserves Phase 10 native-command error semantics'
     $fixText = Get-Content (Join-Path $RootPath 'Fixes\Fix_ActivateWindows.ps1') -Raw
     Assert-Equal $true ($fixText.Contains('$Fix_ActivateWindows = $MemLabsWindowsActivationScript')) 'Phase 10 binds the same shared scriptblock'
     $perfloadingText = Get-Content $perfloadingPath -Raw
     Assert-Equal $true ($perfloadingText.Contains('TrimStart([char]0xFEFF)')) 'perfloading tolerates duplicate BOMs in the shared activation script'
+
+    function Write-FixLog { param([string] $Message) }
+    function Get-CimInstance {
+        param ([string] $ClassName, [string] $Filter)
+        if ($ClassName -eq 'Win32_OperatingSystem') { throw 'activation must not infer edition from Microsoft Windows 11 |C:\Windows|...' }
+        if ($ClassName -eq 'SoftwareLicensingProduct') {
+            return [pscustomobject]@{
+                ApplicationId     = '55c92734-d682-4d71-983e-d6ec3f16059f'
+                PartialProductKey = '2YT43'
+                LicenseStatus     = 1
+                Name              = 'Windows(R), Enterprise edition'
+                Description       = 'Windows(R) Operating System, VOLUME_KMSCLIENT channel'
+            }
+        }
+        throw "Unexpected CIM class '$ClassName'"
+    }
+    $localizedNameResult = & $MemLabsWindowsActivationScript
+    Assert-Equal $true $localizedNameResult.Success 'Enterprise activation handles the localized Win32 operating-system name shape'
+    Assert-Equal 'Windows already activated' $localizedNameResult.Message 'Enterprise licensing product is activated rather than skipped'
 }
 finally {
     Remove-Item -LiteralPath $sourceRoot -Recurse -Force -ErrorAction SilentlyContinue

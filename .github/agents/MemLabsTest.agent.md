@@ -97,6 +97,9 @@ or an observed failure warrants it.
 ### Tier 2: Repository Correctness Gates
 
 For substantive PowerShell changes, select the relevant repo-wide AST gates.
+These semantic gates intentionally run here rather than in pre-commit. Run the
+selected gates before a `normal` or `thorough` push, and immediately after an
+`urgent` provisional push.
 Common high-signal gates include:
 
 - `vmbuild/tools/Test-MandatoryParamCalls.ps1`
@@ -118,9 +121,9 @@ expensive, so run independent gates in parallel only when the execution tool can
 preserve each exit code and output without hiding prompts.
 
 Do not run every listed gate by default. Select only gates whose defect shape is
-present in the diff. When a pre-commit hook will execute the same repo-wide gate,
-the parent may use the hook as final evidence rather than asking this agent to
-duplicate it.
+present in the diff. The MemLabs pre-commit hook covers staged-byte safety,
+encoding, and syntax only; it does not provide evidence for these semantic
+gates.
 
 ### Tier 3: Broad Or Environment-Dependent Tests
 

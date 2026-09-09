@@ -177,6 +177,18 @@ EXIT /B 1
 
 :LauncherCurrent
 
+IF NOT EXIST ".githooks\pre-commit" GOTO HookActivationFailed
+git config --local core.hooksPath .githooks
+IF ERRORLEVEL 1 GOTO HookActivationFailed
+GOTO HookActivationComplete
+
+:HookActivationFailed
+ECHO ERROR: Could not activate the tracked MemLabs Git hooks.
+popd
+EXIT /B 1
+
+:HookActivationComplete
+
 REM ============================================================
 REM Locate or install PowerShell 7 before maintenance can launch
 REM any other package-manager work.

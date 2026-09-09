@@ -264,22 +264,121 @@ function Set-DnsmasqDeployConfigIPAddresses {
     if ($null -eq $LiveVMs) { $LiveVMs = @(Get-VM -ErrorAction SilentlyContinue) }
     $used = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $existingIpByName = @{}
+    $existingVirtualIpsByName = @{}
+    $addressClaims = @{}
     foreach ($live in @($LiveVMs | Where-Object { $_ })) {
         if ($live.Notes) {
             try {
                 $note = $live.Notes | ConvertFrom-Json -ErrorAction Stop
-                foreach ($candidate in @($note.AssignedIP, $note.LastKnownIP)) { if ($candidate) { $null = $used.Add([string]$candidate) } }
+                foreach ($candidate in @($note.AssignedIP, $note.LastKnownIP)) {
+                    if ($candidate) {
+                        $ordinaryIp = [string]$candidate
+                        $null = $used.Add($ordinaryIp)
+                        if (-not $addressClaims.ContainsKey($ordinaryIp)) { $addressClaims[$ordinaryIp] = [Collections.Generic.List[object]]::new() }
+                        $addressClaims[$ordinaryIp].Add([pscustomobject]@{ Name = $live.Name.ToLowerInvariant(); Kind = 'OrdinaryNote' })
+                    }
+                }
+                foreach ($candidate in @($note.ClusterIPAddress, $note.AGIPAddress)) {
+                    if ($candidate) {
+                        $virtualIp = [string]$candidate -replace '/.+$', ''
+                        $null = $used.Add($virtualIp)
+                        if (-not $addressClaims.ContainsKey($virtualIp)) { $addressClaims[$virtualIp] = [Collections.Generic.List[object]]::new() }
+                        $addressClaims[$virtualIp].Add([pscustomobject]@{ Name = $live.Name.ToLowerInvariant(); Kind = 'VirtualNote' })
+                    }
+                }
                 $persistedIp = if ($note.AssignedIP) { [string]$note.AssignedIP } elseif ($note.LastKnownIP) { [string]$note.LastKnownIP } else { '' }
                 if ($persistedIp) { $existingIpByName[$live.Name.ToLowerInvariant()] = $persistedIp }
+                if ($note.ClusterIPAddress -or $note.AGIPAddress) {
+                    $existingVirtualIpsByName[$live.Name.ToLowerInvariant()] = [pscustomobject]@{
+                        ClusterIPAddress = [string]$note.ClusterIPAddress
+                        AGIPAddress      = [string]$note.AGIPAddress
+                    }
+                }
             }
             catch { }
         }
         foreach ($adapter in @(Get-MemLabsVmAdapters -VM $live)) {
-            foreach ($candidate in @($adapter.IPAddresses | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' })) { $null = $used.Add([string]$candidate) }
+            foreach ($candidate in @($adapter.IPAddresses | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' })) {
+                $adapterIp = [string]$candidate
+                $null = $used.Add($adapterIp)
+                if (-not $addressClaims.ContainsKey($adapterIp)) { $addressClaims[$adapterIp] = [Collections.Generic.List[object]]::new() }
+                $addressClaims[$adapterIp].Add([pscustomobject]@{ Name = $live.Name.ToLowerInvariant(); Kind = 'Adapter' })
+            }
         }
     }
 
     $defaultNetwork = [string]$DeployConfig.vmOptions.network
+    $sqlAoOwners = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden })
+
+    # Validate and claim every explicit/restored VIP before allocating any missing
+    # value. Otherwise a missing owner listed first can consume a later owner's
+    # configured address even though other reserved-range addresses are free.
+    foreach ($owner in $sqlAoOwners) {
+        $scopeId = if ($owner.network) { [string]$owner.network } else { $defaultNetwork }
+        $base = (($scopeId -split '\.') | Select-Object -First 3) -join '.'
+        $ownerKey = ([string]$owner.vmName).ToLowerInvariant()
+        $pairKeys = @($ownerKey, ([string]$owner.OtherNode).ToLowerInvariant())
+        foreach ($property in 'ClusterIPAddress', 'AGIPAddress') {
+            $configuredIp = if ($owner.$property) { [string]$owner.$property -replace '/.+$', '' } else { '' }
+            $persistedIps = @($pairKeys | ForEach-Object {
+                    if ($existingVirtualIpsByName.ContainsKey($_)) {
+                        $value = $existingVirtualIpsByName[$_].$property
+                        if ($value) { [string]$value -replace '/.+$', '' }
+                    }
+                } | Sort-Object -Unique)
+            if ($persistedIps.Count -gt 1) {
+                throw "$($owner.vmName)/$($owner.OtherNode): persisted SQLAO $property values disagree: $($persistedIps -join ', ')."
+            }
+            if ($configuredIp -and $persistedIps.Count -eq 1 -and $configuredIp -ne $persistedIps[0]) {
+                throw "$($owner.vmName)/$($owner.OtherNode): configured SQLAO $property $configuredIp disagrees with persisted value $($persistedIps[0])."
+            }
+            $ip = if ($configuredIp) { $configuredIp } elseif ($persistedIps.Count -eq 1) { $persistedIps[0] } else { '' }
+            if (-not $ip) { continue }
+            $parsedIp = $null
+            $octets = @($ip -split '\.')
+            $validIp = [Net.IPAddress]::TryParse($ip, [ref]$parsedIp) -and $parsedIp.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and $parsedIp.ToString() -eq $ip
+            if (-not $validIp -or $octets.Count -ne 4 -or (($octets[0..2] -join '.') -ne $base) -or [int]$octets[3] -lt 201 -or [int]$octets[3] -gt 254) {
+                throw "$($owner.vmName): persisted $property $ip must be a canonical IPv4 address in $base.201-$base.254."
+            }
+            $conflictingClaims = @($addressClaims[$ip] | Where-Object {
+                    $null -ne $_ -and
+                    -not ($_.Kind -eq 'VirtualNote' -and $_.Name -in $pairKeys) -and
+                    -not ($_.Kind -eq 'Adapter' -and $_.Name -in $pairKeys)
+                })
+            if ($conflictingClaims.Count -gt 0) {
+                throw "$($owner.vmName): SQLAO $property $ip is already in use by another VM or virtual endpoint."
+            }
+            $null = $used.Add($ip)
+            if (-not $addressClaims.ContainsKey($ip)) { $addressClaims[$ip] = [Collections.Generic.List[object]]::new() }
+            $addressClaims[$ip].Add([pscustomobject]@{ Name = $ownerKey; Kind = 'ConfigVirtual' })
+            $owner | Add-Member -MemberType NoteProperty -Name $property -Value $ip -Force
+        }
+    }
+
+    foreach ($owner in $sqlAoOwners) {
+        $scopeId = if ($owner.network) { [string]$owner.network } else { $defaultNetwork }
+        $base = (($scopeId -split '\.') | Select-Object -First 3) -join '.'
+        $ownerKey = ([string]$owner.vmName).ToLowerInvariant()
+        foreach ($property in 'ClusterIPAddress', 'AGIPAddress') {
+            $ip = [string]$owner.$property
+            if (-not $ip) {
+                for ($octet = 201; $octet -le 254; $octet++) {
+                    $candidate = "$base.$octet"
+                    if (-not $used.Contains($candidate)) { $ip = $candidate; break }
+                }
+                if (-not $ip) { throw "No free SQLAO virtual address remains in $base.201-$base.254 for $($owner.vmName) $property." }
+                $null = $used.Add($ip)
+                if (-not $addressClaims.ContainsKey($ip)) { $addressClaims[$ip] = [Collections.Generic.List[object]]::new() }
+                $addressClaims[$ip].Add([pscustomobject]@{ Name = $ownerKey; Kind = 'ConfigVirtual' })
+                $owner | Add-Member -MemberType NoteProperty -Name $property -Value $ip -Force
+            }
+            Write-Log "$($owner.vmName): Pre-assigned appliance SQLAO $property $ip (scope $scopeId)" -LogOnly
+        }
+        if ($owner.ClusterIPAddress -eq $owner.AGIPAddress) {
+            throw "$($owner.vmName): SQLAO ClusterIPAddress and AGIPAddress both resolved to $($owner.ClusterIPAddress)."
+        }
+    }
+
     foreach ($vm in @($DeployConfig.virtualMachines)) {
         if ($vm.hidden -or $vm.role -eq 'OSDClient') { continue }
         $scopeId = if ($vm.role -in @('InternetClient', 'AADClient')) { '172.31.250.0' } elseif ($vm.network) { [string]$vm.network } else { $defaultNetwork }

@@ -125,7 +125,8 @@ function Write-LiveOpsLeaseMetadata {
 function Get-LiveOpsVmState {
     param(
         [Parameter(Mandatory)][string[]] $Name,
-        [Parameter(Mandatory)][string] $Type
+        [Parameter(Mandatory)][string] $Type,
+        [switch] $AllowMissing
     )
 
     if ($Type -ne 'VM') {
@@ -137,10 +138,16 @@ function Get-LiveOpsVmState {
     }
 
     $states = [Collections.Generic.List[object]]::new()
+    $allVms = if ($AllowMissing) { @(Get-VM -ErrorAction Stop) } else { @() }
     foreach ($vmName in $Name) {
-        $vm = Get-VM -Name $vmName -ErrorAction Stop
+        $vm = if ($AllowMissing) { $allVms | Where-Object Name -eq $vmName | Select-Object -First 1 } else { Get-VM -Name $vmName -ErrorAction Stop }
+        if (-not $vm) {
+            $states.Add([pscustomobject]@{ Name = $vmName; Exists = $false })
+            continue
+        }
         $states.Add([pscustomobject]@{
                 Name                  = $vm.Name
+                Exists                = $true
                 Id                    = "$($vm.Id)"
                 State                 = "$($vm.State)"
                 Status                = "$($vm.Status)"
@@ -175,7 +182,7 @@ function Test-LiveOpsConflictingCommandLine {
 
     $wrapperEntryPointPattern = '(?i)(^|\s)"?-(?:f|fi|fil|file)"?\s+(?:"[^"]*[\\/]Invoke-MemLabsLiveOperation\.ps1"|[^\s"'']*[\\/]Invoke-MemLabsLiveOperation\.ps1)(?=$|\s)'
     $commandModePattern = '(?i)(^|\s)"?[-/](?:c|co|com|comm|comma|comman|command)"?(?:\s|$)'
-    $entryPointPattern = '(?i)(^|[\s"''=;&|()])(?:[^\s"'']*[\\/])?(?:New-Lab\.ps1|Start-Test(?:\.ps1)?|Invoke-OvernightLocaleMatrix\.ps1|Start-Phase(?:\.ps1)?)(?=$|[\s"'';,&|()])'
+    $entryPointPattern = '(?i)(^|[\s"''=;&|()])(?:[^\s"'']*[\\/])?(?:New-Lab\.ps1|Start-Test(?:\.ps1)?|Invoke-OvernightLocaleMatrix\.ps1|Invoke-MemLabsDeploymentChild\.ps1|Start-Phase(?:\.ps1)?)(?=$|[\s"'';,&|()])'
     $encodedCommandPattern = '(?i)(^|\s)"?[-/](?:e|ec|en|enc|enco|encod|encode|encoded|encodedc|encodedco|encodedcom|encodedcomm|encodedcomma|encodedcomman|encodedcommand)"?(?:\s|$)'
     if (-not $CommandLine) { return $false }
     if ($CommandLine -match $encodedCommandPattern) { return $true }
@@ -281,6 +288,7 @@ $null = New-Item -Path $coordinationRoot -ItemType Directory -Force
 $leasePath = Join-Path $coordinationRoot 'mutation.lock'
 $journalPath = Join-Path $coordinationRoot 'operations.jsonl'
 $operationId = [guid]::NewGuid().ToString('N')
+$handoffToken = if ($Mode -ne 'Observe') { [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N') } else { '' }
 $startedUtc = [datetime]::UtcNow
 $process = Get-Process -Id $PID
 $repository = Get-LiveOpsRepositoryState
@@ -304,6 +312,7 @@ $owner = [ordered]@{
     OperationHash = Get-LiveOpsOperationHash -Text $operationText
     PostconditionHash = Get-LiveOpsOperationHash -Text $postconditionText
     FailureDiagnosticsHash = Get-LiveOpsOperationHash -Text $failureDiagnosticsText
+    HandoffHash   = Get-LiveOpsOperationHash -Text $handoffToken
     ExpectedLoss  = $ExpectedLoss
     RecoveryPath  = $RecoveryPath
     Repository    = $repository
@@ -350,16 +359,31 @@ try {
     $failureStage = 'Operation'
     $savedProgressPreference = $ProgressPreference
     $savedErrorActionPreference = $ErrorActionPreference
+    $handoffEnvironment = [ordered]@{
+        MEMLABS_LIVEOPS_OPERATION_ID = if ($Mode -ne 'Observe') { $operationId } else { $null }
+        MEMLABS_LIVEOPS_LEASE_PATH = if ($Mode -ne 'Observe') { $leasePath } else { $null }
+        MEMLABS_LIVEOPS_HANDOFF_TOKEN = if ($Mode -ne 'Observe') { $handoffToken } else { $null }
+        MEMLABS_LIVEOPS_OWNER_PID = if ($Mode -ne 'Observe') { [string]$PID } else { $null }
+        MEMLABS_LIVEOPS_OWNER_START_UTC = if ($Mode -ne 'Observe') { [string]$owner.ProcessStartUtc } else { $null }
+    }
+    $previousHandoffEnvironment = @{}
     $ProgressPreference = 'SilentlyContinue'
     $ErrorActionPreference = $callbackErrorActionPreference
     try {
+        foreach ($name in $handoffEnvironment.Keys) {
+            $previousHandoffEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable($name, $handoffEnvironment[$name], [EnvironmentVariableTarget]::Process)
+        }
         $operationOutput = @(& $Operation 3>$null 4>$null 5>$null 6>$null)
     }
     finally {
+        foreach ($name in $handoffEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $previousHandoffEnvironment[$name], [EnvironmentVariableTarget]::Process)
+        }
         $ErrorActionPreference = $savedErrorActionPreference
         $ProgressPreference = $savedProgressPreference
     }
-    $afterState = @(Get-LiveOpsVmState -Name $normalizedTargets -Type $TargetType)
+    $afterState = @(Get-LiveOpsVmState -Name $normalizedTargets -Type $TargetType -AllowMissing)
 
     $postconditionPassed = $null
     if ($Postcondition) {
@@ -408,7 +432,7 @@ catch {
     [object[]] $failureDiagnosticsOutput = @()
     $failureDiagnosticsOutputCount = 0
     try {
-        $afterState = @(Get-LiveOpsVmState -Name $normalizedTargets -Type $TargetType)
+        $afterState = @(Get-LiveOpsVmState -Name $normalizedTargets -Type $TargetType -AllowMissing)
     }
     catch {
         $postFailureStateErrorType = $_.Exception.GetType().FullName

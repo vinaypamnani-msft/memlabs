@@ -4329,6 +4329,64 @@ function Remove-StaleAdComputer {
     "$($out.Outcome)"
 }
 
+function Remove-StaleAdDomainControllerMetadata {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $DCName,
+        [Parameter(Mandatory = $true)]
+        [string] $Domain,
+        [Parameter(Mandatory = $true)]
+        [string] $ComputerName,
+        [Parameter(Mandatory = $false)]
+        [string] $Reason
+    )
+
+    $removeBlock = {
+        $name = $using:ComputerName
+        try {
+            $root = Get-ADRootDSE -ErrorAction Stop
+            $sitesDn = "CN=Sites,$($root.configurationNamingContext)"
+            $escapedName = $name.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29').Replace([string][char]0, '\00')
+            $objects = @(Get-ADObject -SearchBase $sitesDn -LDAPFilter "(&(objectClass=server)(cn=$escapedName))" -Properties dNSHostName -ErrorAction Stop)
+        }
+        catch {
+            return [pscustomobject]@{ Outcome = 'LookupFailed'; Error = $_.Exception.Message }
+        }
+        if ($objects.Count -eq 0) { return [pscustomobject]@{ Outcome = 'NotPresent' } }
+        if ($objects.Count -ne 1) {
+            return [pscustomobject]@{ Outcome = 'LookupFailed'; Error = "Found $($objects.Count) server objects named '$name'; refusing an ambiguous recursive delete." }
+        }
+
+        $object = $objects[0]
+        try {
+            Remove-ADObject -Identity $object.DistinguishedName -Recursive -Confirm:$false -ErrorAction Stop
+            return [pscustomobject]@{ Outcome = 'Removed'; Dn = $object.DistinguishedName; DnsHostName = $object.dNSHostName }
+        }
+        catch {
+            return [pscustomobject]@{ Outcome = 'RemoveFailed'; Dn = $object.DistinguishedName; DnsHostName = $object.dNSHostName; Error = $_.Exception.Message }
+        }
+    }
+
+    $suffix = if ($Reason) { " ($Reason)" } else { '' }
+    Write-Log "Checking $DCName for stale domain-controller metadata '$ComputerName'$suffix..." -LogOnly
+    $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $removeBlock -SuppressLog
+    if (-not $result -or $result.ScriptBlockFailed -or -not $result.ScriptBlockOutput) {
+        Write-OrangePoint "Could not check AD Sites and Services for '$ComputerName'$suffix -- stale NTDS metadata may still block promotion." -WriteLog
+        return 'NoResponse'
+    }
+
+    $out = $result.ScriptBlockOutput
+    switch ($out.Outcome) {
+        'NotPresent' { Write-Log "No stale domain-controller metadata '$ComputerName'$suffix." -LogOnly }
+        'Removed' { Write-GreenCheck "Removed stale domain-controller metadata '$ComputerName'$suffix ($($out.Dn))" -WriteLog }
+        'LookupFailed' { Write-OrangePoint "Could not identify stale domain-controller metadata '$ComputerName'$suffix`: $($out.Error)" -WriteLog }
+        'RemoveFailed' { Write-OrangePoint "Failed to remove stale domain-controller metadata '$ComputerName'$suffix at $($out.Dn): $($out.Error)" -WriteLog }
+        default { Write-OrangePoint "Unexpected result checking domain-controller metadata '$ComputerName'$suffix`: $($out.Outcome)" -WriteLog }
+    }
+    "$($out.Outcome)"
+}
+
 function Clear-SqlAoBackupShare {
     <#
     .SYNOPSIS

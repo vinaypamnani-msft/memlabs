@@ -528,7 +528,7 @@
             Registry RAMDiskTFTPWIndowSize {
                 DependsOn = $nextDepend
                 Ensure    = "Present"
-                Key       = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SMS\DP"
+                Key       = "HKLM:\SOFTWARE\Microsoft\SMS\DP"
                 ValueName = "RamDiskTFTPWindowSize"
                 ValueData = "16"
                 ValueType = "DWord"
@@ -537,7 +537,7 @@
             Registry RAMDiskTFTPBlockSize {
                 DependsOn = $nextDepend
                 Ensure    = "Present"
-                Key       = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SMS\DP"
+                Key       = "HKLM:\SOFTWARE\Microsoft\SMS\DP"
                 ValueName = "RamDiskTFTPBlockSize"
                 # 1456 + 4-byte TFTP + 8-byte UDP + 20-byte IPv4 = 1488,
                 # safely below Ethernet MTU 1500. The old 4096 cap allowed a
