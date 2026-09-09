@@ -2,7 +2,8 @@
 param (
     [Parameter(Mandatory = $true)]
     [string] $ResultPath,
-    [version] $MinimumVersion = [version] '7.4'
+    [version] $MinimumVersion = [version] '7.4',
+    [string[]] $CandidatePaths
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,6 +14,34 @@ function Get-PowerShell7CandidatePaths {
     foreach ($programFilesRoot in @($env:ProgramW6432, $env:ProgramFiles)) {
         if ([string]::IsNullOrWhiteSpace($programFilesRoot)) { continue }
         $paths.Add((Join-Path $programFilesRoot 'PowerShell\7\pwsh.exe'))
+    }
+
+    foreach ($appPathKey in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\pwsh.exe'
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\pwsh.exe'
+            'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\pwsh.exe'
+        )) {
+        $appPath = Get-ItemProperty -LiteralPath $appPathKey -ErrorAction SilentlyContinue
+        if ($null -ne $appPath -and -not [string]::IsNullOrWhiteSpace([string] $appPath.'(default)')) {
+            $paths.Add([string] $appPath.'(default)')
+        }
+    }
+
+    foreach ($uninstallRoot in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+            'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        )) {
+        foreach ($entry in @(Get-ItemProperty -Path $uninstallRoot -ErrorAction SilentlyContinue)) {
+            if ([string] $entry.DisplayName -notmatch '^PowerShell 7(?:-|$)') { continue }
+            if ([string]::IsNullOrWhiteSpace([string] $entry.InstallLocation)) { continue }
+            $paths.Add((Join-Path ([string] $entry.InstallLocation) 'pwsh.exe'))
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $paths.Add((Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'))
+        $paths.Add((Join-Path $env:LOCALAPPDATA 'Microsoft\PowerShell\7\pwsh.exe'))
     }
 
     foreach ($command in @(Get-Command pwsh.exe -CommandType Application -All -ErrorAction SilentlyContinue)) {
@@ -58,13 +87,18 @@ function Find-PowerShell7 {
 
 function Invoke-PowerShell7Install {
     param (
-        [version] $RequiredVersion = [version] '7.4'
+        [version] $RequiredVersion = [version] '7.4',
+        [string[]] $DiscoveryPaths
     )
 
     $choco = Get-Command choco.exe -CommandType Application -ErrorAction SilentlyContinue
     if ($choco) {
         Write-Host 'PowerShell 7.4 or newer was not found. Installing the current PowerShell release with Chocolatey...'
         & $choco.Source upgrade pwsh -y
+        if ($null -eq (Find-PowerShell7 -RequiredVersion $RequiredVersion -CandidatePaths $DiscoveryPaths)) {
+            Write-Host 'Chocolatey still cannot locate a usable PowerShell executable. Forcing a package repair...'
+            & $choco.Source install pwsh -y --force
+        }
         return
     }
 
@@ -72,8 +106,9 @@ function Invoke-PowerShell7Install {
     if ($winget) {
         Write-Host 'PowerShell 7.4 or newer was not found. Installing the current PowerShell release with WinGet...'
         & $winget.Source upgrade --id Microsoft.PowerShell --exact --source winget --silent --accept-source-agreements --accept-package-agreements
-        if ($null -eq (Find-PowerShell7 -RequiredVersion $RequiredVersion)) {
-            & $winget.Source install --id Microsoft.PowerShell --exact --source winget --silent --accept-source-agreements --accept-package-agreements
+        if ($null -eq (Find-PowerShell7 -RequiredVersion $RequiredVersion -CandidatePaths $DiscoveryPaths)) {
+            Write-Host 'WinGet still cannot locate a usable PowerShell executable. Forcing a package repair...'
+            & $winget.Source install --id Microsoft.PowerShell --exact --source winget --silent --force --accept-source-agreements --accept-package-agreements
         }
         return
     }
@@ -83,14 +118,20 @@ function Invoke-PowerShell7Install {
 
 Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
 
-$powerShell = Find-PowerShell7 -RequiredVersion $MinimumVersion
+$discoveryPaths = if ($CandidatePaths) { @($CandidatePaths) } else { @(Get-PowerShell7CandidatePaths) }
+$powerShell = Find-PowerShell7 -RequiredVersion $MinimumVersion -CandidatePaths $discoveryPaths
 if ($null -eq $powerShell) {
-    Invoke-PowerShell7Install -RequiredVersion $MinimumVersion
-    $powerShell = Find-PowerShell7 -RequiredVersion $MinimumVersion
+    Invoke-PowerShell7Install -RequiredVersion $MinimumVersion -DiscoveryPaths $discoveryPaths
+    $discoveryPaths = if ($CandidatePaths) { @($CandidatePaths) } else { @(Get-PowerShell7CandidatePaths) }
+    $powerShell = Find-PowerShell7 -RequiredVersion $MinimumVersion -CandidatePaths $discoveryPaths
 }
 
 if ($null -eq $powerShell) {
-    throw "PowerShell $MinimumVersion or newer was not found after the installation attempt."
+    $candidateSummary = @($discoveryPaths | ForEach-Object {
+            $candidateVersion = Get-PowerShellExecutableVersion -Path $_
+            if ($null -eq $candidateVersion) { "$_ [missing or unreadable]" } else { "$_ [$candidateVersion]" }
+        }) -join '; '
+    throw "PowerShell $MinimumVersion or newer was not found after the installation attempt. Candidates: $candidateSummary"
 }
 
 $resultDirectory = Split-Path -Parent $ResultPath

@@ -151,6 +151,32 @@ IF ERRORLEVEL 1 (
     ECHO Resuming...
 )
 
+REM If git replaced VMBuild.cmd, stop executing this pre-pull snapshot and
+REM restart through the new launcher. The new process takes its own stable
+REM snapshot, so it cannot resume at a stale byte offset either.
+git diff --no-index --quiet -- "%~f0" "%MEMLABS_VMBUILD_ROOT%VMBuild.cmd" >NUL 2>&1
+IF ERRORLEVEL 2 GOTO LauncherCompareFailed
+IF ERRORLEVEL 1 GOTO RestartUpdatedLauncher
+GOTO LauncherCurrent
+
+:LauncherCompareFailed
+ECHO ERROR: Could not compare the running VMBuild snapshot with the updated launcher.
+popd
+EXIT /B 1
+
+:RestartUpdatedLauncher
+ECHO VMBuild.cmd was updated. Restarting with the new launcher...
+CALL "%MEMLABS_VMBUILD_ROOT%VMBuild.cmd" %*
+IF ERRORLEVEL 1 GOTO UpdatedLauncherFailed
+popd
+EXIT /B 0
+
+:UpdatedLauncherFailed
+popd
+EXIT /B 1
+
+:LauncherCurrent
+
 REM ============================================================
 REM Locate or install PowerShell 7 before maintenance can launch
 REM any other package-manager work.

@@ -65,6 +65,19 @@ function Get-PowerShellExecutableVersion {
 
 $canonicalPath = 'C:\Program Files\PowerShell\7\pwsh.exe'
 $pathCandidate = 'C:\tools\pwsh.exe'
+$appPathCandidate = 'C:\RegistryAppPath\pwsh.exe'
+$uninstallCandidate = 'C:\RegistryInstall\pwsh.exe'
+function Get-ItemProperty {
+    param ([string] $LiteralPath, [string] $Path, [string] $ErrorAction)
+
+    if ($LiteralPath -eq 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\pwsh.exe') {
+        return [pscustomobject]@{ '(default)' = $appPathCandidate }
+    }
+    if ($Path -eq 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*') {
+        return [pscustomobject]@{ DisplayName = 'PowerShell 7-x64'; InstallLocation = 'C:\RegistryInstall' }
+    }
+    return $null
+}
 $savedCandidateEnvironment = @{
     Path = $env:PATH
     ProgramFiles = $env:ProgramFiles
@@ -77,6 +90,8 @@ try {
     $candidatePaths = @(Get-PowerShell7CandidatePaths)
     Assert-Equal $true ($candidatePaths -contains 'C:\Program Files\PowerShell\7\pwsh.exe') 'candidate discovery uses the 64-bit Program Files root when PATH is stale'
     Assert-Equal $true ($candidatePaths -contains 'C:\Program Files (x86)\PowerShell\7\pwsh.exe') 'candidate discovery also considers the current process Program Files root'
+    Assert-Equal $true ($candidatePaths -contains $appPathCandidate) 'candidate discovery reads the registered pwsh App Path'
+    Assert-Equal $true ($candidatePaths -contains $uninstallCandidate) 'candidate discovery reads PowerShell uninstall InstallLocation'
 }
 finally {
     $env:PATH = $savedCandidateEnvironment.Path
@@ -127,8 +142,9 @@ function winget.exe {
 }
 
 Invoke-PowerShell7Install -RequiredVersion ([version] '7.4')
-Assert-Equal 1 $script:PackageCalls.Count 'Chocolatey bootstrap invokes one package command'
+Assert-Equal 2 $script:PackageCalls.Count 'Chocolatey bootstrap repairs a package record with no usable executable'
 Assert-Equal 'upgrade pwsh -y' ($script:PackageCalls[0] -join ' ') 'Chocolatey installs or upgrades the pwsh package'
+Assert-Equal 'install pwsh -y --force' ($script:PackageCalls[1] -join ' ') 'Chocolatey force-repairs PowerShell when upgrade leaves no usable binary'
 
 function Find-PowerShell7 {
     param ([version] $RequiredVersion)
@@ -143,7 +159,7 @@ $script:PowerShellInstalled = $false
 Invoke-PowerShell7Install -RequiredVersion ([version] '7.4')
 Assert-Equal 2 $script:PackageCalls.Count 'WinGet bootstrap retries installation when upgrade did not create a usable binary'
 Assert-Equal 'upgrade --id Microsoft.PowerShell --exact --source winget --silent --accept-source-agreements --accept-package-agreements' ($script:PackageCalls[0] -join ' ') 'WinGet first attempts an in-place upgrade'
-Assert-Equal 'install --id Microsoft.PowerShell --exact --source winget --silent --accept-source-agreements --accept-package-agreements' ($script:PackageCalls[1] -join ' ') 'WinGet installs PowerShell when no supported binary appears'
+Assert-Equal 'install --id Microsoft.PowerShell --exact --source winget --silent --force --accept-source-agreements --accept-package-agreements' ($script:PackageCalls[1] -join ' ') 'WinGet force-repairs PowerShell when an installed record has no usable binary'
 
 $launcherText = [System.IO.File]::ReadAllText($launcherPath)
 Assert-Equal $true $launcherText.Contains('-File ".\Ensure-PowerShell7.ps1"') 'VMBuild invokes the bootstrap before launch'
@@ -235,14 +251,45 @@ public static class FakePackageProvider
     $powershell51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $process = Start-Process -FilePath $powershell51 -ArgumentList @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-File', ('"{0}"' -f $ensurePath), '-ResultPath', ('"{0}"' -f $resultPath), '-MinimumVersion', '7.4'
+        '-File', ('"{0}"' -f $ensurePath), '-ResultPath', ('"{0}"' -f $resultPath), '-MinimumVersion', '7.4',
+        '-CandidatePaths', ('"{0}"' -f (Join-Path $fixtureRoot 'missing-pwsh.exe'))
     ) -RedirectStandardOutput $standardOutputPath -RedirectStandardError $standardErrorPath -PassThru -Wait
 
     $providerCalls = @(if (Test-Path -LiteralPath $providerLog) { Get-Content -LiteralPath $providerLog })
+    $failureOutput = @(
+        Get-Content -LiteralPath $standardOutputPath -ErrorAction SilentlyContinue
+        Get-Content -LiteralPath $standardErrorPath -ErrorAction SilentlyContinue
+    ) -join "`n"
     Assert-Equal 1 $process.ExitCode 'bootstrap fails when a successful provider call installs no supported binary'
-    Assert-Equal 1 $providerCalls.Count 'failed bootstrap invokes the available provider once'
-    Assert-Equal 'upgrade pwsh -y' $providerCalls[0] 'failed bootstrap attempted the expected Chocolatey package operation'
+    Assert-Equal 2 $providerCalls.Count 'failed bootstrap attempts upgrade and forced repair'
+    Assert-Equal 'upgrade pwsh -y' $providerCalls[0] 'failed bootstrap attempted the expected Chocolatey upgrade'
+    Assert-Equal 'install pwsh -y --force' $providerCalls[1] 'failed bootstrap attempted the expected Chocolatey forced repair'
+    Assert-Equal $true $failureOutput.Contains('Candidates:') 'failed bootstrap reports candidate evidence'
+    Assert-Equal $true $failureOutput.Contains('missing-pwsh.exe [missing or unreadable]') 'failed bootstrap identifies the unusable candidate'
     Assert-Equal $false (Test-Path -LiteralPath $resultPath) 'failed bootstrap removes the stale result file'
+
+    Remove-Item -LiteralPath $providerPath -Force
+    $wingetProviderPath = Join-Path $providerDirectory 'winget.exe'
+    Copy-Item -LiteralPath (Join-Path $fixtureRoot 'FakePackageProvider.exe') -Destination $wingetProviderPath -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $wingetProviderPath)) {
+        & $compilerPath /nologo /target:exe "/out:$wingetProviderPath" $providerSourcePath
+        if ($LASTEXITCODE -ne 0) { throw "Could not compile the isolated WinGet fixture (csc exit $LASTEXITCODE)." }
+    }
+    Remove-Item -LiteralPath $providerLog, $standardOutputPath, $standardErrorPath -Force -ErrorAction SilentlyContinue
+    [System.IO.File]::WriteAllText($resultPath, 'stale result', [System.Text.Encoding]::ASCII)
+
+    $process = Start-Process -FilePath $powershell51 -ArgumentList @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', ('"{0}"' -f $ensurePath), '-ResultPath', ('"{0}"' -f $resultPath), '-MinimumVersion', '7.4',
+        '-CandidatePaths', ('"{0}"' -f (Join-Path $fixtureRoot 'missing-pwsh.exe'))
+    ) -RedirectStandardOutput $standardOutputPath -RedirectStandardError $standardErrorPath -PassThru -Wait
+
+    $providerCalls = @(if (Test-Path -LiteralPath $providerLog) { Get-Content -LiteralPath $providerLog })
+    Assert-Equal 1 $process.ExitCode 'WinGet bootstrap fails when forced repair creates no supported binary'
+    Assert-Equal 2 $providerCalls.Count 'WinGet failure path attempts upgrade and forced repair'
+    Assert-Equal 'upgrade --id Microsoft.PowerShell --exact --source winget --silent --accept-source-agreements --accept-package-agreements' $providerCalls[0] 'end-to-end WinGet path first attempts upgrade'
+    Assert-Equal 'install --id Microsoft.PowerShell --exact --source winget --silent --force --accept-source-agreements --accept-package-agreements' $providerCalls[1] 'end-to-end WinGet path force-repairs the installed package record'
+    Assert-Equal $false (Test-Path -LiteralPath $resultPath) 'failed WinGet repair removes the stale result file'
 }
 finally {
     $env:PATH = $savedEnvironment.Path
