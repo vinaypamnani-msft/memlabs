@@ -81,6 +81,34 @@ function Write-NewLabResumeCommand {
     Add-CmdHistory $resumeCommand
 }
 
+function Initialize-NewLabHyperVPrerequisite {
+    [CmdletBinding()]
+    param ()
+
+    $vmmsRegistered = [bool](Get-Service -Name vmms -ErrorAction SilentlyContinue)
+    $hyperVCmdletsAvailable = [bool](Get-Command -Name Get-VMNetworkAdapter -Module Hyper-V -ErrorAction SilentlyContinue)
+    if (-not ($vmmsRegistered -and $hyperVCmdletsAvailable)) {
+        Write-Host "Hyper-V and its PowerShell management tools are required but are not installed." -ForegroundColor Yellow
+        Write-Host "MemLabs can install the required Windows features now. A restart may be required." -ForegroundColor Yellow
+        $installHyperV = Read-YesOrNoWithTimeout -Prompt "Install Hyper-V now? (Y/n)" -HideHelp -Default "y" -Timeout 300
+        if ($installHyperV -eq "n") {
+            Write-Log "Hyper-V installation was declined. Install Hyper-V and its PowerShell management tools, restart the host, then rerun vmbuild.cmd." -Failure
+            return $false
+        }
+    }
+
+    try {
+        Write-Log "Post-init: Calling Install-HyperV before network validation..." -LogOnly
+        Flush-LogBuffer -All
+        $null = Install-HyperV
+        return $true
+    }
+    catch {
+        Write-Log "Hyper-V prerequisite setup failed: $($_.Exception.Message)" -Failure
+        return $false
+    }
+}
+
 # Give the user immediate visible feedback. Everything below this point (the
 # shortcut creation, dot-sourcing Common.ps1, and Initialize-Common) can take
 # several seconds on a cold start - especially if vmms / WMI / Hyper-V module
@@ -145,6 +173,18 @@ if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq
 
 if ($global:init_failed) {
     Write-Log "Failed to initialize common. Exiting." -Failure
+    exit 1
+}
+
+$principal = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))) {
+    Write-RedX "MemLabs requires administrative rights to configure. Please run vmbuild.cmd as administrator." -ForegroundColor Red
+    Write-Host
+    Start-Sleep -Seconds 60
+    exit 1
+}
+
+if (-not (Initialize-NewLabHyperVPrerequisite)) {
     exit 1
 }
 
@@ -445,14 +485,6 @@ try {
         $global:SkipValidation = $true
     }
 
-    $principal = new-object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
-    if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))) {
-        Write-RedX "MemLabs requires administrative rights to configure. Please run vmbuild.cmd as administrator." -ForegroundColor Red
-        Write-Host
-        Start-Sleep -seconds 60
-        exit 1
-    }
-
     Set-QuickEdit -DisableQuickEdit
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
 
@@ -472,11 +504,6 @@ try {
         }
     }
 
-
-    # Verify Hyper-V is installed
-    Write-Log "Post-init: Calling Install-HyperV..." -LogOnly
-    Flush-LogBuffer -All
-    Install-HyperV
     # Refresh capability evidence after Install-HyperV may have enabled the
     # Client optional feature, then repair any appliance serving existing labs
     # before maintenance is allowed to start VMs.

@@ -4519,6 +4519,13 @@ function Start-VMIPRefreshJob {
         Write-Log "Start-VMIPRefreshJob: Start-ThreadJob not available; skipping." -LogOnly
         return
     }
+    $missingHyperVCmdlets = @('Get-VM', 'Get-VMNetworkAdapter') | Where-Object {
+        -not (Get-Command -Name $_ -Module Hyper-V -ErrorAction SilentlyContinue)
+    }
+    if ($missingHyperVCmdlets.Count -gt 0) {
+        Write-Log "Start-VMIPRefreshJob: Hyper-V cmdlets are unavailable ($($missingHyperVCmdlets -join ', ')); prerequisite setup will handle them." -LogOnly
+        return
+    }
 
     # ThreadJobs run in a separate runspace — $global: variables and custom
     # functions (Write-Log, Set-VMNote, Get-VM2, etc.) are NOT available.
