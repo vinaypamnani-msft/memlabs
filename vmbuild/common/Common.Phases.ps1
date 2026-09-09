@@ -1152,7 +1152,7 @@ function Start-Phase {
                     $availGB = [Math]::Round($availMB / 1024, 1)
                     # Reserve headroom for Hyper-V root-partition per-VM overhead
                     # and the concurrent Phase 1 job processes injecting VHDs.
-                    $hostReserveGB = 8
+                    $hostReserveGB = Get-HostMemoryReserveGB
                     $needGB = [Math]::Round($newStartupGB + $hostReserveGB, 1)
 
                     if ($needGB -gt $availGB) {

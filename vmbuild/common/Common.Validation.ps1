@@ -2399,7 +2399,7 @@ function Test-Configuration {
 
             if ($totalMemory -gt $availableMemory) {
                 if (-not $enableDebug) {
-                    Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB] [8GB buffer]." -ReturnObject $return -Warning
+                    Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB] [15% host reserve, capped at 8GB]." -ReturnObject $return -Warning
                 }
             }
         }

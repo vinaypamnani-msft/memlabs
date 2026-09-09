@@ -6630,6 +6630,22 @@ function New-VirtualMachine {
     }
 }
 
+function Get-HostMemoryReserveGB {
+    param(
+        [Parameter(Mandatory = $false)]
+        [double]$TotalPhysicalMemoryBytes
+    )
+
+    if (-not $PSBoundParameters.ContainsKey('TotalPhysicalMemoryBytes')) {
+        $TotalPhysicalMemoryBytes = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory
+    }
+    if ($TotalPhysicalMemoryBytes -le 0) {
+        throw "Total physical memory must be greater than zero."
+    }
+
+    return [Math]::Round([Math]::Min(8.0, ($TotalPhysicalMemoryBytes / 1GB) * 0.15), 2)
+}
+
 function Get-AvailableMemoryGB {
     param(
         [Parameter(Mandatory = $false)]
@@ -6656,7 +6672,8 @@ function Get-AvailableMemoryGB {
     }
     if (-not $excludedRunningMemory) { $excludedRunningMemory = 0 }
 
-    $availableMemory = [Math]::Round(($availableBytes + $excludedRunningMemory - 8GB) / 1GB, 2)
+    $hostReserveGB = Get-HostMemoryReserveGB
+    $availableMemory = [Math]::Round(($availableBytes + $excludedRunningMemory - ($hostReserveGB * 1GB)) / 1GB, 2)
     if ($availableMemory -lt 0) {
         $availableMemory = 0
     }
