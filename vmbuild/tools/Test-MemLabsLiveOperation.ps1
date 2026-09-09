@@ -355,6 +355,8 @@ param($Helper, $TestRoot)
     Assert-LiveOpsEqual 'rerun fixture setup' $destructiveRequest.Owner.RecoveryPath 'Journal records destructive recovery path'
 
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -File C:\memlabs\vmbuild\New-Lab.ps1') 'Active-process matcher detects New-Lab entry point'
+    Assert-LiveOpsEqual $false (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -NoExit -Command "./New-Lab.ps1"' -IsAncestor) 'NoExit parent shell does not conflict with its own foreground coordinator child'
+    Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -NoExit -Command "./New-Lab.ps1"') 'Unrelated NoExit New-Lab shell remains a mutation conflict'
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -File C:\memlabs\vmbuild\tools\Invoke-MemLabsDeploymentChild.ps1 -Configuration x.json') 'Active-process matcher detects an uncoordinated deployment child'
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -Command "Start-Phase -Phase 3"') 'Active-process matcher detects direct Start-Phase command'
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -Command "Start-Phase; Write-Host done"') 'Active-process matcher detects semicolon-delimited Start-Phase command'

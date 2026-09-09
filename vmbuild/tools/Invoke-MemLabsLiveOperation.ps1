@@ -178,13 +178,18 @@ function Get-LiveOpsRepositoryState {
 }
 
 function Test-LiveOpsConflictingCommandLine {
-    param([AllowEmptyString()][string] $CommandLine)
+    param(
+        [AllowEmptyString()][string] $CommandLine,
+        [switch] $IsAncestor
+    )
 
     $wrapperEntryPointPattern = '(?i)(^|\s)"?-(?:f|fi|fil|file)"?\s+(?:"[^"]*[\\/]Invoke-MemLabsLiveOperation\.ps1"|[^\s"'']*[\\/]Invoke-MemLabsLiveOperation\.ps1)(?=$|\s)'
     $commandModePattern = '(?i)(^|\s)"?[-/](?:c|co|com|comm|comma|comman|command)"?(?:\s|$)'
     $entryPointPattern = '(?i)(^|[\s"''=;&|()])(?:[^\s"'']*[\\/])?(?:New-Lab\.ps1|Start-Test(?:\.ps1)?|Invoke-OvernightLocaleMatrix\.ps1|Invoke-MemLabsDeploymentChild\.ps1|Start-Phase(?:\.ps1)?)(?=$|[\s"'';,&|()])'
     $encodedCommandPattern = '(?i)(^|\s)"?[-/](?:e|ec|en|enc|enco|encod|encode|encoded|encodedc|encodedco|encodedcom|encodedcomm|encodedcomma|encodedcomman|encodedcommand)"?(?:\s|$)'
+    $noExitPattern = '(?i)(^|\s)"?[-/]noexit"?(?=$|\s)'
     if (-not $CommandLine) { return $false }
+    if ($IsAncestor -and $CommandLine -match $noExitPattern) { return $false }
     if ($CommandLine -match $encodedCommandPattern) { return $true }
     $wrapperEntryPoint = [regex]::Match($CommandLine, $wrapperEntryPointPattern)
     $commandMode = [regex]::Match($CommandLine, $commandModePattern)
@@ -194,8 +199,22 @@ function Test-LiveOpsConflictingCommandLine {
 
 function Get-LiveOpsConflictingProcesses {
     try {
-        return @(Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe' OR Name = 'powershell.exe'" -ErrorAction Stop |
-                Where-Object { $_.ProcessId -ne $PID -and (Test-LiveOpsConflictingCommandLine -CommandLine $_.CommandLine) } |
+        $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        $processById = @{}
+        foreach ($process in $processes) { $processById[[int]$process.ProcessId] = $process }
+        $ancestorIds = [Collections.Generic.HashSet[int]]::new()
+        $currentId = [int]$PID
+        while ($processById.ContainsKey($currentId)) {
+            $parentId = [int]$processById[$currentId].ParentProcessId
+            if ($parentId -le 0 -or -not $ancestorIds.Add($parentId)) { break }
+            $currentId = $parentId
+        }
+        return @($processes |
+                Where-Object {
+                    $_.Name -in @('pwsh.exe', 'powershell.exe') -and
+                    $_.ProcessId -ne $PID -and
+                    (Test-LiveOpsConflictingCommandLine -CommandLine $_.CommandLine -IsAncestor:$ancestorIds.Contains([int]$_.ProcessId))
+                } |
                 Select-Object ProcessId, CreationDate, CommandLine)
     }
     catch {
