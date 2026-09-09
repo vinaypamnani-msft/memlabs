@@ -6636,10 +6636,23 @@ function Get-HostMemoryReserveGB {
         [double]$TotalPhysicalMemoryBytes
     )
 
-    if (-not $PSBoundParameters.ContainsKey('TotalPhysicalMemoryBytes')) {
-        $TotalPhysicalMemoryBytes = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory
+    $totalMemoryWasSupplied = $PSBoundParameters.ContainsKey('TotalPhysicalMemoryBytes')
+    if (-not $totalMemoryWasSupplied) {
+        try {
+            $TotalPhysicalMemoryBytes = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory
+        }
+        catch {}
+        if ($TotalPhysicalMemoryBytes -le 0) {
+            try {
+                $TotalPhysicalMemoryBytes = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).TotalVisibleMemorySize * 1KB
+            }
+            catch {}
+        }
     }
     if ($TotalPhysicalMemoryBytes -le 0) {
+        if (-not $totalMemoryWasSupplied) {
+            return 8.0
+        }
         throw "Total physical memory must be greater than zero."
     }
 

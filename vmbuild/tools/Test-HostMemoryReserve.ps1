@@ -40,10 +40,20 @@ function Get-Counter {
     }
 }
 
+$script:CimMode = 'ComputerSystem'
 function Get-CimInstance {
     param([string] $ClassName)
-    if ($ClassName -ne 'Win32_ComputerSystem') { throw "Unexpected CIM class: $ClassName" }
-    return [pscustomobject]@{ TotalPhysicalMemory = 32GB }
+    if ($script:CimMode -eq 'Unavailable') { throw 'CIM unavailable' }
+    if ($ClassName -eq 'Win32_ComputerSystem') {
+        if ($script:CimMode -eq 'OperatingSystem') { throw 'ComputerSystem unavailable' }
+        if ($script:CimMode -eq 'ZeroThenUnavailable') { return [pscustomobject]@{ TotalPhysicalMemory = 0 } }
+        return [pscustomobject]@{ TotalPhysicalMemory = 32GB }
+    }
+    if ($ClassName -eq 'Win32_OperatingSystem') {
+        if ($script:CimMode -eq 'ZeroThenUnavailable') { throw 'OperatingSystem unavailable' }
+        return [pscustomobject]@{ TotalVisibleMemorySize = 32GB / 1KB }
+    }
+    throw "Unexpected CIM class: $ClassName"
 }
 
 function Get-VM { return @() }
@@ -55,9 +65,17 @@ Write-Host "engine : $($PSVersionTable.PSVersion)"
 
 Assert-NumericEqual 2.4 (Get-HostMemoryReserveGB -TotalPhysicalMemoryBytes 16GB) '16GB host reserves 15 percent'
 Assert-NumericEqual 4.8 (Get-HostMemoryReserveGB -TotalPhysicalMemoryBytes 32GB) '32GB host reserves 15 percent'
+Assert-NumericEqual 7.95 (Get-HostMemoryReserveGB -TotalPhysicalMemoryBytes 53GB) '53GB host remains below the cap'
+Assert-NumericEqual 8 (Get-HostMemoryReserveGB -TotalPhysicalMemoryBytes 54GB) '54GB host reaches the 8GB cap'
 Assert-NumericEqual 8 (Get-HostMemoryReserveGB -TotalPhysicalMemoryBytes 64GB) '64GB host reserve is capped at 8GB'
 Assert-NumericEqual 8 (Get-HostMemoryReserveGB -TotalPhysicalMemoryBytes 128GB) '128GB host keeps the existing 8GB cap'
 Assert-NumericEqual 15.2 (Get-AvailableMemoryGB) 'deployable memory subtracts the adaptive 4.8GB reserve'
+$script:CimMode = 'OperatingSystem'
+Assert-NumericEqual 4.8 (Get-HostMemoryReserveGB) 'operating-system memory is used when computer-system CIM fails'
+$script:CimMode = 'Unavailable'
+Assert-NumericEqual 8 (Get-HostMemoryReserveGB) 'existing 8GB reserve is retained when CIM is unavailable'
+$script:CimMode = 'ZeroThenUnavailable'
+Assert-NumericEqual 8 (Get-HostMemoryReserveGB) 'zero total memory falls back to the existing 8GB reserve'
 
 $phaseSource = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Phases.ps1') -Raw
 $configSource = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Config.ps1') -Raw
