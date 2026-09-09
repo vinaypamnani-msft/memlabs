@@ -12,7 +12,7 @@
   },
   "vmOptions": {
     "prefix": "LH1-",
-    "basePath": "C:\\MemLabs-VMs",
+    "basePath": "E:\\VirtualMachines",
     "domainName": "locale1.lab",
     "domainNetBiosName": "LOC1",
     "adminName": "admin",

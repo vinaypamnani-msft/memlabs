@@ -575,6 +575,7 @@ Assert-Equal -Expected 2 -Actual ([regex]::Matches($highMemoryRunner, "= '16GB'"
 Assert-True -Condition ($highMemoryRunner -match '(?s)StartPhase -eq 0.*?target VM\(s\) already exist.*?StartPhase -gt 0.*?target VM\(s\) are missing') -What 'high-memory SQLAO locale test distinguishes fresh and resume VM safety'
 Assert-True -Condition ($highMemoryRunner -match 'Invoke-MemLabsMonitoredDeployment\.ps1' -and $highMemoryRunner -match 'ExpectedCompletedPhase\s*=\s*11') -What 'high-memory SQLAO locale test requires monitored Phase 11 completion'
 Assert-Equal -Expected 'DC,BDC,FileServer,SQLAO,SQLAO,Primary,SiteSystem,DomainMember' -Actual (@($highMemoryConfig.virtualMachines.role) -join ',') -What 'high-memory SQLAO config covers identity, storage, cluster, ConfigMgr, site-system, and client roles'
+Assert-Equal -Expected 'E:\VirtualMachines' -Actual $highMemoryConfig.vmOptions.basePath -What 'high-memory SQLAO config uses the standard non-system VM storage drive'
 Assert-Equal -Expected 61GB -Actual (@($highMemoryConfig.virtualMachines | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum -What 'high-memory SQLAO config remains within a 128 GB host budget'
 $setLocaleMatches = [regex]::Matches($highMemoryRunner, "(?:DC1|BDC1|FS1|SQL1|SQL2|PS1SITE|DPMP1|CL1) = '([^']+)'")
 $setLocales = @($setLocaleMatches | ForEach-Object { $_.Groups[1].Value })
