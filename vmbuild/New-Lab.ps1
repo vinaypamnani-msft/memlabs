@@ -61,6 +61,11 @@ param (
 
 )
 
+if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion -lt [version] '7.4') {
+    Write-Host 'ERROR: MemLabs requires PowerShell 7.4 or newer. Run VMBuild.cmd to locate or install it.' -ForegroundColor Red
+    exit 1
+}
+
 $global:NoSnapshot = $NoSnapshot
 $global:NewLabResumeCommand = $null
 
@@ -387,7 +392,7 @@ if ($Common.FatalError) {
 
 # Validate PS7
 if (-not $Common.PS7) {
-    Write-Log "You must use PowerShell version 7.4 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
+    Write-Log "PowerShell 7.4 or newer is required, but Common.ps1 did not initialize PowerShell 7 support. Run VMBuild.cmd again or install the current PowerShell release from https://aka.ms/powershell-release?tag=stable." -Failure
     exit 1
 }
 

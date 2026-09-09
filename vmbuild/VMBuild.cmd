@@ -152,6 +152,25 @@ IF ERRORLEVEL 1 (
 )
 
 REM ============================================================
+REM Locate or install PowerShell 7 before maintenance can launch
+REM any other package-manager work.
+REM ============================================================
+SET "PS7_RESULT=%TEMP%\MemLabs-PowerShell7-%RANDOM%-%RANDOM%.txt"
+powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\Ensure-PowerShell7.ps1" -ResultPath "%PS7_RESULT%" -MinimumVersion 7.4
+IF ERRORLEVEL 1 GOTO POWERSHELL7_REQUIRED
+IF NOT EXIST "%PS7_RESULT%" GOTO POWERSHELL7_REQUIRED
+SET /P PS7=<"%PS7_RESULT%"
+DEL /Q "%PS7_RESULT%" >NUL 2>&1
+IF NOT DEFINED PS7 GOTO POWERSHELL7_REQUIRED
+IF NOT EXIST "%PS7%" GOTO POWERSHELL7_REQUIRED
+
+"%PS7%" -NoLogo -NoProfile -NonInteractive -Command "if ($PSVersionTable.PSVersion -lt [version]'7.4') { exit 1 }"
+IF ERRORLEVEL 1 (
+    SET "PS7="
+    GOTO POWERSHELL7_REQUIRED
+)
+
+REM ============================================================
 REM Run maintenance operations
 REM ============================================================
 powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -File ".\Invoke-Maintenance.ps1"
@@ -197,17 +216,6 @@ REM ============================================================
 REM Determine launch prerequisites after maintenance
 REM ============================================================
 
-REM Use quoted %ProgramFiles% to avoid "C:\Program not found"
-SET PS7="%ProgramFiles%\PowerShell\7\pwsh.exe"
-
-REM ============================================================
-REM Check PowerShell 7 is available
-REM ============================================================
-IF NOT EXIST %PS7% (
-    ECHO WARNING: PowerShell 7 not available, falling back to PowerShell 5.
-    GOTO PS5
-)
-
 REM ============================================================
 REM Launch with PowerShell 7
 REM ============================================================
@@ -215,33 +223,35 @@ REM ============================================================
 timeout 1
 IF "%~1"=="" (
     IF DEFINED WT_SESSION (
-        wt -w 0 nt -d . %PS7% -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1"
+        wt -w 0 nt -d . "%PS7%" -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1"
         IF ERRORLEVEL 1 GOTO LAUNCHWT_FAILED
     ) ELSE (
-        %PS7% -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
+        "%PS7%" -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
         IF ERRORLEVEL 1 GOTO LAUNCHPS7_FAILED
     )
 ) ELSE (
     IF DEFINED WT_SESSION (
-        wt -w 0 nt -d . %PS7% -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1 -Configuration %1"
+        wt -w 0 nt -d . "%PS7%" -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1 -Configuration %1"
         IF ERRORLEVEL 1 GOTO LAUNCHWT_FAILED
     ) ELSE (
-        %PS7% -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1 -Configuration %1"
+        "%PS7%" -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1 -Configuration %1"
         IF ERRORLEVEL 1 GOTO LAUNCHPS7_FAILED
     )
 )
 GOTO END
 
 REM ============================================================
-REM Launch with PowerShell 5 fallback
+REM PowerShell 7 requirement
 REM ============================================================
-:PS5
-ECHO WARNING: Launching with PowerShell 5. Some features may not work correctly.
-powershell -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
-IF ERRORLEVEL 1 (
-    ECHO ERROR: Failed to launch with PowerShell 5.
-    PAUSE
-)
+:POWERSHELL7_REQUIRED
+DEL /Q "%PS7_RESULT%" >NUL 2>&1
+SET "VMBUILD_EXIT_CODE=1"
+ECHO.
+ECHO ERROR: MemLabs requires PowerShell 7.4 or newer.
+ECHO        Automatic installation failed or no usable pwsh.exe was found.
+ECHO        Install PowerShell, then run VMBuild.cmd again:
+ECHO        https://aka.ms/powershell-release?tag=stable
+ECHO.
 GOTO END
 
 REM ============================================================
@@ -250,10 +260,12 @@ REM ============================================================
 :LAUNCHWT_FAILED
 ECHO ERROR: Failed to launch Windows Terminal.
 ECHO Falling back to direct PowerShell 7 launch...
-%PS7% -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
+"%PS7%" -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
+IF ERRORLEVEL 1 GOTO LAUNCHPS7_FAILED
 GOTO END
 
 :LAUNCHPS7_FAILED
+SET "VMBUILD_EXIT_CODE=1"
 ECHO ERROR: Failed to launch PowerShell 7.
 GOTO END
 
@@ -261,4 +273,5 @@ REM ============================================================
 :END
 REM ============================================================
 popd
+IF DEFINED VMBUILD_EXIT_CODE EXIT /B %VMBUILD_EXIT_CODE%
 timeout 2
