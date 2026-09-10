@@ -82,6 +82,23 @@ function Get-ConsoleVersionState {
     }
 }
 
+function Resolve-ExpectedConsoleRelease {
+    param(
+        [object]$CmOptions,
+        [object]$VM
+    )
+
+    $configuredRelease = "$($CmOptions.Version)"
+    if (-not $configuredRelease) { throw 'Upgrade-Console: cmOptions.Version is missing from deployConfig' }
+    if ($configuredRelease -notin @('current-branch', 'tech-preview')) { return $configuredRelease }
+
+    $deployedRelease = "$($VM.thisParams.cmDownloadVersion.baselineVersion)"
+    if (-not $deployedRelease -or $deployedRelease -in @('current-branch', 'tech-preview')) {
+        throw "Upgrade-Console: could not resolve symbolic cmOptions.Version '$configuredRelease' to the deployed media release"
+    }
+    return $deployedRelease
+}
+
 
 if ( -not $ConfigFilePath) {
     $ConfigFilePath = "C:\staging\DSC\deployConfig.json"
@@ -92,9 +109,8 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
 $sitecode = $ThisVM.SiteCode
 $cmOptions = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
-$expectedRelease = "$($cmOptions.Version)"
 if (-not $sitecode) { throw 'Upgrade-Console: this machine has no SiteCode in deployConfig' }
-if (-not $expectedRelease) { throw 'Upgrade-Console: cmOptions.Version is missing from deployConfig' }
+$expectedRelease = Resolve-ExpectedConsoleRelease -CmOptions $cmOptions -VM $ThisVM
 
 $state = Get-ConsoleVersionState -SiteCode $sitecode -ExpectedRelease $expectedRelease
 if ($state.Current) {
