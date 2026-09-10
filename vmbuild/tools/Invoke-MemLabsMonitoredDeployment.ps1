@@ -184,6 +184,38 @@ function Resolve-MemLabsConfigurationPath {
     return [IO.Path]::GetFullPath((Join-Path $BasePath $Path))
 }
 
+function Save-MemLabsDeploymentFailure {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $Stage,
+        [AllowEmptyString()][string] $ErrorMessage = '',
+        [AllowEmptyString()][string] $OperationId = '',
+        [AllowEmptyString()][string] $JournalPath = '',
+        [AllowNull()][object] $ActiveOwnerMetadata,
+        [AllowNull()][object[]] $FailureDiagnostics,
+        [Parameter(Mandatory)][string] $OutputPath,
+        [Parameter(Mandatory)][string] $MonitorPath,
+        [Parameter(Mandatory)][string] $DiagnosticsPath
+    )
+
+    [pscustomobject]@{
+        CapturedUtc = [datetime]::UtcNow.ToString('o')
+        Stage       = $Stage
+        Error       = $ErrorMessage
+        OperationId = $OperationId
+        Journal     = $JournalPath
+        ActiveOwner = $ActiveOwnerMetadata
+        FailureDiagnostics = @($FailureDiagnostics)
+        Output      = $OutputPath
+        Monitor     = $MonitorPath
+        Diagnostics = $DiagnosticsPath
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function New-MemLabsDeploymentStamp {
+    return '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff'), [guid]::NewGuid().ToString('N').Substring(0, 8)
+}
+
 function Save-MemLabsDeploymentDiagnostics {
     param (
         [Parameter(Mandatory)][string[]] $VMName,
@@ -256,11 +288,12 @@ $vmNames = @($config.virtualMachines | Where-Object { -not $_.hidden } | ForEach
 $diagnosticVmNames = @($config.virtualMachines | ForEach-Object { "$prefix$($_.vmName)" } | Sort-Object -Unique)
 if (-not $domainName -or $vmNames.Count -eq 0) { throw 'Configuration must define a domain and at least one visible VM.' }
 
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$stamp = New-MemLabsDeploymentStamp
 $domainLogPath = Join-Path $vmbuildRoot "logs\VMBuild.$domainName.jsonl"
 $monitorLogPath = Join-Path $vmbuildRoot "logs\MonitoredDeployment-$stamp.jsonl"
 $outputPath = Join-Path $vmbuildRoot "logs\MonitoredDeployment-$stamp.out.txt"
 $diagnosticsPath = Join-Path $vmbuildRoot "logs\MonitoredDeployment-$stamp.diagnostics.json"
+$failurePath = Join-Path $vmbuildRoot "logs\MonitoredDeployment-$stamp.failure.json"
 $launcherPath = Join-Path $PSScriptRoot 'Invoke-MemLabsDeploymentChild.ps1'
 $liveOpsPath = Join-Path $PSScriptRoot 'Invoke-MemLabsLiveOperation.ps1'
 
@@ -335,6 +368,11 @@ $operation = {
         }
         if ($process.ExitCode -ne 0) { throw "New-Lab exited with code $($process.ExitCode). Output: $outputPath" }
     }
+    catch {
+        Save-MemLabsDeploymentFailure -Path $failurePath -Stage Operation -ErrorMessage $_.Exception.Message `
+            -OutputPath $outputPath -MonitorPath $monitorLogPath -DiagnosticsPath $diagnosticsPath
+        throw
+    }
     finally {
         if ($jobHandle -ne [IntPtr]::Zero) { [MemLabsNativeJob]::CloseHandle($jobHandle) | Out-Null }
         if ($process) {
@@ -364,7 +402,21 @@ $postcondition = {
     return $true
 }
 
-& $liveOpsPath -Mode Mutate -Intent "Monitored deployment of $configurationPath" -Target $vmNames -TargetType HostResource `
-    -Operation $operation -Postcondition $postcondition -FailureDiagnostics {
-        Get-VM -Name $vmNames -ErrorAction SilentlyContinue | Select-Object Name, State, Status, Uptime, Notes
-    } -IncludeOperationOutput
+try {
+    & $liveOpsPath -Mode Mutate -Intent "Monitored deployment of $configurationPath" -Target $vmNames -TargetType HostResource `
+        -Operation $operation -Postcondition $postcondition -FailureDiagnostics {
+            Get-VM -Name $vmNames -ErrorAction SilentlyContinue | Select-Object Name, State, Status, Uptime, Notes
+        } -IncludeOperationOutput
+}
+catch {
+    $stage = [string]$_.Exception.Data['FailureStage']
+    if ([string]::IsNullOrWhiteSpace($stage)) { $stage = 'Unhandled' }
+    $operationId = [string]$_.Exception.Data['OperationId']
+    if (-not (Test-Path -LiteralPath $failurePath -PathType Leaf)) {
+        Save-MemLabsDeploymentFailure -Path $failurePath -Stage $stage -ErrorMessage $_.Exception.Message -OperationId $operationId `
+            -JournalPath ([string]$_.Exception.Data['JournalPath']) -ActiveOwnerMetadata $_.Exception.Data['ActiveOwnerMetadata'] `
+            -FailureDiagnostics @($_.Exception.Data['FailureDiagnostics']) `
+            -OutputPath $outputPath -MonitorPath $monitorLogPath -DiagnosticsPath $diagnosticsPath
+    }
+    throw "Monitored deployment failed during Live Ops stage '$stage'. OperationId=$operationId Failure=$failurePath Output=$outputPath Monitor=$monitorLogPath Diagnostics=$diagnosticsPath"
+}

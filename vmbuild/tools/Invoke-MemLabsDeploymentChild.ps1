@@ -49,25 +49,33 @@ function Assert-MemLabsDeploymentLease {
     }
 }
 
-Assert-MemLabsDeploymentLease
-
-$startGate = [Threading.EventWaitHandle]::OpenExisting($GateName)
-$gateReady = [Threading.EventWaitHandle]::OpenExisting($GateReadyName)
 try {
-    if (-not $gateReady.Set()) { throw 'Deployment child could not acknowledge the start gate.' }
-    if (-not $startGate.WaitOne([TimeSpan]::FromMinutes(2))) {
-        throw 'Deployment child start gate was not released within 2 minutes.'
+    Assert-MemLabsDeploymentLease
+
+    $startGate = [Threading.EventWaitHandle]::OpenExisting($GateName)
+    $gateReady = [Threading.EventWaitHandle]::OpenExisting($GateReadyName)
+    try {
+        if (-not $gateReady.Set()) { throw 'Deployment child could not acknowledge the start gate.' }
+        if (-not $startGate.WaitOne([TimeSpan]::FromMinutes(2))) {
+            throw 'Deployment child start gate was not released within 2 minutes.'
+        }
     }
-}
-finally {
-    $gateReady.Dispose()
-    $startGate.Dispose()
-}
+    finally {
+        $gateReady.Dispose()
+        $startGate.Dispose()
+    }
 
-$arguments = @{ Configuration = $Configuration; NoWindowResize = $true; NoSnapshot = $true }
-if ($StartPhase) { $arguments.StartPhase = $StartPhase }
-if ($Phase) { $arguments.Phase = $Phase }
-if ($KeepFailedVMs) { $arguments.KeepFailedVMs = $true }
+    $arguments = @{ Configuration = $Configuration; NoWindowResize = $true; NoSnapshot = $true }
+    if ($StartPhase) { $arguments.StartPhase = $StartPhase }
+    if ($Phase) { $arguments.Phase = $Phase }
+    if ($KeepFailedVMs) { $arguments.KeepFailedVMs = $true }
 
-& (Join-Path (Split-Path -Parent $PSScriptRoot) 'New-Lab.ps1') @arguments *> $OutputPath
-exit $LASTEXITCODE
+    & (Join-Path (Split-Path -Parent $PSScriptRoot) 'New-Lab.ps1') @arguments *> $OutputPath
+    exit $LASTEXITCODE
+}
+catch {
+    $bootstrapError = ($_ | Out-String).Trim()
+    "DEPLOYMENT CHILD FAILURE:`r`n$bootstrapError" | Add-Content -LiteralPath $OutputPath -Encoding UTF8
+    [Console]::Error.WriteLine($bootstrapError)
+    exit 1
+}

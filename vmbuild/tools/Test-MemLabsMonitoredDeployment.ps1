@@ -50,6 +50,29 @@ Assert-Equal $true ($monitorSource -match '\$diagnosticVmNames = @\(\$config\.vi
 Assert-Equal $true ($monitorSource -match '\$Phase -and -not \$PSBoundParameters\.ContainsKey\(''ExpectedCompletedPhase''\)') 'partial phase runs derive their completion postcondition from requested phases'
 Assert-Equal $true ($monitorSource -match '(?s)New-MemLabsDeploymentProcess.*?gateReady\.WaitOne.*?Add-MemLabsDeploymentProcessToJob.*?startGate\.Set\(\)' -and $childSource.IndexOf('gateReady.Set()') -lt $childSource.IndexOf('WaitOne([TimeSpan]::FromMinutes(2))') -and $childSource.IndexOf('WaitOne([TimeSpan]::FromMinutes(2))') -lt $childSource.IndexOf("& (Join-Path (Split-Path -Parent `$PSScriptRoot) 'New-Lab.ps1')")) 'deployment child acknowledges the gate then waits for job ownership before invoking New-Lab'
 Assert-Equal $true ($monitorSource -match '(?s)finally \{.*?CloseHandle\(\$jobHandle\).*?\$process\.Kill\(\$true\).*?WaitForExit\(30000\)') 'monitor cleanup cannot return while an uncontained deployment process remains active'
+Assert-Equal $true ($childSource -match '(?s)catch \{.*?DEPLOYMENT CHILD FAILURE:.*?Add-Content -LiteralPath \$OutputPath' -and $monitorSource -match 'Monitored deployment failed during Live Ops stage.*?Failure=\$failurePath.*?Output=\$outputPath.*?Monitor=\$monitorLogPath.*?Diagnostics=\$diagnosticsPath') 'bootstrap and callback failures publish synchronized evidence paths'
+
+$failureWriter = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'Save-MemLabsDeploymentFailure'
+$stampWriter = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'New-MemLabsDeploymentStamp'
+$stamps = @(& { . $stampWriter; New-MemLabsDeploymentStamp; New-MemLabsDeploymentStamp })
+Assert-Equal 2 @($stamps | Sort-Object -Unique).Count 'simultaneous monitor attempts receive unique artifact names'
+$failureFixturePath = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-failure-' + [guid]::NewGuid().ToString('N') + '.json')
+try {
+    . $failureWriter
+    Save-MemLabsDeploymentFailure -Path $failureFixturePath -Stage Operation -ErrorMessage 'fixture operation failed' -OutputPath 'output.txt' -MonitorPath 'monitor.jsonl' -DiagnosticsPath 'diagnostics.json'
+    $operationFailure = Get-Content -LiteralPath $failureFixturePath -Raw | ConvertFrom-Json
+    Assert-Equal 'Operation' $operationFailure.Stage 'operation failure artifact records its stage'
+    Assert-Equal 'fixture operation failed' $operationFailure.Error 'operation failure artifact preserves the actionable error'
+    Save-MemLabsDeploymentFailure -Path $failureFixturePath -Stage Unhandled -ErrorMessage 'fixture fallback' -OperationId 'fixture-id' -JournalPath 'operations.jsonl' -ActiveOwnerMetadata '{"owner":"fixture"}' -FailureDiagnostics @('diagnostic fixture') -OutputPath 'output.txt' -MonitorPath 'monitor.jsonl' -DiagnosticsPath 'diagnostics.json'
+    $coordinationFailure = Get-Content -LiteralPath $failureFixturePath -Raw | ConvertFrom-Json
+    Assert-Equal 'Unhandled' $coordinationFailure.Stage 'uncorrelated failure artifact receives a nonempty fallback stage'
+    Assert-Equal 'fixture fallback' $coordinationFailure.Error 'fallback failure artifact preserves the caught error'
+    Assert-Equal 'fixture-id|operations.jsonl|{"owner":"fixture"}|diagnostic fixture' "$($coordinationFailure.OperationId)|$($coordinationFailure.Journal)|$($coordinationFailure.ActiveOwner)|$(@($coordinationFailure.FailureDiagnostics) -join ',')" 'correlated failure artifact preserves Live Ops evidence'
+    Assert-Equal 'output.txt|monitor.jsonl|diagnostics.json' "$($coordinationFailure.Output)|$($coordinationFailure.Monitor)|$($coordinationFailure.Diagnostics)" 'failure artifact records every synchronized evidence path'
+}
+finally {
+    Remove-Item -LiteralPath $failureFixturePath -Force -ErrorAction SilentlyContinue
+}
 
 $leaseFunction = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsDeploymentChild.ps1') -Name 'Assert-MemLabsDeploymentLease'
 $leasePath = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-child-lease-' + [guid]::NewGuid().ToString('N') + '.json')
@@ -143,6 +166,35 @@ Set-Content -LiteralPath $env:MEMLABS_TEST_CHILD_MARKER -Value started
     $childGate.Dispose()
     $childGate = $null
 
+    "throw 'fixture child bootstrap failure'" | Set-Content -LiteralPath (Join-Path $childFixtureRoot 'New-Lab.ps1') -Encoding UTF8
+    Remove-Item -LiteralPath $childOutput -Force -ErrorAction SilentlyContinue
+    $failureGateName = 'Local\MemLabsChildFailure-' + [guid]::NewGuid().ToString('N')
+    $failureReadyName = $failureGateName + '-Ready'
+    $failureGate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $failureGateName)
+    $failureReady = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $failureReadyName)
+    $failureInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
+    $failureInfo.UseShellExecute = $false
+    foreach ($argument in @('-NoProfile', '-File', (Join-Path $childFixtureTools 'Invoke-MemLabsDeploymentChild.ps1'), '-Configuration', 'fixture.json', '-OutputPath', $childOutput, '-GateName', $failureGateName, '-GateReadyName', $failureReadyName)) {
+        $failureInfo.ArgumentList.Add($argument)
+    }
+    $failureProcess = [Diagnostics.Process]::Start($failureInfo)
+    Assert-Equal $true $failureReady.WaitOne(10000) 'failing deployment child acknowledges its start gate'
+    $failureJobHandle = [MemLabsNativeJob]::CreateKillOnClose()
+    Add-MemLabsDeploymentProcessToJob -JobHandle $failureJobHandle -Process $failureProcess
+    $null = $failureGate.Set()
+    Assert-Equal $true $failureProcess.WaitForExit(10000) 'failing deployment child exits without hanging the monitor'
+    Assert-Equal 1 $failureProcess.ExitCode 'deployment child returns failure when New-Lab throws'
+    $failureOutput = Get-Content -LiteralPath $childOutput -Raw
+    Assert-Equal $true ($failureOutput -like '*DEPLOYMENT CHILD FAILURE:*fixture child bootstrap failure*') 'deployment child preserves its bootstrap exception in the output artifact'
+    $null = [MemLabsNativeJob]::CloseHandle($failureJobHandle)
+    $failureJobHandle = [IntPtr]::Zero
+    $failureProcess.Dispose()
+    $failureProcess = $null
+    $failureReady.Dispose()
+    $failureReady = $null
+    $failureGate.Dispose()
+    $failureGate = $null
+
     $assignmentGateName = 'Local\MemLabsAssignmentTest-' + [guid]::NewGuid().ToString('N')
     $assignmentGate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $assignmentGateName)
     $assignmentMarker = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-assignment-' + [guid]::NewGuid().ToString('N') + '.txt')
@@ -165,6 +217,13 @@ Set-Content -LiteralPath $env:MEMLABS_TEST_CHILD_MARKER -Value started
     $assignmentGate.Dispose()
 }
 finally {
+    if ($failureJobHandle -and $failureJobHandle -ne [IntPtr]::Zero) { $null = [MemLabsNativeJob]::CloseHandle($failureJobHandle) }
+    if ($failureProcess) {
+        if (-not $failureProcess.HasExited) { $failureProcess.Kill($true); $null = $failureProcess.WaitForExit(10000) }
+        $failureProcess.Dispose()
+    }
+    if ($failureReady) { $failureReady.Dispose() }
+    if ($failureGate) { $failureGate.Dispose() }
     if ($childJobHandle -and $childJobHandle -ne [IntPtr]::Zero) { $null = [MemLabsNativeJob]::CloseHandle($childJobHandle) }
     if ($childProcess) {
         if (-not $childProcess.HasExited) { $childProcess.Kill($true); $null = $childProcess.WaitForExit(10000) }

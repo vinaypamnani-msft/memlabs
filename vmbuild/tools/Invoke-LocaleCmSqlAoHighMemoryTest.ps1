@@ -27,6 +27,26 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-MemLabsHighMemoryStorageInfo {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [int] $MinimumFreeGB = 105
+    )
+
+    $storagePath = [IO.Path]::GetFullPath($Path)
+    $storageRoot = [IO.Path]::GetPathRoot($storagePath)
+    if (-not $storageRoot -or -not (Test-Path -LiteralPath $storageRoot -PathType Container)) {
+        throw "Configured VM storage drive is unavailable: $storageRoot"
+    }
+    $storageDrive = Get-PSDrive -Name $storageRoot.TrimEnd('\').TrimEnd(':') -PSProvider FileSystem -ErrorAction Stop
+    $storageFreeBytes = [double]$storageDrive.Free
+    $storageFreeGB = [math]::Round($storageFreeBytes / 1GB, 1)
+    if ($storageFreeBytes -lt ($MinimumFreeGB * 1GB)) {
+        throw "High-memory locale testing requires at least $MinimumFreeGB GB free on $storageRoot; only $storageFreeGB GB is available."
+    }
+    return [pscustomobject]@{ Path = $storagePath; Root = $storageRoot; FreeGB = $storageFreeGB }
+}
+
 $vmbuildRoot = Split-Path -Parent $PSScriptRoot
 if (-not $Configuration) {
     $Configuration = Join-Path $vmbuildRoot 'config\tests\Locale-CM-SqlAo-HighMemory.json'
@@ -45,6 +65,12 @@ if (-not $PlanOnly -and -not (Get-Command Get-VM -ErrorAction SilentlyContinue))
 }
 
 $config = Get-Content -LiteralPath $sourcePath -Raw | ConvertFrom-Json -ErrorAction Stop
+$storagePath = [IO.Path]::GetFullPath([string]$config.vmOptions.basePath)
+$storageFreeGB = $null
+if (-not $PlanOnly) {
+    $storageInfo = Get-MemLabsHighMemoryStorageInfo -Path $storagePath
+    $storageFreeGB = $storageInfo.FreeGB
+}
 $localeSets = @{
     1 = @{ DC1 = 'pl-PL'; BDC1 = 'zh-TW'; FS1 = 'pt-BR'; SQL1 = 'pt-PT'; SQL2 = 'sv-SE'; PS1SITE = 'tr-TR'; DPMP1 = 'zh-CN'; CL1 = 'ar-SA' }
     2 = @{ DC1 = 'bg-BG'; BDC1 = 'cs-CZ'; FS1 = 'da-DK'; SQL1 = 'de-DE'; SQL2 = 'el-GR'; PS1SITE = 'es-ES'; DPMP1 = 'es-MX'; CL1 = 'et-EE' }
@@ -133,6 +159,7 @@ if ($invalidSqlNodes.Count -gt 0) {
 
 Write-Host "High-memory locale SQLAO test"
 Write-Host "  Host RAM     : $totalMemoryGB GB"
+Write-Host "  VM storage   : $storagePath$(if ($null -ne $storageFreeGB) { " ($storageFreeGB GB free)" })"
 Write-Host "  Locale set   : $LocaleSet"
 Write-Host "  Identity     : $($identity.Prefix) / $($identity.Domain) / $($identity.Network)"
 Write-Host "  SQL nodes    : $($sqlNodes.vmName -join ', ') (16 GB pinned each)"

@@ -571,6 +571,39 @@ $highMemoryRunner = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-
 $highMemoryConfigPath = Join-Path $RootPath 'config\tests\Locale-CM-SqlAo-HighMemory.json'
 $highMemoryConfig = Get-Content -LiteralPath $highMemoryConfigPath -Raw | ConvertFrom-Json
 Assert-True -Condition ($highMemoryRunner -match 'TotalPhysicalMemory' -and $highMemoryRunner -match '-not \$PlanOnly -and \$totalMemoryGB -lt 120') -What 'high-memory SQLAO locale test refuses real runs below the 128 GB class'
+$storageProbe = Import-TestFunction -Path (Join-Path $RootPath 'tools\Invoke-LocaleCmSqlAoHighMemoryTest.ps1') -Name 'Get-MemLabsHighMemoryStorageInfo'
+$missingStorageError = & {
+    param($Definition)
+    function Test-Path { return $false }
+    function Get-PSDrive { throw 'Get-PSDrive must not run for a missing root' }
+    . $Definition
+    try { $null = Get-MemLabsHighMemoryStorageInfo -Path 'Q:\VirtualMachines' } catch { return $_.Exception.Message }
+} $storageProbe
+Assert-True -Condition ($missingStorageError -like '*storage drive is unavailable*Q:\*') -What 'high-memory SQLAO locale test rejects a missing VM storage drive'
+$undersizedStorageError = & {
+    param($Definition)
+    function Test-Path { return $true }
+    function Get-PSDrive { [pscustomobject]@{ Free = 104GB } }
+    . $Definition
+    try { $null = Get-MemLabsHighMemoryStorageInfo -Path 'Q:\VirtualMachines' } catch { return $_.Exception.Message }
+} $storageProbe
+Assert-True -Condition ($undersizedStorageError -like '*at least 105 GB free*104 GB is available*') -What 'high-memory SQLAO locale test rejects undersized VM storage'
+$roundedBoundaryError = & {
+    param($Definition)
+    function Test-Path { return $true }
+    function Get-PSDrive { [pscustomobject]@{ Free = (104.96 * 1GB) } }
+    . $Definition
+    try { $null = Get-MemLabsHighMemoryStorageInfo -Path 'Q:\VirtualMachines' } catch { return $_.Exception.Message }
+} $storageProbe
+Assert-True -Condition ($roundedBoundaryError -like '*at least 105 GB free*') -What 'high-memory SQLAO locale test compares raw free bytes before display rounding'
+$sufficientStorage = & {
+    param($Definition)
+    function Test-Path { return $true }
+    function Get-PSDrive { [pscustomobject]@{ Free = 200GB } }
+    . $Definition
+    Get-MemLabsHighMemoryStorageInfo -Path 'Q:\VirtualMachines'
+} $storageProbe
+Assert-True -Condition ($sufficientStorage.Path -eq 'Q:\VirtualMachines' -and $sufficientStorage.FreeGB -eq 200) -What 'high-memory SQLAO locale test accepts sufficient VM storage'
 Assert-Equal -Expected 2 -Actual ([regex]::Matches($highMemoryRunner, "= '16GB'").Count) -What 'high-memory SQLAO locale test pins SQL maximum and minimum to 16 GB'
 Assert-True -Condition ($highMemoryRunner -match '(?s)StartPhase -eq 0.*?target VM\(s\) already exist.*?StartPhase -gt 0.*?target VM\(s\) are missing') -What 'high-memory SQLAO locale test distinguishes fresh and resume VM safety'
 Assert-True -Condition ($highMemoryRunner -match 'Invoke-MemLabsMonitoredDeployment\.ps1' -and $highMemoryRunner -match 'ExpectedCompletedPhase\s*=\s*11') -What 'high-memory SQLAO locale test requires monitored Phase 11 completion'
