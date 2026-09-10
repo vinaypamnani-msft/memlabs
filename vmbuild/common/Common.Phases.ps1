@@ -4272,7 +4272,7 @@ function Get-ConfigurationData {
         Default { return }
     }
     if ($global:Common.VerboseEnabled) {
-        $cd | ConvertTo-Json | out-host
+        $cd | ConvertTo-Json -Depth 10 | out-host
     }
 
     if ($cd) {

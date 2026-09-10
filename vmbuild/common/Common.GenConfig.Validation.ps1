@@ -175,6 +175,18 @@ function Get-AdditionalValidations {
             }
             $property.$name = $value.ToUpperInvariant()
 
+            $requiresFourGB = (($property.operatingSystem -like "Windows 11*" -and $property.role -notin @("DC", "BDC")) -or $property.role -eq "OSDClient")
+            if ($requiresFourGB) {
+                $memoryBytes = 0
+                try { $memoryBytes = [int64]($property.$name / 1) } catch { }
+                if ($memoryBytes -gt 0 -and $memoryBytes -lt 4GB) {
+                    $enteredMemory = $property.$name
+                    $value = "4GB"
+                    $property.$name = $value
+                    Add-ErrorMessage -property $name -Warning "Raised memory from [$enteredMemory] to 4GB. Windows 11/OSD clients require at least 4GB during deployment."
+                }
+            }
+
             if (-not $Global:Config.domainDefaults.UseDynamicMemory) {
                 if ($property.dynamicMinRam) {
                     $property.dynamicMinRam = $value.ToUpperInvariant()

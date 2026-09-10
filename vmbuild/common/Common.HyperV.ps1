@@ -1894,10 +1894,10 @@ function Restart-VM2Smart {
             if ($jobDetails.Count -gt 0) {
                 $jobError = ((@($jobDetails) | Select-Object -Unique) -join ' | ')
             }
-            # ERROR_SHUTDOWN_IN_PROGRESS. Hyper-V refuses the stop because the guest is
-            # ALREADY going down -- on the DSC reboot-pending path, that is the very reboot
-            # this call exists to force.
-            $shutdownInProgress = [bool]($jobError -match '0x8007045B|shutdown is in progress')
+            # ERROR_SHUTDOWN_IN_PROGRESS / ERROR_SHUTDOWN_IS_SCHEDULED. Hyper-V refuses
+            # the stop because the guest is ALREADY going down -- on the DSC reboot-pending
+            # path, that is the very reboot this call exists to force.
+            $shutdownInProgress = [bool]($jobError -match '0x8007045B(?![0-9A-Fa-f])|0x800704A6(?![0-9A-Fa-f])|shutdown is in progress|shutdown has already been scheduled')
             $gracefulSeconds = [int][Math]::Floor(([DateTime]::UtcNow - $gracefulStart).TotalSeconds)
             $gracefulNote = " (job=$jobState after ${gracefulSeconds}s"
             if ($jobError) { $gracefulNote += "; error: $jobError" }

@@ -753,12 +753,36 @@
                         & $vlog "Forcing AD replication across $($allDCs.Count) DCs"
                         $replJob = Start-Job -ScriptBlock {
                             param($dcNames)
-                            $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
+                            foreach ($dcName in $dcNames) {
+                                $savedErrorActionPreference = $ErrorActionPreference
+                                try {
+                                    $ErrorActionPreference = 'Continue'
+                                    $replicationOutput = @(repadmin /syncall $dcName /AdeP 2>&1)
+                                    $replicationExitCode = $LASTEXITCODE
+                                }
+                                finally {
+                                    $ErrorActionPreference = $savedErrorActionPreference
+                                }
+                                [pscustomobject]@{
+                                    DC       = $dcName
+                                    ExitCode = $replicationExitCode
+                                    Output   = ($replicationOutput -join ' | ')
+                                }
+                            }
                         } -ArgumentList (,$dcShortNames)
                         $null = Wait-Job $replJob -Timeout 30
-                        if ($replJob.State -eq 'Running') { Stop-Job $replJob -ErrorAction SilentlyContinue }
+                        $replicationTimedOut = $replJob.State -eq 'Running'
+                        if ($replicationTimedOut) { Stop-Job $replJob -ErrorAction SilentlyContinue }
+                        $replicationResults = @(Receive-Job $replJob -ErrorAction SilentlyContinue)
                         Remove-Job $replJob -Force -ErrorAction SilentlyContinue
-                        & $vlog 'AD replication job drained'
+                        if ($replicationTimedOut) {
+                            & $vlog 'AD replication job timed out after 30s'
+                        }
+                        foreach ($replicationResult in $replicationResults) {
+                            $replicationDetail = if ([string]::IsNullOrWhiteSpace($replicationResult.Output)) { '<no output>' } else { $replicationResult.Output }
+                            & $vlog "repadmin /syncall '$($replicationResult.DC)' exit $($replicationResult.ExitCode): $replicationDetail"
+                        }
+                        & $vlog "AD replication job drained with $($replicationResults.Count)/$($dcShortNames.Count) target result(s)"
                     }
                     Start-Sleep -Seconds 5
 

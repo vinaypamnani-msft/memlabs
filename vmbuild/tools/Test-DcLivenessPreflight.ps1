@@ -332,9 +332,10 @@ Assert-DcEqual $true ([bool]$defaultDhcpCall) 'Default DHCP slow path receives s
 $phasesAst = Get-DcSourceAst 'common\Common.Phases.ps1'
 . ([scriptblock]::Create((Get-DcSourceFunctionText -Ast $phasesAst -Name 'Get-ConfigurationData')))
 
+$script:Phase3ConfigurationData = @{ AllNodes = @(@{ NodeName = 'PT1-DC1'; Role = 'DC' }) }
 function Get-Phase3ConfigurationData {
     param($DeployConfig)
-    return @{ AllNodes = @(@{ NodeName = 'PT1-DC1'; Role = 'DC' }) }
+    return $script:Phase3ConfigurationData
 }
 function Get-CriticalVMs { param($Domain, $VmNames) return @([pscustomobject]@{ VmName = 'PT1-DC1' }) }
 function Get-List { param($Type, $DomainName, [switch]$SmartUpdate) return @() }
@@ -354,6 +355,18 @@ $threw = $false
 try { $null = Get-ConfigurationData -Phase 3 -deployConfig $preflightConfig }
 catch { $threw = $true }
 Assert-DcEqual $true $threw 'Failed DC recovery terminates configuration preflight'
+
+$script:Phase3ConfigurationData = @{
+    AllNodes    = @(@{ NodeName = '*'; Role = '*' })
+    NonNodeData = @{ SqlAo = @{ Listener = @{ Endpoint = @{ Port = 5022 } } } }
+}
+$global:Common.VerboseEnabled = $true
+$global:StartPhase = $true
+$verboseRecords = @(& { Get-ConfigurationData -Phase 3 -deployConfig $preflightConfig } 3>&1)
+$jsonWarnings = @($verboseRecords | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+Assert-DcEqual 0 $jsonWarnings.Count 'Verbose configuration data renders without JSON depth warnings'
+$global:Common.VerboseEnabled = $false
+$global:StartPhase = $false
 
 $startPhaseJobs = $phasesAst.Find({
         param($candidate)
