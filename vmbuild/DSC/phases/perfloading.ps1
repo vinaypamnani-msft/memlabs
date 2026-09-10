@@ -171,6 +171,59 @@ Write-DscStatus "$Tag Starting perfloading"
         return $false
     }
 
+    function Test-MemLabsContentDistributionTarget {
+        param (
+            [ValidateSet('Application', 'Package', 'DeploymentPackage')]
+            [string] $ContentType,
+            [string] $ContentName,
+            [string] $DistributionPointGroupName,
+            [string] $SiteCode,
+            [string] $StatusTag,
+            [int] $Attempts = 6,
+            [int] $RetrySeconds = 5
+        )
+
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            try {
+                $contentPackageIds = @()
+                switch ($ContentType) {
+                    'Application' {
+                        $applications = @(Get-CMApplication -Name $ContentName -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
+                        if ($applications.Count -ne 1) { throw "expected one application named '$ContentName', found $($applications.Count)" }
+                        $contentPackageIds = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_CIContentPackage -Filter "CI_ID='$($applications[0].CI_ID)'" -ErrorAction Stop |
+                            ForEach-Object { $_.PackageID } | Where-Object { $_ })
+                    }
+                    'Package' {
+                        $packages = @(Get-CMPackage -Name $ContentName -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
+                        if ($packages.Count -ne 1) { throw "expected one package named '$ContentName', found $($packages.Count)" }
+                        $contentPackageIds = @($packages[0].PackageID | Where-Object { $_ })
+                    }
+                    'DeploymentPackage' {
+                        $packages = @(Get-CMSoftwareUpdateDeploymentPackage -Name $ContentName -ErrorAction Stop | Where-Object { $null -ne $_ })
+                        if ($packages.Count -ne 1) { throw "expected one deployment package named '$ContentName', found $($packages.Count)" }
+                        $contentPackageIds = @($packages[0].PackageID | Where-Object { $_ })
+                    }
+                }
+                $groups = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$DistributionPointGroupName'" -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($groups.Count -ne 1) { throw "expected one distribution point group named '$DistributionPointGroupName', found $($groups.Count)" }
+                $groupPackages = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupPackages -Filter "GroupID='$($groups[0].GroupID)'" -ErrorAction Stop | Where-Object { $null -ne $_ })
+                $groupPackageKeys = @{}
+                foreach ($groupPackage in $groupPackages) { $groupPackageKeys["$($groupPackage.PkgID)"] = $true }
+                $missingPackages = @($contentPackageIds | Where-Object { -not $groupPackageKeys.ContainsKey("$_") })
+                if ($contentPackageIds.Count -gt 0 -and $missingPackages.Count -eq 0) { return $true }
+                $reason = if ($contentPackageIds.Count -eq 0) { 'content has no package IDs' } else { "missing package assignment(s): $($missingPackages -join ', ')" }
+            }
+            catch {
+                $reason = $_.Exception.Message
+            }
+            if ($attempt -lt $Attempts) {
+                Write-DscStatus "$StatusTag $ContentType '$ContentName' target '$DistributionPointGroupName' is not ready ($reason); retry $attempt/$Attempts in ${RetrySeconds}s"
+                Start-Sleep -Seconds $RetrySeconds
+            }
+        }
+        return $false
+    }
+
     function Sync-MemLabsContentDistribution {
         param (
             [ValidateSet('Application', 'Package', 'DeploymentPackage')]
@@ -179,9 +232,11 @@ Write-DscStatus "$Tag Starting perfloading"
             [string] $DistributionPointGroupName,
             [string] $LegacyDistributionPointGroupName,
             [bool] $MigrateLegacy,
-            [string] $StatusTag
+            [string] $StatusTag,
+            [string] $SiteCode
         )
 
+        $distributionError = $null
         try {
             switch ($ContentType) {
                 'Application' { Start-CMContentDistribution -ApplicationName $ContentName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
@@ -191,8 +246,23 @@ Write-DscStatus "$Tag Starting perfloading"
             Write-DscStatus "$StatusTag Requested $ContentType '$ContentName' distribution to '$DistributionPointGroupName'"
         }
         catch {
-            Write-DscStatus "$StatusTag Failed to distribute $ContentType '$ContentName' to '$DistributionPointGroupName'; legacy targeting was retained: $($_.Exception.Message)" -Failure
+            $distributionError = $_.Exception.Message
+            if ($distributionError -notmatch 'No content destination was found') {
+                Write-DscStatus "$StatusTag Failed to distribute $ContentType '$ContentName' to '$DistributionPointGroupName'; legacy targeting was retained: $distributionError" -Failure
+                return $false
+            }
+        }
+
+        if (-not (Test-MemLabsContentDistributionTarget -ContentType $ContentType -ContentName $ContentName -DistributionPointGroupName $DistributionPointGroupName -SiteCode $SiteCode -StatusTag $StatusTag)) {
+            $detail = if ($distributionError) { $distributionError } else { 'the distribution request returned without an error, but the target assignment was not visible' }
+            Write-DscStatus "$StatusTag Failed to verify $ContentType '$ContentName' on '$DistributionPointGroupName'; legacy targeting was retained: $detail" -Failure
             return $false
+        }
+        if ($distributionError) {
+            Write-DscStatus "$StatusTag $ContentType '$ContentName' is already targeted to '$DistributionPointGroupName'"
+        }
+        else {
+            Write-DscStatus "$StatusTag Verified $ContentType '$ContentName' targeting to '$DistributionPointGroupName'"
         }
 
         if ($MigrateLegacy) {
@@ -1586,46 +1656,110 @@ if ($licensed) { Write-Output 'Activated' }
         #creating an application
         $appname = "MEMLABS-" + "$($_.Name)"
 
-        $appExists = [bool](Get-CMApplication -Name "$appname" -Fast -ErrorAction SilentlyContinue)
-        if ($appExists) {
-            Write-DscStatus "$Tag Application '$appname' already exists, skipping"
+        $applications = @(Get-CMApplication -Name "$appname" -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
+        if ($applications.Count -gt 1) {
+            Write-DscStatus "$Tag Found $($applications.Count) applications named '$appname'; expected at most one. No application content or deployment was changed." -Failure
+            return
+        }
+        $appExists = $applications.Count -eq 1
+        if (-not $appExists) {
+            Write-DscStatus "$Tag Creating an MEMLABS application for $($_.Name) as App model"
+            New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction Stop | Out-Null
+            $applications = @(Get-CMApplication -Name "$appname" -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
+            if ($applications.Count -ne 1) {
+                Write-DscStatus "$Tag Application '$appname' was not uniquely readable after creation (found $($applications.Count))." -Failure
+                return
+            }
+            Write-DscStatus "$Tag Successfully created an MEMLABS application for $($_.Name) as App model"
         }
         else {
-            Write-DscStatus "$Tag Creating an MEMLABS application for $($_.Name) as App model"
-            New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
-            Write-DscStatus "$Tag Successfully created an MEMLABS application for $($_.Name) as App model"
+            Write-DscStatus "$Tag Application '$appname' already exists"
+        }
 
+        $deploymentTypes = @(Get-CMDeploymentType -ApplicationName $appname -ErrorAction Stop)
+        if ($deploymentTypes.Count -eq 0) {
             Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as App model"
-            Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
+            Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction Stop | Out-Null
             Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
+        }
+        elseif ($deploymentTypes.Count -ne 1 -or $deploymentTypes[0].LocalizedDisplayName -ne $_.AppMsi) {
+            Write-DscStatus "$Tag Application '$appname' has $($deploymentTypes.Count) deployment type(s), but not exactly the expected '$($_.AppMsi)'. Content distribution and deployment were not changed." -Failure
+            return
+        }
 
+        if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $appname -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($appExists -and $legacyDPGroupExists) -StatusTag $Tag -SiteCode $SiteCode)) { return }
+
+        try {
+            $applicationDeployments = @(Get-CMApplicationDeployment -Name $appname -CollectionName "All Systems" -ErrorAction Stop | Where-Object { $null -ne $_ })
+        }
+        catch {
+            Write-DscStatus "$Tag Could not read '$appname' deployments to 'All Systems'; no deployment was created: $($_.Exception.Message)" -Failure
+            return
+        }
+        if ($applicationDeployments.Count -eq 0) {
             Write-DscStatus "$Tag Deploying MEMLABS application $($_.Name) to all Systems as available deployment"
-            New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
+            New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction Stop | Out-Null
             Write-DscStatus "$Tag successfully deployed MEMLABS application $($_.Name) to all Systems as available deployment"
         }
-        if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $appname -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($appExists -and $legacyDPGroupExists) -StatusTag $Tag)) { return }
+        elseif ($applicationDeployments.Count -ne 1) {
+            Write-DscStatus "$Tag Found $($applicationDeployments.Count) '$appname' deployments to 'All Systems'; expected exactly one." -Failure
+            return
+        }
 
         $pkgName = "MEMLABS-$($_.Name)"
 
-        $packageExists = [bool](Get-CMPackage -Name "$pkgName" -Fast -ErrorAction SilentlyContinue)
-        if ($packageExists) {
-            Write-DscStatus "$Tag Package '$pkgName' already exists, skipping"
+        $packages = @(Get-CMPackage -Name "$pkgName" -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
+        if ($packages.Count -gt 1) {
+            Write-DscStatus "$Tag Found $($packages.Count) packages named '$pkgName'; expected at most one. No package content or deployment was changed." -Failure
+            return
+        }
+        $packageExists = $packages.Count -eq 1
+        if (-not $packageExists) {
+            Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as Package model"
+            $Package = New-CMPackage -Name "$pkgName" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)" -ErrorAction Stop
+            $packages = @(Get-CMPackage -Name "$pkgName" -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
+            if ($packages.Count -ne 1) {
+                Write-DscStatus "$Tag Package '$pkgName' was not uniquely readable after creation (found $($packages.Count))." -Failure
+                return
+            }
+            $Package = $packages[0]
+            Write-DscStatus "$Tag Successfully created a MEMLABS application deployment for $($_.Name) as Package model"
         }
         else {
-            Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as Package model"
-            $Package = New-CMPackage -Name "$pkgName" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)"
-            Write-DscStatus "$Tag Successfully created a MEMLABS application deployment for $($_.Name) as Package model"
+            $Package = $packages[0]
+            Write-DscStatus "$Tag Package '$pkgName' already exists"
+        }
 
+        $programs = @(Get-CMProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -ErrorAction Stop)
+        if ($programs.Count -eq 0) {
             Write-DscStatus "$Tag Creating an MEMLABS package deployment for $($_.Name) as Package model"
             $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn"
-            New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
+            New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine -ErrorAction Stop | Out-Null
             Write-DscStatus "$Tag Successfully created a MEMLABS package deployment for $($_.Name) as Package model"
+        }
+        elseif ($programs.Count -ne 1) {
+            Write-DscStatus "$Tag Package '$pkgName' has $($programs.Count) programs named '$($_.AppMsi)'; expected exactly one. Content distribution and deployment were not changed." -Failure
+            return
+        }
 
+        if (-not (Sync-MemLabsContentDistribution -ContentType Package -ContentName $pkgName -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($packageExists -and $legacyDPGroupExists) -StatusTag $Tag -SiteCode $SiteCode)) { return }
+
+        try {
+            $packageDeployments = @(Get-CMPackageDeployment -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -ErrorAction Stop | Where-Object { $null -ne $_ })
+        }
+        catch {
+            Write-DscStatus "$Tag Could not read '$pkgName' deployments to 'All Systems'; no deployment was created: $($_.Exception.Message)" -Failure
+            return
+        }
+        if ($packageDeployments.Count -eq 0) {
             Write-DscStatus "$Tag Deploying MEMLABS package $($_.Name) to all Systems as available deployment"
-            New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
+            New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available -ErrorAction Stop | Out-Null
             Write-DscStatus "$Tag successfully deployed MEMLABS package $($_.Name) to all Systems as available deployment"
         }
-        if (-not (Sync-MemLabsContentDistribution -ContentType Package -ContentName $pkgName -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($packageExists -and $legacyDPGroupExists) -StatusTag $Tag)) { return }
+        elseif ($packageDeployments.Count -ne 1) {
+            Write-DscStatus "$Tag Found $($packageDeployments.Count) '$pkgName' deployments to 'All Systems'; expected exactly one." -Failure
+            return
+        }
     }
 
     #region Microsoft 365 Apps deployment via ODT (background download)
@@ -3339,8 +3473,11 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
                         -EstimatedRuntimeMins 30 `
                         -Force `
                         -ErrorAction SilentlyContinue
+                }
 
-                    # Deploy as Required to target VMs
+                if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $channelAppName -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($channelAppExists -and $legacyDPGroupExists) -StatusTag $Tag -SiteCode $SiteCode)) { return }
+                if (-not $channelAppExists) {
+                    # Deploy as Required only after ConfigMgr projects the content target.
                     $officeCollectionName = "MEMLABS-Office Install Targets"
                     Write-DscStatus "$Tag Deploying '$channelAppName' as Required to collection '$officeCollectionName'"
                     New-CMApplicationDeployment -ApplicationName $channelAppName `
@@ -3348,10 +3485,8 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
                         -DeployAction Install `
                         -DeployPurpose Required `
                         -UserNotification DisplayAll `
-                        -ErrorAction SilentlyContinue
+                        -ErrorAction Stop | Out-Null
                 }
-
-                if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $channelAppName -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($channelAppExists -and $legacyDPGroupExists) -StatusTag $Tag)) { return }
                 Write-DscStatus "$Tag Office application '$channelAppName' deployment complete"
             }
         }
@@ -4486,6 +4621,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             if (-not (Get-CMApplication -Name $appName -Fast -ErrorAction SilentlyContinue)) { continue }
             $existingDep = Get-CMApplicationDeployment -Name $appName -CollectionName $officeColName -ErrorAction SilentlyContinue
             if (-not $existingDep) {
+                if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $appName -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy $legacyDPGroupExists -StatusTag $Tag -SiteCode $SiteCode)) { continue }
                 try {
                     New-CMApplicationDeployment -ApplicationName $appName `
                         -CollectionName $officeColName `
@@ -4989,7 +5125,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             else {
                 Write-DscStatus "$Tag Package already exists: $PackageName"
             }
-            if (-not (Sync-MemLabsContentDistribution -ContentType DeploymentPackage -ContentName $PackageName -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($updatePackageExists -and $legacyDPGroupExists) -StatusTag $Tag)) { return }
+            if (-not (Sync-MemLabsContentDistribution -ContentType DeploymentPackage -ContentName $PackageName -DistributionPointGroupName $DPGroupName -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($updatePackageExists -and $legacyDPGroupExists) -StatusTag $Tag -SiteCode $SiteCode)) { return }
         }
     
         # Loop through each package and create it if it doesn't exist
