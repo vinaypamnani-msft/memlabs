@@ -54,6 +54,7 @@ function Get-DscScriptResourceBlock {
 }
 
 $script:PdcName = 'DC1.memlabs.test'
+$script:PdcSequence = @()
 $script:AnnounceFlags = 10
 $script:NtpServerEnabled = 0
 $script:ServiceStatus = 'Running'
@@ -63,7 +64,15 @@ $script:W32tmCount = 0
 $script:RestartCount = 0
 $script:SetCount = 0
 
-function Get-ADDomain { [pscustomobject]@{ PDCEmulator = $script:PdcName } }
+function Get-ADDomain {
+    $pdcEmulator = $script:PdcName
+    if ($script:PdcSequence.Count -gt 0) {
+        $pdcEmulator = $script:PdcSequence[0]
+        if ($script:PdcSequence.Count -eq 1) { $script:PdcSequence = @() }
+        else { $script:PdcSequence = @($script:PdcSequence[1..($script:PdcSequence.Count - 1)]) }
+    }
+    [pscustomobject]@{ PDCEmulator = $pdcEmulator }
+}
 function Get-ItemPropertyValue {
     param($LiteralPath, $Name, $ErrorAction)
     if ($Name -eq 'AnnounceFlags') { return $script:AnnounceFlags }
@@ -102,7 +111,8 @@ Assert-Equal $true ($phase2Text -match 'Script ConfigurePdcTimeServer' -and $pha
 $env:COMPUTERNAME = 'DC1'
 $phase2State = @(& $phase2Get)
 Assert-Equal 1 $phase2State.Count 'Phase 2 GetScript returns exactly one state object'
-Assert-Equal 'DC1.memlabs.test' $phase2State[0].PdcEmulator 'Phase 2 GetScript reports the current PDC owner'
+Assert-Equal @('Result') @($phase2State[0].Keys) 'Phase 2 GetScript returns the DSC Script resource schema'
+Assert-Equal $true ($phase2State[0].Result -match 'PdcEmulator=DC1\.memlabs\.test; AnnounceFlags=10; NtpServerEnabled=0') 'Phase 2 GetScript reports diagnostic state'
 Assert-Equal $false (& $phase2Test) 'Phase 2 detects unreliable time advertisement on the PDC'
 $phase2SetOutput = @(& $phase2Set)
 Assert-Equal 0 $phase2SetOutput.Count 'Phase 2 SetScript emits no success-stream output'
@@ -120,8 +130,27 @@ Assert-Equal 0 $phase2SetOutput.Count 'Phase 2 non-PDC SetScript returns no outp
 Assert-Equal $true ($script:W32tmCount -eq 0 -and $script:SetCount -eq 0 -and $script:RestartCount -eq 0) 'Phase 2 does not alter a former PDC'
 
 $script:PdcName = 'DC1.memlabs.test'
+$script:PdcSequence = @('DC1.memlabs.test', 'OTHERDC.memlabs.test')
+$script:W32tmCount = 0
+$script:SetCount = 0
+$script:RestartCount = 0
+$null = & $phase2Set
+Assert-Equal $true ($script:W32tmCount -eq 1 -and $script:SetCount -eq 0 -and $script:RestartCount -eq 0) 'Phase 2 stops when ownership changes after w32tm configuration'
+
+$script:PdcSequence = @('DC1.memlabs.test', 'DC1.memlabs.test', 'OTHERDC.memlabs.test')
+$script:W32tmCount = 0
+$script:SetCount = 0
+$script:RestartCount = 0
+$null = & $phase2Set
+Assert-Equal $true ($script:W32tmCount -eq 1 -and $script:SetCount -eq 1 -and $script:RestartCount -eq 0) 'Phase 2 stops when ownership changes after enabling the NTP server provider'
+
+$script:PdcName = 'DC1.memlabs.test'
+$script:PdcSequence = @()
 $script:W32tmExitCode = 5
 $script:W32tmErrorText = 'simulated native stderr'
+$script:W32tmCount = 0
+$script:SetCount = 0
+$script:RestartCount = 0
 $phase2Failure = $null
 $phase2FailureOutput = @()
 $savedErrorActionPreference = $ErrorActionPreference
@@ -137,8 +166,23 @@ Assert-Equal 0 $phase2FailureOutput.Count 'Phase 2 suppresses w32tm failure-stre
 Assert-Equal $true ($script:W32tmCount -eq 1 -and $script:SetCount -eq 0 -and $script:RestartCount -eq 0) 'Phase 2 stops mutation after w32tm failure'
 
 $script:PdcName = 'DC1.memlabs.test'
+$script:PdcSequence = @()
 $script:W32tmExitCode = 0
 $script:W32tmErrorText = $null
+$script:AnnounceFlags = 10
+$script:NtpServerEnabled = 0
+$script:W32tmCount = 0
+$script:SetCount = 0
+$script:RestartCount = 0
+$result = & $probe $true
+Assert-Equal $true ($result.Passed -and $result.Changed) 'configured BDC is repaired when it owns the PDC role'
+Assert-Equal $true ($script:W32tmCount -eq 1 -and $script:SetCount -eq 1 -and $script:RestartCount -eq 1) 'PDC repair runs on the configured BDC'
+
+$script:AnnounceFlags = 10
+$script:NtpServerEnabled = 0
+$script:W32tmCount = 0
+$script:SetCount = 0
+$script:RestartCount = 0
 $result = & $probe $false
 Assert-Equal $true $result.Passed 'unreliable PDC time configuration is repaired'
 Assert-Equal $true $result.Changed 'repair reports a changed state'
@@ -154,10 +198,46 @@ Assert-Equal 0 $script:RestartCount 'healthy PDC state does not restart W32Time'
 Assert-Equal 0 $script:SetCount 'healthy PDC state does not rewrite the registry'
 
 $script:PdcName = 'OTHERDC.memlabs.test'
-$result = & $probe $false
-Assert-Equal $true ($result.Passed -and -not $result.Changed) 'non-PDC domain controller is left unchanged'
+$script:AnnounceFlags = 10
+$script:NtpServerEnabled = 0
+$script:W32tmCount = 0
+$script:SetCount = 0
+$script:RestartCount = 0
+$result = & $probe $true
+Assert-Equal $true ($result.Passed -and -not $result.Changed) 'configured BDC is left unchanged when it does not own the PDC role'
+Assert-Equal $true ($script:W32tmCount -eq 0 -and $script:SetCount -eq 0 -and $script:RestartCount -eq 0) 'non-PDC BDC performs no time-server mutation'
 
 $script:PdcName = 'DC1.memlabs.test'
+$script:PdcSequence = @('DC1.memlabs.test', 'OTHERDC.memlabs.test')
+$script:W32tmCount = 0
+$script:SetCount = 0
+$script:RestartCount = 0
+$result = & $probe $false
+Assert-Equal $true ($result.Passed -and -not $result.Changed -and $script:W32tmCount -eq 0) 'Phase 11 stops before w32tm when PDC ownership changes'
+
+$script:PdcSequence = @('DC1.memlabs.test', 'DC1.memlabs.test', 'OTHERDC.memlabs.test')
+$script:W32tmCount = 0
+$script:SetCount = 0
+$script:RestartCount = 0
+$result = & $probe $false
+Assert-Equal $true (-not $result.Passed -and $script:W32tmCount -eq 1 -and $script:SetCount -eq 0 -and $script:RestartCount -eq 0) 'Phase 11 stops after w32tm when PDC ownership changes'
+
+$script:PdcSequence = @('DC1.memlabs.test', 'DC1.memlabs.test', 'DC1.memlabs.test', 'OTHERDC.memlabs.test')
+$script:W32tmCount = 0
+$script:SetCount = 0
+$script:RestartCount = 0
+$result = & $probe $false
+Assert-Equal $true (-not $result.Passed -and $script:W32tmCount -eq 1 -and $script:SetCount -eq 1 -and $script:RestartCount -eq 0) 'Phase 11 stops after the registry mutation when PDC ownership changes'
+
+$script:PdcSequence = @('DC1.memlabs.test', 'DC1.memlabs.test', 'DC1.memlabs.test', 'DC1.memlabs.test', 'OTHERDC.memlabs.test')
+$script:W32tmCount = 0
+$script:SetCount = 0
+$script:RestartCount = 0
+$result = & $probe $false
+Assert-Equal $true (-not $result.Passed -and $script:W32tmCount -eq 1 -and $script:SetCount -eq 1 -and $script:RestartCount -eq 1) 'Phase 11 does not report success after ownership changes following restart'
+
+$script:PdcName = 'DC1.memlabs.test'
+$script:PdcSequence = @()
 $script:AnnounceFlags = 10
 $script:NtpServerEnabled = 0
 $script:W32tmExitCode = 5

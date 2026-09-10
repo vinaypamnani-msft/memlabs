@@ -242,11 +242,9 @@
             GetScript  = {
                 $pdcEmulator = $null
                 try { $pdcEmulator = (Get-ADDomain -ErrorAction Stop).PDCEmulator } catch { }
-                return @{
-                    AnnounceFlags = (Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config' -Name AnnounceFlags -ErrorAction SilentlyContinue)
-                    NtpServerEnabled = (Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpServer' -Name Enabled -ErrorAction SilentlyContinue)
-                    PdcEmulator = $pdcEmulator
-                }
+                $flags = Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config' -Name AnnounceFlags -ErrorAction SilentlyContinue
+                $serverEnabled = Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpServer' -Name Enabled -ErrorAction SilentlyContinue
+                return @{ Result = "PdcEmulator=$pdcEmulator; AnnounceFlags=$flags; NtpServerEnabled=$serverEnabled" }
             }
             TestScript = {
                 $pdcEmulator = $null
@@ -270,7 +268,11 @@
                     $ErrorActionPreference = $savedErrorActionPreference
                 }
                 if ($w32tmExitCode -ne 0) { throw "w32tm /config /reliable:yes failed with exit $w32tmExitCode" }
+                $pdcEmulator = (Get-ADDomain -ErrorAction Stop).PDCEmulator
+                if (($pdcEmulator -split '\.')[0] -ine $env:COMPUTERNAME) { return }
                 Set-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpServer' -Name Enabled -Type DWord -Value 1 -ErrorAction Stop
+                $pdcEmulator = (Get-ADDomain -ErrorAction Stop).PDCEmulator
+                if (($pdcEmulator -split '\.')[0] -ine $env:COMPUTERNAME) { return }
                 Restart-Service -Name W32Time -Force -ErrorAction Stop
             }
         }

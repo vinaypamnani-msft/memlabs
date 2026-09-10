@@ -672,7 +672,6 @@ function Test-DCFunctionality {
         $ensurePdcTimeAdvertising = {
             param([bool]$IsBdc)
 
-            if ($IsBdc) { return [pscustomobject]@{ Passed = $true; Changed = $false; Message = 'BDC uses the domain time hierarchy' } }
             try {
                 $domain = Get-ADDomain -ErrorAction Stop
                 $pdcName = "$($domain.PDCEmulator)"
@@ -689,6 +688,10 @@ function Test-DCFunctionality {
                     return [pscustomobject]@{ Passed = $true; Changed = $false; Message = "PDC '$pdcName' advertises an enabled reliable Windows Time server (AnnounceFlags=$flags)" }
                 }
 
+                $pdcName = "$((Get-ADDomain -ErrorAction Stop).PDCEmulator)"
+                if (($pdcName -split '\.')[0] -ine $env:COMPUTERNAME) {
+                    return [pscustomobject]@{ Passed = $true; Changed = $false; Message = "PDC ownership changed to '$pdcName'; local time advertisement is not managed here" }
+                }
                 $savedErrorActionPreference = $ErrorActionPreference
                 try {
                     $ErrorActionPreference = 'Continue'
@@ -699,10 +702,16 @@ function Test-DCFunctionality {
                     $ErrorActionPreference = $savedErrorActionPreference
                 }
                 if ($w32tmExitCode -ne 0) { throw "w32tm /config /reliable:yes failed with exit $w32tmExitCode" }
+                $pdcName = "$((Get-ADDomain -ErrorAction Stop).PDCEmulator)"
+                if (($pdcName -split '\.')[0] -ine $env:COMPUTERNAME) { throw "PDC ownership changed to '$pdcName' after w32tm configuration" }
                 Set-ItemProperty -LiteralPath $serverPath -Name Enabled -Type DWord -Value 1 -ErrorAction Stop
+                $pdcName = "$((Get-ADDomain -ErrorAction Stop).PDCEmulator)"
+                if (($pdcName -split '\.')[0] -ine $env:COMPUTERNAME) { throw "PDC ownership changed to '$pdcName' after enabling the NTP server provider" }
                 Restart-Service -Name W32Time -Force -ErrorAction Stop
                 Start-Sleep -Seconds 2
 
+                $pdcName = "$((Get-ADDomain -ErrorAction Stop).PDCEmulator)"
+                if (($pdcName -split '\.')[0] -ine $env:COMPUTERNAME) { throw "PDC ownership changed to '$pdcName' after restarting W32Time" }
                 $flags = Get-ItemPropertyValue -LiteralPath $configPath -Name AnnounceFlags -ErrorAction Stop
                 $serverEnabled = Get-ItemPropertyValue -LiteralPath $serverPath -Name Enabled -ErrorAction Stop
                 $service = Get-Service -Name W32Time -ErrorAction Stop
