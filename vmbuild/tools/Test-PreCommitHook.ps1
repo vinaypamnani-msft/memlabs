@@ -141,12 +141,12 @@ try {
     Assert-Case ($parsedRecord.Count -eq 1 -and $parsedRecord[0].DestinationPath -ceq $newlinePath) 'NUL parser preserves a newline-bearing Git path'
 
     $launcherLines = [System.IO.File]::ReadAllLines($launcherSource)
-    $activationStart = [array]::IndexOf($launcherLines, 'IF NOT EXIST ".githooks\pre-commit" GOTO HookActivationFailed')
+    $activationStart = [array]::IndexOf($launcherLines, 'IF NOT EXIST "%MEMLABS_VMBUILD_ROOT%..\.githooks\pre-commit" GOTO HookActivationFailed')
     $activationEnd = [array]::IndexOf($launcherLines, ':HookActivationComplete')
     Assert-Case ($activationStart -ge 0 -and $activationEnd -gt $activationStart) 'VMBuild contains a bounded hook activation block'
     if ($activationStart -ge 0 -and $activationEnd -gt $activationStart) {
-        $activationFixture = Join-Path $testRoot 'activate-hooks.cmd'
-        $activationContent = @('@ECHO OFF', 'pushd "%~dp0"') + @($launcherLines[$activationStart..$activationEnd]) + @('popd', 'EXIT /B 0')
+        $activationFixture = Join-Path $testRoot 'vmbuild\activate-hooks.cmd'
+        $activationContent = @('@ECHO OFF', 'SET "MEMLABS_VMBUILD_ROOT=%~dp0"', 'pushd "%MEMLABS_VMBUILD_ROOT%"') + @($launcherLines[$activationStart..$activationEnd]) + @('popd', 'EXIT /B 0')
         [System.IO.File]::WriteAllText($activationFixture, (($activationContent -join "`r`n") + "`r`n"), [System.Text.Encoding]::ASCII)
         $null = Invoke-Git @('config', 'core.hooksPath', '.disabled-hooks')
         $activationProcess = Start-Process -FilePath $env:ComSpec -ArgumentList @('/D', '/C', 'CALL', ('"{0}"' -f $activationFixture)) -PassThru -Wait

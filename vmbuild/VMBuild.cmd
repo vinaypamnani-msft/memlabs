@@ -177,7 +177,7 @@ EXIT /B 1
 
 :LauncherCurrent
 
-IF NOT EXIST ".githooks\pre-commit" GOTO HookActivationFailed
+IF NOT EXIST "%MEMLABS_VMBUILD_ROOT%..\.githooks\pre-commit" GOTO HookActivationFailed
 git config --local core.hooksPath .githooks
 IF ERRORLEVEL 1 GOTO HookActivationFailed
 GOTO HookActivationComplete
