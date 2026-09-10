@@ -8,6 +8,8 @@ param (
     [Parameter(Mandatory)][string] $CrashPath,
     [int] $StartPhase = 0,
     [int[]] $Phase,
+    [ValidateRange(2, 11)]
+    [int] $StopPhase = 0,
     [switch] $KeepFailedVMs
 )
 
@@ -51,6 +53,8 @@ function Assert-MemLabsDeploymentLease {
 }
 
 try {
+    if ($StartPhase -and $Phase) { throw 'Specify either -StartPhase or -Phase, not both.' }
+    if ($StopPhase -and ($StartPhase -or $Phase)) { throw 'Specify -StopPhase only for a fresh sequential deployment.' }
     [Environment]::SetEnvironmentVariable('MEMLABS_CRASH_LOG_PATH', $CrashPath, [EnvironmentVariableTarget]::Process)
     Assert-MemLabsDeploymentLease
 
@@ -70,6 +74,7 @@ try {
     $arguments = @{ Configuration = $Configuration; NoWindowResize = $true; NoSnapshot = $true }
     if ($StartPhase) { $arguments.StartPhase = $StartPhase }
     if ($Phase) { $arguments.Phase = $Phase }
+    if ($StopPhase) { $arguments.StopPhase = $StopPhase }
     if ($KeepFailedVMs) { $arguments.KeepFailedVMs = $true }
 
     & (Join-Path (Split-Path -Parent $PSScriptRoot) 'New-Lab.ps1') @arguments *> $OutputPath

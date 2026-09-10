@@ -47,7 +47,14 @@ $timeoutBlockEnd = $monitorSource.IndexOf('throw "Monitored deployment stopped:'
 $timeoutBlock = if ($timeoutBlockStart -ge 0 -and $timeoutBlockEnd -gt $timeoutBlockStart) { $monitorSource.Substring($timeoutBlockStart, $timeoutBlockEnd - $timeoutBlockStart) } else { '' }
 Assert-Equal $true ($timeoutBlock.IndexOf('CloseHandle($jobHandle)') -ge 0 -and $timeoutBlock.IndexOf('CloseHandle($jobHandle)') -lt $timeoutBlock.IndexOf('WaitForExit(30000)') -and $timeoutBlock.IndexOf('WaitForExit(30000)') -lt $timeoutBlock.IndexOf('Save-MemLabsDeploymentDiagnostics')) 'timeout terminates and awaits the process tree before guest diagnostics'
 Assert-Equal $true ($monitorSource -match '\$diagnosticVmNames = @\(\$config\.virtualMachines' -and $monitorSource -match 'Save-MemLabsDeploymentDiagnostics -VMName \$diagnosticVmNames') 'timeout diagnostics include hidden dependency VMs'
-Assert-Equal $true ($monitorSource -match '\$Phase -and -not \$PSBoundParameters\.ContainsKey\(''ExpectedCompletedPhase''\)') 'partial phase runs derive their completion postcondition from requested phases'
+Assert-Equal $true ($monitorSource -match '\$arguments\.StopPhase = \$StopPhase' -and $childSource -match '\$arguments\.StopPhase = \$StopPhase') 'fresh monitored runs pass StopPhase through both process boundaries'
+Assert-Equal $true ($monitorSource -match '\$StopPhase -and \(\$StartPhase -or \$Phase\)') 'stop-phase mode rejects ambiguous start/phase combinations'
+$expectedPhaseFunction = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'Resolve-MemLabsExpectedCompletedPhase'
+. $expectedPhaseFunction
+Assert-Equal 4 (Resolve-MemLabsExpectedCompletedPhase -Phase @(2, 4) -ExpectedCompletedPhase 11 -ExpectedPhaseWasBound $false) 'phase-only run derives expected completion from its highest requested phase'
+Assert-Equal 2 (Resolve-MemLabsExpectedCompletedPhase -StopPhase 2 -ExpectedCompletedPhase 11 -ExpectedPhaseWasBound $false) 'fresh stop-phase run derives its expected completion threshold'
+Assert-Equal 7 (Resolve-MemLabsExpectedCompletedPhase -StopPhase 2 -ExpectedCompletedPhase 7 -ExpectedPhaseWasBound $true) 'explicit expected completion override is preserved'
+Assert-Equal 11 (Resolve-MemLabsExpectedCompletedPhase -ExpectedCompletedPhase 11 -ExpectedPhaseWasBound $false) 'full deployment retains the default Phase 11 postcondition'
 Assert-Equal $true ($monitorSource -match '(?s)New-MemLabsDeploymentProcess.*?gateReady\.WaitOne.*?Add-MemLabsDeploymentProcessToJob.*?startGate\.Set\(\)' -and $childSource.IndexOf('gateReady.Set()') -lt $childSource.IndexOf('WaitOne([TimeSpan]::FromMinutes(2))') -and $childSource.IndexOf('WaitOne([TimeSpan]::FromMinutes(2))') -lt $childSource.IndexOf("& (Join-Path (Split-Path -Parent `$PSScriptRoot) 'New-Lab.ps1')")) 'deployment child acknowledges the gate then waits for job ownership before invoking New-Lab'
 Assert-Equal $true ($monitorSource -match '(?s)finally \{.*?CloseHandle\(\$jobHandle\).*?\$process\.Kill\(\$true\).*?WaitForExit\(30000\)') 'monitor cleanup cannot return while an uncontained deployment process remains active'
 Assert-Equal $true ($childSource -match '(?s)MEMLABS_CRASH_LOG_PATH.*?Assert-MemLabsDeploymentLease.*?catch \{.*?DEPLOYMENT CHILD FAILURE:.*?Add-Content -LiteralPath \$OutputPath' -and $monitorSource -match 'Monitored deployment failed during Live Ops stage.*?Failure=\$failurePath.*?Crash=\$crashEvidence.*?Output=\$outputPath.*?Monitor=\$monitorLogPath.*?Diagnostics=\$diagnosticsPath') 'bootstrap and callback failures publish synchronized evidence paths'
@@ -181,8 +188,8 @@ try {
     $null = New-Item -Path $childFixtureTools -ItemType Directory -Force
     Copy-Item -LiteralPath (Join-Path $RootPath 'tools\Invoke-MemLabsDeploymentChild.ps1') -Destination $childFixtureTools
     @'
-param([string] $Configuration, [switch] $NoWindowResize, [switch] $NoSnapshot)
-Set-Content -LiteralPath $env:MEMLABS_TEST_CHILD_MARKER -Value started
+param([string] $Configuration, [switch] $NoWindowResize, [switch] $NoSnapshot, [int] $StopPhase)
+Set-Content -LiteralPath $env:MEMLABS_TEST_CHILD_MARKER -Value "StopPhase=$StopPhase"
 '@ | Set-Content -LiteralPath (Join-Path $childFixtureRoot 'New-Lab.ps1') -Encoding UTF8
     $childMarker = Join-Path $childFixtureRoot 'started.txt'
     $childOutput = Join-Path $childFixtureRoot 'output.txt'
@@ -200,7 +207,7 @@ Set-Content -LiteralPath $env:MEMLABS_TEST_CHILD_MARKER -Value started
     $childInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
     $childInfo.UseShellExecute = $false
     $childCrashPath = Join-Path $childFixtureRoot 'child-crash.log'
-    foreach ($argument in @('-NoProfile', '-File', (Join-Path $childFixtureTools 'Invoke-MemLabsDeploymentChild.ps1'), '-Configuration', 'fixture.json', '-OutputPath', $childOutput, '-GateName', $childGateName, '-GateReadyName', $childReadyName, '-CrashPath', $childCrashPath)) {
+    foreach ($argument in @('-NoProfile', '-File', (Join-Path $childFixtureTools 'Invoke-MemLabsDeploymentChild.ps1'), '-Configuration', 'fixture.json', '-OutputPath', $childOutput, '-GateName', $childGateName, '-GateReadyName', $childReadyName, '-CrashPath', $childCrashPath, '-StopPhase', '2')) {
         $childInfo.ArgumentList.Add($argument)
     }
     $childProcess = [Diagnostics.Process]::Start($childInfo)
@@ -213,6 +220,7 @@ Set-Content -LiteralPath $env:MEMLABS_TEST_CHILD_MARKER -Value started
     Assert-Equal $true $childProcess.WaitForExit(10000) 'released deployment child completes the harmless fixture'
     Assert-Equal 0 $childProcess.ExitCode 'released deployment child preserves the New-Lab exit code'
     Assert-Equal $true (Test-Path -LiteralPath $childMarker) 'real deployment child invokes New-Lab only after containment'
+    Assert-Equal 'StopPhase=2' (Get-Content -LiteralPath $childMarker -Raw).Trim() 'deployment child passes StopPhase to New-Lab end to end'
     $null = [MemLabsNativeJob]::CloseHandle($childJobHandle)
     $childJobHandle = [IntPtr]::Zero
     $childProcess.Dispose()
@@ -221,6 +229,20 @@ Set-Content -LiteralPath $env:MEMLABS_TEST_CHILD_MARKER -Value started
     $childReady = $null
     $childGate.Dispose()
     $childGate = $null
+
+    Remove-Item -LiteralPath $childMarker, $childOutput -Force -ErrorAction SilentlyContinue
+    $conflictInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
+    $conflictInfo.UseShellExecute = $false
+    foreach ($argument in @('-NoProfile', '-File', (Join-Path $childFixtureTools 'Invoke-MemLabsDeploymentChild.ps1'), '-Configuration', 'fixture.json', '-OutputPath', $childOutput, '-GateName', 'unused', '-GateReadyName', 'unused-ready', '-CrashPath', $childCrashPath, '-StartPhase', '3', '-StopPhase', '2')) {
+        $conflictInfo.ArgumentList.Add($argument)
+    }
+    $conflictProcess = [Diagnostics.Process]::Start($conflictInfo)
+    Assert-Equal $true $conflictProcess.WaitForExit(10000) 'conflicting child phase controls fail without waiting for a start gate'
+    Assert-Equal 1 $conflictProcess.ExitCode 'conflicting child phase controls return failure'
+    Assert-Equal $false (Test-Path -LiteralPath $childMarker) 'conflicting child phase controls cannot invoke New-Lab'
+    Assert-Equal $true ((Get-Content -LiteralPath $childOutput -Raw) -like '*Specify -StopPhase only for a fresh sequential deployment*') 'conflicting child failure is actionable in the output artifact'
+    $conflictProcess.Dispose()
+    $conflictProcess = $null
 
     "throw 'fixture child bootstrap failure'" | Set-Content -LiteralPath (Join-Path $childFixtureRoot 'New-Lab.ps1') -Encoding UTF8
     Remove-Item -LiteralPath $childOutput -Force -ErrorAction SilentlyContinue
@@ -273,6 +295,10 @@ Set-Content -LiteralPath $env:MEMLABS_TEST_CHILD_MARKER -Value started
     $assignmentGate.Dispose()
 }
 finally {
+    if ($conflictProcess) {
+        if (-not $conflictProcess.HasExited) { $conflictProcess.Kill($true); $null = $conflictProcess.WaitForExit(10000) }
+        $conflictProcess.Dispose()
+    }
     if ($failureJobHandle -and $failureJobHandle -ne [IntPtr]::Zero) { $null = [MemLabsNativeJob]::CloseHandle($failureJobHandle) }
     if ($failureProcess) {
         if (-not $failureProcess.HasExited) { $failureProcess.Kill($true); $null = $failureProcess.WaitForExit(10000) }

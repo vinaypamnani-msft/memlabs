@@ -13,6 +13,8 @@ param (
     [string] $Configuration,
     [int] $StartPhase = 0,
     [int[]] $Phase,
+    [ValidateRange(2, 11)]
+    [int] $StopPhase = 0,
     [ValidateRange(1, 1440)]
     [int] $NoProgressMinutes = 45,
     [ValidateRange(10, 3600)]
@@ -184,6 +186,20 @@ function Resolve-MemLabsConfigurationPath {
     return [IO.Path]::GetFullPath((Join-Path $BasePath $Path))
 }
 
+function Resolve-MemLabsExpectedCompletedPhase {
+    param(
+        [int[]] $Phase,
+        [int] $StopPhase,
+        [int] $ExpectedCompletedPhase,
+        [bool] $ExpectedPhaseWasBound
+    )
+
+    if ($ExpectedPhaseWasBound) { return $ExpectedCompletedPhase }
+    if ($Phase) { return [int](($Phase | Measure-Object -Maximum).Maximum) }
+    if ($StopPhase) { return $StopPhase }
+    return $ExpectedCompletedPhase
+}
+
 function Save-MemLabsDeploymentFailure {
     param(
         [Parameter(Mandatory)][string] $Path,
@@ -325,9 +341,9 @@ function Save-MemLabsDeploymentDiagnostics {
 if ($MyInvocation.InvocationName -eq '.') { return }
 if ([string]::IsNullOrWhiteSpace($Configuration)) { throw '-Configuration is required.' }
 if ($StartPhase -and $Phase) { throw 'Specify either -StartPhase or -Phase, not both.' }
-if ($Phase -and -not $PSBoundParameters.ContainsKey('ExpectedCompletedPhase')) {
-    $ExpectedCompletedPhase = [int](($Phase | Measure-Object -Maximum).Maximum)
-}
+if ($StopPhase -and ($StartPhase -or $Phase)) { throw 'Specify -StopPhase only for a fresh sequential deployment.' }
+$ExpectedCompletedPhase = Resolve-MemLabsExpectedCompletedPhase -Phase $Phase -StopPhase $StopPhase `
+    -ExpectedCompletedPhase $ExpectedCompletedPhase -ExpectedPhaseWasBound $PSBoundParameters.ContainsKey('ExpectedCompletedPhase')
 
 $vmbuildRoot = Split-Path -Parent $PSScriptRoot
 $configurationPath = Resolve-MemLabsConfigurationPath -Path $Configuration -BasePath (Get-Location).ProviderPath
@@ -363,6 +379,7 @@ $operation = {
     $arguments = @{ Configuration = $configurationPath; OutputPath = $outputPath; CrashPath = $childCrashPath }
     if ($StartPhase) { $arguments.StartPhase = $StartPhase }
     if ($Phase) { $arguments.Phase = $Phase }
+    if ($StopPhase) { $arguments.StopPhase = $StopPhase }
     if ($KeepFailedVMs) { $arguments.KeepFailedVMs = $true }
     $jobHandle = [MemLabsNativeJob]::CreateKillOnClose()
     $process = $null
