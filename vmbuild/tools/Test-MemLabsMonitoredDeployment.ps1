@@ -50,19 +50,72 @@ Assert-Equal $true ($monitorSource -match '\$diagnosticVmNames = @\(\$config\.vi
 Assert-Equal $true ($monitorSource -match '\$Phase -and -not \$PSBoundParameters\.ContainsKey\(''ExpectedCompletedPhase''\)') 'partial phase runs derive their completion postcondition from requested phases'
 Assert-Equal $true ($monitorSource -match '(?s)New-MemLabsDeploymentProcess.*?gateReady\.WaitOne.*?Add-MemLabsDeploymentProcessToJob.*?startGate\.Set\(\)' -and $childSource.IndexOf('gateReady.Set()') -lt $childSource.IndexOf('WaitOne([TimeSpan]::FromMinutes(2))') -and $childSource.IndexOf('WaitOne([TimeSpan]::FromMinutes(2))') -lt $childSource.IndexOf("& (Join-Path (Split-Path -Parent `$PSScriptRoot) 'New-Lab.ps1')")) 'deployment child acknowledges the gate then waits for job ownership before invoking New-Lab'
 Assert-Equal $true ($monitorSource -match '(?s)finally \{.*?CloseHandle\(\$jobHandle\).*?\$process\.Kill\(\$true\).*?WaitForExit\(30000\)') 'monitor cleanup cannot return while an uncontained deployment process remains active'
-Assert-Equal $true ($childSource -match '(?s)catch \{.*?DEPLOYMENT CHILD FAILURE:.*?Add-Content -LiteralPath \$OutputPath' -and $monitorSource -match 'Monitored deployment failed during Live Ops stage.*?Failure=\$failurePath.*?Output=\$outputPath.*?Monitor=\$monitorLogPath.*?Diagnostics=\$diagnosticsPath') 'bootstrap and callback failures publish synchronized evidence paths'
+Assert-Equal $true ($childSource -match '(?s)MEMLABS_CRASH_LOG_PATH.*?Assert-MemLabsDeploymentLease.*?catch \{.*?DEPLOYMENT CHILD FAILURE:.*?Add-Content -LiteralPath \$OutputPath' -and $monitorSource -match 'Monitored deployment failed during Live Ops stage.*?Failure=\$failurePath.*?Crash=\$crashEvidence.*?Output=\$outputPath.*?Monitor=\$monitorLogPath.*?Diagnostics=\$diagnosticsPath') 'bootstrap and callback failures publish synchronized evidence paths'
 
 $failureWriter = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'Save-MemLabsDeploymentFailure'
 $stampWriter = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'New-MemLabsDeploymentStamp'
 $stamps = @(& { . $stampWriter; New-MemLabsDeploymentStamp; New-MemLabsDeploymentStamp })
 Assert-Equal 2 @($stamps | Sort-Object -Unique).Count 'simultaneous monitor attempts receive unique artifact names'
 $failureFixturePath = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-failure-' + [guid]::NewGuid().ToString('N') + '.json')
+$failureFixtureOutput = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-output-' + [guid]::NewGuid().ToString('N') + '.txt')
+$failureFixtureCrashExport = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-crash-export-' + [guid]::NewGuid().ToString('N') + '.txt')
+$blockedCrashExport = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-blocked-export-' + [guid]::NewGuid().ToString('N'))
 try {
     . $failureWriter
-    Save-MemLabsDeploymentFailure -Path $failureFixturePath -Stage Operation -ErrorMessage 'fixture operation failed' -OutputPath 'output.txt' -MonitorPath 'monitor.jsonl' -DiagnosticsPath 'diagnostics.json'
+    1..125 | ForEach-Object { "output line $_" } | Set-Content -LiteralPath $failureFixtureOutput
+    $finishedInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
+    $finishedInfo.UseShellExecute = $false
+    $finishedInfo.ArgumentList.Add('-NoProfile')
+    $finishedInfo.ArgumentList.Add('-Command')
+    $finishedInfo.ArgumentList.Add('exit 37')
+    $finishedProcess = [Diagnostics.Process]::Start($finishedInfo)
+    if (-not $finishedProcess.WaitForExit(10000)) { throw 'Completed-process fixture did not exit.' }
+    $failureFixtureCrash = Join-Path ([IO.Path]::GetTempPath()) "VMBuild.unhandled.$($finishedProcess.Id).log"
+    'fixture CLR crash stack' | Set-Content -LiteralPath $failureFixtureCrash
+    Save-MemLabsDeploymentFailure -Path $failureFixturePath -Stage Operation -ErrorMessage 'fixture operation failed' -Process $finishedProcess `
+        -OutputPath $failureFixtureOutput -MonitorPath 'monitor.jsonl' -DiagnosticsPath 'diagnostics.json' `
+        -CrashSourcePath $failureFixtureCrash -CrashExportPath $failureFixtureCrashExport
     $operationFailure = Get-Content -LiteralPath $failureFixturePath -Raw | ConvertFrom-Json
     Assert-Equal 'Operation' $operationFailure.Stage 'operation failure artifact records its stage'
     Assert-Equal 'fixture operation failed' $operationFailure.Error 'operation failure artifact preserves the actionable error'
+    Assert-Equal $finishedProcess.Id $operationFailure.ProcessId 'operation failure artifact records the exact child PID'
+    Assert-Equal 37 $operationFailure.ExitCode 'operation failure artifact records the nonzero child exit code'
+    Assert-Equal 120 @($operationFailure.OutputTail).Count 'operation failure artifact preserves the final 120 child-output lines'
+    Assert-Equal 'output line 6' $operationFailure.OutputTail[0] 'operation failure output tail excludes older lines'
+    Assert-Equal $failureFixtureCrash $operationFailure.CrashSource 'operation failure artifact records the PID-derived crash source path'
+    Assert-Equal $failureFixtureCrashExport $operationFailure.CrashExport 'operation failure artifact records the top-level crash export path'
+    Assert-Equal 'fixture CLR crash stack' $operationFailure.Crash.Trim() 'operation failure artifact embeds the CLR crash evidence'
+    Assert-Equal 'fixture CLR crash stack' (Get-Content -LiteralPath $failureFixtureCrashExport -Raw).Trim() 'CLR crash evidence is exported to the top-level synchronized path'
+
+    $staleFailurePath = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-stale-' + [guid]::NewGuid().ToString('N') + '.json')
+    (Get-Item -LiteralPath $failureFixtureCrash).LastWriteTimeUtc = $finishedProcess.StartTime.ToUniversalTime().AddMinutes(-1)
+    Save-MemLabsDeploymentFailure -Path $staleFailurePath -Stage Operation -ErrorMessage 'stale fixture' -Process $finishedProcess `
+        -OutputPath $failureFixtureOutput -MonitorPath 'monitor.jsonl' -DiagnosticsPath 'diagnostics.json' `
+        -CrashSourcePath $failureFixtureCrash -CrashExportPath $failureFixtureCrashExport
+    $staleFailure = Get-Content -LiteralPath $staleFailurePath -Raw | ConvertFrom-Json
+    Assert-Equal '' $staleFailure.Crash 'stale same-PID crash content is not attributed to the current child'
+    Assert-Equal $true ($staleFailure.CrashCaptureError -like 'Ignored crash file outside child lifetime*') 'stale same-PID crash rejection is recorded'
+
+    (Get-Item -LiteralPath $failureFixtureCrash).LastWriteTimeUtc = $finishedProcess.ExitTime.ToUniversalTime().AddMinutes(1)
+    Save-MemLabsDeploymentFailure -Path $staleFailurePath -Stage Operation -ErrorMessage 'after-exit fixture' -Process $finishedProcess `
+        -OutputPath $failureFixtureOutput -MonitorPath 'monitor.jsonl' -DiagnosticsPath 'diagnostics.json' `
+        -CrashSourcePath $failureFixtureCrash -CrashExportPath $failureFixtureCrashExport
+    $afterExitFailure = Get-Content -LiteralPath $staleFailurePath -Raw | ConvertFrom-Json
+    Assert-Equal '' $afterExitFailure.Crash 'after-exit replacement crash content is not attributed to the child'
+    Assert-Equal $true ($afterExitFailure.CrashCaptureError -like 'Ignored crash file outside child lifetime*') 'after-exit replacement rejection is recorded'
+
+    $null = New-Item -Path $blockedCrashExport -ItemType Directory
+    $blockedCrashExportPath = Join-Path $blockedCrashExport 'missing\crash.txt'
+    (Get-Item -LiteralPath $failureFixtureCrash).LastWriteTimeUtc = [datetime]::UtcNow
+    $blockedFailurePath = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-blocked-' + [guid]::NewGuid().ToString('N') + '.json')
+    Save-MemLabsDeploymentFailure -Path $blockedFailurePath -Stage Operation -ErrorMessage 'original child failure' -Process $finishedProcess `
+        -OutputPath $failureFixtureOutput -MonitorPath 'monitor.jsonl' -DiagnosticsPath 'diagnostics.json' `
+        -CrashSourcePath $failureFixtureCrash -CrashExportPath $blockedCrashExportPath
+    $blockedFailure = Get-Content -LiteralPath $blockedFailurePath -Raw | ConvertFrom-Json
+    Assert-Equal 'original child failure' $blockedFailure.Error 'blocked crash export does not mask the original deployment failure'
+    Assert-Equal 37 $blockedFailure.ExitCode 'blocked crash export retains the child exit code'
+    Assert-Equal $true (-not [string]::IsNullOrWhiteSpace([string]$blockedFailure.CrashCaptureError)) 'blocked crash export records its diagnostic I/O error'
+    Assert-Equal '' $blockedFailure.CrashExport 'blocked crash export is not advertised as completed evidence'
     Save-MemLabsDeploymentFailure -Path $failureFixturePath -Stage Unhandled -ErrorMessage 'fixture fallback' -OperationId 'fixture-id' -JournalPath 'operations.jsonl' -ActiveOwnerMetadata '{"owner":"fixture"}' -FailureDiagnostics @('diagnostic fixture') -OutputPath 'output.txt' -MonitorPath 'monitor.jsonl' -DiagnosticsPath 'diagnostics.json'
     $coordinationFailure = Get-Content -LiteralPath $failureFixturePath -Raw | ConvertFrom-Json
     Assert-Equal 'Unhandled' $coordinationFailure.Stage 'uncorrelated failure artifact receives a nonempty fallback stage'
@@ -71,7 +124,9 @@ try {
     Assert-Equal 'output.txt|monitor.jsonl|diagnostics.json' "$($coordinationFailure.Output)|$($coordinationFailure.Monitor)|$($coordinationFailure.Diagnostics)" 'failure artifact records every synchronized evidence path'
 }
 finally {
-    Remove-Item -LiteralPath $failureFixturePath -Force -ErrorAction SilentlyContinue
+    if ($finishedProcess) { $finishedProcess.Dispose() }
+    Remove-Item -LiteralPath $failureFixturePath, $failureFixtureOutput, $failureFixtureCrash, $failureFixtureCrashExport, $staleFailurePath, $blockedFailurePath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $blockedCrashExport -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $leaseFunction = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsDeploymentChild.ps1') -Name 'Assert-MemLabsDeploymentLease'
@@ -144,7 +199,8 @@ Set-Content -LiteralPath $env:MEMLABS_TEST_CHILD_MARKER -Value started
     $childReady = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $childReadyName)
     $childInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
     $childInfo.UseShellExecute = $false
-    foreach ($argument in @('-NoProfile', '-File', (Join-Path $childFixtureTools 'Invoke-MemLabsDeploymentChild.ps1'), '-Configuration', 'fixture.json', '-OutputPath', $childOutput, '-GateName', $childGateName, '-GateReadyName', $childReadyName)) {
+    $childCrashPath = Join-Path $childFixtureRoot 'child-crash.log'
+    foreach ($argument in @('-NoProfile', '-File', (Join-Path $childFixtureTools 'Invoke-MemLabsDeploymentChild.ps1'), '-Configuration', 'fixture.json', '-OutputPath', $childOutput, '-GateName', $childGateName, '-GateReadyName', $childReadyName, '-CrashPath', $childCrashPath)) {
         $childInfo.ArgumentList.Add($argument)
     }
     $childProcess = [Diagnostics.Process]::Start($childInfo)
@@ -174,7 +230,7 @@ Set-Content -LiteralPath $env:MEMLABS_TEST_CHILD_MARKER -Value started
     $failureReady = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $failureReadyName)
     $failureInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
     $failureInfo.UseShellExecute = $false
-    foreach ($argument in @('-NoProfile', '-File', (Join-Path $childFixtureTools 'Invoke-MemLabsDeploymentChild.ps1'), '-Configuration', 'fixture.json', '-OutputPath', $childOutput, '-GateName', $failureGateName, '-GateReadyName', $failureReadyName)) {
+    foreach ($argument in @('-NoProfile', '-File', (Join-Path $childFixtureTools 'Invoke-MemLabsDeploymentChild.ps1'), '-Configuration', 'fixture.json', '-OutputPath', $childOutput, '-GateName', $failureGateName, '-GateReadyName', $failureReadyName, '-CrashPath', $childCrashPath)) {
         $failureInfo.ArgumentList.Add($argument)
     }
     $failureProcess = [Diagnostics.Process]::Start($failureInfo)

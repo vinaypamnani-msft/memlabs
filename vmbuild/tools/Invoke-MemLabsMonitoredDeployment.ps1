@@ -193,12 +193,50 @@ function Save-MemLabsDeploymentFailure {
         [AllowEmptyString()][string] $JournalPath = '',
         [AllowNull()][object] $ActiveOwnerMetadata,
         [AllowNull()][object[]] $FailureDiagnostics,
+        [AllowNull()][object] $Process,
         [Parameter(Mandatory)][string] $OutputPath,
         [Parameter(Mandatory)][string] $MonitorPath,
-        [Parameter(Mandatory)][string] $DiagnosticsPath
+        [Parameter(Mandatory)][string] $DiagnosticsPath,
+        [AllowEmptyString()][string] $CrashSourcePath = '',
+        [AllowEmptyString()][string] $CrashExportPath = ''
     )
 
-    [pscustomobject]@{
+    $exitCode = $null
+    if ($Process -and $Process.HasExited) { $exitCode = $Process.ExitCode }
+    $outputTail = if (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
+        @(Get-Content -LiteralPath $OutputPath -Tail 120 -ErrorAction SilentlyContinue)
+    }
+    else { @() }
+    $crashText = ''
+    $crashCaptureError = ''
+    $crashExportSucceeded = $false
+    if ($CrashSourcePath -and (Test-Path -LiteralPath $CrashSourcePath -PathType Leaf)) {
+        try {
+            $crashItem = Get-Item -LiteralPath $CrashSourcePath -ErrorAction Stop
+            $crashOutsideLifetime = $Process -and (
+                $crashItem.LastWriteTimeUtc -lt $Process.StartTime.ToUniversalTime() -or
+                ($Process.HasExited -and $crashItem.LastWriteTimeUtc -gt $Process.ExitTime.ToUniversalTime().AddSeconds(2))
+            )
+            if ($crashOutsideLifetime) {
+                $crashCaptureError = "Ignored crash file outside child lifetime: $CrashSourcePath"
+            }
+            else {
+                $crashText = Get-Content -LiteralPath $CrashSourcePath -Raw -ErrorAction Stop
+                if ($CrashExportPath) {
+                    $crashTempPath = "$CrashExportPath.$([guid]::NewGuid().ToString('N')).tmp"
+                    try {
+                        Set-Content -LiteralPath $crashTempPath -Value $crashText -Encoding UTF8 -ErrorAction Stop
+                        Move-Item -LiteralPath $crashTempPath -Destination $CrashExportPath -Force -ErrorAction Stop
+                        $crashExportSucceeded = $true
+                    }
+                    finally { Remove-Item -LiteralPath $crashTempPath -Force -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+        catch { $crashCaptureError = $_.Exception.Message }
+    }
+
+    $failureRecord = [pscustomobject]@{
         CapturedUtc = [datetime]::UtcNow.ToString('o')
         Stage       = $Stage
         Error       = $ErrorMessage
@@ -206,10 +244,23 @@ function Save-MemLabsDeploymentFailure {
         Journal     = $JournalPath
         ActiveOwner = $ActiveOwnerMetadata
         FailureDiagnostics = @($FailureDiagnostics)
+        ProcessId   = if ($Process) { $Process.Id } else { $null }
+        ExitCode    = $exitCode
         Output      = $OutputPath
+        OutputTail  = @($outputTail)
         Monitor     = $MonitorPath
         Diagnostics = $DiagnosticsPath
-    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding UTF8
+        CrashSource = $CrashSourcePath
+        CrashExport = if ($crashExportSucceeded) { $CrashExportPath } else { '' }
+        Crash       = $crashText
+        CrashCaptureError = $crashCaptureError
+    }
+    $failureTempPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $failureRecord | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $failureTempPath -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $failureTempPath -Destination $Path -Force -ErrorAction Stop
+    }
+    finally { Remove-Item -LiteralPath $failureTempPath -Force -ErrorAction SilentlyContinue }
 }
 
 function New-MemLabsDeploymentStamp {
@@ -294,6 +345,8 @@ $monitorLogPath = Join-Path $vmbuildRoot "logs\MonitoredDeployment-$stamp.jsonl"
 $outputPath = Join-Path $vmbuildRoot "logs\MonitoredDeployment-$stamp.out.txt"
 $diagnosticsPath = Join-Path $vmbuildRoot "logs\MonitoredDeployment-$stamp.diagnostics.json"
 $failurePath = Join-Path $vmbuildRoot "logs\MonitoredDeployment-$stamp.failure.json"
+$childCrashPath = Join-Path $vmbuildRoot "logs\MonitoredDeployment-$stamp.child-crash.log"
+$crashExportPath = Join-Path $vmbuildRoot "logs\MonitoredDeployment-$stamp.crash.txt"
 $launcherPath = Join-Path $PSScriptRoot 'Invoke-MemLabsDeploymentChild.ps1'
 $liveOpsPath = Join-Path $PSScriptRoot 'Invoke-MemLabsLiveOperation.ps1'
 
@@ -307,7 +360,7 @@ $operation = {
     $lastProgressUtc = $startedUtc
     $lastSignature = ''
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $arguments = @{ Configuration = $configurationPath; OutputPath = $outputPath }
+    $arguments = @{ Configuration = $configurationPath; OutputPath = $outputPath; CrashPath = $childCrashPath }
     if ($StartPhase) { $arguments.StartPhase = $StartPhase }
     if ($Phase) { $arguments.Phase = $Phase }
     if ($KeepFailedVMs) { $arguments.KeepFailedVMs = $true }
@@ -370,7 +423,8 @@ $operation = {
     }
     catch {
         Save-MemLabsDeploymentFailure -Path $failurePath -Stage Operation -ErrorMessage $_.Exception.Message `
-            -OutputPath $outputPath -MonitorPath $monitorLogPath -DiagnosticsPath $diagnosticsPath
+            -Process $process -OutputPath $outputPath -MonitorPath $monitorLogPath -DiagnosticsPath $diagnosticsPath `
+            -CrashSourcePath $childCrashPath -CrashExportPath $crashExportPath
         throw
     }
     finally {
@@ -416,7 +470,8 @@ catch {
         Save-MemLabsDeploymentFailure -Path $failurePath -Stage $stage -ErrorMessage $_.Exception.Message -OperationId $operationId `
             -JournalPath ([string]$_.Exception.Data['JournalPath']) -ActiveOwnerMetadata $_.Exception.Data['ActiveOwnerMetadata'] `
             -FailureDiagnostics @($_.Exception.Data['FailureDiagnostics']) `
-            -OutputPath $outputPath -MonitorPath $monitorLogPath -DiagnosticsPath $diagnosticsPath
+            -OutputPath $outputPath -MonitorPath $monitorLogPath -DiagnosticsPath $diagnosticsPath -CrashExportPath $crashExportPath
     }
-    throw "Monitored deployment failed during Live Ops stage '$stage'. OperationId=$operationId Failure=$failurePath Output=$outputPath Monitor=$monitorLogPath Diagnostics=$diagnosticsPath"
+    $crashEvidence = if (Test-Path -LiteralPath $crashExportPath -PathType Leaf) { $crashExportPath } elseif (Test-Path -LiteralPath $childCrashPath -PathType Leaf) { $childCrashPath } else { '<none>' }
+    throw "Monitored deployment failed during Live Ops stage '$stage'. OperationId=$operationId Failure=$failurePath Crash=$crashEvidence Output=$outputPath Monitor=$monitorLogPath Diagnostics=$diagnosticsPath"
 }

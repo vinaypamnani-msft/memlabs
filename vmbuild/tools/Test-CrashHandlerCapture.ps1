@@ -21,6 +21,30 @@ if (-not (Test-Path -LiteralPath $commonPath)) {
 }
 Write-Host "Common.ps1: $commonPath"
 
+$requestedCrashPath = Join-Path $RootPath 'logs\MonitoredDeployment-crash-handler-test.child-crash.log'
+$handoffJob = Start-Job -ArgumentList $commonPath, $requestedCrashPath -ScriptBlock {
+    param($commonPath, $requestedCrashPath)
+    [Environment]::SetEnvironmentVariable('MEMLABS_CRASH_LOG_PATH', $requestedCrashPath, [EnvironmentVariableTarget]::Process)
+    . $commonPath -InJob
+    "HANDOFF_LOGPATH=$([MemLabsCrash]::LogPath)"
+    "HANDOFF_ENV_CLEARED=$([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('MEMLABS_CRASH_LOG_PATH', [EnvironmentVariableTarget]::Process)))"
+    . $commonPath -InJob
+    "HANDOFF_LOGPATH2=$([MemLabsCrash]::LogPath)"
+}
+$null = Wait-Job -Job $handoffJob -Timeout $TimeoutSeconds
+$handoffOutput = @(Receive-Job -Job $handoffJob -ErrorAction SilentlyContinue 2>&1 | ForEach-Object { "$_" })
+$handoffState = $handoffJob.State
+Remove-Job -Job $handoffJob -Force -ErrorAction SilentlyContinue
+if ($handoffState -ne 'Completed' -or
+    -not ($handoffOutput -contains "HANDOFF_LOGPATH=$requestedCrashPath") -or
+    -not ($handoffOutput -contains 'HANDOFF_ENV_CLEARED=True') -or
+    -not ($handoffOutput -contains "HANDOFF_LOGPATH2=$requestedCrashPath")) {
+    Write-Host 'RESULT: FAIL -- monitored crash target was not consumed once and preserved across a same-process rerun.' -ForegroundColor Red
+    $handoffOutput | ForEach-Object { Write-Host "  $_" }
+    exit 1
+}
+Remove-Item -LiteralPath $requestedCrashPath -Force -ErrorAction SilentlyContinue
+
 $job = Start-Job -ArgumentList $commonPath -ScriptBlock {
     param($commonPath)
     . $commonPath -InJob
@@ -29,6 +53,23 @@ $job = Start-Job -ArgumentList $commonPath -ScriptBlock {
     "TYPE_PRESENT=$([bool]('MemLabsCrash' -as [type]))"
     "REGISTERED=$($global:ps_crashHandlerRegistered)"
     try { "LOGPATH=$([MemLabsCrash]::LogPath)" } catch { "LOGPATH=<threw> $($_.Exception.Message)" }
+    $firstLogPath = [MemLabsCrash]::LogPath
+    . $commonPath -InJob
+    "LOGPATH2=$([MemLabsCrash]::LogPath)"
+    "SECOND_TARGET_PRESERVED=$([MemLabsCrash]::LogPath -eq $firstLogPath)"
+
+    $blockedPath = Join-Path (Split-Path -Parent $firstLogPath) "VMBuild.unhandled.blocked.$PID.log"
+    Set-Content -LiteralPath $blockedPath -Value stale
+    $blockedStream = [IO.File]::Open($blockedPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        try { Set-VmCrashHandlerTarget -Path $blockedPath; 'BLOCKED_TARGET_REJECTED=False' }
+        catch { 'BLOCKED_TARGET_REJECTED=True' }
+    }
+    finally {
+        $blockedStream.Dispose()
+        Remove-Item -LiteralPath $blockedPath -Force -ErrorAction SilentlyContinue
+        Set-VmCrashHandlerTarget -Path $firstLogPath
+    }
 
     Add-Type -TypeDefinition @'
 using System;
@@ -62,6 +103,20 @@ if (-not $logPath -or $logPath -like '<threw>*') {
     exit 1
 }
 Write-Host "handler target: $logPath"
+if (-not ($out -contains "LOGPATH2=$logPath") -or -not ($out -contains 'SECOND_TARGET_PRESERVED=True')) {
+    Write-Host 'RESULT: FAIL -- same-process Common.ps1 rerun changed the durable crash target.' -ForegroundColor Red
+    exit 1
+}
+if (-not ($out -contains 'BLOCKED_TARGET_REJECTED=True')) {
+    Write-Host 'RESULT: FAIL -- crash target registration did not fail closed when stale cleanup was blocked.' -ForegroundColor Red
+    exit 1
+}
+$expectedCrashRoot = [IO.Path]::GetFullPath((Join-Path $RootPath 'logs'))
+$actualCrashRoot = if ($logPath) { Split-Path -Parent ([IO.Path]::GetFullPath($logPath)) } else { '' }
+if ($actualCrashRoot -ne $expectedCrashRoot -or (Split-Path -Leaf $logPath) -ne "VMBuild.unhandled.$(($out | Where-Object { $_ -like 'PID=*' } | Select-Object -First 1) -replace '^PID=', '').log") {
+    Write-Host "RESULT: FAIL -- crash handler target is not a top-level per-PID log under $expectedCrashRoot." -ForegroundColor Red
+    exit 1
+}
 
 if (Test-Path -LiteralPath $logPath) {
     Write-Host 'RESULT: PASS -- the shipped handler captured a threadpool crash.' -ForegroundColor Green

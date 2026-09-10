@@ -9172,10 +9172,42 @@ public static class MemLabsCrash {
     }
 }
 
-# Every per-VM worker dot-sources this file, so registering here covers all of them
-# without touching each job scriptblock. Re-pointed at the logs folder once $Common
-# exists -- see the Register-VmCrashHandler call in the init block below.
-Register-VmCrashHandler
+function Set-VmCrashHandlerTarget {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $Path) { throw "Could not clear stale crash target: $Path" }
+    }
+    Register-VmCrashHandler -Path $Path
+    if (-not $global:ps_crashHandlerRegistered -or [MemLabsCrash]::LogPath -ne $Path) {
+        throw "Crash handler did not accept target: $Path"
+    }
+}
+
+function Set-VmCrashHandlerLogTarget {
+    if (-not $global:Common -or -not $global:Common.LogPath) {
+        if (-not $global:ps_crashHandlerRegistered) { Register-VmCrashHandler }
+        return
+    }
+
+    $logsRoot = Split-Path -Parent $global:Common.LogPath
+    $requestedPath = [Environment]::GetEnvironmentVariable('MEMLABS_CRASH_LOG_PATH', [EnvironmentVariableTarget]::Process)
+    if ($requestedPath) {
+        $global:ps_crashHandlerRequestedPath = [IO.Path]::GetFullPath($requestedPath)
+        [Environment]::SetEnvironmentVariable('MEMLABS_CRASH_LOG_PATH', $null, [EnvironmentVariableTarget]::Process)
+    }
+    $crashHandlerPath = if ($global:ps_crashHandlerRequestedPath) { $global:ps_crashHandlerRequestedPath } else { Join-Path $logsRoot "VMBuild.unhandled.$PID.log" }
+    if ((Split-Path -Parent $crashHandlerPath) -ne [IO.Path]::GetFullPath($logsRoot)) {
+        throw "Crash handler target must be a top-level file under $logsRoot`: $crashHandlerPath"
+    }
+    Set-VmCrashHandlerTarget -Path $crashHandlerPath
+}
+
+# Every per-VM worker dot-sources this file, so registering here covers all of them.
+# On a same-process rerun Common may already be initialized; re-select the durable logs
+# target here so the fallback registration can never replace it with a %TEMP% path.
+Set-VmCrashHandlerLogTarget
 
 function Get-RunspaceInventory {
     <#
@@ -12827,11 +12859,11 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
 
         # The crash handler armed during the dot-source above, before this block ran, so
         # its target was still the %TEMP% fallback: a per-PID file, on the lab host, that
-        # nothing in the run log ever names. A per-VM worker dying is the exact failure it
-        # exists to explain, so put it with the logs and print the path.
+        # nothing in the run log ever names. Keep the per-PID file at the top level of the
+        # logs folder so direct New-Lab runs and non-recursive log mirrors retain it.
         try {
-            $crashHandlerPath = Join-Path $global:Common.CrashLogsPath "VMBuild.unhandled.$PID.log"
-            Register-VmCrashHandler -Path $crashHandlerPath
+            Set-VmCrashHandlerLogTarget
+            $crashHandlerPath = [MemLabsCrash]::LogPath
             if ($global:ps_crashHandlerRegistered) {
                 Write-Log "[CrashHandler] armed pid=$PID -> $crashHandlerPath" -LogOnly
             }

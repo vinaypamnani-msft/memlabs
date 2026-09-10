@@ -5,6 +5,7 @@ param (
     [Parameter(Mandatory)][string] $OutputPath,
     [Parameter(Mandatory)][string] $GateName,
     [Parameter(Mandatory)][string] $GateReadyName,
+    [Parameter(Mandatory)][string] $CrashPath,
     [int] $StartPhase = 0,
     [int[]] $Phase,
     [switch] $KeepFailedVMs
@@ -50,6 +51,7 @@ function Assert-MemLabsDeploymentLease {
 }
 
 try {
+    [Environment]::SetEnvironmentVariable('MEMLABS_CRASH_LOG_PATH', $CrashPath, [EnvironmentVariableTarget]::Process)
     Assert-MemLabsDeploymentLease
 
     $startGate = [Threading.EventWaitHandle]::OpenExisting($GateName)

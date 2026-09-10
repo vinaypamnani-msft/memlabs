@@ -47,6 +47,7 @@ $helper = Join-Path $RootPath 'tools\Invoke-MemLabsLiveOperation.ps1'
 $helperSource = Get-Content -LiteralPath $helper -Raw
 . (Import-LiveOpsTestFunction -Path $helper -Name 'Test-LiveOpsConflictingCommandLine')
 . (Import-LiveOpsTestFunction -Path $helper -Name 'Read-LiveOpsActiveOwner')
+$conflictingProcessesFunction = Import-LiveOpsTestFunction -Path $helper -Name 'Get-LiveOpsConflictingProcesses'
 $vmStateFunction = Import-LiveOpsTestFunction -Path $helper -Name 'Get-LiveOpsVmState'
 $missingState = @(& {
         param($FunctionDefinition)
@@ -357,6 +358,21 @@ param($Helper, $TestRoot)
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -File C:\memlabs\vmbuild\New-Lab.ps1') 'Active-process matcher detects New-Lab entry point'
     Assert-LiveOpsEqual $false (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -NoExit -Command "./New-Lab.ps1"' -IsAncestor) 'NoExit parent shell does not conflict with its own foreground coordinator child'
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -NoExit -Command "./New-Lab.ps1"') 'Unrelated NoExit New-Lab shell remains a mutation conflict'
+    $ancestorConflicts = @(& {
+            param($FunctionDefinition)
+            function Get-CimInstance {
+                @(
+                    [pscustomobject]@{ Name = 'pwsh.exe'; ProcessId = $PID; ParentProcessId = 7002; CommandLine = 'pwsh -NoProfile' }
+                    [pscustomobject]@{ Name = 'pwsh.exe'; ProcessId = 7002; ParentProcessId = 7001; CommandLine = 'pwsh -NoProfile' }
+                    [pscustomobject]@{ Name = 'pwsh.exe'; ProcessId = 7001; ParentProcessId = 0; CommandLine = 'pwsh -NoExit -Command "./New-Lab.ps1"' }
+                    [pscustomobject]@{ Name = 'pwsh.exe'; ProcessId = 8000; ParentProcessId = 0; CommandLine = 'pwsh -NoExit -Command "./New-Lab.ps1"' }
+                )
+            }
+            . $FunctionDefinition
+            Get-LiveOpsConflictingProcesses
+        } $conflictingProcessesFunction)
+    Assert-LiveOpsEqual 1 $ancestorConflicts.Count 'Ancestor-chain process scan returns only the unrelated matching process'
+    Assert-LiveOpsEqual 8000 $ancestorConflicts[0].ProcessId 'Ancestor-chain process scan ignores the multi-hop NoExit parent'
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -File C:\memlabs\vmbuild\tools\Invoke-MemLabsDeploymentChild.ps1 -Configuration x.json') 'Active-process matcher detects an uncoordinated deployment child'
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -Command "Start-Phase -Phase 3"') 'Active-process matcher detects direct Start-Phase command'
     Assert-LiveOpsEqual $true (Test-LiveOpsConflictingCommandLine -CommandLine 'pwsh -Command "Start-Phase; Write-Host done"') 'Active-process matcher detects semicolon-delimited Start-Phase command'
