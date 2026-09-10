@@ -82,6 +82,10 @@ Assert-LocalizedOutput ($validation.Text -match 'Get-ItemPropertyValue.+CRLDelta
 Assert-LocalizedOutput ($validation.Text -match '(?s)\$ErrorActionPreference\s*=\s*''Continue''.+?\$dcdiag\s*=\s*& dcdiag\.exe.+?\$dcdiagExitCode\s*=\s*\$LASTEXITCODE.+?\$ErrorActionPreference\s*=\s*\$savedErrorActionPreference' -and
     $validation.Text -match 'elseif \(\$dcdiagExitCode -ne 0\)') 'dcdiag verdict uses its native exit code'
 Assert-LocalizedOutput ($validation.Text -notmatch 'failed test') 'dcdiag verdict does not parse localized failure prose'
+Assert-LocalizedOutput ($validation.Text -match 'dcdiag\.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /v' -and
+    $validation.Text -notmatch 'dcdiag\.exe .+ /q' -and
+    $validation.Text -match 'dcdiag verbose output follows' -and
+    $validation.Text -match 'Select-Object -First 120') 'dcdiag failure retains bounded verbose diagnostics'
 Assert-LocalizedOutput ($validation.Text -match '(?s)\$ErrorActionPreference\s*=\s*''Continue''.+?\$scLines\s*=\s*@\(& nltest.+?\$scExitCode\s*=\s*\$LASTEXITCODE.+?\$ErrorActionPreference\s*=\s*\$savedErrorActionPreference' -and
     $validation.Text -match 'if \(\$scExitCode -eq 0\)') 'nltest secure-channel verdict uses its native exit code'
 Assert-LocalizedOutput ($validation.Text -notmatch 'NERR_Success|Connection Status = 0') 'nltest verdict does not parse localized success prose'

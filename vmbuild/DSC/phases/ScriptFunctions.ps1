@@ -177,7 +177,9 @@ function Invoke-DotSource {
 
     # Pre-flight: verify the file exists
     if (-not (Test-Path $Script)) {
-        Write-DscStatus "FAILED to dot-source $__idsScriptName -- file not found: $Script" -Failure
+        $__idsMissingMessage = "FAILED to dot-source $__idsScriptName -- file not found: $Script"
+        Write-DscStatus $__idsMissingMessage -Failure
+        if ($__idsRethrow) { throw $__idsMissingMessage }
         return
     }
 
@@ -187,7 +189,9 @@ function Invoke-DotSource {
     [void][System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$__idsTokens, [ref]$__idsParseErrors)
     if ($__idsParseErrors -and $__idsParseErrors.Count -gt 0) {
         $__idsFirstErr = $__idsParseErrors[0]
-        Write-DscStatus "FAILED to dot-source $__idsScriptName -- parse error at line $($__idsFirstErr.Extent.StartLineNumber): $($__idsFirstErr.Message)" -Failure
+        $__idsParseMessage = "FAILED to dot-source $__idsScriptName -- parse error at line $($__idsFirstErr.Extent.StartLineNumber): $($__idsFirstErr.Message)"
+        Write-DscStatus $__idsParseMessage -Failure
+        if ($__idsRethrow) { throw $__idsParseMessage }
         return
     }
 

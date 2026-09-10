@@ -947,6 +947,87 @@ else {
     }
 }
 
+function Wait-PerfloadingSmsProviderReady {
+    param (
+        [string] $SiteCode,
+        [int] $MaxAttempts = 60,
+        [int] $PollSeconds = 10,
+        [int] $RequiredConsecutiveSuccesses = 2,
+        [int] $MaxWaitSeconds = 600,
+        [int] $QueryTimeoutSeconds = 15
+    )
+
+    if (-not $SiteCode) {
+        Write-DscStatus "Cannot wait for SMS Provider recovery because this VM has no site code." -Warning
+        return $false
+    }
+
+    $namespace = "root\SMS\site_$SiteCode"
+    $consecutiveSuccesses = 0
+    $lastError = 'provider probe was not attempted'
+    $waitTimer = [Diagnostics.Stopwatch]::StartNew()
+    for ($providerAttempt = 1; $providerAttempt -le $MaxAttempts; $providerAttempt++) {
+        if ($waitTimer.Elapsed.TotalSeconds -ge $MaxWaitSeconds) { break }
+        try {
+            $siteRows = @(Get-CimInstance -Namespace $namespace -ClassName SMS_Site -OperationTimeoutSec $QueryTimeoutSeconds -ErrorAction Stop |
+                Where-Object { $null -ne $_ })
+            if ($siteRows.Count -eq 0) { throw "SMS_Site returned no rows" }
+            $null = @(Get-CimInstance -Namespace $namespace -ClassName SMS_DistributionPointGroup -OperationTimeoutSec $QueryTimeoutSeconds -ErrorAction Stop)
+            $consecutiveSuccesses++
+            if ($consecutiveSuccesses -ge $RequiredConsecutiveSuccesses) {
+                Write-DscStatus "SMS Provider recovered for site $SiteCode after $providerAttempt probe(s); both representative queries succeeded $consecutiveSuccesses consecutive times."
+                return $true
+            }
+        }
+        catch {
+            $consecutiveSuccesses = 0
+            $lastError = $_.Exception.Message
+        }
+
+        $remainingSeconds = $MaxWaitSeconds - [int]$waitTimer.Elapsed.TotalSeconds
+        if ($providerAttempt -lt $MaxAttempts -and $remainingSeconds -gt 0) {
+            Start-Sleep -Seconds ([Math]::Min($PollSeconds, $remainingSeconds))
+        }
+    }
+
+    $waitTimer.Stop()
+    Write-DscStatus "SMS Provider for site $SiteCode did not recover after $providerAttempt probe(s) over $([int]$waitTimer.Elapsed.TotalSeconds)s: $lastError" -Warning
+    return $false
+}
+
+function Invoke-PerfloadingWithProviderRecovery {
+    param (
+        [string] $ScriptFile,
+        [string] $ConfigFilePath,
+        [string] $LogPath,
+        [string] $SiteCode,
+        [int] $MaxAttempts = 3
+    )
+
+    for ($perfAttempt = 1; $perfAttempt -le $MaxAttempts; $perfAttempt++) {
+        try {
+            if ($perfAttempt -gt 1) {
+                Write-DscStatus "Retrying perfloading (attempt $perfAttempt of $MaxAttempts) after SMS Provider recovery"
+            }
+            $null = Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+            return $true
+        }
+        catch {
+            Write-DscStatus "Perfloading.ps1 failed (attempt $perfAttempt of $MaxAttempts): $_" -Warning
+            if ($perfAttempt -ge $MaxAttempts) {
+                Write-DscStatus "Perfloading.ps1 did not complete after $MaxAttempts attempts. MEMLABS object pre-population is incomplete; Phase 8 cannot continue." -Failure
+                return $false
+            }
+            if (-not (Wait-PerfloadingSmsProviderReady -SiteCode $SiteCode)) {
+                Write-DscStatus "SMS Provider did not recover for site $SiteCode; perfloading cannot be retried safely and Phase 8 cannot continue." -Failure
+                return $false
+            }
+        }
+    }
+
+    return $false
+}
+
 # Object pre-population (perfloading) runs FIRST, while the only SMS Provider
 # is the one CM setup installed on this site server and is therefore stable.
 # It MUST NOT overlap the additional/remote SMS Provider install below:
@@ -963,32 +1044,12 @@ if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateOb
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
     Set-Location $LogPath
-    # Retry the whole perfloading run: it is idempotent (every create is guarded
-    # by a Get-CM* existence check / already-subscribed check), so a re-run picks
-    # up wherever a transient SMS Provider / WMI hiccup aborted the prior pass.
-    $perfMaxAttempts = 3
-    for ($perfAttempt = 1; $perfAttempt -le $perfMaxAttempts; $perfAttempt++) {
-        try {
-            if ($perfAttempt -gt 1) {
-                Write-DscStatus "Retrying perfloading (attempt $perfAttempt of $perfMaxAttempts)"
-            }
-            # -Rethrow: Invoke-DotSource normally swallows a script's runtime
-            # exception (logs a WARNING and returns). We OWN the retry here, so
-            # ask it to re-throw on failure -- otherwise the loop could never see
-            # an aborted perfloading run and would 'succeed' on the first pass
-            # even when perfloading died partway (e.g. the SMS Provider/WMI crash).
-            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
-            break
-        }
-        catch {
-            Write-DscStatus "Perfloading.ps1 failed (attempt $perfAttempt of $perfMaxAttempts): $_" -Warning
-            if ($perfAttempt -lt $perfMaxAttempts) {
-                Start-Sleep -Seconds 30
-            }
-            else {
-                Write-DscStatus "Perfloading.ps1 did not complete after $perfMaxAttempts attempts; continuing. Some MEMLABS objects may be missing -- re-run Phase 8 to finish pre-population." -Warning
-            }
-        }
+    # Perfloading is idempotent, but a provider host that returned 0x8004108A
+    # remained unhealthy across the old fixed 30-second delays. Wait on the
+    # actual site namespace before retrying, and never advance to Phase 9 after
+    # every attempt failed.
+    if (-not (Invoke-PerfloadingWithProviderRecovery -ScriptFile $ScriptFile -ConfigFilePath $ConfigFilePath -LogPath $LogPath -SiteCode $ThisVM.siteCode)) {
+        return
     }
 }
 

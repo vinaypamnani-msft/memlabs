@@ -928,7 +928,7 @@ function Test-DCFunctionality {
         # DC (e.g. Phase 2 interrupted mid-DCPROMO) can show all services Running
         # yet refuse to serve authentications -- Advertising/NetLogons catches that
         # before downstream DomainMember tests fail with cryptic ERROR_NO_LOGON_SERVERS.
-        $results.Details.Add("CMD: dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /q")
+        $results.Details.Add("CMD: dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /v")
         # Retry on transient failures: right after a reboot (e.g. a -startPhase 11
         # rerun) AD replication between DCs is still re-establishing, so dcdiag's
         # Replications test can fail on the first pass and pass moments later.
@@ -940,7 +940,7 @@ function Test-DCFunctionality {
                 $savedErrorActionPreference = $ErrorActionPreference
                 try {
                     $ErrorActionPreference = 'Continue'
-                    $dcdiag = & dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /q 2>&1
+                    $dcdiag = & dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /v 2>&1
                     $dcdiagExitCode = $LASTEXITCODE
                 }
                 finally {
@@ -960,8 +960,14 @@ function Test-DCFunctionality {
         elseif ($dcdiagExitCode -ne 0) {
             $results.Passed = $false
             $results.Details.Add("FAIL: dcdiag failed after retries (exit $dcdiagExitCode)")
-            $failLines = $dcdiag | Where-Object { $_ -and "$($_)".Trim() } | Select-Object -First 5
-            foreach ($fl in $failLines) { $results.Details.Add("  dcdiag: $($fl.Trim())") }
+            $dcdiagLines = @($dcdiag | Where-Object { $_ -and "$($_)".Trim() })
+            $results.Details.Add("DIAG: dcdiag verbose output follows ($($dcdiagLines.Count) nonblank line(s), up to 120 shown)")
+            foreach ($line in $dcdiagLines | Select-Object -First 120) {
+                $results.Details.Add("  dcdiag: $($line.Trim())")
+            }
+            if ($dcdiagLines.Count -gt 120) {
+                $results.Details.Add("  dcdiag: ... $($dcdiagLines.Count - 120) additional line(s) omitted")
+            }
         }
         else {
             $results.Details.Add("OK: dcdiag Services/Replications/FSMOCheck/Advertising/NetLogons passed")
