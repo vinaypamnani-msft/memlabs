@@ -95,7 +95,8 @@ function Write-DscStatus {
 }
 function Test-Path { param($LiteralPath); return $true }
 function Get-Item { param($LiteralPath); return [pscustomobject]@{ LinkType = 'HardLink' } }
-function Get-FileHash { param($LiteralPath, $Algorithm); return [pscustomobject]@{ Hash = 'SAME' } }
+function Get-MockedFileHash { param($LiteralPath, $Algorithm); return [pscustomobject]@{ Hash = 'SAME' } }
+Set-Alias -Name Get-FileHash -Value Get-MockedFileHash -Scope Script
 function Get-CMApplication {
     param($Name, [switch]$Fast, $ErrorAction)
 
