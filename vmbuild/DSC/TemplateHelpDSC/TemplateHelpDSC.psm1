@@ -6071,6 +6071,34 @@ class ClusterSetOwnerNodes {
 
 }
 
+function Get-CoreClusterNetworkNameResource {
+    [CmdletBinding()]
+    param(
+        [string] $Cluster,
+        [Parameter(Mandatory)]
+        [string] $ClusterName
+    )
+
+    $networkNameResources = @()
+    if ([string]::IsNullOrWhiteSpace($Cluster)) {
+        $networkNameResources = @(Get-ClusterResource -ErrorAction Stop |
+                Where-Object { $_.ResourceType -eq 'Network Name' })
+    }
+    else {
+        $networkNameResources = @(Get-ClusterResource -Cluster $Cluster -ErrorAction Stop |
+                Where-Object { $_.ResourceType -eq 'Network Name' })
+    }
+
+    foreach ($resource in $networkNameResources) {
+        $resourceDnsName = ($resource | Get-ClusterParameter -Name DnsName -ErrorAction Stop).Value
+        if ([string]::Equals([string]$resourceDnsName, $ClusterName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $resource
+        }
+    }
+
+    throw "Could not find the core Network Name resource for cluster '$ClusterName'"
+}
+
 [DscResource()]
 class WaitForClusterAccess {
     [DscProperty(Key)]
@@ -6208,10 +6236,10 @@ class WaitForClusterAccess {
                     # the name-based failure is a client-side resolution issue
                     # (e.g. local ClusSvc not running on this pre-join node)
                     # and the cluster itself is fully functional.
+                    $nameRes = $null
                     $nameResOnline = $false
                     try {
-                        $nameRes = Get-ClusterResource -Cluster $_ClusterIP -ErrorAction Stop |
-                            Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'Network Name' }
+                        $nameRes = Get-CoreClusterNetworkNameResource -Cluster $_ClusterIP -ClusterName $name
                         if ($nameRes -and $nameRes.State -eq 'Online') {
                             $nameResOnline = $true
                         }
@@ -6227,12 +6255,8 @@ class WaitForClusterAccess {
                         # so we can't accept IP-only access.
                         Write-Status "Get-Cluster by name failed but by IP $_ClusterIP succeeded; Cluster Name resource is Online -- forcing DNS update and retrying by name"
                         try {
-                            $nameRes2 = Get-ClusterResource -Cluster $_ClusterIP -ErrorAction Stop |
-                                Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'Network Name' }
-                            if ($nameRes2) {
-                                $nameRes2 | Update-ClusterNetworkNameResource -ErrorAction Stop
-                                Write-Verbose "Update-ClusterNetworkNameResource succeeded"
-                            }
+                            $nameRes | Update-ClusterNetworkNameResource -ErrorAction Stop | Out-Null
+                            Write-Verbose "Update-ClusterNetworkNameResource succeeded"
                         } catch {
                             Write-Verbose "Update-ClusterNetworkNameResource failed: $_"
                         }
@@ -6275,19 +6299,20 @@ class WaitForClusterAccess {
 
                 # Check all resources in the Cluster Group -- the "Cluster Name" and
                 # "Cluster IP Address" resources must be Online for remote access.
-                $clusterGroup = Get-ClusterGroup -Name "Cluster Group" -ErrorAction Stop
+                $nameRes = Get-CoreClusterNetworkNameResource -ClusterName $name
+                $clusterGroupName = [string]$nameRes.OwnerGroup.Name
+                $clusterGroup = Get-ClusterGroup -Name $clusterGroupName -ErrorAction Stop
                 $groupState = $clusterGroup.State
                 $actions.Add("ClusterGroup:$groupState")
 
                 $clusterResources = Get-ClusterResource -ErrorAction Stop |
-                    Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+                    Where-Object { $_.OwnerGroup.Name -eq $clusterGroupName }
                 foreach ($res in $clusterResources) {
                     $actions.Add("$($res.Name):$($res.State)")
                     Write-Status "Cluster resource '$($res.Name)' state: $($res.State)"
                 }
 
                 # If Cluster Name or its IP is not Online, try to bring the group online
-                $nameRes = $clusterResources | Where-Object { $_.ResourceType -eq 'Network Name' }
                 $ipRes = $clusterResources | Where-Object { $_.ResourceType -eq 'IP Address' }
 
                 # If the Cluster IP resource is missing entirely (deleted by a
@@ -6303,13 +6328,13 @@ class WaitForClusterAccess {
                             Select-Object -First 1
 
                         $resName = "Cluster IP Address"
-                        $newIP = Add-ClusterResource -Name $resName -Group "Cluster Group" -ResourceType "IP Address" -ErrorAction Stop
+                        $newIP = Add-ClusterResource -Name $resName -Group $clusterGroupName -ResourceType "IP Address" -ErrorAction Stop
                         $setParams = @{ Address = $_ClusterIP; SubnetMask = "255.255.255.0" }
                         if ($clusterNetwork) { $setParams['Network'] = $clusterNetwork.Name }
                         $newIP | Set-ClusterParameter -Multiple $setParams -ErrorAction Stop
 
                         if ($nameRes) {
-                            Add-ClusterResourceDependency -Resource "Cluster Name" -Provider $resName -ErrorAction SilentlyContinue
+                            Add-ClusterResourceDependency -Resource $nameRes.Name -Provider $resName -ErrorAction SilentlyContinue
                         }
 
                         Start-ClusterResource -Name $resName -ErrorAction SilentlyContinue
@@ -6370,14 +6395,15 @@ class WaitForClusterAccess {
                     if ($remoteCluster.Name -eq $name) {
                         $actions.Add("RemoteCluster via $($_ClusterIP) OK")
 
+                        $nameRes = Get-CoreClusterNetworkNameResource -Cluster $_ClusterIP -ClusterName $name
+                        $clusterGroupName = [string]$nameRes.OwnerGroup.Name
                         $clusterResources = Get-ClusterResource -Cluster $_ClusterIP -ErrorAction Stop |
-                            Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+                            Where-Object { $_.OwnerGroup.Name -eq $clusterGroupName }
                         foreach ($res in $clusterResources) {
                             $actions.Add("$($res.Name):$($res.State)")
                             Write-Status "Cluster resource '$($res.Name)' state: $($res.State)"
                         }
 
-                        $nameRes = $clusterResources | Where-Object { $_.ResourceType -eq 'Network Name' }
                         $ipRes = $clusterResources | Where-Object { $_.ResourceType -eq 'IP Address' }
 
                         if ($nameRes -and $nameRes.State -ne 'Online') {
@@ -6907,7 +6933,9 @@ class ClusterRemoveUnwantedIPs {
             # Only clean IPs from the "Cluster Group" (the cluster's own identity).
             # Do NOT touch IP resources in AG listener groups -- those belong to
             # the availability group and use domain-subnet IPs by design.
-            $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+            $nameRes = Get-CoreClusterNetworkNameResource -Cluster $_ClusterName -ClusterName $_ClusterName
+            $clusterGroupName = [string]$nameRes.OwnerGroup.Name
+            $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq $clusterGroupName }
             $ipParams = $clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value
             if ($_KeepIP) {
                 $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -ne $_KeepIP }).ClusterObject
@@ -6930,7 +6958,7 @@ class ClusterRemoveUnwantedIPs {
             # cluster needs.  Recreate it if missing.
             if ($_KeepIP) {
                 $currentClusterRes = Get-ClusterResource -Cluster $_ClusterName -ErrorAction SilentlyContinue |
-                    Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'IP Address' }
+                    Where-Object { $_.OwnerGroup.Name -eq $clusterGroupName -and $_.ResourceType -eq 'IP Address' }
                 $remainingIPs = $currentClusterRes |
                     Get-ClusterParameter -Name 'Address' -ErrorAction SilentlyContinue
                 $hasIntendedIP = $remainingIPs | Where-Object { $_.Value -eq $_KeepIP }
@@ -6949,7 +6977,7 @@ class ClusterRemoveUnwantedIPs {
                         $existing = Get-ClusterResource -Name $resName -ErrorAction SilentlyContinue
                         if ($existing) { $resName = "Cluster IP Address ($_KeepIP)" }
 
-                        $newIP = Add-ClusterResource -Name $resName -Group "Cluster Group" -ResourceType "IP Address" -ErrorAction Stop
+                        $newIP = Add-ClusterResource -Name $resName -Group $clusterGroupName -ResourceType "IP Address" -ErrorAction Stop
                         $setParams = @{ Address = $_KeepIP; SubnetMask = "255.255.255.0" }
                         if ($clusterNetwork) {
                             $setParams['Network'] = $clusterNetwork.Name
@@ -6957,16 +6985,14 @@ class ClusterRemoveUnwantedIPs {
                         $newIP | Set-ClusterParameter -Multiple $setParams -ErrorAction Stop
 
                         # Cluster Name must depend on this IP
-                        $nameRes = Get-ClusterResource -Name "Cluster Name" -ErrorAction SilentlyContinue
-                        if ($nameRes) {
-                            Add-ClusterResourceDependency -Resource "Cluster Name" -Provider $resName -ErrorAction SilentlyContinue
-                        }
+                        Add-ClusterResourceDependency -Resource $nameRes.Name -Provider $resName -ErrorAction Stop
 
-                        Start-ClusterResource -Name $resName -ErrorAction SilentlyContinue
+                        Start-ClusterResource -Name $resName -ErrorAction Stop | Out-Null
                         Start-Sleep -Seconds 5
                         # Try to bring the Cluster Name online now that it has an IP
+                        $nameRes = Get-ClusterResource -Cluster $_ClusterName -Name $nameRes.Name -ErrorAction Stop
                         if ($nameRes -and $nameRes.State -ne 'Online') {
-                            Start-ClusterResource -Name "Cluster Name" -ErrorAction SilentlyContinue
+                            $nameRes | Start-ClusterResource -ErrorAction Stop | Out-Null
                         }
                         Write-Status "Cluster IP resource $_KeepIP recreated"
                     }
@@ -6979,7 +7005,7 @@ class ClusterRemoveUnwantedIPs {
             $dnsRegistered = $false
             for ($dnsAttempt = 1; $dnsAttempt -le 3; $dnsAttempt++) {
                 try {
-                    Get-ClusterResource -Name "Cluster Name" | Update-ClusterNetworkNameResource -ErrorAction Stop
+                    $nameRes | Update-ClusterNetworkNameResource -ErrorAction Stop | Out-Null
                     $dnsRegistered = $true
                     break
                 }
@@ -7028,7 +7054,9 @@ class ClusterRemoveUnwantedIPs {
                     start-sleep 60
                 }
             }
-            $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+            $nameRes = Get-CoreClusterNetworkNameResource -Cluster $_ClusterName -ClusterName $_ClusterName
+            $clusterGroupName = [string]$nameRes.OwnerGroup.Name
+            $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq $clusterGroupName }
             $ipParams = $clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value
             if ($_KeepIP) {
                 $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -ne $_KeepIP }).ClusterObject
@@ -9907,6 +9935,9 @@ class DisableClusterNicDnsRegistration {
     [string] $ClusterName
 
     [DscProperty()]
+    [bool] $ManageClusterNameResource = $false
+
+    [DscProperty()]
     [string] $ClusterIPAddress
 
     [DscProperty()]
@@ -10171,7 +10202,10 @@ class DisableClusterNicDnsRegistration {
         #    active node's IP is registered in DNS (not all node IPs). Prevents
         #    clients from resolving the cluster name to a node that isn't hosting.
         $_clusterName = $this.ClusterName
-        if ($_clusterName) {
+        if ($this.ManageClusterNameResource) {
+            if ([string]::IsNullOrWhiteSpace($_clusterName)) {
+                throw 'ClusterName is required when ManageClusterNameResource is enabled'
+            }
             try {
                 # Load FailoverClusters on demand (skipped in the eager import above).
                 if (-not (Get-Module -Name FailoverClusters -ErrorAction SilentlyContinue)) {
@@ -10180,19 +10214,56 @@ class DisableClusterNicDnsRegistration {
                     try { Import-Module FailoverClusters -ErrorAction SilentlyContinue }
                     finally { $global:VerbosePreference = $savedVerbose }
                 }
-                $clusNameRes = Get-ClusterResource -Cluster $_clusterName -Name 'Cluster Name' -ErrorAction Stop
-                $regAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction SilentlyContinue).Value
-                if ($regAll -ne 0) {
+                $clusNameRes = Get-CoreClusterNetworkNameResource -Cluster $_clusterName -ClusterName $_clusterName
+                $clusterNameResourceName = [string]$clusNameRes.Name
+                $regAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction Stop).Value
+                $restartRequired = $regAll -ne 0
+                $restartObserved = -not $restartRequired
+                $transitionErrors = [System.Collections.Generic.List[string]]::new()
+                if ($restartRequired) {
                     $clusNameRes | Set-ClusterParameter -Name RegisterAllProvidersIP -Value 0 -ErrorAction Stop
-                    # Bounce the resource so the parameter takes effect immediately
-                    # instead of waiting for the next failover.
-                    $clusNameRes | Stop-ClusterResource -ErrorAction SilentlyContinue
-                    $clusNameRes | Start-ClusterResource -ErrorAction SilentlyContinue
+                    for ($attempt = 1; $attempt -le 2; $attempt++) {
+                        $clusNameRes = Get-ClusterResource -Cluster $_clusterName -Name $clusterNameResourceName -ErrorAction Stop
+                        if ([string]$clusNameRes.State -eq 'Online') {
+                            try {
+                                $clusNameRes | Stop-ClusterResource -Wait 30 -ErrorAction Stop | Out-Null
+                                $restartObserved = $true
+                            }
+                            catch { $transitionErrors.Add("stop attempt $attempt`: $($_.Exception.Message)") }
+                        }
+                        $clusNameRes = Get-ClusterResource -Cluster $_clusterName -Name $clusterNameResourceName -ErrorAction Stop
+                        if ([string]$clusNameRes.State -ne 'Online') {
+                            $restartObserved = $true
+                            try { $clusNameRes | Start-ClusterResource -Wait 30 -ErrorAction Stop | Out-Null }
+                            catch { $transitionErrors.Add("start attempt $attempt`: $($_.Exception.Message)") }
+                        }
+                        $clusNameRes = Get-ClusterResource -Cluster $_clusterName -Name $clusterNameResourceName -ErrorAction Stop
+                        if ($restartObserved -and [string]$clusNameRes.State -eq 'Online') { break }
+                    }
+                }
+                else {
+                    $clusNameRes = Get-ClusterResource -Cluster $_clusterName -Name $clusterNameResourceName -ErrorAction Stop
+                    if ([string]$clusNameRes.State -ne 'Online') {
+                        try { $clusNameRes | Start-ClusterResource -Wait 30 -ErrorAction Stop | Out-Null }
+                        catch { $transitionErrors.Add("online recovery: $($_.Exception.Message)") }
+                    }
+                }
+                $clusNameRes = Get-ClusterResource -Cluster $_clusterName -Name $clusterNameResourceName -ErrorAction Stop
+                $resourceState = [string]$clusNameRes.State
+                $appliedRegAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction Stop).Value
+                if (-not $restartObserved -or $resourceState -ne 'Online' -or $appliedRegAll -ne 0) {
+                    $transitionDetail = if ($transitionErrors.Count) { "; transitions: $($transitionErrors -join ' | ')" } else { '' }
+                    throw "Core Network Name resource '$clusterNameResourceName' did not converge: state='$resourceState', RegisterAllProvidersIP='$appliedRegAll', restartObserved='$restartObserved'$transitionDetail"
+                }
+                if ($restartRequired) {
                     Write-Status "Set RegisterAllProvidersIP=0 on Cluster Name resource (restarted)"
+                }
+                elseif ($transitionErrors.Count) {
+                    Write-Verbose "Core Network Name resource converged after transition errors: $($transitionErrors -join ' | ')"
                 }
             }
             catch {
-                Write-Verbose "Could not set RegisterAllProvidersIP: $_"
+                throw "Could not enforce RegisterAllProvidersIP=0 on cluster '$_clusterName': $($_.Exception.Message)"
             }
         }
         $blockTimes['ClusterOps'] = [math]::Round(([datetime]::UtcNow - $lapStart).TotalSeconds, 1)

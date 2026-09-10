@@ -229,6 +229,8 @@ $phase3 = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase3.ps1')
 $phase4Path = Join-Path $RootPath 'DSC\phases\Phase4.ps1'
 $phase4 = Get-Content -LiteralPath $phase4Path -Raw
 $phase5 = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase5.ps1') -Raw
+$templateHelpDscPath = Join-Path $RootPath 'DSC\TemplateHelpDSC\TemplateHelpDSC.psm1'
+$templateHelpDsc = Get-Content -LiteralPath $templateHelpDscPath -Raw
 $phase8 = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase8.ps1') -Raw
 $phase4Tokens = $null
 $phase4ParseErrors = $null
@@ -559,9 +561,81 @@ Assert-True -Condition ($phase5 -match '(?s)\$_phase5Primary = if \(\$_phase5Ins
 Assert-True -Condition ([regex]::Matches($phase5, 'Data Source=\$localServer;Initial Catalog=master').Count -eq 2 -and $phase5 -notmatch "Data Source=localhost;Initial Catalog=master") -What 'Phase 5 restore and membership polling use the same default or named local SQL instance'
 Assert-True -Condition ($phase5.Contains("DATABASEPROPERTYEX(N'`$databaseLiteral', 'Status') <> 'RESTORING'")) -What 'Phase 5 secondary seeding preserves an existing restoring database before replacement'
 Assert-True -Condition ($phase5 -match '(?s)Script ''ClusterWitness''.*?TestScript.*?QuorumResource\.State -eq ''Online''.*?sharePath -eq') -What 'Phase 5 quorum resource requires online state and the expected SharePath'
-$functionalValidation = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Validation.Functional.ps1') -Raw
-Assert-True -Condition ($functionalValidation -match '(?s)Get-ClusterQuorum.*?Get-ClusterParameter -Name SharePath.*?QuorumResource\.State.*?Online') -What 'post-Phase-5 validation uses typed online quorum witness state'
-Assert-True -Condition ($functionalValidation -notmatch 'Test-Path \$witnessShare') -What 'post-Phase-5 validation does not probe the restricted witness as an admin'
+$functionalValidationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
+$sqlAoValidation = (Import-TestFunction -Path $functionalValidationPath -Name 'Test-SQLAOFunctionality').ToString()
+$postPhase5Validation = (Import-TestFunction -Path $functionalValidationPath -Name 'Test-SQLAOPostPhase5').ToString()
+$coreClusterResourceFunction = Import-TestFunction -Path $templateHelpDscPath -Name 'Get-CoreClusterNetworkNameResource'
+$clusterNicResource = [regex]::Match($templateHelpDsc, '(?ms)^\[DscResource\(\)\]\s*class DisableClusterNicDnsRegistration\s*\{.*?(?=^\[DscResource\(\)\]|\z)').Value
+$clusterIpCleanupResource = [regex]::Match($templateHelpDsc, '(?ms)^\[DscResource\(\)\]\s*class ClusterRemoveUnwantedIPs\s*\{.*?(?=^\[DscResource\(\)\]|\z)').Value
+$clusterAccessResource = [regex]::Match($templateHelpDsc, '(?ms)^\[DscResource\(\)\]\s*class WaitForClusterAccess\s*\{.*?(?=^\[DscResource\(\)\]|\z)').Value
+Assert-True -Condition ($sqlAoValidation -match '(?s)# 7\. Backup and Witness share accessibility.*?if \(\$witnessShare\).*?Get-ClusterQuorum.*?Get-ClusterParameter -Name SharePath.*?quorumResource\.State.*?Online.*?if \(\$backupShare\).*?Test-Path \$backupShare') -What 'Phase 11 validates the restricted witness through typed online quorum state and probes the backup share directly'
+Assert-True -Condition ($sqlAoValidation -match '(?s)\[string\]::Equals\(\[string\]\$configuredWitness, \[string\]\$witnessShare, \[System\.StringComparison\]::OrdinalIgnoreCase\).*?else\s*\{\s*\$results\.Passed = \$false.*?catch\s*\{\s*\$results\.Passed = \$false') -What 'Phase 11 compares the expected witness path without case sensitivity and fails mismatches or query errors'
+Assert-True -Condition ($sqlAoValidation -notmatch 'Test-Path[^\r\n]*(?:\$witnessShare|\$share\.Path)') -What 'Phase 11 does not probe the restricted witness through its admin session'
+Assert-True -Condition ($postPhase5Validation -match '(?s)Get-ClusterQuorum.*?Get-ClusterParameter -Name SharePath.*?QuorumResource\.State.*?Online') -What 'post-Phase-5 validation uses typed online quorum witness state'
+Assert-True -Condition ($postPhase5Validation -notmatch 'Test-Path\s+\$witnessShare') -What 'post-Phase-5 validation does not probe the restricted witness as an admin'
+Assert-True -Condition ($sqlAoValidation -match '(?s)RegisterAllProvidersIP.*?Get-ClusterResource.*?ResourceType -eq ''Network Name''.*?Get-ClusterParameter -Name DnsName.*?OrdinalIgnoreCase.*?Get-ClusterParameter -Name RegisterAllProvidersIP') -What 'Phase 11 discovers the core cluster resource through its invariant DNS name'
+Assert-True -Condition ($sqlAoValidation -notmatch 'Get-ClusterResource[^\r\n]*-Name\s+[''"]Cluster Name[''"]') -What 'Phase 11 does not address the core cluster resource by its localized display name'
+Assert-True -Condition ($sqlAoValidation -match '(?s)coreClusterGroupName = \[string\]\$clusNameRes\.OwnerGroup\.Name.*?OwnerGroup\.Name -eq \$coreClusterGroupName') -What 'Phase 11 audits cluster IP resources through the core resource actual localized group name'
+$coreClusterProbe = & {
+    param([scriptblock] $Definition)
+    $listener = [pscustomobject]@{ Name = 'Localized Listener'; ResourceType = 'Network Name'; DnsName = 'APP-LISTENER' }
+    $core = [pscustomobject]@{ Name = 'Localized Core Name'; ResourceType = 'Network Name'; DnsName = 'LAB-CLUSTER' }
+    function Get-ClusterResource {
+        [CmdletBinding()]
+        param([string] $Cluster)
+        return @($listener, $core)
+    }
+    function Get-ClusterParameter {
+        [CmdletBinding()]
+        param(
+            [Parameter(ValueFromPipeline)]
+            [object] $InputObject,
+            [string] $Name
+        )
+        process { return [pscustomobject]@{ Value = $InputObject.DnsName } }
+    }
+    . $Definition
+    return Get-CoreClusterNetworkNameResource -Cluster '192.0.2.10' -ClusterName 'lab-cluster'
+} $coreClusterResourceFunction
+Assert-Equal -Expected 'Localized Core Name' -Actual $coreClusterProbe.Name -What 'core cluster resource discovery skips a listener and matches DNS name without case sensitivity'
+$missingCoreFailed = & {
+    param([scriptblock] $Definition)
+    function Get-ClusterResource {
+        [CmdletBinding()]
+        param([string] $Cluster)
+        return [pscustomobject]@{ Name = 'Localized Listener'; ResourceType = 'Network Name'; DnsName = 'APP-LISTENER' }
+    }
+    function Get-ClusterParameter {
+        [CmdletBinding()]
+        param(
+            [Parameter(ValueFromPipeline)]
+            [object] $InputObject,
+            [string] $Name
+        )
+        process { return [pscustomobject]@{ Value = $InputObject.DnsName } }
+    }
+    . $Definition
+    try {
+        $null = Get-CoreClusterNetworkNameResource -Cluster '192.0.2.10' -ClusterName 'LAB-CLUSTER'
+        return $false
+    }
+    catch { return $true }
+} $coreClusterResourceFunction
+Assert-True -Condition $missingCoreFailed -What 'core cluster resource discovery fails when no DNS name matches'
+Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($clusterNicResource)) -What 'locale test located the DisableClusterNicDnsRegistration resource'
+Assert-True -Condition ($clusterNicResource -match '(?s)Get-CoreClusterNetworkNameResource.*?Get-ClusterParameter -Name RegisterAllProvidersIP') -What 'Phase 5 discovers the core cluster resource through its invariant DNS name'
+Assert-True -Condition ($clusterNicResource -notmatch 'Get-ClusterResource[^\r\n]*-Name\s+[''"]Cluster Name[''"]') -What 'Phase 5 does not address the core cluster resource by its localized display name'
+Assert-True -Condition ($clusterNicResource -match '(?s)ManageClusterNameResource.*?Set-ClusterParameter -Name RegisterAllProvidersIP -Value 0 -ErrorAction Stop.*?Stop-ClusterResource -Wait 30 -ErrorAction Stop.*?Start-ClusterResource -Wait 30 -ErrorAction Stop.*?restartObserved.*?resourceState -ne ''Online''.*?appliedRegAll -ne 0') -What 'Phase 5 bounds and verifies the core cluster resource restart and RegisterAllProvidersIP readback'
+Assert-True -Condition ($clusterNicResource -match '(?s)else\s*\{.*?State -ne ''Online''.*?Start-ClusterResource -Wait 30 -ErrorAction Stop') -What 'Phase 5 recovers an offline core resource even when RegisterAllProvidersIP is already zero'
+Assert-True -Condition ($clusterNicResource -notmatch '(?:Stop|Start)-ClusterResource[^\r\n]*-ErrorAction SilentlyContinue') -What 'Phase 5 does not suppress core cluster resource restart failures'
+Assert-True -Condition ($clusterNicResource -match '(?s)catch\s*\{\s*throw "Could not enforce RegisterAllProvidersIP=0') -What 'Phase 5 propagates RegisterAllProvidersIP discovery and mutation failures'
+Assert-Equal -Expected 1 -Actual ([regex]::Matches($phase5, 'ManageClusterNameResource\s*=\s*\$true').Count) -What 'Phase 5 assigns RegisterAllProvidersIP mutation to one SQLAO replica'
+Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($clusterIpCleanupResource)) -What 'locale test located the ClusterRemoveUnwantedIPs resource'
+Assert-True -Condition ($clusterIpCleanupResource -match '(?s)Get-CoreClusterNetworkNameResource.*?clusterGroupName = \[string\]\$nameRes\.OwnerGroup\.Name.*?Add-ClusterResource -Name \$resName -Group \$clusterGroupName.*?Add-ClusterResourceDependency -Resource \$nameRes\.Name.*?\$nameRes \| Update-ClusterNetworkNameResource') -What 'Phase 5 IP cleanup uses the invariant core resource and its actual localized group and resource names'
+Assert-True -Condition ($clusterIpCleanupResource -notmatch '(?:Get-ClusterResource|Add-ClusterResourceDependency|Start-ClusterResource)[^\r\n]*(?:-Name|-Resource)\s+[''"]Cluster Name[''"]') -What 'Phase 5 IP cleanup does not address the core cluster resource by its localized display name'
+Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($clusterAccessResource)) -What 'locale test located the WaitForClusterAccess resource'
+Assert-True -Condition ([regex]::Matches($clusterAccessResource, 'Get-CoreClusterNetworkNameResource').Count -ge 3 -and $clusterAccessResource -match 'clusterGroupName = \[string\]\$nameRes\.OwnerGroup\.Name') -What 'Phase 5 cluster access recovery discovers the core resource and its actual localized group name'
+Assert-True -Condition ($clusterAccessResource -notmatch '(?:Get-ClusterResource|Get-ClusterGroup|Add-ClusterResource|Add-ClusterResourceDependency|Start-ClusterResource)[^\r\n]*(?:-Name|-Group|-Resource)\s+[''"]Cluster (?:Name|Group)[''"]') -What 'Phase 5 cluster access recovery does not address core objects by localized display names'
 Assert-True -Condition ($phase8 -match '(?s)Script EnsurePMPCAppsAccess.*?SecurityIdentifier\]''S-1-1-0''.*?Translate\(\[Security\.Principal\.NTAccount\]\).*?New-SmbShare.*?-FullAccess @\(\$worldName, \$adminName\)') -What 'Phase 8 PMPCApps access resolves the world SID to the localized account name'
 Assert-True -Condition ($phase8 -notmatch '(?s)(?:NTFSAccessEntry PMPCApps|SmbShare "PMPCShare").*?Everyone') -What 'Phase 8 PMPCApps resources do not use the English Everyone account name'
 Assert-True -Condition ($phase8 -match '(?s)EnsurePMPCAppsAccess.*?share\.Path.*?E:\\PMPCApps.*?Remove-SmbShare.*?New-SmbShare') -What 'Phase 8 PMPCApps repairs an existing share that targets the wrong path'

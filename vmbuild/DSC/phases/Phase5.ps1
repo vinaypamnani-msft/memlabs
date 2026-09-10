@@ -406,6 +406,7 @@
             DomainName           = $DomainName
             DCName               = $DC
             ClusterName          = $thisVM.ClusterName
+            ManageClusterNameResource = $true
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -1004,7 +1005,7 @@
 
         WriteStatus PostClusterDnsConfig {
             DependsOn = $nextDepend
-            Status    = "Setting RegisterAllProvidersIP=0 on cluster '$($Node1VM.ClusterName)'"
+            Status    = "Finalizing post-cluster NIC and DNS configuration"
         }
 
         DisableClusterNicDnsRegistration PostClusterDnsConfig {

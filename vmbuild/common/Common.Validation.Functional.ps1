@@ -2522,11 +2522,28 @@ function Test-SQLAOFunctionality {
                 }
 
                 # RegisterAllProvidersIP on Cluster Name resource should be 0
+                $coreClusterGroupName = ''
                 try {
-                    $clusNameRes = Get-ClusterResource -Name 'Cluster Name' -ErrorAction Stop
-                    $regAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction SilentlyContinue).Value
+                    $clusNameRes = $null
+                    $networkNameResources = @(Get-ClusterResource -ErrorAction Stop |
+                            Where-Object { $_.ResourceType -eq 'Network Name' })
+                    foreach ($resource in $networkNameResources) {
+                        $resourceDnsName = ($resource | Get-ClusterParameter -Name DnsName -ErrorAction Stop).Value
+                        if ([string]::Equals([string]$resourceDnsName, [string]$cluster.Name, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $clusNameRes = $resource
+                            break
+                        }
+                    }
+                    if (-not $clusNameRes) {
+                        throw "Could not find the core Network Name resource for cluster '$($cluster.Name)'"
+                    }
+                    $coreClusterGroupName = [string]$clusNameRes.OwnerGroup.Name
+                    $regAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction Stop).Value
                     if ($null -ne $regAll -and $regAll -ne 0) {
                         $results.Details.Add("WARN: Cluster Name RegisterAllProvidersIP = $regAll (expected 0)")
+                    }
+                    elseif ($null -eq $regAll) {
+                        $results.Details.Add("WARN: Cluster Name RegisterAllProvidersIP has no value (expected 0)")
                     }
                     else {
                         $results.Details.Add("OK: Cluster Name RegisterAllProvidersIP = 0")
@@ -2537,8 +2554,11 @@ function Test-SQLAOFunctionality {
                 }
 
                 # Cluster Group IP resources should be on Domain Network, not heartbeat
-                $clusterGroupIPs = Get-ClusterResource -ErrorAction SilentlyContinue |
-                    Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'IP Address' }
+                $clusterGroupIPs = if ($coreClusterGroupName) {
+                    @(Get-ClusterResource -ErrorAction SilentlyContinue |
+                        Where-Object { $_.OwnerGroup.Name -eq $coreClusterGroupName -and $_.ResourceType -eq 'IP Address' })
+                }
+                else { @() }
                 foreach ($cgIP in $clusterGroupIPs) {
                     $ipNetwork = ($cgIP | Get-ClusterParameter -Name Network -ErrorAction SilentlyContinue).Value
                     $ipAddr    = ($cgIP | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
@@ -3177,16 +3197,37 @@ WHERE drs.is_local = 1
             # 7. Backup and Witness share accessibility
             # ==============================================================
             Write-Progress -Activity $progressActivity -Status "Checking witness and backup share accessibility"
-            foreach ($share in @(@{Name = 'Witness'; Path = $witnessShare }, @{Name = 'Backup'; Path = $backupShare })) {
-                if ($share.Path) {
-                    $results.Details.Add("CMD: Test-Path '$($share.Path)'")
-                    if (Test-Path $share.Path -ErrorAction SilentlyContinue) {
-                        $results.Details.Add("OK: $($share.Name) share '$($share.Path)' is accessible")
+            if ($witnessShare) {
+                $results.Details.Add("CMD: Get-ClusterQuorum / Get-ClusterParameter SharePath")
+                try {
+                    $quorum = Get-ClusterQuorum -ErrorAction Stop
+                    $quorumResource = $quorum.QuorumResource
+                    $configuredWitness = if ($quorumResource) {
+                        $quorumResource | Get-ClusterParameter -Name SharePath -ErrorAction Stop | Select-Object -ExpandProperty Value
+                    }
+                    if ($quorumResource -and
+                        [string]$quorumResource.State -eq 'Online' -and
+                        [string]::Equals([string]$configuredWitness, [string]$witnessShare, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $results.Details.Add("OK: Online quorum witness uses '$configuredWitness'")
                     }
                     else {
                         $results.Passed = $false
-                        $results.Details.Add("FAIL: $($share.Name) share '$($share.Path)' is not accessible")
+                        $results.Details.Add("FAIL: Quorum witness state/path mismatch: state='$($quorumResource.State)' configured='$configuredWitness' expected='$witnessShare'")
                     }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Quorum witness query failed: $($_.Exception.Message)")
+                }
+            }
+            if ($backupShare) {
+                $results.Details.Add("CMD: Test-Path '$backupShare'")
+                if (Test-Path $backupShare -ErrorAction SilentlyContinue) {
+                    $results.Details.Add("OK: Backup share '$backupShare' is accessible")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Backup share '$backupShare' is not accessible")
                 }
             }
 
