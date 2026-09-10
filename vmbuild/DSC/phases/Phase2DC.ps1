@@ -233,6 +233,48 @@
             }
         }
 
+        # The forest-root PDC has no higher domain time source. Mark it as an
+        # always-reliable time server so DC Locator returns TIME_SERVER and
+        # GOOD_TIME_SERVER_PREFERRED. Without this, dcdiag Advertising and
+        # FsmoCheck both fail with error 1355 even while every AD service runs.
+        Script ConfigurePdcTimeServer {
+            DependsOn  = '[ADDomain]FirstDS'
+            GetScript  = {
+                $pdcEmulator = $null
+                try { $pdcEmulator = (Get-ADDomain -ErrorAction Stop).PDCEmulator } catch { }
+                return @{
+                    AnnounceFlags = (Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config' -Name AnnounceFlags -ErrorAction SilentlyContinue)
+                    NtpServerEnabled = (Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpServer' -Name Enabled -ErrorAction SilentlyContinue)
+                    PdcEmulator = $pdcEmulator
+                }
+            }
+            TestScript = {
+                $pdcEmulator = $null
+                try { $pdcEmulator = (Get-ADDomain -ErrorAction Stop).PDCEmulator } catch { return $false }
+                if (($pdcEmulator -split '\.')[0] -ine $env:COMPUTERNAME) { return $true }
+                $flags = Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config' -Name AnnounceFlags -ErrorAction SilentlyContinue
+                $serverEnabled = Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpServer' -Name Enabled -ErrorAction SilentlyContinue
+                $service = Get-Service -Name W32Time -ErrorAction SilentlyContinue
+                return ([int]$flags -band 5) -eq 5 -and [int]$serverEnabled -eq 1 -and $service.Status -eq 'Running'
+            }
+            SetScript  = {
+                $pdcEmulator = (Get-ADDomain -ErrorAction Stop).PDCEmulator
+                if (($pdcEmulator -split '\.')[0] -ine $env:COMPUTERNAME) { return }
+                $savedErrorActionPreference = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = 'Continue'
+                    $null = & w32tm.exe /config /reliable:yes /update 2>&1
+                    $w32tmExitCode = $LASTEXITCODE
+                }
+                finally {
+                    $ErrorActionPreference = $savedErrorActionPreference
+                }
+                if ($w32tmExitCode -ne 0) { throw "w32tm /config /reliable:yes failed with exit $w32tmExitCode" }
+                Set-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpServer' -Name Enabled -Type DWord -Value 1 -ErrorAction Stop
+                Restart-Service -Name W32Time -Force -ErrorAction Stop
+            }
+        }
+
         # Set the KDC default encryption types so all accounts (even those
         # without msDS-SupportedEncryptionTypes) get AES tickets. Without this,
         # Windows Server 2025 issues only RC4 tickets for accounts that lack
@@ -245,7 +287,7 @@
             ValueName = 'DefaultDomainSupportedEncTypes'
             ValueType = 'Dword'
             ValueData = '28'
-            DependsOn = '[ADDomain]FirstDS'
+            DependsOn = '[Script]ConfigurePdcTimeServer'
         }
 
         # Reduce intra-site replication notification delay from 15s to 0s.

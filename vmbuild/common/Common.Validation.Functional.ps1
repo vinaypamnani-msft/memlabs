@@ -669,6 +669,53 @@ function Test-DCFunctionality {
         $hasCmSites = ($hasCmSitesInner -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        $ensurePdcTimeAdvertising = {
+            param([bool]$IsBdc)
+
+            if ($IsBdc) { return [pscustomobject]@{ Passed = $true; Changed = $false; Message = 'BDC uses the domain time hierarchy' } }
+            try {
+                $domain = Get-ADDomain -ErrorAction Stop
+                $pdcName = "$($domain.PDCEmulator)"
+                if (($pdcName -split '\.')[0] -ine $env:COMPUTERNAME) {
+                    return [pscustomobject]@{ Passed = $true; Changed = $false; Message = "PDC is '$pdcName'; local time advertisement is not managed here" }
+                }
+
+                $configPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config'
+                $serverPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpServer'
+                $flags = Get-ItemPropertyValue -LiteralPath $configPath -Name AnnounceFlags -ErrorAction SilentlyContinue
+                $serverEnabled = Get-ItemPropertyValue -LiteralPath $serverPath -Name Enabled -ErrorAction SilentlyContinue
+                $service = Get-Service -Name W32Time -ErrorAction SilentlyContinue
+                if (([int]$flags -band 5) -eq 5 -and [int]$serverEnabled -eq 1 -and $service.Status -eq 'Running') {
+                    return [pscustomobject]@{ Passed = $true; Changed = $false; Message = "PDC '$pdcName' advertises an enabled reliable Windows Time server (AnnounceFlags=$flags)" }
+                }
+
+                $savedErrorActionPreference = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = 'Continue'
+                    $null = & w32tm.exe /config /reliable:yes /update 2>&1
+                    $w32tmExitCode = $LASTEXITCODE
+                }
+                finally {
+                    $ErrorActionPreference = $savedErrorActionPreference
+                }
+                if ($w32tmExitCode -ne 0) { throw "w32tm /config /reliable:yes failed with exit $w32tmExitCode" }
+                Set-ItemProperty -LiteralPath $serverPath -Name Enabled -Type DWord -Value 1 -ErrorAction Stop
+                Restart-Service -Name W32Time -Force -ErrorAction Stop
+                Start-Sleep -Seconds 2
+
+                $flags = Get-ItemPropertyValue -LiteralPath $configPath -Name AnnounceFlags -ErrorAction Stop
+                $serverEnabled = Get-ItemPropertyValue -LiteralPath $serverPath -Name Enabled -ErrorAction Stop
+                $service = Get-Service -Name W32Time -ErrorAction Stop
+                if (([int]$flags -band 5) -ne 5 -or [int]$serverEnabled -ne 1 -or $service.Status -ne 'Running') {
+                    throw "postcondition failed (AnnounceFlags=$flags, NtpServerEnabled=$serverEnabled, W32Time=$($service.Status))"
+                }
+                return [pscustomobject]@{ Passed = $true; Changed = $true; Message = "PDC '$pdcName' was marked as a reliable Windows Time server and W32Time was restarted" }
+            }
+            catch {
+                return [pscustomobject]@{ Passed = $false; Changed = $false; Message = $_.Exception.Message }
+            }
+        }
+
         # Check critical services. KDC included: if it's stopped, machine-account
         # Kerberos breaks while user auth (via cached tickets) may still appear to
         # work, which produces very confusing "secure channel False" symptoms on
@@ -687,6 +734,18 @@ function Test-DCFunctionality {
             else {
                 $results.Details.Add("OK: Service '$svc' is Running")
             }
+        }
+
+        $timeAdvertising = & $ensurePdcTimeAdvertising $isBdc
+        if (-not $timeAdvertising.Passed) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: PDC Windows Time advertisement could not be configured: $($timeAdvertising.Message)")
+        }
+        elseif ($timeAdvertising.Changed) {
+            $results.Details.Add("RECOVERED: $($timeAdvertising.Message)")
+        }
+        else {
+            $results.Details.Add("OK: $($timeAdvertising.Message)")
         }
 
         # DNS resolution test — query the local DNS zone database directly
