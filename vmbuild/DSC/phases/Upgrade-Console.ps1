@@ -16,22 +16,70 @@ function Install-Console {
         [string]$UIInstallDir,
         [string]$localsiteserver
     )
-    #Uninstall the console
     Write-DscStatus -NoStatus "Upgrade-Console: Uninstalling the console"
-    & $ConsoleUIExe  /uninstall /q
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $uninstallOutput = @(& $ConsoleUIExe /uninstall /q 2>&1)
+        $uninstallExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    if ($uninstallExitCode -notin @(0, 3010)) {
+        throw "Console uninstall failed with exit $uninstallExitCode`: $($uninstallOutput -join '; ')"
+    }
     Start-Sleep -Seconds 5
     Wait-Process -Name ConsoleSetup -ErrorAction SilentlyContinue
 
     Write-DscStatus -NoStatus "Upgrade-Console: Uninstall Complete"
 
-
     Write-DscStatus -NoStatus "Upgrade-Console: Installing the console"
-    #Install the Console
     Write-DscStatus -NoStatus "& $ConsoleUIExe /q LangPackDir=$LangPackDir TargetDir=$UIInstallDir DEFAULTSITESERVERNAME=$localsiteserver"
-    & $ConsoleUIExe /q LangPackDir=$LangPackDir TargetDir=$UIInstallDir DEFAULTSITESERVERNAME=$localsiteserver
+    try {
+        $ErrorActionPreference = 'Continue'
+        $installOutput = @(& $ConsoleUIExe /q "LangPackDir=$LangPackDir" "TargetDir=$UIInstallDir" "DEFAULTSITESERVERNAME=$localsiteserver" 2>&1)
+        $installExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    if ($installExitCode -notin @(0, 3010)) {
+        throw "Console install failed with exit $installExitCode`: $($installOutput -join '; ')"
+    }
     Start-Sleep -Seconds 5
     Wait-Process -Name ConsoleSetup -ErrorAction SilentlyContinue
     Write-DscStatus -NoStatus "Upgrade-Console: Install Complete"
+}
+
+function Get-ConsoleVersionState {
+    param(
+        [string]$SiteCode,
+        [string]$ExpectedRelease
+    )
+
+    $setup = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup' -ErrorAction SilentlyContinue
+    $adminConsoleVersion = [string]$setup.AdminConsoleVersion
+    $requiredExtensionVersion = [string]$setup.RequiredExtensionVersion
+    $requiredExtensionSiteVersion = [string](Get-WmiObject -Namespace "root\sms\Site_$SiteCode" -Query 'SELECT FileVersion FROM SMS_ConsoleSetupInfo WHERE FileName = "ConfigMgr.AC_Extension.i386.cab"' -ErrorAction Stop).FileVersion
+    if (-not $requiredExtensionSiteVersion) {
+        throw "SMS_ConsoleSetupInfo returned no required extension version for site $SiteCode"
+    }
+
+    $consoleRelease = ''
+    $parsedConsoleVersion = $null
+    if ($adminConsoleVersion -and [version]::TryParse($adminConsoleVersion, [ref]$parsedConsoleVersion)) {
+        $consoleRelease = "$($parsedConsoleVersion.Minor)"
+    }
+
+    [pscustomobject]@{
+        AdminConsoleVersion          = $adminConsoleVersion
+        ConsoleRelease               = $consoleRelease
+        ExpectedRelease              = $ExpectedRelease
+        RequiredExtensionVersion     = $requiredExtensionVersion
+        RequiredExtensionSiteVersion = $requiredExtensionSiteVersion
+        Current                      = $consoleRelease -eq $ExpectedRelease -and $requiredExtensionVersion -eq $requiredExtensionSiteVersion
+    }
 }
 
 
@@ -43,26 +91,17 @@ if ( -not $ConfigFilePath) {
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
 $sitecode = $ThisVM.SiteCode
+$cmOptions = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$expectedRelease = "$($cmOptions.Version)"
+if (-not $sitecode) { throw 'Upgrade-Console: this machine has no SiteCode in deployConfig' }
+if (-not $expectedRelease) { throw 'Upgrade-Console: cmOptions.Version is missing from deployConfig' }
 
-$AdminConsoleVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "AdminConsoleVersion" -ErrorAction SilentlyContinue
-$RequiredExtensionVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "RequiredExtensionVersion" -ErrorAction SilentlyContinue
-$RequiredExtensionSiteVersion = (gwmi -namespace "root\sms\Site_$($sitecode)" -Query "SELECT FileVersion from SMS_ConsoleSetupInfo WHERE FileName = ""ConfigMgr.AC_Extension.i386.cab""").FileVersion
-
-
-
-
-if ($RequiredExtensionVersion -ne $RequiredExtensionSiteVersion) {
-    Write-DscStatus "Upgrade-Console: RequiredExtensionVersion is not the same as RequiredExtensionSiteVersion.  Upgrading to $RequiredExtensionSiteVersion"
+$state = Get-ConsoleVersionState -SiteCode $sitecode -ExpectedRelease $expectedRelease
+if ($state.Current) {
+    Write-DscStatus "Upgrade-Console: Console is already current ($($state.AdminConsoleVersion)); extension $($state.RequiredExtensionVersion)"
+    return [pscustomobject]@{ Success = $true; Message = "Console is current at $($state.AdminConsoleVersion)" }
 }
-else {    
-    # Do Nothing
-    Write-DScStatus "Upgrade-Console: Console is already at the correct version Console: $ConsoleShortVersion Extensions: $RequiredExtensionSiteVersion"
-    return
-}
-
-
-
-
+Write-DscStatus "Upgrade-Console: Upgrading console release '$($state.ConsoleRelease)' to '$expectedRelease'; extension '$($state.RequiredExtensionVersion)' to '$($state.RequiredExtensionSiteVersion)'"
 
 $CMInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Installation Directory" -ErrorAction SilentlyContinue
 if (-not $CMInstallDir) {
@@ -71,12 +110,11 @@ if (-not $CMInstallDir) {
 
 Write-DscStatus -NoStatus "Upgrade-Console: CMInstallDir: $CMInstallDir"
 if (-not (Test-Path $CMInstallDir)) {
-    Write-DscStatus -NoStatus "Upgrade-Console: $CMInstallDir does not exist"
-    return
+    throw "Upgrade-Console: CM install directory '$CMInstallDir' does not exist"
 }
 
-$ConsoleUIExe = (Join-Path $CMInstallDir "\bin\I386\Consolesetup.exe") 
-$LangPackDir = (Join-Path $CMInstallDir "\bin\I386\LanguagePack")
+$ConsoleUIExe = Join-Path $CMInstallDir 'bin\I386\Consolesetup.exe'
+$LangPackDir = Join-Path $CMInstallDir 'bin\I386\LanguagePack'
 $UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "UI Installation Directory"  -ErrorAction SilentlyContinue
 if (-not $UIInstallDir) {
     $UIInstallDir = "E:\ConfigMgr\AdminConsole"
@@ -84,14 +122,12 @@ if (-not $UIInstallDir) {
 
 Write-DscStatus -NoStatus "Upgrade-Console: UIInstallDir: $UIInstallDir"
 if (-not (Test-Path $UIInstallDir)) {
-    Write-DscStatus -NoStatus "Upgrade-Console: $UIInstallDir does not exist"
-    return
+    throw "Upgrade-Console: UI install directory '$UIInstallDir' does not exist"
 }   
 
 Write-DscStatus -NoStatus "Upgrade-Console: ConsoleUIExe: $ConsoleUIExe"
 if (-not (Test-Path $ConsoleUIExe)) {
-    Write-DscStatus -NoStatus "Upgrade-Console: $ConsoleUIExe does not exist"
-    return
+    throw "Upgrade-Console: console setup '$ConsoleUIExe' does not exist"
 }   
 
 $localsiteServer = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\ConfigMgr10\AdminUI\Connection"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "server"  -ErrorAction SilentlyContinue
@@ -101,25 +137,19 @@ if (-not $localSiteServer) {
 
 
 Install-Console -ConsoleUIExe $ConsoleUIExe -LangPackDir $LangPackDir -UIInstallDir $UIInstallDir -localsiteserver $localsiteserver
-start-sleep -Seconds 5
-
-$AdminConsoleVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "AdminConsoleVersion" -ErrorAction SilentlyContinue
-$RequiredExtensionVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "RequiredExtensionVersion" -ErrorAction SilentlyContinue
-if ($AdminConsoleVersion) {
-    $ConsoleShortVersion = ([System.Version]$AdminConsoleVersion).Minor
-}
-
 Write-DscStatus -NoStatus "Upgrade-Console: Checking if the console installed successfully"
-
-
-if ($RequiredExtensionVersion -eq $RequiredExtensionSiteVersion) { 
-    Write-DscStatus "Console installed successfully Console: $ConsoleShortVersion Extensions: $RequiredExtensionSiteVersion"
-}
-else {
-    
-    Write-DscStatus "Console failed to install.  Retrying."
+$state = Get-ConsoleVersionState -SiteCode $sitecode -ExpectedRelease $expectedRelease
+if (-not $state.Current) {
+    Write-DscStatus "Upgrade-Console: Console validation failed after first install; retrying"
     Start-Sleep -Seconds 60
     Install-Console -ConsoleUIExe $ConsoleUIExe -LangPackDir $LangPackDir -UIInstallDir $UIInstallDir -localsiteserver $localsiteserver
-
+    $state = Get-ConsoleVersionState -SiteCode $sitecode -ExpectedRelease $expectedRelease
 }
+
+if (-not $state.Current) {
+    throw "Console upgrade did not converge: installed '$($state.AdminConsoleVersion)' release '$($state.ConsoleRelease)' expected '$expectedRelease'; extension '$($state.RequiredExtensionVersion)' expected '$($state.RequiredExtensionSiteVersion)'"
+}
+
+Write-DscStatus "Console installed successfully Console: $($state.AdminConsoleVersion) Extensions: $($state.RequiredExtensionVersion)"
+[pscustomobject]@{ Success = $true; Message = "Console upgraded to $($state.AdminConsoleVersion)" }
 

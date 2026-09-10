@@ -12261,7 +12261,48 @@ function Test-CMSiteWideFunctionality {
             }
         }
 
-        # 3b. IISSSLState -- the definitive HTTPS flag on the site component.
+        # 3b. The local admin console must match the requested release and the
+        # extension version published by this site. Site upgrade success does
+        # not update an already-installed console by itself.
+        if ($vmRole -in @('Primary', 'CAS') -and $cmVersionInner) {
+            try {
+                $consoleSetup = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup' -ErrorAction Stop
+                $adminConsoleVersion = [string]$consoleSetup.AdminConsoleVersion
+                $requiredExtensionVersion = [string]$consoleSetup.RequiredExtensionVersion
+                $requiredExtensionSiteVersion = [string](Get-WmiObject -Namespace $ns -Class SMS_ConsoleSetupInfo -Filter "FileName='ConfigMgr.AC_Extension.i386.cab'" -ErrorAction Stop | Select-Object -First 1).FileVersion
+                $parsedConsoleVersion = $null
+                $consoleRelease = ''
+                if ($adminConsoleVersion -and [version]::TryParse($adminConsoleVersion, [ref]$parsedConsoleVersion)) {
+                    $consoleRelease = "$($parsedConsoleVersion.Minor)"
+                }
+
+                if (-not $adminConsoleVersion -or -not $consoleRelease) {
+                    $results.Passed = $false
+                    $results.Details.Add('FAIL: ConfigMgr admin console version is missing or invalid in HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup')
+                }
+                elseif ($consoleRelease -ne "$cmVersionInner") {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: ConfigMgr admin console is release $consoleRelease ($adminConsoleVersion), but cmOptions.version is $cmVersionInner. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
+                }
+                elseif (-not $requiredExtensionSiteVersion) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: SMS_ConsoleSetupInfo returned no required console extension version for site $sc; console currency was not verified")
+                }
+                elseif ($requiredExtensionVersion -ne $requiredExtensionSiteVersion) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: ConfigMgr admin console extension is $requiredExtensionVersion, but site $sc requires $requiredExtensionSiteVersion. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
+                }
+                else {
+                    $results.Details.Add("OK: ConfigMgr admin console $adminConsoleVersion is release $consoleRelease and extension $requiredExtensionVersion matches site $sc")
+                }
+            }
+            catch {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: ConfigMgr admin console currency could not be verified on this $vmRole`: $($_.Exception.Message)")
+            }
+        }
+
+        # 3c. IISSSLState -- the definitive HTTPS flag on the site component.
         # CCM_SSL_ENABLED (0x1) must be set for ccmsetup to use PKI certs.
         # IISSSLState=63 (0x3F) has all the right bits including 0x1.
         if ($usePki) {

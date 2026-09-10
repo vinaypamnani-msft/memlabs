@@ -7,8 +7,12 @@ $Fix_UpgradeConsole = {
         return [pscustomobject]@{ Success = $false; Message = "Upgrade-Console.ps1 not found at $script" }
     }
     try {
-        & $script
-        [pscustomobject]@{ Success = $true; Message = 'Upgrade-Console.ps1 completed' }
+        $output = @(& $script)
+        $result = @($output | Where-Object { $_ -and $_.PSObject.Properties['Success'] }) | Select-Object -Last 1
+        if (-not $result) {
+            return [pscustomobject]@{ Success = $false; Message = 'Upgrade-Console.ps1 returned no result'; Errors = @($output | ForEach-Object { "$_" }) }
+        }
+        return $result
     }
     catch {
         [pscustomobject]@{ Success = $false; Message = 'Upgrade-Console.ps1 threw'; Errors = @("$($_.Exception.Message)") }
@@ -17,9 +21,9 @@ $Fix_UpgradeConsole = {
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-Upgrade-Console"
-    FixVersion        = "250107.0"
+    FixVersion        = "260910.0"
     NeededOnFreshDeploy = $true
-    AppliesToExisting   = $false
+    AppliesToExisting   = $true
     AppliesToRoles    = @("Primary", "CAS")
     NotAppliesToRoles = @()
     DependentVMs      = @()
