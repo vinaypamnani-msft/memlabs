@@ -218,11 +218,11 @@ CurrentBranch=1
         $cmini = $cmini.Replace('SysCenterId=', "SysCenterId=$($deployConfig.parameters.SysCenterId)")
     }
 
-    if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER" -or $installToAO) {
+    if ($sqlInstanceName -ieq "MSSQLSERVER" -or $installToAO) {
         $cmini = $cmini.Replace('%SQLInstance%', "")
     }
     else {
-        $tinstance = $sqlInstanceName.ToUpper() + "\"
+        $tinstance = $sqlInstanceName.ToUpperInvariant() + "\"
         $cmini = $cmini.Replace('%SQLInstance%', $tinstance)
     }
 

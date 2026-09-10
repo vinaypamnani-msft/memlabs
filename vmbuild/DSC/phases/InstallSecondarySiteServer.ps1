@@ -268,7 +268,7 @@ $Install_Secondary = {
                 $FileSetting = New-CMInstallationSourceFile -CopyFromParentSiteServer
 
                 if ($SecondaryVM.sqlVersion) {
-                    if ($SecondaryVM.sqlInstanceName.ToUpper() -eq "MSSQLSERVER") {
+                    if ($SecondaryVM.sqlInstanceName -ieq "MSSQLSERVER") {
                         # New-CMSqlServerSetting does not allow you to specify a port # when using full SQL
                         #$SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -SqlServerServiceBrokerPort 4022 -SqlServerServicePort $SecondaryVM.thisParams.sqlPort
                         $SQLSetting = New-CMSqlServerSetting -SiteDatabaseName "CM_$secondarySiteCode" -UseExistingSqlServerInstance -SqlServerServiceBrokerPort 4022

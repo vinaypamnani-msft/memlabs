@@ -933,15 +933,21 @@ function Test-DCFunctionality {
         # rerun) AD replication between DCs is still re-establishing, so dcdiag's
         # Replications test can fail on the first pass and pass moments later.
         $dcdiag = $null
-        $failCount = 0
+        $dcdiagExitCode = -1
         $dcdiagErr = $null
         for ($dd = 1; $dd -le 3; $dd++) {
             try {
-                $dcdiag = & dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /q 2>&1
-                $dcdiagText = $dcdiag -join "`n"
-                $failCount = ([regex]::Matches($dcdiagText, 'failed test')).Count
+                $savedErrorActionPreference = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = 'Continue'
+                    $dcdiag = & dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /q 2>&1
+                    $dcdiagExitCode = $LASTEXITCODE
+                }
+                finally {
+                    $ErrorActionPreference = $savedErrorActionPreference
+                }
                 $dcdiagErr = $null
-                if ($failCount -eq 0) { break }
+                if ($dcdiagExitCode -eq 0) { break }
             }
             catch {
                 $dcdiagErr = $_
@@ -951,10 +957,10 @@ function Test-DCFunctionality {
         if ($dcdiagErr) {
             $results.Details.Add("WARN: dcdiag execution failed: $($dcdiagErr.Exception.Message)")
         }
-        elseif ($failCount -gt 0) {
+        elseif ($dcdiagExitCode -ne 0) {
             $results.Passed = $false
-            $results.Details.Add("FAIL: dcdiag reported $failCount failed test(s) after retries")
-            $failLines = $dcdiag | Where-Object { $_ -match 'failed test' } | Select-Object -First 5
+            $results.Details.Add("FAIL: dcdiag failed after retries (exit $dcdiagExitCode)")
+            $failLines = $dcdiag | Where-Object { $_ -and "$($_)".Trim() } | Select-Object -First 5
             foreach ($fl in $failLines) { $results.Details.Add("  dcdiag: $($fl.Trim())") }
         }
         else {
@@ -4550,7 +4556,7 @@ function Test-MPReplicaFunctionality {
         $replicaPorts = @{}
         foreach ($pair in @("$replicaPortCsv" -split ',' | Where-Object { $_ })) {
             $kv = $pair -split '='
-            if ($kv.Count -eq 2) { $replicaPorts[$kv[0].Trim().ToUpper()] = $kv[1].Trim() }
+            if ($kv.Count -eq 2) { $replicaPorts[$kv[0].Trim().ToUpperInvariant()] = $kv[1].Trim() }
         }
 
         # Site DB from this server's registry (same detection ConfigMgr uses).
@@ -4583,7 +4589,7 @@ function Test-MPReplicaFunctionality {
         try {
             $bgb = Invoke-Sqlcmd -ServerInstance $inst -Database $db -Query "SELECT ServerName, DBID FROM v_BgbMP" -TrustServerCertificate -ErrorAction Stop
             $routes = Invoke-Sqlcmd -ServerInstance $inst -Database $db -Query "SELECT remote_service_name FROM sys.routes WHERE remote_service_name LIKE 'ConfigMgrBGB%'" -TrustServerCertificate -ErrorAction Stop
-            $routeSvcs = @($routes | ForEach-Object { "$($_.remote_service_name)".ToLower() })
+            $routeSvcs = @($routes | ForEach-Object { "$($_.remote_service_name)".ToLowerInvariant() })
         }
         catch {
             $results.Passed = $false
@@ -4636,16 +4642,16 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
         }
 
         foreach ($mp in $mpList) {
-            $row = @($bgb | Where-Object { "$($_.ServerName)".ToLower() -eq $mp.ToLower() }) | Select-Object -First 1
+            $row = @($bgb | Where-Object { "$($_.ServerName)" -ieq $mp }) | Select-Object -First 1
             if (-not $row) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: MP '$mp' not found in v_BgbMP")
                 continue
             }
             $dbid = "$($row.DBID)"
-            if ($dbid.ToLower().StartsWith('0x')) {
+            if ($dbid.ToLowerInvariant().StartsWith('0x')) {
                 $results.Details.Add("OK: MP '$mp' DBID is a replica hash ($dbid)")
-                $wantSvc = "configmgrbgb_site$($dbid.ToLower())"
+                $wantSvc = "configmgrbgb_site$($dbid.ToLowerInvariant())"
                 if ($routeSvcs -contains $wantSvc) {
                     $results.Details.Add("OK: site route to replica service present for '$mp'")
                 }
@@ -4655,7 +4661,7 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
                 }
 
                 # Stored SQL server + DB for this MP (what the MP connects to).
-                $prop = @($mpProps | Where-Object { "$($_.ServerName)".ToLower() -eq $mp.ToLower() }) | Select-Object -First 1
+                $prop = @($mpProps | Where-Object { "$($_.ServerName)" -ieq $mp }) | Select-Object -First 1
                 $storedSql = if ($prop) { "$($prop.SQLServerName)".Trim() } else { '' }
                 $storedDb = if ($prop) { "$($prop.DatabaseName)".Trim() } else { '' }
 
@@ -4683,7 +4689,7 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
                 # DB (parse instance from the stored DatabaseName) and confirm it.
                 if ($storedSql -and $storedDb) {
                     if ($storedDb -match '\\') { $rInst = "$storedSql\$($storedDb.Split('\')[0])"; $rDb = $storedDb.Split('\')[1] } else { $rInst = $storedSql; $rDb = $storedDb }
-                    $rPort = $replicaPorts[(($storedSql -split '\.')[0]).ToUpper()]
+                    $rPort = $replicaPorts[(($storedSql -split '\.')[0]).ToUpperInvariant()]
                     if ($rPort) { $rInst = "$rInst,$rPort" }
                     try {
                         $qRow = Invoke-Sqlcmd -ServerInstance $rInst -Database $rDb -TrustServerCertificate -ErrorAction Stop -Query "SELECT c = COUNT(*) FROM sys.service_queues WHERE name = 'ConfigMgrBGBQueue'"
@@ -4703,7 +4709,7 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
                 # falls back to the site code when EITHER is the empty string, so those two
                 # values -- not the DBID -- say which half of the repoint is missing.
                 $results.Passed = $false
-                $prop = @($mpProps | Where-Object { "$($_.ServerName)".ToLower() -eq $mp.ToLower() }) | Select-Object -First 1
+                $prop = @($mpProps | Where-Object { "$($_.ServerName)" -ieq $mp }) | Select-Object -First 1
                 $storedSql = if ($prop) { "$($prop.SQLServerName)".Trim() } else { '<no SC_SysResUse row>' }
                 $storedDb = if ($prop) { "$($prop.DatabaseName)".Trim() } else { '<no SC_SysResUse row>' }
                 $results.Details.Add("FAIL: MP '$mp' DBID='$dbid' is the site code, not a replica hash -- the MP is still reading the site DB. Stored SQLServerName='$storedSql', DatabaseName='$storedDb'; v_BgbMP falls back to the site code when either is empty, so the empty one names what did not get written.")
@@ -6281,6 +6287,60 @@ function Test-CAFunctionality {
         param($isStandalone)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        function Select-ActiveCaCertificate {
+            param($CertificateHashes, $Certificates)
+
+            $normalizedHashes = @($CertificateHashes | ForEach-Object { "$($_)" -replace '\s', '' } | Where-Object { $_ })
+            return @($Certificates | Where-Object {
+                    $normalizedHashes -contains ("$($_.Thumbprint)" -replace '\s', '')
+                } | Sort-Object NotAfter -Descending | Select-Object -First 1)
+        }
+
+        function Get-ActiveCaBaseCrlFreshness {
+            param([string]$Directory, [string]$Issuer)
+
+            if ([string]::IsNullOrWhiteSpace($Issuer)) {
+                return [pscustomobject]@{ Measured = $false; NextUpdate = $null; Path = $null; Error = 'active CA certificate issuer is unavailable' }
+            }
+            $files = @(Get-ChildItem -LiteralPath $Directory -Filter '*.crl' -File -ErrorAction SilentlyContinue)
+            if ($files.Count -eq 0) {
+                return [pscustomobject]@{ Measured = $false; NextUpdate = $null; Path = $null; Error = "no CRL files found under '$Directory'" }
+            }
+
+            $issuerKey = ($Issuer -replace '\s', '').ToUpperInvariant()
+            $baseCrls = [System.Collections.Generic.List[object]]::new()
+            $decodeErrors = [System.Collections.Generic.List[string]]::new()
+            foreach ($file in $files) {
+                $crl = $null
+                try {
+                    $crl = New-Object -ComObject X509Enrollment.CX509CertificateRevocationList
+                    $encoded = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file.FullName))
+                    $crl.InitializeDecode($encoded, 1)
+                    $decodedIssuer = "$($crl.Issuer.Name)"
+                    if ($crl.BaseCRL -and ($decodedIssuer -replace '\s', '').ToUpperInvariant() -eq $issuerKey) {
+                        $baseCrls.Add([pscustomobject]@{
+                                Path       = $file.FullName
+                                ThisUpdate = [datetime]$crl.ThisUpdate
+                                NextUpdate = [datetime]$crl.NextUpdate
+                            })
+                    }
+                }
+                catch {
+                    $decodeErrors.Add("$($file.Name): $($_.Exception.Message)")
+                }
+                finally {
+                    if ($crl) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($crl) }
+                }
+            }
+
+            $selected = $baseCrls | Sort-Object ThisUpdate -Descending | Select-Object -First 1
+            if (-not $selected) {
+                $detail = if ($decodeErrors.Count -gt 0) { $decodeErrors -join '; ' } else { "no base CRL matched issuer '$Issuer'" }
+                return [pscustomobject]@{ Measured = $false; NextUpdate = $null; Path = $null; Error = $detail }
+            }
+            return [pscustomobject]@{ Measured = $true; NextUpdate = $selected.NextUpdate; Path = $selected.Path; Error = $null }
+        }
+
         # CertSvc service (Active Directory Certificate Services)
         $results.Details.Add("CMD: Get-Service -Name 'CertSvc'")
         $svc = Get-Service -Name 'CertSvc' -ErrorAction SilentlyContinue
@@ -6324,10 +6384,10 @@ function Test-CAFunctionality {
         try {
             $activeCaName = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration' -Name Active -ErrorAction Stop).Active
             $caConfig = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$activeCaName" -ErrorAction Stop
-            $caThumbprint = "$($caConfig.CACertHash)" -replace '\s', ''
-            $localCaCert = Get-ChildItem Cert:\LocalMachine\CA, Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
-                Where-Object { ($_.Thumbprint -replace '\s', '') -eq $caThumbprint } | Select-Object -First 1
-            if (-not $localCaCert) { throw "certificate '$caThumbprint' was not found in LocalMachine CA/My stores" }
+            $caThumbprints = @($caConfig.CACertHash | ForEach-Object { "$($_)" -replace '\s', '' } | Where-Object { $_ })
+            $localCaCert = Select-ActiveCaCertificate -CertificateHashes $caThumbprints `
+                -Certificates @(Get-ChildItem Cert:\LocalMachine\CA, Cert:\LocalMachine\My -ErrorAction SilentlyContinue)
+            if (-not $localCaCert) { throw "none of the configured CA certificates '$($caThumbprints -join ', ')' was found in LocalMachine CA/My stores" }
             $results.Details.Add("OK: Active CA '$activeCaName' certificate = $($localCaCert.Thumbprint)")
         }
         catch {
@@ -6382,38 +6442,33 @@ function Test-CAFunctionality {
         } # end if (-not $isStandalone)
 
         # ---- CRL freshness: base CRL must be valid; delta CRL must not exist or be valid ----
-        $results.Details.Add("CMD: certutil.exe -crl")
+        $results.Details.Add("CMD: CertSvc CRL configuration")
         try {
-            $crlOut = & certutil.exe -getreg CA\CRLDeltaPeriodUnits 2>&1
-            $deltaUnits = ($crlOut | Where-Object { $_ -match 'CRLDeltaPeriodUnits REG_DWORD' }) -replace '.*= ', ''
-            if ($deltaUnits -match '^0') {
+            $deltaUnits = Get-ItemPropertyValue -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$activeCaName" -Name CRLDeltaPeriodUnits -ErrorAction Stop
+            if ([int]$deltaUnits -eq 0) {
                 $results.Details.Add("OK: CA delta CRL generation is disabled (CRLDeltaPeriodUnits=0)")
             }
-            elseif ($deltaUnits) {
+            else {
                 $results.Details.Add("WARN: CA delta CRL generation is enabled (CRLDeltaPeriodUnits=$deltaUnits)")
             }
 
-            # Check that a valid base CRL exists
-            $crlList = & certutil.exe -store CA CRL 2>&1
-            $crlText = $crlList -join "`n"
-            if ($crlText -match 'NextUpdate:\s*(.+)') {
-                $nextStr = $Matches[1].Trim()
-                try {
-                    $nextUpdate = [DateTime]::Parse($nextStr)
-                    $hoursLeft = ($nextUpdate - (Get-Date)).TotalHours
-                    if ($hoursLeft -lt 0) {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: Base CRL expired at $nextStr")
-                    }
-                    elseif ($hoursLeft -lt 48) {
-                        $results.Details.Add("WARN: Base CRL expires in $([int]$hoursLeft) hours ($nextStr)")
-                    }
-                    else {
-                        $results.Details.Add("OK: Base CRL valid until $nextStr ($([int]$hoursLeft) hours)")
-                    }
+            $crlFreshness = Get-ActiveCaBaseCrlFreshness `
+                -Directory "$env:WINDIR\System32\CertSrv\CertEnroll" -Issuer $localCaCert.Subject
+            if (-not $crlFreshness.Measured) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Base CRL freshness was not measured: $($crlFreshness.Error)")
+            }
+            else {
+                $hoursLeft = ($crlFreshness.NextUpdate - (Get-Date)).TotalHours
+                if ($hoursLeft -lt 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Base CRL expired at $($crlFreshness.NextUpdate.ToString('o'))")
                 }
-                catch {
-                    $results.Details.Add("WARN: Could not parse CRL NextUpdate: '$nextStr'")
+                elseif ($hoursLeft -lt 48) {
+                    $results.Details.Add("WARN: Base CRL expires in $([int]$hoursLeft) hours ($($crlFreshness.NextUpdate.ToString('o')))")
+                }
+                else {
+                    $results.Details.Add("OK: Base CRL valid until $($crlFreshness.NextUpdate.ToString('o')) ($([int]$hoursLeft) hours)")
                 }
             }
         }
@@ -6748,72 +6803,38 @@ function Test-PKICertificatesOnVM {
             }
             catch {}
 
-            # Export cert to temp file for certutil -verify
-            $tmpCer = "$env:TEMP\phase11_crl_check.cer"
+            # X509Chain exposes language-neutral revocation status. certutil's
+            # success prose and evidence labels are localized and its exit code
+            # alone does not prove that a CRL was retrieved.
+            $chain = $null
             try {
-                Export-Certificate -Cert $webCert -FilePath $tmpCer -Force -ErrorAction Stop | Out-Null
-                $verifyOutput = & certutil.exe -verify -urlfetch $tmpCer 2>&1
-                $verifyExit = $LASTEXITCODE
-                $verifyText = $verifyOutput -join "`n"
-                Remove-Item $tmpCer -Force -ErrorAction SilentlyContinue
-
-                if ($verifyExit -eq 0 -and $verifyText -match 'revocation check passed') {
+                $chain = New-Object Security.Cryptography.X509Certificates.X509Chain
+                $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+                $chain.ChainPolicy.RevocationFlag = [Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
+                $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+                $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(30)
+                $chainOk = $chain.Build($webCert)
+                $chainStatus = @($chain.ChainStatus | ForEach-Object {
+                        "$($_.Status): $($_.StatusInformation.Trim())"
+                    } | Where-Object { $_ })
+                if ($chainOk) {
                     $results.Details.Add("OK: Certificate chain + CRL verification passed")
                 }
                 else {
-                    # certutil still exits 0 when the chain builds but every CDP fetch failed, so
-                    # the 'revocation check passed' line is the only proof revocation actually worked.
                     $results.Passed = $false
-                    $why = if ($verifyExit -eq 0) {
-                        "certutil exited 0 but never reported a passing revocation check -- no CRL could be retrieved"
-                    }
-                    else {
-                        "certutil -verify -urlfetch failed (exit $verifyExit)"
-                    }
+                    $why = if ($chainStatus.Count -gt 0) { $chainStatus -join '; ' } else { 'chain build returned false without status' }
                     $results.Details.Add("FAIL: Revocation checking is broken for '$($webCert.Subject)': $why. The site is configured to check the CRL for site systems, so an unreachable CDP breaks HTTPS MP/DP traffic and PXE.")
                     if ($cdpUrls.Count -eq 0) {
                         $results.Details.Add("  CDP in cert: (none - the certificate carries no CRL Distribution Point)")
                     }
                     foreach ($u in $cdpUrls) { $results.Details.Add("  CDP in cert: $u") }
-                    $evidence = @($verifyOutput | Where-Object { "$_" -match 'Error retrieving URL|Failed "|FAILED|revocation' })
-                    foreach ($e in $evidence | Select-Object -First 8) {
-                        $results.Details.Add("  $("$e".Trim())")
-                    }
                 }
             }
             catch {
                 $results.Details.Add("WARN: CRL verification skipped: $($_.Exception.Message)")
             }
-
-            # ---- Check 4: Delta CRL expiry ----
-            # Parse delta CRL NextUpdate from the certutil output
-            $deltaBlocks = @()
-            $inDelta = $false
-            foreach ($line in $verifyOutput) {
-                if ($line -match 'Delta CRL') { $inDelta = $true }
-                if ($inDelta -and $line -match 'NextUpdate:\s*(.+)') {
-                    $deltaBlocks += $Matches[1].Trim()
-                    $inDelta = $false
-                }
-            }
-            foreach ($nextUpdateStr in $deltaBlocks | Select-Object -Unique) {
-                try {
-                    $nextUpdate = [DateTime]::Parse($nextUpdateStr)
-                    $hoursLeft = ($nextUpdate - (Get-Date)).TotalHours
-                    if ($hoursLeft -lt 0) {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: Delta CRL expired at $nextUpdateStr")
-                    }
-                    elseif ($hoursLeft -lt 48) {
-                        $results.Details.Add("WARN: Delta CRL expires in $([int]$hoursLeft) hours ($nextUpdateStr)")
-                    }
-                    else {
-                        $results.Details.Add("OK: Delta CRL valid until $nextUpdateStr ($([int]$hoursLeft) hours)")
-                    }
-                }
-                catch {
-                    $results.Details.Add("WARN: Could not parse delta CRL NextUpdate: '$nextUpdateStr'")
-                }
+            finally {
+                if ($chain) { $chain.Dispose() }
             }
 
             # ---- Check 5: IIS 443 binding ----
@@ -7063,13 +7084,22 @@ function Test-ForestTrustFunctionality {
         # --- A2: Functional secure channel to the remote forest ---
         $results.Details.Add("CMD: nltest /sc_query:$remoteForest")
         try {
-            $sc = & nltest "/sc_query:$remoteForest" 2>&1 | Out-String
-            if ($sc -match 'Success|NERR_Success|Connection Status = 0\b') {
+            $savedErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $scLines = @(& nltest "/sc_query:$remoteForest" 2>&1)
+                $scExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
+            $sc = $scLines | Out-String
+            if ($scExitCode -eq 0) {
                 $results.Details.Add("OK: Secure channel to '$remoteForest' verified (nltest)")
             }
             else {
                 $firstLine = (($sc -split "`n") | Where-Object { $_.Trim() } | Select-Object -First 1)
-                $results.Details.Add("WARN: nltest secure channel to '$remoteForest' did not report success: $($firstLine.Trim())")
+                $results.Details.Add("WARN: nltest secure channel to '$remoteForest' failed (exit $scExitCode): $($firstLine.Trim())")
             }
         }
         catch {
@@ -8819,7 +8849,7 @@ function Test-DomainMemberFunctionality {
         $decodeCcmError = {
             param($line)
             if (-not $line) { return $null }
-            $l = "$line".ToLower()
+            $l = "$line".ToLowerInvariant()
             if ($l -match '0x87d00454') {
                 return "CCM_E_NO_CLIENT_PKI_CERT -- the client had no usable PKI client-auth certificate for an HTTPS site, so ccmsetup aborted BEFORE any request reached the MP (ConfigMgr requestresponse.cpp: 'Client is not allowed to use or doesn't have PKI cert while talking to HTTPS server'). The 'StatusCode 200' printed alongside is the value ccmsetup seeds itself before each attempt ('Reset status to ok' in ccmsetup.cpp), NOT a reply from the MP -- nothing was sent. This is NOT a content-distribution race: an MP that answers with no content location returns 0x87d00215 (CCM_E_ITEMNOTFOUND) instead. Check ccmsetup.log for CCMCERTISSUERS + 'Unable to find any Certificate based on Certificate Issuers': either the machine never enrolled (Enroll/AutoEnroll not granted to this domain's computers on the ConfigMgr client template) or the issuing CA is not trusted here (cross-forest: root/NTAuth not published into this forest)."
             }
@@ -10652,12 +10682,12 @@ function Get-ClientPackageValidationScope {
     }
     catch {}
     $ownedSiteCodes = @($ownedSiteCodes | Where-Object { $_ } | Select-Object -Unique)
-    $ownedSiteUpper = @($ownedSiteCodes | ForEach-Object { "$($_)".ToUpper() })
+    $ownedSiteUpper = @($ownedSiteCodes | ForEach-Object { "$($_)".ToUpperInvariant() })
 
     $ownedDpNames = @($DeployConfig.virtualMachines | Where-Object {
             if (-not $_.vmName -or -not $_.siteCode) { return $false }
             $isDp = ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Secondary')
-            return $isDp -and ($ownedSiteUpper -contains "$($_.siteCode)".ToUpper())
+            return $isDp -and ($ownedSiteUpper -contains "$($_.siteCode)".ToUpperInvariant())
         } | Select-Object -ExpandProperty vmName | Select-Object -Unique)
 
     return [pscustomobject]@{
@@ -10718,13 +10748,13 @@ function Test-CMClientPackageDistribution {
         # every DP and boundary group any EARLIER test ever created. A DP is this
         # deployment's when it is a VM in the config, or when its site is one this server
         # owns. Everything else is reported for context and never judged.
-        $ownedSites = @("$ownedSitesCsv" -split ',' | Where-Object { $_ } | ForEach-Object { $_.Trim().ToUpper() })
-        $ownedDps = @("$ownedDpCsv" -split ',' | Where-Object { $_ } | ForEach-Object { $_.Trim().ToUpper() })
+        $ownedSites = @("$ownedSitesCsv" -split ',' | Where-Object { $_ } | ForEach-Object { $_.Trim().ToUpperInvariant() })
+        $ownedDps = @("$ownedDpCsv" -split ',' | Where-Object { $_ } | ForEach-Object { $_.Trim().ToUpperInvariant() })
         $isOwnedDp = {
             param($DpNameOrFqdn, $DpSiteCode)
-            $short = ("$DpNameOrFqdn" -split '\.')[0].ToUpper()
+            $short = ("$DpNameOrFqdn" -split '\.')[0].ToUpperInvariant()
             if ($ownedDps -contains $short) { return $true }
-            if ($DpSiteCode -and ($ownedSites -contains "$DpSiteCode".ToUpper())) { return $true }
+            if ($DpSiteCode -and ($ownedSites -contains "$DpSiteCode".ToUpperInvariant())) { return $true }
             return $false
         }
 
@@ -10921,12 +10951,12 @@ function Test-CMClientPackageDistribution {
                 $dpState = @{}
                 $dpSite = @{}
                 foreach ($row in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($pkg.PackageID)'" -ErrorAction SilentlyContinue)) {
-                    $rowName = (& $dpNameOf $row.ServerNALPath).ToUpper()
+                    $rowName = (& $dpNameOf $row.ServerNALPath).ToUpperInvariant()
                     $dpState[$rowName] = [int]$row.State
                     $dpSite[$rowName] = "$($row.SiteCode)"
                 }
                 foreach ($bg in $bgs) {
-                    $bgDps = @($bgLinks | Where-Object { $_.GroupID -eq $bg.GroupID } | ForEach-Object { (& $dpNameOf $_.ServerNALPath).ToUpper() } | Select-Object -Unique)
+                    $bgDps = @($bgLinks | Where-Object { $_.GroupID -eq $bg.GroupID } | ForEach-Object { (& $dpNameOf $_.ServerNALPath).ToUpperInvariant() } | Select-Object -Unique)
                     if ($bgDps.Count -eq 0) { continue }
                     $ownedInBg = @($bgDps | Where-Object { & $isOwnedDp $_ $dpSite[$_] })
                     if ($ownedInBg.Count -eq 0) {
@@ -11076,8 +11106,8 @@ function Test-CMClientPackageDistribution {
         [void]$collectedFrom.Add($VMName)
 
         foreach ($dpShort in ($failing | Select-Object -Unique)) {
-            $dpVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$dpShort".ToUpper()) } | Select-Object -First 1
-            if (-not $dpVm) { $dpVm = $domainVms | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$dpShort".ToUpper()) } | Select-Object -First 1 }
+            $dpVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -and ($_.vmName -ieq "$dpShort") } | Select-Object -First 1
+            if (-not $dpVm) { $dpVm = $domainVms | Where-Object { $_.vmName -and ($_.vmName -ieq "$dpShort") } | Select-Object -First 1 }
             if (-not $dpVm) {
                 Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: failing DP '$dpShort' matches no VM in domain '$domain' -- no DP-side logs collected, triage it by hand." -Level Warning
                 continue
@@ -11188,7 +11218,7 @@ function Test-CMClientPackageDistribution {
             Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: no Installed DP to use as a content-probe baseline -- the failing DP's content/vdir readings have no control to compare against." -Level Warning
         }
         else {
-            $baselineVm = @(@($DeployConfig.virtualMachines) + @($domainVms) | Where-Object { $_.vmName -and ($_.vmName.ToUpper() -eq "$baselineName".ToUpper()) }) | Select-Object -First 1
+            $baselineVm = @(@($DeployConfig.virtualMachines) + @($domainVms) | Where-Object { $_.vmName -and ($_.vmName -ieq "$baselineName") }) | Select-Object -First 1
             if (-not $baselineVm) {
                 Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: baseline DP '$baselineName' matches no VM in domain '$domain' -- no control content probe collected." -Level Warning
             }
@@ -11367,7 +11397,7 @@ function Test-AdditionalDisks {
         }
 
         foreach ($letter in $expected) {
-            $letter = $letter.TrimEnd(':').ToUpper()
+            $letter = $letter.TrimEnd(':').ToUpperInvariant()
             $results.Details.Add("CMD: Get-Volume -DriveLetter $letter")
             $vol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
             if (-not $vol) {
@@ -14703,7 +14733,7 @@ function Test-LinuxDomainJoin {
     $Phase = 11
     $RoleLabel = $CurrentItem.role
     $domain = $DeployConfig.vmOptions.domainName
-    $domainLower = if ($domain) { $domain.ToLower() } else { $domain }
+    $domainLower = if ($domain) { $domain.ToLowerInvariant() } else { $domain }
 
     if (-not (Get-Command Invoke-LinuxVmCommand -ErrorAction SilentlyContinue)) {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Domain-join check skipped (Invoke-LinuxVmCommand unavailable)" -LogOnly

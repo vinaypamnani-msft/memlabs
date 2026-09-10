@@ -149,10 +149,10 @@ $getMissingBoundaryGroupSiteSystems = {
         $currentSiteSystems = @{}
         foreach ($siteSystemLink in @(Get-WmiObject -Namespace $boundaryNamespace -Class SMS_BoundaryGroupSiteSystems -Filter "GroupID='$($BoundaryGroup.GroupID)'" -ErrorAction Stop)) {
             if ("$($siteSystemLink.ServerNALPath)" -match '\\([^\\"\]]+)') {
-                $currentSiteSystems[$Matches[1].ToUpper()] = $true
+                $currentSiteSystems[$Matches[1].ToUpperInvariant()] = $true
             }
         }
-        return @($DesiredSiteSystems | Where-Object { -not $currentSiteSystems.ContainsKey("$_".ToUpper()) })
+        return @($DesiredSiteSystems | Where-Object { -not $currentSiteSystems.ContainsKey("$_".ToUpperInvariant()) })
     }
     catch {
         Write-DscStatus "Could not read current site-system membership for Boundary Group '$($BoundaryGroup.Name)'; falling back to idempotent adds: $($_.Exception.Message)" -Warning
@@ -218,7 +218,7 @@ $ensureClientPkgCoverage = {
     # negative answer. Reliability over speed -- the wait only happens when
     # something looks missing.
     $expectedBgNames = @($bgs.SiteCode | Where-Object { $_ } | Select-Object -Unique)
-    $shortOf = { param($name) ("$name" -split '\.')[0].ToUpper() }
+    $shortOf = { param($name) ("$name" -split '\.')[0].ToUpperInvariant() }
     $configDpHosts = @{}
     foreach ($v in @($deployConfig.virtualMachines)) {
         # KEEP IN SYNC with Phase 11's owned-DP rule (Common.Validation.Functional.ps1, the
@@ -351,7 +351,7 @@ $ensureClientPkgCoverage = {
     # boundary, and the content will arrive on its own via normal inter-site
     # replication -- Phase 11 re-checks). Non-secondary DPs are always waited on.
     $vmByHost = @{}
-    foreach ($v in @($deployConfig.virtualMachines)) { if ($v.vmName) { $vmByHost["$($v.vmName)".ToUpper()] = $v } }
+    foreach ($v in @($deployConfig.virtualMachines)) { if ($v.vmName) { $vmByHost["$($v.vmName)".ToUpperInvariant()] = $v } }
     # Grace is charged only AFTER every DP something depends on is Installed, because until
     # then the loop is polling anyway and these cost nothing. Sized from measurement, not
     # taste: on wacky 08-17 and 08-25 08:26 the unneeded secondary DP was already Installed
@@ -361,7 +361,7 @@ $ensureClientPkgCoverage = {
     $keptDpFqdns = @()
     $secKeptDps = @()
     foreach ($dp in $bgDpFqdns) {
-        $dpHost = ("$dp" -split '\.')[0].ToUpper()
+        $dpHost = ("$dp" -split '\.')[0].ToUpperInvariant()
         $dpVm = $vmByHost[$dpHost]
         if (-not $dpVm -or $dpVm.role -ne 'Secondary') { $keptDpFqdns += $dp; continue }   # not a secondary -> always cover
         $secSite = "$($dpVm.siteCode)"
@@ -396,7 +396,7 @@ $ensureClientPkgCoverage = {
     # gave up twice at exactly 742/743/744s. Track the covered secondary DPs themselves.
     $secLinkSites = @{}   # secondary siteCode -> $true (for kept secondary DPs)
     foreach ($dp in $secKeptDps) {
-        $dpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
+        $dpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpperInvariant())]
         if ($dpVm -and $dpVm.siteCode) { $secLinkSites["$($dpVm.siteCode)"] = $true }
     }
     if ($secLinkSites.Count -gt 0) {
@@ -459,7 +459,7 @@ $ensureClientPkgCoverage = {
     }
     $isDpRoleLive = {
         param($DpFqdn)
-        $k = ("$DpFqdn" -split '\.')[0].ToUpper()
+        $k = ("$DpFqdn" -split '\.')[0].ToUpperInvariant()
         if ($dpRoleKnown.ContainsKey($k)) { return $true }
         if ($dpRoleLastCheck.ContainsKey($k) -and ((Get-Date) - $dpRoleLastCheck[$k]).TotalSeconds -lt 120) { return $false }
         $dpRoleLastCheck[$k] = Get-Date
@@ -471,7 +471,7 @@ $ensureClientPkgCoverage = {
                 foreach ($d in @(Get-WmiObject -Namespace $ns -Class $q.Class -Filter $q.Filter -ErrorAction Stop)) {
                     $df = & $fqdnOf $d.NALPath
                     if (-not $df -and $d.ServerName) { $df = "$($d.ServerName)" }
-                    if ($df -and ((("$df" -split '\.')[0]).ToUpper()) -eq $k) { $dpRoleKnown[$k] = $true; return $true }
+                    if ($df -and ((("$df" -split '\.')[0]).ToUpperInvariant()) -eq $k) { $dpRoleKnown[$k] = $true; return $true }
                 }
             }
             catch { }
@@ -1044,9 +1044,9 @@ $ensureClientPkgCoverage = {
         }
         $state = @{}
         foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
-            $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpper()] = [int]$r.State }
+            $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpperInvariant()] = [int]$r.State }
         }
-        $notInstalled = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
+        $notInstalled = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpperInvariant()) -and $state[$_.ToUpperInvariant()] -eq 0) })
         if ($notInstalled.Count -eq 0) {
             Write-DscStatus "Client package is Installed on all $($bgDpFqdns.Count) boundary-group DP(s)."
             break
@@ -1066,7 +1066,7 @@ $ensureClientPkgCoverage = {
             }
         }
         foreach ($dp in $notInstalled) {
-            $u = $dp.ToUpper()
+            $u = $dp.ToUpperInvariant()
             $hasRow = $state.ContainsKey($u)
             $st = if ($hasRow) { $state[$u] } else { -1 }
             $stName = if ($stateName.ContainsKey("$st")) { $stateName["$st"] } else { "State$st" }
@@ -1162,7 +1162,7 @@ $ensureClientPkgCoverage = {
                 # past 24h -- and every extra poke resets the clock, turning a 24-hour stall into an
                 # indefinite one. Measured 2026-08-24: PkgStatus_G(SEC) UpdateTime landed 19s after
                 # our poke, nine times.
-                $secDpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
+                $secDpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpperInvariant())]
                 if ($secDpVm -and "$($secDpVm.role)" -eq 'Secondary' -and "$($secDpVm.siteCode)") {
                     # The repair DECIDES FIRST, before the poke below. spAoRetryPkgDistribution sets
                     # PkgStatus(target).Status = 0, which erases the very PKG_STATUS_SENT row that
@@ -1238,7 +1238,7 @@ $ensureClientPkgCoverage = {
             catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
         }
         $waitDesc = @($notInstalled | ForEach-Object {
-                $uw = $_.ToUpper()
+                $uw = $_.ToUpperInvariant()
                 $sw = if (-not $state.ContainsKey($uw)) { 'no-row' } elseif ($stateName.ContainsKey("$($state[$uw])")) { $stateName["$($state[$uw])"] } else { "State$($state[$uw])" }
                 "$_ ($sw)"
             })
@@ -1263,16 +1263,16 @@ $ensureClientPkgCoverage = {
 
     $state = @{}; $stateVer = @{}
     foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
-        $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpper()] = [int]$r.State; $stateVer[$f.ToUpper()] = "$($r.SourceVersion)" }
+        $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpperInvariant()] = [int]$r.State; $stateVer[$f.ToUpperInvariant()] = "$($r.SourceVersion)" }
     }
-    $stillBad = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
+    $stillBad = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpperInvariant()) -and $state[$_.ToUpperInvariant()] -eq 0) })
     if ($stillBad.Count -gt 0) {
         $coverageElapsedSec = [math]::Round(((Get-Date) - $coverageStart).TotalSeconds)
         Write-DscStatus "Client pkg coverage: STILL not Installed at the wall-clock deadline after ${coverageElapsedSec}s and $try attempt(s) on: $($stillBad -join ', ') [pkg $PackageID SourceVersion=$pkgSourceVersion]. Capturing DP-side diagnostics..." -Warning
         foreach ($dp in $stillBad) {
             $dpHost = ("$dp" -split '\.')[0]
-            $u = $dp.ToUpper()
-            $diagVm = $vmByHost[$dpHost.ToUpper()]
+            $u = $dp.ToUpperInvariant()
+            $diagVm = $vmByHost[$dpHost.ToUpperInvariant()]
             if ($diagVm -and "$($diagVm.role)" -eq 'Secondary') {
                 Write-DscStatus "Client pkg coverage: [source-drop] $dpHost -- $(& $sourceDroppedAsInactive $dpHost)"
                 Write-DscStatus "Client pkg coverage: [source-drop] a drop at the SOURCE is a DIFFERENT failure from the 0x800704D3 bundle wedge -- nothing was ever sent, so there is no local abort to find. It clears once the child site reads Sites.Status=1 (ACTIVE) and the source re-enumerates its package servers."
@@ -1520,7 +1520,7 @@ if ($allBGsExist) {
 if ($allBGsExist) {
     $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
     $adsgdiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
-    if ($adiscovery.Value1.ToLower() -eq "active" -and $adsgdiscovery.Value1.ToLower() -eq "active") {
+    if ($adiscovery.Value1 -ieq "active" -and $adsgdiscovery.Value1 -ieq "active") {
         Write-DscStatus "All boundary groups, boundaries, and discovery already configured. Skipping."
         # A DP/MP/SUP can be added after its boundary group already exists (for
         # example, an add-on SiteSystem deployment). The old early-return path
@@ -1733,7 +1733,7 @@ $DN = 'DC=' + $Domain.Replace('.',',DC=')
 do {
     $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
 
-    if ($adiscovery.Value1.ToLower() -ne "active") {
+    if ($adiscovery.Value1 -ine "active") {
         Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
         Start-Sleep -Seconds 30
         Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DN" -Recursive
@@ -1741,14 +1741,14 @@ do {
     else {
         Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)"
     }
-} until ($adiscovery.Value1.ToLower() -eq "active")
+} until ($adiscovery.Value1 -ieq "active")
 
 # Setup SG Discovery
 Write-DscStatus "Enabling AD Group discovery"
 do {
     $adsgdiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
 
-    if ($adsgdiscovery.Value1.ToLower() -ne "active") {
+    if ($adsgdiscovery.Value1 -ine "active") {
 
         Write-DscStatus "AD Group Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
         Start-Sleep -Seconds 30
@@ -1758,7 +1758,7 @@ do {
     else {
         Write-DscStatus "AD System Discovery state is: $($adsgdiscovery.Value1)"
     }
-} until ($adsgdiscovery.Value1.ToLower() -eq "active")
+} until ($adsgdiscovery.Value1 -ieq "active")
 
 # Run discovery
 Write-DscStatus "Invoking AD system discovery"

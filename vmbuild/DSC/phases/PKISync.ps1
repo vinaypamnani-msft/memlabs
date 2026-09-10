@@ -29,7 +29,7 @@ function ParseCommandLine()
 
     for($i = 0; $i -lt $Script:args.Count; $i++)
     {
-        switch($Script:args[$i].ToLower())
+        switch($Script:args[$i])
         {
             -sourceforest
             {
@@ -49,7 +49,7 @@ function ParseCommandLine()
             -type
             {
                 $i++
-                $Script:ObjectType = $Script:args[$i].ToLower()
+                $Script:ObjectType = $Script:args[$i].ToLowerInvariant()
             }
             -f
             {
@@ -147,7 +147,7 @@ function GetSchemaSystemMayContain($ForestContext, $ObjectType)
     {
         $SystemMayContain.Add("flags")
     }
-    if ($objectType.ToLower().Contains("template") -and -1 -eq $SystemMayContain.IndexOf("revision"))
+    if ($objectType.IndexOf("template", [StringComparison]::OrdinalIgnoreCase) -ge 0 -and -1 -eq $SystemMayContain.IndexOf("revision"))
     {
         $SystemMayContain.Add("revision")
     }
@@ -316,14 +316,14 @@ ParseCommandLine
 #
 # Get a hold of the containers in each forest
 #
-write-host ("Target Forest: " + $TargetForestName.ToUpper())
+write-host ("Target Forest: " + $TargetForestName.ToUpperInvariant())
 $TargetForestContext = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext Forest, $TargetForestName
 $TargetPKIServicesDE = GetPKIServicesContainer $TargetForestContext $Script:TargetDC
 
 # Only need source forest when copying
 if($FALSE -eq $Script:DeleteOnly)
 {
-    write-host ("Source Forest: " + $SourceForestName.ToUpper())
+    write-host ("Source Forest: " + $SourceForestName.ToUpperInvariant())
     $SourceForestContext = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext Forest, $SourceForestName
     $SourcePKIServicesDE = GetPKIServicesContainer $SourceForestContext $Script:SourceDC
 }
@@ -332,12 +332,12 @@ else
     $SourcePKIServicesDE = $TargetPKIServicesDE
 }
 
-if("" -ne $ObjectType) {write-host ("Object Category to process: " + $ObjectType.ToUpper())}
+if("" -ne $ObjectType) {write-host ("Object Category to process: " + $ObjectType.ToUpperInvariant())}
 
 #
 # Process the command
 #
-switch($ObjectType.ToLower())
+switch($ObjectType)
 {
     all
     {
@@ -383,7 +383,7 @@ switch($ObjectType.ToLower())
     }
     default
     {
-        write-warning ("Unknown object type: " + $ObjectType.ToLower())
+        write-warning ("Unknown object type: " + $ObjectType)
         Usage
         exit 87
     }

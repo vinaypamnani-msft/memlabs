@@ -96,11 +96,11 @@ function Get-AdditionalValidations {
     Write-Verbose "[Get-AdditionalValidations] Prop:'$property' Name:'$name' Current:'$CurrentValue' New:'$value'"
     switch ($name) {
         "E" {
-            if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
-                if ($CurrentValue.ToUpper().EndsWith("GB")) {
+            if (-not $value.EndsWith("GB", [StringComparison]::OrdinalIgnoreCase) -and (-not $value.EndsWith("MB", [StringComparison]::OrdinalIgnoreCase))) {
+                if ($CurrentValue.EndsWith("GB", [StringComparison]::OrdinalIgnoreCase)) {
                     $property.$name = $value.Trim() + "GB"
                 }
-                if ($CurrentValue.ToUpper().EndsWith("MB")) {
+                if ($CurrentValue.EndsWith("MB", [StringComparison]::OrdinalIgnoreCase)) {
                     $property.$name = $value.Trim() + "MB"
                 }
             }
@@ -108,11 +108,11 @@ function Get-AdditionalValidations {
             $property.$name = $value.ToUpperInvariant()
         }
         "F" {
-            if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
-                if ($CurrentValue.ToUpper().EndsWith("GB")) {
+            if (-not $value.EndsWith("GB", [StringComparison]::OrdinalIgnoreCase) -and (-not $value.EndsWith("MB", [StringComparison]::OrdinalIgnoreCase))) {
+                if ($CurrentValue.EndsWith("GB", [StringComparison]::OrdinalIgnoreCase)) {
                     $property.$name = $value.Trim() + "GB"
                 }
-                if ($CurrentValue.ToUpper().EndsWith("MB")) {
+                if ($CurrentValue.EndsWith("MB", [StringComparison]::OrdinalIgnoreCase)) {
                     $property.$name = $value.Trim() + "MB"
                 }
             }
@@ -120,11 +120,11 @@ function Get-AdditionalValidations {
             $property.$name = $value.ToUpperInvariant()
         }
         "G" {
-            if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
-                if ($CurrentValue.ToUpper().EndsWith("GB")) {
+            if (-not $value.EndsWith("GB", [StringComparison]::OrdinalIgnoreCase) -and (-not $value.EndsWith("MB", [StringComparison]::OrdinalIgnoreCase))) {
+                if ($CurrentValue.EndsWith("GB", [StringComparison]::OrdinalIgnoreCase)) {
                     $property.$name = $value.Trim() + "GB"
                 }
-                if ($CurrentValue.ToUpper().EndsWith("MB")) {
+                if ($CurrentValue.EndsWith("MB", [StringComparison]::OrdinalIgnoreCase)) {
                     $property.$name = $value.Trim() + "MB"
                 }
             }
@@ -132,11 +132,11 @@ function Get-AdditionalValidations {
             $property.$name = $value.ToUpperInvariant()
         }
         "dynamicMinRam" {
-            if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
-                if ($CurrentValue.ToUpper().EndsWith("GB")) {
+            if (-not $value.EndsWith("GB", [StringComparison]::OrdinalIgnoreCase) -and (-not $value.EndsWith("MB", [StringComparison]::OrdinalIgnoreCase))) {
+                if ($CurrentValue.EndsWith("GB", [StringComparison]::OrdinalIgnoreCase)) {
                     $property.$name = $value.Trim() + "GB"
                 }
-                if ($CurrentValue.ToUpper().EndsWith("MB")) {
+                if ($CurrentValue.EndsWith("MB", [StringComparison]::OrdinalIgnoreCase)) {
                     $property.$name = $value.Trim() + "MB"
                 }
             }
@@ -155,11 +155,11 @@ function Get-AdditionalValidations {
             $property.$name = $value.ToUpperInvariant()
         }
         "memory" {
-            if (-not ($value.ToUpper().EndsWith("GB")) -and (-not ($value.ToUpper().EndsWith("MB")))) {
-                if ($CurrentValue.ToUpper().EndsWith("GB")) {
+            if (-not $value.EndsWith("GB", [StringComparison]::OrdinalIgnoreCase) -and (-not $value.EndsWith("MB", [StringComparison]::OrdinalIgnoreCase))) {
+                if ($CurrentValue.EndsWith("GB", [StringComparison]::OrdinalIgnoreCase)) {
                     $property.$name = $value.Trim() + "GB"
                 }
-                if ($CurrentValue.ToUpper().EndsWith("MB")) {
+                if ($CurrentValue.EndsWith("MB", [StringComparison]::OrdinalIgnoreCase)) {
                     $property.$name = $value.Trim() + "MB"
                 }
             }
@@ -252,7 +252,7 @@ function Get-AdditionalValidations {
             if ($value -eq $true) {
                 if (-not $property.domainUser) {
                     $existingUsers = @(get-list2 -DeployConfig $Global:Config | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique)
-                    $userPrefix = "$($Global:Config.vmOptions.prefix)".ToLower() + "user"
+                    $userPrefix = "$($Global:Config.vmOptions.prefix)".ToLowerInvariant() + "user"
                     $userNoPrefix = "user"
                     [int]$i = 1
                     while ($true) {

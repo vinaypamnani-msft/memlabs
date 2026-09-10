@@ -328,9 +328,9 @@ if (-not $SkipChecksum.IsPresent) {
             Write-Log "First 200 chars of fetched content: $($sumsText.Substring(0, [Math]::Min(200, $sumsText.Length)))" -Failure
             return
         }
-        $expectedHash = ($expectedLine -split '\s+')[0].ToLower()
+        $expectedHash = ($expectedLine -split '\s+')[0].ToLowerInvariant()
         Write-Log "Computing SHA256 of downloaded image (this can take ~30s on slow disks)..."
-        $actualHash = (Get-FileHash -Algorithm SHA256 -Path $qcow2Path).Hash.ToLower()
+        $actualHash = (Get-FileHash -Algorithm SHA256 -Path $qcow2Path).Hash.ToLowerInvariant()
         if ($actualHash -ne $expectedHash) {
             Write-Log "SHA256 mismatch! expected=$expectedHash actual=$actualHash" -Failure
             Write-Log "The downloaded file is corrupt or upstream has rotated. Delete $qcow2Path and re-run with -ForceDownload." -Failure

@@ -875,7 +875,7 @@ function New-MRemoteNGContainerNode {
     $node = $Doc.CreateElement("Node")
     $node.SetAttribute("Name", $Name)
     $node.SetAttribute("Type", "Container")
-    $node.SetAttribute("Expanded", $Expanded.ToString().ToLower())
+    $node.SetAttribute("Expanded", $Expanded.ToString().ToLowerInvariant())
     $node.SetAttribute("Descr", "MemLabs Auto Generated")
     $node.SetAttribute("Icon", "mRemoteNG")
     $node.SetAttribute("Panel", "General")
@@ -1081,7 +1081,7 @@ function New-MRemoteNGConnectionNode {
     if (-not [string]::IsNullOrWhiteSpace($VmId)) {
         $node.SetAttribute("VmId", $VmId)
         $node.SetAttribute("UseVmId", "true")
-        $node.SetAttribute("UseEnhancedMode", $UseEnhancedMode.ToString().ToLower())
+        $node.SetAttribute("UseEnhancedMode", $UseEnhancedMode.ToString().ToLowerInvariant())
     }
 
     $node.SetAttribute("UseRCG", "false")

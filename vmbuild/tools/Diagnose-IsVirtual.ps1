@@ -198,7 +198,7 @@ foreach ($probe in $regProbes) {
         continue
     }
     Write-Host ('  CCM-read Value  : {0}' -f $ccm.Value)
-    $match = ($null -ne $ccm.Value -and $ccm.Value.Trim().ToLower() -eq $expected.Trim().ToLower())
+    $match = ($null -ne $ccm.Value -and $ccm.Value.Trim() -ieq $expected.Trim())
     if ($match) {
         Write-Flag 'Value matches -> IsVirtual = TRUE from this probe.' 'hit'
         $causeVirtual.Add(('RegKey probe matched: {0}\{1} = "{2}"' -f $probe.RegKey, $probe.RegKeyValueName, $ccm.Value))

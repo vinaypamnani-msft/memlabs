@@ -7110,9 +7110,9 @@ function Initialize-ModuleAddProxy {
     $proxyAddress = [Environment]::GetEnvironmentVariable('HTTPS_PROXY', 'Machine')
     if ([string]::IsNullOrWhiteSpace($proxyAddress)) {
         try {
-            $winHttp = (& netsh winhttp show proxy 2>$null) -join "`n"
-            if ($winHttp -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
-                $proxyAddress = $Matches[1].Trim()
+            $winHttp = Get-MemLabsWinHttpDefaultProxy
+            if ($winHttp.Error -eq 0 -and $winHttp.AccessType -eq 3) {
+                $proxyAddress = $winHttp.Proxy
             }
         }
         catch { }
@@ -8431,7 +8431,7 @@ class InstallPBIRS {
                 }
 
                 Write-Status ("Adding HTTPS ReportServerWebApp ReportServerWebService URLS")
-                $thumbprint = $cert.ThumbPrint.ToLower()
+                $thumbprint = $cert.ThumbPrint.ToLowerInvariant()
                 foreach ($_app in @('ReportServerWebApp', 'ReportServerWebService')) {
                     $_rsErr = Get-RsWmiCallFailure $rsConfig.CreateSSLCertificateBinding($_app, $thumbprint, $ipAddress, $httpsport, $lcid) "CreateSSLCertificateBinding($_app, $($thumbprint.Substring(0, 8)).., ${ipAddress}:$httpsPort)"
                     if ($_rsErr) { [void]$rsFailures.Add($_rsErr) }
@@ -9647,8 +9647,8 @@ class AddCertificateToIIS {
                 return $false
             }
             $certdata = netsh http show sslcert ipport=0.0.0.0:443
-            $thumbPrint = $($cert.Thumbprint).ToLower()
-            if ($certdata.ToLower() -match $thumbPrint ) {
+            $thumbPrint = $($cert.Thumbprint).ToLowerInvariant()
+            if ($certdata.ToLowerInvariant() -match $thumbPrint ) {
                 return $true
             }
         }
@@ -10224,6 +10224,61 @@ class DisableClusterNicDnsRegistration {
     }
 }
 
+function Get-MemLabsWinHttpDefaultProxy {
+    if (-not ('MemLabs.WinHttpProxyReader' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace MemLabs {
+    public sealed class WinHttpProxyState {
+        public int AccessType;
+        public string Proxy;
+        public string Bypass;
+        public int Error;
+    }
+
+    public static class WinHttpProxyReader {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WINHTTP_PROXY_INFO {
+            public int AccessType;
+            public IntPtr Proxy;
+            public IntPtr Bypass;
+        }
+
+        [DllImport("winhttp.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool WinHttpGetDefaultProxyConfiguration(out WINHTTP_PROXY_INFO proxyInfo);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GlobalFree(IntPtr memory);
+
+        public static WinHttpProxyState Read() {
+            WINHTTP_PROXY_INFO info;
+            if (!WinHttpGetDefaultProxyConfiguration(out info)) {
+                return new WinHttpProxyState { Error = Marshal.GetLastWin32Error() };
+            }
+
+            try {
+                return new WinHttpProxyState {
+                    AccessType = info.AccessType,
+                    Proxy = info.Proxy == IntPtr.Zero ? null : Marshal.PtrToStringUni(info.Proxy),
+                    Bypass = info.Bypass == IntPtr.Zero ? null : Marshal.PtrToStringUni(info.Bypass)
+                };
+            }
+            finally {
+                if (info.Proxy != IntPtr.Zero) { GlobalFree(info.Proxy); }
+                if (info.Bypass != IntPtr.Zero) { GlobalFree(info.Bypass); }
+            }
+        }
+    }
+}
+'@
+    }
+
+    $reader = 'MemLabs.WinHttpProxyReader' -as [type]
+    return $reader::Read()
+}
+
 [DscResource()]
 class SetWindowsProxy {
     [DscProperty(Key)]
@@ -10334,13 +10389,18 @@ class SetWindowsProxy {
 
         # Check WinHTTP
         try {
-            $output = & netsh winhttp show proxy 2>$null
-            if ($output -notmatch 'Proxy Server\(s\)\s*:\s*(\S+)') {
-                Write-Verbose "SetWindowsProxy Test: WinHTTP proxy not set"
+            $winHttpProxy = Get-MemLabsWinHttpDefaultProxy
+            if ($winHttpProxy.Error -ne 0) {
+                Write-Verbose "SetWindowsProxy Test: WinHTTP query failed with error $($winHttpProxy.Error)"
                 return $false
             }
-            if ($Matches[1].Trim() -ne $_proxy) {
-                Write-Verbose "SetWindowsProxy Test: WinHTTP proxy is '$($Matches[1].Trim())', expected '$_proxy'"
+            if ($winHttpProxy.AccessType -ne 3 -or
+                -not [string]::Equals($winHttpProxy.Proxy, $_proxy, [System.StringComparison]::OrdinalIgnoreCase)) {
+                Write-Verbose "SetWindowsProxy Test: WinHTTP proxy is '$($winHttpProxy.Proxy)', expected '$_proxy'"
+                return $false
+            }
+            if (-not [string]::Equals($winHttpProxy.Bypass, $this.BypassList, [System.StringComparison]::OrdinalIgnoreCase)) {
+                Write-Verbose "SetWindowsProxy Test: WinHTTP bypass is '$($winHttpProxy.Bypass)', expected '$($this.BypassList)'"
                 return $false
             }
         }

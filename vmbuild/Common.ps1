@@ -1230,8 +1230,8 @@ function Get-File {
     # ---- Build transfer arguments ----
     $destinationFile = Split-Path $Destination -Leaf
     $isVhdxCopy = ($Action -eq "Copying") -and (
-        ($Source -is [string] -and $Source.ToLower().EndsWith(".vhdx")) -or
-        ($Destination -is [string] -and $Destination.ToLower().EndsWith(".vhdx"))
+        ($Source -is [string] -and $Source.ToLowerInvariant().EndsWith(".vhdx")) -or
+        ($Destination -is [string] -and $Destination.ToLowerInvariant().EndsWith(".vhdx"))
     )
 
     $HashArguments = @{
@@ -5225,7 +5225,7 @@ function Add-DHCPReservationIsolated {
     # during a run, and it only writes for MACs it is itself assigning.
     $purgeSkipped = $false
     if ($purgeMac -and $null -ne $KnownReservedMacs -and $null -ne $KnownReservedMacs['Macs']) {
-        $selfMac = ($Mac -replace '[-:]', '').ToUpper()
+        $selfMac = ($Mac -replace '[-:]', '').ToUpperInvariant()
         if (-not $KnownReservedMacs['Macs'].ContainsKey($selfMac)) {
             $purgeMac = $false
             $purgeSkipped = $true
@@ -5294,14 +5294,14 @@ function Add-DHCPReservationIsolated {
                     # == "MAC is attached to the switch named $scopeId". Membership
                     # is resolved lazily (only when a conflict must be adjudicated)
                     # so the common no-conflict path does no Get-VM enumeration.
-                    $ourMac = ($mac -replace '[-:]', '').ToLower()
+                    $ourMac = ($mac -replace '[-:]', '').ToLowerInvariant()
                     $switchMacs = $null
                     $resolveSwitchMacs = {
                         $m = @{}
                         try {
                             Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
                                 Where-Object { $_.SwitchName -eq $scopeId -and $_.MacAddress -and $_.MacAddress -ne '000000000000' } |
-                                ForEach-Object { $m[($_.MacAddress -replace '[-:]', '').ToLower()] = $_.VMName }
+                                ForEach-Object { $m[($_.MacAddress -replace '[-:]', '').ToLowerInvariant()] = $_.VMName }
                         }
                         catch { }
                         $m
@@ -5328,7 +5328,7 @@ function Add-DHCPReservationIsolated {
                     try { $existing = & $findReservation $ip } catch { }
                     $msFind = [int]$swStage.ElapsedMilliseconds
                     if ($existing) {
-                        $existingMac = ($existing.ClientId -replace '[-:]', '').ToLower()
+                        $existingMac = ($existing.ClientId -replace '[-:]', '').ToLowerInvariant()
                         if ($existingMac -eq $ourMac) {
                             # Reservation already exists with our MAC -- idempotent success.
                             $notes.Add("already reserved to our MAC; left unchanged")
@@ -5353,7 +5353,7 @@ function Add-DHCPReservationIsolated {
                         $lease = $null
                         try { $lease = Get-DhcpServerv4Lease -IPAddress $ip -ErrorAction SilentlyContinue } catch { }
                         if ($lease) {
-                            $leaseMac = ($lease.ClientId -replace '[-:]', '').ToLower()
+                            $leaseMac = ($lease.ClientId -replace '[-:]', '').ToLowerInvariant()
                             if ($leaseMac -ne $ourMac) {
                                 if ($null -eq $switchMacs) { $swStage.Restart(); $switchMacs = & $resolveSwitchMacs; $msSwitch += [int]$swStage.ElapsedMilliseconds }
                                 $holder = if ($switchMacs.ContainsKey($leaseMac)) { "live switch member '$($switchMacs[$leaseMac])'" } else { 'a non-member client' }
@@ -5376,7 +5376,7 @@ function Add-DHCPReservationIsolated {
                     if (-not $verify) {
                         throw "post-add read-back found NO reservation at $ip in scope $scopeId, although Add-DhcpServerv4Reservation reported success"
                     }
-                    $verifyMac = ([string]$verify.ClientId -replace '[-:]', '').ToLower()
+                    $verifyMac = ([string]$verify.ClientId -replace '[-:]', '').ToLowerInvariant()
                     if ($verifyMac -ne $ourMac) {
                         throw "post-add read-back found $ip in scope $scopeId reserved to MAC $verifyMac, not $ourMac"
                     }
@@ -5837,7 +5837,7 @@ function Set-DeployConfigIPAddresses {
                 if (-not $liveVm) { continue }
                 foreach ($nic in ($liveVm | Get-VMNetworkAdapter -ErrorAction SilentlyContinue)) {
                     if ($nic.MacAddress -and $nic.MacAddress -ne '000000000000') {
-                        $null = $validMacs.Add(($nic.MacAddress -replace '-', '').ToUpper())
+                        $null = $validMacs.Add(($nic.MacAddress -replace '-', '').ToUpperInvariant())
                     }
                 }
             }
@@ -5850,7 +5850,7 @@ function Set-DeployConfigIPAddresses {
             $resv = @()
             try { $resv = @(Get-DhcpServerv4Reservation -ScopeId $sid -ErrorAction SilentlyContinue) } catch {}
             foreach ($r in $resv) {
-                $rMac = ($r.ClientId -replace '-', '').ToUpper()
+                $rMac = ($r.ClientId -replace '-', '').ToUpperInvariant()
                 if (-not $rMac) { continue }
                 if ($validMacs.Contains($rMac)) { continue }   # held by a live VM -- keep
 
@@ -6397,7 +6397,7 @@ function New-VirtualMachine {
                         # runspace (~4s of CDXML import per call).
                         $existing = $null
                         if ($KnownReservedMacs -and $KnownReservedMacs['ByScopeMac']) {
-                            $existing = [string]$KnownReservedMacs['ByScopeMac']["$scopeId|$(($vmMac -replace '[-:]', '').ToUpper())"]
+                            $existing = [string]$KnownReservedMacs['ByScopeMac']["$scopeId|$(($vmMac -replace '[-:]', '').ToUpperInvariant())"]
                         }
                         else {
                             $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
@@ -6629,7 +6629,7 @@ function New-VirtualMachine {
                         # the VM on the wrong address (and collide with that IP's rightful owner).
                         $existing2 = $null
                         if ($KnownReservedMacs -and $KnownReservedMacs['ByScopeMac']) {
-                            $existing2 = [string]$KnownReservedMacs['ByScopeMac']["$scopeId2|$(($vmMac2 -replace '[-:]', '').ToUpper())"]
+                            $existing2 = [string]$KnownReservedMacs['ByScopeMac']["$scopeId2|$(($vmMac2 -replace '[-:]', '').ToUpperInvariant())"]
                         }
                         else {
                             $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2

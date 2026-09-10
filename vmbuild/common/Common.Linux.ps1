@@ -667,13 +667,13 @@ function New-LinuxSeedIso {
 
     $sshKey = Get-LinuxAdminSshKeyPair
     $instanceId = "memlabs-$VmName-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
-    $fqdn = "$VmName.$Domain".ToLower()
+    $fqdn = "$VmName.$Domain".ToLowerInvariant()
 
     # Normalize the optional workgroup local-admin account name. Ignore it if it
     # collides with the deployment account (vmbuildadmin) so we never emit a
     # duplicate users: entry.
     $localAdminUser = $null
-    if ($LocalAdminUser -and $LocalAdminUser.Trim() -and $LocalAdminUser.Trim().ToLower() -ne 'vmbuildadmin') {
+    if ($LocalAdminUser -and $LocalAdminUser.Trim() -and $LocalAdminUser.Trim() -ine 'vmbuildadmin') {
         $localAdminUser = $LocalAdminUser.Trim()
     }
 
@@ -915,7 +915,7 @@ chpasswd:
     # meta-data: NoCloud requires instance-id; local-hostname is a fallback.
     $metaData = @"
 instance-id: $instanceId
-local-hostname: $($VmName.ToLower())
+local-hostname: $($VmName.ToLowerInvariant())
 "@
 
     # network-config: NoCloud picks this up and writes /etc/netplan/50-cloud-init.yaml.
@@ -970,7 +970,7 @@ ethernets:
     # user-data: '#cloud-config' header is mandatory.
     $userData = @"
 #cloud-config
-hostname: $($VmName.ToLower())
+hostname: $($VmName.ToLowerInvariant())
 fqdn: $fqdn
 manage_etc_hosts: true
 preserve_hostname: false
@@ -1351,7 +1351,7 @@ function Get-LinuxDomainJoinSeedArgs {
 
     # Bash single-quote escape: ' -> '\''
     $pwBashSingle = $adminPwd -replace "'", "'\''"
-    $domainLower = $Domain.ToLower()
+    $domainLower = $Domain.ToLowerInvariant()
 
     $extraPackages = @(
         'realmd',
@@ -2325,7 +2325,7 @@ function Wait-LinuxCloudInitComplete {
             -BashCommand 'cloud-init status 2>/dev/null || echo "status: unknown"'
         $state = ""
         if ($r -and -not $r.ScriptBlockFailed -and $r.ScriptBlockOutput -match 'status:\s*(\S+)') {
-            $state = $Matches[1].Trim().ToLower()
+            $state = $Matches[1].Trim().ToLowerInvariant()
         }
         if ($state -in @('done', 'error', 'degraded', 'disabled')) {
             $elapsed = [int]$sw.Elapsed.TotalSeconds
@@ -4447,7 +4447,7 @@ function Get-LinuxRealmJoinBashScript {
     )
 
     $pwBashSingle = $AdminPassword -replace "'", "'\''"
-    $domainLower = $Domain.ToLower()
+    $domainLower = $Domain.ToLowerInvariant()
 
     $vars = @{
         DOMAIN    = $domainLower

@@ -176,7 +176,7 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
         # Breadcrumb present. Probe the site DB to decide whether setup.exe
         # got far enough to do real damage.
         $cmDbName = "CM_$SiteCode"
-        if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') {
+        if ($sqlInstanceName -and $sqlInstanceName -ine 'MSSQLSERVER') {
             $sqlDataSource = "$sqlServerName\$sqlInstanceName"
         }
         else {
@@ -309,7 +309,7 @@ if ($Configuration.InstallSCCM.Status -eq 'Completed') {
         $dbExists = $false
         $sqlReachable = $false
         $cmDbName = "CM_$SiteCode"
-        if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') {
+        if ($sqlInstanceName -and $sqlInstanceName -ine 'MSSQLSERVER') {
             $sqlDataSource = "$sqlServerName\$sqlInstanceName"
         }
         else {
@@ -531,11 +531,11 @@ CurrentBranch=1
         }
     }
 
-    if ($sqlInstanceName.ToUpper() -eq "MSSQLSERVER" -or $installToAO) {
+    if ($sqlInstanceName -ieq "MSSQLSERVER" -or $installToAO) {
         $cmini = $cmini.Replace('%SQLInstance%', "")
     }
     else {
-        $tinstance = $sqlInstanceName.ToUpper() + "\"
+        $tinstance = $sqlInstanceName.ToUpperInvariant() + "\"
         $cmini = $cmini.Replace('%SQLInstance%', $tinstance)
     }
 
@@ -663,8 +663,21 @@ CurrentBranch=1
                 else {
                     $dcName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
                     if ($dcName) { $dcName = $dcName.TrimStart('\\') }
-                    if (-not $dcName) { $dcName = (nltest /dsgetdc:$DomainFullName 2>$null | Select-String 'DC: \\\\(.+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }) }
-                    $allDCs = @($dcName)
+                    $dcCandidates = @($dcName, ("$env:LOGONSERVER".TrimStart('\\')) | Where-Object { $_ })
+                    try {
+                        $dcCandidates += @(Resolve-DnsName -Name "_ldap._tcp.dc._msdcs.$DomainFullName" -Type SRV -ErrorAction Stop |
+                                Where-Object { $_.NameTarget } |
+                                Sort-Object Priority, @{ Expression = 'Weight'; Descending = $true } |
+                                ForEach-Object { "$($_.NameTarget)".TrimEnd('.') })
+                    }
+                    catch {}
+                    $allDCs = @($dcCandidates | Where-Object { $_ } | Select-Object -Unique)
+                    $dcName = $allDCs | Select-Object -First 1
+                }
+                if (-not $dcName) {
+                    Write-DscStatus "SQL pre-flight DNS: no domain controller could be discovered from AD, Group Policy history, LOGONSERVER, or DNS SRV records; retrying DNS resolution."
+                    Start-Sleep -Seconds 5
+                    continue
                 }
                 $dcShortNames = @($allDCs | ForEach-Object { ($_ -split '\.')[0] })
 
@@ -2002,7 +2015,7 @@ if ($UpdateRequired) {
     if ($upgradingfailed -eq $true) {
         Write-DscStatus "Upgrade to '$($updatepack.Name)' failed."
 
-        if ($($updatepack.Name).ToLower().Contains("hotfix")) {
+        if ($updatepack.Name.IndexOf("hotfix", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
             Write-DscStatus "'$($updatepack.Name)' is a hotfix, skip it and continue...."
             $Configuration.UpgradeSCCM.Status = 'Completed'
         }
@@ -2296,7 +2309,7 @@ else {
         # CAS's own site DB data source (for the SQL ground-truth health check below). Mirrors the CAS SQL
         # resolution used elsewhere in this script (honors named instance / non-default or SQLAO port).
         $casSqlDataSource = $sqlServerName
-        if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') { $casSqlDataSource = "$sqlServerName\$sqlInstanceName" }
+        if ($sqlInstanceName -and $sqlInstanceName -ine 'MSSQLSERVER') { $casSqlDataSource = "$sqlServerName\$sqlInstanceName" }
         if ($sqlPort -and $sqlPort -ne 1433) { $casSqlDataSource = "$sqlServerName,$sqlPort" }
         $casDbName = "CM_$SiteCode"
 

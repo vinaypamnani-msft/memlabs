@@ -250,7 +250,7 @@ function Get-NewMachineName {
         write-log -verbose "$newName already exists [$CurrentName].. Trying next"
         $i++
     }
-    return $NewName.ToUpper()
+    return $NewName.ToUpperInvariant()
 }
 
 function Get-NewSiteCode {
@@ -333,7 +333,7 @@ function get-PrefixForDomain {
     $ValidDomainNames = Get-ValidDomainNames
     $prefix = $($ValidDomainNames[$domain])
     if ([String]::IsNullOrWhiteSpace($prefix)) {
-        $prefix = ($domain.ToUpper().SubString(0, 3) + "-") -replace "\.", ""
+        $prefix = ($domain.ToUpperInvariant().SubString(0, 3) + "-") -replace "\.", ""
     }
     if ([string]::IsNullOrWhiteSpace($prefix)) {
         $prefix = "NULL-"

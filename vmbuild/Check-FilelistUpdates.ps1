@@ -214,7 +214,10 @@ function Get-KbDirectDownloadUrl {
     param([Parameter(Mandatory)][string]$KB, [string]$Prefer = 'x64')
     $hits = Get-MUCatalogResults -Query $KB
     if (-not $hits) { return $null }
-    $matching = $hits | Where-Object { $_.Url -match [regex]::Escape($KB.ToLower()) }
+    $matching = $hits | Where-Object {
+        [regex]::IsMatch("$($_.Url)", [regex]::Escape($KB),
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    }
     if (-not $matching) { $matching = $hits }
     $preferred = $matching | Where-Object { $_.Url -match $Prefer -and $_.Url -match '\.exe$' } | Select-Object -First 1
     if (-not $preferred) { $preferred = $matching | Where-Object { $_.Url -match '\.exe$' } | Select-Object -First 1 }
@@ -433,7 +436,7 @@ function Invoke-ApplyChanges {
         try {
             Write-Host "  Downloading $($c.Name) to compute MD5 ..." -ForegroundColor DarkCyan
             Invoke-WebRequest -Uri $c.NewUrl -OutFile $tmp -UseBasicParsing -TimeoutSec 600
-            $newMd5 = (Get-FileHash -Path $tmp -Algorithm MD5).Hash.ToUpper()
+            $newMd5 = (Get-FileHash -Path $tmp -Algorithm MD5).Hash.ToUpperInvariant()
             if ($c.OldMd5) {
                 $c.Replacements += @{ Old = $c.OldMd5; New = $newMd5; Desc = 'md5' }
             }

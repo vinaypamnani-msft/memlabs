@@ -1566,11 +1566,11 @@ if ($licensed) { Write-Output 'Activated' }
     }
     $managedDpNames = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $deployConfig.virtualMachines -DefaultDomainName $DomainFullName)
     $managedDpKeys = @{}
-    foreach ($managedDpName in $managedDpNames) { $managedDpKeys[$managedDpName.ToUpper()] = $true }
+    foreach ($managedDpName in $managedDpNames) { $managedDpKeys[$managedDpName.ToUpperInvariant()] = $true }
     $allDistributionPoints = @(Get-CMDistributionPoint -AllSite)
     $DistributionPoints = @($allDistributionPoints | Where-Object {
             $liveDpName = ($_.NetworkOSPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
-            $managedDpKeys.ContainsKey($liveDpName.ToUpper())
+            $managedDpKeys.ContainsKey($liveDpName.ToUpperInvariant())
         })
     Write-DscStatus "$Tag Reconciling '$DPGroupName' membership for $($DistributionPoints.Count) MemLabs-managed DP(s); $($allDistributionPoints.Count - $DistributionPoints.Count) external DP(s)/CMG(s) are left unchanged"
     $existingAllDpMemberKeys = @{}
@@ -1580,7 +1580,7 @@ if ($licensed) { Write-Output 'Activated' }
             foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($allGrpWmi.GroupID)'" -ErrorAction Stop)) {
                 $memberHostName = & $serverFromNal $memberRow.DPNALPath
                 if (-not $memberHostName) { continue }
-                $existingAllDpMemberKeys[$memberHostName.ToUpper()] = $true
+                $existingAllDpMemberKeys[$memberHostName.ToUpperInvariant()] = $true
             }
         }
     }
@@ -2099,8 +2099,8 @@ if ($licensed) { Write-Output 'Activated' }
                     foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction Stop)) {
                         $memberHostName = & $serverFromNal $memberRow.DPNALPath
                         if (-not $memberHostName) { continue }
-                        $osdMemberKeys[$memberHostName.ToUpper()] = $true
-                        $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
+                        $osdMemberKeys[$memberHostName.ToUpperInvariant()] = $true
+                        $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpperInvariant()] = $true
                     }
                     $osdMembershipRead = $true
                 }
@@ -2114,7 +2114,7 @@ if ($licensed) { Write-Output 'Activated' }
                 # name ('PL-PANCETTA') fails to match, the error is swallowed, and the group is left EMPTY
                 # -- so every Start-CMContentDistribution to 'OSD DPS' becomes a no-op and OSD content never
                 # lands (the Phase 11 'not on any DP' WARN). This mirrors the working MemLabs DP group block above.
-                if ($osdMembershipRead -and ($osdMemberKeys.ContainsKey($d.Fqdn.ToUpper()) -or $osdMemberKeys.ContainsKey($d.Short.ToUpper()))) {
+                if ($osdMembershipRead -and ($osdMemberKeys.ContainsKey($d.Fqdn.ToUpperInvariant()) -or $osdMemberKeys.ContainsKey($d.Short.ToUpperInvariant()))) {
                     Write-DscStatus "$Tag OSD DP '$($d.Fqdn)' is already in '$OsdDpGroupName' -- skipping add"
                 }
                 else {
@@ -2148,12 +2148,12 @@ if ($licensed) { Write-Output 'Activated' }
                         foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction Stop)) {
                             $memberHostName = & $serverFromNal $memberRow.DPNALPath
                             if (-not $memberHostName) { continue }
-                            $osdMemberKeys[$memberHostName.ToUpper()] = $true
-                            $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
+                            $osdMemberKeys[$memberHostName.ToUpperInvariant()] = $true
+                            $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpperInvariant()] = $true
                         }
                     }
                     $missingOsdGroupMembers = @($osdDps | Where-Object {
-                            -not ($osdMemberKeys.ContainsKey($_.Fqdn.ToUpper()) -or $osdMemberKeys.ContainsKey($_.Short.ToUpper()))
+                            -not ($osdMemberKeys.ContainsKey($_.Fqdn.ToUpperInvariant()) -or $osdMemberKeys.ContainsKey($_.Short.ToUpperInvariant()))
                         })
                     if ($missingOsdGroupMembers.Count -eq 0) { break }
                     if ($osdGroupTry -lt 6) {
@@ -2629,7 +2629,7 @@ if ($licensed) { Write-Output 'Activated' }
                     # ContentValidating can sit until ConfigMgr's 30-minute retry fires. Re-arm
                     # the existing target without rebuilding the WIM or changing SourceVersion.
                     foreach ($incompleteDp in @($bootIncompleteDps | Select-Object -Unique)) {
-                        $armKey = $incompleteDp.ToUpper()
+                        $armKey = $incompleteDp.ToUpperInvariant()
                         try {
                             $targetRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
                                     Where-Object { (& $serverFromNal $_.ServerNALPath) -ieq $incompleteDp })

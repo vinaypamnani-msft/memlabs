@@ -220,10 +220,10 @@ if ($dhcpAvailable) {
         $memberMacs = @{}
         Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
             Where-Object { $_.SwitchName -eq $scopeId -and $_.MacAddress -and $_.MacAddress -ne '000000000000' } |
-            ForEach-Object { $memberMacs[($_.MacAddress -replace '[-:]', '').ToLower()] = $_.VMName }
+            ForEach-Object { $memberMacs[($_.MacAddress -replace '[-:]', '').ToLowerInvariant()] = $_.VMName }
 
         foreach ($res in @(Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue)) {
-            $resMac = ($res.ClientId -replace '[-:]', '').ToLower()
+            $resMac = ($res.ClientId -replace '[-:]', '').ToLowerInvariant()
             if ($memberMacs.ContainsKey($resMac)) { continue }   # live switch member -- keep
 
             $stats.Reservation.Found++

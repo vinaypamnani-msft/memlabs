@@ -174,15 +174,72 @@ if (-not $gotLock) {
 $watchNames = @('WmiPrvSE', 'WmiApSrv', 'msiexec', 'TrustedInstaller', 'TiWorker', 'MsMpEng', 'powershell', 'dsc', 'lsass')
 
 # Winmgmt hosts the RPC server the DSC provider host blocks on, and WinRM is the
-# next hop that relays the record back to the pushing client. Resolve with sc.exe,
-# NOT a Win32_Process query: WMI is the thing under investigation and the query
-# would queue behind the very stall being captured.
+# next hop that relays the record back to the pushing client. Query the Service
+# Control Manager directly, not WMI (which may be the thing that is stalled) or
+# localized sc.exe text.
+if (-not ('MemLabs.ServiceProcessReader' -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace MemLabs {
+    public static class ServiceProcessReader {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SERVICE_STATUS_PROCESS {
+            public uint ServiceType;
+            public uint CurrentState;
+            public uint ControlsAccepted;
+            public uint Win32ExitCode;
+            public uint ServiceSpecificExitCode;
+            public uint CheckPoint;
+            public uint WaitHint;
+            public uint ProcessId;
+            public uint ServiceFlags;
+        }
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenSCManager(string machineName, string databaseName, uint desiredAccess);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenService(IntPtr serviceManager, string serviceName, uint desiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool QueryServiceStatusEx(IntPtr service, int infoLevel, IntPtr buffer, int bufferSize, out int bytesNeeded);
+
+        [DllImport("advapi32.dll")]
+        private static extern bool CloseServiceHandle(IntPtr handle);
+
+        public static uint GetProcessId(string serviceName) {
+            IntPtr serviceManager = OpenSCManager(null, null, 1);
+            if (serviceManager == IntPtr.Zero) { return 0; }
+            try {
+                IntPtr service = OpenService(serviceManager, serviceName, 4);
+                if (service == IntPtr.Zero) { return 0; }
+                try {
+                    int size = Marshal.SizeOf(typeof(SERVICE_STATUS_PROCESS));
+                    IntPtr buffer = Marshal.AllocHGlobal(size);
+                    try {
+                        int needed;
+                        if (!QueryServiceStatusEx(service, 0, buffer, size, out needed)) { return 0; }
+                        SERVICE_STATUS_PROCESS status = (SERVICE_STATUS_PROCESS)Marshal.PtrToStructure(buffer, typeof(SERVICE_STATUS_PROCESS));
+                        return status.ProcessId;
+                    }
+                    finally { Marshal.FreeHGlobal(buffer); }
+                }
+                finally { CloseServiceHandle(service); }
+            }
+            finally { CloseServiceHandle(serviceManager); }
+        }
+    }
+}
+"@
+}
+
 function Get-ServicePid {
     param([string]$Name)
     try {
-        foreach ($line in (& sc.exe queryex $Name 2>$null)) {
-            if ($line -match 'PID\s*:\s*(\d+)') { return [int]$Matches[1] }
-        }
+        $reader = 'MemLabs.ServiceProcessReader' -as [type]
+        return [int]$reader::GetProcessId($Name)
     }
     catch {}
     return 0
@@ -352,14 +409,10 @@ function Write-StallBundle {
     $b.Add('')
     $b.Add('== services by pid (svchost is ambiguous without this) ==')
     try {
-        $svc = & sc.exe queryex type= service state= all 2>$null
-        $curName = $null
-        foreach ($l in $svc) {
-            if ($l -match '^SERVICE_NAME:\s*(\S+)') { $curName = $Matches[1] }
-            elseif ($l -match '^\s*PID\s*:\s*(\d+)' -and $curName) {
-                if ([int]$Matches[1] -gt 0) { $b.Add(("   pid={0,-8} {1}" -f $Matches[1], $curName)) }
-                $curName = $null
-            }
+        foreach ($serviceKey in (Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Services' -ErrorAction Stop)) {
+            $serviceName = $serviceKey.PSChildName
+            $servicePid = Get-ServicePid -Name $serviceName
+            if ($servicePid -gt 0) { $b.Add(("   pid={0,-8} {1}" -f $servicePid, $serviceName)) }
         }
     }
     catch { $b.Add("   service map failed: $($_.Exception.Message)") }

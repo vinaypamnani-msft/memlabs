@@ -865,10 +865,10 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
                     $tp.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
                     $tp.Add([Security.Cryptography.X509Certificates.X509Certificate2]$bytes)
                     $tp.Close()
-                    $thumb = ([Security.Cryptography.X509Certificates.X509Certificate2]$bytes).Thumbprint.ToLower()
+                    $thumb = ([Security.Cryptography.X509Certificates.X509Certificate2]$bytes).Thumbprint.ToLowerInvariant()
                 }
                 else {
-                    $thumb = $existing[0].Thumbprint.ToLower()
+                    $thumb = $existing[0].Thumbprint.ToLowerInvariant()
                 }
                 # Point SQL at the cert (per-instance) and restart so it takes effect.
                 $path = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL'

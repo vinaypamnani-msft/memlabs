@@ -198,17 +198,17 @@ else {
         $fileTime = $dateTime.ToFileTime()
         $hi = ($fileTime -shr 32)
         $low = ($fileTime -band 0xFFFFFFFFL)
-        ($hi.ToString("X8") + $low.ToString("X8")).ToLower()
+        ($hi.ToString("X8") + $low.ToString("X8")).ToLowerInvariant()
     }
 
     function Set-FileTypeAssociation {
         param ([string]$Extension, [string]$ProgId, [int]$MaxRetries = 2)
 
         # Get user SID (domain-aware)
-        $userSid = ([System.Security.Principal.WindowsIdentity]::GetCurrent().User).Value.ToLower()
+        $userSid = ([System.Security.Principal.WindowsIdentity]::GetCurrent().User).Value.ToLowerInvariant()
         $userDateTime = Get-HexDateTime
 
-        $baseInfo = "$Extension$userSid$ProgId$userDateTime$script:UserExperience".ToLower()
+        $baseInfo = "$Extension$userSid$ProgId$userDateTime$script:UserExperience".ToLowerInvariant()
         $progHash = Get-Hash $baseInfo
 
         if (-not $progHash) {
@@ -253,7 +253,7 @@ namespace RegHelper {
                 Start-Sleep -Milliseconds 200
                 try { [RegHelper.Utils]::DeleteKey($ucKeyPath) } catch {}
                 $userDateTime = Get-HexDateTime
-                $baseInfo = "$Extension$userSid$ProgId$userDateTime$script:UserExperience".ToLower()
+                $baseInfo = "$Extension$userSid$ProgId$userDateTime$script:UserExperience".ToLowerInvariant()
                 $progHash = Get-Hash $baseInfo
                 if (-not $progHash) { return $false }
             }

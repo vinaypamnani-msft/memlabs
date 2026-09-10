@@ -128,6 +128,33 @@ foreach ($path in $paths) {
             }
         }
     }
+
+    $casingExtents = [System.Collections.Generic.List[object]]::new()
+    foreach ($call in $ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+                $node.Member -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                $node.Member.Value -in @('ToLower', 'ToUpper') -and
+                $node.Arguments.Count -eq 0
+            }, $true)) {
+        $casingExtents.Add([pscustomobject]@{ Start = $call.Extent.StartOffset; End = $call.Extent.EndOffset })
+        $failures.Add("${path}:$($call.Extent.StartLineNumber): culture-sensitive parameterless $($call.Member.Value) call")
+    }
+
+        foreach ($match in [regex]::Matches($content, '\.(?:ToLower|ToUpper)\s*\(\s*\)',
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [Text.RegularExpressions.RegexOptions]::CultureInvariant)) {
+        $coveredByAst = @($casingExtents | Where-Object {
+            $_.Start -le $match.Index -and $_.End -ge ($match.Index + $match.Length)
+            }).Count -gt 0
+        if ($coveredByAst) { continue }
+        $comment = @($tokens | Where-Object {
+                $_.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment -and
+                $_.Extent.StartOffset -le $match.Index -and $_.Extent.EndOffset -ge ($match.Index + $match.Length)
+            })
+        if ($comment.Count -gt 0) { continue }
+        $line = 1 + ([regex]::Matches($content.Substring(0, $match.Index), "`n")).Count
+        $failures.Add("${path}:${line}: culture-sensitive parameterless casing in generated or partially parsed code")
+    }
 }
 
 if ($failures.Count -gt 0) {

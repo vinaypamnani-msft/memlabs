@@ -823,7 +823,7 @@ function Get-VmSqlConnectionTarget {
     }
 
     $target = if ($sqlServer -like '*.*') { $sqlServer } else { "$sqlServer.$DomainFullName" }
-    if ($sqlInstance -and $sqlInstance.ToUpper() -ne 'MSSQLSERVER') { $target = "$target\$sqlInstance" }
+    if ($sqlInstance -and $sqlInstance -ine 'MSSQLSERVER') { $target = "$target\$sqlInstance" }
     if ($sqlPort -and "$sqlPort" -ne '1433') { $target = "$target,$sqlPort" }
     return $target
 }

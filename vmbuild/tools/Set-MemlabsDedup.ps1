@@ -111,7 +111,7 @@ function Resolve-VmVolume {
     if ($Requested) {
         $letter = $Requested.Trim().TrimEnd('\').TrimEnd(':')
         if (-not $letter) { return $null }
-        return ($letter.ToUpper() + ':')
+        return ($letter.ToUpperInvariant() + ':')
     }
 
     # Auto-detect: fixed volumes that host a 'VirtualMachines' folder, E: preferred,

@@ -1176,7 +1176,7 @@ function Select-VirtualMachines {
                         if ($null -ne $newValue -and $newValue -is [string]) {
                             $newValue = [string]$newValue.Trim()
                             #Write-Host "NewValue = '$newValue'"
-                            $newValue = [string]$newValue.ToUpper()
+                            $newValue = [string]$newValue.ToUpperInvariant()
                         }
                         if (([string]::IsNullOrEmpty($newValue))) {
                             break VMLoop

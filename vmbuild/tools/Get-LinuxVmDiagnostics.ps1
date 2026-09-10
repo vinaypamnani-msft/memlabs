@@ -100,7 +100,7 @@ function Copy-LinuxRootLogViaWsl {
         Write-Host "  destination '$WindowsDestination' is not a local drive path; skipping ext4 collection." -ForegroundColor Yellow
         return
     }
-    $wslDest = '/mnt/' + $WindowsDestination.Substring(0, 1).ToLower() + ($WindowsDestination.Substring(2) -replace '\\', '/')
+    $wslDest = '/mnt/' + $WindowsDestination.Substring(0, 1).ToLowerInvariant() + ($WindowsDestination.Substring(2) -replace '\\', '/')
     # Per-VM mount point: two of these running at once would otherwise stack on the
     # same path and one script's umount would yank the other's filesystem.
     $tag = (Split-Path $WindowsDestination -Leaf) -replace '[^A-Za-z0-9._-]', '_'

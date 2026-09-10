@@ -1153,7 +1153,7 @@ function Add-NewVMForRole {
             if ($OperatingSystem -notlike "*Server*") {
                 $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 [int]$i = 1
-                $userPrefix = "$($oldConfig.vmOptions.prefix)".ToLower() + "user"
+                $userPrefix = "$($oldConfig.vmOptions.prefix)".ToLowerInvariant() + "user"
                 $userNoPrefix = "user"
                 while ($true) {
                     $preferredUserName = $userPrefix + $i
@@ -1187,7 +1187,7 @@ function Add-NewVMForRole {
 
             $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
             [int]$i = 1
-            $userPrefix = "$($oldConfig.vmOptions.prefix)".ToLower() + "user"
+            $userPrefix = "$($oldConfig.vmOptions.prefix)".ToLowerInvariant() + "user"
             $userNoPrefix = "user"
             while ($true) {
                 $preferredUserName = $userPrefix + $i

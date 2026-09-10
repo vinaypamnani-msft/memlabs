@@ -401,7 +401,7 @@ function Get-AdditionalInformation {
         }
 
         "domainUser" {
-            $prefixLower = $configPrefix.ToLower()
+            $prefixLower = $configPrefix.ToLowerInvariant()
             if ($prefixLower -and -not $data.StartsWith($prefixLower)) {
                 $data = $data.PadRight(21) + "($($prefixLower + $data))"
             }

@@ -357,7 +357,7 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
 "@
         foreach ($b in @($bgbMp)) {
             $dbid = [string]$b.DBID
-            $isReplica = $dbid -and $dbid.ToLower().StartsWith('0x')
+            $isReplica = $dbid -and $dbid.ToLowerInvariant().StartsWith('0x')
             $mp = @($mpProps) | Where-Object { $_.ServerName -eq $b.ServerName } | Select-Object -First 1
             $sqlName = if ($mp) { [string]$mp.SQLServerName } else { '' }
             $dbName = if ($mp) { [string]$mp.DatabaseName } else { '' }
@@ -369,7 +369,7 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
                             MPServerName = [string]$b.ServerName
                             Instance     = $sqlName
                             Database     = $dbName
-                            DBID         = $dbid.ToLower()
+                            DBID         = $dbid.ToLowerInvariant()
                         })
                 }
                 else {
@@ -548,7 +548,7 @@ foreach ($rt in @($replicaTargets)) {
     #    Replica DB must route back to the site's ConfigMgrBGB_Site<siteCode>.
     try {
         $wantSvc = "ConfigMgrBGB_Site$($rt.DBID)"
-        $match = @($siteRoutes) | Where-Object { $_.remote_service_name -and ($_.remote_service_name.ToLower() -eq $wantSvc.ToLower()) }
+        $match = @($siteRoutes) | Where-Object { $_.remote_service_name -and ($_.remote_service_name -ieq $wantSvc) }
         $replHostShort = ($rt.Instance.Split('\')[0]).Split(',')[0]
         if ($match) {
             $addrOk = $false
@@ -564,7 +564,7 @@ foreach ($rt in @($replicaTargets)) {
         }
 
         $wantBack = "ConfigMgrBGB_Site$SiteCode"
-        $matchBack = @($replRoutes) | Where-Object { $_.remote_service_name -and ($_.remote_service_name.ToLower() -eq $wantBack.ToLower()) }
+        $matchBack = @($replRoutes) | Where-Object { $_.remote_service_name -and ($_.remote_service_name -ieq $wantBack) }
         if ($matchBack) { Add-Result PASS 'Route match' 'Replica DB -> site route exists' "service '$wantBack' address '$((@($matchBack)[0]).address)'" }
         else { Add-Result WARN 'Route match' 'Replica DB -> site route missing' "Expected '$wantBack' on the replica (doc Step 5.5: sp_BgbConfigSSBForRemoteService '<SiteCode>', ...)." }
     }

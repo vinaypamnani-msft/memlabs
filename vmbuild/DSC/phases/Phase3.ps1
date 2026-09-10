@@ -241,25 +241,30 @@
             GetScript  = { @{ Result = "$([System.Net.WebRequest]::DefaultWebProxy)" } }
             TestScript = {
                 try {
-                    $output = & netsh winhttp show proxy 2>$null
-                    if ($output -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
-                        $current = [System.Net.WebRequest]::DefaultWebProxy
-                        if ($current) {
-                            $resolved = $current.GetProxy([System.Uri]"https://aka.ms")
-                            if ($resolved -and $resolved.Host -ne 'aka.ms') { return $true }
-                        }
-                        return $false
+                    $proxyMatches = {
+                        param([Uri]$Actual, [Uri]$Expected)
+                        return ($Actual -and $Expected -and
+                            [string]::Equals($Actual.Scheme, $Expected.Scheme, [StringComparison]::OrdinalIgnoreCase) -and
+                            [string]::Equals($Actual.Host, $Expected.Host, [StringComparison]::OrdinalIgnoreCase) -and
+                            $Actual.Port -eq $Expected.Port)
                     }
+                    $proxyUri = [Environment]::GetEnvironmentVariable('HTTPS_PROXY', 'Machine')
+                    if (-not $proxyUri) { return $true }
+                    $expected = [Uri]$proxyUri
+                    $current = [System.Net.WebRequest]::DefaultWebProxy
+                    if ($current) {
+                        $resolved = $current.GetProxy([System.Uri]"https://aka.ms")
+                        if (& $proxyMatches $resolved $expected) { return $true }
+                    }
+                    return $false
                 } catch {}
-                return $true   # No WinHTTP proxy configured; not a proxy client
+                return $false
             }
             SetScript  = {
-                $output = & netsh winhttp show proxy 2>$null
-                if ($output -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
-                    $proxyAddr = $Matches[1].Trim()
-                    $bypass = ''
-                    if ($output -match 'Bypass List\s*:\s*(.+)') { $bypass = $Matches[1].Trim() }
-                    $wp = New-Object System.Net.WebProxy("http://$proxyAddr", $true)
+                $proxyUri = [Environment]::GetEnvironmentVariable('HTTPS_PROXY', 'Machine')
+                if ($proxyUri) {
+                    $bypass = [Environment]::GetEnvironmentVariable('NO_PROXY', 'Machine')
+                    $wp = New-Object System.Net.WebProxy($proxyUri, $true)
                     if ($bypass -and $bypass -ne '(none)') {
                         $wp.BypassList = @($bypass -split ';' | ForEach-Object {
                             $e = $_.Trim()
@@ -268,7 +273,7 @@
                         $wp.BypassProxyOnLocal = $true
                     }
                     [System.Net.WebRequest]::DefaultWebProxy = $wp
-                    Write-Verbose "EnsureProcessProxy: set DefaultWebProxy to http://$proxyAddr"
+                    Write-Verbose "EnsureProcessProxy: set DefaultWebProxy to $proxyUri"
                 }
             }
         }

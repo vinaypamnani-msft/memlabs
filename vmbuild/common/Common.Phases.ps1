@@ -2873,7 +2873,7 @@ DROP TABLE #memlabs_idxprobe;
             # by Phase 3.
             if ($null -eq $reservationRows) { $reservationRows = Get-AllDHCPReservationsIsolated }
             foreach ($r in $reservationRows) {
-                $normMac = (([string]$r.Mac) -replace '[-:]', '').ToUpper()
+                $normMac = (([string]$r.Mac) -replace '[-:]', '').ToUpperInvariant()
                 if ($normMac) {
                     $phaseDhcpReservationMap["$($r.ScopeId)|$normMac"] = [string]$r.Ip
                 }
@@ -2902,7 +2902,7 @@ DROP TABLE #memlabs_idxprobe;
             $macSet = @{}
             $byScopeMac = @{}
             foreach ($r in @(Get-AllDHCPReservationsIsolated)) {
-                $nm = (([string]$r.Mac) -replace '[-:]', '').ToUpper()
+                $nm = (([string]$r.Mac) -replace '[-:]', '').ToUpperInvariant()
                 if (-not $nm) { continue }
                 $macSet[$nm] = $true
                 $byScopeMac["$($r.ScopeId)|$nm"] = [string]$r.Ip
@@ -3179,7 +3179,7 @@ DROP TABLE #memlabs_idxprobe;
 
                 $hintMac = $null
                 if ($phaseVmMacMap.ContainsKey($currentItem.vmName)) {
-                    $hintMac = (([string]$phaseVmMacMap[$currentItem.vmName]) -replace '[-:]', '').ToUpper()
+                    $hintMac = (([string]$phaseVmMacMap[$currentItem.vmName]) -replace '[-:]', '').ToUpperInvariant()
                 }
 
                 $hintReservationIp = $null
@@ -3351,13 +3351,13 @@ function Get-JobWaitTargets {
     $waitMatch = [regex]::Match($StatusText, 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)')
     if ($waitMatch.Success) {
         foreach ($w in ($waitMatch.Groups[1].Value -split ',')) {
-            $t = "$w".Trim().ToUpper()
+            $t = "$w".Trim().ToUpperInvariant()
             if ($t) { [void]$targets.Add($t) }
         }
     }
     $ownerMatch = [regex]::Match($StatusText, 'Setting up ConfigMgr\. \[([A-Za-z0-9\-]+)\]:')
     if ($ownerMatch.Success) {
-        $t = "$($ownerMatch.Groups[1].Value)".Trim().ToUpper()
+        $t = "$($ownerMatch.Groups[1].Value)".Trim().ToUpperInvariant()
         if ($t) { [void]$targets.Add($t) }
     }
     return $targets.ToArray()
@@ -4003,7 +4003,7 @@ function Wait-Phase {
                 # Count once per job based on worst severity seen
                 if ($worstLogLevel -ge 3) {
                     $return.Failed++
-                    try { $failedVmNames[("$jobName" -split ' ')[0].ToUpper()] = (Get-Date) } catch { }
+                    try { $failedVmNames[("$jobName" -split ' ')[0].ToUpperInvariant()] = (Get-Date) } catch { }
                 }
                 elseif ($worstLogLevel -ge 2) { $return.Warning++ }
                 elseif ($jobOutput) { $return.Success++ }
@@ -4089,7 +4089,7 @@ function Wait-Phase {
                 $stallHeartbeatLastUtc = [DateTime]::UtcNow
                 $phaseHeldMin = [Math]::Floor(((Get-Date) - $StartTime).TotalMinutes)
                 $hbRunningVms = @{}
-                foreach ($rj in $runningJobs) { $hbRunningVms[(("$($rj.Name)" -split ' ')[0].Trim().ToUpper())] = $true }
+                foreach ($rj in $runningJobs) { $hbRunningVms[(("$($rj.Name)" -split ' ')[0].Trim().ToUpperInvariant())] = $true }
                 foreach ($hbJob in $runningJobs) {
                     $hbEntry = $global:JobProgressHistory[$hbJob.Id]
                     if (-not $hbEntry -or -not $hbEntry.StatusSince) { continue }
@@ -4102,7 +4102,7 @@ function Wait-Phase {
                     # its own line here, so warning about its followers only crowds out the
                     # line that matters. (A wait on a VM that has FAILED is handled far above:
                     # the job is stopped outright, since it can never be satisfied.)
-                    $hbVm = ("$($hbJob.Name)" -split ' ')[0].Trim().ToUpper()
+                    $hbVm = ("$($hbJob.Name)" -split ' ')[0].Trim().ToUpperInvariant()
                     $hbBlockedBy = $null
                     foreach ($hbTarget in @(Get-JobWaitTargets -StatusText "$($hbEntry.Status)")) {
                         if ($hbTarget -ne $hbVm -and $hbRunningVms.ContainsKey($hbTarget)) { $hbBlockedBy = $hbTarget; break }

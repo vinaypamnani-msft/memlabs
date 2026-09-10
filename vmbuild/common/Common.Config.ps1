@@ -738,7 +738,7 @@ function Get-UserConfiguration {
         #Apply Fixes to Config
 
         # vmOptions.prefix is optional. Normalize a missing/blank prefix to "" (never
-        # $null): call sites do $prefix.ToLower() and .Replace($prefix, ""), and both
+        # $null): call sites do $prefix.ToLowerInvariant() and .Replace($prefix, ""), and both
         # throw on $null while the same calls on "" are handled.
         if ($config.vmOptions) {
             if ([string]::IsNullOrWhiteSpace($config.vmOptions.prefix)) {
@@ -1509,7 +1509,7 @@ function New-DeployConfig {
         # add prefix to vm names
         # The prefix is optional. Normalize blank/missing to "" first: at "" every
         # .StartsWith() below returns true so the prepend no-ops and vmName stays the
-        # base name, and downstream $prefix.ToLower()/.Replace() callers stop throwing.
+        # base name, and downstream $prefix.ToLowerInvariant()/.Replace() callers stop throwing.
         if ($configObject.vmOptions -and [string]::IsNullOrWhiteSpace($configObject.vmOptions.prefix)) {
             $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "prefix" -Value "" -Force
         }

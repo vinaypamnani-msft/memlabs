@@ -4168,12 +4168,12 @@ $global:VM_Config = {
                 if ($clusterMAC) {
                     $setStaticIP = {
                         param($targetIP, $targetMAC)
-                        $targetMAC = ($targetMAC -replace '-','').ToLower()
+                        $targetMAC = ($targetMAC -replace '-','').ToLowerInvariant()
                         # The heartbeat NIC is hot-added at the start of Phase 5, so the
                         # guest may take a few seconds to enumerate it. Retry up to ~30s.
                         $nic = $null
                         for ($findTry = 0; $findTry -lt 15; $findTry++) {
-                            $nic = Get-NetAdapter | Where-Object { ($_.MacAddress -replace '-','').ToLower() -eq $targetMAC }
+                            $nic = Get-NetAdapter | Where-Object { ($_.MacAddress -replace '-','').ToLowerInvariant() -eq $targetMAC }
                             if ($nic) { break }
                             Start-Sleep -Seconds 2
                         }
