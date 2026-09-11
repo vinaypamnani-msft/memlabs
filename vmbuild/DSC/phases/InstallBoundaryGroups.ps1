@@ -1518,9 +1518,12 @@ if ($allBGsExist) {
     }
 }
 if ($allBGsExist) {
-    $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
-    $adsgdiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
-    if ($adiscovery.Value1 -ieq "active" -and $adsgdiscovery.Value1 -ieq "active") {
+    $adiscovery = @((Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" })
+    $adsgdiscovery = @((Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" })
+    $adiscoveryValues = @($adiscovery | ForEach-Object { [string]$_.Value1 })
+    $adsgdiscoveryValues = @($adsgdiscovery | ForEach-Object { [string]$_.Value1 })
+    if ($adiscoveryValues.Count -eq 1 -and $adiscoveryValues[0] -ieq "active" -and
+        $adsgdiscoveryValues.Count -eq 1 -and $adsgdiscoveryValues[0] -ieq "active") {
         Write-DscStatus "All boundary groups, boundaries, and discovery already configured. Skipping."
         # A DP/MP/SUP can be added after its boundary group already exists (for
         # example, an add-on SiteSystem deployment). The old early-return path
@@ -1729,36 +1732,49 @@ foreach ($bg in $bgs) {
 Write-DscStatus "Enabling AD system discovery"
 
 $Domain = $DomainFullName
-$DN = 'DC=' + $Domain.Replace('.',',DC=')    
-do {
-    $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
+$DN = 'DC=' + $Domain.Replace('.',',DC=')
+$discoveryMaxAttempts = 10
+$discoveryRetrySeconds = 30
+for ($discoveryAttempt = 1; $discoveryAttempt -le $discoveryMaxAttempts; $discoveryAttempt++) {
+    $adiscovery = @((Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" })
+    $adiscoveryValues = @($adiscovery | ForEach-Object { [string]$_.Value1 })
+    if ($adiscoveryValues.Count -eq 1 -and $adiscoveryValues[0] -ieq "active") {
+        Write-DscStatus "AD System Discovery state is: $($adiscoveryValues[0])"
+        break
+    }
 
-    if ($adiscovery.Value1 -ine "active") {
-        Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
-        Start-Sleep -Seconds 30
-        Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DN" -Recursive
+    $adiscoverySummary = if ($adiscoveryValues.Count -eq 0) { '<missing>' } else { $adiscoveryValues -join ', ' }
+    if ($discoveryAttempt -eq $discoveryMaxAttempts) {
+        throw "AD System Discovery did not become ACTIVE after $discoveryMaxAttempts attempts. Settings count=$($adiscoveryValues.Count), values=[$adiscoverySummary]."
     }
-    else {
-        Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)"
-    }
-} until ($adiscovery.Value1 -ieq "active")
+    Write-DscStatus "AD System Discovery state is: $adiscoverySummary (attempt $discoveryAttempt/$discoveryMaxAttempts)" -RetrySeconds $discoveryRetrySeconds
+    Start-Sleep -Seconds $discoveryRetrySeconds
+    Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DN" -Recursive
+}
 
 # Setup SG Discovery
 Write-DscStatus "Enabling AD Group discovery"
-do {
-    $adsgdiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
+$groupDiscoveryWriteAttempted = $false
+for ($discoveryAttempt = 1; $discoveryAttempt -le $discoveryMaxAttempts; $discoveryAttempt++) {
+    $adsgdiscovery = @((Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" })
+    $adsgdiscoveryValues = @($adsgdiscovery | ForEach-Object { [string]$_.Value1 })
+    if ($adsgdiscoveryValues.Count -eq 1 -and $adsgdiscoveryValues[0] -ieq "active") {
+        Write-DscStatus "AD Group Discovery state is: $($adsgdiscoveryValues[0])"
+        break
+    }
 
-    if ($adsgdiscovery.Value1 -ine "active") {
-
-        Write-DscStatus "AD Group Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
-        Start-Sleep -Seconds 30
+    $adsgdiscoverySummary = if ($adsgdiscoveryValues.Count -eq 0) { '<missing>' } else { $adsgdiscoveryValues -join ', ' }
+    if ($discoveryAttempt -eq $discoveryMaxAttempts) {
+        throw "AD Group Discovery did not become ACTIVE after $discoveryMaxAttempts attempts. Settings count=$($adsgdiscoveryValues.Count), values=[$adsgdiscoverySummary]."
+    }
+    Write-DscStatus "AD Group Discovery state is: $adsgdiscoverySummary (attempt $discoveryAttempt/$discoveryMaxAttempts)" -RetrySeconds $discoveryRetrySeconds
+    Start-Sleep -Seconds $discoveryRetrySeconds
+    if (-not $groupDiscoveryWriteAttempted) {
         $sgscope = New-CMADGroupDiscoveryScope -name Allscope -SiteCode $SiteCode -LdapLocation "LDAP://$DN" -RecursiveSearch $true -Verbose
-        Set-CMDiscoveryMethod -ActiveDirectoryGroupDiscovery -AddGroupDiscoveryScope $sgscope -Enabled $true -Verbose
+        Set-CMDiscoveryMethod -ActiveDirectoryGroupDiscovery -SiteCode $SiteCode -AddGroupDiscoveryScope $sgscope -Enabled $true -Verbose
+        $groupDiscoveryWriteAttempted = $true
     }
-    else {
-        Write-DscStatus "AD System Discovery state is: $($adsgdiscovery.Value1)"
-    }
-} until ($adsgdiscovery.Value1 -ieq "active")
+}
 
 # Run discovery
 Write-DscStatus "Invoking AD system discovery"

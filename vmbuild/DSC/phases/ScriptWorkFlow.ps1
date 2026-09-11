@@ -563,7 +563,7 @@ if ($scenario -eq "Standalone") {
     Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
     Set-Location $LogPath
-    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
 }
 
@@ -689,7 +689,7 @@ if ($scenario -eq "Hierarchy") {
         Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
         Set-Location $LogPath
-        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
     }
 }
