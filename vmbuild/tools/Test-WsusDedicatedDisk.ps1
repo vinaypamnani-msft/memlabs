@@ -110,16 +110,35 @@ function Get-TestNestedScriptBlock {
     return $assignment[0].Right.Expression.ScriptBlock.GetScriptBlock()
 }
 
-function Write-Log { param() }
+function Write-Log { param($Message, [switch] $Failure, [switch] $LogOnly) }
 function Add-ErrorMessage {
     param ([string] $Property, [string] $Message, [switch] $Warning)
     $script:LastGenConfigError = $Message
 }
-function Get-NewSiteCode { 'PS1' }
+function Get-NewSiteCode {
+    param($Domain, $Role, $ConfigToCheck)
+    for ($i = 1; $i -lt 10; $i++) {
+        $candidate = "PS$i"
+        if ($candidate -notin @($ConfigToCheck.virtualMachines.siteCode)) { return $candidate }
+    }
+}
+function Get-NewMachineName {
+    param($ConfigToCheck, $vm)
+    if ($vm.role -eq 'Primary') { return "$($vm.siteCode)SITE" }
+    if ($vm.role -eq 'SiteSystem') { return "$($vm.siteCode)DPMP1" }
+    return 'VM1'
+}
+function Get-VM { param($Name) }
+function Get-RoleForSitecode { 'Primary' }
+function Set-SiteSystemPropertiesForOperatingSystem { param($VirtualMachine) }
+function Set-DefaultLocaleForVM { param($VM, $Config) }
+function Get-CmVersionWithHintFallback { param($DomainDefaults, $FallbackVersion) $FallbackVersion }
+function Get-NetworkForVM { param($vm, $ConfigToModify, $ReturnIfNotNeeded) }
 function Test-VmIsLinux { $false }
 function Get-CMLatestBaselineVersion { 'current-branch' }
 
 $addVmPath = Join-Path $RootPath 'common\Common.GenConfig.AddVM.ps1'
+. (Import-TestFunction -Path $addVmPath -Name 'Resolve-AvailableNewVmName')
 . (Import-TestFunction -Path $addVmPath -Name 'Add-NewVMForRole')
 $genConfigValidationPath = Join-Path $RootPath 'common\Common.GenConfig.Validation.ps1'
 . (Import-TestFunction -Path $genConfigValidationPath -Name 'Get-AdditionalValidations')
@@ -241,6 +260,28 @@ $generatedPrimary = $generatedConfig.virtualMachines | Where-Object { $_.vmName 
 Assert-Equal $true ([bool]$generatedPrimary) 'production Add-NewVMForRole creates the Primary'
 Assert-Equal 'E=600GB;F=250GB;G=250GB' (Get-DiskSnapshot $generatedPrimary).Split('|')[0] 'production Primary creation allocates a third WSUS disk'
 Assert-Equal 'G:\WSUS' $generatedPrimary.wsusContentDir 'production Primary creation binds WSUS to G'
+
+$collisionConfig = [pscustomobject]@{
+    vmOptions       = [pscustomobject]@{ domainName = 'example.test'; prefix = 'PRO-' }
+    domainDefaults  = [pscustomobject]@{
+        IncludeSSMSOnNONSQL       = $false
+        DefaultSqlVersion         = 'SQL Server 2022'
+        EnableSUPOnSiteServers    = $false
+        UseDynamicMemory          = $false
+        PushCMClientToSiteSystems = $false
+        UseProxyForCM             = $false
+    }
+    cmOptions       = [pscustomobject]@{ EnableBLM = $false }
+    virtualMachines = @()
+}
+$global:existingMachines = @([pscustomobject]@{ vmName = 'PRO-PS1SITE'; role = 'Primary'; siteCode = 'PS1' })
+Add-NewVMForRole -Role 'Primary' -Domain 'example.test' -ConfigToModify $collisionConfig -OperatingSystem 'Server 2022' -ParentSiteCode 'CS1' -Quiet:$true -Test:$true
+$recoveredPrimary = $collisionConfig.virtualMachines | Where-Object { $_.role -eq 'Primary' } | Select-Object -First 1
+$recoveredSiteSystem = $collisionConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' } | Select-Object -First 1
+Assert-Equal 'PS2SITE' $recoveredPrimary.vmName 'production Primary collision advances the generated VM name'
+Assert-Equal 'PS2' $recoveredPrimary.siteCode 'production Primary collision advances the site code'
+Assert-Equal 'PS2' $recoveredSiteSystem.siteCode 'automatic DP/MP uses the recovered Primary site code'
+$global:existingMachines = $null
 
 $existingSupTarget = [pscustomobject]@{
     vmName     = 'EXISTING'
