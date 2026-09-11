@@ -169,6 +169,21 @@ $phasesPath = Join-Path $RootPath 'common\Common.Phases.ps1'
 
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 
+$script:VmStore['NESTED-NOTE'] = [pscustomobject]@{ Name = 'NESTED-NOTE'; Notes = '{}' }
+$nestedNote = [pscustomobject]@{
+    role     = 'SQLAO'
+    metadata = [pscustomobject]@{
+        cluster = [pscustomobject]@{
+            endpoint = [pscustomobject]@{ listener = 'ALWAYSON' }
+        }
+    }
+}
+$noteWarnings = @()
+Set-VMNote -VmName 'NESTED-NOTE' -VmNote $nestedNote -Force $true -WarningVariable noteWarnings -WarningAction SilentlyContinue
+Assert-Equal 0 @($noteWarnings).Count 'nested VM-note serialization emits no depth-truncation warning'
+Assert-Equal 'ALWAYSON' (Get-VMNote -VMName 'NESTED-NOTE').metadata.cluster.endpoint.listener 'nested VM-note metadata survives serialization'
+$script:SetVmCalls = 0
+
 $scalarOptionsA = [pscustomobject][ordered]@{ Version = '2509'; EnableBLM = $true; Install = $false }
 $scalarOptionsB = [pscustomobject][ordered]@{ Install = $false; EnableBLM = $true; Version = '2509' }
 $scalarValueChanged = [pscustomobject][ordered]@{ Install = $false; EnableBLM = $false; Version = '2509' }

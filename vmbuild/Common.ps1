@@ -4066,7 +4066,7 @@ function Set-VMNote {
     }
 
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
-    $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
+    $vmNoteJson = ($vmNote | ConvertTo-Json -Depth 5) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
     $vm = Get-VM2 $VmName -Fallback
     if ($vm) {
         # Skip the Set-VM -Notes round trip when nothing meaningful changed.
