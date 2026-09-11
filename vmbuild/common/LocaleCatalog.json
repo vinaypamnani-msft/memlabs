@@ -52,9 +52,7 @@
     "AddInputLanguages": [
       "0402:00030402"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "bg-BG",
     "LanguageID": 1026,
     "CMLanguage": "ENG",
@@ -105,9 +103,7 @@
     "AddInputLanguages": [
       "0405:00000405"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "cs-CZ",
     "LanguageID": 1029,
     "CMLanguage": "CSY",
@@ -151,9 +147,7 @@
     "AddInputLanguages": [
       "0406:00000406"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "da-DK",
     "LanguageID": 1030,
     "CMLanguage": "ENG",
@@ -198,9 +192,7 @@
     "AddInputLanguages": [
       "0407:00000407"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "de-DE",
     "LanguageID": 1031,
     "CMLanguage": "DEU",
@@ -289,9 +281,7 @@
     "AddInputLanguages": [
       "0809:00000809"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "en-GB",
     "LanguageID": 2057,
     "CMLanguage": "ENG",
@@ -352,9 +342,7 @@
     "AddInputLanguages": [
       "0C0A:0000040A"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "es-ES",
     "LanguageID": 3082,
     "CMLanguage": "ESN",
@@ -399,9 +387,7 @@
     "AddInputLanguages": [
       "080A:0000080A"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "es-MX",
     "LanguageID": 2058,
     "CMLanguage": "ESN",
@@ -446,9 +432,7 @@
     "AddInputLanguages": [
       "0425:00000425"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "et-EE",
     "LanguageID": 1061,
     "CMLanguage": "ENG",
@@ -495,9 +479,7 @@
     "AddInputLanguages": [
       "040B:0000040B"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "fi-FI",
     "LanguageID": 1035,
     "CMLanguage": "ENG",
@@ -541,9 +523,7 @@
     "AddInputLanguages": [
       "0C0C:00001009"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "fr-CA",
     "LanguageID": 3084,
     "CMLanguage": "FRA",
@@ -587,9 +567,7 @@
     "AddInputLanguages": [
       "040C:0000040C"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "fr-FR",
     "LanguageID": 1036,
     "CMLanguage": "FRA",
@@ -634,9 +612,7 @@
     "AddInputLanguages": [
       "040D:0002040D"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "he-IL",
     "LanguageID": 1037,
     "CMLanguage": "ENG",
@@ -685,9 +661,7 @@
     "AddInputLanguages": [
       "041A:0000041A"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "hr-HR",
     "LanguageID": 1050,
     "CMLanguage": "ENG",
@@ -731,9 +705,7 @@
     "AddInputLanguages": [
       "040E:0000040E"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "hu-HU",
     "LanguageID": 1038,
     "CMLanguage": "HUN",
@@ -784,9 +756,7 @@
     "AddInputLanguages": [
       "0410:00000410"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "it-IT",
     "LanguageID": 1040,
     "CMLanguage": "ITA",
@@ -831,9 +801,7 @@
     "AddInputLanguages": [
       "0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-5523-4E90-AAFA-4DB112F9AC76}"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "ja-JP",
     "LanguageID": 1041,
     "CMLanguage": "JPN",
@@ -878,9 +846,7 @@
     "AddInputLanguages": [
       "0412:{A028AE76-01B1-46C2-99C4-ACD9858AE02F}{B5FE1F02-D5F2-4445-9C03-C568F23C99A1}"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "ko-KR",
     "LanguageID": 1042,
     "CMLanguage": "KOR",
@@ -924,9 +890,7 @@
     "AddInputLanguages": [
       "0427:00010427"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "lt-LT",
     "LanguageID": 1063,
     "CMLanguage": "ENG",
@@ -973,9 +937,7 @@
     "AddInputLanguages": [
       "0426:00020426"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "lv-LV",
     "LanguageID": 1062,
     "CMLanguage": "ENG",
@@ -1022,9 +984,7 @@
     "AddInputLanguages": [
       "0414:00000414"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "nb-NO",
     "LanguageID": 1044,
     "CMLanguage": "ENG",
@@ -1068,9 +1028,7 @@
     "AddInputLanguages": [
       "0413:00020409"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "nl-NL",
     "LanguageID": 1043,
     "CMLanguage": "NLD",
@@ -1114,9 +1072,7 @@
     "AddInputLanguages": [
       "0415:00000415"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "pl-PL",
     "LanguageID": 1045,
     "CMLanguage": "PLK",
@@ -1160,9 +1116,7 @@
     "AddInputLanguages": [
       "0416:00000416"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "pt-BR",
     "LanguageID": 1046,
     "CMLanguage": "PTB",
@@ -1207,9 +1161,7 @@
     "AddInputLanguages": [
       "0816:00000816"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "pt-PT",
     "LanguageID": 2070,
     "CMLanguage": "PTG",
@@ -1253,9 +1205,7 @@
     "AddInputLanguages": [
       "0418:00010418"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "ro-RO",
     "LanguageID": 1048,
     "CMLanguage": "ENG",
@@ -1343,9 +1293,7 @@
     "AddInputLanguages": [
       "041B:0000041B"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "sk-SK",
     "LanguageID": 1051,
     "CMLanguage": "ENG",
@@ -1389,9 +1337,7 @@
     "AddInputLanguages": [
       "0424:00000424"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "sl-SI",
     "LanguageID": 1060,
     "CMLanguage": "ENG",
@@ -1435,9 +1381,7 @@
     "AddInputLanguages": [
       "241A:0000081A"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "sr-Latn-RS",
     "LanguageID": 9242,
     "CMLanguage": "ENG",
@@ -1480,9 +1424,7 @@
     "AddInputLanguages": [
       "041D:0000041D"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "sv-SE",
     "LanguageID": 1053,
     "CMLanguage": "SVE",
@@ -1526,9 +1468,7 @@
     "AddInputLanguages": [
       "041E:0000041E"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "th-TH",
     "LanguageID": 1054,
     "CMLanguage": "ENG",
@@ -1577,9 +1517,7 @@
     "AddInputLanguages": [
       "041F:0000041F"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "tr-TR",
     "LanguageID": 1055,
     "CMLanguage": "TRK",
@@ -1623,9 +1561,7 @@
     "AddInputLanguages": [
       "0422:00020422"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "uk-UA",
     "LanguageID": 1058,
     "CMLanguage": "ENG",
@@ -1672,9 +1608,7 @@
     "AddInputLanguages": [
       "0804:{81D4E9C9-1D3B-41BC-9E6C-4B40BF79E35E}{FA550B04-5AD7-411F-A5AC-CA038EC515D7}"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "zh-CN",
     "LanguageID": 2052,
     "CMLanguage": "CHS",
@@ -1719,9 +1653,7 @@
     "AddInputLanguages": [
       "0404:{B115690A-EA02-48D5-A231-E3578D2FDF80}{B2F9C502-1742-11D4-9790-0080C882687E}"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "zh-TW",
     "LanguageID": 1028,
     "CMLanguage": "CHT",

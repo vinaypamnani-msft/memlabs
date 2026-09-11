@@ -105,11 +105,25 @@ $expectedTags = @(
 ) | Sort-Object
 Assert-Equal -Expected 38 -Actual $catalogTags.Count -What 'catalog contains the 38-language Server and Windows client intersection'
 Assert-Equal -Expected ($expectedTags -join ',') -Actual ($catalogTags -join ',') -What 'catalog language tags match the measured intersection'
-Assert-True -Condition ($catalog.'ar-SA'.PSObject.Properties.Name -contains 'RemoveInputLanguages') -What 'Arabic explicitly defines input languages to remove'
-Assert-True -Condition ($catalog.'ar-SA'.RemoveInputLanguages -is [array]) -What 'Arabic input-language removal remains an array'
-Assert-Equal -Expected 0 -Actual $catalog.'ar-SA'.RemoveInputLanguages.Count -What 'Arabic retains the Windows English fallback input method'
-Assert-Equal -Expected 0 -Actual $catalog.'el-GR'.RemoveInputLanguages.Count -What 'Greek retains the Windows English fallback input method'
-Assert-Equal -Expected 0 -Actual $catalog.'ru-RU'.RemoveInputLanguages.Count -What 'Russian retains the Windows English fallback input method'
+$missingRemovalPolicies = @(
+    foreach ($tag in $catalogTags) {
+        if ($catalog.$tag.PSObject.Properties.Name -notcontains 'RemoveInputLanguages') { $tag }
+    }
+)
+$invalidRemovalPolicies = @(
+    foreach ($tag in $catalogTags) {
+        if ($catalog.$tag.PSObject.Properties.Name -contains 'RemoveInputLanguages' -and $catalog.$tag.RemoveInputLanguages -isnot [array]) { $tag }
+    }
+)
+$activeRemovalPolicies = @(
+    foreach ($tag in $catalogTags) {
+        $requestedRemovals = @($catalog.$tag.RemoveInputLanguages | Where-Object { $null -ne $_ })
+        if ($requestedRemovals.Count -gt 0) { "$tag=$($requestedRemovals -join ',')" }
+    }
+)
+Assert-Equal -Expected '' -Actual ($missingRemovalPolicies -join ',') -What 'every locale explicitly defines its input-language removal policy'
+Assert-Equal -Expected '' -Actual ($invalidRemovalPolicies -join ',') -What 'every locale input-language removal policy remains an array'
+Assert-Equal -Expected '' -Actual ($activeRemovalPolicies -join ';') -What 'catalog preserves existing input methods for every locale'
 
 $server2022Capabilities = @{
     'ar-SA' = 'Basic,OCR,TextToSpeech'; 'bg-BG' = 'Basic,OCR,TextToSpeech'; 'cs-CZ' = 'Basic,Handwriting,OCR,TextToSpeech'
