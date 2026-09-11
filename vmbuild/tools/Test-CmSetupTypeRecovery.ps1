@@ -9,9 +9,9 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "$sourcePath has $($errors.Count) parse error(s)." }
-$functionAsts = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in 'Test-CmServiceNotFoundError', 'Get-CmDatabaseStateForRetry', 'Repair-StaleCmSetupTypeForRetry', 'Start-CmSetupProcessWithBreadcrumb' }, $true))
-if ($functionAsts.Count -ne 4) { throw "Expected four recovery functions, found $($functionAsts.Count)." }
-foreach ($functionName in 'Test-CmServiceNotFoundError', 'Get-CmDatabaseStateForRetry', 'Repair-StaleCmSetupTypeForRetry', 'Start-CmSetupProcessWithBreadcrumb') {
+$functionAsts = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in 'Test-CmServiceNotFoundError', 'Get-CmDatabaseStateForRetry', 'Repair-StaleCmSetupTypeForRetry', 'Start-CmSetupProcessWithBreadcrumb', 'Get-CmDatabaseProbeTargets' }, $true))
+if ($functionAsts.Count -ne 5) { throw "Expected five recovery functions, found $($functionAsts.Count)." }
+foreach ($functionName in 'Test-CmServiceNotFoundError', 'Get-CmDatabaseStateForRetry', 'Repair-StaleCmSetupTypeForRetry', 'Start-CmSetupProcessWithBreadcrumb', 'Get-CmDatabaseProbeTargets') {
     $functionAst = @($functionAsts | Where-Object Name -eq $functionName)
     if ($functionAst.Count -ne 1) { throw "Expected one $functionName function, found $($functionAst.Count)." }
     . ([scriptblock]::Create($functionAst[0].Extent.Text))
@@ -25,6 +25,10 @@ function Assert-Equal {
     if (-not $passed) { $script:Failures++ }
     Write-Host ('{0}  {1}' -f $(if ($passed) { 'PASS' } else { 'FAIL' }), $What)
 }
+
+Assert-Equal 'LMT-LMTSQL,1500|LMT-SQL1' (@(Get-CmDatabaseProbeTargets -ListenerTarget 'LMT-LMTSQL,1500' -InstallToAO $true -NodeName 'LMT-SQL1' -NodePort 1433) -join '|') 'AO database probe uses listener port 1500 and physical node port 1433 independently'
+Assert-Equal 'CUSTOM-LISTENER,1500|CUSTOM-SQL1,5422' (@(Get-CmDatabaseProbeTargets -ListenerTarget 'CUSTOM-LISTENER,1500' -InstallToAO $true -NodeName 'CUSTOM-SQL1' -NodePort 5422) -join '|') 'AO database probe preserves a custom physical node port'
+Assert-Equal 'SQL1,1433' (@(Get-CmDatabaseProbeTargets -ListenerTarget 'SQL1,1433' -InstallToAO $false -NodeName 'SQL1' -NodePort 1433) -join '|') 'non-AO database probe keeps only its configured target'
 
 $script:SetupType = 0
 $script:Services = @()
@@ -364,6 +368,8 @@ foreach ($databaseState in @(
 $source = Get-Content -LiteralPath $sourcePath -Raw
 Assert-Equal $true ($source -match '(?s)preLaunchDatabaseState\s*=\s*Get-CmDatabaseStateForRetry.+?Repair-StaleCmSetupTypeForRetry.+?-DatabaseState \$preLaunchDatabaseState.+?Set Install action as Running') 'NotStart path repairs stale Setup Type only after pre-launch database measurement'
 Assert-Equal $true ($source -match '(?s)Start-CmSetupProcessWithBreadcrumb.+?catch \{.+?Write-DscStatus.+?mandatory breadcrumb.+?-Failure\s*\r?\n\s*return') 'breadcrumb launch failure is reported as fatal before setup can continue'
+Assert-Equal 3 ([regex]::Matches($source, 'Get-CmDatabaseProbeTargets -ListenerTarget \$sqlDataSource -InstallToAO \$installToAO -NodeName \$sqlNode1 -NodePort \$sqlNodePort').Count) 'all setup retry paths use the shared listener/node target builder'
+Assert-Equal $true ($source -match '(?s)\$sqlNodePort\s*=\s*\$sqlPort.+?\$sqlPort\s*=\s*\$SQLVM\.thisParams\.SQLAO\.SQLAOPort') 'physical node port is captured before SQLAO listener port replaces the setup port'
 
 if ($script:Failures -gt 0) { throw "$script:Failures ConfigMgr Setup Type recovery test(s) failed." }
 Write-Host 'ALL CONFIGMGR SETUP TYPE RECOVERY TESTS PASSED'

@@ -87,6 +87,23 @@ function Start-CmSetupProcessWithBreadcrumb {
     return Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -PassThru -ErrorAction Stop
 }
 
+function Get-CmDatabaseProbeTargets {
+    param(
+        [Parameter(Mandatory)][string]$ListenerTarget,
+        [bool]$InstallToAO,
+        [AllowEmptyString()][string]$NodeName = '',
+        [int]$NodePort = 1433
+    )
+
+    $targets = [Collections.Generic.List[string]]::new()
+    $targets.Add($ListenerTarget)
+    if ($InstallToAO -and $NodeName) {
+        $nodeTarget = if ($NodePort -and $NodePort -ne 1433) { "$NodeName,$NodePort" } else { $NodeName }
+        if (-not $targets.Contains($nodeTarget)) { $targets.Add($nodeTarget) }
+    }
+    return @($targets)
+}
+
 function Get-CmDatabaseStateForRetry {
     param(
         [Parameter(Mandatory)][string]$DatabaseName,
@@ -273,6 +290,7 @@ if ($ThisVM.remoteSQLVM) {
     else {
         $sqlPort = 1433
     }
+    $sqlNodePort = $sqlPort
     if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
         $sqlServerName = $SQLVM.AlwaysOnListenerName
@@ -366,16 +384,7 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
 
         # For SQLAO, if the listener fails try the actual SQL node which has
         # a real computer account and works with Integrated Auth.
-        $sqlProbeTargets = @($sqlDataSource)
-        if ($installToAO -and $sqlNode1) {
-            $nodeDataSource = $sqlNode1
-            if ($sqlPort -and $sqlPort -ne 1433) {
-                $nodeDataSource = "$sqlNode1,$sqlPort"
-            }
-            if ($nodeDataSource -ne $sqlDataSource) {
-                $sqlProbeTargets += $nodeDataSource
-            }
-        }
+        $sqlProbeTargets = @(Get-CmDatabaseProbeTargets -ListenerTarget $sqlDataSource -InstallToAO $installToAO -NodeName $sqlNode1 -NodePort $sqlNodePort)
 
         Write-DscStatus "InstallSCCM.Status='Running' on re-entry with setup.exe breadcrumb present. Probing for database [$cmDbName] (targets: $($sqlProbeTargets -join ', ')) to decide whether retry is safe..."
 
@@ -487,16 +496,7 @@ if ($Configuration.InstallSCCM.Status -eq 'Completed') {
 
         # For SQLAO, if the listener fails try the actual SQL node name which
         # has a real computer account and works with Integrated Auth.
-        $sqlProbeTargets = @($sqlDataSource)
-        if ($installToAO -and $sqlNode1) {
-            $nodeDataSource = $sqlNode1
-            if ($sqlPort -and $sqlPort -ne 1433) {
-                $nodeDataSource = "$sqlNode1,$sqlPort"
-            }
-            if ($nodeDataSource -ne $sqlDataSource) {
-                $sqlProbeTargets += $nodeDataSource
-            }
-        }
+        $sqlProbeTargets = @(Get-CmDatabaseProbeTargets -ListenerTarget $sqlDataSource -InstallToAO $installToAO -NodeName $sqlNode1 -NodePort $sqlNodePort)
 
         foreach ($probeTarget in $sqlProbeTargets) {
             try {
@@ -566,11 +566,7 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
     if ($sqlInstanceName -and $sqlInstanceName -ine 'MSSQLSERVER') { $sqlDataSource = "$sqlServerName\$sqlInstanceName" }
     else { $sqlDataSource = $sqlServerName }
     if ($sqlPort -and $sqlPort -ne 1433) { $sqlDataSource = "$sqlServerName,$sqlPort" }
-    $sqlProbeTargets = @($sqlDataSource)
-    if ($installToAO -and $sqlNode1) {
-        $nodeDataSource = if ($sqlPort -and $sqlPort -ne 1433) { "$sqlNode1,$sqlPort" } else { $sqlNode1 }
-        if ($nodeDataSource -ne $sqlDataSource) { $sqlProbeTargets += $nodeDataSource }
-    }
+    $sqlProbeTargets = @(Get-CmDatabaseProbeTargets -ListenerTarget $sqlDataSource -InstallToAO $installToAO -NodeName $sqlNode1 -NodePort $sqlNodePort)
     $preLaunchDatabaseState = Get-CmDatabaseStateForRetry -DatabaseName $cmDbName -Targets $sqlProbeTargets
     try {
         if (Repair-StaleCmSetupTypeForRetry -SiteCode $SiteCode -DatabaseState $preLaunchDatabaseState) {

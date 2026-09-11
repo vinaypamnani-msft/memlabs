@@ -309,6 +309,8 @@ function Get-SqlVMNamesNeedingReplication {
 function Mount-SqlIsoForPhase {
     param([object]$deployConfig)
 
+    $mountSucceeded = $true
+
     # New SQL installs (non-hidden) always need the media. ALSO mount for existing
     # (hidden) SQL VMs that must gain the 'Replication' feature for an MP replica.
     $replNeeded = Get-SqlVMNamesNeedingReplication -deployConfig $deployConfig
@@ -317,23 +319,26 @@ function Mount-SqlIsoForPhase {
         $sqlIsoPath = Get-SqlIsoPathForVm -VirtualMachine $vm
         if (-not $sqlIsoPath) {
             Write-Log "[Phase 4]: $($vm.vmName): Could not resolve SQL ISO path for '$($vm.sqlVersion)'; skipping mount." -Warning
+            $mountSucceeded = $false
             continue
         }
         # Idempotent, per-drive, multi-drive-safe (see Mount-IsoOnVm): a re-run is a
         # no-op, and it never evicts another disc that may be co-mounted. The guest
         # picks the SQL disc by content (Phase4 AssignSqlIsoDriveLetter -> S:).
         # -RepresentIfAttached: if a prior (killed) run left the SQL ISO inserted
-        # across the guest's reboot, re-present it so the guest raises a fresh
-        # media-arrival event and the Phase 4 DSC can see the disc.
+        # across the guest's reboot, rebuild the DVD devices so the guest receives
+        # a fresh device-arrival event and the Phase 4 DSC can see the disc.
         $mountState = Test-VmMediaChangeReadiness -VmName $vm.vmName -TimeoutSeconds 120
         if (-not $mountState.Ok) {
             Write-Log "[Phase 4]: $($vm.vmName): cannot attach the SQL ISO -- VM state '$($mountState.State)' does not accept a DVD change ($($mountState.Reason)). SQL install will fail without media." -Failure
+            $mountSucceeded = $false
             continue
         }
         Write-Log "[Phase 4]: $($vm.vmName): SQL ISO mount pre-check: state=$($mountState.State) gen=$($mountState.Generation) uptime=$($mountState.Uptime) $($mountState.Heartbeat)$(if ($mountState.Actions.Count) { " actions=[$($mountState.Actions -join '; ')]" })" -LogOnly
         if (-not (Mount-IsoOnVm -VmName $vm.vmName -IsoPath $sqlIsoPath -Context "SQL" -Phase 4 -RepresentIfAttached)) {
             Write-Log "[Phase 4]: $($vm.vmName): Failed mounting SQL ISO $sqlIsoPath as a DVD drive" -Failure
             Write-VmMediaHostDiag -VmName $vm.vmName -IsoPath $sqlIsoPath -Context 'SQL' -Phase 4
+            $mountSucceeded = $false
             continue
         }
 
@@ -363,14 +368,30 @@ function Mount-SqlIsoForPhase {
                 Write-Log "[Phase 4]: $($vm.vmName): skipping the DVD reset -- the guest answered none of $($mediaDiag['Attempts']) probe(s), so there is no evidence the media is the problem. Phase 4's in-guest AssignSqlIsoDriveLetter will re-enumerate." -Warning
                 continue
             }
-            Write-Log "[Phase 4]: $($vm.vmName): SQL media not yet visible in guest after mount (guest answered $($mediaDiag['Answered']) of $($mediaDiag['Attempts']) probes, reason=$($mediaDiag['Reason'])); clean DVD reset + recheck." -Warning
-            $null = Reset-AllDvdDrivesOnVm -VmName $vm.vmName -RequiredIsoPath $sqlIsoPath -Context "SQL" -Phase 4
+            Write-Log "[Phase 4]: $($vm.vmName): SQL media not yet visible in guest after mount (guest answered $($mediaDiag['Answered']) of $($mediaDiag['Attempts']) probes, reason=$($mediaDiag['Reason'])); clean DVD reset + recheck." -Warning -LogOnly
+            $resetOk = Reset-AllDvdDrivesOnVm -VmName $vm.vmName -RequiredIsoPath $sqlIsoPath -Context "SQL" -Phase 4
             $recheckDiag = @{}
             if (Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $sqlDomainName -MarkerRelativePath 'setup.exe' -Context 'SQL' -Phase 4 -TimeoutSeconds 60 -Diagnostics $recheckDiag) {
-                Write-Log "[Phase 4]: $($vm.vmName): SQL media became visible at $($recheckDiag['Root']) after the DVD reset -- the guest had missed the media-arrival event on the existing drive and needed a device-arrival." -Warning
+                if ($resetOk) {
+                    Write-Log "[Phase 4]: $($vm.vmName): SQL media recovered at $($recheckDiag['Root']) after a clean DVD device rebuild." -Warning
+                }
+                else {
+                    Write-Log "[Phase 4]: $($vm.vmName): SQL media is visible at $($recheckDiag['Root']), but the DVD rebuild did not restore the complete optical topology; detailed diagnostics are in the log." -Failure
+                    $mountSucceeded = $false
+                }
+            }
+            else {
+                if ($resetOk) {
+                    Write-Log "[Phase 4]: $($vm.vmName): SQL media is still not visible after a clean DVD device rebuild (reason=$($recheckDiag['Reason'])); detailed diagnostics are in the log and Phase 4 will retry in-guest." -Warning
+                }
+                else {
+                    Write-Log "[Phase 4]: $($vm.vmName): SQL media is still not visible and the DVD rebuild did not restore the complete optical topology; detailed diagnostics are in the log." -Failure
+                    $mountSucceeded = $false
+                }
             }
         }
     }
+    return $mountSucceeded
 }
 
 # Ejects the SQL ISO from every SQL VM in the config. Called after a SUCCESSFUL
@@ -800,6 +821,7 @@ function Set-CmMediaMountAndShare {
     # from the DVD either way; setupdl writes REdist locally to C:\<CM>\REdist.
     $shareScript = {
         param($ShareName, $Root)
+        $worldName = ([Security.Principal.SecurityIdentifier]'S-1-1-0').Translate([Security.Principal.NTAccount]).Value
         New-Item -Path "C:\$ShareName\REdist" -ItemType Directory -Force | Out-Null
         try {
             $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
@@ -808,7 +830,7 @@ function Set-CmMediaMountAndShare {
                 $share = $null
             }
             if (-not $share) {
-                New-SmbShare -Name $ShareName -Path $Root -ReadAccess "Everyone" -ErrorAction Stop | Out-Null
+                New-SmbShare -Name $ShareName -Path $Root -ReadAccess $worldName -ErrorAction Stop | Out-Null
             }
             return "OK: $ShareName -> $Root"
         }
@@ -823,7 +845,7 @@ function Set-CmMediaMountAndShare {
                 $share = $null
             }
             if (-not $share) {
-                New-SmbShare -Name $ShareName -Path $localRoot -ReadAccess "Everyone" -ErrorAction Stop | Out-Null
+                New-SmbShare -Name $ShareName -Path $localRoot -ReadAccess $worldName -ErrorAction Stop | Out-Null
             }
             return "OK(local extadsch fallback): $ShareName -> $localRoot"
         }
@@ -844,7 +866,7 @@ function Set-CmMediaMountAndShare {
     $shareTry = 0
     while ($true) {
         $shareTry++
-        $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName, $mediaRoot) -DisplayName "Share CM media ($shareName)"
+        $res = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -ScriptBlock $shareScript -ArgumentList @($shareName, $mediaRoot) -SuppressLog -DisplayName "Share CM media ($shareName)"
         # A null result is "never measured", not "succeeded" -- keep retrying on it.
         $shareFailed = (-not $res) -or $res.ScriptBlockFailed
         if (-not $shareFailed) { break }
@@ -1254,7 +1276,10 @@ function Start-Phase {
     # The single DVD drive is free here because the create-time CM/OSD copies
     # already ejected. Idempotent on -StartPhase 4 reruns.
     if ($Phase -eq 4) {
-        $null = Mount-SqlIsoForPhase -deployConfig $deployConfig
+        if (-not (Mount-SqlIsoForPhase -deployConfig $deployConfig)) {
+            Write-Log '[Phase 4] SQL media preparation failed; aborting before worker dispatch.' -Failure
+            return $false
+        }
     }
 
     # Cross-forest: mount the CM ISO on the EXTERNAL top-level site servers before

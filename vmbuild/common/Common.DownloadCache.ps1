@@ -525,7 +525,7 @@ function Write-VmMediaHostDiag {
     try {
         $vm = Get-VM2 -Name $VmName -Fallback
         if (-not $vm) {
-            Write-Log "$tag$($VmName): [$Context media host diag] VM not found in Hyper-V." -Warning
+            Write-Log "$tag$($VmName): [$Context media host diag] VM not found in Hyper-V." -Warning -LogOnly
             return
         }
         $hb = ''
@@ -534,14 +534,14 @@ function Write-VmMediaHostDiag {
             if ($svc.Count -gt 0) { $hb = "heartbeat=$($svc[0].PrimaryStatusDescription) enabled=$($svc[0].Enabled)" }
         }
         catch { }
-        Write-Log "$tag$($VmName): [$Context media host diag] state=$($vm.State) status='$($vm.Status)' gen=$($vm.Generation) uptime=$($vm.Uptime) $hb" -Warning
+        Write-Log "$tag$($VmName): [$Context media host diag] state=$($vm.State) status='$($vm.Status)' gen=$($vm.Generation) uptime=$($vm.Uptime) $hb" -Warning -LogOnly
         $dvds = @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue)
         if ($dvds.Count -eq 0) {
-            Write-Log "$tag$($VmName): [$Context media host diag] the VM has NO DVD drives attached." -Warning
+            Write-Log "$tag$($VmName): [$Context media host diag] the VM has NO DVD drives attached." -Warning -LogOnly
         }
         foreach ($d in $dvds) {
             $p = if ($d.Path) { $d.Path } else { '<empty>' }
-            Write-Log "$tag$($VmName): [$Context media host diag] DVD ctrl=$($d.ControllerNumber):$($d.ControllerLocation) type=$($d.ControllerType) path=$p" -Warning
+            Write-Log "$tag$($VmName): [$Context media host diag] DVD ctrl=$($d.ControllerNumber):$($d.ControllerLocation) type=$($d.ControllerType) path=$p" -Warning -LogOnly
         }
         if ($IsoPath) {
             $isoInfo = 'MISSING ON HOST'
@@ -550,11 +550,11 @@ function Write-VmMediaHostDiag {
                 $isoInfo = "size=$([Math]::Round($f.Length / 1MB))MB modified=$($f.LastWriteTime.ToString('s'))"
             }
             catch { }
-            Write-Log "$tag$($VmName): [$Context media host diag] ISO '$IsoPath' $isoInfo" -Warning
+            Write-Log "$tag$($VmName): [$Context media host diag] ISO '$IsoPath' $isoInfo" -Warning -LogOnly
         }
     }
     catch {
-        Write-Log "$tag$($VmName): [$Context media host diag] failed: $($_.Exception.Message)" -Warning
+        Write-Log "$tag$($VmName): [$Context media host diag] failed: $($_.Exception.Message)" -Warning -LogOnly
     }
 }
 
@@ -573,11 +573,10 @@ function Mount-IsoOnVm {
     # cannot hot-add while running -- Add-VMDvdDrive then throws, is caught, and the
     # function returns $false (opportunistic callers like the cache simply yield).
     #
-    # -RepresentIfAttached: when the ISO is ALREADY attached, eject+remount it so the
-    # guest raises a fresh media-arrival event. A disc left inserted across a guest
-    # reboot (e.g. a -startPhase retry) is not re-announced by Hyper-V on boot, so the
-    # guest never surfaces the optical volume; re-presenting fixes that. Off by default
-    # (case 1 stays a cheap no-op) so opportunistic callers pay nothing.
+    # -RepresentIfAttached: when the ISO is ALREADY attached, rebuild the VM's DVD
+    # topology so the guest gets a device-arrival rather than an unreliable same-drive
+    # media-arrival. Off by default (case 1 stays a cheap no-op) so opportunistic
+    # callers pay nothing.
     param(
         [Parameter(Mandatory)][string]$VmName,
         [Parameter(Mandatory)][string]$IsoPath,
@@ -606,20 +605,30 @@ function Mount-IsoOnVm {
         return $false
     }
 
-    # Re-present an already-attached disc so the guest gets a fresh media-arrival
-    # event (see -RepresentIfAttached). Eject here; the loop below re-adds it.
+    # A same-drive eject/remount can briefly verify as attached and then settle back
+    # to an empty drive. Rebuild the DVD devices instead; this is also the proven
+    # recovery for guests that missed the original media-arrival event.
     if ($RepresentIfAttached) {
         try {
             $existing = @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $IsoPath }
             if ($existing) {
-                foreach ($d in $existing) {
-                    Set-VMDvdDrive -VMName $VmName -ControllerNumber $d.ControllerNumber -ControllerLocation $d.ControllerLocation -Path $null -ErrorAction SilentlyContinue
+                if ($ready.Running -and -not $ready.HotPlugOk) {
+                    foreach ($drive in $existing) {
+                        Set-VMDvdDrive -VMName $VmName -ControllerNumber $drive.ControllerNumber -ControllerLocation $drive.ControllerLocation -Path $null -ErrorAction Stop
+                    }
+                    Write-Log "$tag$($VmName): re-presenting $Context ISO with a same-drive eject/remount because running Gen1 cannot hot-add DVD devices" -LogOnly
+                    Start-Sleep -Seconds 3
                 }
-                Write-Log "$tag$($VmName): re-presenting $Context ISO (eject+remount) for a fresh guest media-arrival event" -LogOnly
-                Start-Sleep -Seconds 3
+                else {
+                    Write-Log "$tag$($VmName): re-presenting $Context ISO with a clean DVD rebuild for a fresh guest device-arrival event" -LogOnly
+                    return (Reset-AllDvdDrivesOnVm -VmName $VmName -RequiredIsoPath $IsoPath -Context $Context -Phase $Phase)
+                }
             }
         }
-        catch { }
+        catch {
+            Write-Log "$tag$($VmName): $Context ISO re-presentation failed: $($_.Exception.Message)" -LogOnly
+            return $false
+        }
     }
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
@@ -949,7 +958,7 @@ function Confirm-IsoVisibleInGuest {
         $up = [int]$out.UptimeSec
         if ($lastUptime -ge 0 -and $up -ge 0 -and $up -lt $lastUptime) {
             $rebooted = $true
-            Write-Log "$tag$($VmName): $Context media probe: the guest REBOOTED mid-probe (uptime $lastUptime`s -> $up`s, boot $($out.BootTimeUtc)Z). A disc already inserted is not re-announced across a guest reboot." -Warning
+            Write-Log "$tag$($VmName): $Context media probe: the guest REBOOTED mid-probe (uptime $lastUptime`s -> $up`s, boot $($out.BootTimeUtc)Z). A disc already inserted is not re-announced across a guest reboot." -Warning -LogOnly
         }
         $lastUptime = $up
 
@@ -977,19 +986,19 @@ function Confirm-IsoVisibleInGuest {
         # Nothing was measured. Saying "media not visible" here would be a
         # confident report about a probe that never ran.
         $summary = if ($failReasons.Count -gt 0) { ($failReasons | Select-Object -Last 3) -join ' | ' } else { 'no reason captured' }
-        Write-Log "$tag$($VmName): $Context media state UNKNOWN -- the guest did not answer any of $attempt probe(s) in ~$([int]$TimeoutSeconds)s, so nothing about the media was measured. Last: $summary" -Warning
+        Write-Log "$tag$($VmName): $Context media state UNKNOWN -- the guest did not answer any of $attempt probe(s) in ~$([int]$TimeoutSeconds)s, so nothing about the media was measured. Last: $summary" -Warning -LogOnly
         if ($null -ne $Diagnostics) { $Diagnostics['Reason'] = 'guest-unreachable' }
         Write-VmMediaHostDiag -VmName $VmName -Context $Context -Phase $Phase
         return $false
     }
 
-    Write-Log "$tag$($VmName): $Context media NOT visible in guest after ~$([int]$TimeoutSeconds)s (marker '$MarkerRelativePath'); $answered of $attempt probe(s) answered$(if ($rebooted) { ', guest rebooted mid-probe' }); leaving it to the in-guest re-enumeration." -Warning
+    Write-Log "$tag$($VmName): $Context media NOT visible in guest after ~$([int]$TimeoutSeconds)s (marker '$MarkerRelativePath'); $answered of $attempt probe(s) answered$(if ($rebooted) { ', guest rebooted mid-probe' }); leaving it to the in-guest re-enumeration." -Warning -LogOnly
     if ($null -ne $Diagnostics) { $Diagnostics['Reason'] = if ($rebooted) { 'guest-rebooted' } else { 'marker-absent' } }
     if ($lastOut) {
-        Write-Log "$tag$($VmName): [$Context media guest diag] host=$($lastOut.Computer) sessionPid=$($lastOut.ProbePid) uptime=$($lastOut.UptimeSec)s boot=$($lastOut.BootTimeUtc)Z pendingReboot=$($lastOut.PendingReboot)" -Warning
+        Write-Log "$tag$($VmName): [$Context media guest diag] host=$($lastOut.Computer) sessionPid=$($lastOut.ProbePid) uptime=$($lastOut.UptimeSec)s boot=$($lastOut.BootTimeUtc)Z pendingReboot=$($lastOut.PendingReboot)" -Warning -LogOnly
         foreach ($k in @('Optical', 'Volumes', 'Letters', 'Listing', 'Assigned', 'Rescan', 'Events', 'Errors')) {
             foreach ($line in @($lastOut.$k)) {
-                if ($line) { Write-Log "$tag$($VmName): [$Context media guest diag] $k`: $line" -Warning }
+                if ($line) { Write-Log "$tag$($VmName): [$Context media guest diag] $k`: $line" -Warning -LogOnly }
             }
         }
     }
@@ -1070,8 +1079,9 @@ function Reset-AllDvdDrivesOnVm {
     # (clearing orphans + the climbing locations) and re-add each wanted ISO fresh
     # at a low location. This preserves co-mounts (cache + SQL + CM can all be
     # present at once -- multiple DVDs are fine; the churn, not the count, is what
-    # wedges the guest). Returns $true only after verifying $RequiredIsoPath is
-    # attached again. Gen2/SCSI only (hot remove/add while running). Never throws.
+    # wedges the guest). Returns $true only after confirming every drive was
+    # removed and every captured ISO was restored exactly once. Gen2/SCSI only
+    # (hot remove/add while running). Never throws.
     param(
         [Parameter(Mandatory)][string]$VmName,
         [Parameter(Mandatory)][string]$RequiredIsoPath,
@@ -1085,30 +1095,85 @@ function Reset-AllDvdDrivesOnVm {
         Write-Log "$tag$($VmName): $Context DVD reset skipped -- VM is not in a state that accepts a DVD change (state=$($ready.State), $($ready.Reason))." -Warning
         return $false
     }
+    $wanted = @()
+    $removedIsoPaths = [Collections.Generic.List[string]]::new()
+    $removeFailures = @()
+    $restoreFailures = @()
+    $cleared = $false
+    $finalDrives = @()
     try {
         # Capture the ISOs currently mounted (drop empty/orphan drives), and make
         # sure the required ISO is in the set to re-add.
-        $wanted = @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -ExpandProperty Path)
+        $initialDrives = @(Get-VMDvdDrive -VMName $VmName -ErrorAction Stop)
+        $wanted = @($initialDrives | Where-Object { $_.Path } | Select-Object -ExpandProperty Path)
         $wanted = @($wanted + $RequiredIsoPath | Where-Object { $_ } | Select-Object -Unique)
 
         # Remove EVERY DVD drive (orphan empties included) for a clean slate.
-        foreach ($d in @(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue)) {
-            Remove-VMDvdDrive -VMName $VmName -ControllerNumber $d.ControllerNumber -ControllerLocation $d.ControllerLocation -ErrorAction SilentlyContinue
-        }
-        Write-Log "$tag$($VmName): $Context DVD reset -- removed all DVD drives; re-adding $($wanted.Count) disc(s) cleanly." -LogOnly
-        Start-Sleep -Seconds 3
-
-        # Re-add each wanted ISO fresh, one at a time with a short settle so the
-        # guest gets a clean device-arrival per disc at a low controller location.
-        foreach ($iso in $wanted) {
-            if (Test-Path $iso) {
-                try { Add-VMDvdDrive -VMName $VmName -Path $iso -ErrorAction Stop } catch { Write-Log "$tag$($VmName): re-add of '$iso' failed: $($_.Exception.Message)" -LogOnly }
-                Start-Sleep -Seconds 2
+        foreach ($d in $initialDrives) {
+            try {
+                Remove-VMDvdDrive -VMName $VmName -ControllerNumber $d.ControllerNumber -ControllerLocation $d.ControllerLocation -ErrorAction Stop
+                if ($d.Path) { $removedIsoPaths.Add([string]$d.Path) }
+            }
+            catch {
+                $removeFailures += "$($d.ControllerNumber):$($d.ControllerLocation) $($_.Exception.Message)"
             }
         }
+        Start-Sleep -Seconds 3
+        try {
+            $remaining = @(Get-VMDvdDrive -VMName $VmName -ErrorAction Stop)
+        }
+        catch {
+            Write-Log "$tag$($VmName): $Context DVD inventory failed after removal; restoring $($removedIsoPaths.Count) successfully removed disc(s): $($_.Exception.Message)" -Warning -LogOnly
+            foreach ($iso in @($removedIsoPaths | Select-Object -Unique)) {
+                if (-not (Test-Path -LiteralPath $iso)) {
+                    Write-Log "$tag$($VmName): cannot restore removed $Context ISO '$iso' because the host file is missing." -Warning -LogOnly
+                    continue
+                }
+                try { Add-VMDvdDrive -VMName $VmName -Path $iso -ErrorAction Stop }
+                catch { Write-Log "$tag$($VmName): emergency re-add of removed ISO '$iso' failed: $($_.Exception.Message)" -Warning -LogOnly }
+            }
+            Invoke-VmSessionRefreshAfterMediaChange -VmName $VmName
+            return $false
+        }
+        $cleared = ($remaining.Count -eq 0)
+        if ($cleared) {
+            Write-Log "$tag$($VmName): $Context DVD reset -- removed all DVD drives; re-adding $($wanted.Count) disc(s) cleanly." -LogOnly
+        }
+        else {
+            $remainingText = @($remaining | ForEach-Object {
+                    $path = if ($_.Path) { $_.Path } else { '<empty>' }
+                    "$($_.ControllerNumber):$($_.ControllerLocation)=$path"
+                }) -join ', '
+            Write-Log "$tag$($VmName): $Context DVD reset did not reach an empty topology; remaining drives: $remainingText" -Warning -LogOnly
+        }
+
+        # Restore every missing captured ISO. After a clean removal this re-adds
+        # them all; after a partial removal it limits damage by restoring only the
+        # discs that were actually removed, while the final result remains false.
+        $attachedPaths = @($remaining | Where-Object { $_.Path } | Select-Object -ExpandProperty Path)
+        foreach ($iso in $wanted) {
+            if ($attachedPaths -contains $iso) { continue }
+            if (-not (Test-Path -LiteralPath $iso)) {
+                $restoreFailures += "missing host file '$iso'"
+                Write-Log "$tag$($VmName): cannot restore $Context ISO '$iso' because the host file is missing." -Warning -LogOnly
+                continue
+            }
+            try {
+                Add-VMDvdDrive -VMName $VmName -Path $iso -ErrorAction Stop
+                $attachedPaths += $iso
+                Start-Sleep -Seconds 2
+            }
+            catch {
+                $restoreFailures += "'$iso' $($_.Exception.Message)"
+                Write-Log "$tag$($VmName): re-add of '$iso' failed: $($_.Exception.Message)" -Warning -LogOnly
+            }
+        }
+        $finalDrives = @(Get-VMDvdDrive -VMName $VmName -ErrorAction Stop)
     }
     catch {
-        Write-Log "$tag$($VmName): $Context DVD reset failed: $($_.Exception.Message)" -LogOnly
+        Write-Log "$tag$($VmName): $Context DVD reset failed: $($_.Exception.Message)" -Warning -LogOnly
+        Invoke-VmSessionRefreshAfterMediaChange -VmName $VmName
+        return $false
     }
     # The optical topology was just rebuilt (all drives removed + discs re-added).
     # Evict the cached host session so the next probe sees the fresh device set,
@@ -1116,7 +1181,17 @@ function Reset-AllDvdDrivesOnVm {
     # eviction -- without it the very DVD reset done to un-wedge enumeration would
     # be re-read through the same stale session that couldn't see the disc).
     Invoke-VmSessionRefreshAfterMediaChange -VmName $VmName
-    return ([bool](@(Get-VMDvdDrive -VMName $VmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $RequiredIsoPath }))
+    $actualPaths = @($finalDrives | Where-Object { $_.Path } | Select-Object -ExpandProperty Path)
+    $missingPaths = @($wanted | Where-Object { $actualPaths -notcontains $_ })
+    $unexpectedPaths = @($actualPaths | Where-Object { $wanted -notcontains $_ })
+    $emptyCount = @($finalDrives | Where-Object { -not $_.Path }).Count
+    $complete = ($cleared -and $removeFailures.Count -eq 0 -and $restoreFailures.Count -eq 0 -and
+        $missingPaths.Count -eq 0 -and $unexpectedPaths.Count -eq 0 -and $emptyCount -eq 0 -and
+        $finalDrives.Count -eq $wanted.Count)
+    if (-not $complete) {
+        Write-Log "$tag$($VmName): $Context DVD reset verification failed (cleared=$cleared removeFailures=$($removeFailures.Count) restoreFailures=$($restoreFailures.Count) expected=$($wanted.Count) actual=$($finalDrives.Count) empty=$emptyCount missing=[$($missingPaths -join '; ')] unexpected=[$($unexpectedPaths -join '; ')])." -Warning -LogOnly
+    }
+    return $complete
 }
 
 function Dismount-IsoFromAllVMs {
