@@ -594,23 +594,34 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
 
         # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
         $managedSQLSysAdminAccounts = @($SQLSysAdminAccounts | Where-Object {
-                $_ -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM', 'NT AUTHORITY\System')
+                $_ -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM', 'NT AUTHORITY\System', 'BUILTIN\Administrators')
             })
         $localSystemSidHex = '010100000000000512000000'
-        $localSystemTest = @"
+        $builtInAdministratorsSidHex = '01020000000000052000000020020000'
+        $sqlSysadminSidRows = "(0x$localSystemSidHex), (0x$builtInAdministratorsSidHex)"
+        $sqlSysadminSidTest = @"
 `$ErrorActionPreference = 'SilentlyContinue'
 `$cs = 'Data Source=$cvSqlDs;Initial Catalog=master;Integrated Security=True;Connect Timeout=5;Encrypt=False;TrustServerCertificate=True'
 try {
     `$c = New-Object System.Data.SqlClient.SqlConnection `$cs
     `$c.Open()
     `$cmd = `$c.CreateCommand()
-    `$cmd.CommandText = "SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.server_principals WHERE sid = 0x$localSystemSidHex AND IS_SRVROLEMEMBER('sysadmin', name) = 1) THEN 1 ELSE 0 END"
+    `$cmd.CommandText = @'
+DECLARE @required table (sid varbinary(85) PRIMARY KEY);
+INSERT @required (sid) VALUES $sqlSysadminSidRows;
+SELECT CASE WHEN NOT EXISTS (
+    SELECT 1
+    FROM @required AS required
+    LEFT JOIN sys.server_principals AS principal ON principal.sid = required.sid
+    WHERE principal.sid IS NULL OR ISNULL(IS_SRVROLEMEMBER(N'sysadmin', principal.name), 0) <> 1
+) THEN 1 ELSE 0 END;
+'@
     `$ok = [int]`$cmd.ExecuteScalar() -eq 1
     `$c.Close(); `$c.Dispose()
     return `$ok
 } catch { return `$false }
 "@
-        $localSystemSet = @"
+    $sqlSysadminSidSet = @"
 `$ErrorActionPreference = 'Stop'
 `$cs = 'Data Source=$cvSqlDs;Initial Catalog=master;Integrated Security=True;Connect Timeout=5;Encrypt=False;TrustServerCertificate=True'
 `$c = New-Object System.Data.SqlClient.SqlConnection `$cs
@@ -618,19 +629,27 @@ try {
     `$c.Open()
     `$cmd = `$c.CreateCommand()
     `$cmd.CommandText = @'
-DECLARE @sid varbinary(85) = 0x$localSystemSidHex;
-DECLARE @name sysname = SUSER_SNAME(@sid);
-IF @name IS NULL THROW 51000, 'Windows could not resolve the LocalSystem SID S-1-5-18.', 1;
+DECLARE @required table (sid varbinary(85) PRIMARY KEY);
+INSERT @required (sid) VALUES $sqlSysadminSidRows;
+DECLARE @sid varbinary(85);
+DECLARE @name sysname;
 DECLARE @sql nvarchar(max);
-IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE sid = @sid)
+WHILE EXISTS (SELECT 1 FROM @required)
 BEGIN
-    SET @sql = N'CREATE LOGIN ' + QUOTENAME(@name) + N' FROM WINDOWS';
-    EXEC sys.sp_executesql @sql;
-END;
-IF IS_SRVROLEMEMBER(N'sysadmin', @name) <> 1
-BEGIN
-    SET @sql = N'ALTER SERVER ROLE [sysadmin] ADD MEMBER ' + QUOTENAME(@name);
-    EXEC sys.sp_executesql @sql;
+    SELECT TOP (1) @sid = sid FROM @required;
+    DELETE FROM @required WHERE sid = @sid;
+    SET @name = SUSER_SNAME(@sid);
+    IF @name IS NULL THROW 51000, 'Windows could not resolve a required SQL sysadmin SID.', 1;
+    IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE sid = @sid)
+    BEGIN
+        SET @sql = N'CREATE LOGIN ' + QUOTENAME(@name) + N' FROM WINDOWS';
+        EXEC sys.sp_executesql @sql;
+    END;
+    IF ISNULL(IS_SRVROLEMEMBER(N'sysadmin', @name), 0) <> 1
+    BEGIN
+        SET @sql = N'ALTER SERVER ROLE [sysadmin] ADD MEMBER ' + QUOTENAME(@name);
+        EXEC sys.sp_executesql @sql;
+    END;
 END;
 '@
     `$cmd.ExecuteNonQuery() | Out-Null
@@ -641,15 +660,15 @@ finally {
 }
 "@
 
-        Script EnsureLocalSystemSqlSysadmin {
+    Script EnsureSidSqlSysadmins {
             DependsOn            = '[Script]EnsureSqlReachable'
             PsDscRunAsCredential = $Admincreds
             GetScript            = { @{ Result = '' } }
-            TestScript           = $localSystemTest
-            SetScript            = $localSystemSet
+            TestScript           = $sqlSysadminSidTest
+            SetScript            = $sqlSysadminSidSet
         }
 
-        $sqlDependency = @('[Script]EnsureLocalSystemSqlSysadmin')
+    $sqlDependency = @('[Script]EnsureSidSqlSysadmins')
         $i = 0
         foreach ($account in $managedSQLSysAdminAccounts | Where-Object { $_ -notlike "BUILTIN*" } ) {
             if (-not $account) {
@@ -663,7 +682,7 @@ finally {
                 LoginType               = 'WindowsUser'
                 InstanceName            = $SQLInstanceName
                 LoginMustChangePassword = $false
-                DependsOn               = '[Script]EnsureLocalSystemSqlSysadmin'
+                DependsOn               = '[Script]EnsureSidSqlSysadmins'
             }
             $sqlDependency += "[SqlLogin]AddSqlLogin$i"
         }

@@ -475,6 +475,28 @@ function Write-Phase {
     }
 }
 
+function Invoke-NewLabDscArchiveRefresh {
+    param (
+        [Parameter(Mandatory)][string] $DscRoot,
+        [Parameter(Mandatory)][scriptblock] $TestBuildServer,
+        [Parameter(Mandatory)][scriptblock] $BuildArchive
+    )
+
+    $artifactState = Get-MemLabsDscArtifactState -DscRoot $DscRoot
+    if ($artifactState.Current) { return $false }
+
+    if (-not (& $TestBuildServer)) {
+        throw "DSC artifacts are not current ($($artifactState.Reason)), but $env:COMPUTERNAME is not a designated MemLabs DSC build server. Pull a commit containing current vmbuild/DSC/DSC.zip and vmbuild/DSC/DSC.build.json, or designate this build host with '.\DSC\createGuestDscZip.ps1 -DesignateBuildServer' and rerun."
+    }
+
+    & $BuildArchive | Out-Host
+    $artifactState = Get-MemLabsDscArtifactState -DscRoot $DscRoot
+    if (-not $artifactState.Current) {
+        throw "DSC archive build returned without producing current, version-bound artifacts: $($artifactState.Reason)"
+    }
+    return $true
+}
+
 # Main script starts here
 try {
 
@@ -496,16 +518,15 @@ try {
     # Automatically update DSC.Zip
     if ($Common.DevBranch) {
         Set-Location $PSScriptRoot  | Out-Null
-        $psdLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
-        $psmLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
-        if (Test-Path ".\DSC\DSC.zip") {
-            $zipLastWriteTime = (Get-ChildItem ".\DSC\DSC.zip").LastWriteTime + (New-TimeSpan -Minutes 1)
-        }
-        if (-not $zipLastWriteTime -or ($psdLastWriteTime -gt $zipLastWriteTime) -or ($psmLastWriteTime -gt $zipLastWriteTime)) {
-            powershell .\dsc\createGuestDscZip.ps1 | Out-Host
-            Set-Location $PSScriptRoot | Out-Null
+        $archiveRefreshed = Invoke-NewLabDscArchiveRefresh -DscRoot (Join-Path $PSScriptRoot 'DSC') `
+            -TestBuildServer { Test-MemLabsBuildServer } -BuildArchive {
+                & powershell.exe -NoProfile -File (Join-Path $PSScriptRoot 'DSC\createGuestDscZip.ps1') | Out-Host
+                if ($LASTEXITCODE -ne 0) { throw "createGuestDscZip.ps1 exited with code $LASTEXITCODE." }
+            }
+        Set-Location $PSScriptRoot | Out-Null
+        if ($archiveRefreshed) {
             $exitcode = 55
-            exit 55
+            exit $exitcode
         }
     }
 
@@ -1789,6 +1810,7 @@ finally {
     else {
         Write-Host "Script exited. SUCCESS"
         Set-TitleBar "SCRIPT FINISHED"
+        $global:LASTEXITCODE = 0
     }
     
 }

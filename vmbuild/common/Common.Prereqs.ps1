@@ -13,8 +13,30 @@
 #   Get-OpenSshToolPath      - locate ssh.exe / ssh-keygen.exe, installing the Windows
 #                              OpenSSH Client capability when it is missing
 
+function Get-MemLabsWindowsPowerShellModulePath {
+    param ([switch]$AllUsersOnly)
+
+    $roots = [Collections.Generic.List[string]]::new()
+    $documents = [Environment]::GetFolderPath('MyDocuments')
+    if (-not $AllUsersOnly -and -not [string]::IsNullOrWhiteSpace($documents)) {
+        $roots.Add((Join-Path $documents 'WindowsPowerShell\Modules'))
+    }
+    $machinePath = [Environment]::GetEnvironmentVariable('PSModulePath', [EnvironmentVariableTarget]::Machine)
+    foreach ($root in @($machinePath -split ';')) {
+        if (-not [string]::IsNullOrWhiteSpace($root) -and $root -notmatch '(?i)\\PowerShell\\7(?:\\|$)') {
+            $roots.Add($root)
+        }
+    }
+    $roots.Add((Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\Modules'))
+    return (@($roots | Select-Object -Unique) -join ';')
+}
+
 function Test-MemLabsElevated {
     return ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+    $env:PSModulePath = Get-MemLabsWindowsPowerShellModulePath -AllUsersOnly:(Test-MemLabsElevated)
 }
 
 function Write-PrereqLog {
@@ -135,6 +157,173 @@ function Deny-MemLabsNonBuildServer {
     Write-Host "    .\$ScriptName -DesignateBuildServer" -ForegroundColor Cyan
     Write-Host "Marker file: $(Get-MemLabsBuildServerMarkerPath)" -ForegroundColor Cyan
     Write-Host
+}
+
+function Get-MemLabsZipEntrySha256 {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$EntryPath
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        $normalizedPath = $EntryPath.Replace('/', '\')
+        $entries = @($archive.Entries | Where-Object { $_.FullName.Replace('/', '\') -eq $normalizedPath })
+        if ($entries.Count -ne 1) { throw "Expected one '$EntryPath' entry in $ArchivePath, found $($entries.Count)." }
+        $stream = $entries[0].Open()
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '') }
+        finally {
+            $sha256.Dispose()
+            $stream.Dispose()
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
+function Get-MemLabsDscArtifactState {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$DscRoot
+    )
+
+    $archivePath = Join-Path $DscRoot 'DSC.zip'
+    $manifestPath = Join-Path $DscRoot 'TemplateHelpDSC\TemplateHelpDSC.psd1'
+    $modulePath = Join-Path $DscRoot 'TemplateHelpDSC\TemplateHelpDSC.psm1'
+    $versionPath = Join-Path (Split-Path $DscRoot -Parent) 'version.json'
+    $receiptPath = Join-Path $DscRoot 'DSC.build.json'
+    foreach ($requiredPath in @($archivePath, $manifestPath, $modulePath, $versionPath, $receiptPath)) {
+        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+            return [pscustomobject]@{ Current = $false; Reason = "missing $requiredPath"; ReceiptPath = $receiptPath }
+        }
+    }
+
+    try {
+        $receipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $version = Get-Content -LiteralPath $versionPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return [pscustomobject]@{ Current = $false; Reason = "unreadable receipt or version file: $($_.Exception.Message)"; ReceiptPath = $receiptPath }
+    }
+
+    try {
+        $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        $moduleHash = (Get-FileHash -LiteralPath $modulePath -Algorithm SHA256 -ErrorAction Stop).Hash
+        $embeddedManifestHash = Get-MemLabsZipEntrySha256 -ArchivePath $archivePath -EntryPath 'TemplateHelpDSC\TemplateHelpDSC.psd1'
+        $embeddedModuleHash = Get-MemLabsZipEntrySha256 -ArchivePath $archivePath -EntryPath 'TemplateHelpDSC\TemplateHelpDSC.psm1'
+    }
+    catch {
+        return [pscustomobject]@{ Current = $false; Reason = "unreadable DSC archive: $($_.Exception.Message)"; ReceiptPath = $receiptPath }
+    }
+    if ($manifestHash -ne $embeddedManifestHash) {
+        return [pscustomobject]@{ Current = $false; Reason = 'embedded TemplateHelpDSC.psd1 does not match the loose source'; ReceiptPath = $receiptPath }
+    }
+    if ($moduleHash -ne $embeddedModuleHash) {
+        return [pscustomobject]@{ Current = $false; Reason = 'embedded TemplateHelpDSC.psm1 does not match the loose source'; ReceiptPath = $receiptPath }
+    }
+
+    $expected = [ordered]@{
+        ArchiveSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256 -ErrorAction Stop).Hash
+        TemplateHelpDscPsd1Sha256 = $manifestHash
+        TemplateHelpDscPsm1Sha256 = $moduleHash
+        EmbeddedTemplateHelpDscPsd1Sha256 = $embeddedManifestHash
+        EmbeddedTemplateHelpDscPsm1Sha256 = $embeddedModuleHash
+        MemLabsVersion = [string]$version.memLabsVersion
+        LatestHotfixVersion = [string]$version.latestHotfixVersion
+    }
+    if ([int]$receipt.SchemaVersion -ne 1) {
+        return [pscustomobject]@{ Current = $false; Reason = 'unsupported DSC build receipt schema'; ReceiptPath = $receiptPath }
+    }
+    foreach ($property in $expected.Keys) {
+        if ([string]$receipt.$property -ne [string]$expected[$property]) {
+            return [pscustomobject]@{ Current = $false; Reason = "DSC build receipt does not match $property"; ReceiptPath = $receiptPath }
+        }
+    }
+    return [pscustomobject]@{ Current = $true; Reason = ''; ReceiptPath = $receiptPath }
+}
+
+function Write-MemLabsDscArtifactReceipt {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$DscRoot
+    )
+
+    $archivePath = Join-Path $DscRoot 'DSC.zip'
+    $manifestPath = Join-Path $DscRoot 'TemplateHelpDSC\TemplateHelpDSC.psd1'
+    $modulePath = Join-Path $DscRoot 'TemplateHelpDSC\TemplateHelpDSC.psm1'
+    $versionPath = Join-Path (Split-Path $DscRoot -Parent) 'version.json'
+    $receiptPath = Join-Path $DscRoot 'DSC.build.json'
+    $version = Get-Content -LiteralPath $versionPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256 -ErrorAction Stop).Hash
+    $moduleHash = (Get-FileHash -LiteralPath $modulePath -Algorithm SHA256 -ErrorAction Stop).Hash
+    $embeddedManifestHash = Get-MemLabsZipEntrySha256 -ArchivePath $archivePath -EntryPath 'TemplateHelpDSC\TemplateHelpDSC.psd1'
+    $embeddedModuleHash = Get-MemLabsZipEntrySha256 -ArchivePath $archivePath -EntryPath 'TemplateHelpDSC\TemplateHelpDSC.psm1'
+    if ($manifestHash -ne $embeddedManifestHash -or $moduleHash -ne $embeddedModuleHash) {
+        throw 'DSC.zip contains TemplateHelpDSC bytes that do not match the loose source files.'
+    }
+    $receipt = [ordered]@{
+        SchemaVersion = 1
+        CreatedUtc = [datetime]::UtcNow.ToString('o')
+        ArchiveSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256 -ErrorAction Stop).Hash
+        TemplateHelpDscPsd1Sha256 = $manifestHash
+        TemplateHelpDscPsm1Sha256 = $moduleHash
+        EmbeddedTemplateHelpDscPsd1Sha256 = $embeddedManifestHash
+        EmbeddedTemplateHelpDscPsm1Sha256 = $embeddedModuleHash
+        MemLabsVersion = [string]$version.memLabsVersion
+        LatestHotfixVersion = [string]$version.latestHotfixVersion
+    }
+    $temporaryPath = "$receiptPath.$([guid]::NewGuid().ToString('N')).tmp"
+    $backupPath = "$temporaryPath.backup"
+    try {
+        $receipt | ConvertTo-Json | Set-Content -LiteralPath $temporaryPath -Encoding UTF8 -ErrorAction Stop
+        if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+            [IO.File]::Replace($temporaryPath, $receiptPath, $backupPath)
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction Stop
+        }
+        else {
+            [IO.File]::Move($temporaryPath, $receiptPath)
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryPath, $backupPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Set-MemLabsVersionFileAtomic {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$MemLabsVersion,
+        [Parameter(Mandatory = $true)][string]$LatestHotfixVersion
+    )
+
+    if ([string]::IsNullOrWhiteSpace($MemLabsVersion) -or [string]::IsNullOrWhiteSpace($LatestHotfixVersion)) {
+        throw 'MemLabs version values must be nonempty strings.'
+    }
+    $versionDoc = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $versionDoc.memLabsVersion = $MemLabsVersion
+    $versionDoc.latestHotfixVersion = $LatestHotfixVersion
+    $temporaryPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    $backupPath = "$temporaryPath.backup"
+    try {
+        $versionDoc | ConvertTo-Json | Set-Content -LiteralPath $temporaryPath -Encoding UTF8 -ErrorAction Stop
+        $verify = Get-Content -LiteralPath $temporaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($verify.memLabsVersion -ne $MemLabsVersion -or $verify.latestHotfixVersion -ne $LatestHotfixVersion) {
+            throw "Version bump temporary file reads memLabs=$($verify.memLabsVersion) hotfix=$($verify.latestHotfixVersion), expected $MemLabsVersion."
+        }
+        if (-not ($verify.memLabsVersion -is [string]) -or -not ($verify.latestHotfixVersion -is [string])) {
+            throw "Version bump wrote a non-string to $temporaryPath; Common.ps1 requires quoted values."
+        }
+        [IO.File]::Replace($temporaryPath, $Path, $backupPath)
+        Remove-Item -LiteralPath $backupPath -Force -ErrorAction Stop
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryPath, $backupPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Initialize-PSGallery {

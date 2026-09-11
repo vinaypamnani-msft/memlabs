@@ -60,6 +60,7 @@ if ($DryRun) {
 $zipTarget = if ($DryRun) { Join-Path $dryRunRoot 'DSC.zip' } else { Join-Path $PSScriptRoot 'DSC.zip' }
 $zipBuildTarget = Join-Path (Split-Path $zipTarget -Parent) ('.DSC.{0}.building.zip' -f [guid]::NewGuid().ToString('N'))
 $zipBackupTarget = "$zipBuildTarget.backup"
+$receiptTarget = Join-Path $PSScriptRoot 'DSC.build.json'
 $zipJob = $null
 $parseCheckJob = $null
 
@@ -159,15 +160,20 @@ try {
         $Common.Initialized = $false
     }
     # Not -InJob: this is host-side tooling and needs Test-Configuration, which Common.ps1
-    # only loads outside a job. StartupProfile Fast already skips the expensive host probes.
-    . "..\Common.ps1" -StartupProfile Fast
+    # only loads outside a job. Storage initialization is required because it populates the
+    # supported CM/SQL catalogs consumed by Test-Configuration below.
+    . "..\Common.ps1" -SkipMaintenanceRefresh -SkipEnvironmentDetection -SkipHostPreparation
     # ConfirmImpact enum, not a bool -- $false threw a MetadataError on every run.
     $ConfirmPreference = 'None'
 
     # Create dummy file so config doesn't fail
     $userConfig = Get-UserConfiguration -Configuration $configName
     $result = Test-Configuration -InputObject $userConfig.Config
-    $ThisVM = $result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
+    $matchingVm = @($result.DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName })
+    if ($matchingVm.Count -ne 1) {
+        throw "DSC compile VM '$vmName' resolved to $($matchingVm.Count) VM(s). Use the full deployed VM name, including the configured prefix."
+    }
+    $ThisVM = $matchingVm[0]
     $deployConfigCopy = $result.DeployConfig
 
     # Dump config to file, for debugging
@@ -294,6 +300,7 @@ try {
         $zipJob = $null
         $zipOutput | ForEach-Object { Write-Host "  $_" }
         & (Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\Update-LanguageDscArchive.ps1') -ArchivePath $zipBuildTarget
+        Remove-Item -LiteralPath $receiptTarget -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $zipTarget) {
             [IO.File]::Replace($zipBuildTarget, $zipTarget, $zipBackupTarget)
             Remove-Item -LiteralPath $zipBackupTarget -Force -ErrorAction Stop
@@ -334,17 +341,18 @@ try {
     # approach anchored a -replace on the loaded version string: when that anchor did not match
     # (file already bumped, hand-edited, or the loaded value stale) the replace was a no-op, the
     # file was rewritten byte-identical, and it still printed "updated". Read back and compare.
-    $versionDoc = Get-Content -LiteralPath $versionFilePath -Raw | ConvertFrom-Json
-    $versionDoc.memLabsVersion = $newVersion
-    $versionDoc.latestHotfixVersion = $newVersion
-    $versionDoc | ConvertTo-Json | Set-Content -LiteralPath $versionFilePath -Encoding utf8
-
-    $verify = Get-Content -LiteralPath $versionFilePath -Raw | ConvertFrom-Json
+    Set-MemLabsVersionFileAtomic -Path $versionFilePath -MemLabsVersion $newVersion -LatestHotfixVersion $newVersion
+    $verify = Get-Content -LiteralPath $versionFilePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     if ($verify.memLabsVersion -ne $newVersion -or $verify.latestHotfixVersion -ne $newVersion) {
         throw "Version bump did not take: $versionFilePath still reads memLabs=$($verify.memLabsVersion) hotfix=$($verify.latestHotfixVersion), expected $newVersion."
     }
     if (-not ($verify.memLabsVersion -is [string])) {
         throw "Version bump wrote a non-string to $versionFilePath; Common.ps1 requires a quoted value."
+    }
+    Write-MemLabsDscArtifactReceipt -DscRoot $PSScriptRoot
+    $artifactState = Get-MemLabsDscArtifactState -DscRoot $PSScriptRoot
+    if (-not $artifactState.Current) {
+        throw "DSC artifact receipt validation failed after publication: $($artifactState.Reason)"
     }
     Write-Host "MemLabsVersion updated: $oldVersion -> $newVersion (verified in version.json)" -ForegroundColor Cyan
 }

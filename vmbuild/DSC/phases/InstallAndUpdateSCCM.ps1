@@ -38,6 +38,184 @@ function Invoke-CommandWithTimeout {
     }
 }
 
+function Test-CmServiceNotFoundError {
+    param([Parameter(Mandatory)]$ErrorRecord)
+
+    return ([string]$ErrorRecord.FullyQualifiedErrorId -eq 'NoServiceFoundForGivenName,Microsoft.PowerShell.Commands.GetServiceCommand')
+}
+
+function Get-CmSetupFailureLine {
+    param(
+        [AllowNull()][object[]]$Lines,
+        [int]$ExitCode
+    )
+
+    if ($ExitCode -ne 0) { return "setup.exe exited with code $ExitCode" }
+    $failure = @($Lines | Select-String -Pattern "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights|^(?:~)?Setup failed to" | Select-Object -First 1)
+    if ($failure.Count -eq 0) { return '' }
+    return ([string](($failure[0].Line -split '\$\$<')[0])).Trim().TrimStart('~')
+}
+
+function Get-CmSetupCompletionFailureReason {
+    param(
+        [AllowNull()][object[]]$LogLines,
+        [int]$ExitCode,
+        [AllowEmptyString()][string]$ConfigurationManagerModule,
+        [bool]$ConfigurationManagerModuleExists
+    )
+
+    $setupFailureLine = Get-CmSetupFailureLine -Lines $LogLines -ExitCode $ExitCode
+    if ($setupFailureLine) { return $setupFailureLine }
+    if (-not $ConfigurationManagerModule -or -not $ConfigurationManagerModuleExists) {
+        return "setup.exe returned without installing the requested Configuration Manager console module at '$ConfigurationManagerModule'"
+    }
+    return ''
+}
+
+function Start-CmSetupProcessWithBreadcrumb {
+    param(
+        [Parameter(Mandatory)][string]$BreadcrumbPath,
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string]$ArgumentList
+    )
+
+    $flagDir = Split-Path -Parent $BreadcrumbPath
+    if (-not (Test-Path -LiteralPath $flagDir)) {
+        New-Item -ItemType Directory -Path $flagDir -Force -ErrorAction Stop | Out-Null
+    }
+    Set-Content -LiteralPath $BreadcrumbPath -Value (Get-Date -Format 'o') -Force -ErrorAction Stop
+    return Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -Wait -PassThru -ErrorAction Stop
+}
+
+function Get-CmDatabaseStateForRetry {
+    param(
+        [Parameter(Mandatory)][string]$DatabaseName,
+        [Parameter(Mandatory)][string[]]$Targets
+    )
+
+    $state = [pscustomobject]@{ Reached = $false; Exists = $false; Target = ''; Error = '' }
+    $reachedTargets = [Collections.Generic.List[string]]::new()
+    $targetErrors = [Collections.Generic.List[string]]::new()
+    foreach ($target in $Targets) {
+        $connection = $null
+        $targetReached = $false
+        $targetExists = $false
+        $targetError = ''
+        try {
+            $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$target;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+            $connection.Open()
+            $command = $connection.CreateCommand()
+            $command.CommandText = 'SELECT COUNT(*) FROM sys.databases WHERE name = @n'
+            $parameter = $command.Parameters.Add('@n', [System.Data.SqlDbType]::NVarChar, 128)
+            $parameter.Value = $DatabaseName
+            $databaseCount = $command.ExecuteScalar()
+            if ($null -eq $databaseCount -or $databaseCount -is [DBNull]) {
+                throw 'SQL database existence query returned no scalar value.'
+            }
+            if ($databaseCount -isnot [int] -or $databaseCount -lt 0) {
+                throw "SQL database existence query returned an invalid scalar value of type '$($databaseCount.GetType().FullName)'."
+            }
+            $targetExists = ($databaseCount -gt 0)
+            $targetReached = $true
+        }
+        catch { $targetError = $_.Exception.Message }
+        finally {
+            if ($connection) {
+                try { $connection.Close() }
+                catch {
+                    $targetError = "SQL connection cleanup failed after the database query: $($_.Exception.Message)"
+                    if (-not $targetExists) { $targetReached = $false }
+                }
+            }
+        }
+        if ($targetExists) {
+            $state.Exists = $true
+            $state.Reached = $true
+            $state.Target = $target
+            $state.Error = $targetError
+            return $state
+        }
+        if ($targetReached) {
+            $reachedTargets.Add($target)
+        }
+        else {
+            $targetErrors.Add("$target`: $targetError")
+        }
+    }
+    if ($Targets.Count -gt 0 -and $reachedTargets.Count -eq $Targets.Count) {
+        $state.Reached = $true
+        $state.Target = $reachedTargets -join ', '
+    }
+    elseif ($targetErrors.Count -gt 0) {
+        $state.Error = $targetErrors -join '; '
+    }
+    else {
+        $state.Error = 'No SQL database probe targets were supplied.'
+    }
+    return $state
+}
+
+function Repair-StaleCmSetupTypeForRetry {
+    param(
+        [Parameter(Mandatory)][string]$SiteCode,
+        [Parameter(Mandatory)]$DatabaseState
+    )
+
+    if (-not $DatabaseState.Reached) {
+        throw "Cannot prepare ConfigMgr setup retry because database state was not measured: $($DatabaseState.Error)"
+    }
+    if ($DatabaseState.Exists) {
+        throw "Cannot prepare ConfigMgr setup retry while CM_$SiteCode exists on $($DatabaseState.Target)."
+    }
+
+    $setupPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Setup'
+    if (-not (Test-Path -Path $setupPath -ErrorAction Stop)) { return $false }
+    $setupValues = Get-ItemProperty -Path $setupPath -ErrorAction Stop
+    $setupTypeProperty = $setupValues.PSObject.Properties['Type']
+    if ($null -eq $setupTypeProperty) { return $false }
+    $setupType = $setupTypeProperty.Value
+    if ($null -eq $setupType -or (([int]$setupType -band 0x0B) -eq 0)) { return $false }
+    $blockers = [Collections.Generic.List[string]]::new()
+    $services = [Collections.Generic.List[object]]::new()
+    foreach ($serviceName in 'SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER') {
+        try {
+            $service = Get-Service -Name $serviceName -ErrorAction Stop
+            if ($service) { $services.Add($service) }
+        }
+        catch [Microsoft.PowerShell.Commands.ServiceCommandException] {
+            if (-not (Test-CmServiceNotFoundError -ErrorRecord $_)) {
+                throw "Could not determine whether ConfigMgr service '$serviceName' remains: $($_.Exception.Message)"
+            }
+        }
+        catch { throw "Could not determine whether ConfigMgr service '$serviceName' remains: $($_.Exception.Message)" }
+    }
+    if ($services.Count -gt 0) { $blockers.Add("services=$($services.Name -join ',')") }
+    try {
+        $site = Get-CimInstance -Namespace "root\SMS\Site_$SiteCode" -ClassName SMS_Site -ErrorAction Stop
+        if ($site) { $blockers.Add("WMI=root\SMS\Site_$SiteCode") }
+    }
+    catch [Microsoft.Management.Infrastructure.CimException] {
+        if ($_.Exception.NativeErrorCode.ToString() -ne 'InvalidNamespace') {
+            throw "Could not determine whether ConfigMgr site WMI remains: $($_.Exception.Message)"
+        }
+    }
+    catch { throw "Could not determine whether ConfigMgr site WMI remains: $($_.Exception.Message)" }
+    foreach ($path in 'HKLM:\SOFTWARE\Microsoft\SMS\Operations\Management Server Role', 'HKLM:\SOFTWARE\Microsoft\SMS\Providers\Sites') {
+        if (-not (Test-Path -Path $path -ErrorAction Stop)) { continue }
+        try { $children = @(Get-ChildItem -Path $path -ErrorAction Stop) }
+        catch { throw "Could not enumerate ConfigMgr installed-state registry path '$path': $($_.Exception.Message)" }
+        if ($children.Count -gt 0) { $blockers.Add("registry=$path") }
+    }
+    if ($blockers.Count -gt 0) {
+        throw "Refusing to clear stale ConfigMgr Setup Type=$setupType because installed-site markers remain: $($blockers -join '; ')"
+    }
+
+    Set-ItemProperty -Path $setupPath -Name 'Type' -Type DWord -Value 0 -ErrorAction Stop
+    $verifiedType = Get-ItemPropertyValue -Path $setupPath -Name 'Type' -ErrorAction Stop
+    if ([int]$verifiedType -ne 0) { throw "ConfigMgr Setup Type recovery did not take: expected 0, found $verifiedType." }
+    return $true
+}
+
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
@@ -204,31 +382,11 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
         $probeReached = $false
         $probeDbExists = $false
         $probeError = $null
-        foreach ($probeTarget in $sqlProbeTargets) {
-            try {
-                $cs = "Data Source=$probeTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
-                $conn = New-Object System.Data.SqlClient.SqlConnection $cs
-                $conn.Open()
-                try {
-                    $cmd = $conn.CreateCommand()
-                    $cmd.CommandText = "SELECT COUNT(*) FROM sys.databases WHERE name = @n"
-                    $p = $cmd.Parameters.Add('@n', [System.Data.SqlDbType]::NVarChar, 128)
-                    $p.Value = $cmDbName
-                    [int]$probeCount = $cmd.ExecuteScalar()
-                    $probeDbExists = ($probeCount -gt 0)
-                    $probeReached = $true
-                    $sqlDataSource = $probeTarget
-                }
-                finally {
-                    $conn.Close()
-                }
-                break  # connected successfully
-            }
-            catch {
-                $probeError = $_.Exception.Message
-                Write-DscStatus "SQL probe of [$probeTarget] failed: $probeError"
-            }
-        }
+        $databaseState = Get-CmDatabaseStateForRetry -DatabaseName $cmDbName -Targets $sqlProbeTargets
+        $probeDbExists = $databaseState.Exists
+        $probeReached = $databaseState.Reached
+        $probeError = $databaseState.Error
+        if ($databaseState.Target) { $sqlDataSource = $databaseState.Target }
 
         if (-not $probeReached) {
             $failReason = "setup.exe breadcrumb present but SQL probe failed (tried: $($sqlProbeTargets -join ', ')): $probeError. Cannot confirm whether [$cmDbName] exists; refusing to retry blind. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
@@ -238,6 +396,14 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
         }
         else {
             $resetReason = "setup.exe breadcrumb present but [$cmDbName] does not exist on [$sqlDataSource] -- prior setup.exe attempt failed before creating the site database, so no install state was committed. Safe to retry."
+            try {
+                if (Repair-StaleCmSetupTypeForRetry -SiteCode $SiteCode -DatabaseState $databaseState) {
+                    $resetReason += " Cleared stale HKLM:\SOFTWARE\Microsoft\SMS\Setup\Type after verifying no ConfigMgr services, site WMI, server-role keys, or provider-site keys remain."
+                }
+            }
+            catch {
+                $failReason = "Database [$cmDbName] is absent, but stale local ConfigMgr setup state could not be safely recovered: $($_.Exception.Message)"
+            }
         }
     }
 
@@ -395,6 +561,26 @@ if ($Configuration.InstallSCCM.Status -eq 'Completed') {
 }
 
 if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
+
+    $cmDbName = "CM_$SiteCode"
+    if ($sqlInstanceName -and $sqlInstanceName -ine 'MSSQLSERVER') { $sqlDataSource = "$sqlServerName\$sqlInstanceName" }
+    else { $sqlDataSource = $sqlServerName }
+    if ($sqlPort -and $sqlPort -ne 1433) { $sqlDataSource = "$sqlServerName,$sqlPort" }
+    $sqlProbeTargets = @($sqlDataSource)
+    if ($installToAO -and $sqlNode1) {
+        $nodeDataSource = if ($sqlPort -and $sqlPort -ne 1433) { "$sqlNode1,$sqlPort" } else { $sqlNode1 }
+        if ($nodeDataSource -ne $sqlDataSource) { $sqlProbeTargets += $nodeDataSource }
+    }
+    $preLaunchDatabaseState = Get-CmDatabaseStateForRetry -DatabaseName $cmDbName -Targets $sqlProbeTargets
+    try {
+        if (Repair-StaleCmSetupTypeForRetry -SiteCode $SiteCode -DatabaseState $preLaunchDatabaseState) {
+            Write-DscStatus "Cleared stale HKLM:\SOFTWARE\Microsoft\SMS\Setup\Type before setup launch after verifying [$cmDbName] absent and no ConfigMgr services, site WMI, server-role keys, or provider-site keys remain."
+        }
+    }
+    catch {
+        Write-DscStatus "ConfigMgr pre-launch stale-state recovery refused: $($_.Exception.Message)" -Failure
+        return
+    }
 
     # Set Install action as Running
     $Configuration.InstallSCCM.Status = 'Running'
@@ -1171,15 +1357,13 @@ WHERE drs.is_suspended = 1
     # setup.exe (must restore Phase 8 checkpoint). See the Status='Running'
     # gate near the top of this script for the consuming side.
     try {
-        $flagDir = Split-Path -Parent $setupExeStartedFlag
-        if (-not (Test-Path $flagDir)) { New-Item -ItemType Directory -Path $flagDir -Force | Out-Null }
-        Set-Content -Path $setupExeStartedFlag -Value (Get-Date -Format 'o') -Force
+        $setupProcess = Start-CmSetupProcessWithBreadcrumb -BreadcrumbPath $setupExeStartedFlag -FilePath $CMInstallationFile -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"')
     }
     catch {
-        Write-DscStatus "Warning: failed to write setup.exe breadcrumb at $setupExeStartedFlag : $($_.Exception.Message). Re-entry recovery may be less precise."
+        Write-DscStatus "Cannot launch setup.exe because its mandatory breadcrumb could not be written at $setupExeStartedFlag : $($_.Exception.Message)" -Failure
+        return
     }
-
-    Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
+    $setupExitCode = $setupProcess.ExitCode
 
     # Check if setup.exe failed the prerequisite check. If so, rename the
     # log, re-run the SQL pre-flight (Kerberos may have settled since our
@@ -1250,7 +1434,8 @@ WHERE drs.is_suspended = 1
             }
 
             Write-DscStatus "Re-launching setup.exe (attempt 2)"
-            Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
+            $setupProcess = Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -Wait -PassThru
+            $setupExitCode = $setupProcess.ExitCode
 
             # Check if the retry also failed prereq
             if (Test-Path 'C:\ConfigMgrSetup.log') {
@@ -1269,16 +1454,17 @@ WHERE drs.is_suspended = 1
     # Completed here strands the site for good: every later re-run takes the
     # "already installed" path and waits for an SMS Provider that will never exist.
     # Same tail and patterns the host monitor uses, so both sides agree on "fatal".
-    if (Test-Path 'C:\ConfigMgrSetup.log') {
-        $setupFatal = Get-Content 'C:\ConfigMgrSetup.log' -Tail 30 -ErrorAction SilentlyContinue |
-            Select-String "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights" |
-            Select-Object -First 1
-        if ($setupFatal) {
-            # Leave Status='Running' and the breadcrumb in place: re-entry then takes
-            # the partial-install path, which knows a checkpoint restore is required.
-            Write-DscStatus "setup.exe returned but ConfigMgrSetup.log reports a fatal -- NOT marking the install complete: $(($setupFatal.Line -split '\$\$<')[0].Trim()). Check C:\ConfigMgrSetup.log." -Failure
-            return
-        }
+    $setupLogTail = if (Test-Path 'C:\ConfigMgrSetup.log') { @(Get-Content 'C:\ConfigMgrSetup.log' -Tail 60 -ErrorAction SilentlyContinue) } else { @() }
+    $uiInstallDirectory = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'UI Installation Directory' -ErrorAction SilentlyContinue
+    $configurationManagerModule = if ($uiInstallDirectory) { Join-Path $uiInstallDirectory 'bin\ConfigurationManager.psd1' } else { '' }
+    $configurationManagerModuleExists = [bool]($configurationManagerModule -and (Test-Path -LiteralPath $configurationManagerModule -PathType Leaf))
+    $completionFailureReason = Get-CmSetupCompletionFailureReason -LogLines $setupLogTail -ExitCode $setupExitCode `
+        -ConfigurationManagerModule $configurationManagerModule -ConfigurationManagerModuleExists $configurationManagerModuleExists
+    if ($completionFailureReason) {
+        # Leave Status='Running' and the breadcrumb in place: re-entry then takes
+        # the partial-install path, which knows a checkpoint restore is required.
+        Write-DscStatus "setup.exe did not complete successfully -- NOT marking the install complete: $completionFailureReason. Check C:\ConfigMgrSetup.log." -Failure
+        return
     }
 
     Write-DscStatus "Installation finished [$($CMFileVersion.VersionInfo.FileVersion)]."

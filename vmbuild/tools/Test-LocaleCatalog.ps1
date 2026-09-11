@@ -261,8 +261,10 @@ $phase8 = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase8.ps1')
 $phase4Tokens = $null
 $phase4ParseErrors = $null
 [void][Management.Automation.Language.Parser]::ParseFile($phase4Path, [ref]$phase4Tokens, [ref]$phase4ParseErrors)
-$phase4StructuralErrors = @($phase4ParseErrors | Where-Object { $_.Message -notmatch '^Could not find the module ' })
-Assert-Equal -Expected 0 -Actual $phase4StructuralErrors.Count -What 'Phase 4 has no structural parser errors beyond unavailable guest DSC modules'
+$phase4StructuralErrors = @($phase4ParseErrors | Where-Object {
+        $_.ErrorId -ne 'MultipleModuleEntriesFoundDuringParse' -and $_.Message -notmatch '^Could not find the module '
+    })
+Assert-Equal -Expected 0 -Actual $phase4StructuralErrors.Count -What 'Phase 4 has no structural parser errors beyond guest DSC module discovery diagnostics'
 $perfloading = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\perfloading.ps1') -Raw
 Assert-True -Condition ($phase3 -match '\$ThisVM\.localeSettings') -What 'Phase 3 consumes the per-VM profile'
 Assert-True -Condition ($phase3 -match "\$localeAcquisition -eq 'WindowsUpdate'") -What 'Phase 3 selects the online acquisition resource per VM'
@@ -410,7 +412,11 @@ $isoProbePath = Join-Path ([IO.Path]::GetTempPath()) ("memlabs-locale-iso-" + [g
 try {
     [IO.File]::WriteAllBytes($isoProbePath, [byte[]](1, 2, 3, 4))
     $isoFileTime = (Get-Item -LiteralPath $isoProbePath).LastWriteTimeUtc
-    $isoProbeHash = (Get-FileHash -LiteralPath $isoProbePath -Algorithm SHA256).Hash
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $isoProbeHash = ([BitConverter]::ToString($sha256.ComputeHash([IO.File]::ReadAllBytes($isoProbePath)))).Replace('-', '')
+    }
+    finally { $sha256.Dispose() }
     $isoProbeSource = [pscustomobject]@{ Size = 4; SHA256 = $isoProbeHash }
     Assert-True -Condition (Test-LocaleMediaIso -Path $isoProbePath -Source $isoProbeSource) -What 'offline locale media accepts a cached ISO with exact size and hash'
     $isoProbeSource.Size = 5
@@ -541,16 +547,20 @@ Assert-True -Condition ($phase3.Contains("Add-WindowsCapability -Online -Name `$
 Assert-True -Condition ($phase3 -match '(?s)Registry RAMDiskTFTPWIndowSize\s*\{.*?Key\s*=\s*["'']HKLM:\\SOFTWARE\\Microsoft\\SMS\\DP["''].*?\}') -What 'Phase 3 TFTP window registry resource uses a provider-qualified HKLM path'
 Assert-True -Condition ($phase3 -match '(?s)Registry RAMDiskTFTPBlockSize\s*\{.*?Key\s*=\s*["'']HKLM:\\SOFTWARE\\Microsoft\\SMS\\DP["''].*?\}') -What 'Phase 3 TFTP block registry resource uses a provider-qualified HKLM path'
 Assert-True -Condition ($phase3 -notmatch 'Key\s*=\s*["'']HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\SMS\\DP["'']') -What 'Phase 3 DP registry resources reject an unqualified registry hive path'
-Assert-True -Condition ($phase4 -match '(?s)\$managedSQLSysAdminAccounts\s*=.*?NT AUTHORITY\\SYSTEM.*?foreach \(\$account in \$managedSQLSysAdminAccounts') -What 'Phase 4 does not recreate the locale-dependent LocalSystem SQL login name'
-Assert-True -Condition ($phase4 -match 'MembersToInclude\s*=\s*\$managedSQLSysAdminAccounts') -What 'Phase 4 leaves the existing LocalSystem SID role membership unchanged'
+Assert-True -Condition ($phase4 -match '(?s)\$managedSQLSysAdminAccounts\s*=.*?NT AUTHORITY\\SYSTEM.*?BUILTIN\\Administrators.*?foreach \(\$account in \$managedSQLSysAdminAccounts') -What 'Phase 4 excludes locale-dependent well-known SQL login names from SqlServerDsc'
+Assert-True -Condition ($phase4 -match 'MembersToInclude\s*=\s*\$managedSQLSysAdminAccounts') -What 'Phase 4 leaves SID-managed SQL role memberships unchanged'
+Assert-True -Condition ($phase4 -notmatch '(?m)MembersToInclude\s*=.*BUILTIN\\Administrators') -What 'Phase 4 never passes the English builtin Administrators name to SqlRole'
+Assert-True -Condition ($phase5 -notmatch 'BUILTIN\\Administrators') -What 'Phase 5 relies on Phase 4 SID membership instead of reintroducing an English builtin name'
 $localSystemSidDefinitionIndex = $phase4.IndexOf("`$localSystemSidHex = '010100000000000512000000'")
-$localSystemSidUseIndex = $phase4.IndexOf('DECLARE @sid varbinary(85) = 0x$localSystemSidHex')
-$localSystemNameIndex = $phase4.IndexOf('SUSER_SNAME(@sid)')
-$localSystemLoginIndex = $phase4.IndexOf('CREATE LOGIN')
-$localSystemRoleIndex = $phase4.IndexOf('ALTER SERVER ROLE [sysadmin] ADD MEMBER')
-Assert-True -Condition ($localSystemSidDefinitionIndex -ge 0 -and $localSystemSidUseIndex -gt $localSystemSidDefinitionIndex -and $localSystemNameIndex -gt $localSystemSidUseIndex -and $localSystemLoginIndex -gt $localSystemNameIndex -and $localSystemRoleIndex -gt $localSystemLoginIndex) -What 'Phase 4 repairs the LocalSystem SQL login and sysadmin role through stable SID resolution'
-Assert-True -Condition ($phase4 -match '(?s)Script EnsureLocalSystemSqlSysadmin\s*\{.*?PsDscRunAsCredential\s*=\s*\$Admincreds') -What 'Phase 4 LocalSystem SQL repair uses a separately privileged credential'
-Assert-Equal -Expected 2 -Actual ([regex]::Matches($phase4, 'EXEC sys\.sp_executesql @sql').Count) -What 'Phase 4 LocalSystem SQL repair executes valid dynamic statements through sp_executesql'
+$builtInAdministratorsSidDefinitionIndex = $phase4.IndexOf("`$builtInAdministratorsSidHex = '01020000000000052000000020020000'")
+$sqlSysadminSidRowsIndex = $phase4.IndexOf('$sqlSysadminSidRows = "(0x$localSystemSidHex), (0x$builtInAdministratorsSidHex)"')
+$sqlSysadminNameIndex = $phase4.IndexOf('SUSER_SNAME(@sid)')
+$sqlSysadminLoginIndex = $phase4.IndexOf('CREATE LOGIN')
+$sqlSysadminRoleIndex = $phase4.IndexOf('ALTER SERVER ROLE [sysadmin] ADD MEMBER')
+Assert-True -Condition ($localSystemSidDefinitionIndex -ge 0 -and $builtInAdministratorsSidDefinitionIndex -gt $localSystemSidDefinitionIndex -and $sqlSysadminSidRowsIndex -gt $builtInAdministratorsSidDefinitionIndex -and $sqlSysadminNameIndex -gt $sqlSysadminSidRowsIndex -and $sqlSysadminLoginIndex -gt $sqlSysadminNameIndex -and $sqlSysadminRoleIndex -gt $sqlSysadminLoginIndex) -What 'Phase 4 repairs well-known SQL logins and sysadmin roles through stable SID resolution'
+Assert-True -Condition ($phase4 -match '(?s)Script EnsureSidSqlSysadmins\s*\{.*?PsDscRunAsCredential\s*=\s*\$Admincreds') -What 'Phase 4 SID-based SQL repair uses a separately privileged credential'
+Assert-Equal -Expected 2 -Actual ([regex]::Matches($phase4, 'EXEC sys\.sp_executesql @sql').Count) -What 'Phase 4 SID-based SQL repair executes valid dynamic statements through sp_executesql'
+Assert-Equal -Expected 2 -Actual ([regex]::Matches($phase4, "ISNULL\(IS_SRVROLEMEMBER\(N'sysadmin', (?:principal\.name|@name)\), 0\) <> 1").Count) -What 'Phase 4 treats indeterminate SQL role membership as noncompliant in both test and repair paths'
 $spnSetStart = $phase4.IndexOf('Script SetSQLSPNs')
 $spnSetEnd = $phase4.IndexOf('Script GrantSPNWritePermission', $spnSetStart)
 $spnSetBlock = if ($spnSetStart -ge 0 -and $spnSetEnd -gt $spnSetStart) { $phase4.Substring($spnSetStart, $spnSetEnd - $spnSetStart) } else { '' }

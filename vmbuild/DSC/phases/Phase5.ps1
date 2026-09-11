@@ -445,7 +445,7 @@
             ServerRoleName   = 'SysAdmin'
             ServerName       = $thisVM.vmName
             InstanceName     = $thisVM.sqlInstanceName
-            MembersToInclude = $thisVM.thisParams.SQLAO.SqlAgentServiceAccountFQ, $thisVM.thisParams.SQLAO.SqlServiceAccountFQ, 'BUILTIN\Administrators'
+            MembersToInclude = $thisVM.thisParams.SQLAO.SqlAgentServiceAccountFQ, $thisVM.thisParams.SQLAO.SqlServiceAccountFQ
             #PsDscRunAsCredential = $Admincreds
             DependsOn        = '[SqlLogin]Add_WindowsUser'
         }
@@ -1128,7 +1128,7 @@
             ServerRoleName       = 'SysAdmin'
             ServerName           = $node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
-            MembersToInclude     = $node1vm.thisParams.SQLAO.SqlAgentServiceAccountFQ, $node1vm.thisParams.SQLAO.SqlServiceAccountFQ, 'BUILTIN\Administrators'
+            MembersToInclude     = $node1vm.thisParams.SQLAO.SqlAgentServiceAccountFQ, $node1vm.thisParams.SQLAO.SqlServiceAccountFQ
             PsDscRunAsCredential = $Admincreds
             DependsOn            = $nextDepend
         }
