@@ -10,7 +10,9 @@ param (
     [int[]] $Phase,
     [ValidateRange(2, 11)]
     [int] $StopPhase = 0,
-    [switch] $KeepFailedVMs
+    [switch] $KeepFailedVMs,
+    [switch] $NoSnapshot,
+    [switch] $Restore
 )
 
 function Assert-MemLabsDeploymentLease {
@@ -71,13 +73,16 @@ try {
         $startGate.Dispose()
     }
 
-    $arguments = @{ Configuration = $Configuration; NoWindowResize = $true; NoSnapshot = $true }
+    $arguments = @{ Configuration = $Configuration; NoWindowResize = $true }
     if ($StartPhase) { $arguments.StartPhase = $StartPhase }
     if ($Phase) { $arguments.Phase = $Phase }
     if ($StopPhase) { $arguments.StopPhase = $StopPhase }
     if ($KeepFailedVMs) { $arguments.KeepFailedVMs = $true }
+    if ($NoSnapshot) { $arguments.NoSnapshot = $true }
+    if ($Restore) { $arguments.Restore = $true }
 
-    & (Join-Path (Split-Path -Parent $PSScriptRoot) 'New-Lab.ps1') @arguments *> $OutputPath
+    $global:LASTEXITCODE = 0
+    & (Join-Path (Split-Path -Parent $PSScriptRoot) 'New-Lab.ps1') @arguments *>> $OutputPath
     exit $LASTEXITCODE
 }
 catch {

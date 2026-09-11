@@ -23,7 +23,9 @@ param (
     [int] $MaxHours = 12,
     [ValidateRange(1, 11)]
     [int] $ExpectedCompletedPhase = 11,
-    [switch] $KeepFailedVMs
+    [switch] $KeepFailedVMs,
+    [switch] $NoSnapshot,
+    [switch] $Restore
 )
 
 $ErrorActionPreference = 'Stop'
@@ -152,6 +154,18 @@ function New-MemLabsDeploymentProcess {
     return [Diagnostics.Process]::Start($info)
 }
 
+function Resolve-MemLabsDeploymentExitAction {
+    param (
+        [Parameter(Mandatory)][int] $ExitCode,
+        [Parameter(Mandatory)][ValidateRange(1, 2)][int] $Attempt
+    )
+
+    if ($ExitCode -eq 0) { return 'Complete' }
+    if ($ExitCode -ne 55) { return 'Fail' }
+    if ($Attempt -eq 1) { return 'Restart' }
+    throw 'New-Lab requested a second DSC archive restart; refusing an unbounded restart loop.'
+}
+
 function Add-MemLabsDeploymentProcessToJob {
     param (
         [Parameter(Mandatory)][IntPtr] $JobHandle,
@@ -209,16 +223,18 @@ function Save-MemLabsDeploymentFailure {
         [AllowEmptyString()][string] $JournalPath = '',
         [AllowNull()][object] $ActiveOwnerMetadata,
         [AllowNull()][object[]] $FailureDiagnostics,
+        [AllowNull()][object] $ExistingRecord,
         [AllowNull()][object] $Process,
         [Parameter(Mandatory)][string] $OutputPath,
         [Parameter(Mandatory)][string] $MonitorPath,
-        [Parameter(Mandatory)][string] $DiagnosticsPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $DiagnosticsPath,
+        [AllowEmptyString()][string] $DiagnosticsCaptureError = '',
         [AllowEmptyString()][string] $CrashSourcePath = '',
         [AllowEmptyString()][string] $CrashExportPath = ''
     )
 
-    $exitCode = $null
-    if ($Process -and $Process.HasExited) { $exitCode = $Process.ExitCode }
+    $exitCode = if ($Process -and $Process.HasExited) { $Process.ExitCode } elseif ($ExistingRecord) { $ExistingRecord.ExitCode } else { $null }
+    $processId = if ($Process) { $Process.Id } elseif ($ExistingRecord) { $ExistingRecord.ProcessId } else { $null }
     $outputTail = if (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
         @(Get-Content -LiteralPath $OutputPath -Tail 120 -ErrorAction SilentlyContinue)
     }
@@ -260,16 +276,17 @@ function Save-MemLabsDeploymentFailure {
         Journal     = $JournalPath
         ActiveOwner = $ActiveOwnerMetadata
         FailureDiagnostics = @($FailureDiagnostics)
-        ProcessId   = if ($Process) { $Process.Id } else { $null }
+        ProcessId   = $processId
         ExitCode    = $exitCode
         Output      = $OutputPath
         OutputTail  = @($outputTail)
         Monitor     = $MonitorPath
         Diagnostics = $DiagnosticsPath
-        CrashSource = $CrashSourcePath
-        CrashExport = if ($crashExportSucceeded) { $CrashExportPath } else { '' }
-        Crash       = $crashText
-        CrashCaptureError = $crashCaptureError
+        DiagnosticsCaptureError = $DiagnosticsCaptureError
+        CrashSource = if ($CrashSourcePath) { $CrashSourcePath } elseif ($ExistingRecord) { [string]$ExistingRecord.CrashSource } else { '' }
+        CrashExport = if ($crashExportSucceeded) { $CrashExportPath } elseif ($ExistingRecord) { [string]$ExistingRecord.CrashExport } else { '' }
+        Crash       = if ($crashText) { $crashText } elseif ($ExistingRecord) { [string]$ExistingRecord.Crash } else { '' }
+        CrashCaptureError = if ($crashCaptureError) { $crashCaptureError } elseif ($ExistingRecord) { [string]$ExistingRecord.CrashCaptureError } else { '' }
     }
     $failureTempPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
     try {
@@ -326,7 +343,7 @@ function Save-MemLabsDeploymentDiagnostics {
         }
     }
 
-    [pscustomobject]@{
+    $diagnostics = [pscustomobject]@{
         CapturedUtc = [datetime]::UtcNow.ToString('o')
         Reason      = $Reason
         Guests      = @($guestDiagnostics)
@@ -335,7 +352,80 @@ function Save-MemLabsDeploymentDiagnostics {
                 Id = 18560, 18590, 18602
                 StartTime = (Get-Date).AddHours(-12)
             } -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, Message)
-    } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $Path -Encoding UTF8
+    }
+    $tempPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $diagnostics | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $tempPath -Encoding UTF8 -ErrorAction Stop
+        $null = Get-Content -LiteralPath $tempPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        Move-Item -LiteralPath $tempPath -Destination $Path -Force -ErrorAction Stop
+    }
+    finally { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+}
+
+function Test-MemLabsJsonArtifact {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][ValidateSet('Diagnostics', 'Failure')][string] $Kind
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $artifact = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $artifact -or $artifact -is [array] -or $artifact -is [string] -or $artifact.GetType().IsPrimitive) { return $false }
+        $requiredProperties = if ($Kind -eq 'Diagnostics') {
+            'CapturedUtc', 'Reason', 'Guests', 'FatalEvents'
+        }
+        else {
+            'CapturedUtc', 'Stage', 'Error', 'Output', 'Monitor', 'Diagnostics'
+        }
+        foreach ($propertyName in $requiredProperties) {
+            if ($null -eq $artifact.PSObject.Properties[$propertyName]) { return $false }
+        }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Save-MemLabsDeploymentDiagnosticsSafely {
+    param (
+        [Parameter(Mandatory)][string[]] $VMName,
+        [Parameter(Mandatory)][string] $DomainName,
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $Reason
+    )
+
+    if (Test-MemLabsJsonArtifact -Path $Path -Kind Diagnostics) {
+        $existing = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $existingError = if ($existing.PSObject.Properties['DiagnosticCaptureError']) { [string]$existing.DiagnosticCaptureError } else { '' }
+        return [pscustomobject]@{ Succeeded = $true; Path = $Path; Error = $existingError }
+    }
+    $richCaptureError = ''
+    try {
+        Save-MemLabsDeploymentDiagnostics -VMName $VMName -DomainName $DomainName -Path $Path -Reason $Reason
+        if (-not (Test-MemLabsJsonArtifact -Path $Path -Kind Diagnostics)) { throw 'Rich diagnostics writer did not publish valid JSON.' }
+        return [pscustomobject]@{ Succeeded = $true; Path = $Path; Error = '' }
+    }
+    catch {
+        $richCaptureError = $_.Exception.Message
+        $tempPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+        try {
+            [pscustomobject]@{
+                CapturedUtc           = [datetime]::UtcNow.ToString('o')
+                Reason                = $Reason
+                DiagnosticCaptureError = $richCaptureError
+                Guests                = @()
+                FatalEvents           = @()
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tempPath -Encoding UTF8 -ErrorAction Stop
+            $null = Get-Content -LiteralPath $tempPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            Move-Item -LiteralPath $tempPath -Destination $Path -Force -ErrorAction Stop
+            if (-not (Test-MemLabsJsonArtifact -Path $Path -Kind Diagnostics)) { throw 'Fallback diagnostics writer did not publish valid JSON.' }
+            return [pscustomobject]@{ Succeeded = $true; Path = $Path; Error = $richCaptureError }
+        }
+        catch {
+            return [pscustomobject]@{ Succeeded = $false; Path = ''; Error = "Rich capture failed: $richCaptureError Fallback publication failed: $($_.Exception.Message)" }
+        }
+        finally { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }
@@ -381,68 +471,97 @@ $operation = {
     if ($Phase) { $arguments.Phase = $Phase }
     if ($StopPhase) { $arguments.StopPhase = $StopPhase }
     if ($KeepFailedVMs) { $arguments.KeepFailedVMs = $true }
+    if ($NoSnapshot) { $arguments.NoSnapshot = $true }
+    if ($Restore) { $arguments.Restore = $true }
     $jobHandle = [MemLabsNativeJob]::CreateKillOnClose()
     $process = $null
     try {
-        $gateName = 'Local\MemLabsDeployment-' + [guid]::NewGuid().ToString('N')
-        $gateReadyName = $gateName + '-Ready'
-        $startGate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $gateName)
-        $gateReady = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $gateReadyName)
-        try {
-            $arguments.GateName = $gateName
-            $arguments.GateReadyName = $gateReadyName
-            $process = New-MemLabsDeploymentProcess -LauncherPath $launcherPath -Arguments $arguments
-            if (-not $gateReady.WaitOne([TimeSpan]::FromSeconds(30))) {
-                throw 'Deployment child did not acknowledge the start gate within 30 seconds.'
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            if ($process) {
+                $process.Dispose()
+                $process = $null
             }
-            Add-MemLabsDeploymentProcessToJob -JobHandle $jobHandle -Process $process
-            if (-not $startGate.Set()) { throw 'Could not release the deployment child start gate.' }
-        }
-        finally {
-            $gateReady.Dispose()
-            $startGate.Dispose()
-        }
-        while (-not $process.HasExited) {
-            [Threading.Thread]::Sleep($PollSeconds * 1000)
-            $progress = @(Get-MemLabsDeploymentProgressRecords -Path $domainLogPath -SinceUtc $startedUtc)
-            foreach ($record in $progress) {
-                if ($seen.Add($record.Signature)) {
-                    $lastProgressUtc = [datetime]::UtcNow
-                    $lastSignature = $record.Signature
+
+            $gateName = 'Local\MemLabsDeployment-' + [guid]::NewGuid().ToString('N')
+            $gateReadyName = $gateName + '-Ready'
+            $startGate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $gateName)
+            $gateReady = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $gateReadyName)
+            try {
+                $arguments.GateName = $gateName
+                $arguments.GateReadyName = $gateReadyName
+                $process = New-MemLabsDeploymentProcess -LauncherPath $launcherPath -Arguments $arguments
+                if (-not $gateReady.WaitOne([TimeSpan]::FromSeconds(30))) {
+                    throw 'Deployment child did not acknowledge the start gate within 30 seconds.'
+                }
+                Add-MemLabsDeploymentProcessToJob -JobHandle $jobHandle -Process $process
+                if (-not $startGate.Set()) { throw 'Could not release the deployment child start gate.' }
+            }
+            finally {
+                $gateReady.Dispose()
+                $startGate.Dispose()
+            }
+            while (-not $process.HasExited) {
+                [Threading.Thread]::Sleep($PollSeconds * 1000)
+                $progress = @(Get-MemLabsDeploymentProgressRecords -Path $domainLogPath -SinceUtc $startedUtc)
+                foreach ($record in $progress) {
+                    if ($seen.Add($record.Signature)) {
+                        $lastProgressUtc = [datetime]::UtcNow
+                        $lastSignature = $record.Signature
+                    }
+                }
+
+                $nowUtc = [datetime]::UtcNow
+                $noProgressSeconds = [math]::Round(($nowUtc - $lastProgressUtc).TotalSeconds, 1)
+                [pscustomobject]@{
+                    TimeUtc = $nowUtc.ToString('o')
+                    ProcessId = $process.Id
+                    LastSignature = $lastSignature
+                    NoProgressSeconds = $noProgressSeconds
+                } | ConvertTo-Json -Compress | Add-Content -LiteralPath $monitorLogPath -Encoding UTF8
+
+                $reason = $null
+                if ($nowUtc -ge $deadlineUtc) { $reason = "maximum runtime of $MaxHours hour(s) exceeded" }
+                elseif ($noProgressSeconds -ge ($NoProgressMinutes * 60)) { $reason = "no new semantic progress for $NoProgressMinutes minute(s); last='$lastSignature'" }
+                if ($reason) {
+                    if (-not [MemLabsNativeJob]::CloseHandle($jobHandle)) {
+                        throw "Could not terminate the stalled deployment process tree: Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())."
+                    }
+                    $jobHandle = [IntPtr]::Zero
+                    if (-not $process.WaitForExit(30000)) {
+                        throw 'The stalled deployment process tree did not exit within 30 seconds; diagnostics were not started while mutation could continue.'
+                    }
+                    $diagnosticResult = Save-MemLabsDeploymentDiagnosticsSafely -VMName $diagnosticVmNames -DomainName $domainName -Path $diagnosticsPath -Reason $reason
+                    throw "Monitored deployment stopped: $reason. Diagnostics: $diagnosticsPath"
                 }
             }
 
-            $nowUtc = [datetime]::UtcNow
-            $noProgressSeconds = [math]::Round(($nowUtc - $lastProgressUtc).TotalSeconds, 1)
+            $exitAction = Resolve-MemLabsDeploymentExitAction -ExitCode $process.ExitCode -Attempt $attempt
+            if ($exitAction -eq 'Complete') { break }
+            if ($exitAction -eq 'Fail') { throw "New-Lab exited with code $($process.ExitCode). Output: $outputPath" }
+
+            $lastProgressUtc = [datetime]::UtcNow
+            $lastSignature = 'child-restart|dsc-archive'
             [pscustomobject]@{
-                TimeUtc = $nowUtc.ToString('o')
+                TimeUtc = $lastProgressUtc.ToString('o')
                 ProcessId = $process.Id
-                LastSignature = $lastSignature
-                NoProgressSeconds = $noProgressSeconds
+                Event = 'ChildRestartRequested'
+                ExitCode = $process.ExitCode
+                Attempt = $attempt
             } | ConvertTo-Json -Compress | Add-Content -LiteralPath $monitorLogPath -Encoding UTF8
-
-            $reason = $null
-            if ($nowUtc -ge $deadlineUtc) { $reason = "maximum runtime of $MaxHours hour(s) exceeded" }
-            elseif ($noProgressSeconds -ge ($NoProgressMinutes * 60)) { $reason = "no new semantic progress for $NoProgressMinutes minute(s); last='$lastSignature'" }
-            if ($reason) {
-                if (-not [MemLabsNativeJob]::CloseHandle($jobHandle)) {
-                    throw "Could not terminate the stalled deployment process tree: Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())."
-                }
-                $jobHandle = [IntPtr]::Zero
-                if (-not $process.WaitForExit(30000)) {
-                    throw 'The stalled deployment process tree did not exit within 30 seconds; diagnostics were not started while mutation could continue.'
-                }
-                Save-MemLabsDeploymentDiagnostics -VMName $diagnosticVmNames -DomainName $domainName -Path $diagnosticsPath -Reason $reason
-                throw "Monitored deployment stopped: $reason. Diagnostics: $diagnosticsPath"
-            }
         }
-        if ($process.ExitCode -ne 0) { throw "New-Lab exited with code $($process.ExitCode). Output: $outputPath" }
     }
     catch {
-        Save-MemLabsDeploymentFailure -Path $failurePath -Stage Operation -ErrorMessage $_.Exception.Message `
-            -Process $process -OutputPath $outputPath -MonitorPath $monitorLogPath -DiagnosticsPath $diagnosticsPath `
-            -CrashSourcePath $childCrashPath -CrashExportPath $crashExportPath
-        throw
+        $operationFailure = $_
+        $diagnosticResult = Save-MemLabsDeploymentDiagnosticsSafely -VMName $diagnosticVmNames -DomainName $domainName -Path $diagnosticsPath -Reason $operationFailure.Exception.Message
+        try {
+            Save-MemLabsDeploymentFailure -Path $failurePath -Stage Operation -ErrorMessage $operationFailure.Exception.Message `
+                -Process $process -OutputPath $outputPath -MonitorPath $monitorLogPath -DiagnosticsPath $diagnosticResult.Path `
+                -DiagnosticsCaptureError $diagnosticResult.Error `
+                -CrashSourcePath $childCrashPath -CrashExportPath $crashExportPath
+        }
+        catch { $operationFailure.Exception.Data['FailureArtifactWriteError'] = $_.Exception.Message }
+        if (-not [string]::IsNullOrWhiteSpace($diagnosticResult.Error)) { $operationFailure.Exception.Data['DiagnosticsCaptureError'] = $diagnosticResult.Error }
+        throw $operationFailure
     }
     finally {
         if ($jobHandle -ne [IntPtr]::Zero) { [MemLabsNativeJob]::CloseHandle($jobHandle) | Out-Null }
@@ -474,21 +593,41 @@ $postcondition = {
 }
 
 try {
-    & $liveOpsPath -Mode Mutate -Intent "Monitored deployment of $configurationPath" -Target $vmNames -TargetType HostResource `
+    $liveOpsMode = if ($Restore) { 'Destructive' } else { 'Mutate' }
+    $liveOpsExpectedLoss = if ($Restore) { 'All VM state after the selected MemLabs checkpoint will be discarded before deployment resumes.' } else { '' }
+    $liveOpsRecoveryPath = if ($Restore) { 'Retain the selected checkpoint until Phase 11 validation succeeds; preserve failed VMs and diagnostics on retry failure.' } else { '' }
+    & $liveOpsPath -Mode $liveOpsMode -Intent "Monitored deployment of $configurationPath" -Target $vmNames -TargetType VM `
+        -ExpectedLoss $liveOpsExpectedLoss -RecoveryPath $liveOpsRecoveryPath -AcknowledgeDestructive:$Restore `
         -Operation $operation -Postcondition $postcondition -FailureDiagnostics {
             Get-VM -Name $vmNames -ErrorAction SilentlyContinue | Select-Object Name, State, Status, Uptime, Notes
         } -IncludeOperationOutput
 }
 catch {
-    $stage = [string]$_.Exception.Data['FailureStage']
+    $liveFailure = $_
+    $stage = [string]$liveFailure.Exception.Data['FailureStage']
     if ([string]::IsNullOrWhiteSpace($stage)) { $stage = 'Unhandled' }
-    $operationId = [string]$_.Exception.Data['OperationId']
-    if (-not (Test-Path -LiteralPath $failurePath -PathType Leaf)) {
-        Save-MemLabsDeploymentFailure -Path $failurePath -Stage $stage -ErrorMessage $_.Exception.Message -OperationId $operationId `
-            -JournalPath ([string]$_.Exception.Data['JournalPath']) -ActiveOwnerMetadata $_.Exception.Data['ActiveOwnerMetadata'] `
-            -FailureDiagnostics @($_.Exception.Data['FailureDiagnostics']) `
-            -OutputPath $outputPath -MonitorPath $monitorLogPath -DiagnosticsPath $diagnosticsPath -CrashExportPath $crashExportPath
+    $operationId = [string]$liveFailure.Exception.Data['OperationId']
+    $diagnosticResult = Save-MemLabsDeploymentDiagnosticsSafely -VMName $diagnosticVmNames -DomainName $domainName -Path $diagnosticsPath -Reason $liveFailure.Exception.Message
+    $failureArtifactWriteError = [string]$liveFailure.Exception.Data['FailureArtifactWriteError']
+    $existingFailure = $null
+    if (Test-MemLabsJsonArtifact -Path $failurePath -Kind Failure) {
+        try { $existingFailure = Get-Content -LiteralPath $failurePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { $failureArtifactWriteError = $_.Exception.Message }
     }
+    $failureErrorMessage = if ($existingFailure -and -not [string]::IsNullOrWhiteSpace([string]$existingFailure.Error)) { [string]$existingFailure.Error } else { $liveFailure.Exception.Message }
+    try {
+        Save-MemLabsDeploymentFailure -Path $failurePath -Stage $stage -ErrorMessage $failureErrorMessage -OperationId $operationId `
+            -JournalPath ([string]$liveFailure.Exception.Data['JournalPath']) -ActiveOwnerMetadata $liveFailure.Exception.Data['ActiveOwnerMetadata'] `
+            -FailureDiagnostics @($liveFailure.Exception.Data['FailureDiagnostics']) -ExistingRecord $existingFailure `
+            -OutputPath $outputPath -MonitorPath $monitorLogPath -DiagnosticsPath $diagnosticResult.Path `
+            -DiagnosticsCaptureError $diagnosticResult.Error -CrashExportPath $crashExportPath
+    }
+    catch { $failureArtifactWriteError = $_.Exception.Message }
     $crashEvidence = if (Test-Path -LiteralPath $crashExportPath -PathType Leaf) { $crashExportPath } elseif (Test-Path -LiteralPath $childCrashPath -PathType Leaf) { $childCrashPath } else { '<none>' }
-    throw "Monitored deployment failed during Live Ops stage '$stage'. OperationId=$operationId Failure=$failurePath Crash=$crashEvidence Output=$outputPath Monitor=$monitorLogPath Diagnostics=$diagnosticsPath"
+    $failureEvidence = if (Test-MemLabsJsonArtifact -Path $failurePath -Kind Failure) { $failurePath } else { '<unavailable>' }
+    $diagnosticsEvidence = if ($diagnosticResult.Succeeded) { $diagnosticResult.Path } else { '<unavailable>' }
+    $secondaryErrors = @($failureArtifactWriteError, [string]$liveFailure.Exception.Data['DiagnosticsCaptureError'], $diagnosticResult.Error) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    $secondaryText = if ($secondaryErrors.Count -gt 0) { " EvidenceErrors=$($secondaryErrors -join ' | ')" } else { '' }
+    throw "Monitored deployment failed during Live Ops stage '$stage'. Cause=$($liveFailure.Exception.Message) OperationId=$operationId Failure=$failureEvidence Crash=$crashEvidence Output=$outputPath Monitor=$monitorLogPath Diagnostics=$diagnosticsEvidence$secondaryText"
 }

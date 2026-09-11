@@ -28,6 +28,153 @@ function Import-MonitoredTestFunction {
     return [scriptblock]::Create($definition[0].Extent.Text)
 }
 
+function Invoke-MemLabsMonitorSequenceFixture {
+    param (
+        [Parameter(Mandatory)][string] $SourceRoot,
+        [Parameter(Mandatory)][string] $Sequence,
+        [Parameter(Mandatory)][string] $FixtureRoot,
+        [switch] $NoSnapshot,
+        [switch] $Restore
+    )
+
+    $caseName = ($Sequence -replace ',', '-') + $(if ($NoSnapshot) { '-nosnapshot' } else { '-snapshot' }) + $(if ($Restore) { '-restore' } else { '' })
+    $caseRoot = Join-Path $FixtureRoot $caseName
+    $toolsRoot = Join-Path $caseRoot 'tools'
+    $logsRoot = Join-Path $caseRoot 'logs'
+    $null = New-Item -Path $toolsRoot, $logsRoot -ItemType Directory -Force
+    Copy-Item -LiteralPath (Join-Path $SourceRoot 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Destination $toolsRoot
+    Copy-Item -LiteralPath (Join-Path $SourceRoot 'tools\Invoke-MemLabsDeploymentChild.ps1') -Destination $toolsRoot
+    @'
+param([switch] $SkipMaintenanceRefresh, [switch] $SkipVmCacheRefresh, [switch] $SkipEnvironmentDetection, [switch] $SkipHostPreparation)
+function Get-LocalAdminCredential { return $true }
+function Get-VM { throw 'injected fixture rich diagnostics failure' }
+'@ | Set-Content -LiteralPath (Join-Path $caseRoot 'Common.ps1') -Encoding UTF8
+    @'
+param(
+    [string] $Mode,
+    [string] $Intent,
+    [string[]] $Target,
+    [string] $TargetType,
+    [scriptblock] $Operation,
+    [scriptblock] $Postcondition,
+    [scriptblock] $FailureDiagnostics,
+    [switch] $IncludeOperationOutput
+)
+$operationId = 'fixture-operation'
+$handoffToken = [guid]::NewGuid().ToString('N')
+$sha256 = [Security.Cryptography.SHA256]::Create()
+try { $handoffHash = [Convert]::ToHexString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($handoffToken))) }
+finally { $sha256.Dispose() }
+$ownerStartUtc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
+$leasePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'fixture-lease.json'
+[pscustomobject]@{
+    OperationId = $operationId
+    State = 'Active'
+    PID = $PID
+    ProcessStartUtc = $ownerStartUtc
+    HandoffHash = $handoffHash
+} | ConvertTo-Json -Compress | Set-Content -LiteralPath $leasePath -Encoding UTF8
+$env:MEMLABS_LIVEOPS_OPERATION_ID = $operationId
+$env:MEMLABS_LIVEOPS_LEASE_PATH = $leasePath
+$env:MEMLABS_LIVEOPS_HANDOFF_TOKEN = $handoffToken
+$env:MEMLABS_LIVEOPS_OWNER_PID = [string]$PID
+$env:MEMLABS_LIVEOPS_OWNER_START_UTC = $ownerStartUtc
+try { & $Operation }
+catch {
+    $_.Exception.Data['FailureStage'] = 'Operation'
+    $_.Exception.Data['OperationId'] = $operationId
+    $_.Exception.Data['JournalPath'] = 'fixture-operations.jsonl'
+    $_.Exception.Data['ActiveOwnerMetadata'] = '{"owner":"fixture"}'
+    $_.Exception.Data['FailureDiagnostics'] = @('fixture failure diagnostic')
+    throw
+}
+'@ | Set-Content -LiteralPath (Join-Path $toolsRoot 'Invoke-MemLabsLiveOperation.ps1') -Encoding UTF8
+    @'
+param(
+    [string] $Configuration,
+    [switch] $NoWindowResize,
+    [switch] $NoSnapshot,
+    [switch] $Restore,
+    [int] $StartPhase,
+    [int[]] $Phase,
+    [int] $StopPhase,
+    [switch] $KeepFailedVMs
+)
+$attempt = if (Test-Path -LiteralPath $env:MEMLABS_TEST_COUNTER_PATH) {
+    [int](Get-Content -LiteralPath $env:MEMLABS_TEST_COUNTER_PATH -Raw) + 1
+}
+else { 1 }
+Set-Content -LiteralPath $env:MEMLABS_TEST_COUNTER_PATH -Value $attempt
+Write-Output "attempt=$attempt pid=$PID operation=$env:MEMLABS_LIVEOPS_OPERATION_ID"
+Write-Output "nosnapshot=$($NoSnapshot.IsPresent)"
+Write-Output "restore=$($Restore.IsPresent)"
+$actions = @($env:MEMLABS_TEST_EXIT_SEQUENCE -split ',')
+$action = $actions[$attempt - 1]
+if ($action -eq 'normal55') {
+    & cmd.exe /c exit 55
+    $global:LASTEXITCODE = 0
+    return
+}
+exit ([int]$action)
+'@ | Set-Content -LiteralPath (Join-Path $caseRoot 'New-Lab.ps1') -Encoding UTF8
+    $configPath = Join-Path $caseRoot 'fixture.json'
+    @{
+        vmOptions = @{ domainName = 'fixture.test'; prefix = 'FIX-' }
+        virtualMachines = @(@{ vmName = 'VM1'; hidden = $false })
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $configPath -Encoding UTF8
+    $counterPath = Join-Path $caseRoot 'attempt.txt'
+    $processInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
+    $processInfo.UseShellExecute = $false
+    $processInfo.CreateNoWindow = $true
+    $processInfo.RedirectStandardOutput = $true
+    $processInfo.RedirectStandardError = $true
+    foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', (Join-Path $toolsRoot 'Invoke-MemLabsMonitoredDeployment.ps1'), '-Configuration', $configPath, '-StartPhase', '4', '-PollSeconds', '10', '-MaxHours', '1', '-KeepFailedVMs')) {
+        $processInfo.ArgumentList.Add($argument)
+    }
+    if ($NoSnapshot) { $processInfo.ArgumentList.Add('-NoSnapshot') }
+    if ($Restore) { $processInfo.ArgumentList.Add('-Restore') }
+    $processInfo.Environment['MEMLABS_TEST_EXIT_SEQUENCE'] = $Sequence
+    $processInfo.Environment['MEMLABS_TEST_COUNTER_PATH'] = $counterPath
+    $process = [Diagnostics.Process]::Start($processInfo)
+    $monitorOutputTask = $process.StandardOutput.ReadToEndAsync()
+    $monitorErrorTask = $process.StandardError.ReadToEndAsync()
+    try {
+        if (-not $process.WaitForExit(60000)) {
+            $process.Kill($true)
+            $null = $process.WaitForExit(10000)
+            throw "Monitor sequence fixture '$Sequence' exceeded 60 seconds."
+        }
+        $exitCode = $process.ExitCode
+        $monitorOutput = $monitorOutputTask.GetAwaiter().GetResult()
+        $monitorError = $monitorErrorTask.GetAwaiter().GetResult()
+    }
+    finally {
+        $process.Dispose()
+    }
+
+    $outputPath = @(Get-ChildItem -LiteralPath $logsRoot -Filter 'MonitoredDeployment-*.out.txt' -File)[0].FullName
+    $monitorPath = @(Get-ChildItem -LiteralPath $logsRoot -Filter 'MonitoredDeployment-*.jsonl' -File -ErrorAction SilentlyContinue | Where-Object Name -notlike '*.failure.json')[0].FullName
+    $failurePath = @(Get-ChildItem -LiteralPath $logsRoot -Filter 'MonitoredDeployment-*.failure.json' -File -ErrorAction SilentlyContinue)[0].FullName
+    $diagnosticsPath = @(Get-ChildItem -LiteralPath $logsRoot -Filter 'MonitoredDeployment-*.diagnostics.json' -File -ErrorAction SilentlyContinue)[0].FullName
+    $output = Get-Content -LiteralPath $outputPath -Raw
+    $childPids = @([regex]::Matches($output, 'pid=(?<PID>\d+)') | ForEach-Object { [int]$_.Groups['PID'].Value })
+    $operationIds = @([regex]::Matches($output, 'operation=(?<ID>\S+)') | ForEach-Object { $_.Groups['ID'].Value })
+    [pscustomobject]@{
+        ExitCode = $exitCode
+        Attempts = [int](Get-Content -LiteralPath $counterPath -Raw)
+        Output = $output
+        Monitor = if ($monitorPath) { @(Get-Content -LiteralPath $monitorPath | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() }
+        Failure = if ($failurePath) { Get-Content -LiteralPath $failurePath -Raw | ConvertFrom-Json } else { $null }
+        DiagnosticsPath = $diagnosticsPath
+        Diagnostics = if ($diagnosticsPath) { Get-Content -LiteralPath $diagnosticsPath -Raw | ConvertFrom-Json } else { $null }
+        MonitorOutput = $monitorOutput
+        MonitorError = $monitorError
+        ChildPids = $childPids
+        OperationIds = $operationIds
+        TemporaryFiles = @(Get-ChildItem -LiteralPath $caseRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object Extension -eq '.tmp')
+    }
+}
+
 . (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1')
 $monitorSource = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Raw
 $childSource = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-MemLabsDeploymentChild.ps1') -Raw
@@ -46,8 +193,14 @@ $timeoutBlockStart = $monitorSource.IndexOf('if ($reason) {')
 $timeoutBlockEnd = $monitorSource.IndexOf('throw "Monitored deployment stopped:', $timeoutBlockStart)
 $timeoutBlock = if ($timeoutBlockStart -ge 0 -and $timeoutBlockEnd -gt $timeoutBlockStart) { $monitorSource.Substring($timeoutBlockStart, $timeoutBlockEnd - $timeoutBlockStart) } else { '' }
 Assert-Equal $true ($timeoutBlock.IndexOf('CloseHandle($jobHandle)') -ge 0 -and $timeoutBlock.IndexOf('CloseHandle($jobHandle)') -lt $timeoutBlock.IndexOf('WaitForExit(30000)') -and $timeoutBlock.IndexOf('WaitForExit(30000)') -lt $timeoutBlock.IndexOf('Save-MemLabsDeploymentDiagnostics')) 'timeout terminates and awaits the process tree before guest diagnostics'
-Assert-Equal $true ($monitorSource -match '\$diagnosticVmNames = @\(\$config\.virtualMachines' -and $monitorSource -match 'Save-MemLabsDeploymentDiagnostics -VMName \$diagnosticVmNames') 'timeout diagnostics include hidden dependency VMs'
+Assert-Equal $true ($monitorSource -match '\$diagnosticVmNames = @\(\$config\.virtualMachines' -and $monitorSource -match 'Save-MemLabsDeploymentDiagnosticsSafely -VMName \$diagnosticVmNames') 'failure diagnostics include hidden dependency VMs through the safe writer'
 Assert-Equal $true ($monitorSource -match '\$arguments\.StopPhase = \$StopPhase' -and $childSource -match '\$arguments\.StopPhase = \$StopPhase') 'fresh monitored runs pass StopPhase through both process boundaries'
+Assert-Equal $true ($monitorSource -match '\$arguments\.NoSnapshot = \$true' -and $childSource -match '\$arguments\.NoSnapshot = \$true') 'explicit NoSnapshot opt-out passes through both process boundaries'
+Assert-Equal $true ($monitorSource -match '\$arguments\.Restore = \$true' -and $childSource -match '\$arguments\.Restore = \$true') 'Phase 8 restore mode passes through both process boundaries'
+Assert-Equal $true ($monitorSource -match 'if \(\$Restore\) \{ ''Destructive'' \} else \{ ''Mutate'' \}') 'restore uses destructive Live Ops classification while ordinary deployment remains a mutation'
+Assert-Equal $true ($monitorSource -match '-TargetType VM' -and $monitorSource -match '-AcknowledgeDestructive:\$Restore') 'monitored restore targets VMs and explicitly acknowledges destructive state loss'
+Assert-Equal $true ($monitorSource -match 'All VM state after the selected MemLabs checkpoint will be discarded') 'monitored restore records its expected loss'
+Assert-Equal $true ($childSource.IndexOf('$arguments = @{ Configuration = $Configuration; NoWindowResize = $true }', [StringComparison]::Ordinal) -ge 0) 'deployment child does not disable recovery snapshots by default'
 Assert-Equal $true ($monitorSource -match '\$StopPhase -and \(\$StartPhase -or \$Phase\)') 'stop-phase mode rejects ambiguous start/phase combinations'
 $expectedPhaseFunction = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'Resolve-MemLabsExpectedCompletedPhase'
 . $expectedPhaseFunction
@@ -55,9 +208,83 @@ Assert-Equal 4 (Resolve-MemLabsExpectedCompletedPhase -Phase @(2, 4) -ExpectedCo
 Assert-Equal 2 (Resolve-MemLabsExpectedCompletedPhase -StopPhase 2 -ExpectedCompletedPhase 11 -ExpectedPhaseWasBound $false) 'fresh stop-phase run derives its expected completion threshold'
 Assert-Equal 7 (Resolve-MemLabsExpectedCompletedPhase -StopPhase 2 -ExpectedCompletedPhase 7 -ExpectedPhaseWasBound $true) 'explicit expected completion override is preserved'
 Assert-Equal 11 (Resolve-MemLabsExpectedCompletedPhase -ExpectedCompletedPhase 11 -ExpectedPhaseWasBound $false) 'full deployment retains the default Phase 11 postcondition'
+$exitActionFunction = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'Resolve-MemLabsDeploymentExitAction'
+. $exitActionFunction
+Assert-Equal 'Complete' (Resolve-MemLabsDeploymentExitAction -ExitCode 0 -Attempt 1) 'successful child completes without a restart'
+Assert-Equal 'Restart' (Resolve-MemLabsDeploymentExitAction -ExitCode 55 -Attempt 1) 'first DSC archive restart request relaunches the contained child'
+Assert-Equal 'Fail' (Resolve-MemLabsDeploymentExitAction -ExitCode 37 -Attempt 1) 'ordinary nonzero child exit remains a failure'
+$repeatedRestartError = $null
+try { Resolve-MemLabsDeploymentExitAction -ExitCode 55 -Attempt 2 }
+catch { $repeatedRestartError = $_ }
+Assert-Equal $true ($repeatedRestartError.Exception.Message -like '*second DSC archive restart*') 'a repeated DSC archive restart request fails instead of looping'
+Assert-Equal $true ($childSource.IndexOf('*>> $OutputPath', [StringComparison]::Ordinal) -ge 0) 'deployment retries append to the synchronized output artifact'
+Assert-Equal $true ($childSource -match '(?s)\$global:LASTEXITCODE = 0.+?New-Lab\.ps1.+?exit \$LASTEXITCODE') 'deployment child preserves explicit New-Lab exit codes'
 Assert-Equal $true ($monitorSource -match '(?s)New-MemLabsDeploymentProcess.*?gateReady\.WaitOne.*?Add-MemLabsDeploymentProcessToJob.*?startGate\.Set\(\)' -and $childSource.IndexOf('gateReady.Set()') -lt $childSource.IndexOf('WaitOne([TimeSpan]::FromMinutes(2))') -and $childSource.IndexOf('WaitOne([TimeSpan]::FromMinutes(2))') -lt $childSource.IndexOf("& (Join-Path (Split-Path -Parent `$PSScriptRoot) 'New-Lab.ps1')")) 'deployment child acknowledges the gate then waits for job ownership before invoking New-Lab'
 Assert-Equal $true ($monitorSource -match '(?s)finally \{.*?CloseHandle\(\$jobHandle\).*?\$process\.Kill\(\$true\).*?WaitForExit\(30000\)') 'monitor cleanup cannot return while an uncontained deployment process remains active'
-Assert-Equal $true ($childSource -match '(?s)MEMLABS_CRASH_LOG_PATH.*?Assert-MemLabsDeploymentLease.*?catch \{.*?DEPLOYMENT CHILD FAILURE:.*?Add-Content -LiteralPath \$OutputPath' -and $monitorSource -match 'Monitored deployment failed during Live Ops stage.*?Failure=\$failurePath.*?Crash=\$crashEvidence.*?Output=\$outputPath.*?Monitor=\$monitorLogPath.*?Diagnostics=\$diagnosticsPath') 'bootstrap and callback failures publish synchronized evidence paths'
+Assert-Equal $true ($childSource -match '(?s)MEMLABS_CRASH_LOG_PATH.*?Assert-MemLabsDeploymentLease.*?catch \{.*?DEPLOYMENT CHILD FAILURE:.*?Add-Content -LiteralPath \$OutputPath' -and $monitorSource -match 'Monitored deployment failed during Live Ops stage.*?Failure=\$failureEvidence.*?Crash=\$crashEvidence.*?Output=\$outputPath.*?Monitor=\$monitorLogPath.*?Diagnostics=\$diagnosticsEvidence') 'bootstrap and callback failures publish truthful synchronized evidence paths'
+Assert-Equal $true ($monitorSource -match '(?s)function Save-MemLabsDeploymentDiagnostics.+?\.tmp.+?ConvertFrom-Json.+?Move-Item.+?finally \{ Remove-Item') 'rich diagnostics publish atomically after JSON validation'
+Assert-Equal $true (@([regex]::Matches($monitorSource, '(?s)try \{\s*Save-MemLabsDeploymentFailure.+?\}\s*catch')).Count -ge 2) 'failure-record writes are guarded so artifact I/O cannot replace the deployment cause'
+
+$safeDiagnosticsWriter = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'Save-MemLabsDeploymentDiagnosticsSafely'
+$jsonArtifactTester = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'Test-MemLabsJsonArtifact'
+$safeFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-safe-diag-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -Path $safeFixtureRoot -ItemType Directory
+try {
+    $malformedPath = Join-Path $safeFixtureRoot 'malformed.json'
+    'not json' | Set-Content -LiteralPath $malformedPath -Encoding UTF8
+    $replacementResult = & {
+        param($SafeDefinition, $TestDefinition, $Path)
+        function Save-MemLabsDeploymentDiagnostics {
+            param([string[]]$VMName, [string]$DomainName, [string]$Path, [string]$Reason)
+            [pscustomobject]@{ Reason = $Reason; Guests = @(); FatalEvents = @() } | ConvertTo-Json | Set-Content -LiteralPath $Path -Encoding UTF8
+        }
+        . $TestDefinition
+        . $SafeDefinition
+        Save-MemLabsDeploymentDiagnosticsSafely -VMName 'FIX-VM1' -DomainName 'fixture.test' -Path $Path -Reason 'replace malformed'
+    } $safeDiagnosticsWriter $jsonArtifactTester $malformedPath
+    Assert-Equal $true $replacementResult.Succeeded 'safe diagnostics replace a malformed preexisting artifact'
+    Assert-Equal $true (& { param($Definition, $Path) . $Definition; Test-MemLabsJsonArtifact -Path $Path -Kind Diagnostics } $jsonArtifactTester $malformedPath) 'malformed diagnostics replacement is valid diagnostics JSON'
+
+    foreach ($invalidJson in 'null', '42', '[]', '{}') {
+        $invalidPath = Join-Path $safeFixtureRoot ("invalid-$([guid]::NewGuid().ToString('N')).json")
+        $invalidJson | Set-Content -LiteralPath $invalidPath -Encoding UTF8
+        Assert-Equal $false (& { param($Definition, $Path) . $Definition; Test-MemLabsJsonArtifact -Path $Path -Kind Diagnostics } $jsonArtifactTester $invalidPath) "diagnostics schema rejects $invalidJson"
+        Assert-Equal $false (& { param($Definition, $Path) . $Definition; Test-MemLabsJsonArtifact -Path $Path -Kind Failure } $jsonArtifactTester $invalidPath) "failure schema rejects $invalidJson"
+    }
+
+    $fallbackPath = Join-Path $safeFixtureRoot 'fallback.json'
+    $fallbackResult = & {
+        param($SafeDefinition, $TestDefinition, $Path)
+        function Save-MemLabsDeploymentDiagnostics { throw 'injected rich fallback cause' }
+        . $TestDefinition
+        . $SafeDefinition
+        Save-MemLabsDeploymentDiagnosticsSafely -VMName 'FIX-VM1' -DomainName 'fixture.test' -Path $Path -Reason 'fallback succeeds'
+    } $safeDiagnosticsWriter $jsonArtifactTester $fallbackPath
+    Assert-Equal $true $fallbackResult.Succeeded 'fallback diagnostics publish valid JSON when the destination is writable'
+    Assert-Equal 'injected rich fallback cause' $fallbackResult.Error 'successful fallback retains the rich-capture error'
+    Assert-Equal $true (& { param($Definition, $Path) . $Definition; Test-MemLabsJsonArtifact -Path $Path -Kind Diagnostics } $jsonArtifactTester $fallbackPath) 'fallback diagnostics satisfy the diagnostics schema'
+    $reusedFallback = & { param($SafeDefinition, $TestDefinition, $Path) . $TestDefinition; . $SafeDefinition; Save-MemLabsDeploymentDiagnosticsSafely -VMName 'FIX-VM1' -DomainName 'fixture.test' -Path $Path -Reason ignored } $safeDiagnosticsWriter $jsonArtifactTester $fallbackPath
+    Assert-Equal 'injected rich fallback cause' $reusedFallback.Error 'reused fallback diagnostics retain the degraded-capture error'
+
+    $richPath = Join-Path $safeFixtureRoot 'rich.json'
+    [pscustomobject]@{ CapturedUtc = [datetime]::UtcNow.ToString('o'); Reason = 'rich'; Guests = @([pscustomobject]@{ VMName = 'FIX-VM1' }); FatalEvents = @() } |
+        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $richPath -Encoding UTF8
+    Assert-Equal $true (& { param($Definition, $Path) . $Definition; Test-MemLabsJsonArtifact -Path $Path -Kind Diagnostics } $jsonArtifactTester $richPath) 'rich diagnostics satisfy the diagnostics schema'
+
+    $blockedPath = Join-Path $safeFixtureRoot 'missing\diagnostics.json'
+    $blockedResult = & {
+        param($SafeDefinition, $TestDefinition, $Path)
+        function Save-MemLabsDeploymentDiagnostics { throw 'injected rich diagnostics failure' }
+        . $TestDefinition
+        . $SafeDefinition
+        Save-MemLabsDeploymentDiagnosticsSafely -VMName 'FIX-VM1' -DomainName 'fixture.test' -Path $Path -Reason 'blocked fallback'
+    } $safeDiagnosticsWriter $jsonArtifactTester $blockedPath
+    Assert-Equal $false $blockedResult.Succeeded 'safe diagnostics report fallback publication failure'
+    Assert-Equal '' $blockedResult.Path 'failed diagnostics publication advertises no path'
+    Assert-Equal $true ($blockedResult.Error -like '*injected rich diagnostics failure*Fallback publication failed*') 'failed diagnostics publication preserves rich and fallback errors'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $safeFixtureRoot -Filter '*.tmp' -File -Recurse -ErrorAction SilentlyContinue).Count 'safe diagnostics tests leave no temporary files'
+}
+finally { Remove-Item -LiteralPath $safeFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue }
 
 $failureWriter = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'Save-MemLabsDeploymentFailure'
 $stampWriter = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'New-MemLabsDeploymentStamp'
@@ -83,6 +310,7 @@ try {
         -OutputPath $failureFixtureOutput -MonitorPath 'monitor.jsonl' -DiagnosticsPath 'diagnostics.json' `
         -CrashSourcePath $failureFixtureCrash -CrashExportPath $failureFixtureCrashExport
     $operationFailure = Get-Content -LiteralPath $failureFixturePath -Raw | ConvertFrom-Json
+    Assert-Equal $true (& { param($Definition, $Path) . $Definition; Test-MemLabsJsonArtifact -Path $Path -Kind Failure } $jsonArtifactTester $failureFixturePath) 'failure writer publishes the required failure-record schema'
     Assert-Equal 'Operation' $operationFailure.Stage 'operation failure artifact records its stage'
     Assert-Equal 'fixture operation failed' $operationFailure.Error 'operation failure artifact preserves the actionable error'
     Assert-Equal $finishedProcess.Id $operationFailure.ProcessId 'operation failure artifact records the exact child PID'
@@ -320,6 +548,84 @@ finally {
     Remove-Item -LiteralPath $leasePath -Force -ErrorAction SilentlyContinue
     if ($childFixtureRoot) { Remove-Item -LiteralPath $childFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue }
     if ($assignmentMarker) { Remove-Item -LiteralPath $assignmentMarker -Force -ErrorAction SilentlyContinue }
+}
+$sequenceFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-sequence-' + [guid]::NewGuid().ToString('N'))
+try {
+    $normalSuccess = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence 'normal55' -FixtureRoot $sequenceFixtureRoot
+    Assert-Equal 0 $normalSuccess.ExitCode 'normal New-Lab return ignores a stale native exit code 55'
+    Assert-Equal 1 $normalSuccess.Attempts 'normal return after native exit 55 does not relaunch the child'
+    Assert-Equal 0 @($normalSuccess.Monitor | Where-Object Event -eq 'ChildRestartRequested').Count 'stale native exit 55 records no restart event'
+    Assert-Equal 1 $normalSuccess.ChildPids.Count 'normal return output identifies its child process'
+    Assert-Equal 0 @(Get-Process -Id $normalSuccess.ChildPids -ErrorAction SilentlyContinue).Count 'normal return leaves no child process running'
+
+    $restartSuccess = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '55,0' -FixtureRoot $sequenceFixtureRoot
+    Assert-Equal 0 $restartSuccess.ExitCode 'exit sequence 55,0 succeeds through the complete monitor loop'
+    Assert-Equal 2 $restartSuccess.Attempts 'exit sequence 55,0 launches exactly two children'
+    Assert-Equal 1 @([regex]::Matches($restartSuccess.Output, 'attempt=1\b')).Count 'restart output contains exactly one first-attempt marker'
+    Assert-Equal 1 @([regex]::Matches($restartSuccess.Output, 'attempt=2\b')).Count 'restart output contains exactly one second-attempt marker'
+    Assert-Equal $true ($restartSuccess.Output.IndexOf('attempt=1', [StringComparison]::Ordinal) -lt $restartSuccess.Output.IndexOf('attempt=2', [StringComparison]::Ordinal)) 'restart output retains both attempts in order'
+    Assert-Equal 1 @($restartSuccess.Monitor | Where-Object Event -eq 'ChildRestartRequested').Count 'exit sequence 55,0 records exactly one restart event'
+    Assert-Equal 2 @([regex]::Matches($restartSuccess.Output, 'nosnapshot=False\b')).Count 'both default monitor attempts leave recovery snapshots enabled'
+    Assert-Equal 2 $restartSuccess.OperationIds.Count 'restart output identifies both child operation handoffs'
+    Assert-Equal 1 @($restartSuccess.OperationIds | Sort-Object -Unique).Count 'both restart attempts inherit one Live Ops operation identity'
+    Assert-Equal 2 $restartSuccess.ChildPids.Count 'restart output identifies both child processes'
+    Assert-Equal 0 @(Get-Process -Id $restartSuccess.ChildPids -ErrorAction SilentlyContinue).Count 'successful restart leaves no child process running'
+    Assert-Equal $null $restartSuccess.Failure 'successful restart creates no failure artifact'
+    Assert-Equal 0 $restartSuccess.TemporaryFiles.Count 'successful restart leaves no temporary artifact files'
+
+    $restartNoSnapshot = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '55,0' -FixtureRoot $sequenceFixtureRoot -NoSnapshot
+    Assert-Equal 0 $restartNoSnapshot.ExitCode 'explicit NoSnapshot exit sequence 55,0 succeeds through the complete monitor loop'
+    Assert-Equal 2 $restartNoSnapshot.Attempts 'explicit NoSnapshot exit sequence launches exactly two children'
+    Assert-Equal 2 @([regex]::Matches($restartNoSnapshot.Output, 'nosnapshot=True\b')).Count 'both restarted children inherit the explicit NoSnapshot opt-out'
+    Assert-Equal 1 @($restartNoSnapshot.Monitor | Where-Object Event -eq 'ChildRestartRequested').Count 'explicit NoSnapshot restart records exactly one restart event'
+    Assert-Equal 2 $restartNoSnapshot.ChildPids.Count 'explicit NoSnapshot output identifies both child processes'
+    Assert-Equal 0 @(Get-Process -Id $restartNoSnapshot.ChildPids -ErrorAction SilentlyContinue).Count 'explicit NoSnapshot restart leaves no child process running'
+    Assert-Equal 0 $restartNoSnapshot.TemporaryFiles.Count 'explicit NoSnapshot restart leaves no temporary artifact files'
+
+    $restoreSuccess = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '0' -FixtureRoot $sequenceFixtureRoot -Restore
+    Assert-Equal 0 $restoreSuccess.ExitCode 'restore mode succeeds through the complete monitor loop'
+    Assert-Equal 1 $restoreSuccess.Attempts 'restore mode launches exactly one child on success'
+    Assert-Equal 1 @([regex]::Matches($restoreSuccess.Output, 'restore=True\b')).Count 'deployment child passes Restore to New-Lab'
+    Assert-Equal 0 @($restoreSuccess.Monitor | Where-Object Event -eq 'ChildRestartRequested').Count 'restore success records no restart event'
+    Assert-Equal 1 $restoreSuccess.ChildPids.Count 'restore output identifies its child process'
+    Assert-Equal 0 @(Get-Process -Id $restoreSuccess.ChildPids -ErrorAction SilentlyContinue).Count 'restore mode leaves no child process running'
+    Assert-Equal 0 $restoreSuccess.TemporaryFiles.Count 'restore mode leaves no temporary artifact files'
+
+    $repeatedRestart = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '55,55' -FixtureRoot $sequenceFixtureRoot
+    Assert-Equal 1 $repeatedRestart.ExitCode 'exit sequence 55,55 fails the complete monitor loop'
+    Assert-Equal 2 $repeatedRestart.Attempts 'exit sequence 55,55 is bounded at two children'
+    Assert-Equal 1 @([regex]::Matches($repeatedRestart.Output, 'attempt=1\b')).Count 'repeated restart output contains exactly one first-attempt marker'
+    Assert-Equal 1 @([regex]::Matches($repeatedRestart.Output, 'attempt=2\b')).Count 'repeated restart output contains exactly one second-attempt marker'
+    Assert-Equal 55 $repeatedRestart.Failure.ExitCode 'repeated restart failure records the final child exit code'
+    Assert-Equal $true ($repeatedRestart.Failure.Error -like '*second DSC archive restart*') 'repeated restart failure preserves its actionable reason'
+    Assert-Equal $true (Test-Path -LiteralPath $repeatedRestart.DiagnosticsPath -PathType Leaf) 'repeated restart failure writes its advertised diagnostics artifact'
+    Assert-Equal $true ($repeatedRestart.Diagnostics.Reason -like '*second DSC archive restart*') 'repeated restart diagnostics preserve the failure reason'
+    Assert-Equal $true ($repeatedRestart.MonitorError -match 'Cause=' -and $repeatedRestart.MonitorError -match 'EvidenceErrors=') 'repeated restart final error preserves cause and degraded diagnostics evidence'
+    Assert-Equal 1 @($repeatedRestart.Monitor | Where-Object Event -eq 'ChildRestartRequested').Count 'exit sequence 55,55 records only the accepted first restart'
+    Assert-Equal 2 $repeatedRestart.OperationIds.Count 'repeated restart output identifies both child operation handoffs'
+    Assert-Equal 1 @($repeatedRestart.OperationIds | Sort-Object -Unique).Count 'repeated restart children inherit one Live Ops operation identity'
+    Assert-Equal 2 $repeatedRestart.ChildPids.Count 'repeated restart output identifies both child processes'
+    Assert-Equal 0 @(Get-Process -Id $repeatedRestart.ChildPids -ErrorAction SilentlyContinue).Count 'repeated restart failure leaves no child process running'
+    Assert-Equal 0 $repeatedRestart.TemporaryFiles.Count 'repeated restart failure leaves no temporary artifact files'
+
+    $ordinaryFailure = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '37' -FixtureRoot $sequenceFixtureRoot
+    Assert-Equal 1 $ordinaryFailure.ExitCode 'ordinary nonzero exit fails the complete monitor loop'
+    Assert-Equal 1 $ordinaryFailure.Attempts 'ordinary nonzero exit does not relaunch the child'
+    Assert-Equal 1 @([regex]::Matches($ordinaryFailure.Output, 'attempt=1\b')).Count 'ordinary failure output contains exactly one attempt marker'
+    Assert-Equal 37 $ordinaryFailure.Failure.ExitCode 'ordinary failure artifact records the child exit code'
+    Assert-Equal $true ($ordinaryFailure.Failure.Error -like '*exited with code 37*') 'ordinary failure artifact preserves its actionable reason'
+    Assert-Equal 'fixture-operation|fixture-operations.jsonl|{"owner":"fixture"}|fixture failure diagnostic' "$($ordinaryFailure.Failure.OperationId)|$($ordinaryFailure.Failure.Journal)|$($ordinaryFailure.Failure.ActiveOwner)|$(@($ordinaryFailure.Failure.FailureDiagnostics) -join ',')" 'ordinary failure artifact merges Live Ops correlation without losing child evidence'
+    Assert-Equal $true (Test-Path -LiteralPath $ordinaryFailure.DiagnosticsPath -PathType Leaf) 'ordinary failure writes its advertised diagnostics artifact'
+    Assert-Equal $true ($ordinaryFailure.Diagnostics.Reason -like '*exited with code 37*') 'ordinary failure diagnostics preserve the child exit reason'
+    Assert-Equal $true ($ordinaryFailure.MonitorError -match 'Cause=' -and $ordinaryFailure.MonitorError -match 'EvidenceErrors=') 'ordinary failure final error preserves cause and degraded diagnostics evidence'
+    Assert-Equal 0 @($ordinaryFailure.Monitor | Where-Object Event -eq 'ChildRestartRequested').Count 'ordinary nonzero exit records no restart event'
+    Assert-Equal 1 $ordinaryFailure.OperationIds.Count 'ordinary failure output identifies its lease handoff'
+    Assert-Equal 1 $ordinaryFailure.ChildPids.Count 'ordinary failure output identifies its child process'
+    Assert-Equal 0 @(Get-Process -Id $ordinaryFailure.ChildPids -ErrorAction SilentlyContinue).Count 'ordinary failure leaves no child process running'
+    Assert-Equal 0 $ordinaryFailure.TemporaryFiles.Count 'ordinary failure leaves no temporary artifact files'
+}
+finally {
+    Remove-Item -LiteralPath $sequenceFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 $path = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-' + [guid]::NewGuid().ToString('N') + '.jsonl')
 $start = [datetime]'2026-09-09T00:00:00Z'
