@@ -436,6 +436,8 @@ $shareAccts = @(@($targets | ForEach-Object { "$($_.ReplicaShort)`$" }) + "$site
 $shareSetupSb = {
     param($accts, $domainNb)
     $out = @()
+    $systemSid = [Security.Principal.SecurityIdentifier]'S-1-5-18'
+    $systemName = $systemSid.Translate([Security.Principal.NTAccount]).Value
     try {
         if (-not (Get-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -ErrorAction SilentlyContinue)) {
             New-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -Description 'ConfigMgr MP replica snapshot/cert access' | Out-Null
@@ -454,12 +456,12 @@ $shareSetupSb = {
     try {
         if (-not (Test-Path $shareRoot)) { New-Item -Path $shareRoot -ItemType Directory -Force | Out-Null }
         if (-not (Get-SmbShare -Name 'ConfigMgr_MPReplica' -ErrorAction SilentlyContinue)) {
-            New-SmbShare -Name 'ConfigMgr_MPReplica' -Path $shareRoot -FullAccess 'SYSTEM' -ChangeAccess 'ConfigMgr_MPReplicaAccess' -ErrorAction Stop | Out-Null
+            New-SmbShare -Name 'ConfigMgr_MPReplica' -Path $shareRoot -FullAccess $systemName -ChangeAccess 'ConfigMgr_MPReplicaAccess' -ErrorAction Stop | Out-Null
             $out += "created share ConfigMgr_MPReplica -> $shareRoot"
         }
         $acl = Get-Acl $shareRoot
         $rules = @(
-            (New-Object System.Security.AccessControl.FileSystemAccessRule('SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')),
+            (New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')),
             (New-Object System.Security.AccessControl.FileSystemAccessRule("$env:COMPUTERNAME\ConfigMgr_MPReplicaAccess", 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
         )
         foreach ($r in $rules) { try { $acl.AddAccessRule($r) } catch {} }
@@ -785,8 +787,9 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
                     Invoke-Command -ComputerName $t.ReplicaShort -ArgumentList $t.MPAccount -ScriptBlock {
                         param($mpAcct)
                         $member = $mpAcct
-                        $exists = Get-LocalGroupMember -Group 'Administrators' -Member $member -ErrorAction SilentlyContinue
-                        if (-not $exists) { Add-LocalGroupMember -Group 'Administrators' -Member $member -ErrorAction SilentlyContinue }
+                        $administratorsSid = 'S-1-5-32-544'
+                        $exists = Get-LocalGroupMember -SID $administratorsSid -Member $member -ErrorAction SilentlyContinue
+                        if (-not $exists) { Add-LocalGroupMember -SID $administratorsSid -Member $member -ErrorAction SilentlyContinue }
                     } -ErrorAction Stop
                     Write-DscStatus "$Tag [$rlabel] MP account added to local Administrators on $($t.ReplicaShort)."
                 }

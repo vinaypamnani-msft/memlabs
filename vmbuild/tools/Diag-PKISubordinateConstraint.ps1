@@ -308,9 +308,9 @@ $diagScript = {
     try {
         $whoami = whoami /groups /fo list 2>&1 | Out-String
         # Explicit checks for the well-known admin groups by RID (domain-relative).
-        $hasEA = ($whoami -match '-519\b') -or ($whoami -match 'Enterprise Admins')
-        $hasDA = ($whoami -match '-512\b') -or ($whoami -match 'Domain Admins')
-        $hasSA = ($whoami -match '-518\b') -or ($whoami -match 'Schema Admins')
+        $hasEA = ($whoami -match '-519\b')
+        $hasDA = ($whoami -match '-512\b')
+        $hasSA = ($whoami -match '-518\b')
         _R "TOKEN HAS Enterprise Admins (RID 519): $hasEA"
         _R "TOKEN HAS Domain Admins   (RID 512): $hasDA"
         _R "TOKEN HAS Schema Admins   (RID 518): $hasSA"
@@ -525,7 +525,10 @@ $diagScript = {
 
     _H "CERT PUBLISHERS membership (CA machine account)"
     try {
-        $cp = [ADSI]("LDAP://CN=Cert Publishers,CN=Users," + $defaultNC)
+        Import-Module ActiveDirectory -ErrorAction Stop
+        $domainSid = (Get-ADDomain -ErrorAction Stop).DomainSID.Value
+        $cpDn = (Get-ADGroup -Identity "$domainSid-517" -ErrorAction Stop).DistinguishedName
+        $cp = [ADSI]("LDAP://" + $cpDn)
         $members = @($cp.member) | ForEach-Object { $_ }
         _R "Cert Publishers members: $($members -join ' ; ')"
         _R "This machine ($env:COMPUTERNAME`$) present: $([bool]($members -match [regex]::Escape("CN=$env:COMPUTERNAME,")))"

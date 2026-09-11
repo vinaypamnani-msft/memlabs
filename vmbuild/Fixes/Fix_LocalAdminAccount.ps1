@@ -11,15 +11,17 @@
 $Fix_LocalAdminAccount = {
     param ([string]$password)
     try {
-        $existing = Get-LocalUser -Name 'Administrator' -ErrorAction Stop
-        Write-FixLog "Found local Administrator (SID=$($existing.SID), Enabled=$($existing.Enabled))"
+        $existing = @(Get-LocalUser -ErrorAction Stop | Where-Object { $_.SID.Value -match '-500$' })
+        if ($existing.Count -ne 1) { throw "Expected one built-in local administrator account with RID 500, found $($existing.Count)." }
+        $administratorSid = $existing[0].SID
+        Write-FixLog "Found built-in local administrator '$($existing[0].Name)' (SID=$administratorSid, Enabled=$($existing[0].Enabled))"
 
         $secure = ConvertTo-SecureString -String $password -AsPlainText -Force
-        Set-LocalUser -Name 'Administrator' -Password $secure -ErrorAction Stop
+        Set-LocalUser -SID $administratorSid -Password $secure -ErrorAction Stop
         Write-FixLog "Password reset via Set-LocalUser" -Level Success
 
-        Enable-LocalUser -Name 'Administrator' -ErrorAction Stop
-        $after = Get-LocalUser -Name 'Administrator'
+        Enable-LocalUser -SID $administratorSid -ErrorAction Stop
+        $after = Get-LocalUser -SID $administratorSid
         Write-FixLog "Account enabled (Enabled=$($after.Enabled), PasswordLastSet=$($after.PasswordLastSet))" -Level Success
 
         [pscustomobject]@{ Success = $true; Message = 'Local Administrator password reset and account enabled' }
@@ -41,7 +43,7 @@ $Fix_LocalAdminAccount = {
 if ($null -ne $Common.LocalAdmin) {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_LocalAdminAccount"
-        FixVersion        = "240710"
+        FixVersion        = "260911"
         NeededOnFreshDeploy = $true
         AppliesToExisting   = $true
         AppliesToRoles    = @()

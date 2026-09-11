@@ -2661,8 +2661,9 @@ class WaitForExtendSchemaFile {
             # Verify Schema Admin membership (extadsch.exe requires it)
             try {
                 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-                $schemaAdminsSID = (Get-ADGroup "Schema Admins" -ErrorAction Stop).SID
-                if ($currentUser.Groups -notcontains $schemaAdminsSID) {
+                $forestRootDomain = (Get-ADForest -ErrorAction Stop).RootDomain
+                $schemaAdminsSid = "$((Get-ADDomain -Identity $forestRootDomain -ErrorAction Stop).DomainSID.Value)-518"
+                if (@($currentUser.Groups | ForEach-Object { $_.Value }) -notcontains $schemaAdminsSid) {
                     Write-Status "WARNING: Current identity '$($currentUser.Name)' is not in Schema Admins -- extadsch.exe will likely fail. Ensure PsDscRunAsCredential is set to a domain admin account."
                 }
                 else {
@@ -3169,10 +3170,10 @@ class AddNtfsPermissions {
     [void] Set() {
         Write-Status "Adding NTFS permissions to C:\tools"
         $testPath = "C:\staging\DSC\AddNtfsPermissions.txt"
-        & icacls C:\tools /grant "Users:(M,RX)" /t | Out-File $testPath -Force -ErrorAction SilentlyContinue
-        & icacls C:\temp /grant "Users:F" /t | Out-File $testPath -Append -Force
+        & icacls C:\tools /grant "*S-1-5-32-545:(M,RX)" /t | Out-File $testPath -Force -ErrorAction SilentlyContinue
+        & icacls C:\temp /grant "*S-1-5-32-545:F" /t | Out-File $testPath -Append -Force
         & takeown /F C:\windows\system32\Configuration /A /R | Out-File $testPath -Append -Force
-        & icacls C:\windows\system32\Configuration /grant "Administrators:F" /t | Out-File $testPath -Append -Force
+        & icacls C:\windows\system32\Configuration /grant "*S-1-5-32-544:F" /t | Out-File $testPath -Append -Force
     }
 
     [bool] Test() {
@@ -4817,39 +4818,43 @@ class AddUserToLocalAdminGroup {
     [void] Set() {
         $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
+        $administratorSid = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-544'
+        $memberName = "$_DomainName\$_Name"
         try {
-            $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
-            $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
-            Write-Status "Adding $_DomainName\$_Name to administrators group"
-            if (-not $GroupObj.IsMember("WinNT://$_DomainName/$_Name")) {
-                $GroupObj.Add("WinNT://$_DomainName/$_Name")
+            $existing = @(Get-LocalGroupMember -SID $administratorSid -ErrorAction Stop |
+                Where-Object { $_.Name -ieq $memberName })
+            Write-Status "Adding $memberName to administrators group"
+            if ($existing.Count -eq 0) {
+                Add-LocalGroupMember -SID $administratorSid -Member $memberName -ErrorAction Stop
             }
         }
         catch {
-            Write-Status "AddUserToLocalAdminGroup: Failed to add $_DomainName\$_Name to administrators group $_"
-            if ($(Test-ComputerSecureChannel) -eq $False) { 
+            $failureMessage = $_.Exception.Message
+            Write-Status "AddUserToLocalAdminGroup: Failed to add $memberName to administrators group: $failureMessage"
+            $secureChannelBroken = $false
+            try { $secureChannelBroken = -not (Test-ComputerSecureChannel -ErrorAction Stop) } catch { }
+            if ($secureChannelBroken) {
                 Write-Status "AddUserToLocalAdminGroup: Secure Channel is broken. Attempting to reboot to fix it."
                 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
             }
+            throw "AddUserToLocalAdminGroup: Failed to add $memberName to administrators group: $failureMessage"
         }
-    
     }
 
     [bool] Test() {
         $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
+        $administratorSid = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-544'
+        $memberName = "$_DomainName\$_Name"
         try {
-            $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
-            $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
-            Write-Verbose "[$(Get-Date -format HH:mm:ss)] Testing $_DomainName\$_Name is in administrators group"
-            if ($GroupObj.IsMember("WinNT://$_DomainName/$_Name") -eq $true) {
-                return $true
-            }
-            return $false
+            Write-Verbose "[$(Get-Date -format HH:mm:ss)] Testing $memberName is in administrators group"
+            $existing = @(Get-LocalGroupMember -SID $administratorSid -ErrorAction Stop |
+                Where-Object { $_.Name -ieq $memberName })
+            return $existing.Count -gt 0
         }
         catch {
-            Write-Verbose "AddUserToLocalAdminGroup: Failed to test $_DomainName\$_Name in administrators group $_"
+            Write-Verbose "AddUserToLocalAdminGroup: Failed to test $memberName in administrators group $_"
             return $false
         }
     }
@@ -9707,6 +9712,7 @@ class AddToAdminGroup {
 
     [DscProperty(Key)]
     [string] $TargetGroup
+
     [void] Set() {
 
 
@@ -9714,23 +9720,41 @@ class AddToAdminGroup {
         $retries = 120
         $tryno = 0
         $DisplayAccountName = "$($this.AccountNames -join ',')"
-        while ($tryno -le $retries) {
+        while ($tryno -lt $retries) {
             $tryno++
             try {
+                $targetLookup = @{ ErrorAction = 'Stop' }
+                $memberLookup = @{ ErrorAction = 'Stop' }
+                if ($this.DomainName -ne "NONE") {
+                    $memberLookup['Server'] = $this.DomainName
+                    $memberLookup['AuthType'] = 'Negotiate'
+                    $memberLookup['Credential'] = $this.RemoteCreds
+                }
+                $targetIdentity = $this.TargetGroup
+                if ($this.TargetGroup -match '^SID:(S-\d(?:-\d+)+)$') {
+                    $targetIdentity = $Matches[1]
+                }
+                elseif ($this.TargetGroup -match '^RID:(\d+)$') {
+                    $domainInfo = Get-ADDomain @targetLookup
+                    $targetIdentity = "$($domainInfo.DomainSID.Value)-$($Matches[1])"
+                }
+                $targetGroupDn = (Get-ADGroup -Identity $targetIdentity @targetLookup).DistinguishedName
+                if (-not $targetGroupDn) { throw "Could not resolve target group '$targetIdentity'." }
+
                 if ($this.DomainName -ne "NONE") {
                     foreach ($AccountName in $this.AccountNames) {
                         $DisplayAccountName = "$($this.DomainName)\$AccountName"
 
                         if ($AccountName.EndsWith("$")) {                           
                             Write-Status "Adding Computer $DisplayAccountName to $($this.TargetGroup)"
-                            $user1 = Get-ADComputer -Identity $AccountName -server $this.DomainName -AuthType Negotiate -Credential $this.RemoteCreds
+                            $user1 = Get-ADComputer -Identity $AccountName @memberLookup
                         }
                         else {
                             Write-Status "Adding User  $DisplayAccountName to $($this.TargetGroup)"
-                            $user1 = Get-ADuser -Identity $AccountName -server $this.DomainName -AuthType Negotiate -Credential $this.RemoteCreds
+                            $user1 = Get-ADuser -Identity $AccountName @memberLookup
                         }
-                        Write-Verbose "Add-ADGroupMember -Identity $($this.TargetGroup) -Members $user1 ($DisplayAccountName)"
-                        Add-ADGroupMember -Identity $this.TargetGroup -Members $user1
+                        Write-Verbose "Add-ADGroupMember -Identity $targetGroupDn -Members $user1 ($DisplayAccountName)"
+                        Add-ADGroupMember -Identity $targetGroupDn -Members $user1 -ErrorAction Stop
                     }
                 }
                 else {
@@ -9739,18 +9763,22 @@ class AddToAdminGroup {
                         $DisplayAccountName = "$AccountName"
                         if ($AccountName.EndsWith("$")) {
                             Write-Status "Adding Computer $DisplayAccountName"
-                            $user2 = Get-ADComputer -Identity $AccountName
+                            $user2 = Get-ADComputer -Identity $AccountName @memberLookup
                         }
                         else {
                             Write-Status "Adding User $DisplayAccountName"
-                            $user2 = Get-ADuser -Identity $AccountName
+                            $user2 = Get-ADuser -Identity $AccountName @memberLookup
                         }
-                        Write-Verbose "Add-ADGroupMember -Identity $($this.TargetGroup) -Members $user2 ($DisplayAccountName)"
-                        Add-ADGroupMember -Identity $this.TargetGroup -Members $user2
+                        Write-Verbose "Add-ADGroupMember -Identity $targetGroupDn -Members $user2 ($DisplayAccountName)"
+                        Add-ADGroupMember -Identity $targetGroupDn -Members $user2 -ErrorAction Stop
                     }
                 }
             }
             catch {
+                $failureMessage = $_.Exception.Message
+                if ($tryno -ge $retries) {
+                    throw "Failed to add $DisplayAccountName to $($this.TargetGroup) after $tryno attempts: $failureMessage"
+                }
                 Write-Status "Failed to add $DisplayAccountName To $($this.TargetGroup).  Retrying. $tryno/$retries"
                 Write-Verbose $_
                 start-sleep -seconds 5
@@ -10634,6 +10662,7 @@ class PromoteDomainController {
             $searcher = New-Object System.DirectoryServices.DirectorySearcher($de)
             $searcher.Filter = "(&(objectClass=user)(sAMAccountName=$($this.Credential.GetNetworkCredential().UserName)))"
             $searcher.PropertiesToLoad.Add('memberOf') | Out-Null
+            $searcher.PropertiesToLoad.Add('tokenGroups') | Out-Null
             $searcher.PropertiesToLoad.Add('distinguishedName') | Out-Null
             $userResult = $searcher.FindOne()
             if ($userResult) {
@@ -10645,8 +10674,11 @@ class PromoteDomainController {
                     foreach ($g in $groups) {
                         Write-Verbose "PromoteDomainController: Member of: $g"
                     }
-                    $isDomainAdmin = $groups | Where-Object { $_ -like 'CN=Domain Admins,*' }
-                    $isEnterpriseAdmin = $groups | Where-Object { $_ -like 'CN=Enterprise Admins,*' }
+                    $groupSids = @($userResult.Properties['tokengroups'] | ForEach-Object {
+                            [System.Security.Principal.SecurityIdentifier]::new([byte[]]$_, 0).Value
+                        })
+                    $isDomainAdmin = @($groupSids | Where-Object { $_ -match '-512$' }).Count -gt 0
+                    $isEnterpriseAdmin = @($groupSids | Where-Object { $_ -match '-519$' }).Count -gt 0
                     if (-not $isDomainAdmin) {
                         Write-Verbose "PromoteDomainController: WARNING - '$credUser' is NOT in Domain Admins"
                     }

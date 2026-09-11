@@ -128,7 +128,7 @@
             DomainName   = ($deployConfig.vmOptions.domainName)
             RemoteCreds  = $DomainCreds
             AccountNames = @($DomainAdminName, $Admincreds.UserName)
-            TargetGroup = "Administrators"
+            TargetGroup = 'SID:S-1-5-32-544'
             DependsOn    = $nextDepend
         }
         $nextDepend = "[AddToAdminGroup]AddRemoteAdmins"

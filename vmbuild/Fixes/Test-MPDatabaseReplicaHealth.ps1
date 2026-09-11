@@ -655,7 +655,7 @@ FROM dbo.MSreplication_subscriptions
 
         try {
             $admins = Invoke-Command -ComputerName $replicaServer -ScriptBlock {
-                (Get-LocalGroupMember -Group 'Administrators' -ErrorAction SilentlyContinue).Name
+                (Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction SilentlyContinue).Name
             } -ErrorAction Stop
             $hit = @($admins) | Where-Object { $_ -match "\\$mpShort\$?$" -or $_ -match "$mpShort\$$" }
             if ($hit) { Add-Result PASS 'Replica OS' "MP '$mpAccount' in local Administrators ($replicaServer)" ($hit -join ', ') }

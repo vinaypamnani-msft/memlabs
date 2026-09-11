@@ -542,7 +542,7 @@ if ($blmEnabled) {
                     # Add Domain Admins as a member if missing
                     try {
                         $daFinder = New-Object DirectoryServices.DirectorySearcher
-                        $daFinder.Filter = "(&(objectClass=group)(sAMAccountName=Domain Admins))"
+                        $daFinder.Filter = "(&(objectClass=group)(primaryGroupToken=512))"
                         $daFound = $daFinder.FindOne()
                         if ($daFound) {
                             $grpObj = $found.GetDirectoryEntry()

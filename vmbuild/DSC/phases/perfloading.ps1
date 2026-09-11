@@ -28,6 +28,8 @@ Write-DscStatus "$Tag Starting perfloading"
 
     # dot source functions
     . $PSScriptRoot\ScriptFunctions.ps1
+    $worldName = ([Security.Principal.SecurityIdentifier]'S-1-1-0').Translate([Security.Principal.NTAccount]).Value
+    $administratorsName = ([Security.Principal.SecurityIdentifier]'S-1-5-32-544').Translate([Security.Principal.NTAccount]).Value
     $activationScriptPath = Join-Path $PSScriptRoot 'WindowsActivation.Script.ps1'
     $activationScriptText = [IO.File]::ReadAllText($activationScriptPath).TrimStart([char]0xFEFF)
     . ([scriptblock]::Create($activationScriptText))
@@ -834,7 +836,7 @@ foreach ($requiredShortcut in @('SCCM Control Panel Applet.lnk', 'Client Logs.ln
 $taskName = 'EnableLogMachine'
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$shortcutScript`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn
-$principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Refresh MemLabs desktop shortcuts and LogMachine associations' -Force | Out-Null
 
@@ -2195,9 +2197,9 @@ if ($licensed) { Write-Output 'Activated' }
         Write-DscStatus "$Tag OSD folder does not exist and creating one"
     }
 
-    # Create the share with read access for "Everyone"
+    # Preserve broad lab access without relying on localized built-in names.
     if (-not (Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue)) {
-        New-SmbShare -Name $shareName -Path $folderPath -FullAccess @("Administrators", "Everyone")
+        New-SmbShare -Name $shareName -Path $folderPath -FullAccess @($administratorsName, $worldName)
     }
 
     Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
@@ -3418,7 +3420,7 @@ Write-Output `$true
 
             # Create SMB share for Office source
             if (-not (Get-SmbShare -Name $officeShareName -ErrorAction SilentlyContinue)) {
-                New-SmbShare -Name $officeShareName -Path $officeSourceRoot -FullAccess @("Administrators", "Everyone") -ErrorAction SilentlyContinue
+                New-SmbShare -Name $officeShareName -Path $officeSourceRoot -FullAccess @($administratorsName, $worldName) -ErrorAction SilentlyContinue
                 Write-DscStatus "$Tag Created SMB share \\$ThisMachineName\$officeShareName"
             }
 
@@ -5085,9 +5087,9 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             Write-DscStatus "$Tag updatePkgs folder does not exist and creating one"
         }
 
-        # Create the share with read access for "Everyone"
+        # Preserve broad lab access without relying on localized built-in names.
         if (-not (Get-SmbShare -Name $shareName1 -ErrorAction SilentlyContinue)) {
-            New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators", "Everyone")
+            New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @($administratorsName, $worldName)
         }
 
         Write-DscStatus "$Tag $shareName1 share successfully shared with Administrators"

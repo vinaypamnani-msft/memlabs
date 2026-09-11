@@ -1149,7 +1149,7 @@ function ConvertTo-DeployConfigEx {
             SQLSysAdminAccounts = @()
             LocalAdminAccounts  = @($cm_svc)
             WaitOnDomainJoin    = @()
-            DomainAccounts      = @($deployConfig.vmOptions.adminName, "cm_svc", "vmbuildadmin", "administrator")
+            DomainAccounts      = @($deployConfig.vmOptions.adminName, "cm_svc", "vmbuildadmin")
             DomainAdmins        = @($deployConfig.vmOptions.adminName)
             SchemaAdmins        = @($deployConfig.vmOptions.adminName)
         }
@@ -1579,7 +1579,9 @@ function ConvertTo-DeployConfigEx {
             $DName = $deployConfig.vmOptions.domainNetBiosName
             $cm_admin = "$DNAME\$DomainAdminName"
             $vm_admin = "$DNAME\vmbuildadmin"
-            $accountLists.SQLSysAdminAccounts = @('NT AUTHORITY\SYSTEM', $cm_admin, $vm_admin, 'BUILTIN\Administrators')
+            # Phase 4 converges LocalSystem and built-in Administrators by SID.
+            # Keep only deployment-specific names in generated configuration.
+            $accountLists.SQLSysAdminAccounts = @($cm_admin, $vm_admin)
             $SiteServerVM = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $thisVM.vmName }
 
             if ($SiteServerVM) {

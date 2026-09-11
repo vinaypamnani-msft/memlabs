@@ -38,7 +38,7 @@ $Fix_ConfigureSSMS = {
     $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
     $action    = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
     $trigger   = New-ScheduledTaskTrigger -AtLogOn
-    $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
+    $principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Highest
     $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description 'Configure SSMS Registered Servers'
 
     Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
@@ -56,7 +56,7 @@ $Fix_ConfigureSSMS = {
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-ConfigureSSMS"
-    FixVersion        = "260522"
+    FixVersion        = "260911"
     NeededOnFreshDeploy = $true
     AppliesToExisting   = $true
     AppliesToRoles    = @()

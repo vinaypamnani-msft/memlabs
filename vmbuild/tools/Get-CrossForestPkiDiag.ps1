@@ -9,10 +9,9 @@
 
       - The remote CA / OtherDC (default CST-DC1, cstest8 forest): dumps the
         ConfigMgrClientCertificate template ACL, tests whether the FOREIGN
-        domain's "Domain Computers" principal resolves on the CA, attempts the
-        exact PSPKI Add-CertificateTemplateAcl grant in a try/catch (capturing
-        the real exception), and pulls the DSC status logs for the
-        AddCertificateTemplate resource.
+        domain's "Domain Computers" principal resolves on the CA, reads the
+        SID-native ACEs written by the current DSC implementation, and pulls
+        the DSC status logs for the AddCertificateTemplate resource.
 
       - The cross-forest client (default CSB-W11CLIENT1, cstest8b forest):
         dumps LocalMachine\My certs, the CertificateServicesClient-
@@ -72,36 +71,86 @@ $caScript = {
     param($TemplateName, $ClientDomainNetbios)
     $out = [System.Collections.Generic.List[string]]::new()
     function W { param($t) $script:out.Add([string]$t) }
+    function Get-TemplateAclGrantState {
+        param([object[]]$AccessRules, [string]$SidValue)
+
+        $enrollGuid = [guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55'
+        $autoEnrollGuid = [guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
+        $granted = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $matchingCount = 0
+        foreach ($ace in @($AccessRules | Where-Object { $null -ne $_ })) {
+            try {
+                if ($ace.IdentityReference -is [System.Security.Principal.SecurityIdentifier]) {
+                    $aceSid = $ace.IdentityReference.Value
+                }
+                else {
+                    $aceSid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+                }
+            }
+            catch { $aceSid = "$($ace.IdentityReference)" }
+            if ($aceSid -ne $SidValue) { continue }
+            $matchingCount++
+            if ("$($ace.AccessControlType)" -ne 'Allow') { continue }
+
+            $rights = [System.DirectoryServices.ActiveDirectoryRights]$ace.ActiveDirectoryRights
+            $genericAll = ($rights -band [System.DirectoryServices.ActiveDirectoryRights]::GenericAll) -eq [System.DirectoryServices.ActiveDirectoryRights]::GenericAll
+            if ($genericAll -or (($rights -band [System.DirectoryServices.ActiveDirectoryRights]::GenericRead) -eq [System.DirectoryServices.ActiveDirectoryRights]::GenericRead)) {
+                [void]$granted.Add('Read')
+            }
+            if ($genericAll) {
+                [void]$granted.Add('Enroll')
+                [void]$granted.Add('AutoEnroll')
+                continue
+            }
+            if (($rights -band [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight) -ne [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight) { continue }
+            $objectType = [guid]$ace.ObjectType
+            if ($objectType -eq $enrollGuid) { [void]$granted.Add('Enroll') }
+            elseif ($objectType -eq $autoEnrollGuid) { [void]$granted.Add('AutoEnroll') }
+        }
+        $required = @('Read', 'Enroll', 'AutoEnroll')
+        $missing = @($required | Where-Object { -not $granted.Contains($_) })
+        return [pscustomobject]@{
+            Complete = $missing.Count -eq 0
+            MatchingCount = $matchingCount
+            Granted = @($required | Where-Object { $granted.Contains($_) })
+            Missing = $missing
+        }
+    }
 
     W "### certutil -v -template $TemplateName (security descriptor + ACEs) ###"
     try { W ((& certutil -v -template $TemplateName 2>&1 | Out-String)) } catch { W "ERR certutil: $($_.Exception.Message)" }
 
-    W "### Resolve '$ClientDomainNetbios\Domain Computers' on this CA (cross-forest principal translation) ###"
+    W "### Resolve the foreign Domain Computers SID on this CA ###"
     try {
-        $nt  = New-Object System.Security.Principal.NTAccount("$ClientDomainNetbios\Domain Computers")
-        $sid = $nt.Translate([System.Security.Principal.SecurityIdentifier])
-        W "OK: '$ClientDomainNetbios\Domain Computers' -> $($sid.Value)"
-    } catch { W "FAIL: cannot translate '$ClientDomainNetbios\Domain Computers': $($_.Exception.GetType().Name): $($_.Exception.Message)" }
+        Import-Module ActiveDirectory -ErrorAction Stop
+        $clientDomainSid = (Get-ADDomain -Identity $ClientDomainNetbios -ErrorAction Stop).DomainSID.Value
+        $sid = [System.Security.Principal.SecurityIdentifier]"$clientDomainSid-515"
+        W "OK: foreign Domain Computers RID 515 -> $($sid.Value)"
+    } catch { W "FAIL: cannot resolve foreign Domain Computers RID 515: $($_.Exception.GetType().Name): $($_.Exception.Message)" }
 
-    W "### Live PSPKI grant attempt: Add-CertificateTemplateAcl -Identity '$ClientDomainNetbios\Domain Computers' (try/catch, NOT saved) ###"
+    W "### SID-native template ACL readback (current production path) ###"
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Import-Module PSPKI -ErrorAction Stop
-        $tmpl = PSPKI\Get-CertificateTemplate -Name $TemplateName -ErrorAction Stop
-        if (-not $tmpl) { W "FAIL: Get-CertificateTemplate returned nothing for $TemplateName" }
-        else {
-            $acl = $tmpl | PSPKI\Get-CertificateTemplateAcl -ErrorAction Stop
-            W "Current ACEs on template:"
-            foreach ($ace in $acl.Access) { W ("  {0}  {1}  {2}" -f $ace.AccessControlType, $ace.Rights, $ace.IdentityReference) }
-            try {
-                $acl2 = $acl | PSPKI\Add-CertificateTemplateAcl -Identity "$ClientDomainNetbios\Domain Computers" -AccessType Allow -AccessMask 'Read, Enroll, AutoEnroll' -ErrorAction Stop
-                W "Add-CertificateTemplateAcl SUCCEEDED in memory. Resulting ACEs (NOT committed):"
-                foreach ($ace in $acl2.Access) { W ("  {0}  {1}  {2}" -f $ace.AccessControlType, $ace.Rights, $ace.IdentityReference) }
-            } catch {
-                W "Add-CertificateTemplateAcl THREW: $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+        $configContext = "$(([ADSI]'LDAP://RootDSE').configurationNamingContext)"
+        if ($configContext -notmatch '^CN=Configuration,DC=') { throw "Unusable configurationNamingContext '$configContext'" }
+        $templatePath = "LDAP://CN=$TemplateName,CN=Certificate Templates,CN=Public Key Services,CN=Services,$configContext"
+        if (-not [System.DirectoryServices.DirectoryEntry]::Exists($templatePath)) { throw "Template '$TemplateName' is absent." }
+        $template = [ADSI]$templatePath
+        $accessRules = @($template.psbase.ObjectSecurity.Access | Where-Object { $null -ne $_ })
+        foreach ($ace in $accessRules) {
+            try { $aceSid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+            catch { $aceSid = "$($ace.IdentityReference)" }
+            if ($aceSid -eq $sid.Value) {
+                W ("  {0}  rights={1}  objectType={2}  SID={3}" -f $ace.AccessControlType, $ace.ActiveDirectoryRights, $ace.ObjectType, $aceSid)
             }
         }
-    } catch { W "PSPKI block error: $($_.Exception.GetType().FullName): $($_.Exception.Message)" }
+        $grantState = Get-TemplateAclGrantState -AccessRules $accessRules -SidValue $sid.Value
+        if ($grantState.Complete) {
+            W "OK: SID-native ACL grants Read, Enroll, and AutoEnroll across $($grantState.MatchingCount) matching ACE(s)"
+        }
+        else {
+            W "FAIL: SID-native ACL has $($grantState.MatchingCount) matching ACE(s), grants [$($grantState.Granted -join ', ')], missing [$($grantState.Missing -join ', ')]"
+        }
+    } catch { W "SID-native ACL readback error: $($_.Exception.GetType().FullName): $($_.Exception.Message)" }
 
     W "### DSC status logs mentioning AddCertificateTemplate / ConfigMgrClientCertificate ###"
     try {

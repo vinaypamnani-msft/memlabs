@@ -34,6 +34,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Import-Module ActiveDirectory -ErrorAction Stop
+$script:domainSid = (Get-ADDomain -ErrorAction Stop).DomainSID.Value
+$forestRootDomain = (Get-ADForest -ErrorAction Stop).RootDomain
+$forestRootSid = (Get-ADDomain -Identity $forestRootDomain -ErrorAction Stop).DomainSID.Value
+$script:adminSidValues = @("$script:domainSid-512", "$forestRootSid-519", 'S-1-5-32-544')
 
 $deleteMask = [System.DirectoryServices.ActiveDirectoryRights]::Delete -bor
 [System.DirectoryServices.ActiveDirectoryRights]::DeleteTree -bor
@@ -60,7 +64,11 @@ function Show-ObjectAcl {
             "    deny ACE   : $($a.IdentityReference) [$($a.ActiveDirectoryRights)]$blocks"
         }
     }
-    $da = @($sd.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and "$($_.IdentityReference)" -match 'Domain Admins|Enterprise Admins|BUILTIN\\Administrators' })
+    $da = @($sd.Access | Where-Object {
+            if ($_.AccessControlType -ne 'Allow') { return $false }
+            try { return $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -in $script:adminSidValues }
+            catch { return $false }
+        })
     "    admin allow: $(if ($da.Count) { ($da | ForEach-Object { "$($_.IdentityReference) [$($_.ActiveDirectoryRights)]" }) -join ' ; ' } else { 'NONE FOUND -- this alone explains a denial' })"
 }
 
@@ -80,7 +88,7 @@ function Clear-DeleteDeny {
 
 function Grant-AdminControl {
     param([string]$Dn)
-    $admins = New-Object System.Security.Principal.NTAccount((Get-ADDomain).NetBIOSName, 'Domain Admins')
+    $admins = [System.Security.Principal.SecurityIdentifier]"$script:domainSid-512"
     $sd = (Get-ADObject -Identity $Dn -Properties nTSecurityDescriptor).nTSecurityDescriptor
     $sd.SetOwner($admins)
     Set-Acl -Path "AD:\$Dn" -AclObject $sd

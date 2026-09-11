@@ -21,7 +21,7 @@ $Fix_DisableIEESC = {
     $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
     $action    = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
     $trigger   = New-ScheduledTaskTrigger -AtLogOn
-    $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
+    $principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Highest
     $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description 'Disable IE Enhanced Security'
 
     Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
@@ -35,7 +35,7 @@ $Fix_DisableIEESC = {
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-DisableIEESC"
-    FixVersion        = "220422"
+    FixVersion        = "260911"
     NeededOnFreshDeploy = $true
     AppliesToExisting   = $true
     AppliesToRoles    = @()

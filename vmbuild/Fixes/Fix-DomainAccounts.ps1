@@ -4,7 +4,8 @@
 
 $Fix_DomainAccount = {
     param ($accountName)
-    $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $accountName) | Select-Object -Unique
+    $domainSid = (Get-ADDomain -ErrorAction Stop).DomainSID.Value
+    $accountsToUpdate = @("vmbuildadmin", "cm_svc", $accountName, "$domainSid-500") | Select-Object -Unique
     $accountsUpdated = 0
     $errs = @()
     foreach ($account in $accountsToUpdate) {
@@ -36,7 +37,7 @@ $Fix_DomainAccount = {
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-DomainAccounts"
-    FixVersion        = "211125.1"
+    FixVersion        = "260911"
     NeededOnFreshDeploy = $false
     AppliesToExisting   = $true
     AppliesToRoles    = @("DC")

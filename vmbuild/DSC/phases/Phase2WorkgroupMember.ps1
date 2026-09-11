@@ -71,18 +71,23 @@
             DependsOn            = "[User]vmbuildadmin"
         }
 
-        Group AddUserToLocalAdminGroup {
-            GroupName        = 'Administrators'
-            Ensure           = 'Present'
-            MembersToInclude = @($AdminName, "vmbuildadmin")
-            DependsOn        = "[User]adminUser"
+        AddUserToLocalAdminGroup AddAdminUserToLocalAdminGroup {
+            Name              = $AdminName
+            NetbiosDomainName = $ThisMachineName
+            DependsOn         = "[User]adminUser"
+        }
+
+        AddUserToLocalAdminGroup AddVmBuildAdminToLocalAdminGroup {
+            Name              = 'vmbuildadmin'
+            NetbiosDomainName = $ThisMachineName
+            DependsOn         = "[AddUserToLocalAdminGroup]AddAdminUserToLocalAdminGroup"
         }
 
         File ShareFolder {
             DestinationPath = $LogPath
             Type            = 'Directory'
             Ensure          = 'Present'
-            DependsOn       = "[Group]AddUserToLocalAdminGroup"
+            DependsOn       = "[AddUserToLocalAdminGroup]AddVmBuildAdminToLocalAdminGroup"
         }
 
         FileReadAccessShare SMBShare {

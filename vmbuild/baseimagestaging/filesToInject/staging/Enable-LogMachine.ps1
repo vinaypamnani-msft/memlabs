@@ -14,21 +14,26 @@ function Add-Permissions {
     # (SMS_DP$, C:\PBIRS) break ACL inheritance and don't include the interactive
     # admin, which is why the shortcut/Explorer reported "cannot be accessed"
     # until the user manually clicked Continue.
-    $identities = @('BUILTIN\Administrators')
-    if ($env:UserName -and $env:UserName -ne 'SYSTEM') { $identities += $env:UserName }
+    $identities = @([pscustomobject]@{
+            AclIdentity     = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-544'
+            IcaclsIdentity = '*S-1-5-32-544'
+        })
+    if ($env:UserName -and $env:UserName -ne 'SYSTEM') {
+        $identities += [pscustomobject]@{ AclIdentity = $env:UserName; IcaclsIdentity = $env:UserName }
+    }
 
     # Grant Read+Execute (with inheritance) on the target log folder itself.
-    foreach ($id in $identities) {
+    foreach ($identity in $identities) {
         try {
             $acl = Get-Acl $folderPath
             $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                $id, 'ReadAndExecute', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
+                $identity.AclIdentity, 'ReadAndExecute', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
             $acl.SetAccessRule($rule)
             Set-Acl -Path $folderPath -AclObject $acl -ErrorAction Stop
         }
         catch {
             # Fall back to icacls, which can lean on privileges Set-Acl can't.
-            try { & icacls "$folderPath" /grant "${id}:(OI)(CI)RX" /T /C 2>$null | Out-Null } catch { }
+            try { & icacls "$folderPath" /grant "$($identity.IcaclsIdentity):(OI)(CI)RX" /T /C 2>$null | Out-Null } catch { }
         }
     }
 
@@ -41,16 +46,16 @@ function Add-Permissions {
         while ($parent) {
             $grand = Split-Path $parent -Parent
             if (-not $grand) { break }   # reached the drive root (e.g. E:\)
-            foreach ($id in $identities) {
+            foreach ($identity in $identities) {
                 try {
                     $pacl = Get-Acl $parent
                     $prule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                        $id, 'ReadAndExecute', 'None', 'None', 'Allow')
+                        $identity.AclIdentity, 'ReadAndExecute', 'None', 'None', 'Allow')
                     $pacl.SetAccessRule($prule)
                     Set-Acl -Path $parent -AclObject $pacl -ErrorAction Stop
                 }
                 catch {
-                    try { & icacls "$parent" /grant "${id}:(RX)" /C 2>$null | Out-Null } catch { }
+                    try { & icacls "$parent" /grant "$($identity.IcaclsIdentity):(RX)" /C 2>$null | Out-Null } catch { }
                 }
             }
             $parent = $grand

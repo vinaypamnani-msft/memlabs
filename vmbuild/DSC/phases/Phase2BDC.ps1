@@ -242,7 +242,7 @@
                             ""`$domain\`$adminUser"",
                             `$adminPass)
                         `$searcher = New-Object System.DirectoryServices.DirectorySearcher(`$de)
-                        `$searcher.Filter = ""(&(objectClass=group)(cn=Domain Admins))""
+                        `$searcher.Filter = ""(&(objectClass=group)(primaryGroupToken=512))""
                         `$searcher.PropertiesToLoad.Add(""member"") | Out-Null
                         `$result = `$searcher.FindOne()
                         if (`$result) {

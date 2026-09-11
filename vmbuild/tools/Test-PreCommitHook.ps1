@@ -12,8 +12,9 @@ if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScri
 
 $hookSource = Join-Path $RepoRoot '.githooks\pre-commit'
 $syntaxSource = Join-Path $RepoRoot 'vmbuild\tools\Test-StagedPowerShellSyntax.ps1'
+$principalSource = Join-Path $RepoRoot 'vmbuild\tools\Test-LocalizedBuiltInPrincipal.ps1'
 $launcherSource = Join-Path $RepoRoot 'vmbuild\VMBuild.cmd'
-foreach ($path in @($hookSource, $syntaxSource, $launcherSource)) {
+foreach ($path in @($hookSource, $syntaxSource, $principalSource, $launcherSource)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing hook test input: $path" }
 }
 
@@ -97,12 +98,13 @@ try {
     $null = New-Item -Path (Join-Path $testRoot 'vmbuild\tools') -ItemType Directory -Force
     Copy-Item -LiteralPath $hookSource -Destination (Join-Path $testRoot '.githooks\pre-commit')
     Copy-Item -LiteralPath $syntaxSource -Destination (Join-Path $testRoot 'vmbuild\tools\Test-StagedPowerShellSyntax.ps1')
+    Copy-Item -LiteralPath $principalSource -Destination (Join-Path $testRoot 'vmbuild\tools\Test-LocalizedBuiltInPrincipal.ps1')
     [System.IO.File]::WriteAllText((Join-Path $testRoot 'vmbuild\rename-source.ps1'), '$value = 1', [System.Text.Encoding]::ASCII)
     $null = New-Item -Path (Join-Path $testRoot 'vmbuild\azureFiles') -ItemType Directory -Force
     [System.IO.File]::WriteAllText((Join-Path $testRoot 'vmbuild\azureFiles\tracked-secret.ps1'), '$value = 1', [System.Text.Encoding]::ASCII)
     $null = Invoke-Git @('config', 'user.email', 'memlabs-hook-test@example.invalid')
     $null = Invoke-Git @('config', 'user.name', 'MemLabs Hook Test')
-    $null = Invoke-Git @('add', '--', '.githooks/pre-commit', 'vmbuild/tools/Test-StagedPowerShellSyntax.ps1', 'vmbuild/rename-source.ps1')
+    $null = Invoke-Git @('add', '--', '.githooks/pre-commit', 'vmbuild/tools/Test-StagedPowerShellSyntax.ps1', 'vmbuild/tools/Test-LocalizedBuiltInPrincipal.ps1', 'vmbuild/rename-source.ps1')
     $null = Invoke-Git @('add', '-f', '--', 'vmbuild/azureFiles/tracked-secret.ps1')
     $null = Invoke-Git @('config', 'core.hooksPath', '.disabled-hooks')
     $result = Invoke-Git @('commit', '-m', 'fixture baseline')
@@ -111,6 +113,44 @@ try {
 
     Invoke-HookCase -Name 'empty index' -ExpectedExit 0
     Invoke-HookCase -Name 'valid staged PowerShell' -Path 'vmbuild\valid.ps1' -StagedContent '$value = 1' -ExpectedExit 0 -ExpectedText 'Fast staged checks: PASS (1 changed path(s), 1 PowerShell file(s)).'
+    Invoke-HookCase -Name 'staged localized principal' -Path 'vmbuild\localized-principal.ps1' -StagedContent "New-SmbShare -Name Data -Path C:\Data -ReadAccess 'Everyone'" -WorktreeContent "`$world = [Security.Principal.SecurityIdentifier]'S-1-1-0'" -ExpectedExit 1 -ExpectedText "literal 'Everyone' passed to New-SmbShare"
+    $indirectPrincipal = @'
+$world = 'Everyone'
+New-SmbShare -Name Data -Path C:\Data -ReadAccess $world
+'@
+    Invoke-HookCase -Name 'staged indirect localized principal' -Path 'vmbuild\indirect-principal.ps1' -StagedContent $indirectPrincipal -ExpectedExit 1 -ExpectedText "indirect literal 'Everyone' reaches New-SmbShare -ReadAccess"
+    $concatenatedPrincipal = @'
+$prefix = 'Admin'
+$suffix = 'istrators'
+$group = $prefix + $suffix
+Add-LocalGroupMember -Group $group -Member 'MEMLABS\user'
+'@
+    Invoke-HookCase -Name 'staged concatenated localized principal' -Path 'vmbuild\concatenated-principal.ps1' -StagedContent $concatenatedPrincipal -ExpectedExit 1 -ExpectedText "indirect literal 'Administrators' reaches Add-LocalGroupMember -Group"
+    $splattedPrincipal = @'
+$shareArgs = @{ ReadAccess = 'Everyone' }
+New-SmbShare -Name Data -Path C:\Data @shareArgs
+'@
+    Invoke-HookCase -Name 'staged splatted localized principal' -Path 'vmbuild\splatted-principal.ps1' -StagedContent $splattedPrincipal -ExpectedExit 1 -ExpectedText "indirect literal 'Everyone' reaches New-SmbShare -ReadAccess through a splatted hashtable"
+    Invoke-HookCase -Name 'staged qualified localized principal' -Path 'vmbuild\qualified-principal.ps1' -StagedContent "Microsoft.PowerShell.LocalAccounts\Add-LocalGroupMember -Group 'Administrators' -Member 'MEMLABS\user'" -ExpectedExit 1 -ExpectedText "literal 'Administrators' passed to Add-LocalGroupMember"
+    Invoke-HookCase -Name 'staged abbreviated localized principal' -Path 'vmbuild\abbreviated-principal.ps1' -StagedContent "Add-LocalGroupMember -Gro 'Administrators' -Member 'MEMLABS\user'" -ExpectedExit 1 -ExpectedText "literal 'Administrators' passed to Add-LocalGroupMember"
+    Invoke-HookCase -Name 'staged positional localized principal' -Path 'vmbuild\positional-principal.ps1' -StagedContent "Add-LocalGroupMember 'Administrators' 'MEMLABS\user'" -ExpectedExit 1 -ExpectedText "literal 'Administrators' passed to Add-LocalGroupMember"
+    $orderedPrincipal = @'
+$groupArgs = [ordered]@{ Group = 'Administrators'; Member = 'MEMLABS\user' }
+Add-LocalGroupMember @groupArgs
+'@
+    Invoke-HookCase -Name 'staged ordered splat localized principal' -Path 'vmbuild\ordered-splat-principal.ps1' -StagedContent $orderedPrincipal -ExpectedExit 1 -ExpectedText "indirect literal 'Administrators' reaches Add-LocalGroupMember -Group through a splatted hashtable"
+    $castPrincipal = @'
+$shareArgs = [hashtable]@{ ReadAccess = 'Everyone' }
+SmbShare\New-SmbShare -Name Data -Path C:\Data @shareArgs
+'@
+    Invoke-HookCase -Name 'staged cast splat localized principal' -Path 'vmbuild\cast-splat-principal.ps1' -StagedContent $castPrincipal -ExpectedExit 1 -ExpectedText "indirect literal 'Everyone' reaches New-SmbShare -ReadAccess through a splatted hashtable"
+    $capturedPrincipal = @'
+$world = 'Everyone'
+& { SmbShare\New-SmbShare -Name Data -Path C:\Data -ReadA $world }
+'@
+    Invoke-HookCase -Name 'staged captured localized principal' -Path 'vmbuild\captured-principal.ps1' -StagedContent $capturedPrincipal -ExpectedExit 1 -ExpectedText "indirect literal 'Everyone' reaches New-SmbShare -ReadAccess"
+    Invoke-HookCase -Name 'staged nonidentity principal-shaped name' -Path 'vmbuild\nonidentity-name.ps1' -StagedContent "New-SmbShare -Name 'Users' -Path C:\Users" -ExpectedExit 0 -ExpectedText 'OK - no localized built-in name flows into a principal-resolution boundary.'
+    Invoke-HookCase -Name 'staged SID principal' -Path 'vmbuild\sid-principal.ps1' -StagedContent "`$world = [Security.Principal.SecurityIdentifier]'S-1-1-0'" -ExpectedExit 0 -ExpectedText 'OK - no localized built-in name flows into a principal-resolution boundary.'
     Invoke-HookCase -Name 'unstaged syntax defect' -Path 'vmbuild\index-valid.ps1' -StagedContent '$value = 1' -WorktreeContent 'function Broken {' -ExpectedExit 0 -ExpectedText 'Fast staged checks: PASS (1 changed path(s), 1 PowerShell file(s)).'
     Invoke-HookCase -Name 'staged syntax defect' -Path 'vmbuild\index-broken.ps1' -StagedContent 'function Broken {' -WorktreeContent '$value = 1' -ExpectedExit 1 -ExpectedText 'index-broken.ps1:1'
     $parameterlessLower = '"ACTIVE".' + 'To' + 'Lower()'

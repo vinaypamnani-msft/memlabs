@@ -250,6 +250,7 @@ $create_Share = {
     $shareName = $using:shareName
     $sharePath = $using:sharePath
     $computersToAdd = $using:computersToAdd
+    $worldName = ([Security.Principal.SecurityIdentifier]'S-1-1-0').Translate([Security.Principal.NTAccount]).Value
 
     $exists = Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue
     if ($exists) {
@@ -258,7 +259,7 @@ $create_Share = {
     else {
         New-Item -Path $sharePath -type directory -Force -ErrorAction Stop
         New-Item -Path (Join-Path $sharePath "ContentLib") -type directory -Force -ErrorAction Stop
-        New-SMBShare -Name $shareName -Path $sharePath -FullAccess $computersToAdd -ReadAccess Everyone -ErrorAction Stop
+        New-SMBShare -Name $shareName -Path $sharePath -FullAccess $computersToAdd -ReadAccess $worldName -ErrorAction Stop
     }
 
     # Configure the access object values - READ-ONLY
@@ -310,12 +311,15 @@ $add_local_admin = {
             try {
                 # Use ADSI to check membership; Get-LocalGroupMember -Member can fail
                 # if the group contains unresolvable SIDs (orphaned accounts).
-                $group = [ADSI]"WinNT://$env:COMPUTERNAME/Administrators"
+                $groupName = (Get-CimInstance -ClassName Win32_Group -Filter 'SID = "S-1-5-32-544"' -ErrorAction Stop | Select-Object -First 1).Name
+                if (-not $groupName) { throw 'Could not resolve the built-in Administrators group from SID S-1-5-32-544.' }
+                $group = [ADSI]"WinNT://$env:COMPUTERNAME/$groupName,group"
+                $memberPath = "WinNT://$domainName/$computer"
                 $isMember = $group.Invoke('Members') | ForEach-Object {
                     $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
                 } | Where-Object { $_ -eq $computer.TrimEnd('$') -or $_ -eq $computer }
                 if (-not $isMember) {
-                    Add-LocalGroupMember -Group "Administrators" -Member $computer -ErrorAction Stop
+                    $group.Add($memberPath)
                 }
                 break
             }

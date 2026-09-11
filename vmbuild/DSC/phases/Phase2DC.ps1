@@ -432,6 +432,31 @@
             $adObjectDependency += "[ADUser]User$($i)"
            
         }
+
+        $builtInAdminPassB64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Admincreds.GetNetworkCredential().Password))
+        Script ConfigureBuiltInDomainAdministrator {
+            DependsOn            = $adObjectDependency
+            PsDscRunAsCredential = $DomainCreds
+            GetScript            = { @{ Result = '' } }
+            TestScript           = {
+                try {
+                    $domainSid = (Get-ADDomain -ErrorAction Stop).DomainSID.Value
+                    $account = Get-ADUser -Identity "$domainSid-500" -Properties Enabled, PasswordNeverExpires, CannotChangePassword -ErrorAction Stop
+                    return $account.Enabled -and $account.PasswordNeverExpires -and $account.CannotChangePassword
+                }
+                catch { return $false }
+            }
+            SetScript            = [string]"
+                `$domainSid = (Get-ADDomain -ErrorAction Stop).DomainSID.Value
+                `$identity = ""`$domainSid-500""
+                `$password = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$builtInAdminPassB64'))
+                `$securePassword = ConvertTo-SecureString `$password -AsPlainText -Force
+                Set-ADAccountPassword -Identity `$identity -Reset -NewPassword `$securePassword -ErrorAction Stop
+                Set-ADUser -Identity `$identity -PasswordNeverExpires `$true -CannotChangePassword `$true -ErrorAction Stop
+                Enable-ADAccount -Identity `$identity -ErrorAction Stop
+            "
+        }
+        $adObjectDependency += '[Script]ConfigureBuiltInDomainAdministrator'
        
         # Stamp msDS-SupportedEncryptionTypes = 28 (RC4 + AES128 + AES256) on
         # every domain user/service account created above, then reset each
@@ -492,28 +517,31 @@
         AddToAdminGroup AddLocalAdmins {
             DomainName   = "NONE"
             AccountNames = @($DomainAdminName, $Admincreds.UserName)
-            TargetGroup  = "Administrators"
+            TargetGroup  = 'SID:S-1-5-32-544'
             DependsOn    = $adObjectDependency
         }
 
-        ADGroup AddToDomainAdmin {
-            GroupName        = "Domain Admins"
-            MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-            DependsOn        = $adObjectDependency
+        AddToAdminGroup AddToDomainAdmin {
+            DomainName    = "NONE"
+            AccountNames  = @($DomainAdminName, $Admincreds.UserName)
+            TargetGroup   = 'RID:512'
+            DependsOn     = $adObjectDependency
         }
 
-        ADGroup AddToSchemaAdmin {
-            GroupName        = "Schema Admins"
-            MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-            DependsOn        = "[ADGroup]AddToDomainAdmin"
+        AddToAdminGroup AddToSchemaAdmin {
+            DomainName    = "NONE"
+            AccountNames  = @($DomainAdminName, $Admincreds.UserName)
+            TargetGroup   = 'RID:518'
+            DependsOn     = "[AddToAdminGroup]AddToDomainAdmin"
         }
 
-        ADGroup AddToEnterpriseAdmin {
-            GroupName        = "Enterprise Admins"
-            MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-            DependsOn        = "[ADGroup]AddToSchemaAdmin"
+        AddToAdminGroup AddToEnterpriseAdmin {
+            DomainName    = "NONE"
+            AccountNames  = @($DomainAdminName, $Admincreds.UserName)
+            TargetGroup   = 'RID:519'
+            DependsOn     = "[AddToAdminGroup]AddToSchemaAdmin"
         }
-        $nextDepend = "[ADGroup]AddToEnterpriseAdmin"
+        $nextDepend = "[AddToAdminGroup]AddToEnterpriseAdmin"
 
 
 
@@ -916,7 +944,7 @@
                 DomainName   = $ThisVM.ForestTrust
                 AccountNames = @($DomainAdminName, $Admincreds.UserName)
                 RemoteCreds  = $groupCreds
-                TargetGroup  = "Administrators"
+                TargetGroup  = 'SID:S-1-5-32-544'
                 DependsOn    = $waitOnDependency
             }
             $waitOnDependency = "[AddToAdminGroup]AddRemoteAdmins"
@@ -926,7 +954,7 @@
                     DomainName   = $ThisVM.ForestTrust
                     AccountNames = "$($OtherDCVM.VmName)$"
                     RemoteCreds  = $groupCreds
-                    TargetGroup  = "Cert Publishers"
+                    TargetGroup  = 'RID:517'
                     DependsOn    = $waitOnDependency
                 }
                 $waitOnDependency = "[AddToAdminGroup]AddCertPublisher"

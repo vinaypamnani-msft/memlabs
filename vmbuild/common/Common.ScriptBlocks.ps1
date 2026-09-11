@@ -4276,7 +4276,14 @@ $global:VM_Config = {
                 #    during the specialize pass. If it actually disables the account
                 #    mid-execution, subsequent crypto operations fail with 0x5
                 #    (ACCESS_DENIED). Pre-disabling makes it a no-op.
-                Disable-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue
+                $builtInAdministrator = @(Get-LocalUser -ErrorAction Stop | Where-Object { $_.SID.Value -match '-500$' })
+                if ($builtInAdministrator.Count -ne 1) {
+                    throw "Expected one built-in local administrator account with RID 500, found $($builtInAdministrator.Count)."
+                }
+                $administratorSid = $builtInAdministrator[0].SID
+                Disable-LocalUser -SID $administratorSid -ErrorAction Stop
+                $administratorState = Get-LocalUser -SID $administratorSid -ErrorAction Stop
+                if ($administratorState.Enabled) { throw "Built-in local administrator SID $administratorSid is still enabled." }
 
                 # 2. Disable Defender real-time protection. Defender can hold locks
                 #    on crypto stores during the specialize pass, contributing to
@@ -4295,6 +4302,10 @@ $global:VM_Config = {
                 $moSetup = 'HKLM:\SYSTEM\Setup\MoSetup'
                 if (-not (Test-Path $moSetup)) { New-Item -Path $moSetup -Force | Out-Null }
                 Set-ItemProperty -Path $moSetup -Name AllowUpgradesWithUnsupportedTPMOrCPU -Value 1 -Type DWord -Force
+            }
+            if ($result.ScriptBlockFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not prepare the RID-500 Administrator account for sysprep. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
             }
 
             # 4. Settle delay — let services stabilize after first boot before
@@ -4906,8 +4917,9 @@ $global:VM_Config = {
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
                     try {
                         # Grant Users read access to DSC configuration folders
+                        $usersSid = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-545'
                         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                            'BUILTIN\Users', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+                            $usersSid, 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
                         foreach ($folder in @(
                             'C:\Windows\System32\Configuration',
                             'C:\Windows\System32\Configuration\ConfigurationStatus'

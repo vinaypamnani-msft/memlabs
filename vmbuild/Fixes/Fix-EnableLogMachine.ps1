@@ -43,7 +43,7 @@ $Fix_EnableLogMachine = {
 
             $action     = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs -ErrorAction Stop
             $trigger    = New-ScheduledTaskTrigger -AtLogOn -ErrorAction Stop
-            $principal  = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest -ErrorAction Stop
+            $principal  = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Highest -ErrorAction Stop
             $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description 'Enable Log Machine' -ErrorAction Stop
 
             Register-ScheduledTask -TaskName $taskName -InputObject $definition -Force -ErrorAction Stop | Out-Null
@@ -80,7 +80,7 @@ $Fix_EnableLogMachine = {
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-EnableLogMachine"
-    FixVersion        = "260628"
+    FixVersion        = "260911"
     NeededOnFreshDeploy = $true
     AppliesToExisting   = $true
     AppliesToRoles    = @()

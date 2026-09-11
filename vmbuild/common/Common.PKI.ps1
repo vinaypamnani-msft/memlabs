@@ -261,6 +261,9 @@ function Install-PKICertificateTemplates {
             $autoEnrollGuid = [Guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
             $configCtx = ([ADSI]"LDAP://RootDSE").configurationNamingContext
             $tplBaseDN = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configCtx"
+            $domainEntry = [ADSI]"LDAP://$dnPath"
+            $domainSidBytes = [byte[]]$domainEntry.Properties['objectSid'].Value
+            $domainSid = [System.Security.Principal.SecurityIdentifier]::new($domainSidBytes, 0)
 
             $tplIndex = 0
             foreach ($tplName in $TemplateList) {
@@ -268,7 +271,7 @@ function Install-PKICertificateTemplates {
                 $groupName = switch ($tplName) {
                     'ConfigMgrWebServerCertificate'               { 'ConfigMgr IIS Servers' }
                     'ConfigMgrClientDistributionPointCertificate' { 'ConfigMgr IIS Servers' }
-                    'ConfigMgrClientCertificate'                  { 'Domain Computers' }
+                    'ConfigMgrClientCertificate'                  { "$($domainSid.Value)-515" }
                 }
                 $doAutoEnroll = ($tplName -eq 'ConfigMgrClientCertificate')
 
@@ -278,8 +281,13 @@ function Install-PKICertificateTemplates {
                 while ($retries -lt 5 -and -not $aclOk) {
                     $retries++
                     try {
-                        $ntAccount = New-Object System.Security.Principal.NTAccount($groupName)
-                        $groupSid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
+                        if ($groupName -match '^S-\d(?:-\d+)+$') {
+                            $groupSid = [System.Security.Principal.SecurityIdentifier]$groupName
+                        }
+                        else {
+                            $ntAccount = New-Object System.Security.Principal.NTAccount($groupName)
+                            $groupSid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
+                        }
 
                         $tplDN = "CN=$tplName,$tplBaseDN"
                         $tplEntry = [ADSI]"LDAP://$tplDN"
@@ -719,9 +727,9 @@ function Install-SingleTierPKI {
             } catch {}
             try {
                 $g = whoami /groups /fo list 2>&1 | Out-String
-                $hasEA = ($g -match '-519\b') -or ($g -match 'Enterprise Admins')
-                $hasDA = ($g -match '-512\b') -or ($g -match 'Domain Admins')
-                $hasSA = ($g -match '-518\b') -or ($g -match 'Schema Admins')
+                $hasEA = ($g -match '-519\b')
+                $hasDA = ($g -match '-512\b')
+                $hasSA = ($g -match '-518\b')
                 _Log "[PKI-DIAG] Token EnterpriseAdmins=$hasEA DomainAdmins=$hasDA SchemaAdmins=$hasSA"
             } catch { _Log "[PKI-DIAG] whoami error: $($_.Exception.Message)" }
             try {
@@ -1924,9 +1932,9 @@ Empty=True
             } catch {}
             try {
                 $g = whoami /groups /fo list 2>&1 | Out-String
-                $hasEA = ($g -match '-519\b') -or ($g -match 'Enterprise Admins')
-                $hasDA = ($g -match '-512\b') -or ($g -match 'Domain Admins')
-                $hasSA = ($g -match '-518\b') -or ($g -match 'Schema Admins')
+                $hasEA = ($g -match '-519\b')
+                $hasDA = ($g -match '-512\b')
+                $hasSA = ($g -match '-518\b')
                 _Log "[PKI-DIAG] Token EnterpriseAdmins=$hasEA DomainAdmins=$hasDA SchemaAdmins=$hasSA"
             } catch { _Log "[PKI-DIAG] whoami error: $($_.Exception.Message)" }
             try {
@@ -2134,7 +2142,7 @@ Empty=True
                 $cs = Get-Service -Name CertSvc -ErrorAction SilentlyContinue
                 _Log "[ENV] Web-Server(W3SVC)=$(if($w3){'present'}else{'ABSENT -> IIS NOT pre-staged'}) ADCS(CertSvc)=$(if($cs){'present'}else{'ABSENT -> ADCS NOT pre-staged'})"
                 $g = whoami /groups /fo list 2>&1 | Out-String
-                $ea = ($g -match '-519\b') -or ($g -match 'Enterprise Admins')
+                $ea = ($g -match '-519\b')
                 _Log "[ENV] Identity=$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) TokenEnterpriseAdmins=$ea (false => settling-token race; a fresh host session mints a PAC that carries EA)"
             } catch { _Log "[ENV] snapshot error: $($_.Exception.Message)" }
 

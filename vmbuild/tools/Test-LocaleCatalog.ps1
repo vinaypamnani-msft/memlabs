@@ -258,6 +258,26 @@ $phase5 = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase5.ps1')
 $templateHelpDscPath = Join-Path $RootPath 'DSC\TemplateHelpDSC\TemplateHelpDSC.psm1'
 $templateHelpDsc = Get-Content -LiteralPath $templateHelpDscPath -Raw
 $phase8 = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase8.ps1') -Raw
+$phase2Dc = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase2DC.ps1') -Raw
+$phase2Bdc = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase2BDC.ps1') -Raw
+$phase2OtherDc = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase2OtherDC.ps1') -Raw
+$phase2Workgroup = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\Phase2WorkgroupMember.ps1') -Raw
+$passiveSite = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\InstallPassiveSiteServer.ps1') -Raw
+$mpReplica = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\ConfigureMPReplica.ps1') -Raw
+$enableBlm = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\EnableBLM.ps1') -Raw
+$commonPki = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.PKI.ps1') -Raw
+$commonValidationFunctional = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Validation.Functional.ps1') -Raw
+$commonGenConfig = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.GenConfig.ps1') -Raw
+$baseEnableLogMachine = Get-Content -LiteralPath (Join-Path $RootPath 'baseimagestaging\filesToInject\staging\Enable-LogMachine.ps1') -Raw
+$fixLocalAdmin = Get-Content -LiteralPath (Join-Path $RootPath 'Fixes\Fix_LocalAdminAccount.ps1') -Raw
+$fixDomainAccounts = Get-Content -LiteralPath (Join-Path $RootPath 'Fixes\Fix-DomainAccounts.ps1') -Raw
+$fixConfigureSsms = Get-Content -LiteralPath (Join-Path $RootPath 'Fixes\Fix-ConfigureSSMS.ps1') -Raw
+$fixDisableIeEsc = Get-Content -LiteralPath (Join-Path $RootPath 'Fixes\Fix-DisableIEESC.ps1') -Raw
+$fixEnableLogMachine = Get-Content -LiteralPath (Join-Path $RootPath 'Fixes\Fix-EnableLogMachine.ps1') -Raw
+$principalGate = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Test-LocalizedBuiltInPrincipal.ps1') -Raw
+$crossForestPkiDiagPath = Join-Path $RootPath 'tools\Get-CrossForestPkiDiag.ps1'
+$crossForestPkiDiag = Get-Content -LiteralPath $crossForestPkiDiagPath -Raw
+$preCommitHook = Get-Content -LiteralPath (Join-Path (Split-Path $RootPath -Parent) '.githooks\pre-commit') -Raw
 $phase4Tokens = $null
 $phase4ParseErrors = $null
 [void][Management.Automation.Language.Parser]::ParseFile($phase4Path, [ref]$phase4Tokens, [ref]$phase4ParseErrors)
@@ -677,6 +697,47 @@ Assert-True -Condition ($phase8 -notmatch '(?s)(?:NTFSAccessEntry PMPCApps|SmbSh
 Assert-True -Condition ($phase8 -match '(?s)EnsurePMPCAppsAccess.*?share\.Path.*?E:\\PMPCApps.*?Remove-SmbShare.*?New-SmbShare') -What 'Phase 8 PMPCApps repairs an existing share that targets the wrong path'
 Assert-True -Condition ($phase8 -match '(?s)EnsurePMPCAppsAccess.*?ContainerInherit.*?ObjectInherit.*?PropagationFlags.*?None.*?RemoveAccessRuleSpecific') -What 'Phase 8 PMPCApps requires inherited full access and removes explicit deny rules'
 Assert-True -Condition ($phase8 -match '(?s)\$_pmpcAdmin.*?targetSids.*?adminSid.*?FullAccess @\(\$worldName, \$adminName\)') -What 'Phase 8 PMPCApps preserves explicit domain-admin full access'
+Assert-True -Condition ($phases -match '(?s)\$worldName = \(\[Security\.Principal\.SecurityIdentifier\]''S-1-1-0''\).*?New-SmbShare -Name \$ShareName -Path \$Root -ReadAccess \$worldName.*?New-SmbShare -Name \$ShareName -Path \$localRoot -ReadAccess \$worldName') -What 'Phase 8 CMCB share resolves Everyone from the well-known world SID on the target guest'
+Assert-True -Condition ($phases -match '(?s)Invoke-VmCommand.*?-SuppressLog.*?Share CM media \(\$shareName\)') -What 'Phase 8 CMCB retries keep per-attempt principal errors in the log'
+Assert-True -Condition ($perfloading -match '(?s)S-1-1-0.*?S-1-5-32-544.*?New-SmbShare -Name \$shareName -Path \$folderPath -FullAccess @\(\$administratorsName, \$worldName\).*?New-SmbShare -Name \$officeShareName -Path \$officeSourceRoot -FullAccess @\(\$administratorsName, \$worldName\).*?New-SmbShare -Name \$shareName1 -Path \$folderPath1 -FullAccess @\(\$administratorsName, \$worldName\)') -What 'ConfigMgr content shares translate world and Administrators SIDs instead of using English names'
+Assert-True -Condition ($perfloading -match 'New-ScheduledTaskPrincipal -GroupId ''S-1-5-32-545''') -What 'generated OSD bootstrap targets the built-in Users group by SID'
+Assert-True -Condition ($passiveSite -match '(?s)S-1-1-0.*?New-SMBShare.*?-ReadAccess \$worldName' -and $passiveSite -match '(?s)S-1-5-32-544.*?\[ADSI\].*?\$groupName') -What 'passive-site shares and local admin membership resolve well-known SIDs on the target'
+Assert-True -Condition ($mpReplica -match 'Get-LocalGroupMember -SID \$administratorsSid' -and $mpReplica -match 'Add-LocalGroupMember -SID \$administratorsSid' -and $mpReplica -match '(?s)SecurityIdentifier\]''S-1-5-18''.*?New-SmbShare.*?-FullAccess \$systemName') -What 'MP replica OS and share access use Administrators and LocalSystem SIDs'
+Assert-Equal -Expected 6 -Actual ([regex]::Matches($phase2Dc, 'TargetGroup\s*=\s*''(?:SID|RID):').Count) -What 'first-DC group membership targets built-in and default AD groups by SID or RID'
+Assert-True -Condition ($phase2Dc -notmatch 'GroupName\s*=\s*"(?:Domain Admins|Schema Admins|Enterprise Admins)"' -and $phase2OtherDc -match 'TargetGroup\s*=\s*''SID:S-1-5-32-544''') -What 'Phase 2 avoids English default group names across same- and cross-forest membership'
+Assert-True -Condition ($phase2Workgroup -match '(?s)AddUserToLocalAdminGroup AddAdminUserToLocalAdminGroup.*?AddUserToLocalAdminGroup AddVmBuildAdminToLocalAdminGroup' -and $phase2Workgroup -notmatch 'GroupName\s*=\s*''Administrators''') -What 'workgroup Phase 2 uses the SID-aware local Administrators resource'
+Assert-True -Condition ($phase2Bdc -match 'primaryGroupToken=512' -and $enableBlm -match 'primaryGroupToken=512') -What 'domain-admin LDAP lookups use RID 512 rather than localized names'
+Assert-True -Condition ($templateHelpDsc -match '(?s)class AddToAdminGroup.*?\^SID:.*?\^RID:.*?Get-ADGroup -Identity \$targetIdentity' -and $templateHelpDsc -match '\$schemaAdminsSid = .*?-518') -What 'TemplateHelpDSC resolves group selectors and Schema Admins through stable SIDs'
+Assert-True -Condition ($templateHelpDsc -match '\*S-1-5-32-545:\(M,RX\)' -and $templateHelpDsc -match '\*S-1-5-32-544:F') -What 'TemplateHelpDSC native ACL grants use SID syntax'
+Assert-True -Condition ($commonPki -match '(?s)\$domainSid.*?''ConfigMgrClientCertificate''\s*\{\s*"\$\(\$domainSid\.Value\)-515"\s*\}.*?SecurityIdentifier\]\$groupName') -What 'PKI client-template ACL resolves Domain Computers through RID 515'
+Assert-True -Condition ($scriptBlocks -match 'SecurityIdentifier\]''S-1-5-32-545''' -and $scriptBlocks -match '(?s)Get-LocalUser.*?SID\.Value -match ''-500\$''.*?Disable-LocalUser -SID') -What 'host guest helpers use Users and built-in Administrator SIDs'
+Assert-True -Condition ($commonValidationFunctional -match '(?s)S-1-5-32-544.*?WinNT://\$env:COMPUTERNAME/\$adminGroupName,group') -What 'cross-forest validation resolves the localized Administrators ADSI path from SID'
+Assert-True -Condition ($baseEnableLogMachine -match 'AclIdentity\s*=\s*\[System\.Security\.Principal\.SecurityIdentifier\]''S-1-5-32-544''' -and $baseEnableLogMachine -match 'IcaclsIdentity\s*=\s*''\*S-1-5-32-544''') -What 'LogMachine ACL repair uses SID-native managed and native ACL identities'
+Assert-True -Condition ($fixLocalAdmin -match '(?s)SID\.Value -match ''-500\$''.*?Set-LocalUser -SID.*?Enable-LocalUser -SID' -and $fixDomainAccounts -match '"\$domainSid-500"') -What 'maintenance targets local and domain built-in Administrator accounts by RID 500'
+Assert-True -Condition ($commonGenConfig -notmatch 'DomainAccounts[^\r\n]*administrator' -and $commonGenConfig -notmatch 'SQLSysAdminAccounts[^\r\n]*BUILTIN\\Administrators') -What 'new deploy configs do not synthesize English built-in account names'
+Assert-True -Condition (@(@($fixConfigureSsms, $fixDisableIeEsc, $fixEnableLogMachine) | Where-Object { $_ -notmatch 'New-ScheduledTaskPrincipal -GroupId ''S-1-5-32-545''' }).Count -eq 0) -What 'maintenance logon tasks target built-in Users by SID'
+Assert-True -Condition ($principalGate -match 'SELF-TEST PASSED - caught 16 identity-name defects' -and $preCommitHook -match 'Test-LocalizedBuiltInPrincipal\.ps1 -Staged') -What 'localized built-in principal scanning is mutation-tested and enforced on staged bytes'
+Assert-True -Condition ($crossForestPkiDiag -match 'SID-native template ACL readback' -and $crossForestPkiDiag -notmatch 'Add-CertificateTemplateAcl -Identity \$sid') -What 'cross-forest PKI diagnostic reads the production SID-native ACL path instead of calling PSPKI with a SID'
+. (Import-TestFunction -Path $crossForestPkiDiagPath -Name 'Get-TemplateAclGrantState')
+$testTemplateSid = [System.Security.Principal.SecurityIdentifier]'S-1-5-21-111-222-333-515'
+$allowAce = [System.Security.AccessControl.AccessControlType]::Allow
+$denyAce = [System.Security.AccessControl.AccessControlType]::Deny
+$readRight = [System.DirectoryServices.ActiveDirectoryRights]::GenericRead
+$extendedRight = [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight
+$enrollGuid = [guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55'
+$autoEnrollGuid = [guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
+$completeAcl = @(
+    [pscustomobject]@{ IdentityReference = $testTemplateSid; AccessControlType = $allowAce; ActiveDirectoryRights = $readRight; ObjectType = [guid]::Empty }
+    [pscustomobject]@{ IdentityReference = $testTemplateSid; AccessControlType = $allowAce; ActiveDirectoryRights = $extendedRight; ObjectType = $enrollGuid }
+    [pscustomobject]@{ IdentityReference = $testTemplateSid; AccessControlType = $allowAce; ActiveDirectoryRights = $extendedRight; ObjectType = $autoEnrollGuid }
+)
+$completeAclState = Get-TemplateAclGrantState -AccessRules $completeAcl -SidValue $testTemplateSid.Value
+Assert-True -Condition ($completeAclState.Complete -and ($completeAclState.Granted -join ',') -eq 'Read,Enroll,AutoEnroll') -What 'cross-forest PKI diagnostic accepts the complete SID-native template ACL'
+$partialAclState = Get-TemplateAclGrantState -AccessRules @($completeAcl[0]) -SidValue $testTemplateSid.Value
+Assert-True -Condition (-not $partialAclState.Complete -and ($partialAclState.Missing -join ',') -eq 'Enroll,AutoEnroll') -What 'cross-forest PKI diagnostic rejects a read-only SID-native template ACL'
+$denyAcl = @([pscustomobject]@{ IdentityReference = $testTemplateSid; AccessControlType = $denyAce; ActiveDirectoryRights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll; ObjectType = [guid]::Empty })
+$denyAclState = Get-TemplateAclGrantState -AccessRules $denyAcl -SidValue $testTemplateSid.Value
+Assert-True -Condition (-not $denyAclState.Complete -and $denyAclState.Granted.Count -eq 0) -What 'cross-forest PKI diagnostic does not count deny ACEs as grants'
 $highMemoryRunner = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-LocaleCmSqlAoHighMemoryTest.ps1') -Raw
 $highMemoryConfigPath = Join-Path $RootPath 'config\tests\Locale-CM-SqlAo-HighMemory.json'
 $highMemoryConfig = Get-Content -LiteralPath $highMemoryConfigPath -Raw | ConvertFrom-Json

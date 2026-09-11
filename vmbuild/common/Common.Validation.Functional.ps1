@@ -7265,7 +7265,9 @@ function Test-ForestTrustFunctionality {
         # DCs and member servers and lists foreign-forest principals too.
         $results.Details.Add("CMD: enumerate Administrators members via ADSI WinNT (looking for '$remoteNetbios\\*')")
         try {
-            $adminGroup = [ADSI]"WinNT://$env:COMPUTERNAME/Administrators,group"
+            $adminGroupName = (Get-CimInstance -ClassName Win32_Group -Filter 'SID = "S-1-5-32-544"' -ErrorAction Stop | Select-Object -First 1).Name
+            if (-not $adminGroupName) { throw 'Could not resolve SID S-1-5-32-544 to the built-in Administrators group.' }
+            $adminGroup = [ADSI]"WinNT://$env:COMPUTERNAME/$adminGroupName,group"
             $rawMembers = @($adminGroup.psbase.Invoke('Members'))
             $memberNames = @()
             foreach ($m in $rawMembers) {
