@@ -108,6 +108,7 @@ Assert-Equal -Expected ($expectedTags -join ',') -Actual ($catalogTags -join ','
 Assert-True -Condition ($catalog.'ar-SA'.PSObject.Properties.Name -contains 'RemoveInputLanguages') -What 'Arabic explicitly defines input languages to remove'
 Assert-True -Condition ($catalog.'ar-SA'.RemoveInputLanguages -is [array]) -What 'Arabic input-language removal remains an array'
 Assert-Equal -Expected 0 -Actual $catalog.'ar-SA'.RemoveInputLanguages.Count -What 'Arabic retains the Windows English fallback input method'
+Assert-Equal -Expected 0 -Actual $catalog.'el-GR'.RemoveInputLanguages.Count -What 'Greek retains the Windows English fallback input method'
 Assert-Equal -Expected 0 -Actual $catalog.'ru-RU'.RemoveInputLanguages.Count -What 'Russian retains the Windows English fallback input method'
 
 $server2022Capabilities = @{
@@ -210,6 +211,17 @@ Assert-Equal -Expected '0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-552
 Assert-Equal -Expected 'custom-input' -Actual @($staleProfileConfig.virtualMachines[2].localeSettings.AddInputLanguages)[0] -What 'config loading preserves custom locale settings'
 $staleProfileConfig.virtualMachines[0].localeSettings.AddInputLanguages[0] = 'mutated'
 Assert-Equal -Expected '0411:{03B5835F-F03C-411B-9CE2-AA23E1171E36}{A76C93D9-5523-4E90-AAFA-4DB112F9AC76}' -Actual @($staleProfileConfig.virtualMachines[1].localeSettings.AddInputLanguages)[0] -What 'catalog profiles are deep-cloned per VM'
+$staleGreekConfig = [pscustomobject]@{
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'STALE-GREEK'
+            locale = 'el-GR'
+            localeSettings = [pscustomobject]@{ LanguageTag = 'el-GR'; RemoveInputLanguages = @('0409:00000409') }
+        }
+    )
+}
+Update-CatalogLocaleSettings -Config $staleGreekConfig -CatalogPath $catalogPath
+Assert-Equal -Expected 0 -Actual @($staleGreekConfig.virtualMachines[0].localeSettings.RemoveInputLanguages).Count -What 'config loading removes the stale Greek fallback-keyboard removal request'
 $missingCatalogConfig = [pscustomobject]@{ virtualMachines = @([pscustomobject]@{ locale = 'ja-JP'; localeSettings = [pscustomobject]@{ AddInputLanguages = @('unchanged') } }) }
 Update-CatalogLocaleSettings -Config $missingCatalogConfig -CatalogPath (Join-Path ([IO.Path]::GetTempPath()) 'missing-locale-catalog.json')
 Assert-Equal -Expected 'unchanged' -Actual @($missingCatalogConfig.virtualMachines[0].localeSettings.AddInputLanguages)[0] -What 'missing locale catalog leaves config unchanged'

@@ -245,9 +245,7 @@
     "AddInputLanguages": [
       "0408:00000408"
     ],
-    "RemoveInputLanguages": [
-      "0409:00000409"
-    ],
+    "RemoveInputLanguages": [],
     "UserLocale": "el-GR",
     "LanguageID": 1032,
     "CMLanguage": "ENG",
