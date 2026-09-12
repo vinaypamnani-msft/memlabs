@@ -59,6 +59,7 @@ $missingState = @(& {
 Assert-LiveOpsEqual 1 $missingState.Count 'Post-operation VM snapshot returns one record for a deleted target'
 Assert-LiveOpsEqual $false $missingState[0].Exists 'Post-operation VM snapshot records an intentionally deleted target as absent'
 Assert-LiveOpsEqual $true ($helperSource -match 'Get-LiveOpsVmState -Name \$normalizedTargets -Type \$TargetType -AllowMissing') 'Post-operation snapshots opt into missing-target representation'
+Assert-LiveOpsEqual $true ($helperSource -match 'Get-LiveOpsVmState -Name \$normalizedTargets -Type \$TargetType -AllowMissing:\$AllowMissingTargets') 'Pre-operation snapshots require an explicit missing-target opt-in'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-liveops-test-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -Path $testRoot -ItemType Directory -Force
 $heldStream = $null

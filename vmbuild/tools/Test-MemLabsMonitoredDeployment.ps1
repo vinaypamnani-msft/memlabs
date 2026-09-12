@@ -34,10 +34,13 @@ function Invoke-MemLabsMonitorSequenceFixture {
         [Parameter(Mandatory)][string] $Sequence,
         [Parameter(Mandatory)][string] $FixtureRoot,
         [switch] $NoSnapshot,
-        [switch] $Restore
+        [switch] $Restore,
+        [ValidateSet('Fresh', 'StartPhase', 'Phase', 'Restore')]
+        [string] $InvocationMode = 'StartPhase',
+        [switch] $PolicyOnly
     )
 
-    $caseName = ($Sequence -replace '[,:]', '-') + $(if ($NoSnapshot) { '-nosnapshot' } else { '-snapshot' }) + $(if ($Restore) { '-restore' } else { '' })
+    $caseName = ($Sequence -replace '[,:]', '-') + "-$($InvocationMode.ToLowerInvariant())" + $(if ($NoSnapshot) { '-nosnapshot' } else { '-snapshot' }) + $(if ($Restore) { '-restore' } else { '' }) + $(if ($PolicyOnly) { '-policy' } else { '' })
     $caseRoot = Join-Path $FixtureRoot $caseName
     $toolsRoot = Join-Path $caseRoot 'tools'
     $logsRoot = Join-Path $caseRoot 'logs'
@@ -70,8 +73,14 @@ param(
     [scriptblock] $Operation,
     [scriptblock] $Postcondition,
     [scriptblock] $FailureDiagnostics,
+    [switch] $AllowMissingTargets,
     [switch] $IncludeOperationOutput
 )
+if ($env:MEMLABS_TEST_ALLOW_MISSING_CAPTURE) {
+    [pscustomobject]@{ AllowMissingTargets = $AllowMissingTargets.IsPresent } |
+        ConvertTo-Json | Set-Content -LiteralPath $env:MEMLABS_TEST_ALLOW_MISSING_CAPTURE -Encoding UTF8
+    return
+}
 $operationId = 'fixture-operation'
 $handoffToken = [guid]::NewGuid().ToString('N')
 $sha256 = [Security.Cryptography.SHA256]::Create()
@@ -156,11 +165,18 @@ exit $exitCode
     $processInfo.CreateNoWindow = $true
     $processInfo.RedirectStandardOutput = $true
     $processInfo.RedirectStandardError = $true
-    foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', (Join-Path $toolsRoot 'Invoke-MemLabsMonitoredDeployment.ps1'), '-Configuration', $configPath, '-StartPhase', '4', '-PollSeconds', '10', '-MaxHours', '1', '-KeepFailedVMs')) {
+    foreach ($argument in @('-NoProfile', '-NonInteractive', '-File', (Join-Path $toolsRoot 'Invoke-MemLabsMonitoredDeployment.ps1'), '-Configuration', $configPath, '-PollSeconds', '10', '-MaxHours', '1', '-KeepFailedVMs')) {
         $processInfo.ArgumentList.Add($argument)
+    }
+    switch ($InvocationMode) {
+        'StartPhase' { $processInfo.ArgumentList.Add('-StartPhase'); $processInfo.ArgumentList.Add('4') }
+        'Phase' { $processInfo.ArgumentList.Add('-Phase'); $processInfo.ArgumentList.Add('4') }
+        'Restore' { $processInfo.ArgumentList.Add('-StartPhase'); $processInfo.ArgumentList.Add('4'); $processInfo.ArgumentList.Add('-Restore') }
     }
     if ($NoSnapshot) { $processInfo.ArgumentList.Add('-NoSnapshot') }
     if ($Restore) { $processInfo.ArgumentList.Add('-Restore') }
+    $allowMissingCapturePath = Join-Path $caseRoot 'allow-missing.json'
+    if ($PolicyOnly) { $processInfo.Environment['MEMLABS_TEST_ALLOW_MISSING_CAPTURE'] = $allowMissingCapturePath }
     $processInfo.Environment['MEMLABS_TEST_EXIT_SEQUENCE'] = $Sequence
     $processInfo.Environment['MEMLABS_TEST_COUNTER_PATH'] = $counterPath
     $process = [Diagnostics.Process]::Start($processInfo)
@@ -178,6 +194,16 @@ exit $exitCode
     }
     finally {
         $process.Dispose()
+    }
+
+    if ($PolicyOnly) {
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            AllowMissingTargets = [bool](Get-Content -LiteralPath $allowMissingCapturePath -Raw | ConvertFrom-Json).AllowMissingTargets
+            MonitorOutput = $monitorOutput
+            MonitorError = $monitorError
+            TemporaryFiles = @(Get-ChildItem -LiteralPath $caseRoot -Recurse -File -ErrorAction SilentlyContinue | Where-Object Extension -eq '.tmp')
+        }
     }
 
     $outputPath = @(Get-ChildItem -LiteralPath $logsRoot -Filter 'MonitoredDeployment-*.out.txt' -File)[0].FullName
@@ -227,6 +253,7 @@ Assert-Equal $true ($monitorSource -match '\$arguments\.NoSnapshot = \$true' -an
 Assert-Equal $true ($monitorSource -match '\$arguments\.Restore = \$true' -and $childSource -match '\$arguments\.Restore = \$true') 'Phase 8 restore mode passes through both process boundaries'
 Assert-Equal $true ($monitorSource -match 'if \(\$Restore\) \{ ''Destructive'' \} else \{ ''Mutate'' \}') 'restore uses destructive Live Ops classification while ordinary deployment remains a mutation'
 Assert-Equal $true ($monitorSource -match '-TargetType VM' -and $monitorSource -match '-AcknowledgeDestructive:\$Restore') 'monitored restore targets VMs and explicitly acknowledges destructive state loss'
+Assert-Equal $true ($monitorSource -match '\$allowMissingTargets = -not \(\$StartPhase -or \$Phase -or \$Restore\)' -and $monitorSource -match '-AllowMissingTargets:\$allowMissingTargets') 'only fresh monitored deployments allow absent pre-operation VM targets'
 Assert-Equal $true ($monitorSource -match 'All VM state after the selected MemLabs checkpoint will be discarded') 'monitored restore records its expected loss'
 Assert-Equal $true ($childSource.IndexOf('$arguments = @{ Configuration = $Configuration; NoWindowResize = $true }', [StringComparison]::Ordinal) -ge 0) 'deployment child does not disable recovery snapshots by default'
 Assert-Equal $true ($monitorSource -match '\$StopPhase -and \(\$StartPhase -or \$Phase\)') 'stop-phase mode rejects ambiguous start/phase combinations'
@@ -583,6 +610,14 @@ finally {
 }
 $sequenceFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-sequence-' + [guid]::NewGuid().ToString('N'))
 try {
+    $freshPolicy = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '0' -FixtureRoot $sequenceFixtureRoot -InvocationMode Fresh -PolicyOnly
+    $startPhasePolicy = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '0' -FixtureRoot $sequenceFixtureRoot -InvocationMode StartPhase -PolicyOnly
+    $phasePolicy = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '0' -FixtureRoot $sequenceFixtureRoot -InvocationMode Phase -PolicyOnly
+    $restorePolicy = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '0' -FixtureRoot $sequenceFixtureRoot -InvocationMode Restore -PolicyOnly
+    Assert-Equal 'True,False,False,False' (@($freshPolicy, $startPhasePolicy, $phasePolicy, $restorePolicy).AllowMissingTargets -join ',') 'actual Live Ops binding allows absent targets only for fresh monitored deployment'
+    Assert-Equal '0,0,0,0' (@($freshPolicy, $startPhasePolicy, $phasePolicy, $restorePolicy).ExitCode -join ',') 'fresh-target policy binding fixtures all complete successfully'
+    Assert-Equal 0 @($freshPolicy, $startPhasePolicy, $phasePolicy, $restorePolicy | ForEach-Object TemporaryFiles).Count 'fresh-target policy binding fixtures leave no temporary files'
+
     $normalSuccess = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence 'normal55' -FixtureRoot $sequenceFixtureRoot
     Assert-Equal 0 $normalSuccess.ExitCode 'normal New-Lab return ignores a stale native exit code 55'
     Assert-Equal 1 $normalSuccess.Attempts 'normal return after native exit 55 does not relaunch the child'

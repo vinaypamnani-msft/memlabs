@@ -630,9 +630,11 @@ $postcondition = {
 
 try {
     $liveOpsMode = if ($Restore) { 'Destructive' } else { 'Mutate' }
+    $allowMissingTargets = -not ($StartPhase -or $Phase -or $Restore)
     $liveOpsExpectedLoss = if ($Restore) { 'All VM state after the selected MemLabs checkpoint will be discarded before deployment resumes.' } else { '' }
     $liveOpsRecoveryPath = if ($Restore) { 'Retain the selected checkpoint until Phase 11 validation succeeds; preserve failed VMs and diagnostics on retry failure.' } else { '' }
     & $liveOpsPath -Mode $liveOpsMode -Intent "Monitored deployment of $configurationPath" -Target $vmNames -TargetType VM `
+        -AllowMissingTargets:$allowMissingTargets `
         -ExpectedLoss $liveOpsExpectedLoss -RecoveryPath $liveOpsRecoveryPath -AcknowledgeDestructive:$Restore `
         -Operation $operation -Postcondition $postcondition -FailureDiagnostics {
             Get-VM -Name $vmNames -ErrorAction SilentlyContinue | Select-Object Name, State, Status, Uptime, Notes

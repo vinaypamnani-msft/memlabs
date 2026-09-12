@@ -42,6 +42,8 @@ param (
     [Parameter(DontShow)]
     [switch] $SkipActiveProcessCheck,
 
+    [switch] $AllowMissingTargets,
+
     [Parameter(DontShow)]
     [string] $TestCoordinationRoot = '',
 
@@ -372,7 +374,7 @@ try {
         Write-LiveOpsJournal -Path $journalPath -Record ([ordered]@{ Event = 'LeaseAcquired'; TimeUtc = [datetime]::UtcNow.ToString('o'); OperationId = $operationId })
     }
 
-    $beforeState = @(Get-LiveOpsVmState -Name $normalizedTargets -Type $TargetType)
+    $beforeState = @(Get-LiveOpsVmState -Name $normalizedTargets -Type $TargetType -AllowMissing:$AllowMissingTargets)
     Write-LiveOpsJournal -Path $journalPath -Record ([ordered]@{ Event = 'OperationStarted'; TimeUtc = [datetime]::UtcNow.ToString('o'); OperationId = $operationId; Before = $beforeState })
 
     $failureStage = 'Operation'
