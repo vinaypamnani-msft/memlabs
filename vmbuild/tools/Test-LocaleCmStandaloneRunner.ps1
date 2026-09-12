@@ -52,6 +52,9 @@ $global:MemLabsStandaloneCounterAvailableMB = 30720
 $global:MemLabsStandaloneCounterFailure = $false
 $global:MemLabsStandaloneFallbackAvailableKB = 26624 * 1024
 $global:MemLabsStandaloneNow = [datetime]'2026-09-12T00:00:00Z'
+$global:MemLabsStandaloneCounterSamplesMB = @()
+$global:MemLabsStandaloneCounterSampleIndex = 0
+$global:MemLabsStandaloneProbeDelaySeconds = 0
 
 function global:Get-CimInstance {
     param([string] $ClassName)
@@ -74,11 +77,34 @@ function global:Get-PSDrive {
 function global:Get-Counter {
     param([string] $Counter)
     if ($global:MemLabsStandaloneCounterFailure) { throw 'fixture counter failure' }
-    return [pscustomobject]@{ CounterSamples = @([pscustomobject]@{ CookedValue = $global:MemLabsStandaloneCounterAvailableMB }) }
+    $value = $global:MemLabsStandaloneCounterAvailableMB
+    if ($global:MemLabsStandaloneCounterSamplesMB.Count -gt 0) {
+        $sampleIndex = [math]::Min($global:MemLabsStandaloneCounterSampleIndex, $global:MemLabsStandaloneCounterSamplesMB.Count - 1)
+        $value = $global:MemLabsStandaloneCounterSamplesMB[$sampleIndex]
+        $global:MemLabsStandaloneCounterSampleIndex++
+    }
+    return [pscustomobject]@{ CounterSamples = @([pscustomobject]@{ CookedValue = $value }) }
 }
 
 function global:Get-Date { return $global:MemLabsStandaloneNow }
 function global:Start-Sleep { param([int] $Seconds) $global:MemLabsStandaloneNow = $global:MemLabsStandaloneNow.AddSeconds($Seconds) }
+function global:Start-ThreadJob {
+    param([scriptblock] $ScriptBlock)
+    $value = & $ScriptBlock
+    return [pscustomobject]@{ Value = $value; DelaySeconds = $global:MemLabsStandaloneProbeDelaySeconds }
+}
+function global:Wait-Job {
+    param($Job, [int] $Timeout)
+    if ($Job.DelaySeconds -gt $Timeout) {
+        $global:MemLabsStandaloneNow = $global:MemLabsStandaloneNow.AddSeconds($Timeout)
+        return $null
+    }
+    $global:MemLabsStandaloneNow = $global:MemLabsStandaloneNow.AddSeconds($Job.DelaySeconds)
+    return $Job
+}
+function global:Receive-Job { param($Job) return $Job.Value }
+function global:Stop-Job { param($Job) }
+function global:Remove-Job { param($Job, [switch] $Force) }
 
 function global:Get-VM {
     param([string[]] $Name)
@@ -112,17 +138,31 @@ param(
     $env:MEMLABS_STANDALONE_CAPTURE = $capturePath
 
     . (Import-TestFunction -Path $runnerPath -Name 'Wait-LocaleStageCapacity')
-    $global:MemLabsStandaloneCounterAvailableMB = 25600
-    Wait-LocaleStageCapacity -RequiredAvailableGB 25 -TimeoutMinutes 1
-    Assert-True -Condition $true -What 'stage handoff accepts the exact authoritative memory threshold'
+    $global:MemLabsStandaloneCounterAvailableMB = 23552
+    Wait-LocaleStageCapacity -RequiredAvailableGB 23 -TimeoutMinutes 2
+    Assert-True -Condition ($global:MemLabsStandaloneNow -eq [datetime]'2026-09-12T00:01:00Z') -What 'stage handoff requires three sustained samples at the exact authoritative threshold'
     $global:MemLabsStandaloneCounterFailure = $true
-    $global:MemLabsStandaloneFallbackAvailableKB = 26GB / 1KB
-    Wait-LocaleStageCapacity -RequiredAvailableGB 25 -TimeoutMinutes 1
-    Assert-True -Condition $true -What 'stage handoff accepts sufficient CIM fallback memory'
     $global:MemLabsStandaloneFallbackAvailableKB = 24GB / 1KB
-    Assert-ThrowsLike -Action { Wait-LocaleStageCapacity -RequiredAvailableGB 25 -TimeoutMinutes 1 } -Pattern '*raw available memory remained below 25 GB for 1 minute*' -What 'stage handoff times out when fallback memory remains insufficient'
+    $global:MemLabsStandaloneNow = [datetime]'2026-09-12T00:00:00Z'
+    Wait-LocaleStageCapacity -RequiredAvailableGB 23 -TimeoutMinutes 2
+    Assert-True -Condition ($global:MemLabsStandaloneNow -eq [datetime]'2026-09-12T00:01:00Z') -What 'stage handoff requires three sustained CIM fallback samples'
+    $global:MemLabsStandaloneFallbackAvailableKB = 22GB / 1KB
+    $global:MemLabsStandaloneNow = [datetime]'2026-09-12T00:00:00Z'
+    Assert-ThrowsLike -Action { Wait-LocaleStageCapacity -RequiredAvailableGB 23 -TimeoutMinutes 1 } -Pattern '*raw available memory remained below 23 GB for 1 minute*' -What 'stage handoff times out when fallback memory remains insufficient'
     $global:MemLabsStandaloneCounterFailure = $false
+    $global:MemLabsStandaloneNow = [datetime]'2026-09-12T00:00:00Z'
+    $global:MemLabsStandaloneCounterSamplesMB = @(23552, 23551.5, 23552, 23552, 23552)
+    $global:MemLabsStandaloneCounterSampleIndex = 0
+    Wait-LocaleStageCapacity -RequiredAvailableGB 23 -TimeoutMinutes 3
+    Assert-True -Condition ($global:MemLabsStandaloneCounterSampleIndex -eq 5) -What 'stage handoff rejects an unrounded sub-threshold sample and resets the qualifying streak'
+    $global:MemLabsStandaloneCounterSamplesMB = @()
+    $global:MemLabsStandaloneCounterSampleIndex = 0
     $global:MemLabsStandaloneCounterAvailableMB = 30720
+    $global:MemLabsStandaloneProbeDelaySeconds = 30
+    $global:MemLabsStandaloneNow = [datetime]'2026-09-12T00:00:00Z'
+    Assert-ThrowsLike -Action { Wait-LocaleStageCapacity -RequiredAvailableGB 23 -TimeoutMinutes 1 } -Pattern '*raw available memory remained below 23 GB for 1 minute*' -What 'stage handoff bounds stalled probes to the wall-clock timeout'
+    Assert-True -Condition ($global:MemLabsStandaloneNow -eq [datetime]'2026-09-12T00:01:00Z') -What 'stalled memory probes cannot overrun the handoff deadline'
+    $global:MemLabsStandaloneProbeDelaySeconds = 0
 
     $global:LASTEXITCODE = 37
     & $runnerPath -LocaleSet 3 -OutputDirectory $outputRoot -DeploymentRunner $stubPath | Out-Null
@@ -137,7 +177,8 @@ param(
     $generatedVms = @($generatedCore.virtualMachines) + @($generatedAdditions.virtualMachines)
     Assert-True -Condition ($generatedCore.vmOptions.basePath -eq 'C:\VirtualMachines' -and $generatedAdditions.vmOptions.basePath -eq 'C:\VirtualMachines' -and $generatedCore.vmOptions.prefix -eq 'LS3-' -and $generatedCore.vmOptions.domainName -eq 'standalone3.lab' -and $generatedCore.vmOptions.network -eq '10.221.223.0') -What 'serialized set 3 stages contain matching storage and identity'
     Assert-True -Condition ((@($generatedVms | ForEach-Object locale) -join ',') -eq 'fi-FI,hr-HR,it-IT,fr-CA,he-IL,hu-HU,ja-JP,ko-KR') -What 'serialized set 3 stages contain all eight locale assignments'
-    Assert-True -Condition (((@($generatedCore.virtualMachines | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum -eq 22GB) -and ((@($generatedAdditions.virtualMachines | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum -eq 17GB)) -What 'serialized stages preserve 22 GB and 17 GB deployment budgets'
+    Assert-True -Condition (((@($generatedCore.virtualMachines | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum -eq 22GB) -and ((@($generatedAdditions.virtualMachines | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum -eq 15GB)) -What 'serialized stages preserve 22 GB and 15 GB deployment budgets'
+    Assert-True -Condition ((@($generatedAdditions.virtualMachines | ForEach-Object { "$($_.vmName)=$($_.memory)/$($_.dynamicMinRam)" }) -join ',') -eq 'BDC1=3GB/1GB,FS1=3GB/1GB,SRV1=2GB/1GB,DPMP1=3GB/1GB,CL1=4GB/1GB') -What 'serialized additions preserve the reviewed per-role memory profile'
 
     $forbiddenProperties = @('OtherNode', 'AlwaysOnName', 'ClusterName', 'ClusterIPAddress', 'AGIPAddress', 'fileServerVM', 'AlwaysOnGroupName', 'AlwaysOnListenerName', 'SqlServiceAccount', 'SqlAgentAccount')
     $generatedAoProperties = @(foreach ($vm in $generatedVms) {
@@ -155,9 +196,11 @@ param(
 
     $global:MemLabsStandaloneExistingVmNames = @($generatedVms | ForEach-Object { "LS3-$($_.vmName)" })
     Remove-Item -LiteralPath $capturePath -Force
+    $additionsResumeStart = $global:MemLabsStandaloneNow
     & $runnerPath -LocaleSet 3 -Stage Additions -StartPhase 8 -OutputDirectory $outputRoot -DeploymentRunner $stubPath | Out-Null
     $additionsResumeCapture = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json -ErrorAction Stop
     Assert-True -Condition ($additionsResumeCapture.StartPhase -eq 8 -and $additionsResumeCapture.ExpectedCompletedPhase -eq 11 -and $additionsResumeCapture.Configuration -eq $expectedAdditionsPath) -What 'additions resume forwards start phase 8 and expected completion phase 11'
+    Assert-True -Condition ($global:MemLabsStandaloneNow -eq $additionsResumeStart.AddMinutes(1)) -What 'explicit additions resume also requires three sustained capacity samples'
 
     Assert-ThrowsLike -Action { & $runnerPath -LocaleSet 3 -StartPhase 8 -PlanOnly | Out-Null } -Pattern '*Select -Stage Core or -Stage Additions*' -What 'all-stage resume requires an explicit stage'
 
@@ -203,8 +246,8 @@ param(
 }
 finally {
     Remove-Item Env:\MEMLABS_STANDALONE_CAPTURE -ErrorAction SilentlyContinue
-    Remove-Item Function:\Get-CimInstance, Function:\Get-Command, Function:\Get-PSDrive, Function:\Get-Counter, Function:\Get-Date, Function:\Start-Sleep, Function:\Get-VM -ErrorAction SilentlyContinue
-    Remove-Variable MemLabsStandaloneHostProductType, MemLabsStandaloneExistingVmNames, MemLabsStandaloneCounterAvailableMB, MemLabsStandaloneCounterFailure, MemLabsStandaloneFallbackAvailableKB, MemLabsStandaloneNow -Scope Global -ErrorAction SilentlyContinue
+    Remove-Item Function:\Get-CimInstance, Function:\Get-Command, Function:\Get-PSDrive, Function:\Get-Counter, Function:\Get-Date, Function:\Start-Sleep, Function:\Start-ThreadJob, Function:\Wait-Job, Function:\Receive-Job, Function:\Stop-Job, Function:\Remove-Job, Function:\Get-VM -ErrorAction SilentlyContinue
+    Remove-Variable MemLabsStandaloneHostProductType, MemLabsStandaloneExistingVmNames, MemLabsStandaloneCounterAvailableMB, MemLabsStandaloneCounterFailure, MemLabsStandaloneFallbackAvailableKB, MemLabsStandaloneNow, MemLabsStandaloneCounterSamplesMB, MemLabsStandaloneCounterSampleIndex, MemLabsStandaloneProbeDelaySeconds -Scope Global -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 

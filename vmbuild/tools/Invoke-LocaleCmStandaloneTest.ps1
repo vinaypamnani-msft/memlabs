@@ -98,7 +98,7 @@ $expectedAdditions = [ordered]@{
 }
 $stageDefinitions = @(
     [pscustomobject]@{ Name = 'Core'; Config = $coreConfig; Expected = $expectedCore; MemoryBytes = 22GB }
-    [pscustomobject]@{ Name = 'Additions'; Config = $additionsConfig; Expected = $expectedAdditions; MemoryBytes = 17GB }
+    [pscustomobject]@{ Name = 'Additions'; Config = $additionsConfig; Expected = $expectedAdditions; MemoryBytes = 15GB }
 )
 foreach ($stageDefinition in $stageDefinitions) {
     $configuredVms = @($stageDefinition.Config.virtualMachines | Where-Object { $null -ne $_ })
@@ -251,7 +251,7 @@ Write-Host "  Locale set   : $LocaleSet"
 Write-Host "  Stage        : $Stage"
 Write-Host "  Identity     : $($identity.Prefix) / $($identity.Domain) / $($identity.Network)"
 Write-Host "  SQL topology : $remoteSqlName (standalone remote SQL)"
-Write-Host '  Memory stages: Core=22 GB, Additions=17 GB'
+Write-Host '  Memory stages: Core=22 GB, Additions=15 GB'
 Write-Host "  Assignments  : $(@($allVms | ForEach-Object { "$($_.vmName)=$($_.locale)" }) -join ', ')"
 Write-Host "  Core config  : $(if ($PlanOnly) { '<plan only>' } else { $coreGeneratedPath })"
 Write-Host "  Additions    : $(if ($PlanOnly) { '<plan only>' } else { $additionsGeneratedPath })"
@@ -282,23 +282,56 @@ function Wait-LocaleStageCapacity {
     param([double] $RequiredAvailableGB, [int] $TimeoutMinutes)
 
     $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    $requiredAvailableBytes = [int64]($RequiredAvailableGB * 1GB)
+    $qualifyingSamples = 0
     do {
-        try { $availableBytes = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue * 1MB }
-        catch { $availableBytes = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).FreePhysicalMemory * 1KB }
-        $rawAvailableGB = [math]::Round($availableBytes / 1GB, 2)
-        Write-Host "Stage handoff memory: $rawAvailableGB GB raw available; $RequiredAvailableGB GB required."
-        if ($rawAvailableGB -ge $RequiredAvailableGB) { return }
-        Start-Sleep -Seconds 30
+        $remainingSeconds = [math]::Floor(($deadline - (Get-Date)).TotalSeconds)
+        if ($remainingSeconds -le 0) { break }
+        $probeTimeoutSeconds = [int][math]::Min(15, $remainingSeconds)
+        $probeJob = Start-ThreadJob -ScriptBlock {
+            try { return [double]((Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue * 1MB) }
+            catch { return [double]((Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).FreePhysicalMemory * 1KB) }
+        }
+        $availableBytes = $null
+        try {
+            if (Wait-Job -Job $probeJob -Timeout $probeTimeoutSeconds) {
+                $probeOutput = @(Receive-Job -Job $probeJob -ErrorAction Stop)
+                if ($probeOutput.Count -ne 1 -or [double]$probeOutput[0] -le 0) {
+                    throw "Memory availability probe returned $($probeOutput.Count) unusable result(s)."
+                }
+                $availableBytes = [double]$probeOutput[0]
+            }
+        }
+        finally {
+            Stop-Job -Job $probeJob -ErrorAction SilentlyContinue
+            Remove-Job -Job $probeJob -Force -ErrorAction SilentlyContinue
+        }
+        if ((Get-Date) -gt $deadline) { break }
+        if ($null -eq $availableBytes) {
+            $qualifyingSamples = 0
+            Write-Host "Stage handoff memory: probe did not complete within $probeTimeoutSeconds second(s); qualifying sample 0 of 3."
+        }
+        else {
+            $rawAvailableGB = [math]::Round($availableBytes / 1GB, 2)
+            if ($availableBytes -ge $requiredAvailableBytes) { $qualifyingSamples++ } else { $qualifyingSamples = 0 }
+            Write-Host "Stage handoff memory: $rawAvailableGB GB raw available; $RequiredAvailableGB GB required; qualifying sample $qualifyingSamples of 3."
+        }
+        if ($qualifyingSamples -ge 3) { return }
+        $sleepSeconds = [math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+        if ($sleepSeconds -gt 0) { Start-Sleep -Seconds ([int][math]::Min(30, $sleepSeconds)) }
     } while ((Get-Date) -lt $deadline)
     throw "Additions stage cannot start: raw available memory remained below $RequiredAvailableGB GB for $TimeoutMinutes minute(s)."
 }
 
 switch ($Stage) {
     'Core' { Invoke-LocaleStage -Name Core -Path $coreGeneratedPath -ResumePhase $StartPhase }
-    'Additions' { Invoke-LocaleStage -Name Additions -Path $additionsGeneratedPath -ResumePhase $StartPhase }
+    'Additions' {
+        Wait-LocaleStageCapacity -RequiredAvailableGB 23 -TimeoutMinutes $StageHandoffMinutes
+        Invoke-LocaleStage -Name Additions -Path $additionsGeneratedPath -ResumePhase $StartPhase
+    }
     'All' {
         Invoke-LocaleStage -Name Core -Path $coreGeneratedPath
-        Wait-LocaleStageCapacity -RequiredAvailableGB 25 -TimeoutMinutes $StageHandoffMinutes
+        Wait-LocaleStageCapacity -RequiredAvailableGB 23 -TimeoutMinutes $StageHandoffMinutes
         Invoke-LocaleStage -Name Additions -Path $additionsGeneratedPath
     }
 }
