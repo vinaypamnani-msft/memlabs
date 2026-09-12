@@ -1255,7 +1255,7 @@ function New-RDCManFileFromHyperV {
                 $c | Add-Member -MemberType NoteProperty -Name "SiteGroupTag" -Value "site_$($siteHierarchy.VmSiteMap[$vm.vmName])" -Force
             }
 
-            $comment = $c | ConvertTo-Json
+            $comment = $c | ConvertTo-Json -Depth 10
             if ($useIP) {
                 $name = $($vm.LastKnownIP)
             }
@@ -1443,7 +1443,7 @@ function New-RDCManFileFromHyperV {
             Write-Verbose "New-RDCManFileFromHyperV: Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -force }
-            $comment = $c | ConvertTo-Json
+            $comment = $c | ConvertTo-Json -Depth 10
             $name = $($vm.VmName)
             $displayName = $($vm.VmName)
             if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $unknownTargetGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString()) -eq $True) {
