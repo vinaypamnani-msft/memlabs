@@ -231,38 +231,269 @@
                 `$adminPass = [System.Text.Encoding]::Unicode.GetString(
                                   [Convert]::FromBase64String('$cvAdminPassB64'))
 
+                function Test-BoundedDomainAdminMembership {
+                    param(
+                        [string] `$PdcIP,
+                        [int] `$Port = 389,
+                        [string] `$Domain,
+                        [string] `$DomainDN,
+                        [string] `$AdminUser,
+                        [string] `$AdminPass,
+                        [int] `$TimeoutSeconds = 10,
+                        [string] `$WorkerScript
+                    )
+
+                    if (-not ('MemLabsLdapNativeJob' -as [type])) {
+                        `$nativeJobSource = @(
+                            'using System;'
+                            'using System.ComponentModel;'
+                            'using System.Runtime.InteropServices;'
+                            'public static class MemLabsLdapNativeJob {'
+                            '    [StructLayout(LayoutKind.Sequential)]'
+                            '    private struct BasicLimitInformation {'
+                            '        public long PerProcessUserTimeLimit;'
+                            '        public long PerJobUserTimeLimit;'
+                            '        public uint LimitFlags;'
+                            '        public UIntPtr MinimumWorkingSetSize;'
+                            '        public UIntPtr MaximumWorkingSetSize;'
+                            '        public uint ActiveProcessLimit;'
+                            '        public UIntPtr Affinity;'
+                            '        public uint PriorityClass;'
+                            '        public uint SchedulingClass;'
+                            '    }'
+                            '    [StructLayout(LayoutKind.Sequential)]'
+                            '    private struct IoCounters {'
+                            '        public ulong ReadOperationCount;'
+                            '        public ulong WriteOperationCount;'
+                            '        public ulong OtherOperationCount;'
+                            '        public ulong ReadTransferCount;'
+                            '        public ulong WriteTransferCount;'
+                            '        public ulong OtherTransferCount;'
+                            '    }'
+                            '    [StructLayout(LayoutKind.Sequential)]'
+                            '    private struct ExtendedLimitInformation {'
+                            '        public BasicLimitInformation BasicLimitInformation;'
+                            '        public IoCounters IoInfo;'
+                            '        public UIntPtr ProcessMemoryLimit;'
+                            '        public UIntPtr JobMemoryLimit;'
+                            '        public UIntPtr PeakProcessMemoryUsed;'
+                            '        public UIntPtr PeakJobMemoryUsed;'
+                            '    }'
+                            '    [DllImport(""kernel32.dll"", CharSet = CharSet.Unicode, SetLastError = true)]'
+                            '    private static extern IntPtr CreateJobObject(IntPtr attributes, string name);'
+                            '    [DllImport(""kernel32.dll"", SetLastError = true)]'
+                            '    private static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimitInformation info, uint length);'
+                            '    [DllImport(""kernel32.dll"", SetLastError = true)]'
+                            '    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);'
+                            '    [DllImport(""kernel32.dll"", SetLastError = true)]'
+                            '    private static extern bool CloseHandle(IntPtr handle);'
+                            '    public static IntPtr CreateKillOnClose() {'
+                            '        IntPtr job = CreateJobObject(IntPtr.Zero, null);'
+                            '        if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());'
+                            '        ExtendedLimitInformation info = new ExtendedLimitInformation();'
+                            '        info.BasicLimitInformation.LimitFlags = 0x00002000;'
+                            '        if (!SetInformationJobObject(job, 9, ref info, (uint)Marshal.SizeOf(info))) {'
+                            '            int error = Marshal.GetLastWin32Error();'
+                            '            CloseHandle(job);'
+                            '            throw new Win32Exception(error);'
+                            '        }'
+                            '        return job;'
+                            '    }'
+                            '    public static void Assign(IntPtr job, IntPtr process) {'
+                            '        if (!AssignProcessToJobObject(job, process)) throw new Win32Exception(Marshal.GetLastWin32Error());'
+                            '    }'
+                            '    public static void Close(IntPtr job) {'
+                            '        if (job != IntPtr.Zero && !CloseHandle(job)) throw new Win32Exception(Marshal.GetLastWin32Error());'
+                            '    }'
+                            '}'
+                        ) -join [Environment]::NewLine
+                        Add-Type -TypeDefinition `$nativeJobSource -ErrorAction Stop
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace(`$WorkerScript)) {
+                        `$WorkerScript = {
+                            `$ErrorActionPreference = 'Stop'
+                            Add-Type -AssemblyName System.DirectoryServices.Protocols -ErrorAction Stop
+                            `$connection = `$null
+                            try {
+                                `$hostName = `$env:MEMLABS_LDAP_HOST
+                                `$portNumber = [int]`$env:MEMLABS_LDAP_PORT
+                                `$domainName = `$env:MEMLABS_LDAP_DOMAIN
+                                `$domainDistinguishedName = `$env:MEMLABS_LDAP_DOMAIN_DN
+                                `$userName = `$env:MEMLABS_LDAP_USER
+                                `$password = `$env:MEMLABS_LDAP_PASSWORD
+                                Remove-Item Env:MEMLABS_LDAP_PASSWORD -ErrorAction SilentlyContinue
+
+                                `$identifier = [System.DirectoryServices.Protocols.LdapDirectoryIdentifier]::new(`$hostName, `$portNumber, `$false, `$false)
+                                `$credential = [Net.NetworkCredential]::new(`$userName, `$password, `$domainName)
+                                `$connection = [System.DirectoryServices.Protocols.LdapConnection]::new(
+                                    `$identifier,
+                                    `$credential,
+                                    [System.DirectoryServices.Protocols.AuthType]::Negotiate)
+                                `$connection.SessionOptions.ProtocolVersion = 3
+
+                                `$escapedUserName = `$userName.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29')
+                                `$requestTimeout = [TimeSpan]::FromSeconds(4)
+                                `$userRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
+                                    `$domainDistinguishedName,
+                                    ""(&(objectClass=user)(sAMAccountName=`$escapedUserName))"",
+                                    [System.DirectoryServices.Protocols.SearchScope]::Subtree,
+                                    [string[]]@('distinguishedName'))
+                                `$userRequest.SizeLimit = 1
+                                `$userRequest.TimeLimit = `$requestTimeout
+                                `$userResponse = `$connection.SendRequest(`$userRequest, `$requestTimeout)
+
+                                if (`$userResponse.Entries.Count -gt 0) {
+                                    `$tokenRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
+                                        [string]`$userResponse.Entries[0].DistinguishedName,
+                                        '(objectClass=*)',
+                                        [System.DirectoryServices.Protocols.SearchScope]::Base,
+                                        [string[]]@('tokenGroups'))
+                                    `$tokenRequest.SizeLimit = 1
+                                    `$tokenRequest.TimeLimit = `$requestTimeout
+                                    `$tokenResponse = `$connection.SendRequest(`$tokenRequest, `$requestTimeout)
+                                    `$tokenGroups = if (`$tokenResponse.Entries.Count -gt 0) {
+                                        `$tokenResponse.Entries[0].Attributes['tokenGroups']
+                                    }
+                                    `$isDomainAdmin = @(`$tokenGroups | ForEach-Object {
+                                            [System.Security.Principal.SecurityIdentifier]::new([byte[]]`$_, 0).Value
+                                        } | Where-Object { `$_ -match '-512$' }).Count -gt 0
+                                    if (`$isDomainAdmin) {
+                                        Write-Output 'VERIFIED'
+                                        exit 0
+                                    }
+                                }
+
+                                Write-Output 'NOT_VERIFIED'
+                                exit 3
+                            }
+                            catch {
+                                Write-Output ""ERROR: `$(`$_.Exception.Message)""
+                                exit 2
+                            }
+                            finally {
+                                if (`$connection) { `$connection.Dispose() }
+                            }
+                        }.ToString()
+                    }
+
+                    `$gatePreamble = @(
+                        '`$startGate = [Threading.EventWaitHandle]::OpenExisting(`$env:MEMLABS_LDAP_START_GATE)'
+                        'try { [void]`$startGate.WaitOne() } finally { `$startGate.Dispose() }'
+                        'Remove-Item Env:MEMLABS_LDAP_START_GATE -ErrorAction SilentlyContinue'
+                    ) -join [Environment]::NewLine
+                    `$gatedWorkerScript = `$gatePreamble + [Environment]::NewLine + `$WorkerScript
+                    `$encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(`$gatedWorkerScript))
+                    `$startGateName = 'Local\MemLabsLdapWorker-' + [guid]::NewGuid().ToString('N')
+                    `$startGate = [Threading.EventWaitHandle]::new(`$false, [Threading.EventResetMode]::ManualReset, `$startGateName)
+                    `$startInfo = New-Object Diagnostics.ProcessStartInfo
+                    `$startInfo.FileName = Join-Path `$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                    `$startInfo.Arguments = ""-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand `$encodedCommand""
+                    `$startInfo.UseShellExecute = `$false
+                    `$startInfo.CreateNoWindow = `$true
+                    `$startInfo.RedirectStandardOutput = `$true
+                    `$startInfo.RedirectStandardError = `$true
+                    `$startInfo.EnvironmentVariables['MEMLABS_LDAP_HOST'] = `$PdcIP
+                    `$startInfo.EnvironmentVariables['MEMLABS_LDAP_PORT'] = [string]`$Port
+                    `$startInfo.EnvironmentVariables['MEMLABS_LDAP_DOMAIN'] = `$Domain
+                    `$startInfo.EnvironmentVariables['MEMLABS_LDAP_DOMAIN_DN'] = `$DomainDN
+                    `$startInfo.EnvironmentVariables['MEMLABS_LDAP_USER'] = `$AdminUser
+                    `$startInfo.EnvironmentVariables['MEMLABS_LDAP_PASSWORD'] = `$AdminPass
+                    `$startInfo.EnvironmentVariables['MEMLABS_LDAP_START_GATE'] = `$startGateName
+
+                    `$process = New-Object Diagnostics.Process
+                    `$process.StartInfo = `$startInfo
+                    `$started = `$false
+                    `$jobHandle = [IntPtr]::Zero
+                    try {
+                        `$jobHandle = [MemLabsLdapNativeJob]::CreateKillOnClose()
+                        `$started = `$process.Start()
+                        `$startInfo.EnvironmentVariables['MEMLABS_LDAP_PASSWORD'] = ''
+                        if (-not `$started) { throw 'Could not start the LDAP verification worker.' }
+                        [MemLabsLdapNativeJob]::Assign(`$jobHandle, `$process.Handle)
+                        if (-not `$startGate.Set()) { throw 'Could not release the LDAP verification worker start gate.' }
+
+                        if (-not `$process.WaitForExit(`$TimeoutSeconds * 1000)) {
+                            try {
+                                `$process.Kill()
+                            }
+                            catch {
+                                if (-not `$process.HasExited) {
+                                    throw ""Could not terminate LDAP verification worker PID `$(`$process.Id): `$(`$_.Exception.Message)""
+                                }
+                            }
+                            if (-not `$process.HasExited -and -not `$process.WaitForExit(5000)) {
+                                throw ""Could not terminate LDAP verification worker PID `$(`$process.Id) within 5 seconds.""
+                            }
+                            Write-Verbose ""LDAP verification worker exceeded its `$TimeoutSeconds-second limit and was terminated.""
+                            return `$false
+                        }
+
+                        `$standardOutput = `$process.StandardOutput.ReadToEnd().Trim()
+                        `$standardError = `$process.StandardError.ReadToEnd().Trim()
+                        if (`$process.ExitCode -eq 0 -and `$standardOutput -eq 'VERIFIED') { return `$true }
+                        Write-Verbose ""LDAP verification worker exited `$(`$process.ExitCode): `$standardOutput `$standardError""
+                        return `$false
+                    }
+                    finally {
+                        `$startInfo.EnvironmentVariables['MEMLABS_LDAP_PASSWORD'] = ''
+                        `$cleanupError = `$null
+                        if (`$jobHandle -ne [IntPtr]::Zero) {
+                            try {
+                                [MemLabsLdapNativeJob]::Close(`$jobHandle)
+                            }
+                            catch {
+                                `$cleanupError = ""Could not close LDAP verification worker job: `$(`$_.Exception.Message)""
+                            }
+                            `$jobHandle = [IntPtr]::Zero
+                        }
+                        if (`$started -and -not `$process.HasExited -and -not `$process.WaitForExit(5000)) {
+                            try {
+                                `$process.Kill()
+                            }
+                            catch {
+                                if (-not `$process.HasExited) {
+                                    `$cleanupError = ""Could not terminate LDAP verification worker PID `$(`$process.Id): `$(`$_.Exception.Message)""
+                                }
+                            }
+                            if (-not `$process.HasExited -and -not `$process.WaitForExit(5000)) {
+                                `$cleanupError = ""Could not terminate LDAP verification worker PID `$(`$process.Id) within 5 seconds.""
+                            }
+                        }
+                        `$startGate.Dispose()
+                        `$process.Dispose()
+                        if (`$cleanupError) { throw `$cleanupError }
+                    }
+                }
+
                 `$maxWait = 600   # 10 minutes
-                `$waited  = 0
+                `$timer = [Diagnostics.Stopwatch]::StartNew()
                 `$verified = `$false
 
-                while (`$waited -lt `$maxWait) {
+                while (`$timer.Elapsed.TotalSeconds -lt `$maxWait) {
                     try {
-                        `$de = New-Object System.DirectoryServices.DirectoryEntry(
-                            ""LDAP://`$pdcIP/`$domainDN"",
-                            ""`$domain\`$adminUser"",
-                            `$adminPass)
-                        `$searcher = New-Object System.DirectoryServices.DirectorySearcher(`$de)
-                        `$searcher.Filter = ""(&(objectClass=group)(primaryGroupToken=512))""
-                        `$searcher.PropertiesToLoad.Add(""member"") | Out-Null
-                        `$result = `$searcher.FindOne()
-                        if (`$result) {
-                            `$found = @(`$result.Properties[""member""]) |
-                                      Where-Object { `$_ -like ""CN=`$adminUser,*"" }
-                            if (`$found) {
-                                Write-Verbose ""User '`$adminUser' confirmed in Domain Admins via LDAP""
-                                `$verified = `$true
-                                break
-                            }
+                        `$remainingSeconds = `$maxWait - `$timer.Elapsed.TotalSeconds
+                        if (`$remainingSeconds -lt 1) { break }
+                        `$probeTimeout = [int][Math]::Min(10, [Math]::Floor(`$remainingSeconds))
+                        if (Test-BoundedDomainAdminMembership -PdcIP `$pdcIP -Domain `$domain -DomainDN `$domainDN -AdminUser `$adminUser -AdminPass `$adminPass -TimeoutSeconds `$probeTimeout) {
+                            Write-Verbose ""User '`$adminUser' confirmed in Domain Admins via LDAP""
+                            `$verified = `$true
+                            break
                         }
                     }
                     catch {
+                        if (`$_.Exception.Message -like 'Could not terminate LDAP verification worker*') { throw }
                         Write-Verbose ""LDAP query to `$pdcIP failed: `$_""
                     }
 
-                    Start-Sleep -Seconds 15
-                    `$waited += 15
+                    `$remainingSeconds = `$maxWait - `$timer.Elapsed.TotalSeconds
+                    if (`$remainingSeconds -lt 1) { break }
+                    `$sleepSeconds = [int][Math]::Min(15, [Math]::Floor(`$remainingSeconds))
+                    Start-Sleep -Seconds `$sleepSeconds
+                    `$waited = [int]`$timer.Elapsed.TotalSeconds
                     Write-Verbose ""Waiting for '`$adminUser' in Domain Admins (`$waited s / `$maxWait s)""
                 }
+                `$timer.Stop()
 
                 # Purge any cached Kerberos tickets so promotion uses a fresh TGT
                 klist purge 2>&1 | Out-Null
@@ -281,8 +512,11 @@
                     }
                     else {
                         try {
-                            `$lastReboot = [DateTime]::Parse((Get-Content `$rebootFile -First 1))
-                            if (([DateTime]::UtcNow - `$lastReboot).TotalMinutes -ge 60) {
+                            `$lastReboot = [DateTime]::Parse(
+                                (Get-Content `$rebootFile -First 1),
+                                [Globalization.CultureInfo]::InvariantCulture,
+                                [Globalization.DateTimeStyles]::RoundtripKind)
+                            if (([DateTime]::UtcNow - `$lastReboot.ToUniversalTime()).TotalMinutes -ge 60) {
                                 `$shouldReboot = `$true
                             }
                         }
