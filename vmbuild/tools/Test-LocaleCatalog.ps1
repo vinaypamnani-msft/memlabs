@@ -797,6 +797,32 @@ Assert-Equal -Expected 38 -Actual @($setLocales | Sort-Object -Unique).Count -Wh
 Assert-Equal -Expected ($catalogTags -join ',') -Actual (@($setLocales | Sort-Object -Unique) -join ',') -What 'high-memory locale-set coverage exactly matches the locale catalog'
 Assert-Equal -Expected 'tr-TR,es-ES,it-IT,ru-RU,fr-FR' -Actual (@([regex]::Matches($highMemoryRunner, "PS1SITE = '([^']+)'") | ForEach-Object { $_.Groups[1].Value }) -join ',') -What 'high-memory sets exercise five native ConfigMgr setup languages'
 
+$standaloneRunner = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-LocaleCmStandaloneTest.ps1') -Raw
+$standaloneConfigPath = Join-Path $RootPath 'config\tests\Locale-CM-Standalone.json'
+$standaloneConfig = Get-Content -LiteralPath $standaloneConfigPath -Raw | ConvertFrom-Json
+Assert-True -Condition ($standaloneRunner -match "VmStorageRoot = 'C:\\VirtualMachines'" -and $standaloneRunner -match "storageRoot -eq 'C:\\'.*?ProductType -ne 1") -What 'standalone locale test uses supported C drive storage only on Windows Client hosts'
+Assert-True -Condition ($standaloneRunner -match '(?s)role -eq ''SQLAO''.*?Standalone locale testing refuses SQLAO topology' -and $standaloneRunner -match 'AlwaysOnGroupName' -and $standaloneRunner -match 'AlwaysOnListenerName') -What 'standalone locale test rejects SQLAO roles and topology properties'
+Assert-True -Condition ($standaloneRunner -match '(?s)StartPhase -eq 0.*?target VM\(s\) already exist.*?StartPhase -gt 0.*?target VM\(s\) are missing') -What 'standalone locale test distinguishes fresh and resume VM safety'
+Assert-True -Condition ($standaloneRunner -match 'Invoke-MemLabsMonitoredDeployment\.ps1' -and $standaloneRunner -match 'ExpectedCompletedPhase\s*=\s*11') -What 'standalone locale test requires monitored Phase 11 completion'
+Assert-Equal -Expected 'DC,BDC,FileServer,DomainMember,DomainMember,Primary,SiteSystem,DomainMember' -Actual (@($standaloneConfig.virtualMachines.role) -join ',') -What 'standalone locale config covers identity, storage, SQL, member server, ConfigMgr, site-system, and client roles'
+Assert-Equal -Expected 'C:\VirtualMachines' -Actual $standaloneConfig.vmOptions.basePath -What 'standalone locale config uses supported Windows Client host storage'
+Assert-Equal -Expected 40GB -Actual (@($standaloneConfig.virtualMachines | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum -What 'standalone locale config remains within a 64 GB host budget'
+$standaloneSqlAoProperties = @(foreach ($vm in $standaloneConfig.virtualMachines) {
+    foreach ($property in @('OtherNode', 'AlwaysOnName', 'ClusterName', 'ClusterIPAddress', 'AGIPAddress', 'fileServerVM', 'AlwaysOnGroupName', 'AlwaysOnListenerName', 'SqlServiceAccount', 'SqlAgentAccount')) {
+            if ($vm.PSObject.Properties.Name -contains $property) { "$($vm.vmName).$property" }
+        }
+    })
+Assert-Equal -Expected 0 -Actual $standaloneSqlAoProperties.Count -What 'standalone locale config contains no SQLAO-only properties'
+$standalonePrimary = @($standaloneConfig.virtualMachines | Where-Object role -eq 'Primary')
+$standaloneSql = @($standaloneConfig.virtualMachines | Where-Object vmName -eq $standalonePrimary[0].remoteSQLVM)
+Assert-True -Condition ($standalonePrimary.Count -eq 1 -and $standaloneSql.Count -eq 1 -and $standaloneSql[0].role -eq 'DomainMember' -and $standaloneSql[0].sqlVersion -eq 'SQL Server 2022') -What 'standalone locale primary targets one non-AO remote SQL server'
+$standaloneSetLocaleMatches = [regex]::Matches($standaloneRunner, "(?:DC1|BDC1|FS1|SQL1|SRV1|PS1SITE|DPMP1|CL1) = '([^']+)'")
+$standaloneSetLocales = @($standaloneSetLocaleMatches | ForEach-Object { $_.Groups[1].Value })
+Assert-Equal -Expected 40 -Actual $standaloneSetLocales.Count -What 'five standalone locale sets assign all eight roles'
+Assert-Equal -Expected 38 -Actual @($standaloneSetLocales | Sort-Object -Unique).Count -What 'standalone locale sets cover all 38 catalog locales'
+Assert-Equal -Expected ($catalogTags -join ',') -Actual (@($standaloneSetLocales | Sort-Object -Unique) -join ',') -What 'standalone locale-set coverage exactly matches the locale catalog'
+Assert-Equal -Expected 'tr-TR,es-ES,it-IT,ru-RU,fr-FR' -Actual (@([regex]::Matches($standaloneRunner, "PS1SITE = '([^']+)'") | ForEach-Object { $_.Groups[1].Value }) -join ',') -What 'standalone sets exercise five native ConfigMgr setup languages'
+
 $script:PreparedLocaleRequests = [Collections.Generic.List[string]]::new()
 $script:ClearLocaleCacheCalls = 0
 function Initialize-LocaleMedia {
