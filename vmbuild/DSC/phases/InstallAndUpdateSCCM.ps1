@@ -280,6 +280,7 @@ if ($ThisVM.cmInstallDir) {
 
 # SQL FQDN
 
+$installToAO = $false
 if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }

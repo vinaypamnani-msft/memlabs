@@ -29,6 +29,10 @@ function Assert-Equal {
 Assert-Equal 'LMT-LMTSQL,1500|LMT-SQL1' (@(Get-CmDatabaseProbeTargets -ListenerTarget 'LMT-LMTSQL,1500' -InstallToAO $true -NodeName 'LMT-SQL1' -NodePort 1433) -join '|') 'AO database probe uses listener port 1500 and physical node port 1433 independently'
 Assert-Equal 'CUSTOM-LISTENER,1500|CUSTOM-SQL1,5422' (@(Get-CmDatabaseProbeTargets -ListenerTarget 'CUSTOM-LISTENER,1500' -InstallToAO $true -NodeName 'CUSTOM-SQL1' -NodePort 5422) -join '|') 'AO database probe preserves a custom physical node port'
 Assert-Equal 'SQL1,1433' (@(Get-CmDatabaseProbeTargets -ListenerTarget 'SQL1,1433' -InstallToAO $false -NodeName 'SQL1' -NodePort 1433) -join '|') 'non-AO database probe keeps only its configured target'
+$source = Get-Content -LiteralPath $sourcePath -Raw
+$nonAoInitialization = $source.IndexOf('$installToAO = $false', [StringComparison]::Ordinal)
+$remoteSqlBranch = $source.IndexOf('if ($ThisVM.remoteSQLVM)', [StringComparison]::Ordinal)
+Assert-Equal $true ($nonAoInitialization -ge 0 -and $nonAoInitialization -lt $remoteSqlBranch) 'standalone setup initializes InstallToAO false before remote SQL scenario selection'
 
 $script:SetupType = 0
 $script:Services = @()
