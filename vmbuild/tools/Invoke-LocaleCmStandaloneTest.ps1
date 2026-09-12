@@ -3,19 +3,22 @@
     Runs the non-SQLAO ConfigMgr locale matrix on a Windows Client host.
 
 .DESCRIPTION
-    Derives a temporary configuration from the tracked standalone locale test
-    config. Five locale sets cover all 38 catalog locales across DC, BDC, file
-    server, standalone SQL, member server, ConfigMgr primary, remote DP/MP, and
-    Windows 11 client roles. The generated configuration rejects every SQLAO
-    role and topology property before deployment.
+    Derives memory-safe core and additions configurations from the tracked
+    standalone locale test configs. Five locale sets cover all 38 catalog
+    locales across DC, BDC, file server, standalone SQL, member server,
+    ConfigMgr primary, remote DP/MP, and Windows 11 client roles. Generated
+    configurations reject every SQLAO role and topology property.
 #>
 #requires -Version 7.4
 #requires -RunAsAdministrator
 [CmdletBinding()]
 param(
     [string] $Configuration,
+    [string] $AdditionsConfiguration,
     [ValidateRange(1, 5)]
     [int] $LocaleSet = 1,
+    [ValidateSet('All', 'Core', 'Additions')]
+    [string] $Stage = 'All',
     [ValidateRange(0, 11)]
     [int] $StartPhase = 0,
     [string] $VmStorageRoot = 'C:\VirtualMachines',
@@ -23,6 +26,8 @@ param(
     [int] $NoProgressMinutes = 45,
     [ValidateRange(1, 48)]
     [int] $MaxHours = 18,
+    [ValidateRange(1, 120)]
+    [int] $StageHandoffMinutes = 30,
     [switch] $PlanOnly,
     [Parameter(DontShow)]
     [string] $OutputDirectory,
@@ -36,9 +41,15 @@ $vmbuildRoot = Split-Path -Parent $PSScriptRoot
 if (-not $Configuration) {
     $Configuration = Join-Path $vmbuildRoot 'config\tests\Locale-CM-Standalone.json'
 }
-$sourcePath = [IO.Path]::GetFullPath($Configuration)
-if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-    throw "Configuration not found: $sourcePath"
+if (-not $AdditionsConfiguration) {
+    $AdditionsConfiguration = Join-Path $vmbuildRoot 'config\tests\Locale-CM-Standalone-Additions.json'
+}
+$coreSourcePath = [IO.Path]::GetFullPath($Configuration)
+$additionsSourcePath = [IO.Path]::GetFullPath($AdditionsConfiguration)
+foreach ($configurationPath in @($coreSourcePath, $additionsSourcePath)) {
+    if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) {
+        throw "Configuration not found: $configurationPath"
+    }
 }
 
 $storagePath = [IO.Path]::GetFullPath($VmStorageRoot)
@@ -67,34 +78,52 @@ if (-not $PlanOnly) {
     $storageFreeGB = [math]::Round([double]$storageDrive.Free / 1GB, 1)
 }
 
-$config = Get-Content -LiteralPath $sourcePath -Raw | ConvertFrom-Json -ErrorAction Stop
-$expectedMatrix = [ordered]@{
+if ($Stage -eq 'All' -and $StartPhase -gt 0) {
+    throw 'Select -Stage Core or -Stage Additions when resuming with -StartPhase.'
+}
+
+$coreConfig = Get-Content -LiteralPath $coreSourcePath -Raw | ConvertFrom-Json -ErrorAction Stop
+$additionsConfig = Get-Content -LiteralPath $additionsSourcePath -Raw | ConvertFrom-Json -ErrorAction Stop
+$expectedCore = [ordered]@{
     DC1     = [pscustomobject]@{ Role = 'DC'; OperatingSystem = 'Server 2025' }
+    SQL1    = [pscustomobject]@{ Role = 'DomainMember'; OperatingSystem = 'Server 2022' }
+    PS1SITE = [pscustomobject]@{ Role = 'Primary'; OperatingSystem = 'Server 2022' }
+}
+$expectedAdditions = [ordered]@{
     BDC1    = [pscustomobject]@{ Role = 'BDC'; OperatingSystem = 'Server 2022' }
     FS1     = [pscustomobject]@{ Role = 'FileServer'; OperatingSystem = 'Server 2022' }
-    SQL1    = [pscustomobject]@{ Role = 'DomainMember'; OperatingSystem = 'Server 2022' }
     SRV1    = [pscustomobject]@{ Role = 'DomainMember'; OperatingSystem = 'Server 2022' }
-    PS1SITE = [pscustomobject]@{ Role = 'Primary'; OperatingSystem = 'Server 2022' }
     DPMP1   = [pscustomobject]@{ Role = 'SiteSystem'; OperatingSystem = 'Server 2025' }
     CL1     = [pscustomobject]@{ Role = 'DomainMember'; OperatingSystem = 'Windows 11*' }
 }
-$configuredVms = @($config.virtualMachines | Where-Object { $null -ne $_ })
-if ($configuredVms.Count -ne $expectedMatrix.Count) {
-    throw "Standalone locale matrix requires exactly $($expectedMatrix.Count) VMs; found $($configuredVms.Count)."
-}
-foreach ($expectedVm in $expectedMatrix.GetEnumerator()) {
-    $matrixMatches = @($configuredVms | Where-Object vmName -eq $expectedVm.Key)
-    if ($matrixMatches.Count -ne 1) {
-        throw "Standalone locale matrix requires exactly one '$($expectedVm.Key)' VM; found $($matrixMatches.Count)."
+$stageDefinitions = @(
+    [pscustomobject]@{ Name = 'Core'; Config = $coreConfig; Expected = $expectedCore; MemoryBytes = 22GB }
+    [pscustomobject]@{ Name = 'Additions'; Config = $additionsConfig; Expected = $expectedAdditions; MemoryBytes = 17GB }
+)
+foreach ($stageDefinition in $stageDefinitions) {
+    $configuredVms = @($stageDefinition.Config.virtualMachines | Where-Object { $null -ne $_ })
+    if ($configuredVms.Count -ne $stageDefinition.Expected.Count) {
+        throw "$($stageDefinition.Name) locale stage requires exactly $($stageDefinition.Expected.Count) VMs; found $($configuredVms.Count)."
     }
-    $vm = $matrixMatches[0]
-    if ($vm.role -ne $expectedVm.Value.Role -or $vm.operatingSystem -notlike $expectedVm.Value.OperatingSystem -or $vm.hidden) {
-        throw "Standalone locale matrix VM '$($expectedVm.Key)' must be one visible $($expectedVm.Value.Role) running $($expectedVm.Value.OperatingSystem)."
+    foreach ($expectedVm in $stageDefinition.Expected.GetEnumerator()) {
+        $matrixMatches = @($configuredVms | Where-Object vmName -eq $expectedVm.Key)
+        if ($matrixMatches.Count -ne 1) {
+            throw "$($stageDefinition.Name) locale stage requires exactly one '$($expectedVm.Key)' VM; found $($matrixMatches.Count)."
+        }
+        $vm = $matrixMatches[0]
+        if ($vm.role -ne $expectedVm.Value.Role -or $vm.operatingSystem -notlike $expectedVm.Value.OperatingSystem -or $vm.hidden) {
+            throw "$($stageDefinition.Name) locale stage VM '$($expectedVm.Key)' must be one visible $($expectedVm.Value.Role) running $($expectedVm.Value.OperatingSystem)."
+        }
+    }
+    $configuredMemoryBytes = (@($configuredVms | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum
+    if ($configuredMemoryBytes -ne $stageDefinition.MemoryBytes) {
+        throw "$($stageDefinition.Name) locale stage requires exactly $($stageDefinition.MemoryBytes / 1GB) GB configured VM memory; found $([math]::Round($configuredMemoryBytes / 1GB, 1)) GB."
     }
 }
-$configuredMemoryBytes = (@($configuredVms | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum
-if ($configuredMemoryBytes -ne 40GB) {
-    throw "Standalone locale matrix requires exactly 40 GB configured VM memory; found $([math]::Round($configuredMemoryBytes / 1GB, 1)) GB."
+$allVms = @($coreConfig.virtualMachines) + @($additionsConfig.virtualMachines)
+$allVmNames = @($allVms | ForEach-Object { [string]$_.vmName })
+if (@($allVmNames | Sort-Object -Unique).Count -ne 8) {
+    throw 'Core and additions locale stages must define eight unique VM names.'
 }
 
 $localeSets = @{
@@ -113,27 +142,29 @@ $identity = [pscustomobject]@{
     SiteCode = "S0$LocaleSet"
 }
 
-$config.vmOptions.prefix = $identity.Prefix
-$config.vmOptions.basePath = $storagePath
-$config.vmOptions.domainName = $identity.Domain
-$config.vmOptions.domainNetBiosName = $identity.NetBios
-$config.vmOptions.network = $identity.Network
-$config.domainDefaults.DomainName = $identity.Domain
-$config.domainDefaults.Network = $identity.Network
-foreach ($vm in $config.virtualMachines) {
-    if (-not $assignments.ContainsKey([string]$vm.vmName)) {
-        throw "Locale set $LocaleSet has no assignment for '$($vm.vmName)'."
-    }
-    $vm.locale = [string]$assignments[[string]$vm.vmName]
-    $vm.localeAcquisition = if ($vm.operatingSystem -like 'Windows 11*') { 'WindowsUpdate' } else { 'MicrosoftMedia' }
-    if ($vm.PSObject.Properties.Name -contains 'localeSettings') {
-        $vm.PSObject.Properties.Remove('localeSettings')
-    }
-    if ($vm.PSObject.Properties.Name -contains 'siteCode') {
-        $vm.siteCode = $identity.SiteCode
+foreach ($stageConfig in @($coreConfig, $additionsConfig)) {
+    $stageConfig.vmOptions.prefix = $identity.Prefix
+    $stageConfig.vmOptions.basePath = $storagePath
+    $stageConfig.vmOptions.domainName = $identity.Domain
+    $stageConfig.vmOptions.domainNetBiosName = $identity.NetBios
+    $stageConfig.vmOptions.network = $identity.Network
+    $stageConfig.domainDefaults.DomainName = $identity.Domain
+    $stageConfig.domainDefaults.Network = $identity.Network
+    foreach ($vm in $stageConfig.virtualMachines) {
+        if (-not $assignments.ContainsKey([string]$vm.vmName)) {
+            throw "Locale set $LocaleSet has no assignment for '$($vm.vmName)'."
+        }
+        $vm.locale = [string]$assignments[[string]$vm.vmName]
+        $vm.localeAcquisition = if ($vm.operatingSystem -like 'Windows 11*') { 'WindowsUpdate' } else { 'MicrosoftMedia' }
+        if ($vm.PSObject.Properties.Name -contains 'localeSettings') {
+            $vm.PSObject.Properties.Remove('localeSettings')
+        }
+        if ($vm.PSObject.Properties.Name -contains 'siteCode') {
+            $vm.siteCode = $identity.SiteCode
+        }
     }
 }
-$primary = @($config.virtualMachines | Where-Object role -eq 'Primary')
+$primary = @($coreConfig.virtualMachines | Where-Object role -eq 'Primary')
 if ($primary.Count -ne 1) {
     throw "Expected exactly one ConfigMgr primary, found $($primary.Count)."
 }
@@ -151,8 +182,8 @@ $forbiddenProperties = @(
     'SqlServiceAccount',
     'SqlAgentAccount'
 )
-$sqlAoRoles = @($config.virtualMachines | Where-Object role -eq 'SQLAO')
-$sqlAoProperties = @(foreach ($vm in $config.virtualMachines) {
+$sqlAoRoles = @($allVms | Where-Object role -eq 'SQLAO')
+$sqlAoProperties = @(foreach ($vm in $allVms) {
         foreach ($property in $forbiddenProperties) {
             if ($vm.PSObject.Properties.Name -contains $property) {
                 "$($vm.vmName).$property"
@@ -165,50 +196,65 @@ if ($sqlAoRoles.Count -gt 0 -or $sqlAoProperties.Count -gt 0) {
 }
 
 $remoteSqlName = [string]$primary[0].remoteSQLVM
-$remoteSql = @($config.virtualMachines | Where-Object vmName -eq $remoteSqlName)
+$remoteSql = @($coreConfig.virtualMachines | Where-Object vmName -eq $remoteSqlName)
 if ($remoteSql.Count -ne 1 -or $remoteSql[0].role -ne 'DomainMember' -or -not $remoteSql[0].sqlVersion) {
     throw "Primary remoteSQLVM '$remoteSqlName' must resolve to one standalone SQL DomainMember."
 }
 
 $catalogPath = Join-Path $vmbuildRoot 'common\LocaleCatalog.json'
 $catalog = Get-Content -LiteralPath $catalogPath -Raw | ConvertFrom-Json -ErrorAction Stop
-foreach ($vm in $config.virtualMachines) {
+foreach ($vm in $allVms) {
     if (-not $catalog.PSObject.Properties[[string]$vm.locale]) {
         throw "Locale '$($vm.locale)' is absent from LocaleCatalog.json."
     }
 }
 
-$prefix = [string]$config.vmOptions.prefix
-$targetNames = @($config.virtualMachines | Where-Object { -not $_.hidden } | ForEach-Object { "$prefix$($_.vmName)" })
-$existingNames = @()
+$prefix = [string]$coreConfig.vmOptions.prefix
+$coreTargetNames = @($coreConfig.virtualMachines | ForEach-Object { "$prefix$($_.vmName)" })
+$additionsTargetNames = @($additionsConfig.virtualMachines | ForEach-Object { "$prefix$($_.vmName)" })
 if (-not $PlanOnly) {
-    $existingNames = @(Get-VM -Name $targetNames -ErrorAction SilentlyContinue | Where-Object { $null -ne $_ } | Select-Object -ExpandProperty Name)
-    if ($StartPhase -eq 0 -and $existingNames.Count -gt 0) {
-        throw "Fresh test refused because target VM(s) already exist: $($existingNames -join ', '). Remove them intentionally or resume with -StartPhase."
+    $existingNames = @(Get-VM -Name @($coreTargetNames + $additionsTargetNames) -ErrorAction SilentlyContinue | Where-Object { $null -ne $_ } | Select-Object -ExpandProperty Name)
+    $selectedTargets = if ($Stage -eq 'Core') { $coreTargetNames } elseif ($Stage -eq 'Additions') { $additionsTargetNames } else { @($coreTargetNames + $additionsTargetNames) }
+    if ($Stage -eq 'Additions') {
+        $missingCore = @($coreTargetNames | Where-Object { $_ -notin $existingNames })
+        if ($missingCore.Count -gt 0) {
+            throw "Additions stage requires completed core VM(s): $($missingCore -join ', ')."
+        }
     }
-    if ($StartPhase -gt 0) {
-        $missingNames = @($targetNames | Where-Object { $_ -notin $existingNames })
+    if ($StartPhase -eq 0) {
+        $existingTargets = @($selectedTargets | Where-Object { $_ -in $existingNames })
+        if ($existingTargets.Count -gt 0) {
+            throw "Fresh $Stage stage refused because target VM(s) already exist: $($existingTargets -join ', '). Remove them intentionally or resume the selected stage with -StartPhase."
+        }
+    }
+    else {
+        $missingNames = @($selectedTargets | Where-Object { $_ -notin $existingNames })
         if ($missingNames.Count -gt 0) {
-            throw "Resume from Phase $StartPhase refused because target VM(s) are missing: $($missingNames -join ', ')."
+            throw "$Stage stage resume from Phase $StartPhase refused because target VM(s) are missing: $($missingNames -join ', ')."
         }
     }
 }
 
 $outputRoot = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $vmbuildRoot 'temp' }
-$generatedPath = Join-Path $outputRoot "Locale-CM-Standalone-Set$LocaleSet.json"
+$coreGeneratedPath = Join-Path $outputRoot "Locale-CM-Standalone-Core-Set$LocaleSet.json"
+$additionsGeneratedPath = Join-Path $outputRoot "Locale-CM-Standalone-Additions-Set$LocaleSet.json"
 if (-not $PlanOnly) {
     $null = New-Item -Path $outputRoot -ItemType Directory -Force
-    $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $generatedPath -Encoding UTF8
+    $coreConfig | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $coreGeneratedPath -Encoding UTF8
+    $additionsConfig | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $additionsGeneratedPath -Encoding UTF8
 }
 
 Write-Host 'Standalone ConfigMgr locale test'
 Write-Host "  Host RAM     : $totalMemoryGB GB"
 Write-Host "  VM storage   : $storagePath$(if ($null -ne $storageFreeGB) { " ($storageFreeGB GB free)" })"
 Write-Host "  Locale set   : $LocaleSet"
+Write-Host "  Stage        : $Stage"
 Write-Host "  Identity     : $($identity.Prefix) / $($identity.Domain) / $($identity.Network)"
 Write-Host "  SQL topology : $remoteSqlName (standalone remote SQL)"
-Write-Host "  Assignments  : $(@($config.virtualMachines | ForEach-Object { "$($_.vmName)=$($_.locale)" }) -join ', ')"
-Write-Host "  Configuration: $(if ($PlanOnly) { '<plan only>' } else { $generatedPath })"
+Write-Host '  Memory stages: Core=22 GB, Additions=17 GB'
+Write-Host "  Assignments  : $(@($allVms | ForEach-Object { "$($_.vmName)=$($_.locale)" }) -join ', ')"
+Write-Host "  Core config  : $(if ($PlanOnly) { '<plan only>' } else { $coreGeneratedPath })"
+Write-Host "  Additions    : $(if ($PlanOnly) { '<plan only>' } else { $additionsGeneratedPath })"
 Write-Host "  Start phase  : $(if ($StartPhase) { $StartPhase } else { 'fresh' })"
 if ($PlanOnly) { return }
 
@@ -216,17 +262,43 @@ $runner = if ($DeploymentRunner) { [IO.Path]::GetFullPath($DeploymentRunner) } e
 if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
     throw "Deployment runner not found: $runner"
 }
-$arguments = @{
-    Configuration          = $generatedPath
-    NoProgressMinutes      = $NoProgressMinutes
-    PollSeconds            = 60
-    MaxHours               = $MaxHours
-    ExpectedCompletedPhase = 11
-    KeepFailedVMs          = $true
-}
-if ($StartPhase -gt 0) {
-    $arguments.StartPhase = $StartPhase
+function Invoke-LocaleStage {
+    param([Parameter(Mandatory)][string] $Name, [Parameter(Mandatory)][string] $Path, [int] $ResumePhase)
+
+    Write-Host "Starting $Name locale stage: $Path"
+    $arguments = @{
+        Configuration          = $Path
+        NoProgressMinutes      = $NoProgressMinutes
+        PollSeconds            = 60
+        MaxHours               = $MaxHours
+        ExpectedCompletedPhase = 11
+        KeepFailedVMs          = $true
+    }
+    if ($ResumePhase -gt 0) { $arguments.StartPhase = $ResumePhase }
+    & $runner @arguments
 }
 
-& $runner @arguments
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+function Wait-LocaleStageCapacity {
+    param([double] $RequiredAvailableGB, [int] $TimeoutMinutes)
+
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    do {
+        try { $availableBytes = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue * 1MB }
+        catch { $availableBytes = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).FreePhysicalMemory * 1KB }
+        $rawAvailableGB = [math]::Round($availableBytes / 1GB, 2)
+        Write-Host "Stage handoff memory: $rawAvailableGB GB raw available; $RequiredAvailableGB GB required."
+        if ($rawAvailableGB -ge $RequiredAvailableGB) { return }
+        Start-Sleep -Seconds 30
+    } while ((Get-Date) -lt $deadline)
+    throw "Additions stage cannot start: raw available memory remained below $RequiredAvailableGB GB for $TimeoutMinutes minute(s)."
+}
+
+switch ($Stage) {
+    'Core' { Invoke-LocaleStage -Name Core -Path $coreGeneratedPath -ResumePhase $StartPhase }
+    'Additions' { Invoke-LocaleStage -Name Additions -Path $additionsGeneratedPath -ResumePhase $StartPhase }
+    'All' {
+        Invoke-LocaleStage -Name Core -Path $coreGeneratedPath
+        Wait-LocaleStageCapacity -RequiredAvailableGB 25 -TimeoutMinutes $StageHandoffMinutes
+        Invoke-LocaleStage -Name Additions -Path $additionsGeneratedPath
+    }
+}
