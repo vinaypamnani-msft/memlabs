@@ -4807,6 +4807,30 @@ class InitializeDisks {
     }
 }
 
+function Get-MemLabsBuiltinAdministratorsGroup {
+    $groups = @(Get-CimInstance -ClassName Win32_Group -Filter 'SID = "S-1-5-32-544"' -ErrorAction Stop)
+    if ($groups.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$groups[0].Name)) {
+        throw "Expected exactly one built-in Administrators group for SID S-1-5-32-544; found $($groups.Count)."
+    }
+    $groupName = [string]$groups[0].Name
+    return [ADSI]"WinNT://$env:COMPUTERNAME/$groupName,group"
+}
+
+function Test-MemLabsIsDomainController {
+    $computerSystems = @(Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop)
+    if ($computerSystems.Count -ne 1) {
+        throw "Expected exactly one Win32_ComputerSystem instance; found $($computerSystems.Count)."
+    }
+    $domainRole = 0
+    $domainRoleText = [string]$computerSystems[0].DomainRole
+    if ([string]::IsNullOrWhiteSpace($domainRoleText) -or
+        -not [int]::TryParse($domainRoleText, [ref]$domainRole) -or
+        $domainRole -lt 0 -or $domainRole -gt 5) {
+        throw "Win32_ComputerSystem returned invalid DomainRole '$domainRoleText'."
+    }
+    return $domainRole -in 4, 5
+}
+
 [DscResource()]
 class AddUserToLocalAdminGroup {
     [DscProperty(Key)]
@@ -4818,21 +4842,29 @@ class AddUserToLocalAdminGroup {
     [void] Set() {
         $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
-        $administratorSid = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-544'
         $memberName = "$_DomainName\$_Name"
+        $memberPath = "WinNT://$_DomainName/$_Name"
         try {
-            $existing = @(Get-LocalGroupMember -SID $administratorSid -ErrorAction Stop |
-                Where-Object { $_.Name -ieq $memberName })
+            $administratorGroup = Get-MemLabsBuiltinAdministratorsGroup
             Write-Status "Adding $memberName to administrators group"
-            if ($existing.Count -eq 0) {
-                Add-LocalGroupMember -SID $administratorSid -Member $memberName -ErrorAction Stop
+            if (-not $administratorGroup.IsMember($memberPath)) {
+                $administratorGroup.Add($memberPath)
+                if (-not $administratorGroup.IsMember($memberPath)) {
+                    throw "ADSI Add returned without error, but $memberName is still not a member"
+                }
             }
         }
         catch {
             $failureMessage = $_.Exception.Message
             Write-Status "AddUserToLocalAdminGroup: Failed to add $memberName to administrators group: $failureMessage"
             $secureChannelBroken = $false
-            try { $secureChannelBroken = -not (Test-ComputerSecureChannel -ErrorAction Stop) } catch { }
+            $isDomainController = $null
+            try { $isDomainController = Test-MemLabsIsDomainController } catch {
+                Write-Status "AddUserToLocalAdminGroup: Domain role could not be determined; skipping secure-channel diagnosis: $($_.Exception.Message)"
+            }
+            if ($null -ne $isDomainController -and -not $isDomainController) {
+                try { $secureChannelBroken = -not (Test-ComputerSecureChannel -ErrorAction Stop) } catch { }
+            }
             if ($secureChannelBroken) {
                 Write-Status "AddUserToLocalAdminGroup: Secure Channel is broken. Attempting to reboot to fix it."
                 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
@@ -4845,13 +4877,12 @@ class AddUserToLocalAdminGroup {
     [bool] Test() {
         $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
-        $administratorSid = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-544'
         $memberName = "$_DomainName\$_Name"
+        $memberPath = "WinNT://$_DomainName/$_Name"
         try {
             Write-Verbose "[$(Get-Date -format HH:mm:ss)] Testing $memberName is in administrators group"
-            $existing = @(Get-LocalGroupMember -SID $administratorSid -ErrorAction Stop |
-                Where-Object { $_.Name -ieq $memberName })
-            return $existing.Count -gt 0
+            $administratorGroup = Get-MemLabsBuiltinAdministratorsGroup
+            return [bool]$administratorGroup.IsMember($memberPath)
         }
         catch {
             Write-Verbose "AddUserToLocalAdminGroup: Failed to test $memberName in administrators group $_"

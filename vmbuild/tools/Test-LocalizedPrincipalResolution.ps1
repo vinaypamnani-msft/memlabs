@@ -124,6 +124,22 @@ function Get-TestClassDefinition {
     return $definitions[0].Extent.Text
 }
 
+function Get-TestFunctionDefinition {
+    param ([string] $Path, [string] $FunctionName)
+
+    $errors = $null
+    $tokens = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    $parseErrors = @($errors | Where-Object { $null -ne $_ -and $_.ErrorId -ne 'ModuleNotFoundDuringParse' })
+    if ($parseErrors.Count -ne 0) { throw "$Path has parse errors: $($parseErrors.Message -join '; ')" }
+    $definitions = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $FunctionName
+            }, $true))
+    if ($definitions.Count -ne 1) { throw "Expected one $FunctionName function in $Path, found $($definitions.Count)." }
+    return $definitions[0].Extent.Text
+}
+
 $script:DomainSid = 'S-1-5-21-111-222-333'
 $script:DomainLookups = @()
 $script:GroupLookups = @()
@@ -213,6 +229,50 @@ function Add-ADGroupMember {
 $templatePath = Join-Path $RootPath 'DSC\TemplateHelpDSC\TemplateHelpDSC.psm1'
 Invoke-Expression (Get-TestClassDefinition -Path $templatePath -ClassName 'AddToAdminGroup')
 Invoke-Expression (Get-TestClassDefinition -Path $templatePath -ClassName 'AddUserToLocalAdminGroup')
+
+$administratorHelperText = Get-TestFunctionDefinition -Path $templatePath -FunctionName 'Get-MemLabsBuiltinAdministratorsGroup'
+& {
+    $script:TestAdministratorGroups = @()
+    function Get-CimInstance { return $script:TestAdministratorGroups }
+    Invoke-Expression $administratorHelperText
+
+    $missingGroupError = $null
+    try { Get-MemLabsBuiltinAdministratorsGroup } catch { $missingGroupError = $_.Exception.Message }
+    Assert-True ($missingGroupError -match 'found 0') 'missing built-in Administrators SID match fails closed'
+
+    $script:TestAdministratorGroups = @(
+        [pscustomobject]@{ Name = 'Administrators A' },
+        [pscustomobject]@{ Name = 'Administrators B' }
+    )
+    $ambiguousGroupError = $null
+    try { Get-MemLabsBuiltinAdministratorsGroup } catch { $ambiguousGroupError = $_.Exception.Message }
+    Assert-True ($ambiguousGroupError -match 'found 2') 'multiple built-in Administrators SID matches fail closed'
+}
+
+$domainRoleHelperText = Get-TestFunctionDefinition -Path $templatePath -FunctionName 'Test-MemLabsIsDomainController'
+& {
+    $script:TestComputerSystems = @()
+    function Get-CimInstance { return $script:TestComputerSystems }
+    Invoke-Expression $domainRoleHelperText
+
+    foreach ($invalidCase in @(
+        @{ Name = 'missing instance'; Systems = @(); Pattern = 'found 0' },
+        @{ Name = 'multiple instances'; Systems = @([pscustomobject]@{ DomainRole = 3 }, [pscustomobject]@{ DomainRole = 4 }); Pattern = 'found 2' },
+        @{ Name = 'null role'; Systems = @([pscustomobject]@{ DomainRole = $null }); Pattern = 'invalid DomainRole' },
+        @{ Name = 'blank role'; Systems = @([pscustomobject]@{ DomainRole = '' }); Pattern = 'invalid DomainRole' },
+        @{ Name = 'nonnumeric role'; Systems = @([pscustomobject]@{ DomainRole = 'member' }); Pattern = 'invalid DomainRole' },
+        @{ Name = 'out-of-range role'; Systems = @([pscustomobject]@{ DomainRole = 6 }); Pattern = 'invalid DomainRole' }
+    )) {
+        $script:TestComputerSystems = @($invalidCase.Systems)
+        $roleError = $null
+        try { Test-MemLabsIsDomainController } catch { $roleError = $_.Exception.Message }
+        Assert-True ($roleError -match $invalidCase.Pattern) "$($invalidCase.Name) fails domain-role classification closed"
+    }
+    foreach ($domainRole in 0..5) {
+        $script:TestComputerSystems = @([pscustomobject]@{ DomainRole = $domainRole })
+        Assert-Equal -Expected ($domainRole -in 4, 5) -Actual (Test-MemLabsIsDomainController) -What "DomainRole $domainRole classification"
+    }
+}
 
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 Write-Host "source : $templatePath"
@@ -309,29 +369,40 @@ foreach ($lookupKind in @('user', 'computer')) {
 }
 $sidResource.AccountNames = @('usuario-localizado')
 
-$script:LocalGroupMembers = @()
-$script:AddLocalGroupCalls = @()
-$script:AddLocalGroupNonTerminatingFailure = $false
+$script:LocalGroupMemberPaths = @()
+$script:AddLocalGroupPaths = @()
+$script:AddLocalGroupFailure = $false
+$script:AddLocalGroupNoOp = $false
+$script:IsDomainController = $false
+$script:DomainRoleThrows = $false
+$script:SecureChannelCalls = 0
 $script:SecureChannelHealthy = $true
 $script:SecureChannelThrows = $false
 
-function Get-LocalGroupMember {
-    [CmdletBinding()]
-    param ($SID)
-    return $script:LocalGroupMembers
+function Get-MemLabsBuiltinAdministratorsGroup {
+    $group = [pscustomobject]@{}
+    $group | Add-Member -MemberType ScriptMethod -Name IsMember -Value {
+        param([string] $Path)
+        return $script:LocalGroupMemberPaths -contains $Path
+    }
+    $group | Add-Member -MemberType ScriptMethod -Name Add -Value {
+        param([string] $Path)
+        $script:AddLocalGroupPaths += $Path
+        if ($script:AddLocalGroupFailure) { throw 'simulated ADSI membership failure' }
+        if (-not $script:AddLocalGroupNoOp) { $script:LocalGroupMemberPaths += $Path }
+    }
+    return $group
 }
 
-function Add-LocalGroupMember {
-    [CmdletBinding()]
-    param ($SID, [string] $Member)
-    $script:AddLocalGroupCalls += [pscustomobject]@{ SID = $SID; Member = $Member }
-    if ($script:AddLocalGroupNonTerminatingFailure) { Write-Error 'simulated local group membership failure' }
-    $script:LocalGroupMembers += [pscustomobject]@{ Name = $Member }
+function Test-MemLabsIsDomainController {
+    if ($script:DomainRoleThrows) { throw 'simulated domain role lookup failure' }
+    return $script:IsDomainController
 }
 
 function Test-ComputerSecureChannel {
     [CmdletBinding()]
     param()
+    $script:SecureChannelCalls++
     if ($script:SecureChannelThrows) { throw 'computer is not domain joined' }
     return $script:SecureChannelHealthy
 }
@@ -342,15 +413,31 @@ $localGroupResource.NetbiosDomainName = 'EQUIPO'
 Assert-Equal $false $localGroupResource.Test() 'localized local administrator membership starts absent'
 $localGroupOutput = @($localGroupResource.Set())
 Assert-Equal 0 $localGroupOutput.Count 'local Administrators membership emits no success-stream output'
-Assert-Equal 'S-1-5-32-544' ($script:AddLocalGroupCalls.SID.Value -join ',') 'local Administrators membership targets the well-known group SID'
-Assert-Equal 'EQUIPO\AdministradorLab' ($script:AddLocalGroupCalls.Member -join ',') 'local Administrators membership preserves the configured localized account name'
+Assert-Equal 'WinNT://EQUIPO/AdministradorLab' ($script:AddLocalGroupPaths -join ',') 'local Administrators membership uses the locale-neutral WinNT principal path'
 Assert-Equal $true $localGroupResource.Test() 'localized local administrator membership verifies after add'
 $null = $localGroupResource.Set()
-Assert-Equal 1 $script:AddLocalGroupCalls.Count 'local Administrators membership is idempotent on rerun'
+Assert-Equal 1 $script:AddLocalGroupPaths.Count 'local Administrators membership is idempotent on rerun'
 
-$script:LocalGroupMembers = @()
-$script:AddLocalGroupCalls = @()
-$script:AddLocalGroupNonTerminatingFailure = $true
+$script:LocalGroupMemberPaths = @()
+$script:AddLocalGroupPaths = @()
+$localGroupResource.Name = 'NODE$'
+$null = $localGroupResource.Set()
+Assert-Equal 'WinNT://EQUIPO/NODE$' ($script:AddLocalGroupPaths -join ',') 'computer account path preserves its trailing dollar sign'
+$localGroupResource.Name = 'AdministradorLab'
+
+$script:LocalGroupMemberPaths = @()
+$script:AddLocalGroupPaths = @()
+$script:AddLocalGroupNoOp = $true
+$silentNoOpError = $null
+try { $localGroupResource.Set() } catch { $silentNoOpError = $_.Exception.Message }
+Assert-True ($silentNoOpError -match 'still not a member') 'silent ADSI add no-op fails its postcondition'
+$script:AddLocalGroupNoOp = $false
+
+$script:LocalGroupMemberPaths = @()
+$script:AddLocalGroupPaths = @()
+$script:AddLocalGroupFailure = $true
+$script:IsDomainController = $false
+$script:SecureChannelCalls = 0
 $script:SecureChannelHealthy = $false
 $global:DSCMachineStatus = 0
 $localGroupError = $null
@@ -362,10 +449,40 @@ try {
 finally {
     $ErrorActionPreference = $savedErrorActionPreference
 }
-Assert-True ($localGroupError -like '*simulated local group membership failure*') 'local Administrators membership failure is terminal under Continue'
-Assert-Equal 1 $script:AddLocalGroupCalls.Count 'failed local Administrators membership is attempted once'
+Assert-True ($localGroupError -like '*simulated ADSI membership failure*') 'local Administrators membership failure is terminal under Continue'
+Assert-Equal 1 $script:AddLocalGroupPaths.Count 'failed local Administrators membership is attempted once'
+Assert-Equal 1 $script:SecureChannelCalls 'member failure checks the secure channel once'
 Assert-Equal 1 $global:DSCMachineStatus 'broken secure channel requests recovery reboot before failing'
 Remove-Variable -Name DSCMachineStatus -Scope Global -ErrorAction SilentlyContinue
+
+$script:LocalGroupMemberPaths = @()
+$script:AddLocalGroupPaths = @()
+$script:AddLocalGroupFailure = $true
+$script:IsDomainController = $true
+$script:SecureChannelCalls = 0
+$script:SecureChannelHealthy = $false
+$global:DSCMachineStatus = 0
+$domainControllerError = $null
+try { $localGroupResource.Set() } catch { $domainControllerError = $_.Exception.Message }
+Assert-True ($domainControllerError -like '*simulated ADSI membership failure*') 'domain controller membership failure remains terminal'
+Assert-Equal 0 $script:SecureChannelCalls 'domain controller failure skips the member-only secure channel API'
+Assert-Equal 0 $global:DSCMachineStatus 'domain controller membership failure does not request a false secure-channel reboot'
+Remove-Variable -Name DSCMachineStatus -Scope Global -ErrorAction SilentlyContinue
+
+$script:DomainRoleThrows = $true
+$script:SecureChannelCalls = 0
+$global:DSCMachineStatus = 0
+$unknownRoleError = $null
+try { $localGroupResource.Set() } catch { $unknownRoleError = $_.Exception.Message }
+Assert-True ($unknownRoleError -like '*simulated ADSI membership failure*') 'unknown-role membership failure remains terminal'
+Assert-Equal 0 $script:SecureChannelCalls 'unknown domain role fails closed without secure-channel diagnosis'
+Assert-Equal 0 $global:DSCMachineStatus 'unknown domain role does not request a speculative reboot'
+Assert-True ([bool]($script:StatusMessages -match 'Domain role could not be determined')) 'unknown domain role is reported explicitly'
+Remove-Variable -Name DSCMachineStatus -Scope Global -ErrorAction SilentlyContinue
+
+$templateSource = Get-Content -LiteralPath $templatePath -Raw
+Assert-True ($templateSource -match '(?s)function Get-MemLabsBuiltinAdministratorsGroup.*?Win32_Group.*?S-1-5-32-544.*?WinNT://\$env:COMPUTERNAME/\$groupName,group') 'production helper resolves localized Administrators through SID and ADSI'
+Assert-True ($templateSource -notmatch '(?s)class AddUserToLocalAdminGroup.*?(?:Get|Add)-LocalGroupMember') 'local Administrators resource does not depend on the member-server LocalAccounts group API'
 
 $script:LocalUsers = @()
 $script:SetLocalUserCalls = @()
