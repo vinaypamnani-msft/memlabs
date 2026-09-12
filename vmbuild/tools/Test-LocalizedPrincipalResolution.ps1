@@ -238,7 +238,15 @@ $administratorHelperText = Get-TestFunctionDefinition -Path $templatePath -Funct
 
     $missingGroupError = $null
     try { Get-MemLabsBuiltinAdministratorsGroup } catch { $missingGroupError = $_.Exception.Message }
-    Assert-True ($missingGroupError -match 'found 0') 'missing built-in Administrators SID match fails closed'
+    Assert-True ($missingGroupError -match 'found 0 distinct name') 'missing built-in Administrators SID match fails closed'
+
+    $script:TestAdministratorGroups = @(
+        [pscustomobject]@{ Name = 'Administrateurs' },
+        [pscustomobject]@{ Name = 'ADMINISTRATEURS' }
+    )
+    $duplicateGroupError = $null
+    try { $null = Get-MemLabsBuiltinAdministratorsGroup } catch { $duplicateGroupError = $_.Exception.Message }
+    Assert-Equal $null $duplicateGroupError 'duplicate WMI rows for the same localized Administrators name collapse to one identity'
 
     $script:TestAdministratorGroups = @(
         [pscustomobject]@{ Name = 'Administrators A' },
@@ -246,7 +254,15 @@ $administratorHelperText = Get-TestFunctionDefinition -Path $templatePath -Funct
     )
     $ambiguousGroupError = $null
     try { Get-MemLabsBuiltinAdministratorsGroup } catch { $ambiguousGroupError = $_.Exception.Message }
-    Assert-True ($ambiguousGroupError -match 'found 2') 'multiple built-in Administrators SID matches fail closed'
+    Assert-True ($ambiguousGroupError -match 'found 2 distinct name') 'conflicting built-in Administrators SID names fail closed'
+
+    $script:TestAdministratorGroups = @(
+        [pscustomobject]@{ Name = 'Administrateurs' },
+        [pscustomobject]@{ Name = '' }
+    )
+    $blankGroupError = $null
+    try { Get-MemLabsBuiltinAdministratorsGroup } catch { $blankGroupError = $_.Exception.Message }
+    Assert-True ($blankGroupError -match 'blank name') 'mixed valid and blank built-in Administrators SID names fail closed'
 }
 
 $domainRoleHelperText = Get-TestFunctionDefinition -Path $templatePath -FunctionName 'Test-MemLabsIsDomainController'

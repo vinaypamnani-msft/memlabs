@@ -4809,10 +4809,18 @@ class InitializeDisks {
 
 function Get-MemLabsBuiltinAdministratorsGroup {
     $groups = @(Get-CimInstance -ClassName Win32_Group -Filter 'SID = "S-1-5-32-544"' -ErrorAction Stop)
-    if ($groups.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$groups[0].Name)) {
-        throw "Expected exactly one built-in Administrators group for SID S-1-5-32-544; found $($groups.Count)."
+    $groupNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($group in $groups) {
+        $candidateName = [string]$group.Name
+        if ([string]::IsNullOrWhiteSpace($candidateName)) {
+            throw "Win32_Group returned a blank name for built-in Administrators SID S-1-5-32-544."
+        }
+        [void]$groupNames.Add($candidateName)
     }
-    $groupName = [string]$groups[0].Name
+    if ($groupNames.Count -ne 1) {
+        throw "Expected exactly one built-in Administrators group name for SID S-1-5-32-544; found $($groupNames.Count) distinct name(s) across $($groups.Count) row(s)."
+    }
+    $groupName = [string]($groupNames | Select-Object -First 1)
     return [ADSI]"WinNT://$env:COMPUTERNAME/$groupName,group"
 }
 
