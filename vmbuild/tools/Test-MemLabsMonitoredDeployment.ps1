@@ -37,7 +37,7 @@ function Invoke-MemLabsMonitorSequenceFixture {
         [switch] $Restore
     )
 
-    $caseName = ($Sequence -replace ',', '-') + $(if ($NoSnapshot) { '-nosnapshot' } else { '-snapshot' }) + $(if ($Restore) { '-restore' } else { '' })
+    $caseName = ($Sequence -replace '[,:]', '-') + $(if ($NoSnapshot) { '-nosnapshot' } else { '-snapshot' }) + $(if ($Restore) { '-restore' } else { '' })
     $caseRoot = Join-Path $FixtureRoot $caseName
     $toolsRoot = Join-Path $caseRoot 'tools'
     $logsRoot = Join-Path $caseRoot 'logs'
@@ -48,6 +48,18 @@ function Invoke-MemLabsMonitorSequenceFixture {
 param([switch] $SkipMaintenanceRefresh, [switch] $SkipVmCacheRefresh, [switch] $SkipEnvironmentDetection, [switch] $SkipHostPreparation)
 function Get-LocalAdminCredential { return $true }
 function Get-VM { throw 'injected fixture rich diagnostics failure' }
+function Get-MemLabsDscArtifactState {
+    param([string] $DscRoot)
+    $receiptPath = Join-Path $DscRoot 'DSC.build.json'
+    $archivePath = Join-Path $DscRoot 'DSC.zip'
+    if (-not (Test-Path -LiteralPath $receiptPath) -or -not (Test-Path -LiteralPath $archivePath)) {
+        return [pscustomobject]@{ Current = $false; Reason = 'missing fixture artifact' }
+    }
+    try { $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json -ErrorAction Stop }
+    catch { return [pscustomobject]@{ Current = $false; Reason = 'invalid fixture receipt' } }
+    $archiveIdentity = Get-Content -LiteralPath $archivePath -Raw
+    [pscustomobject]@{ Current = ($archiveIdentity -eq [string]$receipt.ArchiveSha256); Reason = 'fixture archive mismatch' }
+}
 '@ | Set-Content -LiteralPath (Join-Path $caseRoot 'Common.ps1') -Encoding UTF8
     @'
 param(
@@ -115,7 +127,23 @@ if ($action -eq 'normal55') {
     $global:LASTEXITCODE = 0
     return
 }
-exit ([int]$action)
+$actionParts = @($action -split ':', 2)
+$exitCode = [int]$actionParts[0]
+if ($exitCode -eq 55) {
+    $identity = if ($actionParts.Count -eq 2) { $actionParts[1] } else { 'same' }
+    $dscRoot = Join-Path $PSScriptRoot 'DSC'
+    New-Item -Path $dscRoot -ItemType Directory -Force | Out-Null
+    [pscustomobject]@{
+        SchemaVersion = 1
+        ArchiveSha256 = $identity
+        TemplateHelpDscPsd1Sha256 = 'psd1'
+        TemplateHelpDscPsm1Sha256 = 'psm1'
+        MemLabsVersion = $identity
+        LatestHotfixVersion = $identity
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dscRoot 'DSC.build.json') -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $dscRoot 'DSC.zip') -Value $identity -NoNewline
+}
+exit $exitCode
 '@ | Set-Content -LiteralPath (Join-Path $caseRoot 'New-Lab.ps1') -Encoding UTF8
     $configPath = Join-Path $caseRoot 'fixture.json'
     @{
@@ -211,12 +239,16 @@ Assert-Equal 11 (Resolve-MemLabsExpectedCompletedPhase -ExpectedCompletedPhase 1
 $exitActionFunction = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'Resolve-MemLabsDeploymentExitAction'
 . $exitActionFunction
 Assert-Equal 'Complete' (Resolve-MemLabsDeploymentExitAction -ExitCode 0 -Attempt 1) 'successful child completes without a restart'
-Assert-Equal 'Restart' (Resolve-MemLabsDeploymentExitAction -ExitCode 55 -Attempt 1) 'first DSC archive restart request relaunches the contained child'
+Assert-Equal 'Restart' (Resolve-MemLabsDeploymentExitAction -ExitCode 55 -Attempt 1 -RestartIdentity first) 'first DSC archive restart request relaunches the contained child'
 Assert-Equal 'Fail' (Resolve-MemLabsDeploymentExitAction -ExitCode 37 -Attempt 1) 'ordinary nonzero child exit remains a failure'
 $repeatedRestartError = $null
-try { Resolve-MemLabsDeploymentExitAction -ExitCode 55 -Attempt 2 }
+try { Resolve-MemLabsDeploymentExitAction -ExitCode 55 -Attempt 2 -RestartIdentity first -AcceptedRestartIdentities first }
 catch { $repeatedRestartError = $_ }
-Assert-Equal $true ($repeatedRestartError.Exception.Message -like '*second DSC archive restart*') 'a repeated DSC archive restart request fails instead of looping'
+Assert-Equal $true ($repeatedRestartError.Exception.Message -like '*same DSC artifact*') 'an identical DSC artifact restart request fails instead of looping'
+$nonconsecutiveRestartError = $null
+try { Resolve-MemLabsDeploymentExitAction -ExitCode 55 -Attempt 3 -RestartIdentity first -AcceptedRestartIdentities first, second }
+catch { $nonconsecutiveRestartError = $_ }
+Assert-Equal $true ($nonconsecutiveRestartError.Exception.Message -like '*same DSC artifact*') 'a nonconsecutive repeated DSC artifact fails instead of looping'
 Assert-Equal $true ($childSource.IndexOf('*>> $OutputPath', [StringComparison]::Ordinal) -ge 0) 'deployment retries append to the synchronized output artifact'
 Assert-Equal $true ($childSource -match '(?s)\$global:LASTEXITCODE = 0.+?New-Lab\.ps1.+?exit \$LASTEXITCODE') 'deployment child preserves explicit New-Lab exit codes'
 Assert-Equal $true ($monitorSource -match '(?s)New-MemLabsDeploymentProcess.*?gateReady\.WaitOne.*?Add-MemLabsDeploymentProcessToJob.*?startGate\.Set\(\)' -and $childSource.IndexOf('gateReady.Set()') -lt $childSource.IndexOf('WaitOne([TimeSpan]::FromMinutes(2))') -and $childSource.IndexOf('WaitOne([TimeSpan]::FromMinutes(2))') -lt $childSource.IndexOf("& (Join-Path (Split-Path -Parent `$PSScriptRoot) 'New-Lab.ps1')")) 'deployment child acknowledges the gate then waits for job ownership before invoking New-Lab'
@@ -573,6 +605,21 @@ try {
     Assert-Equal $null $restartSuccess.Failure 'successful restart creates no failure artifact'
     Assert-Equal 0 $restartSuccess.TemporaryFiles.Count 'successful restart leaves no temporary artifact files'
 
+    $distinctRestartSuccess = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '55:first,55:second,0' -FixtureRoot $sequenceFixtureRoot
+    Assert-Equal 0 $distinctRestartSuccess.ExitCode 'two distinct DSC archive refreshes complete through the bounded monitor loop'
+    Assert-Equal 3 $distinctRestartSuccess.Attempts 'two distinct DSC archive refreshes launch three children'
+    Assert-Equal 2 @($distinctRestartSuccess.Monitor | Where-Object Event -eq 'ChildRestartRequested').Count 'each distinct DSC archive refresh records a restart event'
+    Assert-Equal 2 @($distinctRestartSuccess.Monitor | Where-Object ArtifactIdentity | Select-Object -ExpandProperty ArtifactIdentity -Unique).Count 'distinct restart events preserve distinct artifact identities'
+    Assert-Equal 0 @(Get-Process -Id $distinctRestartSuccess.ChildPids -ErrorAction SilentlyContinue).Count 'distinct refresh success leaves no child process running'
+    Assert-Equal $null $distinctRestartSuccess.Failure 'distinct refresh success creates no failure artifact'
+
+    $nonconsecutiveRestart = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '55:first,55:second,55:first' -FixtureRoot $sequenceFixtureRoot
+    Assert-Equal 1 $nonconsecutiveRestart.ExitCode 'nonconsecutive repeated DSC archive identity fails the complete monitor loop'
+    Assert-Equal 3 $nonconsecutiveRestart.Attempts 'nonconsecutive repeated identity is rejected before a fourth child'
+    Assert-Equal 2 @($nonconsecutiveRestart.Monitor | Where-Object Event -eq 'ChildRestartRequested').Count 'only the two unique artifact identities record restart events'
+    Assert-Equal $true ($nonconsecutiveRestart.Failure.Error -like '*same DSC artifact*') 'nonconsecutive repeated identity preserves its actionable reason'
+    Assert-Equal 0 @(Get-Process -Id $nonconsecutiveRestart.ChildPids -ErrorAction SilentlyContinue).Count 'nonconsecutive repeat failure leaves no child process running'
+
     $restartNoSnapshot = Invoke-MemLabsMonitorSequenceFixture -SourceRoot $RootPath -Sequence '55,0' -FixtureRoot $sequenceFixtureRoot -NoSnapshot
     Assert-Equal 0 $restartNoSnapshot.ExitCode 'explicit NoSnapshot exit sequence 55,0 succeeds through the complete monitor loop'
     Assert-Equal 2 $restartNoSnapshot.Attempts 'explicit NoSnapshot exit sequence launches exactly two children'
@@ -597,9 +644,9 @@ try {
     Assert-Equal 1 @([regex]::Matches($repeatedRestart.Output, 'attempt=1\b')).Count 'repeated restart output contains exactly one first-attempt marker'
     Assert-Equal 1 @([regex]::Matches($repeatedRestart.Output, 'attempt=2\b')).Count 'repeated restart output contains exactly one second-attempt marker'
     Assert-Equal 55 $repeatedRestart.Failure.ExitCode 'repeated restart failure records the final child exit code'
-    Assert-Equal $true ($repeatedRestart.Failure.Error -like '*second DSC archive restart*') 'repeated restart failure preserves its actionable reason'
+    Assert-Equal $true ($repeatedRestart.Failure.Error -like '*same DSC artifact*') 'repeated restart failure preserves its actionable reason'
     Assert-Equal $true (Test-Path -LiteralPath $repeatedRestart.DiagnosticsPath -PathType Leaf) 'repeated restart failure writes its advertised diagnostics artifact'
-    Assert-Equal $true ($repeatedRestart.Diagnostics.Reason -like '*second DSC archive restart*') 'repeated restart diagnostics preserve the failure reason'
+    Assert-Equal $true ($repeatedRestart.Diagnostics.Reason -like '*same DSC artifact*') 'repeated restart diagnostics preserve the failure reason'
     Assert-Equal $true ($repeatedRestart.MonitorError -match 'Cause=' -and $repeatedRestart.MonitorError -match 'EvidenceErrors=') 'repeated restart final error preserves cause and degraded diagnostics evidence'
     Assert-Equal 1 @($repeatedRestart.Monitor | Where-Object Event -eq 'ChildRestartRequested').Count 'exit sequence 55,55 records only the accepted first restart'
     Assert-Equal 2 $repeatedRestart.OperationIds.Count 'repeated restart output identifies both child operation handoffs'

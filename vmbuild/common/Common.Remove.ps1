@@ -893,6 +893,142 @@ function Remove-ForestTrust {
     }
 }
 
+function Initialize-RdcManRemovalSnapshotDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [ValidateRange(1, 365)][int]$RetentionDays = 14
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+            New-Item -Path $Path -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        $security = New-Object Security.AccessControl.DirectorySecurity
+        $security.SetAccessRuleProtection($true, $false)
+        $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        $propagation = [Security.AccessControl.PropagationFlags]::None
+        foreach ($identity in @(
+                [Security.Principal.WindowsIdentity]::GetCurrent().User,
+                (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'),
+                (New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'))) {
+            $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', $inheritance, $propagation, 'Allow')
+            [void]$security.AddAccessRule($rule)
+        }
+        Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+
+        $cutoff = [datetime]::UtcNow.AddDays(-$RetentionDays)
+        Get-ChildItem -LiteralPath $Path -File -ErrorAction Stop |
+            Where-Object LastWriteTimeUtc -lt $cutoff |
+            Remove-Item -Force -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Log "Could not secure RDCMan remove-domain snapshot directory '$Path'; exact RDG snapshots will not be written. $($_.Exception.Message)" -Warning
+        return $false
+    }
+}
+
+function Save-RdcManRemovalSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [AllowEmptyString()][string]$SnapshotPath = '',
+        [Parameter(Mandatory = $true)][ValidateSet('before', 'after')][string]$Stage,
+        [AllowEmptyString()][string]$RemovedDomainName = ''
+    )
+
+    $result = [ordered]@{
+        Stage = $Stage
+        CapturedUtc = [datetime]::UtcNow.ToString('o')
+        SourcePath = $SourcePath
+        SnapshotPath = $SnapshotPath
+        SourceExists = $false
+        Length = 0L
+        Sha256 = ''
+        XmlValid = $false
+        XmlError = ''
+        GroupCount = 0
+        ServerCount = 0
+        RemovedDomainGroupCount = 0
+        CaptureError = ''
+    }
+    $temporaryPath = if ($SnapshotPath) { "$SnapshotPath.$([guid]::NewGuid().ToString('N')).tmp" } else { '' }
+    try {
+        if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) {
+            return [pscustomobject]$result
+        }
+        $result.SourceExists = $true
+        $bytes = [IO.File]::ReadAllBytes($SourcePath)
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try { $result.Sha256 = ([BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '') }
+        finally { $sha256.Dispose() }
+        $result.Length = $bytes.LongLength
+
+        try {
+            $xml = New-Object Xml.XmlDocument
+            $xml.PreserveWhitespace = $true
+            $stream = New-Object IO.MemoryStream(, $bytes)
+            try { $xml.Load($stream) }
+            finally { $stream.Dispose() }
+            $result.XmlValid = $true
+            $result.GroupCount = @($xml.SelectNodes('//group')).Count
+            $result.ServerCount = @($xml.SelectNodes('//server')).Count
+            if (-not [string]::IsNullOrWhiteSpace($RemovedDomainName)) {
+                $result.RemovedDomainGroupCount = @($xml.SelectNodes('//group/properties/name') | Where-Object { $_.InnerText -ieq $RemovedDomainName }).Count
+            }
+        }
+        catch { $result.XmlError = $_.Exception.Message }
+
+        if ($SnapshotPath) {
+            $snapshotDirectory = Split-Path -Parent $SnapshotPath
+            if (-not (Test-Path -LiteralPath $snapshotDirectory -PathType Container)) {
+                New-Item -Path $snapshotDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            }
+            [IO.File]::WriteAllBytes($temporaryPath, $bytes)
+            [IO.File]::Move($temporaryPath, $SnapshotPath)
+        }
+    }
+    catch {
+        $result.CaptureError = $_.Exception.Message
+        Write-Log "Could not capture RDCMan remove-domain $Stage snapshot '$SnapshotPath': $($result.CaptureError)" -Warning
+    }
+    finally {
+        if ($temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+    }
+    return [pscustomobject]$result
+}
+
+function Save-RdcManRemovalSnapshotManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$DomainName,
+        [Parameter(Mandatory = $true)][string]$CorrelationId,
+        [Parameter(Mandatory = $true)][object[]]$Snapshots,
+        [AllowEmptyString()][string]$RegenerationError = ''
+    )
+
+    $temporaryPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [ordered]@{
+            SchemaVersion = 1
+            DomainName = $DomainName
+            CorrelationId = $CorrelationId
+            CapturedUtc = [datetime]::UtcNow.ToString('o')
+            RegenerationError = $RegenerationError
+            Snapshots = @($Snapshots)
+        } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8 -ErrorAction Stop
+        $null = Get-Content -LiteralPath $temporaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        [IO.File]::Move($temporaryPath, $Path)
+        return $true
+    }
+    catch {
+        Write-Log "Could not publish RDCMan remove-domain snapshot manifest '$Path': $($_.Exception.Message)" -Warning
+        return $false
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Remove-Domain {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
@@ -1066,7 +1202,40 @@ function Remove-Domain {
 
     if (-not $WhatIf.IsPresent) {
         Get-List -type VM -SmartUpdate | Out-Null
-        New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+        $rdcSnapshotId = [guid]::NewGuid().ToString('N')
+        $rdcSnapshotStamp = [datetime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+        $safeDomainName = $DomainName -replace '[^A-Za-z0-9._-]', '_'
+        $rdcSnapshotDirectory = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'logs') 'RDCMan-RemoveDomain'
+        $rdcSnapshotsEnabled = Initialize-RdcManRemovalSnapshotDirectory -Path $rdcSnapshotDirectory
+        $rdcSnapshotBase = Join-Path $rdcSnapshotDirectory "RDCMan-RemoveDomain-$rdcSnapshotStamp-$safeDomainName-$rdcSnapshotId"
+        $rdcBeforePath = if ($rdcSnapshotsEnabled) { "$rdcSnapshotBase-before.rdg" } else { '' }
+        $rdcBefore = Save-RdcManRemovalSnapshot -SourcePath $Global:Common.RdcManFilePath -SnapshotPath $rdcBeforePath -Stage before -RemovedDomainName $DomainName
+        $rdcRegenerationError = ''
+        try {
+            New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false -NoReconnect
+        }
+        catch {
+            $rdcRegenerationError = $_.Exception.Message
+            throw
+        }
+        finally {
+            $rdcAfterPath = if ($rdcSnapshotsEnabled) { "$rdcSnapshotBase-after.rdg" } else { '' }
+            $rdcAfter = Save-RdcManRemovalSnapshot -SourcePath $Global:Common.RdcManFilePath -SnapshotPath $rdcAfterPath -Stage after -RemovedDomainName $DomainName
+            if ([string]::IsNullOrWhiteSpace($rdcRegenerationError)) {
+                if (-not $rdcAfter.SourceExists) { $rdcRegenerationError = 'RDCMan regeneration returned without producing an RDG file.' }
+                elseif (-not $rdcAfter.XmlValid) { $rdcRegenerationError = "Generated RDG is invalid XML: $($rdcAfter.XmlError)" }
+                elseif ($rdcAfter.RemovedDomainGroupCount -ne 0) { $rdcRegenerationError = "Generated RDG still contains $($rdcAfter.RemovedDomainGroupCount) group(s) for removed domain '$DomainName'." }
+            }
+            if ($rdcSnapshotsEnabled) {
+                $manifestPath = "$rdcSnapshotBase.json"
+                if (Save-RdcManRemovalSnapshotManifest -Path $manifestPath -DomainName $DomainName -CorrelationId $rdcSnapshotId -Snapshots @($rdcBefore, $rdcAfter) -RegenerationError $rdcRegenerationError) {
+                    Write-Log "RDCMan remove-domain snapshots: $rdcSnapshotBase-before.rdg, $rdcSnapshotBase-after.rdg, $manifestPath" -LogOnly
+                }
+            }
+            if (-not [string]::IsNullOrWhiteSpace($rdcRegenerationError)) {
+                Write-Log "RDCMan remove-domain regeneration diagnostic: $rdcRegenerationError" -Warning
+            }
+        }
         New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath
         Restore-TerminalFocus
         Write-Host

@@ -768,6 +768,7 @@ function New-RDCManFileFromHyperV {
         [bool]$OverWrite = $false,
         [switch]$NoActivity,
         [switch]$UseIP,
+        [switch]$NoReconnect,
         [switch]$WhatIf
     )
 
@@ -828,7 +829,7 @@ function New-RDCManFileFromHyperV {
         if ($null -eq $template) {
             Write-Log "Could not locate $templatefile" -Failure
             if ($OverWrite -eq $false) {
-                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect
             }
             else {
                 return
@@ -846,7 +847,7 @@ function New-RDCManFileFromHyperV {
         if ($null -eq $file) {
             Write-Log "Could not load File section from $rdcmanfile" -Failure
             if ($OverWrite -eq $false) {
-                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect
             }
             else {
                 return
@@ -858,7 +859,7 @@ function New-RDCManFileFromHyperV {
             Write-Log "Could not load group section from $rdcmanfile" -Failure
             Get-Content -Path $rdcmanfile | Out-Host
             if ($OverWrite -eq $false) {
-                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect
             }
             else {
                 return
@@ -894,7 +895,7 @@ function New-RDCManFileFromHyperV {
     }
     catch {
         if ($OverWrite -eq $false) {
-            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
+            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect
         }
     }
     Install-RDCman
@@ -1493,11 +1494,12 @@ function New-RDCManFileFromHyperV {
         if (-not ($rdcExePath -and (Test-Path $rdcExePath))) { $rdcExePath = Get-RDCManExePath }
         $rdcWorkDir = Split-Path $rdcExePath -Parent
         if (-not (Test-Path $rdcWorkDir)) { $rdcWorkDir = $env:TEMP }
-        Write-Log "[RDCMan restart] Gate OPEN (killed=$killed killedAlready=$killedAlready). Launching '$rdcExePath' /reconnect (workdir '$rdcWorkDir', exeExists=$(Test-Path $rdcExePath))." -LogOnly
+        $rdcArguments = if ($NoReconnect) { '/noconnect' } else { '/reconnect' }
+        Write-Log "[RDCMan restart] Gate OPEN (killed=$killed killedAlready=$killedAlready). Launching '$rdcExePath' $rdcArguments (workdir '$rdcWorkDir', exeExists=$(Test-Path $rdcExePath))." -LogOnly
         $rdcProc = $null
         if (Test-Path $rdcExePath) {
             try {
-                $rdcProc = Start-Process $rdcExePath -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory $rdcWorkDir -ErrorAction Stop -WarningAction SilentlyContinue -PassThru
+            $rdcProc = Start-Process $rdcExePath -ArgumentList $rdcArguments -WindowStyle Minimized -WorkingDirectory $rdcWorkDir -ErrorAction Stop -WarningAction SilentlyContinue -PassThru
             }
             catch {
                 Write-Log "[RDCMan restart] Start-Process FAILED for '$rdcExePath': $($_.Exception.Message)" -Warning

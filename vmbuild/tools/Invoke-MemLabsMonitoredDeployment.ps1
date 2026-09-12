@@ -157,13 +157,41 @@ function New-MemLabsDeploymentProcess {
 function Resolve-MemLabsDeploymentExitAction {
     param (
         [Parameter(Mandatory)][int] $ExitCode,
-        [Parameter(Mandatory)][ValidateRange(1, 2)][int] $Attempt
+        [Parameter(Mandatory)][ValidateRange(1, 4)][int] $Attempt,
+        [AllowEmptyString()][string] $RestartIdentity = '',
+        [string[]] $AcceptedRestartIdentities = @()
     )
 
     if ($ExitCode -eq 0) { return 'Complete' }
     if ($ExitCode -ne 55) { return 'Fail' }
-    if ($Attempt -eq 1) { return 'Restart' }
-    throw 'New-Lab requested a second DSC archive restart; refusing an unbounded restart loop.'
+    if ([string]::IsNullOrWhiteSpace($RestartIdentity)) {
+        throw 'New-Lab requested a DSC archive restart without publishing a valid artifact identity.'
+    }
+    if ($AcceptedRestartIdentities -contains $RestartIdentity) {
+        throw "New-Lab repeatedly requested a restart for the same DSC artifact '$RestartIdentity'."
+    }
+    if ($Attempt -lt 4) { return 'Restart' }
+    throw 'New-Lab exceeded the bounded limit of three distinct DSC archive refreshes.'
+}
+
+function Get-MemLabsDscRestartIdentity {
+    param ([Parameter(Mandatory)][string] $DscRoot)
+
+    $receiptPath = Join-Path $DscRoot 'DSC.build.json'
+    try {
+        $firstState = Get-MemLabsDscArtifactState -DscRoot $DscRoot
+        if (-not $firstState.Current) { return '' }
+        $firstReceipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $secondState = Get-MemLabsDscArtifactState -DscRoot $DscRoot
+        if (-not $secondState.Current) { return '' }
+        $secondReceipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch { return '' }
+
+    $firstIdentity = "$( [string]$firstReceipt.SchemaVersion)|$( [string]$firstReceipt.ArchiveSha256)|$( [string]$firstReceipt.TemplateHelpDscPsd1Sha256)|$( [string]$firstReceipt.TemplateHelpDscPsm1Sha256)|$( [string]$firstReceipt.MemLabsVersion)|$( [string]$firstReceipt.LatestHotfixVersion)"
+    $secondIdentity = "$( [string]$secondReceipt.SchemaVersion)|$( [string]$secondReceipt.ArchiveSha256)|$( [string]$secondReceipt.TemplateHelpDscPsd1Sha256)|$( [string]$secondReceipt.TemplateHelpDscPsm1Sha256)|$( [string]$secondReceipt.MemLabsVersion)|$( [string]$secondReceipt.LatestHotfixVersion)"
+    if ($firstIdentity -ne $secondIdentity -or $firstIdentity -match '(?:^|\|)\s*(?:\||$)') { return '' }
+    return $firstIdentity
 }
 
 function Add-MemLabsDeploymentProcessToJob {
@@ -475,8 +503,9 @@ $operation = {
     if ($Restore) { $arguments.Restore = $true }
     $jobHandle = [MemLabsNativeJob]::CreateKillOnClose()
     $process = $null
+    $acceptedRestartIdentities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     try {
-        for ($attempt = 1; $attempt -le 2; $attempt++) {
+        for ($attempt = 1; $attempt -le 4; $attempt++) {
             if ($process) {
                 $process.Dispose()
                 $process = $null
@@ -535,10 +564,16 @@ $operation = {
                 }
             }
 
-            $exitAction = Resolve-MemLabsDeploymentExitAction -ExitCode $process.ExitCode -Attempt $attempt
+            $restartIdentity = ''
+            if ($process.ExitCode -eq 55) {
+                $restartIdentity = Get-MemLabsDscRestartIdentity -DscRoot (Join-Path $vmbuildRoot 'DSC')
+            }
+            $exitAction = Resolve-MemLabsDeploymentExitAction -ExitCode $process.ExitCode -Attempt $attempt `
+                -RestartIdentity $restartIdentity -AcceptedRestartIdentities @($acceptedRestartIdentities)
             if ($exitAction -eq 'Complete') { break }
             if ($exitAction -eq 'Fail') { throw "New-Lab exited with code $($process.ExitCode). Output: $outputPath" }
 
+            [void]$acceptedRestartIdentities.Add($restartIdentity)
             $lastProgressUtc = [datetime]::UtcNow
             $lastSignature = 'child-restart|dsc-archive'
             [pscustomobject]@{
@@ -547,6 +582,7 @@ $operation = {
                 Event = 'ChildRestartRequested'
                 ExitCode = $process.ExitCode
                 Attempt = $attempt
+                ArtifactIdentity = $restartIdentity
             } | ConvertTo-Json -Compress | Add-Content -LiteralPath $monitorLogPath -Encoding UTF8
         }
     }
