@@ -1150,7 +1150,7 @@ try {
     # Define phases
     $start = 1
     $maxPhase = 11
-    $global:StartPhase = $StartPhase
+    $global:MemLabsStartPhaseRequested = [bool]$StartPhase
 
     # Pre-build the host download-cache ISO ONCE, before any phase fans out to
     # per-VM jobs. Building it here (single host process) instead of lazily inside

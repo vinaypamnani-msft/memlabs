@@ -288,6 +288,19 @@ Invoke-DcProducerCase -VmExists $true -AttachedSwitch @('192.168.110.0', '192.16
     -ConfigNetwork '192.168.112.0' -ShouldThrow $true -What 'Existing DC with ambiguous domain switches'
 
 $newLabAst = Get-DcSourceAst 'New-Lab.ps1'
+$startPhaseStateAssignment = $newLabAst.Find({
+        param($candidate)
+        $candidate -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $candidate.Left.Extent.Text -eq '$global:MemLabsStartPhaseRequested' -and
+        $candidate.Right.Extent.Text -eq '[bool]$StartPhase'
+    }, $true)
+$legacyStartPhaseAssignment = $newLabAst.Find({
+        param($candidate)
+        $candidate -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $candidate.Left.Extent.Text -eq '$global:StartPhase'
+    }, $true)
+Assert-DcEqual $true ([bool]$startPhaseStateAssignment) 'New-Lab publishes resume state without reassigning its validated StartPhase parameter'
+Assert-DcEqual $false ([bool]$legacyStartPhaseAssignment) 'New-Lab avoids top-level fresh-run StartPhase self-assignment'
 $dnsIf = $newLabAst.Find({
         param($candidate)
         $candidate -is [System.Management.Automation.Language.IfStatementAst] -and
@@ -342,12 +355,13 @@ function Get-List { param($Type, $DomainName, [switch]$SmartUpdate) return @() }
 function Invoke-SmartStartVMs { param($CritList) return 0 }
 function Write-Progress2 { param($Activity, $Status, $PercentComplete, [switch]$Log) }
 function Start-Sleep { param($Milliseconds, $Seconds) }
-function Test-VmResponsive { param($VmName, $TimeoutSeconds) return $false }
+function Test-VmResponsive { param($VmName, $TimeoutSeconds) $script:VmResponsiveCalls++; return $false }
 function Restart-UnresponsiveVm { param($VmName, $WaitTimeSeconds) return $false }
 
 $global:Common = [pscustomobject]@{ VerboseEnabled = $false }
-$global:StartPhase = $false
+$global:MemLabsStartPhaseRequested = $false
 $global:preparePhasePercent = 0
+$script:VmResponsiveCalls = 0
 $preflightConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ domainNetBiosName = 'PT1'; domainName = 'pstest1.com' }
 }
@@ -355,18 +369,25 @@ $threw = $false
 try { $null = Get-ConfigurationData -Phase 3 -deployConfig $preflightConfig }
 catch { $threw = $true }
 Assert-DcEqual $true $threw 'Failed DC recovery terminates configuration preflight'
+Assert-DcEqual 1 $script:VmResponsiveCalls 'Fresh deployment probes DC responsiveness'
+
+$global:MemLabsStartPhaseRequested = $true
+$script:VmResponsiveCalls = 0
+$resumeConfigurationData = Get-ConfigurationData -Phase 3 -deployConfig $preflightConfig
+Assert-DcEqual 'PT1-DC1' $resumeConfigurationData.AllNodes[0].NodeName 'Resume deployment preserves DC configuration data'
+Assert-DcEqual 0 $script:VmResponsiveCalls 'Resume deployment skips the fresh-run DC responsiveness probe'
 
 $script:Phase3ConfigurationData = @{
     AllNodes    = @(@{ NodeName = '*'; Role = '*' })
     NonNodeData = @{ SqlAo = @{ Listener = @{ Endpoint = @{ Port = 5022 } } } }
 }
 $global:Common.VerboseEnabled = $true
-$global:StartPhase = $true
+$global:MemLabsStartPhaseRequested = $true
 $verboseRecords = @(& { Get-ConfigurationData -Phase 3 -deployConfig $preflightConfig } 3>&1)
 $jsonWarnings = @($verboseRecords | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
 Assert-DcEqual 0 $jsonWarnings.Count 'Verbose configuration data renders without JSON depth warnings'
 $global:Common.VerboseEnabled = $false
-$global:StartPhase = $false
+$global:MemLabsStartPhaseRequested = $false
 
 $startPhaseJobs = $phasesAst.Find({
         param($candidate)
