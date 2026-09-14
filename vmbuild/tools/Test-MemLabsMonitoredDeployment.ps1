@@ -710,6 +710,8 @@ finally {
     Remove-Item -LiteralPath $sequenceFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 $path = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-' + [guid]::NewGuid().ToString('N') + '.jsonl')
+$lockedPath = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-monitor-locked-' + [guid]::NewGuid().ToString('N') + '.jsonl')
+$lockReadyPath = "$lockedPath.ready"
 $start = [datetime]'2026-09-09T00:00:00Z'
 try {
     @(
@@ -728,6 +730,46 @@ try {
     Assert-Equal 1 @($records.Signature | Sort-Object -Unique | Where-Object { $_ -like 'dsc-status*Promoting*' }).Count 'repeated status does not create new semantic progress'
     Assert-Equal 0 @(Get-MemLabsDeploymentProgressRecords -Path $path -SinceUtc ($start.AddHours(1))).Count 'records before monitor start are ignored'
 
+    $monitorRecordWriter = Import-MonitoredTestFunction -Path (Join-Path $RootPath 'tools\Invoke-MemLabsMonitoredDeployment.ps1') -Name 'Write-MemLabsMonitorRecord'
+    . $monitorRecordWriter
+    $lockJob = Start-ThreadJob -ScriptBlock {
+        param($Path, $ReadyPath)
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try {
+            Set-Content -LiteralPath $ReadyPath -Value ready -NoNewline
+            [Threading.Thread]::Sleep(750)
+        }
+        finally { $stream.Dispose() }
+    } -ArgumentList $lockedPath, $lockReadyPath
+    try {
+        $readyDeadline = [datetime]::UtcNow.AddSeconds(5)
+        while (-not (Test-Path -LiteralPath $lockReadyPath) -and [datetime]::UtcNow -lt $readyDeadline) {
+            [Threading.Thread]::Sleep(25)
+        }
+        Assert-Equal $true (Test-Path -LiteralPath $lockReadyPath) 'monitor append fixture acquired an exclusive file lock'
+        $exhaustionError = $null
+        try { Write-MemLabsMonitorRecord -Path $lockedPath -Record ([pscustomobject]@{ Event = 'TooSoon' }) -RetryCount 2 -RetryDelayMilliseconds 25 }
+        catch { $exhaustionError = $_ }
+        Assert-Equal 32 ($exhaustionError.Exception.HResult -band 0xFFFF) 'monitor append rethrows sharing violation after bounded retry exhaustion'
+        Write-MemLabsMonitorRecord -Path $lockedPath -Record ([pscustomobject]@{ Event = 'Heartbeat'; Sequence = 1 }) -RetryCount 20 -RetryDelayMilliseconds 100
+        $lockedRecords = @(Get-Content -LiteralPath $lockedPath | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
+        Assert-Equal 1 $lockedRecords.Count 'transient monitor sharing violation appends exactly one JSONL record after retry'
+        Assert-Equal 'Heartbeat|1' "$($lockedRecords[0].Event)|$($lockedRecords[0].Sequence)" 'retried monitor append preserves the complete record'
+
+        $missingParentPath = Join-Path $lockedPath 'missing\monitor.jsonl'
+        $nonSharingStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $nonSharingError = $null
+        try { Write-MemLabsMonitorRecord -Path $missingParentPath -Record ([pscustomobject]@{ Event = 'InvalidPath' }) -RetryCount 20 -RetryDelayMilliseconds 100 }
+        catch { $nonSharingError = $_ }
+        $nonSharingStopwatch.Stop()
+        Assert-Equal 3 ($nonSharingError.Exception.HResult -band 0xFFFF) 'monitor append preserves non-sharing I/O failure'
+        Assert-Equal $true ($nonSharingStopwatch.ElapsedMilliseconds -lt 1000) 'monitor append does not retry non-sharing I/O failure'
+    }
+    finally {
+        $null = Receive-Job -Job $lockJob -Wait -ErrorAction SilentlyContinue
+        Remove-Job -Job $lockJob -Force -ErrorAction SilentlyContinue
+    }
+
     $jobHandle = [MemLabsNativeJob]::CreateKillOnClose()
     $waitInfo = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
     $waitInfo.UseShellExecute = $false
@@ -741,7 +783,7 @@ try {
     $ownedProcess.Dispose()
 }
 finally {
-    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $path, $lockedPath, $lockReadyPath -Force -ErrorAction SilentlyContinue
 }
 
 if ($script:Failures -ne 0) { throw "$script:Failures monitored deployment test(s) failed" }

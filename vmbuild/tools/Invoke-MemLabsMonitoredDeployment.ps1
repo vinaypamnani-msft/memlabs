@@ -132,6 +132,28 @@ function Get-MemLabsDeploymentProgressRecords {
     return @($records)
 }
 
+function Write-MemLabsMonitorRecord {
+    param (
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][object] $Record,
+        [ValidateRange(1, 120)][int] $RetryCount = 20,
+        [ValidateRange(1, 5000)][int] $RetryDelayMilliseconds = 250
+    )
+
+    $json = $Record | ConvertTo-Json -Compress
+    for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
+        try {
+            $json | Add-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop
+            return
+        }
+        catch [IO.IOException] {
+            $windowsError = $_.Exception.HResult -band 0xFFFF
+            if ($windowsError -notin 32, 33 -or $attempt -eq $RetryCount) { throw }
+            [Threading.Thread]::Sleep($RetryDelayMilliseconds)
+        }
+    }
+}
+
 function New-MemLabsDeploymentProcess {
     param ([Parameter(Mandatory)][string] $LauncherPath, [Parameter(Mandatory)][hashtable] $Arguments)
     $info = [Diagnostics.ProcessStartInfo]::new()
@@ -541,12 +563,12 @@ $operation = {
 
                 $nowUtc = [datetime]::UtcNow
                 $noProgressSeconds = [math]::Round(($nowUtc - $lastProgressUtc).TotalSeconds, 1)
-                [pscustomobject]@{
+                Write-MemLabsMonitorRecord -Path $monitorLogPath -Record ([pscustomobject]@{
                     TimeUtc = $nowUtc.ToString('o')
                     ProcessId = $process.Id
                     LastSignature = $lastSignature
                     NoProgressSeconds = $noProgressSeconds
-                } | ConvertTo-Json -Compress | Add-Content -LiteralPath $monitorLogPath -Encoding UTF8
+                })
 
                 $reason = $null
                 if ($nowUtc -ge $deadlineUtc) { $reason = "maximum runtime of $MaxHours hour(s) exceeded" }
@@ -576,14 +598,14 @@ $operation = {
             [void]$acceptedRestartIdentities.Add($restartIdentity)
             $lastProgressUtc = [datetime]::UtcNow
             $lastSignature = 'child-restart|dsc-archive'
-            [pscustomobject]@{
+            Write-MemLabsMonitorRecord -Path $monitorLogPath -Record ([pscustomobject]@{
                 TimeUtc = $lastProgressUtc.ToString('o')
                 ProcessId = $process.Id
                 Event = 'ChildRestartRequested'
                 ExitCode = $process.ExitCode
                 Attempt = $attempt
                 ArtifactIdentity = $restartIdentity
-            } | ConvertTo-Json -Compress | Add-Content -LiteralPath $monitorLogPath -Encoding UTF8
+            })
         }
     }
     catch {

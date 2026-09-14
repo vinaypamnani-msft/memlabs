@@ -21,7 +21,7 @@ param(
     [string] $Stage = 'All',
     [ValidateRange(0, 11)]
     [int] $StartPhase = 0,
-    [string] $VmStorageRoot = 'C:\VirtualMachines',
+    [string] $VmStorageRoot = '',
     [ValidateRange(1, 1440)]
     [int] $NoProgressMinutes = 45,
     [ValidateRange(1, 48)]
@@ -36,6 +36,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($StartPhase -eq 1) {
+    throw '-StartPhase 1 is invalid; omit -StartPhase for a fresh deployment or specify 2 through 11.'
+}
 
 $vmbuildRoot = Split-Path -Parent $PSScriptRoot
 if (-not $Configuration) {
@@ -52,10 +56,17 @@ foreach ($configurationPath in @($coreSourcePath, $additionsSourcePath)) {
     }
 }
 
+$hostOperatingSystem = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+if (-not $VmStorageRoot) {
+    $VmStorageRoot = if ([int]$hostOperatingSystem.ProductType -eq 1) { 'C:\VirtualMachines' } else { 'E:\VirtualMachines' }
+}
 $storagePath = [IO.Path]::GetFullPath($VmStorageRoot)
 $storageRoot = [IO.Path]::GetPathRoot($storagePath)
 if (-not $storageRoot) {
     throw "VM storage path has no drive root: $storagePath"
+}
+if ($storageRoot -eq 'C:\' -and [int]$hostOperatingSystem.ProductType -ne 1) {
+    throw 'C: VM storage is supported only when the Hyper-V host runs Windows Client.'
 }
 
 $totalMemoryGB = [math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB, 1)
@@ -66,10 +77,6 @@ if (-not $PlanOnly) {
     }
     if (-not (Test-Path -LiteralPath $storageRoot -PathType Container)) {
         throw "Configured VM storage drive is unavailable: $storageRoot"
-    }
-    $hostOperatingSystem = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-    if ($storageRoot -eq 'C:\' -and [int]$hostOperatingSystem.ProductType -ne 1) {
-        throw 'C: VM storage is supported only when the Hyper-V host runs Windows Client.'
     }
     if ($totalMemoryGB -lt 56) {
         throw "The standalone locale matrix requires at least 56 GB host RAM; this host has $totalMemoryGB GB."
@@ -326,7 +333,9 @@ function Wait-LocaleStageCapacity {
 switch ($Stage) {
     'Core' { Invoke-LocaleStage -Name Core -Path $coreGeneratedPath -ResumePhase $StartPhase }
     'Additions' {
-        Wait-LocaleStageCapacity -RequiredAvailableGB 23 -TimeoutMinutes $StageHandoffMinutes
+        if ($StartPhase -eq 0) {
+            Wait-LocaleStageCapacity -RequiredAvailableGB 23 -TimeoutMinutes $StageHandoffMinutes
+        }
         Invoke-LocaleStage -Name Additions -Path $additionsGeneratedPath -ResumePhase $StartPhase
     }
     'All' {

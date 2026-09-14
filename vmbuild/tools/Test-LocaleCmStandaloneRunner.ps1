@@ -74,6 +74,16 @@ function global:Get-PSDrive {
     return [pscustomobject]@{ Name = $Name; Free = 700GB }
 }
 
+function global:Test-Path {
+    param([string] $Path, [string] $LiteralPath, [string] $PathType)
+    $candidate = if ($PSBoundParameters.ContainsKey('LiteralPath')) { $LiteralPath } else { $Path }
+    if ($candidate -eq 'E:\') { return $true }
+    $arguments = @{}
+    if ($PSBoundParameters.ContainsKey('LiteralPath')) { $arguments.LiteralPath = $LiteralPath } else { $arguments.Path = $Path }
+    if ($PSBoundParameters.ContainsKey('PathType')) { $arguments.PathType = $PathType }
+    return Microsoft.PowerShell.Management\Test-Path @arguments
+}
+
 function global:Get-Counter {
     param([string] $Counter)
     if ($global:MemLabsStandaloneCounterFailure) { throw 'fixture counter failure' }
@@ -128,6 +138,7 @@ param(
 [ordered]@{
     Configuration = $Configuration
     StartPhase = $StartPhase
+    StartPhaseBound = $PSBoundParameters.ContainsKey('StartPhase')
     NoProgressMinutes = $NoProgressMinutes
     PollSeconds = $PollSeconds
     MaxHours = $MaxHours
@@ -167,7 +178,7 @@ param(
     $global:LASTEXITCODE = 37
     & $runnerPath -LocaleSet 3 -OutputDirectory $outputRoot -DeploymentRunner $stubPath | Out-Null
     $freshCaptures = @(Get-Content -LiteralPath $capturePath | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
-    Assert-True -Condition ($freshCaptures.Count -eq 2 -and @($freshCaptures | Where-Object { $_.ExpectedCompletedPhase -eq 11 -and $_.StartPhase -eq 0 -and $_.KeepFailedVMs }).Count -eq 2) -What 'default run forwards both fresh stages through monitored Phase 11 completion'
+    Assert-True -Condition ($freshCaptures.Count -eq 2 -and @($freshCaptures | Where-Object { $_.ExpectedCompletedPhase -eq 11 -and -not $_.StartPhaseBound -and $_.KeepFailedVMs }).Count -eq 2) -What 'default run omits StartPhase and forwards both fresh stages through monitored Phase 11 completion'
     Assert-True -Condition (@($freshCaptures | Where-Object { $_.PollSeconds -eq 60 -and $_.NoProgressMinutes -eq 45 -and $_.MaxHours -eq 18 }).Count -eq 2) -What 'both fresh stages forward monitor timing parameters'
     $expectedCorePath = Join-Path $outputRoot 'Locale-CM-Standalone-Core-Set3.json'
     $expectedAdditionsPath = Join-Path $outputRoot 'Locale-CM-Standalone-Additions-Set3.json'
@@ -179,6 +190,12 @@ param(
     Assert-True -Condition ((@($generatedVms | ForEach-Object locale) -join ',') -eq 'fi-FI,hr-HR,it-IT,fr-CA,he-IL,hu-HU,ja-JP,ko-KR') -What 'serialized set 3 stages contain all eight locale assignments'
     Assert-True -Condition (((@($generatedCore.virtualMachines | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum -eq 22GB) -and ((@($generatedAdditions.virtualMachines | ForEach-Object { $_.memory / 1 }) | Measure-Object -Sum).Sum -eq 15GB)) -What 'serialized stages preserve 22 GB and 15 GB deployment budgets'
     Assert-True -Condition ((@($generatedAdditions.virtualMachines | ForEach-Object { "$($_.vmName)=$($_.memory)/$($_.dynamicMinRam)" }) -join ',') -eq 'BDC1=3GB/1GB,FS1=3GB/1GB,SRV1=2GB/1GB,DPMP1=3GB/1GB,CL1=4GB/1GB') -What 'serialized additions preserve the reviewed per-role memory profile'
+
+    $explicitStoragePath = Join-Path $fixtureRoot 'explicit-vms'
+    Remove-Item -LiteralPath $capturePath -Force
+    & $runnerPath -LocaleSet 5 -Stage Core -VmStorageRoot $explicitStoragePath -OutputDirectory $outputRoot -DeploymentRunner $stubPath | Out-Null
+    $explicitStorageCore = Get-Content -LiteralPath (Join-Path $outputRoot 'Locale-CM-Standalone-Core-Set5.json') -Raw | ConvertFrom-Json -ErrorAction Stop
+    Assert-True -Condition ($explicitStorageCore.vmOptions.basePath -eq [IO.Path]::GetFullPath($explicitStoragePath)) -What 'explicit non-default VM storage root is preserved in the generated configuration'
 
     $forbiddenProperties = @('OtherNode', 'AlwaysOnName', 'ClusterName', 'ClusterIPAddress', 'AGIPAddress', 'fileServerVM', 'AlwaysOnGroupName', 'AlwaysOnListenerName', 'SqlServiceAccount', 'SqlAgentAccount')
     $generatedAoProperties = @(foreach ($vm in $generatedVms) {
@@ -192,16 +209,24 @@ param(
     Remove-Item -LiteralPath $capturePath -Force
     & $runnerPath -LocaleSet 3 -Stage Core -StartPhase 8 -OutputDirectory $outputRoot -DeploymentRunner $stubPath | Out-Null
     $coreResumeCapture = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json -ErrorAction Stop
-    Assert-True -Condition ($coreResumeCapture.StartPhase -eq 8 -and $coreResumeCapture.ExpectedCompletedPhase -eq 11 -and $coreResumeCapture.Configuration -eq $expectedCorePath) -What 'core resume forwards start phase 8 and expected completion phase 11'
+    Assert-True -Condition ($coreResumeCapture.StartPhaseBound -and $coreResumeCapture.StartPhase -eq 8 -and $coreResumeCapture.ExpectedCompletedPhase -eq 11 -and $coreResumeCapture.Configuration -eq $expectedCorePath) -What 'core resume forwards start phase 8 and expected completion phase 11'
+
+    foreach ($resumeBoundary in 2, 11) {
+        Remove-Item -LiteralPath $capturePath -Force
+        & $runnerPath -LocaleSet 3 -Stage Core -StartPhase $resumeBoundary -OutputDirectory $outputRoot -DeploymentRunner $stubPath | Out-Null
+        $boundaryCapture = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json -ErrorAction Stop
+        Assert-True -Condition ($boundaryCapture.StartPhaseBound -and $boundaryCapture.StartPhase -eq $resumeBoundary) -What "core resume forwards valid start phase boundary $resumeBoundary"
+    }
 
     $global:MemLabsStandaloneExistingVmNames = @($generatedVms | ForEach-Object { "LS3-$($_.vmName)" })
     Remove-Item -LiteralPath $capturePath -Force
     $additionsResumeStart = $global:MemLabsStandaloneNow
     & $runnerPath -LocaleSet 3 -Stage Additions -StartPhase 8 -OutputDirectory $outputRoot -DeploymentRunner $stubPath | Out-Null
     $additionsResumeCapture = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json -ErrorAction Stop
-    Assert-True -Condition ($additionsResumeCapture.StartPhase -eq 8 -and $additionsResumeCapture.ExpectedCompletedPhase -eq 11 -and $additionsResumeCapture.Configuration -eq $expectedAdditionsPath) -What 'additions resume forwards start phase 8 and expected completion phase 11'
-    Assert-True -Condition ($global:MemLabsStandaloneNow -eq $additionsResumeStart.AddMinutes(1)) -What 'explicit additions resume also requires three sustained capacity samples'
+    Assert-True -Condition ($additionsResumeCapture.StartPhaseBound -and $additionsResumeCapture.StartPhase -eq 8 -and $additionsResumeCapture.ExpectedCompletedPhase -eq 11 -and $additionsResumeCapture.Configuration -eq $expectedAdditionsPath) -What 'additions resume forwards start phase 8 and expected completion phase 11'
+    Assert-True -Condition ($global:MemLabsStandaloneNow -eq $additionsResumeStart) -What 'explicit additions resume bypasses the fresh-stage creation capacity gate'
 
+    Assert-ThrowsLike -Action { & $runnerPath -LocaleSet 3 -Stage Core -StartPhase 1 -PlanOnly | Out-Null } -Pattern '*omit -StartPhase for a fresh deployment or specify 2 through 11*' -What 'start phase 1 is rejected with the underlying deployment contract'
     Assert-ThrowsLike -Action { & $runnerPath -LocaleSet 3 -StartPhase 8 -PlanOnly | Out-Null } -Pattern '*Select -Stage Core or -Stage Additions*' -What 'all-stage resume requires an explicit stage'
 
     $global:MemLabsStandaloneExistingVmNames = @('LS3-DC1')
@@ -214,7 +239,12 @@ param(
 
     $global:MemLabsStandaloneExistingVmNames = @()
     $global:MemLabsStandaloneHostProductType = 3
-    Assert-ThrowsLike -Action { & $runnerPath -LocaleSet 3 -Stage Core -OutputDirectory $outputRoot -DeploymentRunner $stubPath | Out-Null } -Pattern '*C: VM storage is supported only when the Hyper-V host runs Windows Client*' -What 'non-plan run rejects C drive storage on Windows Server'
+    Remove-Item -LiteralPath $capturePath -Force
+    & $runnerPath -LocaleSet 4 -Stage Core -OutputDirectory $outputRoot -DeploymentRunner $stubPath | Out-Null
+    $serverDefaultCore = Get-Content -LiteralPath (Join-Path $outputRoot 'Locale-CM-Standalone-Core-Set4.json') -Raw | ConvertFrom-Json -ErrorAction Stop
+    Assert-True -Condition ($serverDefaultCore.vmOptions.basePath -eq 'E:\VirtualMachines') -What 'Windows Server host defaults VM storage to the standard non-system E drive'
+    Assert-ThrowsLike -Action { & $runnerPath -LocaleSet 3 -Stage Core -VmStorageRoot 'C:\VirtualMachines' -PlanOnly | Out-Null } -Pattern '*C: VM storage is supported only when the Hyper-V host runs Windows Client*' -What 'plan-only run rejects explicit C drive storage on Windows Server'
+    Assert-ThrowsLike -Action { & $runnerPath -LocaleSet 3 -Stage Core -VmStorageRoot 'C:\VirtualMachines' -OutputDirectory $outputRoot -DeploymentRunner $stubPath | Out-Null } -Pattern '*C: VM storage is supported only when the Hyper-V host runs Windows Client*' -What 'non-plan run rejects explicit C drive storage on Windows Server'
     $global:MemLabsStandaloneHostProductType = 1
 
     foreach ($property in $forbiddenProperties) {
@@ -246,7 +276,7 @@ param(
 }
 finally {
     Remove-Item Env:\MEMLABS_STANDALONE_CAPTURE -ErrorAction SilentlyContinue
-    Remove-Item Function:\Get-CimInstance, Function:\Get-Command, Function:\Get-PSDrive, Function:\Get-Counter, Function:\Get-Date, Function:\Start-Sleep, Function:\Start-ThreadJob, Function:\Wait-Job, Function:\Receive-Job, Function:\Stop-Job, Function:\Remove-Job, Function:\Get-VM -ErrorAction SilentlyContinue
+    Remove-Item Function:\Get-CimInstance, Function:\Get-Command, Function:\Get-PSDrive, Function:\Test-Path, Function:\Get-Counter, Function:\Get-Date, Function:\Start-Sleep, Function:\Start-ThreadJob, Function:\Wait-Job, Function:\Receive-Job, Function:\Stop-Job, Function:\Remove-Job, Function:\Get-VM -ErrorAction SilentlyContinue
     Remove-Variable MemLabsStandaloneHostProductType, MemLabsStandaloneExistingVmNames, MemLabsStandaloneCounterAvailableMB, MemLabsStandaloneCounterFailure, MemLabsStandaloneFallbackAvailableKB, MemLabsStandaloneNow, MemLabsStandaloneCounterSamplesMB, MemLabsStandaloneCounterSampleIndex, MemLabsStandaloneProbeDelaySeconds -Scope Global -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
